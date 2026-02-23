@@ -6,7 +6,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::fs::File;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -384,9 +383,6 @@ fn run_materialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
             ),
         )
     })?;
-
-    // Apply read-only permissions after the final location is in place.
-    make_read_only_recursive(&target_dir)?;
 
     update_shared_materialized_state(dirs, build, target_dir.as_path(), now)?;
 
@@ -960,35 +956,6 @@ fn ensure_state_file(path: &Path) -> MResult<()> {
     write_atomic(path, &default_state)
 }
 
-fn make_read_only_recursive(path: &Path) -> MResult<()> {
-    if path.is_dir() {
-        for entry in fs::read_dir(path).map_err(|error| {
-            MbsrcError::new(
-                ErrorClass::FsFailed,
-                format!("failed to read directory '{}': {error}", path.display()),
-            )
-        })? {
-            let entry = entry.map_err(|error| {
-                MbsrcError::new(
-                    ErrorClass::FsFailed,
-                    format!(
-                        "failed to read directory entry in '{}': {error}",
-                        path.display()
-                    ),
-                )
-            })?;
-            make_read_only_recursive(&entry.path())?;
-        }
-        set_dir_read_only(path)?;
-    } else if path.is_file() {
-        set_file_read_only(path)?;
-    } else {
-        let _ = File::open(path);
-    }
-
-    Ok(())
-}
-
 fn make_writable_recursive(path: &Path) -> MResult<()> {
     if path.is_dir() {
         for entry in fs::read_dir(path).map_err(|error| {
@@ -1017,34 +984,6 @@ fn make_writable_recursive(path: &Path) -> MResult<()> {
 }
 
 #[cfg(unix)]
-fn set_dir_read_only(path: &Path) -> MResult<()> {
-    let perms = fs::Permissions::from_mode(0o555);
-    fs::set_permissions(path, perms).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::FsFailed,
-            format!(
-                "failed to set read-only permissions on directory '{}': {error}",
-                path.display()
-            ),
-        )
-    })
-}
-
-#[cfg(unix)]
-fn set_file_read_only(path: &Path) -> MResult<()> {
-    let perms = fs::Permissions::from_mode(0o444);
-    fs::set_permissions(path, perms).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::FsFailed,
-            format!(
-                "failed to set read-only permissions on file '{}': {error}",
-                path.display()
-            ),
-        )
-    })
-}
-
-#[cfg(unix)]
 fn set_dir_writable(path: &Path) -> MResult<()> {
     let perms = fs::Permissions::from_mode(0o755);
     fs::set_permissions(path, perms).map_err(|error| {
@@ -1066,50 +1005,6 @@ fn set_file_writable(path: &Path) -> MResult<()> {
             ErrorClass::FsFailed,
             format!(
                 "failed to set writable permissions on file '{}': {error}",
-                path.display()
-            ),
-        )
-    })
-}
-
-#[cfg(not(unix))]
-fn set_dir_read_only(path: &Path) -> MResult<()> {
-    let mut perms = fs::metadata(path)
-        .map_err(|error| {
-            MbsrcError::new(
-                ErrorClass::FsFailed,
-                format!("failed to read metadata for '{}': {error}", path.display()),
-            )
-        })?
-        .permissions();
-    perms.set_readonly(true);
-    fs::set_permissions(path, perms).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::FsFailed,
-            format!(
-                "failed to set read-only permissions on directory '{}': {error}",
-                path.display()
-            ),
-        )
-    })
-}
-
-#[cfg(not(unix))]
-fn set_file_read_only(path: &Path) -> MResult<()> {
-    let mut perms = fs::metadata(path)
-        .map_err(|error| {
-            MbsrcError::new(
-                ErrorClass::FsFailed,
-                format!("failed to read metadata for '{}': {error}", path.display()),
-            )
-        })?
-        .permissions();
-    perms.set_readonly(true);
-    fs::set_permissions(path, perms).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::FsFailed,
-            format!(
-                "failed to set read-only permissions on file '{}': {error}",
                 path.display()
             ),
         )

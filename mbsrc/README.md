@@ -71,7 +71,7 @@ Error format:
 - `github/mirrors/`:
   - bare mirror clones (`git clone --mirror`) for tracked repositories, created on demand.
 - `materialized/`:
-  - expanded read-only source trees addressable by `artifact-name`.
+  - expanded source trees addressable by `artifact-name`.
 
 Example shape:
 
@@ -114,7 +114,6 @@ Algorithm:
 
 - Resolve requested output by artifact name from local state and mirror data.
 - Expand source tree from mirror into `.mbuild/materialized/<artifact-name>/`.
-- Keep output read-only.
 - Record materialization in state.
 - Current implementation uses `git archive` + `tar` and does not expose `.git` in output.
 
@@ -123,7 +122,6 @@ Algorithm:
 - Remove `.mbuild/materialized/<artifact-name>/`.
 - Clear related materialization metadata in `state.ncl`.
 - Keep mirror data intact.
-- If materialized files are read-only, implementation makes them writable first and then removes them.
 
 ## Design Intent
 

@@ -85,7 +85,7 @@ Bootstrap policy:
 
 ## 8. Materialization Model
 
-- Materialized outputs are intended to be read-only.
+- Materialized outputs are writable directories in MVP.
 - Materialization identity is currently based on `artifact-name`.
 - Shared state (`state.ncl`) tracks materialization metadata for artifacts.
 - Output hashing itself is not implemented yet and is deferred.

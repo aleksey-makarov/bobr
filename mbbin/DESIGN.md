@@ -39,7 +39,7 @@ Important notes:
 
 ## Mount Contract
 
-- Inputs are mounted read-only as `/in/<name>`.
+- Inputs are mounted as overlay writable (`:O`) at `/in/<name>` (writes stay in container overlay layer and do not modify host input directories).
 - Outputs are mounted writable as `/out/<name>`.
 - Builder creates empty output directories before execution.
 - Builder guarantees that every declared output directory exists (created by builder).

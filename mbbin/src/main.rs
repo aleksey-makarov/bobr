@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const ROOT_DIR: &str = ".mbuild";
 const RECIPES_FILE: &str = "recipes.ncl";
 const MATERIALIZED_DIR: &str = "materialized";
-const STANDARD_IMAGE: &str = "docker.io/library/alpine@sha256:b0cb30c51c47cdfde647364301758b14c335dea2fddc9490d4f007d67ecb2538";
+const STANDARD_IMAGE: &str = "docker.io/library/gcc@sha256:99732c3fbda294e6e7c8bb463a98ec394d48de16ee45fece6f28d7bf7d9dbd99";
 
 #[derive(Parser, Debug)]
 #[command(name = "mbbin")]
@@ -134,7 +134,7 @@ fn run_container_build(
         let host_path = layout.materialized.join(input);
         process
             .arg("--volume")
-            .arg(format!("{}:/in/{}:ro", host_path.display(), input));
+            .arg(format!("{}:/in/{}:O", host_path.display(), input));
     }
 
     for output in &recipe.outputs {
