@@ -32,6 +32,7 @@ Important notes:
 
 - Build runs in a one-shot container (`podman run --rm`).
 - No long-lived containers.
+- Current MVP uses an implicit standard image (hardcoded by the builder), not recipe-configurable image.
 - Network is disabled (`--network=none`) for hermeticity.
 - Container runs as host caller UID/GID (`--user <uid>:<gid>`).
 - Output file ownership must match host caller user.
@@ -41,7 +42,8 @@ Important notes:
 - Inputs are mounted read-only as `/in/<name>`.
 - Outputs are mounted writable as `/out/<name>`.
 - Builder creates empty output directories before execution.
-- Builder does not validate output contents in MVP.
+- Builder guarantees that every declared output directory exists (created by builder).
+- Builder does not validate output contents beyond directory existence in MVP.
 - Host output directories are `./.mbuild/materialized/<output-name>`.
 
 ## Script Semantics
