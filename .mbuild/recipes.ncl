@@ -151,4 +151,15 @@
       commit = "f8745da6ff1ad1e7bab384bd1f9d742439278e99",
     },
   },
+
+  "zstd-bin-smoke-1.5.7" = {
+    inputs = [ "zstd-1.5.7" ],
+    outputs = [ "zstd-bin-smoke-1.5.7" ],
+    script = m%"
+      #!/bin/sh
+      set -eu
+      echo "mbbin smoke build for zstd-1.5.7" > /out/zstd-bin-smoke-1.5.7/BUILD.txt
+      find /in/zstd-1.5.7 -maxdepth 2 -type f | head -n 50 > /out/zstd-bin-smoke-1.5.7/FILES.txt
+    "%,
+  },
 }

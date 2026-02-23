@@ -126,6 +126,7 @@ fn run_container_build(
         .arg("run")
         .arg("--rm")
         .arg("--network=none")
+        .arg("--userns=keep-id")
         .arg("--user")
         .arg(format!("{uid}:{gid}"));
 
