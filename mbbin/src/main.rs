@@ -3,6 +3,7 @@ use nickel_lang::{Context as NickelContext, ErrorFormat as NickelErrorFormat};
 use serde::Deserialize;
 use serde_json::Value;
 use std::env;
+use std::fmt;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -54,6 +55,12 @@ impl MbbinError {
     }
 }
 
+impl fmt::Display for MbbinError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message())
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "mbbin")]
 #[command(about = "Minimal binary builder (MVP)")]
@@ -87,7 +94,7 @@ fn main() -> ExitCode {
     match run(cli.command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error[{}]: {}", error.class(), error.message());
+            eprintln!("error[{}]: {}", error.class(), error);
             ExitCode::from(1)
         }
     }

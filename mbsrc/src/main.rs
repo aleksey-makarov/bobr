@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
+use std::fmt;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -64,6 +65,12 @@ impl MbsrcError {
             | Self::DematerializeFailed(message)
             | Self::FsFailed(message) => message,
         }
+    }
+}
+
+impl fmt::Display for MbsrcError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message())
     }
 }
 
@@ -159,7 +166,7 @@ fn main() -> ExitCode {
     match run(cli.command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error[{}]: {}", error.class(), error.message());
+            eprintln!("error[{}]: {}", error.class(), error);
             ExitCode::from(1)
         }
     }
