@@ -23,47 +23,46 @@ const MATERIALIZED_DIR: &str = "materialized";
 type MResult<T> = Result<T, MbsrcError>;
 
 #[derive(Debug)]
-enum ErrorClass {
-    ConfigNotFound,
-    ConfigEvalFailed,
-    ArtifactNotFound,
-    InvalidRecipe,
-    GitFailed,
-    CommitNotFound,
-    StateFailed,
-    MaterializeFailed,
-    DematerializeFailed,
-    FsFailed,
-}
-
-impl ErrorClass {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::ConfigNotFound => "config-not-found",
-            Self::ConfigEvalFailed => "config-eval-failed",
-            Self::ArtifactNotFound => "artifact-not-found",
-            Self::InvalidRecipe => "invalid-recipe",
-            Self::GitFailed => "git-failed",
-            Self::CommitNotFound => "commit-not-found",
-            Self::StateFailed => "state-failed",
-            Self::MaterializeFailed => "materialize-failed",
-            Self::DematerializeFailed => "dematerialize-failed",
-            Self::FsFailed => "fs-failed",
-        }
-    }
-}
-
-#[derive(Debug)]
-struct MbsrcError {
-    class: ErrorClass,
-    message: String,
+enum MbsrcError {
+    ConfigNotFound(String),
+    ConfigEvalFailed(String),
+    ArtifactNotFound(String),
+    InvalidRecipe(String),
+    GitFailed(String),
+    CommitNotFound(String),
+    StateFailed(String),
+    MaterializeFailed(String),
+    DematerializeFailed(String),
+    FsFailed(String),
 }
 
 impl MbsrcError {
-    fn new(class: ErrorClass, message: impl Into<String>) -> Self {
-        Self {
-            class,
-            message: message.into(),
+    fn class(&self) -> &'static str {
+        match self {
+            Self::ConfigNotFound(_) => "config-not-found",
+            Self::ConfigEvalFailed(_) => "config-eval-failed",
+            Self::ArtifactNotFound(_) => "artifact-not-found",
+            Self::InvalidRecipe(_) => "invalid-recipe",
+            Self::GitFailed(_) => "git-failed",
+            Self::CommitNotFound(_) => "commit-not-found",
+            Self::StateFailed(_) => "state-failed",
+            Self::MaterializeFailed(_) => "materialize-failed",
+            Self::DematerializeFailed(_) => "dematerialize-failed",
+            Self::FsFailed(_) => "fs-failed",
+        }
+    }
+    fn message(&self) -> &str {
+        match self {
+            Self::ConfigNotFound(message)
+            | Self::ConfigEvalFailed(message)
+            | Self::ArtifactNotFound(message)
+            | Self::InvalidRecipe(message)
+            | Self::GitFailed(message)
+            | Self::CommitNotFound(message)
+            | Self::StateFailed(message)
+            | Self::MaterializeFailed(message)
+            | Self::DematerializeFailed(message)
+            | Self::FsFailed(message) => message,
         }
     }
 }
@@ -160,7 +159,7 @@ fn main() -> ExitCode {
     match run(cli.command) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error[{}]: {}", error.class.as_str(), error.message);
+            eprintln!("error[{}]: {}", error.class(), error.message());
             ExitCode::from(1)
         }
     }
@@ -188,8 +187,7 @@ fn run_build(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
 
     if mirror_path.exists() {
         if !mirror_path.is_dir() {
-            return Err(MbsrcError::new(
-                ErrorClass::FsFailed,
+            return Err(MbsrcError::FsFailed(
                 format!(
                     "mirror path exists but is not a directory: {}",
                     mirror_path.display()
@@ -219,8 +217,7 @@ fn run_build(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
     }
 
     if !git_has_commit(&mirror_path, &recipe.source.commit)? {
-        return Err(MbsrcError::new(
-            ErrorClass::CommitNotFound,
+        return Err(MbsrcError::CommitNotFound(
             format!(
                 "commit {} not found in mirror {}",
                 recipe.source.commit,
@@ -254,8 +251,7 @@ fn run_materialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
         .iter()
         .find(|record| record.artifact == artifact_name)
         .ok_or_else(|| {
-            MbsrcError::new(
-                ErrorClass::ArtifactNotFound,
+            MbsrcError::ArtifactNotFound(
                 format!(
                     "artifact '{}' is not built yet; run `mbsrc build {}` first",
                     artifact_name, artifact_name
@@ -265,8 +261,7 @@ fn run_materialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
 
     let mirror_path = PathBuf::from(&build.mirror_path);
     if !mirror_path.is_dir() {
-        return Err(MbsrcError::new(
-            ErrorClass::FsFailed,
+        return Err(MbsrcError::FsFailed(
             format!(
                 "mirror directory does not exist for artifact '{}': {}",
                 artifact_name,
@@ -276,8 +271,7 @@ fn run_materialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
     }
 
     if !git_has_commit(&mirror_path, &build.commit)? {
-        return Err(MbsrcError::new(
-            ErrorClass::CommitNotFound,
+        return Err(MbsrcError::CommitNotFound(
             format!(
                 "commit {} not found in mirror {}",
                 build.commit,
@@ -298,8 +292,7 @@ fn run_materialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
 
     if tmp_dir.exists() {
         fs::remove_dir_all(&tmp_dir).map_err(|error| {
-            MbsrcError::new(
-                ErrorClass::MaterializeFailed,
+            MbsrcError::MaterializeFailed(
                 format!(
                     "failed to clean temporary directory '{}': {error}",
                     tmp_dir.display()
@@ -309,8 +302,7 @@ fn run_materialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
     }
     if tmp_tar.exists() {
         fs::remove_file(&tmp_tar).map_err(|error| {
-            MbsrcError::new(
-                ErrorClass::MaterializeFailed,
+            MbsrcError::MaterializeFailed(
                 format!(
                     "failed to clean temporary tar '{}': {error}",
                     tmp_tar.display()
@@ -320,8 +312,7 @@ fn run_materialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
     }
 
     fs::create_dir_all(&tmp_dir).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::MaterializeFailed,
+        MbsrcError::MaterializeFailed(
             format!(
                 "failed to create temporary directory '{}': {error}",
                 tmp_dir.display()
@@ -351,8 +342,7 @@ fn run_materialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
 
     if tmp_tar.exists() {
         fs::remove_file(&tmp_tar).map_err(|error| {
-            MbsrcError::new(
-                ErrorClass::MaterializeFailed,
+            MbsrcError::MaterializeFailed(
                 format!(
                     "failed to remove temporary tar '{}': {error}",
                     tmp_tar.display()
@@ -363,8 +353,7 @@ fn run_materialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
 
     if target_dir.exists() {
         fs::remove_dir_all(&target_dir).map_err(|error| {
-            MbsrcError::new(
-                ErrorClass::MaterializeFailed,
+            MbsrcError::MaterializeFailed(
                 format!(
                     "failed to remove previous materialization '{}': {error}",
                     target_dir.display()
@@ -374,8 +363,7 @@ fn run_materialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
     }
 
     fs::rename(&tmp_dir, &target_dir).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::MaterializeFailed,
+        MbsrcError::MaterializeFailed(
             format!(
                 "failed to finalize materialization '{}' -> '{}': {error}",
                 tmp_dir.display(),
@@ -407,8 +395,7 @@ fn run_dematerialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()>
     if target_dir.exists() {
         make_writable_recursive(&target_dir)?;
         fs::remove_dir_all(&target_dir).map_err(|error| {
-            MbsrcError::new(
-                ErrorClass::DematerializeFailed,
+            MbsrcError::DematerializeFailed(
                 format!(
                     "failed to remove materialized directory '{}': {error}",
                     target_dir.display()
@@ -416,8 +403,7 @@ fn run_dematerialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()>
             )
         })?;
     } else if !had_materialized_state {
-        return Err(MbsrcError::new(
-            ErrorClass::ArtifactNotFound,
+        return Err(MbsrcError::ArtifactNotFound(
             format!("artifact '{}' is not materialized", artifact_name),
         ));
     }
@@ -442,8 +428,7 @@ fn run_dematerialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()>
 
 fn load_recipe_from_config(recipes_path: &Path, artifact_name: &str) -> MResult<Recipe> {
     if !recipes_path.exists() {
-        return Err(MbsrcError::new(
-            ErrorClass::ConfigNotFound,
+        return Err(MbsrcError::ConfigNotFound(
             format!(
                 "default recipes file '{}' was not found",
                 recipes_path.display()
@@ -454,15 +439,13 @@ fn load_recipe_from_config(recipes_path: &Path, artifact_name: &str) -> MResult<
     let json_value = eval_nickel_file_to_json(recipes_path)?;
 
     let object = json_value.as_object().ok_or_else(|| {
-        MbsrcError::new(
-            ErrorClass::InvalidRecipe,
-            "Nickel config must export an object at top level",
+        MbsrcError::InvalidRecipe(
+            "Nickel config must export an object at top level".to_string(),
         )
     })?;
 
     let artifact_value = object.get(artifact_name).ok_or_else(|| {
-        MbsrcError::new(
-            ErrorClass::ArtifactNotFound,
+        MbsrcError::ArtifactNotFound(
             format!(
                 "artifact '{}' was not found in recipes '{}'",
                 artifact_name,
@@ -472,8 +455,7 @@ fn load_recipe_from_config(recipes_path: &Path, artifact_name: &str) -> MResult<
     })?;
 
     serde_json::from_value::<Recipe>(artifact_value.clone()).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::InvalidRecipe,
+        MbsrcError::InvalidRecipe(
             format!("invalid recipe for artifact '{}': {error}", artifact_name),
         )
     })
@@ -481,8 +463,7 @@ fn load_recipe_from_config(recipes_path: &Path, artifact_name: &str) -> MResult<
 
 fn eval_nickel_file_to_json(path: &Path) -> MResult<Value> {
     let source = fs::read_to_string(path).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::ConfigEvalFailed,
+        MbsrcError::ConfigEvalFailed(
             format!("failed to read Nickel file '{}': {error}", path.display()),
         )
     })?;
@@ -498,12 +479,11 @@ fn eval_nickel_file_to_json(path: &Path) -> MResult<Value> {
         .with_added_import_paths(vec![import_dir]);
 
     let expr = context.eval_deep_for_export(&source).map_err(|error| {
-        MbsrcError::new(ErrorClass::ConfigEvalFailed, format_nickel_error(error))
+        MbsrcError::ConfigEvalFailed( format_nickel_error(error))
     })?;
 
     expr.to_serde().map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::ConfigEvalFailed,
+        MbsrcError::ConfigEvalFailed(
             format!("failed to deserialize evaluated Nickel value: {error}"),
         )
     })
@@ -519,8 +499,7 @@ where
 
     let json_value = eval_nickel_file_to_json(path)?;
     serde_json::from_value::<T>(json_value).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::StateFailed,
+        MbsrcError::StateFailed(
             format!(
                 "failed to decode '{}' as expected state type: {error}",
                 path.display()
@@ -548,18 +527,16 @@ fn format_nickel_error(error: nickel_lang::Error) -> String {
 
 fn validate_recipe(recipe: &Recipe) -> MResult<()> {
     if recipe.source.source_type != "github" {
-        return Err(MbsrcError::new(
-            ErrorClass::InvalidRecipe,
-            "source.type must be 'github'",
+        return Err(MbsrcError::InvalidRecipe(
+            "source.type must be 'github'".to_string(),
         ));
     }
 
     parse_github_repo(&recipe.source.repo)?;
 
     if !is_valid_commit_hash(&recipe.source.commit) {
-        return Err(MbsrcError::new(
-            ErrorClass::InvalidRecipe,
-            "source.commit must be a 40-character lowercase hex string",
+        return Err(MbsrcError::InvalidRecipe(
+            "source.commit must be a 40-character lowercase hex string".to_string(),
         ));
     }
 
@@ -572,9 +549,8 @@ fn parse_github_repo(repo: &str) -> MResult<(String, String)> {
     } else if let Some(rest) = repo.strip_prefix("git@github.com:") {
         rest
     } else {
-        return Err(MbsrcError::new(
-            ErrorClass::InvalidRecipe,
-            "source.repo must be a GitHub URL",
+        return Err(MbsrcError::InvalidRecipe(
+            "source.repo must be a GitHub URL".to_string(),
         ));
     };
 
@@ -585,9 +561,8 @@ fn parse_github_repo(repo: &str) -> MResult<(String, String)> {
     let repo_name = parts.next().unwrap_or("");
 
     if owner.is_empty() || repo_name.is_empty() || parts.next().is_some() {
-        return Err(MbsrcError::new(
-            ErrorClass::InvalidRecipe,
-            "source.repo must be in owner/repo format",
+        return Err(MbsrcError::InvalidRecipe(
+            "source.repo must be in owner/repo format".to_string(),
         ));
     }
 
@@ -609,8 +584,7 @@ fn git_has_commit(mirror_path: &Path, commit: &str) -> MResult<bool> {
         .current_dir(mirror_path)
         .status()
         .map_err(|error| {
-            MbsrcError::new(
-                ErrorClass::GitFailed,
+            MbsrcError::GitFailed(
                 format!("failed to run git cat-file: {error}"),
             )
         })?;
@@ -626,8 +600,7 @@ fn run_git(args: &[&str], cwd: Option<&Path>, context: &str) -> MResult<()> {
     }
 
     let output = command.output().map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::GitFailed,
+        MbsrcError::GitFailed(
             format!("{context}: failed to execute git: {error}"),
         )
     })?;
@@ -646,8 +619,7 @@ fn run_git(args: &[&str], cwd: Option<&Path>, context: &str) -> MResult<()> {
         "git command failed without output".to_string()
     };
 
-    Err(MbsrcError::new(
-        ErrorClass::GitFailed,
+    Err(MbsrcError::GitFailed(
         format!("{context}: {details}"),
     ))
 }
@@ -665,8 +637,7 @@ fn run_command(
     }
 
     let output = command.output().map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::MaterializeFailed,
+        MbsrcError::MaterializeFailed(
             format!("{context}: failed to execute {command_name}: {error}"),
         )
     })?;
@@ -685,8 +656,7 @@ fn run_command(
         format!("{command_name} failed without output")
     };
 
-    Err(MbsrcError::new(
-        ErrorClass::MaterializeFailed,
+    Err(MbsrcError::MaterializeFailed(
         format!("{context}: {details}"),
     ))
 }
@@ -856,8 +826,7 @@ fn write_atomic(path: &Path, content: &str) -> MResult<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            MbsrcError::new(
-                ErrorClass::FsFailed,
+            MbsrcError::FsFailed(
                 format!(
                     "invalid file name for atomic write path '{}'",
                     path.display()
@@ -869,8 +838,7 @@ fn write_atomic(path: &Path, content: &str) -> MResult<()> {
     let tmp_path = path.with_file_name(tmp_name);
 
     fs::write(&tmp_path, content).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::FsFailed,
+        MbsrcError::FsFailed(
             format!(
                 "failed to write temporary file '{}': {error}",
                 tmp_path.display()
@@ -879,8 +847,7 @@ fn write_atomic(path: &Path, content: &str) -> MResult<()> {
     })?;
 
     fs::rename(&tmp_path, path).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::FsFailed,
+        MbsrcError::FsFailed(
             format!(
                 "failed to move temporary file '{}' to '{}': {error}",
                 tmp_path.display(),
@@ -895,8 +862,7 @@ fn current_epoch_secs() -> MResult<f64> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs_f64())
         .map_err(|error| {
-            MbsrcError::new(
-                ErrorClass::FsFailed,
+            MbsrcError::FsFailed(
                 format!("system time before UNIX_EPOCH: {error}"),
             )
         })
@@ -937,8 +903,7 @@ fn ensure_base_dirs(layout: &WorkspaceLayout) -> MResult<()> {
 
 fn ensure_dir(path: &PathBuf, label: &str) -> MResult<()> {
     fs::create_dir_all(path).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::FsFailed,
+        MbsrcError::FsFailed(
             format!(
                 "failed to create or access {label} directory '{}': {error}",
                 path.display()
@@ -959,14 +924,12 @@ fn ensure_state_file(path: &Path) -> MResult<()> {
 fn make_writable_recursive(path: &Path) -> MResult<()> {
     if path.is_dir() {
         for entry in fs::read_dir(path).map_err(|error| {
-            MbsrcError::new(
-                ErrorClass::FsFailed,
+            MbsrcError::FsFailed(
                 format!("failed to read directory '{}': {error}", path.display()),
             )
         })? {
             let entry = entry.map_err(|error| {
-                MbsrcError::new(
-                    ErrorClass::FsFailed,
+                MbsrcError::FsFailed(
                     format!(
                         "failed to read directory entry in '{}': {error}",
                         path.display()
@@ -987,8 +950,7 @@ fn make_writable_recursive(path: &Path) -> MResult<()> {
 fn set_dir_writable(path: &Path) -> MResult<()> {
     let perms = fs::Permissions::from_mode(0o755);
     fs::set_permissions(path, perms).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::FsFailed,
+        MbsrcError::FsFailed(
             format!(
                 "failed to set writable permissions on directory '{}': {error}",
                 path.display()
@@ -1001,8 +963,7 @@ fn set_dir_writable(path: &Path) -> MResult<()> {
 fn set_file_writable(path: &Path) -> MResult<()> {
     let perms = fs::Permissions::from_mode(0o644);
     fs::set_permissions(path, perms).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::FsFailed,
+        MbsrcError::FsFailed(
             format!(
                 "failed to set writable permissions on file '{}': {error}",
                 path.display()
@@ -1015,16 +976,14 @@ fn set_file_writable(path: &Path) -> MResult<()> {
 fn set_dir_writable(path: &Path) -> MResult<()> {
     let mut perms = fs::metadata(path)
         .map_err(|error| {
-            MbsrcError::new(
-                ErrorClass::FsFailed,
+            MbsrcError::FsFailed(
                 format!("failed to read metadata for '{}': {error}", path.display()),
             )
         })?
         .permissions();
     perms.set_readonly(false);
     fs::set_permissions(path, perms).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::FsFailed,
+        MbsrcError::FsFailed(
             format!(
                 "failed to set writable permissions on directory '{}': {error}",
                 path.display()
@@ -1037,16 +996,14 @@ fn set_dir_writable(path: &Path) -> MResult<()> {
 fn set_file_writable(path: &Path) -> MResult<()> {
     let mut perms = fs::metadata(path)
         .map_err(|error| {
-            MbsrcError::new(
-                ErrorClass::FsFailed,
+            MbsrcError::FsFailed(
                 format!("failed to read metadata for '{}': {error}", path.display()),
             )
         })?
         .permissions();
     perms.set_readonly(false);
     fs::set_permissions(path, perms).map_err(|error| {
-        MbsrcError::new(
-            ErrorClass::FsFailed,
+        MbsrcError::FsFailed(
             format!(
                 "failed to set writable permissions on file '{}': {error}",
                 path.display()

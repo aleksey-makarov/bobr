@@ -13,7 +13,46 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const ROOT_DIR: &str = ".mbuild";
 const RECIPES_FILE: &str = "recipes.ncl";
 const MATERIALIZED_DIR: &str = "materialized";
-const STANDARD_IMAGE: &str = "docker.io/library/gcc@sha256:99732c3fbda294e6e7c8bb463a98ec394d48de16ee45fece6f28d7bf7d9dbd99";
+const STANDARD_IMAGE: &str =
+    "docker.io/library/gcc@sha256:99732c3fbda294e6e7c8bb463a98ec394d48de16ee45fece6f28d7bf7d9dbd99";
+
+type MResult<T> = Result<T, MbbinError>;
+
+#[derive(Debug)]
+enum MbbinError {
+    ConfigNotFound(String),
+    ConfigEvalFailed(String),
+    ArtifactNotFound(String),
+    InvalidRecipe(String),
+    PodmanFailed(String),
+    BuildFailed(String),
+    FsFailed(String),
+}
+
+impl MbbinError {
+    fn class(&self) -> &'static str {
+        match self {
+            Self::ConfigNotFound(_) => "config-not-found",
+            Self::ConfigEvalFailed(_) => "config-eval-failed",
+            Self::ArtifactNotFound(_) => "artifact-not-found",
+            Self::InvalidRecipe(_) => "invalid-recipe",
+            Self::PodmanFailed(_) => "podman-failed",
+            Self::BuildFailed(_) => "build-failed",
+            Self::FsFailed(_) => "fs-failed",
+        }
+    }
+    fn message(&self) -> &str {
+        match self {
+            Self::ConfigNotFound(message)
+            | Self::ConfigEvalFailed(message)
+            | Self::ArtifactNotFound(message)
+            | Self::InvalidRecipe(message)
+            | Self::PodmanFailed(message)
+            | Self::BuildFailed(message)
+            | Self::FsFailed(message) => message,
+        }
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "mbbin")]
@@ -47,31 +86,31 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli.command) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(message) => {
-            eprintln!("error: {message}");
+        Err(error) => {
+            eprintln!("error[{}]: {}", error.class(), error.message());
             ExitCode::from(1)
         }
     }
 }
 
-fn run(command: Command) -> Result<(), String> {
+fn run(command: Command) -> MResult<()> {
     match command {
         Command::Doctor => run_doctor(),
         Command::Build { artifact_name } => run_build(&artifact_name),
     }
 }
 
-fn run_doctor() -> Result<(), String> {
+fn run_doctor() -> MResult<()> {
     let output = ProcessCommand::new("podman")
         .arg("--version")
         .output()
-        .map_err(|error| format!("failed to execute podman: {error}"))?;
+        .map_err(|error| MbbinError::PodmanFailed(format!("failed to execute podman: {error}")))?;
 
     if !output.status.success() {
-        return Err(format!(
+        return Err(MbbinError::PodmanFailed(format!(
             "podman --version failed: {}",
             command_details(&output)
-        ));
+        )));
     }
 
     println!("doctor: ok");
@@ -79,7 +118,7 @@ fn run_doctor() -> Result<(), String> {
     Ok(())
 }
 
-fn run_build(artifact_name: &str) -> Result<(), String> {
+fn run_build(artifact_name: &str) -> MResult<()> {
     let layout = workspace_layout()?;
     ensure_base_dirs(&layout)?;
 
@@ -89,11 +128,11 @@ fn run_build(artifact_name: &str) -> Result<(), String> {
     for input in &recipe.inputs {
         let input_dir = layout.materialized.join(input);
         if !input_dir.is_dir() {
-            return Err(format!(
+            return Err(MbbinError::BuildFailed(format!(
                 "input '{}' does not exist as a directory: {}",
                 input,
                 input_dir.display()
-            ));
+            )));
         }
     }
 
@@ -117,7 +156,7 @@ fn run_container_build(
     layout: &WorkspaceLayout,
     recipe: &BinRecipe,
     script_path: &Path,
-) -> Result<(), String> {
+) -> MResult<()> {
     let (uid, gid) = current_uid_gid();
     let script_mount = format!("{}:/__mbbin_script:ro", script_path.display());
 
@@ -150,16 +189,16 @@ fn run_container_build(
         .arg(STANDARD_IMAGE)
         .arg("/__mbbin_script");
 
-    let output = process
-        .output()
-        .map_err(|error| format!("failed to execute podman run: {error}"))?;
+    let output = process.output().map_err(|error| {
+        MbbinError::PodmanFailed(format!("failed to execute podman run: {error}"))
+    })?;
 
     if !output.status.success() {
-        return Err(format!(
+        return Err(MbbinError::BuildFailed(format!(
             "podman run failed with exit status {}: {}",
             output.status.code().unwrap_or(1),
             command_details(&output)
-        ));
+        )));
     }
 
     if !output.stdout.is_empty() {
@@ -180,32 +219,36 @@ fn command_details(output: &std::process::Output) -> String {
     }
 }
 
-fn load_recipe_from_recipes(recipes_path: &Path, artifact_name: &str) -> Result<BinRecipe, String> {
+fn load_recipe_from_recipes(recipes_path: &Path, artifact_name: &str) -> MResult<BinRecipe> {
     if !recipes_path.exists() {
-        return Err(format!(
+        return Err(MbbinError::ConfigNotFound(format!(
             "default recipes file '{}' was not found",
             recipes_path.display()
-        ));
+        )));
     }
 
     let json_value = eval_nickel_file_to_json(recipes_path)?;
-    let object = json_value
-        .as_object()
-        .ok_or_else(|| "Nickel recipes must export an object at top level".to_string())?;
+    let object = json_value.as_object().ok_or_else(|| {
+        MbbinError::InvalidRecipe("Nickel recipes must export an object at top level".to_string())
+    })?;
 
     let artifact_value = object.get(artifact_name).ok_or_else(|| {
-        format!(
+        MbbinError::ArtifactNotFound(format!(
             "artifact '{}' was not found in recipes '{}'",
             artifact_name,
             recipes_path.display()
-        )
+        ))
     })?;
 
-    serde_json::from_value::<BinRecipe>(artifact_value.clone())
-        .map_err(|error| format!("invalid recipe for artifact '{}': {error}", artifact_name))
+    serde_json::from_value::<BinRecipe>(artifact_value.clone()).map_err(|error| {
+        MbbinError::InvalidRecipe(format!(
+            "invalid recipe for artifact '{}': {error}",
+            artifact_name
+        ))
+    })
 }
 
-fn validate_recipe(recipe: &BinRecipe) -> Result<(), String> {
+fn validate_recipe(recipe: &BinRecipe) -> MResult<()> {
     for name in &recipe.inputs {
         validate_mount_name(name)?;
     }
@@ -213,33 +256,43 @@ fn validate_recipe(recipe: &BinRecipe) -> Result<(), String> {
         validate_mount_name(name)?;
     }
     if !recipe.script.starts_with("#!") {
-        return Err("script must start with shebang (`#!`)".to_string());
-    }
-    Ok(())
-}
-
-fn validate_mount_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("input/output name must not be empty".to_string());
-    }
-    if name == "." || name == ".." {
-        return Err(format!("invalid input/output name '{name}'"));
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
-    {
-        return Err(format!(
-            "invalid input/output name '{}'; allowed chars: [A-Za-z0-9._-]",
-            name
+        return Err(MbbinError::InvalidRecipe(
+            "script must start with shebang (`#!`)".to_string(),
         ));
     }
     Ok(())
 }
 
-fn eval_nickel_file_to_json(path: &Path) -> Result<Value, String> {
-    let source = fs::read_to_string(path)
-        .map_err(|error| format!("failed to read Nickel file '{}': {error}", path.display()))?;
+fn validate_mount_name(name: &str) -> MResult<()> {
+    if name.is_empty() {
+        return Err(MbbinError::InvalidRecipe(
+            "input/output name must not be empty".to_string(),
+        ));
+    }
+    if name == "." || name == ".." {
+        return Err(MbbinError::InvalidRecipe(format!(
+            "invalid input/output name '{name}'"
+        )));
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+    {
+        return Err(MbbinError::InvalidRecipe(format!(
+            "invalid input/output name '{}'; allowed chars: [A-Za-z0-9._-]",
+            name
+        )));
+    }
+    Ok(())
+}
+
+fn eval_nickel_file_to_json(path: &Path) -> MResult<Value> {
+    let source = fs::read_to_string(path).map_err(|error| {
+        MbbinError::ConfigEvalFailed(format!(
+            "failed to read Nickel file '{}': {error}",
+            path.display()
+        ))
+    })?;
 
     let import_dir = path
         .parent()
@@ -253,10 +306,13 @@ fn eval_nickel_file_to_json(path: &Path) -> Result<Value, String> {
 
     let expr = context
         .eval_deep_for_export(&source)
-        .map_err(format_nickel_error)?;
+        .map_err(|error| MbbinError::ConfigEvalFailed(format_nickel_error(error)))?;
 
-    expr.to_serde()
-        .map_err(|error| format!("failed to deserialize evaluated Nickel value: {error}"))
+    expr.to_serde().map_err(|error| {
+        MbbinError::ConfigEvalFailed(format!(
+            "failed to deserialize evaluated Nickel value: {error}"
+        ))
+    })
 }
 
 fn format_nickel_error(error: nickel_lang::Error) -> String {
@@ -276,59 +332,59 @@ fn format_nickel_error(error: nickel_lang::Error) -> String {
     }
 }
 
-fn write_temp_script(artifact_name: &str, script: &str) -> Result<PathBuf, String> {
+fn write_temp_script(artifact_name: &str, script: &str) -> MResult<PathBuf> {
     let tmp_dir = env::temp_dir();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("system time before UNIX_EPOCH: {error}"))?
+        .map_err(|error| MbbinError::FsFailed(format!("system time before UNIX_EPOCH: {error}")))?
         .as_nanos();
     let path = tmp_dir.join(format!("mbbin-{artifact_name}-{now}.script"));
 
     fs::write(&path, script).map_err(|error| {
-        format!(
+        MbbinError::FsFailed(format!(
             "failed to write temporary script '{}': {error}",
             path.display()
-        )
+        ))
     })?;
 
     #[cfg(unix)]
     {
         let perms = fs::Permissions::from_mode(0o755);
         fs::set_permissions(&path, perms).map_err(|error| {
-            format!(
+            MbbinError::FsFailed(format!(
                 "failed to set executable permissions on '{}': {error}",
                 path.display()
-            )
+            ))
         })?;
     }
 
     Ok(path)
 }
 
-fn recreate_empty_dir(path: &Path) -> Result<(), String> {
+fn recreate_empty_dir(path: &Path) -> MResult<()> {
     if path.exists() {
         if path.is_dir() {
             fs::remove_dir_all(path).map_err(|error| {
-                format!(
+                MbbinError::FsFailed(format!(
                     "failed to remove previous output directory '{}': {error}",
                     path.display()
-                )
+                ))
             })?;
         } else {
             fs::remove_file(path).map_err(|error| {
-                format!(
+                MbbinError::FsFailed(format!(
                     "failed to remove previous output file '{}': {error}",
                     path.display()
-                )
+                ))
             })?;
         }
     }
 
     fs::create_dir_all(path).map_err(|error| {
-        format!(
+        MbbinError::FsFailed(format!(
             "failed to create output directory '{}': {error}",
             path.display()
-        )
+        ))
     })
 }
 
@@ -353,9 +409,10 @@ struct WorkspaceLayout {
     materialized: PathBuf,
 }
 
-fn workspace_layout() -> Result<WorkspaceLayout, String> {
-    let cwd =
-        env::current_dir().map_err(|error| format!("failed to get current directory: {error}"))?;
+fn workspace_layout() -> MResult<WorkspaceLayout> {
+    let cwd = env::current_dir().map_err(|error| {
+        MbbinError::FsFailed(format!("failed to get current directory: {error}"))
+    })?;
     let root = cwd.join(ROOT_DIR);
     Ok(WorkspaceLayout {
         recipes: root.join(RECIPES_FILE),
@@ -364,17 +421,17 @@ fn workspace_layout() -> Result<WorkspaceLayout, String> {
     })
 }
 
-fn ensure_base_dirs(layout: &WorkspaceLayout) -> Result<(), String> {
+fn ensure_base_dirs(layout: &WorkspaceLayout) -> MResult<()> {
     ensure_dir(&layout.root, "mbuild root")?;
     ensure_dir(&layout.materialized, "materialized")?;
     Ok(())
 }
 
-fn ensure_dir(path: &Path, label: &str) -> Result<(), String> {
+fn ensure_dir(path: &Path, label: &str) -> MResult<()> {
     fs::create_dir_all(path).map_err(|error| {
-        format!(
+        MbbinError::FsFailed(format!(
             "failed to create or access {label} directory '{}': {error}",
             path.display()
-        )
+        ))
     })
 }

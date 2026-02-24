@@ -55,6 +55,7 @@ Important notes:
 
 ## Error Policy (MVP)
 
+- CLI errors are emitted as `error[<class>]: <message>`.
 - Non-zero container/script exit code => build failure.
 - Missing interpreter or missing runtime tools in container image => build failure.
 - Output semantic validation is deferred.
