@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use mbuild_core::Builder;
 use nickel_lang::{Context as NickelContext, ErrorFormat as NickelErrorFormat};
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -134,6 +135,34 @@ impl UnifiedRecipe {
 struct WorkspaceLayout {
     recipes: PathBuf,
 }
+
+const BUILD_VERBS: &[&str] = &["build"];
+
+struct GithubBuilder;
+struct BinaryBuilder;
+
+impl Builder for GithubBuilder {
+    fn get_type(&self) -> &'static str {
+        "github"
+    }
+
+    fn verbs(&self) -> &'static [&'static str] {
+        BUILD_VERBS
+    }
+}
+
+impl Builder for BinaryBuilder {
+    fn get_type(&self) -> &'static str {
+        "binary"
+    }
+
+    fn verbs(&self) -> &'static [&'static str] {
+        BUILD_VERBS
+    }
+}
+
+static GITHUB_BUILDER: GithubBuilder = GithubBuilder;
+static BINARY_BUILDER: BinaryBuilder = BinaryBuilder;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -341,15 +370,19 @@ fn io_counts(recipe_value: &Value) -> (usize, usize) {
 }
 
 fn supported_verbs_for_type(recipe_type: &str) -> Option<Vec<&'static str>> {
-    match recipe_type {
-        "github" | "binary" => Some(vec!["build"]),
-        _ => None,
-    }
+    registered_builders()
+        .iter()
+        .find(|builder| builder.get_type() == recipe_type)
+        .map(|builder| builder.verbs().to_vec())
 }
 
 fn supported_verbs_for_artifact(artifact_name: &str) -> MResult<Vec<&'static str>> {
     let recipe_type = artifact_recipe_type(artifact_name)?;
     Ok(supported_verbs_for_type(&recipe_type).unwrap_or_else(|| vec!["build"]))
+}
+
+fn registered_builders() -> [&'static dyn Builder; 2] {
+    [&GITHUB_BUILDER, &BINARY_BUILDER]
 }
 
 fn validate_common_fields(recipe: &UnifiedRecipe) -> MResult<()> {
