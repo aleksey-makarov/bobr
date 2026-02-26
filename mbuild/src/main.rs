@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
+use mbuild_core::BuilderError;
 use nickel_lang::{Context as NickelContext, ErrorFormat as NickelErrorFormat};
-use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::env;
 use std::fmt;
@@ -90,49 +90,6 @@ enum Command {
     External(Vec<String>),
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum UnifiedRecipe {
-    #[serde(rename = "github")]
-    Github {
-        #[serde(default)]
-        inputs: Vec<String>,
-        #[serde(default)]
-        outputs: Vec<String>,
-        repo: String,
-        commit: String,
-    },
-    #[serde(rename = "binary")]
-    Binary {
-        #[serde(default)]
-        inputs: Vec<String>,
-        #[serde(default)]
-        outputs: Vec<String>,
-        script: String,
-    },
-}
-
-impl UnifiedRecipe {
-    fn recipe_type(&self) -> &'static str {
-        match self {
-            Self::Github { .. } => "github",
-            Self::Binary { .. } => "binary",
-        }
-    }
-
-    fn inputs(&self) -> &[String] {
-        match self {
-            Self::Github { inputs, .. } | Self::Binary { inputs, .. } => inputs,
-        }
-    }
-
-    fn outputs(&self) -> &[String] {
-        match self {
-            Self::Github { outputs, .. } | Self::Binary { outputs, .. } => outputs,
-        }
-    }
-}
-
 struct WorkspaceLayout {
     recipes: PathBuf,
 }
@@ -172,42 +129,70 @@ fn run_artifact_form(args: &[String]) -> MResult<()> {
 
     let artifact_name = &args[0];
     let verb = args.get(1).map(String::as_str).unwrap_or("build");
-
     match verb {
         "build" => run_build(artifact_name),
-        _ => Err(MbuildError::InvalidCommand(format!(
-            "unknown verb '{}' for artifact '{}'; supported verbs: {}",
-            verb,
-            artifact_name,
-            supported_verbs_for_artifact(artifact_name)?.join(", ")
-        ))),
+        _ => run_custom_verb(artifact_name, verb),
     }
 }
 
-fn run_build(artifact_name: &str) -> MResult<()> {
+struct ArtifactContext {
+    layout: WorkspaceLayout,
+    artifact_value: Value,
+    recipe_type: String,
+}
+
+fn load_artifact_context(artifact_name: &str) -> MResult<ArtifactContext> {
     let layout = workspace_layout()?;
-    let recipe = load_unified_recipe(&layout.recipes, artifact_name)?;
-    validate_common_fields(&recipe)?;
+    let artifact_value = load_recipe_value(&layout.recipes, artifact_name)?;
+    validate_common_fields(&artifact_value)?;
+    let recipe_type = recipe_type_from_value(&artifact_value)?;
+    Ok(ArtifactContext {
+        layout,
+        artifact_value,
+        recipe_type,
+    })
+}
+
+fn run_build(artifact_name: &str) -> MResult<()> {
+    let ctx = load_artifact_context(artifact_name)?;
+    let builder = builders::get_builder(&ctx.recipe_type).ok_or_else(|| {
+        MbuildError::InvalidCommand(format!(
+            "no builder is registered for type '{}'",
+            ctx.recipe_type
+        ))
+    })?;
 
     println!("build: parsed");
-    println!("recipes: {}", layout.recipes.display());
+    println!("recipes: {}", ctx.layout.recipes.display());
     println!("artifact: {artifact_name}");
-    println!("type: {}", recipe.recipe_type());
-    println!("inputs: {}", recipe.inputs().len());
-    println!("outputs: {}", recipe.outputs().len());
-    match &recipe {
-        UnifiedRecipe::Github { repo, commit, .. } => {
-            println!("repo: {repo}");
-            println!("commit: {commit}");
-        }
-        UnifiedRecipe::Binary { script, .. } => {
-            println!("script_bytes: {}", script.len());
-        }
+    println!("type: {}", ctx.recipe_type);
+    let (inputs, outputs) = io_counts(&ctx.artifact_value);
+    println!("inputs: {inputs}");
+    println!("outputs: {outputs}");
+
+    for (key, value) in builder
+        .summarize_recipe(&ctx.artifact_value)
+        .map_err(map_builder_error)?
+    {
+        println!("{key}: {value}");
     }
 
-    Err(MbuildError::NotImplemented(
-        "dispatch to concrete builders is not implemented yet".to_string(),
-    ))
+    builder
+        .run_build(artifact_name, &ctx.artifact_value)
+        .map_err(map_builder_error)
+}
+
+fn run_custom_verb(artifact_name: &str, verb: &str) -> MResult<()> {
+    let ctx = load_artifact_context(artifact_name)?;
+    let builder = builders::get_builder(&ctx.recipe_type).ok_or_else(|| {
+        MbuildError::InvalidCommand(format!(
+            "no builder is registered for type '{}'",
+            ctx.recipe_type
+        ))
+    })?;
+    builder
+        .run_custom(verb, artifact_name, &ctx.artifact_value)
+        .map_err(map_builder_error)
 }
 
 fn run_verbs(target: &str) -> MResult<()> {
@@ -268,7 +253,7 @@ fn workspace_layout() -> MResult<WorkspaceLayout> {
     })
 }
 
-fn load_unified_recipe(recipes_path: &Path, artifact_name: &str) -> MResult<UnifiedRecipe> {
+fn load_recipe_value(recipes_path: &Path, artifact_name: &str) -> MResult<Value> {
     let object = load_recipes_object(recipes_path)?;
     let artifact_value = object.get(artifact_name).ok_or_else(|| {
         MbuildError::ArtifactNotFound(format!(
@@ -277,13 +262,7 @@ fn load_unified_recipe(recipes_path: &Path, artifact_name: &str) -> MResult<Unif
             recipes_path.display()
         ))
     })?;
-
-    serde_json::from_value::<UnifiedRecipe>(artifact_value.clone()).map_err(|error| {
-        MbuildError::InvalidRecipe(format!(
-            "invalid unified recipe for artifact '{}': {error}",
-            artifact_name
-        ))
-    })
+    Ok(artifact_value.clone())
 }
 
 fn load_recipes_object(recipes_path: &Path) -> MResult<Map<String, Value>> {
@@ -346,17 +325,27 @@ fn supported_verbs_for_type(recipe_type: &str) -> Option<Vec<&'static str>> {
     builders::supported_verbs_for_type(recipe_type)
 }
 
-fn supported_verbs_for_artifact(artifact_name: &str) -> MResult<Vec<&'static str>> {
-    let recipe_type = artifact_recipe_type(artifact_name)?;
-    Ok(supported_verbs_for_type(&recipe_type).unwrap_or_else(|| vec!["build"]))
-}
-
-fn validate_common_fields(recipe: &UnifiedRecipe) -> MResult<()> {
-    for name in recipe.inputs() {
-        validate_name(name)?;
+fn validate_common_fields(recipe: &Value) -> MResult<()> {
+    let Some(obj) = recipe.as_object() else {
+        return Err(MbuildError::InvalidRecipe(
+            "recipe must be an object".to_string(),
+        ));
+    };
+    if let Some(inputs) = obj.get("inputs").and_then(Value::as_array) {
+        for input in inputs {
+            let name = input.as_str().ok_or_else(|| {
+                MbuildError::InvalidRecipe("each input name must be a string".to_string())
+            })?;
+            validate_name(name)?;
+        }
     }
-    for name in recipe.outputs() {
-        validate_name(name)?;
+    if let Some(outputs) = obj.get("outputs").and_then(Value::as_array) {
+        for output in outputs {
+            let name = output.as_str().ok_or_else(|| {
+                MbuildError::InvalidRecipe("each output name must be a string".to_string())
+            })?;
+            validate_name(name)?;
+        }
     }
     Ok(())
 }
@@ -422,5 +411,13 @@ fn format_nickel_error(error: nickel_lang::Error) -> String {
         Err(format_error) => format!(
             "Nickel evaluation failed; could not render diagnostics: {format_error}; original: {error:?}"
         ),
+    }
+}
+
+fn map_builder_error(error: BuilderError) -> MbuildError {
+    match error {
+        BuilderError::NotImplemented(message) => MbuildError::NotImplemented(message),
+        BuilderError::UnsupportedVerb(message) => MbuildError::InvalidCommand(message),
+        BuilderError::InvalidRecipe(message) => MbuildError::InvalidRecipe(message),
     }
 }
