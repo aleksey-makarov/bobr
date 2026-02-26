@@ -11,6 +11,7 @@
 package.json
 package-lock.json
 node_modules
+mbuild/target/
 mbsrc/target/
 mbbin/target/
 .mbuild/github/mirrors/
