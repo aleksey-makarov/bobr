@@ -1,4 +1,5 @@
-use mbuild_core::Builder;
+use mbuild_core::{Builder, BuilderError};
+use serde_json::Value;
 
 const BUILD_VERBS: &[&str] = &["build"];
 
@@ -13,6 +14,13 @@ impl Builder for GithubBuilder {
     fn verbs(&self) -> &'static [&'static str] {
         BUILD_VERBS
     }
+
+    fn run_build(&self, artifact: &str, _recipe: &Value) -> Result<(), BuilderError> {
+        Err(BuilderError::NotImplemented(format!(
+            "github build dispatch is not implemented yet for artifact '{}'",
+            artifact
+        )))
+    }
 }
 
 impl Builder for BinaryBuilder {
@@ -22,6 +30,13 @@ impl Builder for BinaryBuilder {
 
     fn verbs(&self) -> &'static [&'static str] {
         BUILD_VERBS
+    }
+
+    fn run_build(&self, artifact: &str, _recipe: &Value) -> Result<(), BuilderError> {
+        Err(BuilderError::NotImplemented(format!(
+            "binary build dispatch is not implemented yet for artifact '{}'",
+            artifact
+        )))
     }
 }
 
