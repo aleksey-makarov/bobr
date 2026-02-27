@@ -32,4 +32,4 @@ Current examples:
 ## Current Backends
 
 - `mbuild-github`: GitHub source backend
-- binary backend is still wired as an internal stub in `mbuild`
+- `mbuild-binary`: containerized binary build backend

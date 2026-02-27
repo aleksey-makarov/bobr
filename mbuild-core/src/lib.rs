@@ -4,6 +4,7 @@ use serde_json::Value;
 pub enum BuilderError {
     UnsupportedVerb(String),
     InvalidRecipe(String),
+    ExecutionFailed(String),
     NotImplemented(String),
 }
 

@@ -570,9 +570,20 @@ name = "mbuild"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "mbuild-binary",
  "mbuild-core",
  "mbuild-github",
  "nickel-lang",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mbuild-binary"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "mbuild-core",
  "serde",
  "serde_json",
 ]

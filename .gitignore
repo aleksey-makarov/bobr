@@ -13,7 +13,7 @@ package-lock.json
 node_modules
 mbuild/target/
 mbuild-github/target/
-mbbin/target/
+mbuild-binary/target/
 .mbuild/github/mirrors/
 .mbuild/materialized/
 .mbuild/github/internal.ncl

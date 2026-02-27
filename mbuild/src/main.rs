@@ -22,6 +22,7 @@ enum MbuildError {
     ArtifactNotFound(String),
     InvalidCommand(String),
     InvalidRecipe(String),
+    BuilderFailed(String),
     NotImplemented(String),
     FsFailed(String),
 }
@@ -34,6 +35,7 @@ impl MbuildError {
             Self::ArtifactNotFound(_) => "artifact-not-found",
             Self::InvalidCommand(_) => "invalid-command",
             Self::InvalidRecipe(_) => "invalid-recipe",
+            Self::BuilderFailed(_) => "builder-failed",
             Self::NotImplemented(_) => "not-implemented",
             Self::FsFailed(_) => "fs-failed",
         }
@@ -46,6 +48,7 @@ impl MbuildError {
             | Self::ArtifactNotFound(message)
             | Self::InvalidCommand(message)
             | Self::InvalidRecipe(message)
+            | Self::BuilderFailed(message)
             | Self::NotImplemented(message)
             | Self::FsFailed(message) => message,
         }
@@ -419,5 +422,6 @@ fn map_builder_error(error: BuilderError) -> MbuildError {
         BuilderError::NotImplemented(message) => MbuildError::NotImplemented(message),
         BuilderError::UnsupportedVerb(message) => MbuildError::InvalidCommand(message),
         BuilderError::InvalidRecipe(message) => MbuildError::InvalidRecipe(message),
+        BuilderError::ExecutionFailed(message) => MbuildError::BuilderFailed(message),
     }
 }

@@ -460,7 +460,7 @@ fn map_error(error: MbsrcError) -> BuilderError {
         | MbsrcError::CommitNotFound(message)
         | MbsrcError::StateFailed(message)
         | MbsrcError::MaterializeFailed(message)
-        | MbsrcError::FsFailed(message) => BuilderError::NotImplemented(message),
+        | MbsrcError::FsFailed(message) => BuilderError::ExecutionFailed(message),
     }
 }
 
