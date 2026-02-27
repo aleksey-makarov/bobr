@@ -12,7 +12,7 @@ package.json
 package-lock.json
 node_modules
 mbuild/target/
-mbsrc/target/
+mbuild-github/target/
 mbbin/target/
 .mbuild/github/mirrors/
 .mbuild/materialized/

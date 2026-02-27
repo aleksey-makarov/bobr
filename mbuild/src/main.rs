@@ -62,7 +62,7 @@ impl fmt::Display for MbuildError {
 #[command(name = "mbuild")]
 #[command(about = "Unified mbuild CLI (skeleton)")]
 #[command(
-    after_help = "Examples:\n  mbuild zstd-1.5.7\n  mbuild zstd-1.5.7 build\n  mbuild build zstd-1.5.7\n  mbuild info zstd-1.5.7\n  mbuild verbs github\n  mbuild verbs zstd-1.5.7"
+    after_help = "Examples:\n  mbuild zstd-1.5.7\n  mbuild zstd-1.5.7 build\n  mbuild zstd-1.5.7 cache\n  mbuild build zstd-1.5.7\n  mbuild info zstd-1.5.7\n  mbuild verbs github\n  mbuild verbs zstd-1.5.7"
 )]
 struct Cli {
     #[command(subcommand)]

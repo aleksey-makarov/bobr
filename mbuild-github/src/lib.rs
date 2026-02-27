@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use mbuild_core::{Builder, BuilderError, VerbSpec};
 use nickel_lang::{Context as NickelContext, ErrorFormat as NickelErrorFormat};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -7,25 +7,25 @@ use std::collections::HashMap;
 use std::env;
 use std::fmt;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command as ProcessCommand, ExitCode};
+use std::process::Command as ProcessCommand;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const ROOT_DIR: &str = ".mbuild";
-const RECIPES_FILE: &str = "recipes.ncl";
 const SHARED_STATE_FILE: &str = "state.ncl";
 const INTERNAL_STATE_FILE: &str = "internal.ncl";
 const BUILDER_DIR: &str = "github";
 const MIRRORS_DIR: &str = "mirrors";
 const MATERIALIZED_DIR: &str = "materialized";
+const CUSTOM_VERBS: &[VerbSpec] = &[VerbSpec {
+    name: "cache",
+    description: "populate or update github mirrors without materializing outputs",
+}];
 
 type MResult<T> = Result<T, MbsrcError>;
 
 #[derive(Debug)]
 enum MbsrcError {
-    ConfigNotFound(String),
     ConfigEvalFailed(String),
     ArtifactNotFound(String),
     InvalidRecipe(String),
@@ -33,36 +33,19 @@ enum MbsrcError {
     CommitNotFound(String),
     StateFailed(String),
     MaterializeFailed(String),
-    DematerializeFailed(String),
     FsFailed(String),
 }
 
 impl MbsrcError {
-    fn class(&self) -> &'static str {
-        match self {
-            Self::ConfigNotFound(_) => "config-not-found",
-            Self::ConfigEvalFailed(_) => "config-eval-failed",
-            Self::ArtifactNotFound(_) => "artifact-not-found",
-            Self::InvalidRecipe(_) => "invalid-recipe",
-            Self::GitFailed(_) => "git-failed",
-            Self::CommitNotFound(_) => "commit-not-found",
-            Self::StateFailed(_) => "state-failed",
-            Self::MaterializeFailed(_) => "materialize-failed",
-            Self::DematerializeFailed(_) => "dematerialize-failed",
-            Self::FsFailed(_) => "fs-failed",
-        }
-    }
     fn message(&self) -> &str {
         match self {
-            Self::ConfigNotFound(message)
-            | Self::ConfigEvalFailed(message)
+            Self::ConfigEvalFailed(message)
             | Self::ArtifactNotFound(message)
             | Self::InvalidRecipe(message)
             | Self::GitFailed(message)
             | Self::CommitNotFound(message)
             | Self::StateFailed(message)
             | Self::MaterializeFailed(message)
-            | Self::DematerializeFailed(message)
             | Self::FsFailed(message) => message,
         }
     }
@@ -74,42 +57,10 @@ impl fmt::Display for MbsrcError {
     }
 }
 
-#[derive(Parser, Debug)]
-#[command(name = "mbsrc")]
-#[command(about = "Minimal source builder (MVP)")]
-struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand, Debug)]
-enum Command {
-    /// Build one artifact from .mbuild/recipes.ncl.
-    Build {
-        /// Artifact name (case-sensitive key in .mbuild/recipes.ncl).
-        artifact_name: String,
-    },
-    /// Materialize output by artifact name.
-    Materialize {
-        /// Artifact name.
-        artifact_name: String,
-    },
-    /// Remove materialized output by artifact name.
-    Dematerialize {
-        /// Artifact name.
-        artifact_name: String,
-    },
-}
-
 #[derive(Debug, Deserialize)]
-struct Recipe {
-    source: SourceSpec,
-}
-
-#[derive(Debug, Deserialize)]
-struct SourceSpec {
+struct GithubRecipe {
     #[serde(rename = "type")]
-    source_type: String,
+    recipe_type: String,
     repo: String,
     commit: String,
 }
@@ -161,34 +112,55 @@ impl Default for SharedState {
     }
 }
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    match run(cli.command) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("error[{}]: {}", error.class(), error);
-            ExitCode::from(1)
+pub struct GithubBuilder;
+
+impl Builder for GithubBuilder {
+    fn get_type(&self) -> &'static str {
+        "github"
+    }
+
+    fn run_build(&self, artifact: &str, recipe: &Value) -> Result<(), BuilderError> {
+        let recipe = parse_recipe(recipe)?;
+        let dirs = workspace_layout();
+        ensure_base_dirs(&dirs).map_err(map_error)?;
+        run_cache(&dirs, artifact, &recipe).map_err(map_error)?;
+        run_materialize(&dirs, artifact).map_err(map_error)
+    }
+
+    fn summarize_recipe(&self, recipe: &Value) -> Result<Vec<(&'static str, String)>, BuilderError> {
+        let recipe = parse_recipe(recipe)?;
+        Ok(vec![
+            ("repo", recipe.repo),
+            ("commit", recipe.commit),
+        ])
+    }
+
+    fn custom_verbs(&self) -> &'static [VerbSpec] {
+        CUSTOM_VERBS
+    }
+
+    fn run_custom(&self, verb: &str, artifact: &str, recipe: &Value) -> Result<(), BuilderError> {
+        match verb {
+            "cache" => {
+                let recipe = parse_recipe(recipe)?;
+                let dirs = workspace_layout();
+                ensure_base_dirs(&dirs).map_err(map_error)?;
+                run_cache(&dirs, artifact, &recipe).map_err(map_error)
+            }
+            _ => Err(BuilderError::UnsupportedVerb(format!(
+                "verb '{}' is not supported by builder '{}' for artifact '{}'",
+                verb,
+                self.get_type(),
+                artifact
+            ))),
         }
     }
 }
 
-fn run(command: Command) -> MResult<()> {
-    let dirs = workspace_layout();
-    ensure_base_dirs(&dirs)?;
-
-    match command {
-        Command::Build { artifact_name } => run_build(&dirs, &artifact_name),
-        Command::Materialize { artifact_name } => run_materialize(&dirs, &artifact_name),
-        Command::Dematerialize { artifact_name } => run_dematerialize(&dirs, &artifact_name),
-    }
-}
-
-fn run_build(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
-    let recipe = load_recipe_from_config(&dirs.recipes, artifact_name)?;
-    validate_recipe(&recipe)?;
+fn run_cache(dirs: &WorkspaceLayout, artifact_name: &str, recipe: &GithubRecipe) -> MResult<()> {
     ensure_dir(&dirs.mirrors, "mirrors")?;
 
-    let (owner, repo_name) = parse_github_repo(&recipe.source.repo)?;
+    let (owner, repo_name) = parse_github_repo(&recipe.repo)?;
     let mirror_name = format!("{owner}_{repo_name}.git");
     let mirror_path = dirs.mirrors.join(mirror_name);
 
@@ -202,7 +174,7 @@ fn run_build(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
             ));
         }
 
-        let has_commit = git_has_commit(&mirror_path, &recipe.source.commit)?;
+        let has_commit = git_has_commit(&mirror_path, &recipe.commit)?;
         if !has_commit {
             run_git(
                 &["fetch", "--all", "--prune"],
@@ -215,7 +187,7 @@ fn run_build(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
             &[
                 "clone",
                 "--mirror",
-                &recipe.source.repo,
+                &recipe.repo,
                 &mirror_path.to_string_lossy(),
             ],
             None,
@@ -223,11 +195,11 @@ fn run_build(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
         )?;
     }
 
-    if !git_has_commit(&mirror_path, &recipe.source.commit)? {
+    if !git_has_commit(&mirror_path, &recipe.commit)? {
         return Err(MbsrcError::CommitNotFound(
             format!(
                 "commit {} not found in mirror {}",
-                recipe.source.commit,
+                recipe.commit,
                 mirror_path.display()
             ),
         ));
@@ -236,16 +208,15 @@ fn run_build(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
     update_states(
         dirs,
         artifact_name,
-        &recipe.source.repo,
-        &recipe.source.commit,
+        &recipe.repo,
+        &recipe.commit,
         &mirror_path,
     )?;
 
-    println!("build: ok");
-    println!("recipes: {}", dirs.recipes.display());
+    println!("cache: ok");
     println!("artifact: {artifact_name}");
-    println!("repo: {}", recipe.source.repo);
-    println!("commit: {}", recipe.source.commit);
+    println!("repo: {}", recipe.repo);
+    println!("commit: {}", recipe.commit);
     println!("mirror: {}", mirror_path.display());
 
     Ok(())
@@ -260,7 +231,7 @@ fn run_materialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
         .ok_or_else(|| {
             MbsrcError::ArtifactNotFound(
                 format!(
-                    "artifact '{}' is not built yet; run `mbsrc build {}` first",
+                    "artifact '{}' is not cached yet; run `mbuild {} cache` first",
                     artifact_name, artifact_name
                 ),
             )
@@ -388,86 +359,6 @@ fn run_materialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
     Ok(())
 }
 
-fn run_dematerialize(dirs: &WorkspaceLayout, artifact_name: &str) -> MResult<()> {
-    let target_dir = dirs.materialized.join(artifact_name);
-    let mut shared: SharedState = parse_nickel_data_file(&dirs.shared_state)?;
-
-    let had_materialized_state = shared
-        .artifacts
-        .iter()
-        .find(|record| record.artifact == artifact_name)
-        .map(|record| record.materialized)
-        .unwrap_or(false);
-
-    if target_dir.exists() {
-        make_writable_recursive(&target_dir)?;
-        fs::remove_dir_all(&target_dir).map_err(|error| {
-            MbsrcError::DematerializeFailed(
-                format!(
-                    "failed to remove materialized directory '{}': {error}",
-                    target_dir.display()
-                ),
-            )
-        })?;
-    } else if !had_materialized_state {
-        return Err(MbsrcError::ArtifactNotFound(
-            format!("artifact '{}' is not materialized", artifact_name),
-        ));
-    }
-
-    if let Some(existing) = shared
-        .artifacts
-        .iter_mut()
-        .find(|record| record.artifact == artifact_name)
-    {
-        existing.materialized = false;
-        existing.materialized_path.clear();
-        existing.materialized_at_epoch_secs = 0.0;
-    }
-
-    write_atomic(&dirs.shared_state, &render_shared_state_ncl(&shared))?;
-
-    println!("dematerialize: ok");
-    println!("artifact: {artifact_name}");
-    println!("target: {}", target_dir.display());
-    Ok(())
-}
-
-fn load_recipe_from_config(recipes_path: &Path, artifact_name: &str) -> MResult<Recipe> {
-    if !recipes_path.exists() {
-        return Err(MbsrcError::ConfigNotFound(
-            format!(
-                "default recipes file '{}' was not found",
-                recipes_path.display()
-            ),
-        ));
-    }
-
-    let json_value = eval_nickel_file_to_json(recipes_path)?;
-
-    let object = json_value.as_object().ok_or_else(|| {
-        MbsrcError::InvalidRecipe(
-            "Nickel config must export an object at top level".to_string(),
-        )
-    })?;
-
-    let artifact_value = object.get(artifact_name).ok_or_else(|| {
-        MbsrcError::ArtifactNotFound(
-            format!(
-                "artifact '{}' was not found in recipes '{}'",
-                artifact_name,
-                recipes_path.display()
-            ),
-        )
-    })?;
-
-    serde_json::from_value::<Recipe>(artifact_value.clone()).map_err(|error| {
-        MbsrcError::InvalidRecipe(
-            format!("invalid recipe for artifact '{}': {error}", artifact_name),
-        )
-    })
-}
-
 fn eval_nickel_file_to_json(path: &Path) -> MResult<Value> {
     let source = fs::read_to_string(path).map_err(|error| {
         MbsrcError::ConfigEvalFailed(
@@ -532,22 +423,45 @@ fn format_nickel_error(error: nickel_lang::Error) -> String {
     }
 }
 
-fn validate_recipe(recipe: &Recipe) -> MResult<()> {
-    if recipe.source.source_type != "github" {
+fn validate_recipe(recipe: &GithubRecipe) -> MResult<()> {
+    if recipe.recipe_type != "github" {
         return Err(MbsrcError::InvalidRecipe(
-            "source.type must be 'github'".to_string(),
+            "type must be 'github'".to_string(),
         ));
     }
 
-    parse_github_repo(&recipe.source.repo)?;
+    parse_github_repo(&recipe.repo)?;
 
-    if !is_valid_commit_hash(&recipe.source.commit) {
+    if !is_valid_commit_hash(&recipe.commit) {
         return Err(MbsrcError::InvalidRecipe(
-            "source.commit must be a 40-character lowercase hex string".to_string(),
+            "commit must be a 40-character lowercase hex string".to_string(),
         ));
     }
 
     Ok(())
+}
+
+fn parse_recipe(value: &Value) -> Result<GithubRecipe, BuilderError> {
+    serde_json::from_value::<GithubRecipe>(value.clone())
+        .map_err(|error| BuilderError::InvalidRecipe(format!("invalid github recipe: {error}")))
+        .and_then(|recipe| {
+            validate_recipe(&recipe)
+                .map_err(map_error)?;
+            Ok(recipe)
+        })
+}
+
+fn map_error(error: MbsrcError) -> BuilderError {
+    match error {
+        MbsrcError::InvalidRecipe(message) => BuilderError::InvalidRecipe(message),
+        MbsrcError::ArtifactNotFound(message)
+        | MbsrcError::ConfigEvalFailed(message)
+        | MbsrcError::GitFailed(message)
+        | MbsrcError::CommitNotFound(message)
+        | MbsrcError::StateFailed(message)
+        | MbsrcError::MaterializeFailed(message)
+        | MbsrcError::FsFailed(message) => BuilderError::NotImplemented(message),
+    }
 }
 
 fn parse_github_repo(repo: &str) -> MResult<(String, String)> {
@@ -877,7 +791,6 @@ fn current_epoch_secs() -> MResult<f64> {
 
 struct WorkspaceLayout {
     root: PathBuf,
-    recipes: PathBuf,
     shared_state: PathBuf,
     builder_root: PathBuf,
     internal_state: PathBuf,
@@ -890,7 +803,6 @@ fn workspace_layout() -> WorkspaceLayout {
     let root = cwd.join(ROOT_DIR);
     let builder_root = root.join(BUILDER_DIR);
     WorkspaceLayout {
-        recipes: root.join(RECIPES_FILE),
         shared_state: root.join(SHARED_STATE_FILE),
         builder_root: builder_root.clone(),
         internal_state: builder_root.join(INTERNAL_STATE_FILE),
@@ -926,95 +838,4 @@ fn ensure_state_file(path: &Path) -> MResult<()> {
 
     let default_state = render_shared_state_ncl(&SharedState::default());
     write_atomic(path, &default_state)
-}
-
-fn make_writable_recursive(path: &Path) -> MResult<()> {
-    if path.is_dir() {
-        for entry in fs::read_dir(path).map_err(|error| {
-            MbsrcError::FsFailed(
-                format!("failed to read directory '{}': {error}", path.display()),
-            )
-        })? {
-            let entry = entry.map_err(|error| {
-                MbsrcError::FsFailed(
-                    format!(
-                        "failed to read directory entry in '{}': {error}",
-                        path.display()
-                    ),
-                )
-            })?;
-            make_writable_recursive(&entry.path())?;
-        }
-        set_dir_writable(path)?;
-    } else if path.is_file() {
-        set_file_writable(path)?;
-    }
-
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_dir_writable(path: &Path) -> MResult<()> {
-    let perms = fs::Permissions::from_mode(0o755);
-    fs::set_permissions(path, perms).map_err(|error| {
-        MbsrcError::FsFailed(
-            format!(
-                "failed to set writable permissions on directory '{}': {error}",
-                path.display()
-            ),
-        )
-    })
-}
-
-#[cfg(unix)]
-fn set_file_writable(path: &Path) -> MResult<()> {
-    let perms = fs::Permissions::from_mode(0o644);
-    fs::set_permissions(path, perms).map_err(|error| {
-        MbsrcError::FsFailed(
-            format!(
-                "failed to set writable permissions on file '{}': {error}",
-                path.display()
-            ),
-        )
-    })
-}
-
-#[cfg(not(unix))]
-fn set_dir_writable(path: &Path) -> MResult<()> {
-    let mut perms = fs::metadata(path)
-        .map_err(|error| {
-            MbsrcError::FsFailed(
-                format!("failed to read metadata for '{}': {error}", path.display()),
-            )
-        })?
-        .permissions();
-    perms.set_readonly(false);
-    fs::set_permissions(path, perms).map_err(|error| {
-        MbsrcError::FsFailed(
-            format!(
-                "failed to set writable permissions on directory '{}': {error}",
-                path.display()
-            ),
-        )
-    })
-}
-
-#[cfg(not(unix))]
-fn set_file_writable(path: &Path) -> MResult<()> {
-    let mut perms = fs::metadata(path)
-        .map_err(|error| {
-            MbsrcError::FsFailed(
-                format!("failed to read metadata for '{}': {error}", path.display()),
-            )
-        })?
-        .permissions();
-    perms.set_readonly(false);
-    fs::set_permissions(path, perms).map_err(|error| {
-        MbsrcError::FsFailed(
-            format!(
-                "failed to set writable permissions on file '{}': {error}",
-                path.display()
-            ),
-        )
-    })
 }

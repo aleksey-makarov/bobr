@@ -1,0 +1,35 @@
+# mbuild
+
+`mbuild` is the top-level CLI that orchestrates multiple builder backends.
+
+At the current stage:
+- recipes are read from `.mbuild/recipes.ncl`
+- each artifact has a `type`
+- `mbuild` routes execution to the registered builder for that type
+
+## CLI Model
+
+Primary form:
+- `mbuild <artifact> [verb]`
+- default verb is `build`
+
+Introspection commands:
+- `mbuild info <artifact>`
+- `mbuild verbs <type-or-artifact>`
+
+Compatibility alias:
+- `mbuild build <artifact>`
+
+## Verbs
+
+- `build` is universal (supported by all builders)
+- additional verbs are builder-defined
+
+Current examples:
+- for `github`: `build`, `cache`
+- for `binary`: `build`
+
+## Current Backends
+
+- `mbuild-github`: GitHub source backend
+- binary backend is still wired as an internal stub in `mbuild`

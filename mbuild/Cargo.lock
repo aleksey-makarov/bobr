@@ -571,6 +571,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "mbuild-core",
+ "mbuild-github",
  "nickel-lang",
  "serde",
  "serde_json",
@@ -580,6 +581,16 @@ dependencies = [
 name = "mbuild-core"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
+]
+
+[[package]]
+name = "mbuild-github"
+version = "0.1.0"
+dependencies = [
+ "mbuild-core",
+ "nickel-lang",
+ "serde",
  "serde_json",
 ]
 
