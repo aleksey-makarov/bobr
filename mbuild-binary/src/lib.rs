@@ -46,32 +46,16 @@ impl Builder for BinaryBuilder {
     }
 
     fn run_build(&self, artifact: &str, recipe: &Value) -> Result<(), BuilderError> {
-        let recipe = parse_recipe(recipe)?;
-        let layout = workspace_layout().map_err(map_error)?;
-        ensure_base_dirs(&layout).map_err(map_error)?;
+        let ctx = prepare_build_context(artifact, recipe)?;
+        prepare_outputs(&ctx).map_err(map_error)?;
 
-        for input in &recipe.inputs {
-            let input_dir = layout.materialized.join(input);
-            if !input_dir.is_dir() {
-                return Err(BuilderError::ExecutionFailed(format!(
-                    "input '{}' does not exist as a directory: {}",
-                    input,
-                    input_dir.display()
-                )));
-            }
-        }
-
-        for output_name in &recipe.outputs {
-            recreate_empty_dir(&layout.materialized.join(output_name)).map_err(map_error)?;
-        }
-
-        let script_path = write_temp_script(artifact, &recipe.script).map_err(map_error)?;
-        let build_result = run_container_build(&layout, &recipe, &script_path);
+        let script_path = write_temp_script(&ctx.artifact_name, &ctx.recipe.script).map_err(map_error)?;
+        let build_result = run_container_build(&ctx, &script_path);
         let _ = fs::remove_file(&script_path);
         build_result.map_err(map_error)?;
 
         println!("build: ok");
-        println!("artifact: {artifact}");
+        println!("artifact: {}", ctx.artifact_name);
         println!("image: {STANDARD_IMAGE}");
         Ok(())
     }
@@ -136,11 +120,9 @@ fn validate_mount_name(name: &str) -> BResult<()> {
 }
 
 fn run_container_build(
-    layout: &WorkspaceLayout,
-    recipe: &BinaryRecipe,
+    ctx: &BuildContext,
     script_path: &Path,
 ) -> BResult<()> {
-    let (uid, gid) = current_uid_gid();
     let script_mount = format!("{}:/__mbuild_binary_script:ro", script_path.display());
 
     let mut process = ProcessCommand::new("podman");
@@ -150,17 +132,17 @@ fn run_container_build(
         .arg("--network=none")
         .arg("--userns=keep-id")
         .arg("--user")
-        .arg(format!("{uid}:{gid}"));
+        .arg(format!("{}:{}", ctx.uid, ctx.gid));
 
-    for input in &recipe.inputs {
-        let host_path = layout.materialized.join(input);
+    for input in &ctx.recipe.inputs {
+        let host_path = ctx.layout.materialized.join(input);
         process
             .arg("--volume")
             .arg(format!("{}:/in/{}:O", host_path.display(), input));
     }
 
-    for output in &recipe.outputs {
-        let host_path = layout.materialized.join(output);
+    for output in &ctx.recipe.outputs {
+        let host_path = ctx.layout.materialized.join(output);
         process
             .arg("--volume")
             .arg(format!("{}:/out/{}:rw", host_path.display(), output));
@@ -186,6 +168,51 @@ fn run_container_build(
 
     if !output.stdout.is_empty() {
         println!("{}", String::from_utf8_lossy(&output.stdout).trim_end());
+    }
+    Ok(())
+}
+
+struct BuildContext {
+    artifact_name: String,
+    recipe: BinaryRecipe,
+    layout: WorkspaceLayout,
+    uid: u32,
+    gid: u32,
+}
+
+fn prepare_build_context(artifact: &str, recipe_value: &Value) -> Result<BuildContext, BuilderError> {
+    let recipe = parse_recipe(recipe_value)?;
+    let layout = workspace_layout().map_err(map_error)?;
+    ensure_base_dirs(&layout).map_err(map_error)?;
+    ensure_inputs_exist(&layout, &recipe).map_err(map_error)?;
+    let (uid, gid) = current_uid_gid();
+
+    Ok(BuildContext {
+        artifact_name: artifact.to_string(),
+        recipe,
+        layout,
+        uid,
+        gid,
+    })
+}
+
+fn ensure_inputs_exist(layout: &WorkspaceLayout, recipe: &BinaryRecipe) -> BResult<()> {
+    for input in &recipe.inputs {
+        let input_dir = layout.materialized.join(input);
+        if !input_dir.is_dir() {
+            return Err(BinaryError::BuildFailed(format!(
+                "input '{}' does not exist as a directory: {}",
+                input,
+                input_dir.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn prepare_outputs(ctx: &BuildContext) -> BResult<()> {
+    for output_name in &ctx.recipe.outputs {
+        recreate_empty_dir(&ctx.layout.materialized.join(output_name))?;
     }
     Ok(())
 }
