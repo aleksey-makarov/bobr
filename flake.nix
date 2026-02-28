@@ -28,7 +28,6 @@
       };
 
       vscode = pkgs.vscode-with-extensions.override {
-        vscode = pkgs.vscodium;
         vscodeExtensions = with pkgs.vscode-extensions; [
           bbenoist.nix
           timonwong.shellcheck
@@ -55,11 +54,13 @@
               rustfmt
               rust-analyzer
               podman
+              micro
             ];
             shellHook = ''
               echo "nixpkgs: ${nixpkgs}"
 
               export HOME=$(pwd)
+              export EDITOR=micro
               export PATH="$PATH:$HOME/node_modules/.bin"
               export RUST_SRC_PATH="${pkgs.rustPlatform.rustLibSrc}"
             '';
