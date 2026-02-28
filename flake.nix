@@ -49,6 +49,7 @@
               nixfmt
               nickel
               nodejs
+              python3
               cargo
               rustc
               rustfmt
