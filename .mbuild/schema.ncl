@@ -6,7 +6,8 @@ let BaseRecipeContract = {
   inputs | NameList | optional,
   outputs | NameList | optional,
   ..
-} in
+}
+in
 
 let GithubRecipeContract = {
   type | std.contract.Equal "github",
@@ -15,7 +16,8 @@ let GithubRecipeContract = {
   inputs | NameList | optional,
   outputs | NameList | optional,
   ..
-} in
+}
+in
 
 let BinaryRecipeContract = {
   type | std.contract.Equal "binary",
@@ -23,7 +25,8 @@ let BinaryRecipeContract = {
   inputs | NameList | optional,
   outputs | NameList | optional,
   ..
-} in
+}
+in
 
 let TextRecipeContract = {
   type | std.contract.Equal "text",
@@ -32,7 +35,8 @@ let TextRecipeContract = {
   sources | { _ | String } | optional,
   outputs | NameList | optional,
   ..
-} in
+}
+in
 
 {
   validate_recipe = fun recipe =>
