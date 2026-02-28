@@ -1,6 +1,11 @@
-# iana-etc-20250807 build error
+# iana-etc-20250807 build status
 
-- Attempts: 2 (latest with `localhost/mbuild-binary:bookworm-toolchain`)
-- Result: failed
-- Reason: generic recipe ended with `no supported build workflow for iana-etc-20250807`.
-- Notes: this looks like a data/install package and needs a package-specific install recipe.
+- recipe is still inline (not migrated to buildscript)
+- source tree has no standard build markers (`CMakeLists.txt`, `meson.build`, `configure`, `Makefile`)
+
+Why blocked now:
+- current generic buildscript set cannot build this artifact
+- likely this artifact is data/package-content oriented and needs a custom packaging script
+
+What is needed:
+- add a dedicated build-script artifact for iana-etc packaging

@@ -1,6 +1,10 @@
-# systemd-257.8 build error
+# systemd-257.8 build status
 
-- Attempts: 2 (latest with `localhost/mbuild-binary:bookworm-toolchain`)
-- Result: failed
-- Reason: Meson configure fails: `Program 'gperf' not found or not executable`.
-- Notes: add `gperf` to build image; systemd may require additional package-specific deps after that.
+- recipe is migrated to `buildscript-meson`
+- build fails in current container image because required tool `gperf` is missing
+
+Observed failure:
+- `meson.build:695:0: ERROR: Program 'gperf' not found or not executable`
+
+What is needed:
+- add `gperf` to the builder image

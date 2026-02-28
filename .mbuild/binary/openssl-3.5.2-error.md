@@ -1,6 +1,10 @@
-# openssl-3.5.2 build error
+# openssl-3.5.2 build status
 
-- Attempts: 2 (latest with `localhost/mbuild-binary:bookworm-toolchain`)
-- Result: failed
-- Reason: generic recipe ended with `no supported build workflow for openssl-3.5.2`.
-- Notes: OpenSSL needs package-specific build flow (`./Configure` + `make` + install targets), not generic CMake/Meson/Autotools fallback.
+- recipe is still inline (not migrated to buildscript)
+- source tree does not match current generic scripts at top-level (`Configure`-based OpenSSL flow)
+
+Why blocked now:
+- current buildscript set does not include OpenSSL-specific configure/build/install logic
+
+What is needed:
+- add a dedicated OpenSSL build-script artifact (uses OpenSSL `Configure` flow)

@@ -1,6 +1,11 @@
-# meson-1.8.3 build error
+# meson-1.8.3 build status
 
-- Attempts: 2 (latest with `localhost/mbuild-binary:bookworm-toolchain`)
-- Result: failed
-- Reason: generic recipe ended with `no supported build workflow for meson-1.8.3`.
-- Notes: meson itself is a Python package; needs a Python-specific build/install recipe.
+- recipe is still inline (not migrated to buildscript)
+- source tree is not a standard cmake/autotools project at top-level for current generic scripts
+
+Why blocked now:
+- current buildscript set (`gnu-make`, `cmake`, `meson`, `autotools`) is aimed at C/C++ style builds
+- Meson itself needs a dedicated packaging/install flow (Python-oriented)
+
+What is needed:
+- add a dedicated build-script artifact for Meson project installation

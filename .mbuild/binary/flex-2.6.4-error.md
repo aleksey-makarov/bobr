@@ -1,6 +1,11 @@
-# flex-2.6.4 build error
+# flex-2.6.4 build status
 
-- Attempts: 2 (latest with `localhost/mbuild-binary:bookworm-toolchain`)
-- Result: failed
-- Reason: `autoreconf` fails because `autopoint` is missing in the current image.
-- Notes: add `autopoint` (gettext tooling) to build image, then retry.
+- recipe is migrated to `buildscript-autotools`
+- build fails in current container image because `autopoint` is missing
+
+Observed failure:
+- `autoreconf: running: autopoint --force`
+- `Can't exec "autopoint": No such file or directory`
+
+What is needed:
+- provide `autopoint` (gettext tooling) in the builder image

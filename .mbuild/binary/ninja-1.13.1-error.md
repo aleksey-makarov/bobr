@@ -1,6 +1,15 @@
-# ninja-1.13.1 build error
+# ninja-1.13.1 build status
 
-- Attempts: 2 (latest with `localhost/mbuild-binary:bookworm-toolchain`)
-- Result: failed
-- Reason: CMake step tries to fetch googletest from GitHub, but container networking is disabled (`--network=none`), so download fails.
-- Notes: requires vendored dependency path / patch to avoid network fetch / explicit local test dependency.
+- recipe is migrated to `buildscript-cmake`
+- build fails in hermetic container due `FetchContent` dependency download during configure/build
+
+Observed failure:
+- `Build step for googletest failed`
+- CMake `FetchContent_MakeAvailable(googletest)` path fails
+
+Why blocked now:
+- network is disabled for binary builds
+- dependency is not provided as an explicit input artifact yet
+
+What is needed:
+- package googletest as input artifact (or patch ninja build to avoid online fetch)
