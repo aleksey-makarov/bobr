@@ -40,7 +40,7 @@ Shared storage root: `.mbuild/`
 
 - object payloads: `.mbuild/objects/<id>/`
 - metadata: `.mbuild/meta/<id>.ncl`
-- name refs: `.mbuild/refs/<name>` -> `../meta/<id>.ncl`
+- name refs: `.mbuild/refs/<name>` -> `../objects/<id>`
 
 Current `id` is equal to output artifact name.
 
@@ -51,6 +51,8 @@ Current `id` is equal to output artifact name.
 1. Parse and validate recipe.
 2. Ensure `.mbuild/{objects,meta,refs}` exist.
 3. Resolve every input name via `.mbuild/refs/<name>` to object directory.
+   - derive `id` from object directory name
+   - read metadata from `.mbuild/meta/<id>.ncl`
 4. Create temporary output root under `.mbuild/.tmp-binary-...`.
 5. Write script to temporary executable file on host.
 6. Resolve execution mode:

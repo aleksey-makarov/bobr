@@ -237,9 +237,7 @@ fn publish_one(
     )?;
 
     let ref_path = layout.refs.join(output_name);
-    let ref_target = PathBuf::from("..")
-        .join(META_DIR)
-        .join(format!("{output_name}.ncl"));
+    let ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(output_name);
     replace_symlink(&ref_target, &ref_path)?;
 
     println!("publish: ok");

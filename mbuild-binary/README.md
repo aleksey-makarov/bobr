@@ -14,7 +14,7 @@ It implements `mbuild-core::Builder` for recipes with `type = "binary"` and exec
   - publishes declared outputs into object storage:
     - `.mbuild/objects/<id>/`
     - `.mbuild/meta/<id>.ncl`
-    - `.mbuild/refs/<name>`
+    - `.mbuild/refs/<name>` -> `.mbuild/objects/<id>`
 
 No custom verbs are currently defined.
 

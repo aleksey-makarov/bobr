@@ -382,9 +382,7 @@ fn publish_outputs(ctx: &BuildContext) -> BResult<()> {
         )?;
 
         let ref_path = ctx.layout.refs.join(output_name);
-        let ref_target = PathBuf::from("..")
-            .join(META_DIR)
-            .join(format!("{output_name}.ncl"));
+        let ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(output_name);
         replace_symlink(&ref_target, &ref_path)?;
 
         println!("publish: ok");
@@ -402,10 +400,20 @@ fn resolve_inputs(layout: &WorkspaceLayout, recipe: &BinaryRecipe) -> BResult<Ve
 
     for input in &recipe.inputs {
         let ref_path = layout.refs.join(input);
-        let meta_path = read_ref_target(&ref_path)?;
+        let object_path = read_ref_target(&ref_path)?;
+        let id = object_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| {
+                BinaryError::InputResolutionFailed(format!(
+                    "failed to derive object id from ref target '{}'",
+                    object_path.display()
+                ))
+            })?
+            .to_string();
+        let meta_path = layout.meta.join(format!("{id}.ncl"));
         let meta = parse_meta(&meta_path)?;
 
-        let object_path = layout.objects.join(&meta.id);
         if !object_path.is_dir() {
             return Err(BinaryError::InputResolutionFailed(format!(
                 "resolved input '{}' points to missing object directory: {}",
@@ -413,11 +421,17 @@ fn resolve_inputs(layout: &WorkspaceLayout, recipe: &BinaryRecipe) -> BResult<Ve
                 object_path.display()
             )));
         }
+        if meta.id != id {
+            return Err(BinaryError::InputResolutionFailed(format!(
+                "meta id '{}' does not match ref-resolved object id '{}'",
+                meta.id, id
+            )));
+        }
 
         resolved.push(ResolvedInput {
             name: input.clone(),
             object_path,
-            id: meta.id,
+            id,
             artifact_kind: meta.artifact_kind,
         });
     }
@@ -449,9 +463,9 @@ fn read_ref_target(ref_path: &Path) -> BResult<PathBuf> {
             .join(target)
     };
 
-    if !resolved_target.is_file() {
+    if !resolved_target.is_dir() {
         return Err(BinaryError::InputResolutionFailed(format!(
-            "input ref target is not a file: {}",
+            "input ref target is not a directory: {}",
             resolved_target.display()
         )));
     }

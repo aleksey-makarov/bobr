@@ -6,7 +6,7 @@ It implements `mbuild-core::Builder` for recipes with `type = "github"` and mana
 - mirror repositories in `.mbuild/github/mirrors/`
 - published source objects in `.mbuild/objects/<id>/`
 - object metadata in `.mbuild/meta/<id>.ncl`
-- artifact refs in `.mbuild/refs/<name>` (symlink to `../meta/<id>.ncl`)
+- artifact refs in `.mbuild/refs/<name>` (symlink to `../objects/<id>`)
 
 `id` is currently equal to output artifact name.
 

@@ -35,3 +35,8 @@ Current examples:
 - `mbuild-github`: GitHub source backend
 - `mbuild-binary`: containerized binary build backend
 - `mbuild-text`: text artifact backend
+
+## Notes
+
+- Current name refs (`.mbuild/refs/<name>`) point to object payloads.
+- Future TODO: add separate metadata refs namespace (for example, `refs-meta`) for metadata-only artifacts.

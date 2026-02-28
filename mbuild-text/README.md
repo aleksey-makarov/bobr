@@ -27,6 +27,6 @@ A primary use case is build-script artifacts (`artifact_kind = "build-script"`).
 For each output:
 - object payload directory: `.mbuild/objects/<id>/`
 - metadata: `.mbuild/meta/<id>.ncl`
-- ref symlink: `.mbuild/refs/<name> -> ../meta/<id>.ncl`
+- ref symlink: `.mbuild/refs/<name> -> ../objects/<id>`
 
 Current `id` is equal to output name.
