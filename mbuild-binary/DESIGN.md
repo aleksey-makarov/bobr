@@ -20,7 +20,7 @@ No custom verbs are currently exposed.
 
 Expected fields (after selection by artifact key from `.mbuild/recipes.ncl`):
 - `type = "binary"`
-- `script: String` (must start with `#!`)
+- `script?: String` (if provided, must start with `#!`)
 - `inputs?: [String]`
 - `outputs?: [String]`
 
@@ -30,6 +30,9 @@ Name validation (`inputs`, `outputs`):
 - allowed chars: `[A-Za-z0-9._-]`
 
 If `outputs` is omitted, one output is published with current artifact name.
+If `script` is omitted, builder resolves script from inputs by artifact type:
+- exactly one input with `artifact_kind = "build-script"`
+- exactly one input with `artifact_kind = "source-tree"`
 
 ## Storage Model
 
@@ -50,12 +53,15 @@ Current `id` is equal to output artifact name.
 3. Resolve every input name via `.mbuild/refs/<name>` to object directory.
 4. Create temporary output root under `.mbuild/.tmp-binary-...`.
 5. Write script to temporary executable file on host.
-6. Run one-shot Podman container.
-7. On success, publish each output:
+6. Resolve execution mode:
+   - inline script from recipe, or
+   - `/in/<build-script-input>/script.sh` from typed input artifact.
+7. Run one-shot Podman container.
+8. On success, publish each output:
    - move output directory to `.mbuild/objects/<id>`
    - write `.mbuild/meta/<id>.ncl`
    - update `.mbuild/refs/<name>` symlink
-8. Cleanup temporary script and temporary output root.
+9. Cleanup temporary script (if used) and temporary output root.
 
 Build success criterion: container exits with code `0` and every declared output directory exists.
 

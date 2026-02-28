@@ -573,6 +573,7 @@ dependencies = [
  "mbuild-binary",
  "mbuild-core",
  "mbuild-github",
+ "mbuild-text",
  "nickel-lang",
  "serde",
  "serde_json",
@@ -601,6 +602,15 @@ version = "0.1.0"
 dependencies = [
  "mbuild-core",
  "nickel-lang",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mbuild-text"
+version = "0.1.0"
+dependencies = [
+ "mbuild-core",
  "serde",
  "serde_json",
 ]

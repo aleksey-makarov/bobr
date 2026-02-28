@@ -17,6 +17,9 @@ const META_DIR: &str = "meta";
 const REFS_DIR: &str = "refs";
 const STANDARD_IMAGE: &str = "localhost/mbuild-binary:bookworm-toolchain";
 
+const KIND_SOURCE_TREE: &str = "source-tree";
+const KIND_BUILD_SCRIPT: &str = "build-script";
+
 type BResult<T> = Result<T, BinaryError>;
 
 #[derive(Debug)]
@@ -37,7 +40,30 @@ struct BinaryRecipe {
     inputs: Vec<String>,
     #[serde(default)]
     outputs: Vec<String>,
-    script: String,
+    #[serde(default)]
+    script: Option<String>,
+}
+
+#[derive(Debug)]
+struct ResolvedInput {
+    name: String,
+    object_path: PathBuf,
+    id: String,
+    artifact_kind: String,
+}
+
+#[derive(Debug)]
+struct ResolvedMeta {
+    id: String,
+    artifact_kind: String,
+}
+
+enum ScriptExecution {
+    Inline(PathBuf),
+    BuildScriptInput {
+        input_name: String,
+        source_input_name: String,
+    },
 }
 
 pub struct BinaryBuilder;
@@ -51,17 +77,16 @@ impl Builder for BinaryBuilder {
         let mut ctx = prepare_build_context(artifact, recipe)?;
         prepare_outputs(&mut ctx).map_err(map_error)?;
 
-        let script_path =
-            write_temp_script(&ctx.artifact_name, &ctx.recipe.script).map_err(map_error)?;
-        let build_result = run_container_build(&ctx, &script_path);
-        let _ = fs::remove_file(&script_path);
+        let build_result = run_container_build(&ctx);
 
         if let Err(error) = build_result {
+            let _ = cleanup_inline_script(&ctx.script_execution);
             let _ = cleanup_temp_outputs(&ctx);
             return Err(map_error(error));
         }
 
         publish_outputs(&ctx).map_err(map_error)?;
+        cleanup_inline_script(&ctx.script_execution).map_err(map_error)?;
         cleanup_temp_outputs(&ctx).map_err(map_error)?;
 
         println!("build: ok");
@@ -75,7 +100,13 @@ impl Builder for BinaryBuilder {
         recipe: &Value,
     ) -> Result<Vec<(&'static str, String)>, BuilderError> {
         let recipe = parse_recipe(recipe)?;
-        Ok(vec![("script_bytes", recipe.script.len().to_string())])
+        let script_mode = if recipe.script.is_some() {
+            "inline"
+        } else {
+            "input"
+        };
+
+        Ok(vec![("script_mode", script_mode.to_string())])
     }
 }
 
@@ -102,10 +133,12 @@ fn validate_recipe(recipe: &BinaryRecipe) -> BResult<()> {
         validate_artifact_name(name)?;
     }
 
-    if !recipe.script.starts_with("#!") {
-        return Err(BinaryError::InvalidRecipe(
-            "script must start with shebang (`#!`)".to_string(),
-        ));
+    if let Some(script) = &recipe.script {
+        if !script.starts_with("#!") {
+            return Err(BinaryError::InvalidRecipe(
+                "script must start with shebang (`#!`)".to_string(),
+            ));
+        }
     }
 
     Ok(())
@@ -137,9 +170,7 @@ fn validate_artifact_name(name: &str) -> BResult<()> {
     Ok(())
 }
 
-fn run_container_build(ctx: &BuildContext, script_path: &Path) -> BResult<()> {
-    let script_mount = format!("{}:/__mbuild_binary_script:ro", script_path.display());
-
+fn run_container_build(ctx: &BuildContext) -> BResult<()> {
     let mut process = ProcessCommand::new("podman");
     process
         .arg("run")
@@ -149,10 +180,12 @@ fn run_container_build(ctx: &BuildContext, script_path: &Path) -> BResult<()> {
         .arg("--user")
         .arg(format!("{}:{}", ctx.uid, ctx.gid));
 
-    for (input_name, input_path) in &ctx.inputs {
-        process
-            .arg("--volume")
-            .arg(format!("{}:/in/{}:O", input_path.display(), input_name));
+    for input in &ctx.inputs {
+        process.arg("--volume").arg(format!(
+            "{}:/in/{}:O",
+            input.object_path.display(),
+            input.name
+        ));
     }
 
     for output_name in &ctx.outputs {
@@ -162,11 +195,29 @@ fn run_container_build(ctx: &BuildContext, script_path: &Path) -> BResult<()> {
             .arg(format!("{}:/out/{}:rw", host_path.display(), output_name));
     }
 
-    process
-        .arg("--volume")
-        .arg(script_mount)
-        .arg(STANDARD_IMAGE)
-        .arg("/__mbuild_binary_script");
+    match &ctx.script_execution {
+        ScriptExecution::Inline(script_path) => {
+            let script_mount = format!("{}:/__mbuild_binary_script:ro", script_path.display());
+            process
+                .arg("--volume")
+                .arg(script_mount)
+                .arg(STANDARD_IMAGE)
+                .arg("/__mbuild_binary_script");
+        }
+        ScriptExecution::BuildScriptInput {
+            input_name,
+            source_input_name,
+        } => {
+            let primary_output = ctx.outputs.first().cloned().unwrap_or_default();
+            process
+                .arg("--env")
+                .arg(format!("MBUILD_SOURCE_INPUT={source_input_name}"))
+                .arg("--env")
+                .arg(format!("MBUILD_PRIMARY_OUTPUT={primary_output}"))
+                .arg(STANDARD_IMAGE)
+                .arg(format!("/in/{input_name}/script.sh"));
+        }
+    }
 
     let output = process.output().map_err(|error| {
         BinaryError::PodmanFailed(format!("failed to execute podman run: {error}"))
@@ -189,11 +240,11 @@ fn run_container_build(ctx: &BuildContext, script_path: &Path) -> BResult<()> {
 
 struct BuildContext {
     artifact_name: String,
-    recipe: BinaryRecipe,
     layout: WorkspaceLayout,
-    inputs: Vec<(String, PathBuf)>,
+    inputs: Vec<ResolvedInput>,
     outputs: Vec<String>,
     temp_outputs_root: PathBuf,
+    script_execution: ScriptExecution,
     uid: u32,
     gid: u32,
 }
@@ -213,6 +264,9 @@ fn prepare_build_context(
         recipe.outputs.clone()
     };
 
+    let script_execution =
+        resolve_script_execution(artifact, &recipe, &inputs).map_err(map_error)?;
+
     let timestamp = current_epoch_nanos().map_err(map_error)?;
     let temp_outputs_root = layout
         .root
@@ -222,13 +276,52 @@ fn prepare_build_context(
 
     Ok(BuildContext {
         artifact_name: artifact.to_string(),
-        recipe,
         layout,
         inputs,
         outputs,
         temp_outputs_root,
+        script_execution,
         uid,
         gid,
+    })
+}
+
+fn resolve_script_execution(
+    artifact: &str,
+    recipe: &BinaryRecipe,
+    inputs: &[ResolvedInput],
+) -> BResult<ScriptExecution> {
+    if let Some(script) = &recipe.script {
+        let script_path = write_temp_script(artifact, script)?;
+        return Ok(ScriptExecution::Inline(script_path));
+    }
+
+    let build_scripts: Vec<&ResolvedInput> = inputs
+        .iter()
+        .filter(|input| input.artifact_kind == KIND_BUILD_SCRIPT)
+        .collect();
+    let sources: Vec<&ResolvedInput> = inputs
+        .iter()
+        .filter(|input| input.artifact_kind == KIND_SOURCE_TREE)
+        .collect();
+
+    if build_scripts.len() != 1 {
+        return Err(BinaryError::InvalidRecipe(format!(
+            "recipe without inline script requires exactly one '{KIND_BUILD_SCRIPT}' input; found {}",
+            build_scripts.len()
+        )));
+    }
+
+    if sources.len() != 1 {
+        return Err(BinaryError::InvalidRecipe(format!(
+            "recipe without inline script requires exactly one '{KIND_SOURCE_TREE}' input; found {}",
+            sources.len()
+        )));
+    }
+
+    Ok(ScriptExecution::BuildScriptInput {
+        input_name: build_scripts[0].name.clone(),
+        source_input_name: sources[0].name.clone(),
     })
 }
 
@@ -250,6 +343,20 @@ fn cleanup_temp_outputs(ctx: &BuildContext) -> BResult<()> {
                 ctx.temp_outputs_root.display()
             ))
         })?;
+    }
+    Ok(())
+}
+
+fn cleanup_inline_script(script_execution: &ScriptExecution) -> BResult<()> {
+    if let ScriptExecution::Inline(path) = script_execution {
+        if path.exists() {
+            fs::remove_file(path).map_err(|error| {
+                BinaryError::FsFailed(format!(
+                    "failed to remove temporary script '{}': {error}",
+                    path.display()
+                ))
+            })?;
+        }
     }
     Ok(())
 }
@@ -290,27 +397,15 @@ fn publish_outputs(ctx: &BuildContext) -> BResult<()> {
     Ok(())
 }
 
-fn resolve_inputs(
-    layout: &WorkspaceLayout,
-    recipe: &BinaryRecipe,
-) -> BResult<Vec<(String, PathBuf)>> {
+fn resolve_inputs(layout: &WorkspaceLayout, recipe: &BinaryRecipe) -> BResult<Vec<ResolvedInput>> {
     let mut resolved = Vec::with_capacity(recipe.inputs.len());
 
     for input in &recipe.inputs {
         let ref_path = layout.refs.join(input);
         let meta_path = read_ref_target(&ref_path)?;
-        let id = meta_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| {
-                BinaryError::InputResolutionFailed(format!(
-                    "failed to derive object id from ref target '{}'",
-                    meta_path.display()
-                ))
-            })?
-            .to_string();
+        let meta = parse_meta(&meta_path)?;
 
-        let object_path = layout.objects.join(&id);
+        let object_path = layout.objects.join(&meta.id);
         if !object_path.is_dir() {
             return Err(BinaryError::InputResolutionFailed(format!(
                 "resolved input '{}' points to missing object directory: {}",
@@ -319,7 +414,12 @@ fn resolve_inputs(
             )));
         }
 
-        resolved.push((input.clone(), object_path));
+        resolved.push(ResolvedInput {
+            name: input.clone(),
+            object_path,
+            id: meta.id,
+            artifact_kind: meta.artifact_kind,
+        });
     }
 
     Ok(resolved)
@@ -359,18 +459,57 @@ fn read_ref_target(ref_path: &Path) -> BResult<PathBuf> {
     Ok(resolved_target)
 }
 
-fn render_meta_ncl(id: &str, artifact_kind: &str, inputs: &[(String, PathBuf)]) -> String {
+fn parse_meta(path: &Path) -> BResult<ResolvedMeta> {
+    let content = fs::read_to_string(path).map_err(|error| {
+        BinaryError::InputResolutionFailed(format!(
+            "failed to read meta file '{}': {error}",
+            path.display()
+        ))
+    })?;
+
+    let id = extract_ncl_string_field(&content, "id").ok_or_else(|| {
+        BinaryError::InputResolutionFailed(format!(
+            "meta '{}' does not define string field 'id'",
+            path.display()
+        ))
+    })?;
+
+    let artifact_kind = extract_ncl_string_field(&content, "artifact_kind").ok_or_else(|| {
+        BinaryError::InputResolutionFailed(format!(
+            "meta '{}' does not define string field 'artifact_kind'",
+            path.display()
+        ))
+    })?;
+
+    Ok(ResolvedMeta { id, artifact_kind })
+}
+
+fn extract_ncl_string_field(content: &str, field: &str) -> Option<String> {
+    let key = format!("{field} = \"");
+    let start = content.find(&key)? + key.len();
+    let rest = &content[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn render_meta_ncl(id: &str, artifact_kind: &str, inputs: &[ResolvedInput]) -> String {
     let inputs_list = inputs
         .iter()
-        .map(|(name, _)| q(name))
+        .map(|input| q(&input.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let input_ids = inputs
+        .iter()
+        .map(|input| q(&input.id))
         .collect::<Vec<_>>()
         .join(", ");
 
     format!(
-        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"binary\",\n  }},\n  attrs = {{\n    inputs = [{}],\n  }},\n}}\n",
+        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"binary\",\n  }},\n  attrs = {{\n    inputs = [{}],\n    input_ids = [{}],\n  }},\n}}\n",
         q(id),
         q(artifact_kind),
-        inputs_list
+        inputs_list,
+        input_ids
     )
 }
 

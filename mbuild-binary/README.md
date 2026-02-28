@@ -10,7 +10,7 @@ It implements `mbuild-core::Builder` for recipes with `type = "binary"` and exec
   - resolves all declared `inputs` from `.mbuild/refs/<name>`
   - mounts resolved object directories to `/in/<name>`
   - mounts temporary output directories to `/out/<name>`
-  - runs script in container with network disabled
+  - runs either inline `script` or `/in/<build-script>/script.sh` in container
   - publishes declared outputs into object storage:
     - `.mbuild/objects/<id>/`
     - `.mbuild/meta/<id>.ncl`
@@ -24,9 +24,11 @@ Current binary recipe fields:
 - `type = "binary"`
 - optional `inputs` (`[String]`)
 - optional `outputs` (`[String]`)
-- `script` (must start with shebang)
+- optional `script` (must start with shebang)
 
 If `outputs` is omitted, builder publishes one output with the current artifact name.
+If `script` is omitted, recipe must provide exactly one input with `artifact_kind = "build-script"`
+and exactly one input with `artifact_kind = "source-tree"`.
 
 ## Runtime Notes
 

@@ -19,8 +19,17 @@ let GithubRecipeContract = {
 
 let BinaryRecipeContract = {
   type | std.contract.Equal "binary",
-  script | String,
+  script | String | optional,
   inputs | NameList | optional,
+  outputs | NameList | optional,
+  ..
+} in
+
+let TextRecipeContract = {
+  type | std.contract.Equal "text",
+  artifact_kind | String,
+  source | String | optional,
+  sources | { _ | String } | optional,
   outputs | NameList | optional,
   ..
 } in
@@ -32,6 +41,8 @@ let BinaryRecipeContract = {
       base | GithubRecipeContract
     else if base.type == "binary" then
       base | BinaryRecipeContract
+    else if base.type == "text" then
+      base | TextRecipeContract
     else
       base,
 }

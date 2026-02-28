@@ -28,8 +28,10 @@ Compatibility alias:
 Current examples:
 - for `github`: `build`, `cache`
 - for `binary`: `build`
+- for `text`: `build`
 
 ## Current Backends
 
 - `mbuild-github`: GitHub source backend
 - `mbuild-binary`: containerized binary build backend
+- `mbuild-text`: text artifact backend

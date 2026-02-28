@@ -1,12 +1,14 @@
 use mbuild_binary::BinaryBuilder;
 use mbuild_core::Builder;
 use mbuild_github::GithubBuilder;
+use mbuild_text::TextBuilder;
 
 static GITHUB_BUILDER: GithubBuilder = GithubBuilder;
 static BINARY_BUILDER: BinaryBuilder = BinaryBuilder;
+static TEXT_BUILDER: TextBuilder = TextBuilder;
 
-pub fn registered_builders() -> [&'static dyn Builder; 2] {
-    [&GITHUB_BUILDER, &BINARY_BUILDER]
+pub fn registered_builders() -> [&'static dyn Builder; 3] {
+    [&GITHUB_BUILDER, &BINARY_BUILDER, &TEXT_BUILDER]
 }
 
 pub fn get_builder(recipe_type: &str) -> Option<&'static dyn Builder> {

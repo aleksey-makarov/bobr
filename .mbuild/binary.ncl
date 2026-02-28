@@ -2,21 +2,8 @@
 
   "zstd-1.5.7" = {
     type = "binary",
-    inputs = [ "zstd-src-1.5.7" ],
+    inputs = [ "zstd-src-1.5.7", "buildscript-gnu-make" ],
     outputs = [ "zstd-1.5.7" ],
-    script = m%"
-      #!/bin/sh
-      set -eu
-
-      cd /in/zstd-src-1.5.7
-
-      jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
-      make -j"$jobs"
-
-      install -d /out/zstd-1.5.7/bin
-      install -m 0755 programs/zstd /out/zstd-1.5.7/bin/zstd
-      /out/zstd-1.5.7/bin/zstd --version > /out/zstd-1.5.7/VERSION.txt
-    "%,
   },
 
   "bc-7.0.3" = {
