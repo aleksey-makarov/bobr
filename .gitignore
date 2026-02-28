@@ -14,6 +14,9 @@ package-lock.json
 node_modules
 */target/
 .mbuild/github/mirrors/
+.mbuild/objects/
+.mbuild/meta/
+.mbuild/refs/
 .mbuild/materialized/
 .mbuild/github/internal.ncl
 .mbuild/state.ncl

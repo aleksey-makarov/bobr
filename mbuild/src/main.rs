@@ -207,10 +207,7 @@ fn run_verbs(target: &str) -> MResult<()> {
 
     let recipe_type = artifact_recipe_type(target)?;
     let verbs = supported_verbs_for_type(&recipe_type).ok_or_else(|| {
-        MbuildError::InvalidCommand(format!(
-            "no registered verbs for type '{}'",
-            recipe_type
-        ))
+        MbuildError::InvalidCommand(format!("no registered verbs for type '{}'", recipe_type))
     })?;
     println!("artifact: {target}");
     println!("type: {recipe_type}");
@@ -297,12 +294,12 @@ fn artifact_recipe_type(artifact_name: &str) -> MResult<String> {
 }
 
 fn recipe_type_from_value(value: &Value) -> MResult<String> {
-    let object = value.as_object().ok_or_else(|| {
-        MbuildError::InvalidRecipe("recipe must be an object".to_string())
-    })?;
-    let type_value = object.get("type").ok_or_else(|| {
-        MbuildError::InvalidRecipe("recipe must define 'type'".to_string())
-    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| MbuildError::InvalidRecipe("recipe must be an object".to_string()))?;
+    let type_value = object
+        .get("type")
+        .ok_or_else(|| MbuildError::InvalidRecipe("recipe must define 'type'".to_string()))?;
     type_value
         .as_str()
         .map(ToString::to_string)
@@ -379,7 +376,10 @@ fn validate_name(name: &str) -> MResult<()> {
 
 fn eval_nickel_file_to_json(path: &Path) -> MResult<Value> {
     let source = fs::read_to_string(path).map_err(|error| {
-        MbuildError::ConfigEvalFailed(format!("failed to read Nickel file '{}': {error}", path.display()))
+        MbuildError::ConfigEvalFailed(format!(
+            "failed to read Nickel file '{}': {error}",
+            path.display()
+        ))
     })?;
 
     let import_dir = path
@@ -396,8 +396,11 @@ fn eval_nickel_file_to_json(path: &Path) -> MResult<Value> {
         .eval_deep_for_export(&source)
         .map_err(|error| MbuildError::ConfigEvalFailed(format_nickel_error(error)))?;
 
-    expr.to_serde()
-        .map_err(|error| MbuildError::ConfigEvalFailed(format!("failed to deserialize evaluated Nickel value: {error}")))
+    expr.to_serde().map_err(|error| {
+        MbuildError::ConfigEvalFailed(format!(
+            "failed to deserialize evaluated Nickel value: {error}"
+        ))
+    })
 }
 
 fn format_nickel_error(error: nickel_lang::Error) -> String {

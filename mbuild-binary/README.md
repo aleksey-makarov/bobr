@@ -1,15 +1,20 @@
 # mbuild-binary
 
-`mbuild-binary` is the binary build backend for `mbuild`.
+`mbuild-binary` is the containerized binary build backend for `mbuild`.
 
-It implements `mbuild-core::Builder` for recipes with `type = "binary"` and executes build scripts inside a short-lived Podman container.
+It implements `mbuild-core::Builder` for recipes with `type = "binary"` and executes scripts in short-lived Podman containers.
 
 ## Supported Verbs
 
 - `build`:
-  - validates inputs and outputs
-  - creates empty output directories in `.mbuild/materialized/`
-  - runs the recipe script in a container with network disabled
+  - resolves all declared `inputs` from `.mbuild/refs/<name>`
+  - mounts resolved object directories to `/in/<name>`
+  - mounts temporary output directories to `/out/<name>`
+  - runs script in container with network disabled
+  - publishes declared outputs into object storage:
+    - `.mbuild/objects/<id>/`
+    - `.mbuild/meta/<id>.ncl`
+    - `.mbuild/refs/<name>`
 
 No custom verbs are currently defined.
 
@@ -17,19 +22,17 @@ No custom verbs are currently defined.
 
 Current binary recipe fields:
 - `type = "binary"`
-- optional `inputs` (array of artifact names)
-- optional `outputs` (array of artifact names)
+- optional `inputs` (`[String]`)
+- optional `outputs` (`[String]`)
 - `script` (must start with shebang)
 
-Inputs and outputs are mounted by name:
-- `/in/<name>` for inputs
-- `/out/<name>` for outputs
+If `outputs` is omitted, builder publishes one output with the current artifact name.
 
 ## Runtime Notes
 
 - Uses `podman run --rm --network=none`.
 - Runs as host user (`--userns=keep-id`, explicit `uid:gid`).
-- Uses a default image:
+- Uses default image:
   - `localhost/mbuild-binary:bookworm-toolchain`
 - Build this image from `mbuild-binary/Containerfile`:
   - `podman build -t localhost/mbuild-binary:bookworm-toolchain -f mbuild-binary/Containerfile .`

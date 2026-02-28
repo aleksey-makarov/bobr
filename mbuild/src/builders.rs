@@ -1,5 +1,5 @@
-use mbuild_core::Builder;
 use mbuild_binary::BinaryBuilder;
+use mbuild_core::Builder;
 use mbuild_github::GithubBuilder;
 
 static GITHUB_BUILDER: GithubBuilder = GithubBuilder;

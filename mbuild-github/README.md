@@ -1,21 +1,24 @@
 # mbuild-github
 
-`mbuild-github` is the GitHub source builder backend for `mbuild`.
+`mbuild-github` is the GitHub source backend for `mbuild`.
 
 It implements `mbuild-core::Builder` for recipes with `type = "github"` and manages:
 - mirror repositories in `.mbuild/github/mirrors/`
-- materialized source trees in `.mbuild/materialized/`
-- builder-private state in `.mbuild/github/internal.ncl`
-- shared state in `.mbuild/state.ncl`
+- published source objects in `.mbuild/objects/<id>/`
+- object metadata in `.mbuild/meta/<id>.ncl`
+- artifact refs in `.mbuild/refs/<name>` (symlink to `../meta/<id>.ncl`)
+
+`id` is currently equal to output artifact name.
 
 ## Supported Verbs
 
 - `build`:
-  - ensures the mirror contains the requested commit
-  - materializes the corresponding source tree into `.mbuild/materialized/<artifact>`
+  - ensures mirror contains the requested commit
+  - publishes source tree as object + metadata + ref for each declared output
+  - if `outputs` is omitted, falls back to current artifact name
 - `cache`:
-  - ensures/updates the mirror for the requested commit
-  - does not materialize output
+  - ensures/updates mirror for the requested commit
+  - does not publish outputs
 
 ## Recipe Shape
 
@@ -23,12 +26,12 @@ Current GitHub recipe fields:
 - `type = "github"`
 - `repo` (GitHub URL)
 - `commit` (40-char lowercase hex)
-- optional `inputs`, `outputs` (validated by `mbuild`)
+- optional `outputs` (`[String]`)
 
-`mbuild-github` expects recipe values already selected by artifact key from `.mbuild/recipes.ncl`.
+`mbuild-github` receives the already selected recipe value from `.mbuild/recipes.ncl`.
 
 ## Notes
 
-- The builder currently relies on `git` and `tar` executables.
+- Relies on host `git` and `tar` executables.
 - Mirror naming format is `owner_repo.git`.
 - This crate is a library backend, not a standalone CLI tool.

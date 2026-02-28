@@ -1,102 +1,95 @@
 # mbuild-binary Design (Current State)
 
-This document describes the current technical behavior of `mbuild-binary`.
+This document describes current technical behavior of `mbuild-binary`.
 
-## Role In The System
+## Role
 
-`mbuild-binary` is a library backend crate used by `mbuild`.
+`mbuild-binary` is a backend library crate used by `mbuild`.
 It implements `mbuild_core::Builder` for recipes with `type = "binary"`.
-
-There is no standalone CLI in this crate anymore.
-Command parsing, artifact lookup, and high-level orchestration are done by `mbuild`.
 
 ## Builder Interface
 
 `mbuild-binary` provides:
-
 - `get_type() -> "binary"`
 - `run_build(artifact, recipe_value)`
 - `summarize_recipe(recipe_value)`
 
-It does not expose custom verbs yet (only universal `build`).
+No custom verbs are currently exposed.
 
 ## Recipe Contract
 
-Expected recipe fields (after selection by artifact key in `.mbuild/recipes.ncl`):
-
+Expected fields (after selection by artifact key from `.mbuild/recipes.ncl`):
 - `type = "binary"`
 - `script: String` (must start with `#!`)
 - `inputs?: [String]`
 - `outputs?: [String]`
 
-Name validation for `inputs` and `outputs`:
-
+Name validation (`inputs`, `outputs`):
 - non-empty
-- not `.` or `..`
+- not `.` / `..`
 - allowed chars: `[A-Za-z0-9._-]`
 
-## Workspace Layout
+If `outputs` is omitted, one output is published with current artifact name.
 
-`mbuild-binary` uses shared workspace root:
+## Storage Model
 
-- `.mbuild/materialized/` as both input source and output destination
+Shared storage root: `.mbuild/`
 
-Input/output mapping:
+- object payloads: `.mbuild/objects/<id>/`
+- metadata: `.mbuild/meta/<id>.ncl`
+- name refs: `.mbuild/refs/<name>` -> `../meta/<id>.ncl`
 
-- input `<name>` -> host `.mbuild/materialized/<name>` -> container `/in/<name>`
-- output `<name>` -> host `.mbuild/materialized/<name>` -> container `/out/<name>`
+Current `id` is equal to output artifact name.
 
-## Build Execution Flow
+## Build Flow
 
-`run_build` performs:
+`run_build` does:
 
-1. Parse and validate binary recipe from `serde_json::Value`.
-2. Ensure `.mbuild/` and `.mbuild/materialized/` directories exist.
-3. Verify every declared input directory exists in materialized storage.
-4. Recreate every declared output directory as empty.
-5. Write recipe script into a temporary executable file.
-6. Run one-shot container build with Podman.
-7. Remove temporary script file.
+1. Parse and validate recipe.
+2. Ensure `.mbuild/{objects,meta,refs}` exist.
+3. Resolve every input name via `.mbuild/refs/<name>` to object directory.
+4. Create temporary output root under `.mbuild/.tmp-binary-...`.
+5. Write script to temporary executable file on host.
+6. Run one-shot Podman container.
+7. On success, publish each output:
+   - move output directory to `.mbuild/objects/<id>`
+   - write `.mbuild/meta/<id>.ncl`
+   - update `.mbuild/refs/<name>` symlink
+8. Cleanup temporary script and temporary output root.
 
-Success criterion: container command exits with code `0`.
+Build success criterion: container exits with code `0` and every declared output directory exists.
 
 ## Container Runtime Contract
 
 Container command:
-
 - `podman run --rm`
 - `--network=none`
 - `--userns=keep-id`
 - `--user <uid>:<gid>`
 
 Mounts:
+- inputs: `<object_path>:/in/<name>:O`
+- outputs: `<tmp_output_path>:/out/<name>:rw`
+- script: `<tmp_script>:/__mbuild_binary_script:ro`
 
-- inputs: `--volume <host>:/in/<name>:O`
-- outputs: `--volume <host>:/out/<name>:rw`
-- script: `--volume <tmp_script>:/__mbuild_binary_script:ro`
-
-Entrypoint command in container:
-
+Entrypoint command:
 - `/__mbuild_binary_script`
 
-Current default image (hardcoded):
-
+Default image:
 - `localhost/mbuild-binary:bookworm-toolchain`
 
-This image is expected to be built from `mbuild-binary/Containerfile` (base: `buildpack-deps:bookworm`).
+Image is expected to be built from `mbuild-binary/Containerfile` (base `buildpack-deps:bookworm`).
 
 ## Error Mapping
 
-Internal runtime errors are mapped to `BuilderError`:
+Internal errors map to `BuilderError`:
+- invalid recipe/contract -> `InvalidRecipe`
+- input resolution, container runtime, filesystem/publish failures -> `ExecutionFailed`
 
-- recipe shape/validation issues -> `InvalidRecipe`
-- container/process/filesystem/runtime failures -> `ExecutionFailed`
+`mbuild` renders these as `error[builder-failed]: ...`.
 
-In `mbuild`, `ExecutionFailed` is reported as `error[builder-failed]: ...`.
+## Known Gaps
 
-## Current Limitations
-
-- No custom verbs (for example, no binary-specific `cache`).
-- No explicit image field in recipe yet.
-- No semantic validation of output contents beyond successful process exit.
-- Requires working `podman` on host runtime path.
+- No custom verbs yet.
+- No semantic validation of output contents.
+- Ref target is interpreted by file name (`<id>.ncl`); metadata body is not parsed yet for policy checks.
