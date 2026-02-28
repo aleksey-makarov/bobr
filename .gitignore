@@ -8,12 +8,11 @@
 .cargo
 .gitconfig
 .copilot
+.vscode
 package.json
 package-lock.json
 node_modules
-mbuild/target/
-mbuild-github/target/
-mbuild-binary/target/
+*/target/
 .mbuild/github/mirrors/
 .mbuild/materialized/
 .mbuild/github/internal.ncl
