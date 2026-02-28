@@ -38,7 +38,7 @@ If `script` is omitted, builder resolves script from inputs by artifact type:
 
 Shared storage root: `.mbuild/`
 
-- object payloads: `.mbuild/objects/<id>/`
+- object payloads: `.mbuild/objects/<id>` (file or directory)
 - metadata: `.mbuild/meta/<id>.ncl`
 - name refs: `.mbuild/refs/<name>` -> `../objects/<id>`
 
@@ -50,14 +50,15 @@ Current `id` is equal to output artifact name.
 
 1. Parse and validate recipe.
 2. Ensure `.mbuild/{objects,meta,refs}` exist.
-3. Resolve every input name via `.mbuild/refs/<name>` to object directory.
-   - derive `id` from object directory name
+3. Resolve every input name via `.mbuild/refs/<name>` to object payload path.
+   - derive `id` from object path name
    - read metadata from `.mbuild/meta/<id>.ncl`
+   - validate payload shape by artifact type (for example, `build-script` must be file)
 4. Create temporary output root under `.mbuild/.tmp-binary-...`.
 5. Write script to temporary executable file on host.
 6. Resolve execution mode:
    - inline script from recipe, or
-   - `/in/<build-script-input>/script.sh` from typed input artifact.
+   - build-script payload file mounted to `/__mbuild_binary_script`.
 7. Run one-shot Podman container.
 8. On success, publish each output:
    - move output directory to `.mbuild/objects/<id>`
@@ -76,12 +77,13 @@ Container command:
 - `--user <uid>:<gid>`
 
 Mounts:
-- inputs: `<object_path>:/in/<name>:O`
+- non-script inputs: `<object_path>:/in/<name>:O`
 - outputs: `<tmp_output_path>:/out/<name>:rw`
-- script: `<tmp_script>:/__mbuild_binary_script:ro`
+- script: `<host_script_path>:/__mbuild_binary_script:ro`
 
 Entrypoint command:
-- `/__mbuild_binary_script`
+- inline mode: `/__mbuild_binary_script`
+- input-script mode: `/bin/sh /__mbuild_binary_script`
 
 Default image:
 - `localhost/mbuild-binary:bookworm-toolchain`
@@ -100,4 +102,3 @@ Internal errors map to `BuilderError`:
 
 - No custom verbs yet.
 - No semantic validation of output contents.
-- Ref target is interpreted by file name (`<id>.ncl`); metadata body is not parsed yet for policy checks.

@@ -61,7 +61,7 @@ struct ResolvedMeta {
 enum ScriptExecution {
     Inline(PathBuf),
     BuildScriptInput {
-        input_name: String,
+        script_host_path: PathBuf,
         source_input_name: String,
     },
 }
@@ -181,6 +181,9 @@ fn run_container_build(ctx: &BuildContext) -> BResult<()> {
         .arg(format!("{}:{}", ctx.uid, ctx.gid));
 
     for input in &ctx.inputs {
+        if input.artifact_kind == KIND_BUILD_SCRIPT {
+            continue;
+        }
         process.arg("--volume").arg(format!(
             "{}:/in/{}:O",
             input.object_path.display(),
@@ -205,17 +208,21 @@ fn run_container_build(ctx: &BuildContext) -> BResult<()> {
                 .arg("/__mbuild_binary_script");
         }
         ScriptExecution::BuildScriptInput {
-            input_name,
+            script_host_path,
             source_input_name,
         } => {
+            let script_mount = format!("{}:/__mbuild_binary_script:ro", script_host_path.display());
             let primary_output = ctx.outputs.first().cloned().unwrap_or_default();
             process
+                .arg("--volume")
+                .arg(script_mount)
                 .arg("--env")
                 .arg(format!("MBUILD_SOURCE_INPUT={source_input_name}"))
                 .arg("--env")
                 .arg(format!("MBUILD_PRIMARY_OUTPUT={primary_output}"))
                 .arg(STANDARD_IMAGE)
-                .arg(format!("/in/{input_name}/script.sh"));
+                .arg("/bin/sh")
+                .arg("/__mbuild_binary_script");
         }
     }
 
@@ -320,7 +327,7 @@ fn resolve_script_execution(
     }
 
     Ok(ScriptExecution::BuildScriptInput {
-        input_name: build_scripts[0].name.clone(),
+        script_host_path: build_scripts[0].object_path.clone(),
         source_input_name: sources[0].name.clone(),
     })
 }
@@ -411,20 +418,30 @@ fn resolve_inputs(layout: &WorkspaceLayout, recipe: &BinaryRecipe) -> BResult<Ve
                 ))
             })?
             .to_string();
+
         let meta_path = layout.meta.join(format!("{id}.ncl"));
         let meta = parse_meta(&meta_path)?;
 
-        if !object_path.is_dir() {
-            return Err(BinaryError::InputResolutionFailed(format!(
-                "resolved input '{}' points to missing object directory: {}",
-                input,
-                object_path.display()
-            )));
-        }
         if meta.id != id {
             return Err(BinaryError::InputResolutionFailed(format!(
                 "meta id '{}' does not match ref-resolved object id '{}'",
                 meta.id, id
+            )));
+        }
+
+        if meta.artifact_kind == KIND_BUILD_SCRIPT {
+            if !object_path.is_file() {
+                return Err(BinaryError::InputResolutionFailed(format!(
+                    "build-script input '{}' must resolve to a file: {}",
+                    input,
+                    object_path.display()
+                )));
+            }
+        } else if !object_path.is_dir() {
+            return Err(BinaryError::InputResolutionFailed(format!(
+                "input '{}' must resolve to a directory: {}",
+                input,
+                object_path.display()
             )));
         }
 
@@ -463,9 +480,9 @@ fn read_ref_target(ref_path: &Path) -> BResult<PathBuf> {
             .join(target)
     };
 
-    if !resolved_target.is_dir() {
+    if !resolved_target.exists() {
         return Err(BinaryError::InputResolutionFailed(format!(
-            "input ref target is not a directory: {}",
+            "input ref target does not exist: {}",
             resolved_target.display()
         )));
     }
@@ -711,6 +728,7 @@ fn current_epoch_nanos() -> BResult<u128> {
 fn current_uid_gid() -> (u32, u32) {
     #[cfg(unix)]
     {
+        // Safe: libc returns process credentials and has no side effects.
         let uid = unsafe { libc::geteuid() };
         let gid = unsafe { libc::getegid() };
         (uid, gid)

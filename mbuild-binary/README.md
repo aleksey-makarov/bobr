@@ -8,9 +8,9 @@ It implements `mbuild-core::Builder` for recipes with `type = "binary"` and exec
 
 - `build`:
   - resolves all declared `inputs` from `.mbuild/refs/<name>`
-  - mounts resolved object directories to `/in/<name>`
+  - mounts non-script input directories to `/in/<name>`
   - mounts temporary output directories to `/out/<name>`
-  - runs either inline `script` or `/in/<build-script>/script.sh` in container
+  - runs either inline `script` or a `build-script` input file mounted as `/__mbuild_binary_script`
   - publishes declared outputs into object storage:
     - `.mbuild/objects/<id>/`
     - `.mbuild/meta/<id>.ncl`

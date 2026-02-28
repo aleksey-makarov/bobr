@@ -7,17 +7,13 @@ use std::fmt;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const ROOT_DIR: &str = ".mbuild";
 const OBJECTS_DIR: &str = "objects";
 const META_DIR: &str = "meta";
 const REFS_DIR: &str = "refs";
-
-const KIND_BUILD_SCRIPT: &str = "build-script";
 
 #[derive(Debug)]
 enum TextError {
@@ -69,8 +65,8 @@ impl Builder for TextBuilder {
 
         let outputs = resolve_outputs(artifact, &recipe).map_err(map_error)?;
 
-        for (output_name, source_path) in outputs {
-            publish_one(&layout, &output_name, &recipe.artifact_kind, &source_path)
+        for (output_name, source_text) in outputs {
+            publish_one(&layout, &output_name, &recipe.artifact_kind, &source_text)
                 .map_err(map_error)?;
         }
 
@@ -119,13 +115,8 @@ fn validate_recipe(recipe: &TextRecipe) -> TResult<()> {
         validate_name(output)?;
     }
 
-    if let Some(source) = &recipe.source {
-        validate_source_path(source)?;
-    }
-
-    for (output, source) in &recipe.sources {
+    for output in recipe.sources.keys() {
         validate_name(output)?;
-        validate_source_path(source)?;
     }
 
     Ok(())
@@ -171,7 +162,7 @@ fn resolve_outputs(artifact: &str, recipe: &TextRecipe) -> TResult<Vec<(String, 
                 .sources
                 .get(&output)
                 .cloned()
-                .unwrap_or_else(|| "".to_string());
+                .unwrap_or_else(String::new);
             (output, src)
         })
         .collect())
@@ -181,59 +172,38 @@ fn publish_one(
     layout: &WorkspaceLayout,
     output_name: &str,
     artifact_kind: &str,
-    source_rel: &str,
+    source_text: &str,
 ) -> TResult<()> {
     validate_name(output_name)?;
-    validate_source_path(source_rel)?;
-
-    let source_path = layout.root.join(source_rel);
-    let content = fs::read_to_string(&source_path).map_err(|error| {
-        TextError::FsFailed(format!(
-            "failed to read source file '{}': {error}",
-            source_path.display()
-        ))
-    })?;
 
     let now_nanos = current_epoch_nanos()?;
-    let tmp_dir = layout
+    let tmp_path = layout
         .root
-        .join(format!(".tmp-text-{}-{}.dir", output_name, now_nanos));
+        .join(format!(".tmp-text-{}-{}.obj", output_name, now_nanos));
 
-    recreate_empty_dir(&tmp_dir)?;
+    if tmp_path.exists() {
+        fs::remove_file(&tmp_path).map_err(|error| {
+            TextError::FsFailed(format!(
+                "failed to remove previous temporary file '{}': {error}",
+                tmp_path.display()
+            ))
+        })?;
+    }
 
-    let object_file_name = if artifact_kind == KIND_BUILD_SCRIPT {
-        "script.sh"
-    } else {
-        "content"
-    };
-    let object_file_path = tmp_dir.join(object_file_name);
-
-    fs::write(&object_file_path, content).map_err(|error| {
+    fs::write(&tmp_path, source_text).map_err(|error| {
         TextError::PublishFailed(format!(
-            "failed to write object file '{}': {error}",
-            object_file_path.display()
+            "failed to write object payload '{}': {error}",
+            tmp_path.display()
         ))
     })?;
 
-    #[cfg(unix)]
-    if artifact_kind == KIND_BUILD_SCRIPT {
-        fs::set_permissions(&object_file_path, fs::Permissions::from_mode(0o755)).map_err(
-            |error| {
-                TextError::PublishFailed(format!(
-                    "failed to set executable permissions on '{}': {error}",
-                    object_file_path.display()
-                ))
-            },
-        )?;
-    }
-
     let object_path = layout.objects.join(output_name);
-    replace_dir(&tmp_dir, &object_path)?;
+    replace_path(&tmp_path, &object_path)?;
 
     let meta_path = layout.meta.join(format!("{output_name}.ncl"));
     write_atomic(
         &meta_path,
-        &render_meta_ncl(output_name, artifact_kind, source_rel),
+        &render_meta_ncl(output_name, artifact_kind, source_text.len()),
     )?;
 
     let ref_path = layout.refs.join(output_name);
@@ -242,17 +212,17 @@ fn publish_one(
 
     println!("publish: ok");
     println!("output: {output_name}");
-    println!("source: {}", source_path.display());
+    println!("source_bytes: {}", source_text.len());
     println!("object: {}", object_path.display());
     Ok(())
 }
 
-fn render_meta_ncl(id: &str, artifact_kind: &str, source: &str) -> String {
+fn render_meta_ncl(id: &str, artifact_kind: &str, source_bytes: usize) -> String {
     format!(
-        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"text\",\n  }},\n  attrs = {{\n    source = {},\n  }},\n}}\n",
+        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"text\",\n  }},\n  attrs = {{\n    source_bytes = {},\n  }},\n}}\n",
         q(id),
         q(artifact_kind),
-        q(source)
+        source_bytes
     )
 }
 
@@ -277,54 +247,7 @@ fn validate_name(name: &str) -> TResult<()> {
     Ok(())
 }
 
-fn validate_source_path(source: &str) -> TResult<()> {
-    let path = Path::new(source);
-
-    if path.is_absolute() {
-        return Err(TextError::InvalidRecipe(format!(
-            "source path must be relative: '{source}'"
-        )));
-    }
-
-    for component in path.components() {
-        if matches!(component, Component::ParentDir) {
-            return Err(TextError::InvalidRecipe(format!(
-                "source path must not contain '..': '{source}'"
-            )));
-        }
-    }
-
-    Ok(())
-}
-
-fn recreate_empty_dir(path: &Path) -> TResult<()> {
-    if path.exists() {
-        if path.is_dir() {
-            fs::remove_dir_all(path).map_err(|error| {
-                TextError::FsFailed(format!(
-                    "failed to remove previous directory '{}': {error}",
-                    path.display()
-                ))
-            })?;
-        } else {
-            fs::remove_file(path).map_err(|error| {
-                TextError::FsFailed(format!(
-                    "failed to remove previous file '{}': {error}",
-                    path.display()
-                ))
-            })?;
-        }
-    }
-
-    fs::create_dir_all(path).map_err(|error| {
-        TextError::FsFailed(format!(
-            "failed to create directory '{}': {error}",
-            path.display()
-        ))
-    })
-}
-
-fn replace_dir(tmp_dir: &Path, destination: &Path) -> TResult<()> {
+fn replace_path(tmp_path: &Path, destination: &Path) -> TResult<()> {
     if destination.exists() {
         if destination.is_dir() {
             fs::remove_dir_all(destination).map_err(|error| {
@@ -343,10 +266,10 @@ fn replace_dir(tmp_dir: &Path, destination: &Path) -> TResult<()> {
         }
     }
 
-    fs::rename(tmp_dir, destination).map_err(|error| {
+    fs::rename(tmp_path, destination).map_err(|error| {
         TextError::PublishFailed(format!(
             "failed to publish object '{}' -> '{}': {error}",
-            tmp_dir.display(),
+            tmp_path.display(),
             destination.display()
         ))
     })
