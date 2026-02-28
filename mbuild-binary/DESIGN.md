@@ -81,7 +81,9 @@ Entrypoint command in container:
 
 Current default image (hardcoded):
 
-- `docker.io/library/gcc@sha256:99732c3fbda294e6e7c8bb463a98ec394d48de16ee45fece6f28d7bf7d9dbd99`
+- `localhost/mbuild-binary:bookworm-toolchain`
+
+This image is expected to be built from `mbuild-binary/Containerfile` (base: `buildpack-deps:bookworm`).
 
 ## Error Mapping
 

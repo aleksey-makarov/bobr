@@ -29,8 +29,10 @@ Inputs and outputs are mounted by name:
 
 - Uses `podman run --rm --network=none`.
 - Runs as host user (`--userns=keep-id`, explicit `uid:gid`).
-- Uses a pinned default image:
-  - `docker.io/library/gcc@sha256:99732c3fbda294e6e7c8bb463a98ec394d48de16ee45fece6f28d7bf7d9dbd99`
+- Uses a default image:
+  - `localhost/mbuild-binary:bookworm-toolchain`
+- Build this image from `mbuild-binary/Containerfile`:
+  - `podman build -t localhost/mbuild-binary:bookworm-toolchain -f mbuild-binary/Containerfile .`
 - Requires `podman` on PATH.
 
 This crate is a library backend, not a standalone CLI tool.

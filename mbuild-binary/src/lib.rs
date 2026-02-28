@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const ROOT_DIR: &str = ".mbuild";
 const MATERIALIZED_DIR: &str = "materialized";
 const STANDARD_IMAGE: &str =
-    "docker.io/library/gcc@sha256:99732c3fbda294e6e7c8bb463a98ec394d48de16ee45fece6f28d7bf7d9dbd99";
+    "localhost/mbuild-binary:bookworm-toolchain";
 
 type BResult<T> = Result<T, BinaryError>;
 
