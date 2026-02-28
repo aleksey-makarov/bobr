@@ -40,3 +40,16 @@ Current examples:
 
 - Current name refs (`.mbuild/refs/<name>`) point to object payloads.
 - Future TODO: add separate metadata refs namespace (for example, `refs-meta`) for metadata-only artifacts.
+
+## Artifact Kind Contract
+
+Current storage/runtime invariants by `artifact_kind`:
+
+- `build-script`:
+  - payload at `.mbuild/objects/<id>` must be a **file**
+  - `binary` builder mounts this file as `/__mbuild_binary_script` and executes it
+- `source-tree`:
+  - payload at `.mbuild/objects/<id>` must be a **directory**
+  - `binary` builder mounts it as `/in/<name>`
+
+`binary` validates these invariants before starting a container build.

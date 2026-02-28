@@ -11,6 +11,9 @@ stored in `.mbuild/objects`, with metadata and refs like other builders.
 
 A primary use case is build-script artifacts (`artifact_kind = "build-script"`).
 
+Important invariant:
+- `mbuild-text` always publishes payload as a **file** at `.mbuild/objects/<id>`.
+
 ## Recipe Shape
 
 - `type = "text"`

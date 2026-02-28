@@ -30,6 +30,10 @@ If `outputs` is omitted, builder publishes one output with the current artifact 
 If `script` is omitted, recipe must provide exactly one input with `artifact_kind = "build-script"`
 and exactly one input with `artifact_kind = "source-tree"`.
 
+Required payload shape by artifact kind:
+- `build-script` input -> payload must be a **file**
+- `source-tree` input -> payload must be a **directory**
+
 ## Runtime Notes
 
 - Uses `podman run --rm --network=none`.
