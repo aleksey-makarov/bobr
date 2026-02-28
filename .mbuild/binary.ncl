@@ -60,54 +60,8 @@
 
   "expat-2.7.1" = {
     type = "binary",
-    inputs = [ "expat-src-2.7.1" ],
+    inputs = [ "expat-src-2.7.1", "buildscript-cmake" ],
     outputs = [ "expat-2.7.1" ],
-    script = m%"
-      #!/bin/sh
-      set -eu
-
-      cd /in/expat-src-2.7.1
-      jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
-
-      if [ -f CMakeLists.txt ]; then
-        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/out/expat-2.7.1
-        cmake --build build -j"$jobs"
-        cmake --install build
-        exit 0
-      fi
-
-      if [ -f meson.build ]; then
-        meson setup build --prefix=/out/expat-2.7.1
-        meson compile -C build -j"$jobs"
-        meson install -C build
-        exit 0
-      fi
-
-      if [ -x ./autogen.sh ]; then ./autogen.sh; fi
-      if [ -x ./bootstrap ]; then ./bootstrap; fi
-
-      if [ -x ./configure ]; then
-        ./configure --prefix=/out/expat-2.7.1
-        make -j"$jobs"
-        make install
-        exit 0
-      fi
-
-      if [ -f Makefile ] || [ -f makefile ] || [ -f GNUmakefile ]; then
-        make -j"$jobs"
-        if [ -d ./bin ]; then cp -a ./bin/. /out/expat-2.7.1/ 2>/dev/null || true; fi
-        if [ -d ./programs ]; then
-          install -d /out/expat-2.7.1/bin
-          find ./programs -maxdepth 1 -type f -perm /111 -exec install -m 0755 {} /out/expat-2.7.1/bin/ \;
-        fi
-        if [ -n "$(find /out/expat-2.7.1 -mindepth 1 -print -quit 2>/dev/null || true )" ]; then
-          exit 0
-        fi
-      fi
-
-      echo "no supported build workflow for expat-2.7.1" >&2
-      exit 1
-    "%,
   },
 
   "flex-2.6.4" = {
@@ -216,54 +170,8 @@
 
   "libffi-3.5.2" = {
     type = "binary",
-    inputs = [ "libffi-src-3.5.2" ],
+    inputs = [ "libffi-src-3.5.2", "buildscript-autotools" ],
     outputs = [ "libffi-3.5.2" ],
-    script = m%"
-      #!/bin/sh
-      set -eu
-
-      cd /in/libffi-src-3.5.2
-      jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
-
-      if [ -f CMakeLists.txt ]; then
-        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/out/libffi-3.5.2
-        cmake --build build -j"$jobs"
-        cmake --install build
-        exit 0
-      fi
-
-      if [ -f meson.build ]; then
-        meson setup build --prefix=/out/libffi-3.5.2
-        meson compile -C build -j"$jobs"
-        meson install -C build
-        exit 0
-      fi
-
-      if [ -x ./autogen.sh ]; then ./autogen.sh; fi
-      if [ -x ./bootstrap ]; then ./bootstrap; fi
-
-      if [ -x ./configure ]; then
-        ./configure --prefix=/out/libffi-3.5.2
-        make -j"$jobs"
-        make install
-        exit 0
-      fi
-
-      if [ -f Makefile ] || [ -f makefile ] || [ -f GNUmakefile ]; then
-        make -j"$jobs"
-        if [ -d ./bin ]; then cp -a ./bin/. /out/libffi-3.5.2/ 2>/dev/null || true; fi
-        if [ -d ./programs ]; then
-          install -d /out/libffi-3.5.2/bin
-          find ./programs -maxdepth 1 -type f -perm /111 -exec install -m 0755 {} /out/libffi-3.5.2/bin/ \;
-        fi
-        if [ -n "$(find /out/libffi-3.5.2 -mindepth 1 -print -quit 2>/dev/null || true )" ]; then
-          exit 0
-        fi
-      fi
-
-      echo "no supported build workflow for libffi-3.5.2" >&2
-      exit 1
-    "%,
   },
 
   "libxcrypt-4.4.38" = {
@@ -736,105 +644,13 @@
 
   "vim-9.1.1629" = {
     type = "binary",
-    inputs = [ "vim-src-9.1.1629" ],
+    inputs = [ "vim-src-9.1.1629", "buildscript-autotools" ],
     outputs = [ "vim-9.1.1629" ],
-    script = m%"
-      #!/bin/sh
-      set -eu
-
-      cd /in/vim-src-9.1.1629
-      jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
-
-      if [ -f CMakeLists.txt ]; then
-        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/out/vim-9.1.1629
-        cmake --build build -j"$jobs"
-        cmake --install build
-        exit 0
-      fi
-
-      if [ -f meson.build ]; then
-        meson setup build --prefix=/out/vim-9.1.1629
-        meson compile -C build -j"$jobs"
-        meson install -C build
-        exit 0
-      fi
-
-      if [ -x ./autogen.sh ]; then ./autogen.sh; fi
-      if [ -x ./bootstrap ]; then ./bootstrap; fi
-
-      if [ -x ./configure ]; then
-        ./configure --prefix=/out/vim-9.1.1629
-        make -j"$jobs"
-        make install
-        exit 0
-      fi
-
-      if [ -f Makefile ] || [ -f makefile ] || [ -f GNUmakefile ]; then
-        make -j"$jobs"
-        if [ -d ./bin ]; then cp -a ./bin/. /out/vim-9.1.1629/ 2>/dev/null || true; fi
-        if [ -d ./programs ]; then
-          install -d /out/vim-9.1.1629/bin
-          find ./programs -maxdepth 1 -type f -perm /111 -exec install -m 0755 {} /out/vim-9.1.1629/bin/ \;
-        fi
-        if [ -n "$(find /out/vim-9.1.1629 -mindepth 1 -print -quit 2>/dev/null || true )" ]; then
-          exit 0
-        fi
-      fi
-
-      echo "no supported build workflow for vim-9.1.1629" >&2
-      exit 1
-    "%,
   },
 
   "xz-5.8.1" = {
     type = "binary",
-    inputs = [ "xz-src-5.8.1" ],
+    inputs = [ "xz-src-5.8.1", "buildscript-cmake" ],
     outputs = [ "xz-5.8.1" ],
-    script = m%"
-      #!/bin/sh
-      set -eu
-
-      cd /in/xz-src-5.8.1
-      jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
-
-      if [ -f CMakeLists.txt ]; then
-        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/out/xz-5.8.1
-        cmake --build build -j"$jobs"
-        cmake --install build
-        exit 0
-      fi
-
-      if [ -f meson.build ]; then
-        meson setup build --prefix=/out/xz-5.8.1
-        meson compile -C build -j"$jobs"
-        meson install -C build
-        exit 0
-      fi
-
-      if [ -x ./autogen.sh ]; then ./autogen.sh; fi
-      if [ -x ./bootstrap ]; then ./bootstrap; fi
-
-      if [ -x ./configure ]; then
-        ./configure --prefix=/out/xz-5.8.1
-        make -j"$jobs"
-        make install
-        exit 0
-      fi
-
-      if [ -f Makefile ] || [ -f makefile ] || [ -f GNUmakefile ]; then
-        make -j"$jobs"
-        if [ -d ./bin ]; then cp -a ./bin/. /out/xz-5.8.1/ 2>/dev/null || true; fi
-        if [ -d ./programs ]; then
-          install -d /out/xz-5.8.1/bin
-          find ./programs -maxdepth 1 -type f -perm /111 -exec install -m 0755 {} /out/xz-5.8.1/bin/ \;
-        fi
-        if [ -n "$(find /out/xz-5.8.1 -mindepth 1 -print -quit 2>/dev/null || true )" ]; then
-          exit 0
-        fi
-      fi
-
-      echo "no supported build workflow for xz-5.8.1" >&2
-      exit 1
-    "%,
   },
 }
