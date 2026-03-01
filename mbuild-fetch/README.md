@@ -8,7 +8,7 @@
 
 Required fields:
 - `url`: source URL
-- `hash`: currently `sha256:<64-hex>`
+- `hash`: `md5:<32-hex>` or `sha256:<64-hex>`
 - `layout`: `"file"` or `"archive-tree"`
 
 Optional fields:

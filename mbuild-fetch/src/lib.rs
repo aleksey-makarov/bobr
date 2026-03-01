@@ -233,24 +233,35 @@ struct ParsedHash {
 fn parse_hash(value: &str) -> FResult<ParsedHash> {
     let (algorithm, hash_value) = value.split_once(':').ok_or_else(|| {
         FetchError::InvalidRecipe(
-            "hash must be in form '<algo>:<hex>' (for now: sha256)".to_string(),
+            "hash must be in form '<algo>:<hex>' (supported: md5, sha256)".to_string(),
         )
     })?;
+    let normalized_algorithm = algorithm.to_lowercase();
 
-    if algorithm != "sha256" {
-        return Err(FetchError::InvalidRecipe(
-            "only sha256 hash is currently supported".to_string(),
-        ));
-    }
-
-    if hash_value.len() != 64 || !hash_value.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(FetchError::InvalidRecipe(
-            "sha256 hash must be 64 hex characters".to_string(),
-        ));
+    match normalized_algorithm.as_str() {
+        "md5" => {
+            if hash_value.len() != 32 || !hash_value.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(FetchError::InvalidRecipe(
+                    "md5 hash must be 32 hex characters".to_string(),
+                ));
+            }
+        }
+        "sha256" => {
+            if hash_value.len() != 64 || !hash_value.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(FetchError::InvalidRecipe(
+                    "sha256 hash must be 64 hex characters".to_string(),
+                ));
+            }
+        }
+        _ => {
+            return Err(FetchError::InvalidRecipe(
+                "unsupported hash algorithm; supported: md5, sha256".to_string(),
+            ));
+        }
     }
 
     Ok(ParsedHash {
-        algorithm: algorithm.to_string(),
+        algorithm: normalized_algorithm,
         value: hash_value.to_lowercase(),
     })
 }
@@ -261,7 +272,7 @@ fn ensure_cached_blob(layout: &WorkspaceLayout, url: &str, hash: &ParsedHash) ->
     let cache_path = algo_dir.join(format!("{}.blob", hash.value));
 
     if cache_path.exists() {
-        let existing_hash = compute_sha256(&cache_path)?;
+        let existing_hash = compute_hash(&cache_path, &hash.algorithm)?;
         if existing_hash == hash.value {
             println!("cache: hit");
             println!("cached_blob: {}", cache_path.display());
@@ -284,7 +295,7 @@ fn ensure_cached_blob(layout: &WorkspaceLayout, url: &str, hash: &ParsedHash) ->
 
     download_to_file(url, &tmp_path)?;
 
-    let downloaded_hash = compute_sha256(&tmp_path)?;
+    let downloaded_hash = compute_hash(&tmp_path, &hash.algorithm)?;
     if downloaded_hash != hash.value {
         let _ = fs::remove_file(&tmp_path);
         return Err(FetchError::HashMismatch(format!(
@@ -351,6 +362,17 @@ fn download_to_file(url: &str, destination: &Path) -> FResult<()> {
     Ok(())
 }
 
+fn compute_hash(path: &Path, algorithm: &str) -> FResult<String> {
+    match algorithm {
+        "sha256" => compute_sha256(path),
+        "md5" => compute_md5(path),
+        _ => Err(FetchError::InvalidRecipe(format!(
+            "unsupported hash algorithm '{}'",
+            algorithm
+        ))),
+    }
+}
+
 fn compute_sha256(path: &Path) -> FResult<String> {
     let mut file = File::open(path).map_err(|error| {
         FetchError::FsFailed(format!(
@@ -375,12 +397,43 @@ fn compute_sha256(path: &Path) -> FResult<String> {
     }
 
     let digest = hasher.finalize();
-    let mut out = String::with_capacity(64);
-    for b in digest {
+    Ok(bytes_to_hex(&digest))
+}
+
+fn compute_md5(path: &Path) -> FResult<String> {
+    let mut file = File::open(path).map_err(|error| {
+        FetchError::FsFailed(format!(
+            "failed to open file for hashing '{}': {error}",
+            path.display()
+        ))
+    })?;
+
+    let mut context = md5::Context::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read_bytes = file.read(&mut buffer).map_err(|error| {
+            FetchError::FsFailed(format!(
+                "failed to read file for hashing '{}': {error}",
+                path.display()
+            ))
+        })?;
+        if read_bytes == 0 {
+            break;
+        }
+        context.consume(&buffer[..read_bytes]);
+    }
+
+    let digest = context.compute();
+    Ok(bytes_to_hex(&digest.0))
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
         out.push(hex_char(b >> 4));
         out.push(hex_char(b & 0x0f));
     }
-    Ok(out)
+    out
 }
 
 fn hex_char(nibble: u8) -> char {
