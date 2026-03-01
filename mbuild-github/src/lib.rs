@@ -54,8 +54,9 @@ impl fmt::Display for GithubError {
 struct GithubRecipe {
     #[serde(rename = "type")]
     recipe_type: String,
+    owner: String,
     repo: String,
-    commit: String,
+    rev: String,
     #[serde(default)]
     outputs: Vec<String>,
 }
@@ -78,8 +79,9 @@ impl Builder for GithubBuilder {
             publish_output(
                 &layout,
                 output_id,
+                &recipe.owner,
                 &recipe.repo,
-                &recipe.commit,
+                &recipe.rev,
                 &mirror_path,
             )
             .map_err(map_error)?;
@@ -96,7 +98,11 @@ impl Builder for GithubBuilder {
         recipe: &Value,
     ) -> Result<Vec<(&'static str, String)>, BuilderError> {
         let recipe = parse_recipe(recipe)?;
-        Ok(vec![("repo", recipe.repo), ("commit", recipe.commit)])
+        Ok(vec![
+            ("owner", recipe.owner),
+            ("repo", recipe.repo),
+            ("rev", recipe.rev),
+        ])
     }
 
     fn custom_verbs(&self) -> &'static [VerbSpec] {
@@ -146,11 +152,12 @@ fn validate_recipe(recipe: &GithubRecipe) -> GResult<()> {
         ));
     }
 
-    parse_github_repo(&recipe.repo)?;
+    validate_github_component(&recipe.owner, "owner")?;
+    validate_github_component(&recipe.repo, "repo")?;
 
-    if !is_valid_commit_hash(&recipe.commit) {
+    if !is_valid_rev_hash(&recipe.rev) {
         return Err(GithubError::InvalidRecipe(
-            "commit must be a 40-character lowercase hex string".to_string(),
+            "rev must be a 40-character lowercase hex string".to_string(),
         ));
     }
 
@@ -166,9 +173,9 @@ fn run_cache(
     artifact_name: &str,
     recipe: &GithubRecipe,
 ) -> GResult<PathBuf> {
-    let (owner, repo_name) = parse_github_repo(&recipe.repo)?;
-    let mirror_name = format!("{owner}_{repo_name}.git");
+    let mirror_name = format!("{}_{}.git", recipe.owner, recipe.repo);
     let mirror_path = layout.mirrors.join(mirror_name);
+    let remote_url = github_remote_url(&recipe.owner, &recipe.repo);
 
     if mirror_path.exists() {
         if !mirror_path.is_dir() {
@@ -178,7 +185,7 @@ fn run_cache(
             )));
         }
 
-        if !git_has_commit(&mirror_path, &recipe.commit)? {
+        if !git_has_commit(&mirror_path, &recipe.rev)? {
             run_git(
                 &["fetch", "--all", "--prune"],
                 Some(&mirror_path),
@@ -190,7 +197,7 @@ fn run_cache(
             &[
                 "clone",
                 "--mirror",
-                &recipe.repo,
+                &remote_url,
                 &mirror_path.to_string_lossy(),
             ],
             None,
@@ -198,18 +205,20 @@ fn run_cache(
         )?;
     }
 
-    if !git_has_commit(&mirror_path, &recipe.commit)? {
+    if !git_has_commit(&mirror_path, &recipe.rev)? {
         return Err(GithubError::CommitNotFound(format!(
-            "commit {} not found in mirror {}",
-            recipe.commit,
+            "rev {} not found in mirror {}",
+            recipe.rev,
             mirror_path.display()
         )));
     }
 
     println!("cache: ok");
     println!("artifact: {artifact_name}");
+    println!("owner: {}", recipe.owner);
     println!("repo: {}", recipe.repo);
-    println!("commit: {}", recipe.commit);
+    println!("rev: {}", recipe.rev);
+    println!("url: {}", remote_url);
     println!("mirror: {}", mirror_path.display());
 
     Ok(mirror_path)
@@ -218,16 +227,17 @@ fn run_cache(
 fn publish_output(
     layout: &WorkspaceLayout,
     output_id: &str,
+    owner: &str,
     repo: &str,
-    commit: &str,
+    rev: &str,
     mirror_path: &Path,
 ) -> GResult<()> {
     validate_artifact_name(output_id)?;
 
-    if !git_has_commit(mirror_path, commit)? {
+    if !git_has_commit(mirror_path, rev)? {
         return Err(GithubError::CommitNotFound(format!(
-            "commit {} not found in mirror {}",
-            commit,
+            "rev {} not found in mirror {}",
+            rev,
             mirror_path.display()
         )));
     }
@@ -269,7 +279,7 @@ fn publish_output(
             "--format=tar",
             "--output",
             &tmp_tar.to_string_lossy(),
-            commit,
+            rev,
         ],
         Some(mirror_path),
         "failed to create archive from mirror",
@@ -302,7 +312,7 @@ fn publish_output(
     let meta_path = layout.meta.join(format!("{output_id}.ncl"));
     write_atomic(
         &meta_path,
-        &render_meta_ncl(output_id, "source-tree", repo, commit),
+        &render_meta_ncl(output_id, "source-tree", owner, repo, rev),
     )?;
 
     let ref_path = layout.refs.join(output_id);
@@ -318,13 +328,14 @@ fn publish_output(
     Ok(())
 }
 
-fn render_meta_ncl(id: &str, artifact_kind: &str, repo: &str, commit: &str) -> String {
+fn render_meta_ncl(id: &str, artifact_kind: &str, owner: &str, repo: &str, rev: &str) -> String {
     format!(
-        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"github\",\n    repo = {},\n    commit = {},\n  }},\n  attrs = {{}},\n}}\n",
+        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"github\",\n    owner = {},\n    repo = {},\n    rev = {},\n  }},\n  attrs = {{}},\n}}\n",
         q(id),
         q(artifact_kind),
+        q(owner),
         q(repo),
-        q(commit)
+        q(rev)
     )
 }
 
@@ -403,30 +414,26 @@ fn create_symlink(_target: &Path, _link_path: &Path) -> GResult<()> {
     ))
 }
 
-fn parse_github_repo(repo: &str) -> GResult<(String, String)> {
-    let stripped = if let Some(rest) = repo.strip_prefix("https://github.com/") {
-        rest
-    } else if let Some(rest) = repo.strip_prefix("git@github.com:") {
-        rest
-    } else {
-        return Err(GithubError::InvalidRecipe(
-            "repo must be a GitHub URL".to_string(),
-        ));
-    };
+fn github_remote_url(owner: &str, repo: &str) -> String {
+    format!("https://github.com/{owner}/{repo}.git")
+}
 
-    let without_suffix = stripped.trim_end_matches(".git").trim_end_matches('/');
-    let mut parts = without_suffix.split('/');
-
-    let owner = parts.next().unwrap_or("");
-    let repo_name = parts.next().unwrap_or("");
-
-    if owner.is_empty() || repo_name.is_empty() || parts.next().is_some() {
-        return Err(GithubError::InvalidRecipe(
-            "repo must be in owner/repo format".to_string(),
-        ));
+fn validate_github_component(value: &str, field_name: &str) -> GResult<()> {
+    if value.is_empty() {
+        return Err(GithubError::InvalidRecipe(format!(
+            "{field_name} must not be empty"
+        )));
     }
-
-    Ok((owner.to_string(), repo_name.to_string()))
+    if !value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+    {
+        return Err(GithubError::InvalidRecipe(format!(
+            "invalid {field_name} '{}'; allowed chars: [A-Za-z0-9._-]",
+            value
+        )));
+    }
+    Ok(())
 }
 
 fn validate_artifact_name(name: &str) -> GResult<()> {
@@ -455,7 +462,7 @@ fn validate_artifact_name(name: &str) -> GResult<()> {
     Ok(())
 }
 
-fn is_valid_commit_hash(value: &str) -> bool {
+fn is_valid_rev_hash(value: &str) -> bool {
     value.len() == 40
         && value
             .bytes()

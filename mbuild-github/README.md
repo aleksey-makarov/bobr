@@ -13,19 +13,20 @@ It implements `mbuild-core::Builder` for recipes with `type = "github"` and mana
 ## Supported Verbs
 
 - `build`:
-  - ensures mirror contains the requested commit
+  - ensures mirror contains the requested revision
   - publishes source tree as object + metadata + ref for each declared output
   - if `outputs` is omitted, falls back to current artifact name
 - `cache`:
-  - ensures/updates mirror for the requested commit
+  - ensures/updates mirror for the requested revision
   - does not publish outputs
 
 ## Recipe Shape
 
 Current GitHub recipe fields:
 - `type = "github"`
-- `repo` (GitHub URL)
-- `commit` (40-char lowercase hex)
+- `owner` (GitHub owner/org)
+- `repo` (repository name)
+- `rev` (40-char lowercase commit hash)
 - optional `outputs` (`[String]`)
 
 `mbuild-github` receives the already selected recipe value from `.mbuild/recipes.ncl`.
