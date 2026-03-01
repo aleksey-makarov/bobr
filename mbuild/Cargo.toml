@@ -7,6 +7,7 @@ edition = "2024"
 clap = { version = "4.5", features = ["derive"] }
 mbuild-binary = { path = "../mbuild-binary" }
 mbuild-core = { path = "../mbuild-core" }
+mbuild-fetch = { path = "../mbuild-fetch" }
 mbuild-github = { path = "../mbuild-github" }
 mbuild-text = { path = "../mbuild-text" }
 nickel-lang = "2.0.0"

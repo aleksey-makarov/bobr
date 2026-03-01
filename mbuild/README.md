@@ -29,12 +29,14 @@ Current examples:
 - for `github`: `build`, `cache`
 - for `binary`: `build`
 - for `text`: `build`
+- for `fetch`: `build`
 
 ## Current Backends
 
 - `mbuild-github`: GitHub source backend
 - `mbuild-binary`: containerized binary build backend
 - `mbuild-text`: text artifact backend
+- `mbuild-fetch`: URL download backend with hash verification and optional archive extraction
 
 ## Notes
 

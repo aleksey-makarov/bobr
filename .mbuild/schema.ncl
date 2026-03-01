@@ -38,6 +38,26 @@ let TextRecipeContract = {
 }
 in
 
+let FetchRecipeContract = {
+  type | std.contract.Equal "fetch",
+  url | String,
+  hash | String,
+  layout | std.contract.Enum [
+    "file",
+    "archive-tree",
+  ],
+  archive_format | std.contract.Enum [
+    "tar-gz",
+    "tar-xz",
+    "zip",
+  ]
+    | optional,
+  artifact_kind | String | optional,
+  outputs | NameList | optional,
+  ..
+}
+in
+
 {
   validate_recipe = fun recipe =>
     let base = recipe | BaseRecipeContract in
@@ -47,6 +67,8 @@ in
       base | BinaryRecipeContract
     else if base.type == "text" then
       base | TextRecipeContract
+    else if base.type == "fetch" then
+      base | FetchRecipeContract
     else
       base,
 }
