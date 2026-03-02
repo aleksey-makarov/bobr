@@ -489,6 +489,7 @@ fn publish_file_output(
             recipe,
             object_path.as_path(),
             None,
+            false,
         ),
     )?;
 
@@ -520,6 +521,7 @@ fn publish_archive_output(
 
     recreate_empty_dir(&tmp_dir)?;
     extract_archive(cached_blob, format.clone(), &tmp_dir)?;
+    let normalized_root = normalize_extracted_root(&tmp_dir)?;
 
     let object_path = layout.objects.join(output_id);
     replace_path(&tmp_dir, &object_path)?;
@@ -533,6 +535,7 @@ fn publish_archive_output(
             recipe,
             object_path.as_path(),
             Some(format),
+            normalized_root,
         ),
     )?;
 
@@ -712,6 +715,7 @@ fn render_meta_ncl(
     recipe: &FetchRecipe,
     object_path: &Path,
     resolved_archive_format: Option<ArchiveFormat>,
+    normalized_root: bool,
 ) -> String {
     let object_kind = if object_path.is_dir() {
         "directory"
@@ -729,15 +733,82 @@ fn render_meta_ncl(
         .unwrap_or("");
 
     format!(
-        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"fetch\",\n    url = {},\n    hash = {},\n  }},\n  attrs = {{\n    unpack = {},\n    archive_format = {},\n    object_kind = {},\n  }},\n}}\n",
+        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"fetch\",\n    url = {},\n    hash = {},\n  }},\n  attrs = {{\n    unpack = {},\n    archive_format = {},\n    normalized_root = {},\n    object_kind = {},\n  }},\n}}\n",
         q(id),
         q(artifact_kind),
         q(&recipe.url),
         q(&recipe.hash),
         if recipe.unpack { "true" } else { "false" },
         q(archive_format),
+        if normalized_root { "true" } else { "false" },
         q(object_kind),
     )
+}
+
+fn normalize_extracted_root(directory: &Path) -> FResult<bool> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| {
+            FetchError::FsFailed(format!(
+                "failed to read extracted directory '{}': {error}",
+                directory.display()
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            FetchError::FsFailed(format!(
+                "failed to list extracted directory '{}': {error}",
+                directory.display()
+            ))
+        })?;
+
+    if entries.len() != 1 {
+        return Ok(false);
+    }
+
+    let only_entry = entries.remove(0);
+    let only_entry_path = only_entry.path();
+    let only_entry_file_type = only_entry.file_type().map_err(|error| {
+        FetchError::FsFailed(format!(
+            "failed to inspect extracted entry '{}': {error}",
+            only_entry_path.display()
+        ))
+    })?;
+    if !only_entry_file_type.is_dir() {
+        return Ok(false);
+    }
+
+    for child in fs::read_dir(&only_entry_path).map_err(|error| {
+        FetchError::FsFailed(format!(
+            "failed to read extracted root directory '{}': {error}",
+            only_entry_path.display()
+        ))
+    })? {
+        let child = child.map_err(|error| {
+            FetchError::FsFailed(format!(
+                "failed to list extracted root directory '{}': {error}",
+                only_entry_path.display()
+            ))
+        })?;
+        let child_path = child.path();
+        let child_name = child.file_name();
+        let target_path = directory.join(child_name);
+        fs::rename(&child_path, &target_path).map_err(|error| {
+            FetchError::FsFailed(format!(
+                "failed to normalize extracted root '{}' -> '{}': {error}",
+                child_path.display(),
+                target_path.display()
+            ))
+        })?;
+    }
+
+    fs::remove_dir(&only_entry_path).map_err(|error| {
+        FetchError::FsFailed(format!(
+            "failed to remove extracted wrapper directory '{}': {error}",
+            only_entry_path.display()
+        ))
+    })?;
+
+    Ok(true)
 }
 
 fn select_archive_format(recipe: &FetchRecipe, cached_blob: &Path) -> FResult<ArchiveFormat> {

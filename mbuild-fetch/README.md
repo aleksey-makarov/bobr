@@ -34,3 +34,5 @@ On `build`, the builder:
 - For `unpack = true`, format is selected in this order: explicit `archive_format`, magic bytes, URL extension.
 - Supported extraction formats: `tar.gz`/`tgz`, `tar.xz`, `tar.bz2`, `zip`.
 - For `zip`, extraction uses enclosed paths only and rejects unsafe paths.
+- After extraction, if the output root contains exactly one top-level directory, it is normalized
+  away so `.mbuild/objects/<id>` points to the actual source tree root.
