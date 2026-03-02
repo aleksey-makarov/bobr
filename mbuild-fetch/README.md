@@ -36,3 +36,4 @@ On `build`, the builder:
 - For `zip`, extraction uses enclosed paths only and rejects unsafe paths.
 - After extraction, if the output root contains exactly one top-level directory, it is normalized
   away so `.mbuild/objects/<id>` points to the actual source tree root.
+- Future improvement: support recipe-level mirror URL lists and fallback order for source downloads.

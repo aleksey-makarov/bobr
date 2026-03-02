@@ -28,6 +28,7 @@ const OBJECTS_DIR: &str = "objects";
 const META_DIR: &str = "meta";
 const REFS_DIR: &str = "refs";
 const REDIRECT_LIMIT: usize = 10;
+const USER_AGENT: &str = "mbuild-fetch/0.1";
 
 #[derive(Debug)]
 enum FetchError {
@@ -306,6 +307,7 @@ fn ensure_cached_blob(layout: &WorkspaceLayout, url: &str, hash: &ParsedHash) ->
 fn download_to_file(url: &str, destination: &Path) -> FResult<()> {
     let client = Client::builder()
         .redirect(Policy::limited(REDIRECT_LIMIT))
+        .user_agent(USER_AGENT)
         .build()
         .map_err(|error| {
             FetchError::NetworkFailed(format!("failed to create HTTP client: {error}"))
