@@ -1,3 +1,4 @@
+use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use mbuild_core::{Builder, BuilderError};
 use reqwest::blocking::Client;
@@ -59,16 +60,10 @@ type FResult<T> = Result<T, FetchError>;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum LayoutKind {
-    File,
-    ArchiveTree,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case")]
 enum ArchiveFormat {
     TarGz,
     TarXz,
+    TarBz2,
     Zip,
 }
 
@@ -78,13 +73,18 @@ struct FetchRecipe {
     recipe_type: String,
     url: String,
     hash: String,
-    layout: LayoutKind,
+    #[serde(default = "default_unpack")]
+    unpack: bool,
     #[serde(default)]
     archive_format: Option<ArchiveFormat>,
     #[serde(default)]
     artifact_kind: Option<String>,
     #[serde(default)]
     outputs: Vec<String>,
+}
+
+fn default_unpack() -> bool {
+    true
 }
 
 pub struct FetchBuilder;
@@ -105,13 +105,13 @@ impl Builder for FetchBuilder {
         let cached_blob =
             ensure_cached_blob(&layout, &recipe.url, &expected_hash).map_err(map_error)?;
 
-        let artifact_kind = recipe
-            .artifact_kind
-            .clone()
-            .unwrap_or_else(|| match recipe.layout {
-                LayoutKind::File => "fetched-file".to_string(),
-                LayoutKind::ArchiveTree => "source-tree".to_string(),
-            });
+        let artifact_kind = recipe.artifact_kind.clone().unwrap_or_else(|| {
+            if recipe.unpack {
+                "source-tree".to_string()
+            } else {
+                "fetched-file".to_string()
+            }
+        });
 
         for output_id in &outputs {
             publish_output(&layout, output_id, &recipe, &artifact_kind, &cached_blob)
@@ -122,7 +122,7 @@ impl Builder for FetchBuilder {
         println!("artifact: {artifact}");
         println!("url: {}", recipe.url);
         println!("hash: {}", recipe.hash);
-        println!("layout: {}", layout_name(&recipe.layout));
+        println!("unpack: {}", recipe.unpack);
         println!("outputs: {}", outputs.join(", "));
         Ok(())
     }
@@ -135,15 +135,8 @@ impl Builder for FetchBuilder {
         Ok(vec![
             ("url", recipe.url),
             ("hash", recipe.hash),
-            ("layout", layout_name(&recipe.layout).to_string()),
+            ("unpack", recipe.unpack.to_string()),
         ])
-    }
-}
-
-fn layout_name(layout: &LayoutKind) -> &'static str {
-    match layout {
-        LayoutKind::File => "file",
-        LayoutKind::ArchiveTree => "archive-tree",
     }
 }
 
@@ -179,15 +172,9 @@ fn validate_recipe(recipe: &FetchRecipe) -> FResult<()> {
 
     parse_hash(&recipe.hash)?;
 
-    if matches!(recipe.layout, LayoutKind::ArchiveTree) && recipe.archive_format.is_none() {
+    if !recipe.unpack && recipe.archive_format.is_some() {
         return Err(FetchError::InvalidRecipe(
-            "archive_format is required when layout = 'archive-tree'".to_string(),
-        ));
-    }
-
-    if matches!(recipe.layout, LayoutKind::File) && recipe.archive_format.is_some() {
-        return Err(FetchError::InvalidRecipe(
-            "archive_format must not be set when layout = 'file'".to_string(),
+            "archive_format must not be set when unpack = false".to_string(),
         ));
     }
 
@@ -453,13 +440,11 @@ fn publish_output(
 ) -> FResult<()> {
     validate_name(output_id)?;
 
-    match recipe.layout {
-        LayoutKind::File => {
-            publish_file_output(layout, output_id, recipe, artifact_kind, cached_blob)
-        }
-        LayoutKind::ArchiveTree => {
-            publish_archive_output(layout, output_id, recipe, artifact_kind, cached_blob)
-        }
+    if recipe.unpack {
+        let format = select_archive_format(recipe, cached_blob)?;
+        publish_archive_output(layout, output_id, recipe, artifact_kind, cached_blob, format)
+    } else {
+        publish_file_output(layout, output_id, recipe, artifact_kind, cached_blob)
     }
 }
 
@@ -498,7 +483,13 @@ fn publish_file_output(
     let meta_path = layout.meta.join(format!("{output_id}.ncl"));
     write_atomic(
         &meta_path,
-        &render_meta_ncl(output_id, artifact_kind, recipe, object_path.as_path()),
+        &render_meta_ncl(
+            output_id,
+            artifact_kind,
+            recipe,
+            object_path.as_path(),
+            None,
+        ),
     )?;
 
     let ref_path = layout.refs.join(output_id);
@@ -520,6 +511,7 @@ fn publish_archive_output(
     recipe: &FetchRecipe,
     artifact_kind: &str,
     cached_blob: &Path,
+    format: ArchiveFormat,
 ) -> FResult<()> {
     let now_nanos = current_epoch_nanos()?;
     let tmp_dir = layout
@@ -527,14 +519,7 @@ fn publish_archive_output(
         .join(format!(".fetch-archive-{}-{}.dir", output_id, now_nanos));
 
     recreate_empty_dir(&tmp_dir)?;
-    extract_archive(
-        cached_blob,
-        recipe
-            .archive_format
-            .clone()
-            .expect("validated archive_format"),
-        &tmp_dir,
-    )?;
+    extract_archive(cached_blob, format.clone(), &tmp_dir)?;
 
     let object_path = layout.objects.join(output_id);
     replace_path(&tmp_dir, &object_path)?;
@@ -542,7 +527,13 @@ fn publish_archive_output(
     let meta_path = layout.meta.join(format!("{output_id}.ncl"));
     write_atomic(
         &meta_path,
-        &render_meta_ncl(output_id, artifact_kind, recipe, object_path.as_path()),
+        &render_meta_ncl(
+            output_id,
+            artifact_kind,
+            recipe,
+            object_path.as_path(),
+            Some(format),
+        ),
     )?;
 
     let ref_path = layout.refs.join(output_id);
@@ -562,6 +553,7 @@ fn extract_archive(archive_path: &Path, format: ArchiveFormat, destination: &Pat
     match format {
         ArchiveFormat::TarGz => extract_tar_gz(archive_path, destination),
         ArchiveFormat::TarXz => extract_tar_xz(archive_path, destination),
+        ArchiveFormat::TarBz2 => extract_tar_bz2(archive_path, destination),
         ArchiveFormat::Zip => extract_zip(archive_path, destination),
     }
 }
@@ -588,6 +580,19 @@ fn extract_tar_xz(archive_path: &Path, destination: &Path) -> FResult<()> {
     })?;
 
     let decoder = XzDecoder::new(file);
+    let mut archive = Archive::new(decoder);
+    unpack_tar_safely(&mut archive, destination)
+}
+
+fn extract_tar_bz2(archive_path: &Path, destination: &Path) -> FResult<()> {
+    let file = File::open(archive_path).map_err(|error| {
+        FetchError::ExtractFailed(format!(
+            "failed to open tar.bz2 archive '{}': {error}",
+            archive_path.display()
+        ))
+    })?;
+
+    let decoder = BzDecoder::new(file);
     let mut archive = Archive::new(decoder);
     unpack_tar_safely(&mut archive, destination)
 }
@@ -706,32 +711,115 @@ fn render_meta_ncl(
     artifact_kind: &str,
     recipe: &FetchRecipe,
     object_path: &Path,
+    resolved_archive_format: Option<ArchiveFormat>,
 ) -> String {
     let object_kind = if object_path.is_dir() {
         "directory"
     } else {
         "file"
     };
-    let archive_format = recipe
-        .archive_format
+    let archive_format = resolved_archive_format
         .as_ref()
         .map(|fmt| match fmt {
             ArchiveFormat::TarGz => "tar-gz",
             ArchiveFormat::TarXz => "tar-xz",
+            ArchiveFormat::TarBz2 => "tar-bz2",
             ArchiveFormat::Zip => "zip",
         })
         .unwrap_or("");
 
     format!(
-        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"fetch\",\n    url = {},\n    hash = {},\n  }},\n  attrs = {{\n    layout = {},\n    archive_format = {},\n    object_kind = {},\n  }},\n}}\n",
+        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"fetch\",\n    url = {},\n    hash = {},\n  }},\n  attrs = {{\n    unpack = {},\n    archive_format = {},\n    object_kind = {},\n  }},\n}}\n",
         q(id),
         q(artifact_kind),
         q(&recipe.url),
         q(&recipe.hash),
-        q(layout_name(&recipe.layout)),
+        if recipe.unpack { "true" } else { "false" },
         q(archive_format),
         q(object_kind),
     )
+}
+
+fn select_archive_format(recipe: &FetchRecipe, cached_blob: &Path) -> FResult<ArchiveFormat> {
+    if let Some(format) = &recipe.archive_format {
+        return Ok(format.clone());
+    }
+
+    if let Some(format) = detect_archive_format_from_magic(cached_blob)? {
+        return Ok(format);
+    }
+
+    if let Some(format) = detect_archive_format_from_url(&recipe.url) {
+        return Ok(format);
+    }
+
+    Err(FetchError::InvalidRecipe(format!(
+        "unable to detect archive format for url '{}'; set archive_format explicitly or use unpack = false",
+        recipe.url
+    )))
+}
+
+fn detect_archive_format_from_magic(path: &Path) -> FResult<Option<ArchiveFormat>> {
+    let mut file = File::open(path).map_err(|error| {
+        FetchError::FsFailed(format!(
+            "failed to open cached blob for archive detection '{}': {error}",
+            path.display()
+        ))
+    })?;
+
+    let mut header = [0_u8; 8];
+    let bytes_read = file.read(&mut header).map_err(|error| {
+        FetchError::FsFailed(format!(
+            "failed to read cached blob for archive detection '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let header = &header[..bytes_read];
+
+    if header.len() >= 2 && header[0] == 0x1f && header[1] == 0x8b {
+        return Ok(Some(ArchiveFormat::TarGz));
+    }
+    if header.len() >= 6
+        && header[0] == 0xfd
+        && header[1] == 0x37
+        && header[2] == 0x7a
+        && header[3] == 0x58
+        && header[4] == 0x5a
+        && header[5] == 0x00
+    {
+        return Ok(Some(ArchiveFormat::TarXz));
+    }
+    if header.len() >= 3 && header[0] == 0x42 && header[1] == 0x5a && header[2] == 0x68 {
+        return Ok(Some(ArchiveFormat::TarBz2));
+    }
+    if header.len() >= 4
+        && header[0] == 0x50
+        && header[1] == 0x4b
+        && matches!(header[2], 0x03 | 0x05 | 0x07)
+        && matches!(header[3], 0x04 | 0x06 | 0x08)
+    {
+        return Ok(Some(ArchiveFormat::Zip));
+    }
+
+    Ok(None)
+}
+
+fn detect_archive_format_from_url(url: &str) -> Option<ArchiveFormat> {
+    let url_lower = url.to_ascii_lowercase();
+    if url_lower.ends_with(".tar.gz") || url_lower.ends_with(".tgz") {
+        return Some(ArchiveFormat::TarGz);
+    }
+    if url_lower.ends_with(".tar.xz") {
+        return Some(ArchiveFormat::TarXz);
+    }
+    if url_lower.ends_with(".tar.bz2") || url_lower.ends_with(".tbz2") || url_lower.ends_with(".tbz")
+    {
+        return Some(ArchiveFormat::TarBz2);
+    }
+    if url_lower.ends_with(".zip") {
+        return Some(ArchiveFormat::Zip);
+    }
+    None
 }
 
 fn recreate_empty_dir(path: &Path) -> FResult<()> {
