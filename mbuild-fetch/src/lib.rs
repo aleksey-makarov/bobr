@@ -34,7 +34,6 @@ const USER_AGENT: &str = "mbuild-fetch/0.1";
 enum FetchError {
     InvalidRecipe(String),
     NetworkFailed(String),
-    HashMismatch(String),
     ExtractFailed(String),
     FsFailed(String),
 }
@@ -44,7 +43,6 @@ impl FetchError {
         match self {
             Self::InvalidRecipe(message)
             | Self::NetworkFailed(message)
-            | Self::HashMismatch(message)
             | Self::ExtractFailed(message)
             | Self::FsFailed(message) => message,
         }
@@ -68,11 +66,27 @@ enum ArchiveFormat {
     Zip,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum UrlField {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl UrlField {
+    fn as_list(&self) -> Vec<String> {
+        match self {
+            Self::One(url) => vec![url.clone()],
+            Self::Many(urls) => urls.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct FetchRecipe {
     #[serde(rename = "type")]
     recipe_type: String,
-    url: String,
+    url: UrlField,
     hash: String,
     #[serde(default = "default_unpack")]
     unpack: bool,
@@ -99,12 +113,13 @@ impl Builder for FetchBuilder {
         let recipe = parse_recipe(recipe)?;
         let layout = workspace_layout().map_err(map_error)?;
         ensure_base_dirs(&layout).map_err(map_error)?;
+        let urls = recipe.url.as_list();
 
         let outputs = output_ids(artifact, &recipe);
         let expected_hash = parse_hash(&recipe.hash).map_err(map_error)?;
 
-        let cached_blob =
-            ensure_cached_blob(&layout, &recipe.url, &expected_hash).map_err(map_error)?;
+        let (cached_blob, source_url) =
+            ensure_cached_blob(&layout, &urls, &expected_hash).map_err(map_error)?;
 
         let artifact_kind = recipe.artifact_kind.clone().unwrap_or_else(|| {
             if recipe.unpack {
@@ -115,13 +130,21 @@ impl Builder for FetchBuilder {
         });
 
         for output_id in &outputs {
-            publish_output(&layout, output_id, &recipe, &artifact_kind, &cached_blob)
-                .map_err(map_error)?;
+            publish_output(
+                &layout,
+                output_id,
+                &recipe,
+                &artifact_kind,
+                &cached_blob,
+                &source_url,
+            )
+            .map_err(map_error)?;
         }
 
         println!("build: ok");
         println!("artifact: {artifact}");
-        println!("url: {}", recipe.url);
+        println!("source_url: {source_url}");
+        println!("urls_count: {}", urls.len());
         println!("hash: {}", recipe.hash);
         println!("unpack: {}", recipe.unpack);
         println!("outputs: {}", outputs.join(", "));
@@ -133,8 +156,14 @@ impl Builder for FetchBuilder {
         recipe: &Value,
     ) -> Result<Vec<(&'static str, String)>, BuilderError> {
         let recipe = parse_recipe(recipe)?;
+        let urls = recipe.url.as_list();
+        let first_url = urls
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "<none>".to_string());
         Ok(vec![
-            ("url", recipe.url),
+            ("url", first_url),
+            ("urls_count", urls.len().to_string()),
             ("hash", recipe.hash),
             ("unpack", recipe.unpack.to_string()),
         ])
@@ -165,10 +194,17 @@ fn validate_recipe(recipe: &FetchRecipe) -> FResult<()> {
         ));
     }
 
-    if !recipe.url.starts_with("http://") && !recipe.url.starts_with("https://") {
-        return Err(FetchError::InvalidRecipe(
-            "url must start with http:// or https://".to_string(),
-        ));
+    let urls = recipe.url.as_list();
+    if urls.is_empty() {
+        return Err(FetchError::InvalidRecipe("url list must not be empty".to_string()));
+    }
+    for url in &urls {
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err(FetchError::InvalidRecipe(format!(
+                "url '{}' must start with http:// or https://",
+                url
+            )));
+        }
     }
 
     parse_hash(&recipe.hash)?;
@@ -254,7 +290,11 @@ fn parse_hash(value: &str) -> FResult<ParsedHash> {
     })
 }
 
-fn ensure_cached_blob(layout: &WorkspaceLayout, url: &str, hash: &ParsedHash) -> FResult<PathBuf> {
+fn ensure_cached_blob(
+    layout: &WorkspaceLayout,
+    urls: &[String],
+    hash: &ParsedHash,
+) -> FResult<(PathBuf, String)> {
     let algo_dir = layout.cache.join(&hash.algorithm);
     ensure_dir(&algo_dir, "fetch cache algo")?;
     let cache_path = algo_dir.join(format!("{}.blob", hash.value));
@@ -264,7 +304,7 @@ fn ensure_cached_blob(layout: &WorkspaceLayout, url: &str, hash: &ParsedHash) ->
         if existing_hash == hash.value {
             println!("cache: hit");
             println!("cached_blob: {}", cache_path.display());
-            return Ok(cache_path);
+            return Ok((cache_path, urls[0].clone()));
         }
 
         fs::remove_file(&cache_path).map_err(|error| {
@@ -276,32 +316,47 @@ fn ensure_cached_blob(layout: &WorkspaceLayout, url: &str, hash: &ParsedHash) ->
     }
 
     println!("cache: miss");
-    let now_nanos = current_epoch_nanos()?;
-    let tmp_path = layout
-        .builder_root
-        .join(format!(".download-{}-{}.blob", hash.value, now_nanos));
+    let mut failures = Vec::new();
 
-    download_to_file(url, &tmp_path)?;
+    for (index, url) in urls.iter().enumerate() {
+        let now_nanos = current_epoch_nanos()?;
+        let tmp_path = layout
+            .builder_root
+            .join(format!(".download-{}-{}-{}.blob", hash.value, index, now_nanos));
 
-    let downloaded_hash = compute_hash(&tmp_path, &hash.algorithm)?;
-    if downloaded_hash != hash.value {
-        let _ = fs::remove_file(&tmp_path);
-        return Err(FetchError::HashMismatch(format!(
-            "downloaded file hash mismatch: expected {}, got {}",
-            hash.value, downloaded_hash
-        )));
+        println!("download_attempt: {}", url);
+        if let Err(error) = download_to_file(url, &tmp_path) {
+            failures.push(format!("{url}: {}", error.message()));
+            let _ = fs::remove_file(&tmp_path);
+            continue;
+        }
+
+        let downloaded_hash = compute_hash(&tmp_path, &hash.algorithm)?;
+        if downloaded_hash != hash.value {
+            failures.push(format!(
+                "{url}: hash mismatch (expected {}, got {})",
+                hash.value, downloaded_hash
+            ));
+            let _ = fs::remove_file(&tmp_path);
+            continue;
+        }
+
+        fs::rename(&tmp_path, &cache_path).map_err(|error| {
+            FetchError::FsFailed(format!(
+                "failed to move downloaded blob '{}' -> '{}': {error}",
+                tmp_path.display(),
+                cache_path.display()
+            ))
+        })?;
+
+        println!("cached_blob: {}", cache_path.display());
+        return Ok((cache_path, url.clone()));
     }
 
-    fs::rename(&tmp_path, &cache_path).map_err(|error| {
-        FetchError::FsFailed(format!(
-            "failed to move downloaded blob '{}' -> '{}': {error}",
-            tmp_path.display(),
-            cache_path.display()
-        ))
-    })?;
-
-    println!("cached_blob: {}", cache_path.display());
-    Ok(cache_path)
+    Err(FetchError::NetworkFailed(format!(
+        "all download URLs failed:\n  - {}",
+        failures.join("\n  - ")
+    )))
 }
 
 fn download_to_file(url: &str, destination: &Path) -> FResult<()> {
@@ -439,14 +494,23 @@ fn publish_output(
     recipe: &FetchRecipe,
     artifact_kind: &str,
     cached_blob: &Path,
+    source_url: &str,
 ) -> FResult<()> {
     validate_name(output_id)?;
 
     if recipe.unpack {
-        let format = select_archive_format(recipe, cached_blob)?;
-        publish_archive_output(layout, output_id, recipe, artifact_kind, cached_blob, format)
+        let format = select_archive_format(recipe, cached_blob, source_url)?;
+        publish_archive_output(
+            layout,
+            output_id,
+            recipe,
+            artifact_kind,
+            cached_blob,
+            format,
+            source_url,
+        )
     } else {
-        publish_file_output(layout, output_id, recipe, artifact_kind, cached_blob)
+        publish_file_output(layout, output_id, recipe, artifact_kind, cached_blob, source_url)
     }
 }
 
@@ -456,6 +520,7 @@ fn publish_file_output(
     recipe: &FetchRecipe,
     artifact_kind: &str,
     cached_blob: &Path,
+    source_url: &str,
 ) -> FResult<()> {
     let now_nanos = current_epoch_nanos()?;
     let tmp_path = layout
@@ -490,6 +555,7 @@ fn publish_file_output(
             artifact_kind,
             recipe,
             object_path.as_path(),
+            source_url,
             None,
             false,
         ),
@@ -515,6 +581,7 @@ fn publish_archive_output(
     artifact_kind: &str,
     cached_blob: &Path,
     format: ArchiveFormat,
+    source_url: &str,
 ) -> FResult<()> {
     let now_nanos = current_epoch_nanos()?;
     let tmp_dir = layout
@@ -536,6 +603,7 @@ fn publish_archive_output(
             artifact_kind,
             recipe,
             object_path.as_path(),
+            source_url,
             Some(format),
             normalized_root,
         ),
@@ -716,6 +784,7 @@ fn render_meta_ncl(
     artifact_kind: &str,
     recipe: &FetchRecipe,
     object_path: &Path,
+    source_url: &str,
     resolved_archive_format: Option<ArchiveFormat>,
     normalized_root: bool,
 ) -> String {
@@ -738,7 +807,7 @@ fn render_meta_ncl(
         "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"fetch\",\n    url = {},\n    hash = {},\n  }},\n  attrs = {{\n    unpack = {},\n    archive_format = {},\n    normalized_root = {},\n    object_kind = {},\n  }},\n}}\n",
         q(id),
         q(artifact_kind),
-        q(&recipe.url),
+        q(source_url),
         q(&recipe.hash),
         if recipe.unpack { "true" } else { "false" },
         q(archive_format),
@@ -813,7 +882,11 @@ fn normalize_extracted_root(directory: &Path) -> FResult<bool> {
     Ok(true)
 }
 
-fn select_archive_format(recipe: &FetchRecipe, cached_blob: &Path) -> FResult<ArchiveFormat> {
+fn select_archive_format(
+    recipe: &FetchRecipe,
+    cached_blob: &Path,
+    source_url: &str,
+) -> FResult<ArchiveFormat> {
     if let Some(format) = &recipe.archive_format {
         return Ok(format.clone());
     }
@@ -822,13 +895,13 @@ fn select_archive_format(recipe: &FetchRecipe, cached_blob: &Path) -> FResult<Ar
         return Ok(format);
     }
 
-    if let Some(format) = detect_archive_format_from_url(&recipe.url) {
+    if let Some(format) = detect_archive_format_from_url(source_url) {
         return Ok(format);
     }
 
     Err(FetchError::InvalidRecipe(format!(
         "unable to detect archive format for url '{}'; set archive_format explicitly or use unpack = false",
-        recipe.url
+        source_url
     )))
 }
 
@@ -1087,7 +1160,6 @@ fn map_error(error: FetchError) -> BuilderError {
     match error {
         FetchError::InvalidRecipe(message) => BuilderError::InvalidRecipe(message),
         FetchError::NetworkFailed(message)
-        | FetchError::HashMismatch(message)
         | FetchError::ExtractFailed(message)
         | FetchError::FsFailed(message) => BuilderError::ExecutionFailed(message),
     }

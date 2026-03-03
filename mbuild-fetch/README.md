@@ -7,7 +7,7 @@
 `type = "fetch"`
 
 Required fields:
-- `url`: source URL
+- `url`: source URL (`String`) or mirror list (`Array String`)
 - `hash`: `md5:<32-hex>` or `sha256:<64-hex>`
 
 Optional fields:
@@ -20,9 +20,9 @@ Optional fields:
 
 On `build`, the builder:
 1. resolves `.mbuild` layout and ensures directories exist;
-2. downloads the URL with redirect limit 10;
+2. tries URLs in order (if `url` is an array), with redirect limit 10 per attempt;
 3. verifies content hash;
-4. caches the blob at `.mbuild/fetch/cache/sha256/<hex>.blob`;
+4. caches the blob at `.mbuild/fetch/cache/<algo>/<hex>.blob`;
 5. publishes each output into:
    - `.mbuild/objects/<id>` (extracted directory when `unpack = true`, raw file otherwise),
    - `.mbuild/meta/<id>.ncl`,
@@ -36,4 +36,4 @@ On `build`, the builder:
 - For `zip`, extraction uses enclosed paths only and rejects unsafe paths.
 - After extraction, if the output root contains exactly one top-level directory, it is normalized
   away so `.mbuild/objects/<id>` points to the actual source tree root.
-- Future improvement: support recipe-level mirror URL lists and fallback order for source downloads.
+- In metadata, `producer.url` stores the exact URL that succeeded.
