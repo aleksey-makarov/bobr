@@ -221,7 +221,6 @@ fn run_container_build(ctx: &BuildContext) -> BResult<()> {
                 .arg("--env")
                 .arg(format!("MBUILD_PRIMARY_OUTPUT={primary_output}"))
                 .arg(STANDARD_IMAGE)
-                .arg("/bin/sh")
                 .arg("/__mbuild_binary_script");
         }
     }

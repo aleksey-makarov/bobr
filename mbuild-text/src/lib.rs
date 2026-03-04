@@ -7,6 +7,8 @@ use std::fmt;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -196,6 +198,16 @@ fn publish_one(
             tmp_path.display()
         ))
     })?;
+    #[cfg(unix)]
+    if artifact_kind == "build-script" {
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(&tmp_path, perms).map_err(|error| {
+            TextError::PublishFailed(format!(
+                "failed to set executable mode on build-script '{}': {error}",
+                tmp_path.display()
+            ))
+        })?;
+    }
 
     let object_path = layout.objects.join(output_name);
     replace_path(&tmp_path, &object_path)?;
