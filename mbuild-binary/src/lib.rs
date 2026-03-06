@@ -384,7 +384,7 @@ fn publish_outputs(ctx: &BuildContext) -> BResult<()> {
         let meta_path = ctx.layout.meta.join(format!("{output_name}.ncl"));
         write_atomic(
             &meta_path,
-            &render_meta_ncl(output_name, "binary-output", &ctx.inputs),
+            &render_meta_ncl(output_name, "binary-output", &ctx.inputs, ctx.uid, ctx.gid),
         )?;
 
         let ref_path = ctx.layout.refs.join(output_name);
@@ -522,7 +522,13 @@ fn extract_ncl_string_field(content: &str, field: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-fn render_meta_ncl(id: &str, artifact_kind: &str, inputs: &[ResolvedInput]) -> String {
+fn render_meta_ncl(
+    id: &str,
+    artifact_kind: &str,
+    inputs: &[ResolvedInput],
+    owner_uid: u32,
+    owner_gid: u32,
+) -> String {
     let inputs_list = inputs
         .iter()
         .map(|input| q(&input.name))
@@ -535,11 +541,13 @@ fn render_meta_ncl(id: &str, artifact_kind: &str, inputs: &[ResolvedInput]) -> S
         .join(", ");
 
     format!(
-        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"binary\",\n  }},\n  attrs = {{\n    inputs = [{}],\n    input_ids = [{}],\n  }},\n}}\n",
+        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"binary\",\n  }},\n  attrs = {{\n    inputs = [{}],\n    input_ids = [{}],\n    install = {{\n      owners = [\n        {{ path = \"**\", uid = {}, gid = {} }},\n      ],\n    }},\n  }},\n}}\n",
         q(id),
         q(artifact_kind),
         inputs_list,
-        input_ids
+        input_ids,
+        owner_uid,
+        owner_gid
     )
 }
 

@@ -9,6 +9,7 @@ mbuild-binary = { path = "../mbuild-binary" }
 mbuild-core = { path = "../mbuild-core" }
 mbuild-fetch = { path = "../mbuild-fetch" }
 mbuild-github = { path = "../mbuild-github" }
+mbuild-image = { path = "../mbuild-image" }
 mbuild-text = { path = "../mbuild-text" }
 nickel-lang = "2.0.0"
 serde = { version = "1.0", features = ["derive"] }
