@@ -59,6 +59,30 @@ pub fn recreate_empty_dir_force(path: &Path) -> Result<(), FsUtilError> {
     })
 }
 
+pub fn recreate_empty_dir(path: &Path) -> Result<(), FsUtilError> {
+    if path.exists() {
+        if path.is_dir() {
+            fs::remove_dir_all(path).map_err(|error| {
+                FsUtilError::Io(format!(
+                    "failed to remove previous directory '{}': {error}",
+                    path.display()
+                ))
+            })?;
+        } else {
+            fs::remove_file(path).map_err(|error| {
+                FsUtilError::Io(format!(
+                    "failed to remove previous file '{}': {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+
+    fs::create_dir_all(path).map_err(|error| {
+        FsUtilError::Io(format!("failed to create directory '{}': {error}", path.display()))
+    })
+}
+
 pub fn remove_dir_force(path: &Path) -> Result<(), FsUtilError> {
     if !path.exists() {
         return Ok(());

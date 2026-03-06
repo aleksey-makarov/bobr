@@ -168,7 +168,7 @@ fn run_bootstrap_mode(artifact: &str, binary_inputs: &[&ResolvedInput]) -> IResu
     let tar_path = temp_root.join("rootfs.tar");
 
     fsutil::recreate_empty_dir_force(&temp_root).map_err(map_fsutil_error)?;
-    recreate_empty_dir(&rootfs_dir)?;
+    fsutil::recreate_empty_dir(&rootfs_dir).map_err(map_fsutil_error)?;
 
     let build_result = (|| {
         let mut seen: HashMap<PathBuf, EntryKind> = HashMap::new();
@@ -689,33 +689,6 @@ fn replace_symlink(target: &Path, link_path: &Path) -> IResult<()> {
     }
 
     create_symlink(target, link_path)
-}
-
-fn recreate_empty_dir(path: &Path) -> IResult<()> {
-    if path.exists() {
-        if path.is_dir() {
-            fs::remove_dir_all(path).map_err(|error| {
-                ImageError::FsFailed(format!(
-                    "failed to remove previous directory '{}': {error}",
-                    path.display()
-                ))
-            })?;
-        } else {
-            fs::remove_file(path).map_err(|error| {
-                ImageError::FsFailed(format!(
-                    "failed to remove previous file '{}': {error}",
-                    path.display()
-                ))
-            })?;
-        }
-    }
-
-    fs::create_dir_all(path).map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to create directory '{}': {error}",
-            path.display()
-        ))
-    })
 }
 
 fn map_fsutil_error(error: fsutil::FsUtilError) -> ImageError {

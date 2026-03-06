@@ -334,10 +334,11 @@ fn resolve_script_execution(
 }
 
 fn prepare_outputs(ctx: &mut BuildContext) -> BResult<()> {
-    recreate_empty_dir(&ctx.temp_outputs_root)?;
+    fsutil::recreate_empty_dir(&ctx.temp_outputs_root).map_err(map_fsutil_error)?;
 
     for output_name in &ctx.outputs {
-        recreate_empty_dir(&ctx.temp_outputs_root.join(output_name))?;
+        fsutil::recreate_empty_dir(&ctx.temp_outputs_root.join(output_name))
+            .map_err(map_fsutil_error)?;
     }
 
     Ok(())
@@ -611,28 +612,6 @@ fn replace_dir(tmp_dir: &Path, destination: &Path) -> BResult<()> {
             "failed to publish output '{}' -> '{}': {error}",
             tmp_dir.display(),
             destination.display()
-        ))
-    })
-}
-
-fn recreate_empty_dir(path: &Path) -> BResult<()> {
-    if path.exists() {
-        if path.is_dir() {
-            fsutil::remove_dir_force(path).map_err(map_fsutil_error)?;
-        } else {
-            fs::remove_file(path).map_err(|error| {
-                BinaryError::FsFailed(format!(
-                    "failed to remove previous file '{}': {error}",
-                    path.display()
-                ))
-            })?;
-        }
-    }
-
-    fs::create_dir_all(path).map_err(|error| {
-        BinaryError::FsFailed(format!(
-            "failed to create directory '{}': {error}",
-            path.display()
         ))
     })
 }

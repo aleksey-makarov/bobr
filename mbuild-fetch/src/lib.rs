@@ -588,7 +588,7 @@ fn publish_archive_output(
         .root
         .join(format!(".fetch-archive-{}-{}.dir", output_id, now_nanos));
 
-    recreate_empty_dir(&tmp_dir)?;
+    fsutil::recreate_empty_dir(&tmp_dir).map_err(map_fsutil_error)?;
     extract_archive(cached_blob, format.clone(), &tmp_dir)?;
     let normalized_root = normalize_extracted_root(&tmp_dir)?;
 
@@ -967,33 +967,6 @@ fn detect_archive_format_from_url(url: &str) -> Option<ArchiveFormat> {
         return Some(ArchiveFormat::Zip);
     }
     None
-}
-
-fn recreate_empty_dir(path: &Path) -> FResult<()> {
-    if path.exists() {
-        if path.is_dir() {
-            fs::remove_dir_all(path).map_err(|error| {
-                FetchError::FsFailed(format!(
-                    "failed to remove previous directory '{}': {error}",
-                    path.display()
-                ))
-            })?;
-        } else {
-            fs::remove_file(path).map_err(|error| {
-                FetchError::FsFailed(format!(
-                    "failed to remove previous file '{}': {error}",
-                    path.display()
-                ))
-            })?;
-        }
-    }
-
-    fs::create_dir_all(path).map_err(|error| {
-        FetchError::FsFailed(format!(
-            "failed to create directory '{}': {error}",
-            path.display()
-        ))
-    })
 }
 
 fn replace_path(tmp_path: &Path, destination: &Path) -> FResult<()> {
