@@ -4,6 +4,7 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
 pub enum FsUtilError {
@@ -69,6 +70,40 @@ pub fn remove_dir_force(path: &Path) -> Result<(), FsUtilError> {
             path.display()
         ))
     })
+}
+
+pub fn write_atomic(path: &Path, content: &str) -> Result<(), FsUtilError> {
+    let file_name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
+        FsUtilError::Io(format!(
+            "invalid file name for atomic write path '{}'",
+            path.display()
+        ))
+    })?;
+
+    let tmp_name = format!(".{file_name}.tmp");
+    let tmp_path = path.with_file_name(tmp_name);
+
+    fs::write(&tmp_path, content).map_err(|error| {
+        FsUtilError::Io(format!(
+            "failed to write temporary file '{}': {error}",
+            tmp_path.display()
+        ))
+    })?;
+
+    fs::rename(&tmp_path, path).map_err(|error| {
+        FsUtilError::Io(format!(
+            "failed to move temporary file '{}' to '{}': {error}",
+            tmp_path.display(),
+            path.display()
+        ))
+    })
+}
+
+pub fn current_epoch_nanos() -> Result<u128, FsUtilError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .map_err(|error| FsUtilError::Io(format!("system time before UNIX_EPOCH: {error}")))
 }
 
 #[cfg(unix)]

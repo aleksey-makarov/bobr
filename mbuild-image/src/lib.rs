@@ -6,7 +6,6 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 
@@ -163,7 +162,7 @@ struct ImportedImage {
 
 fn run_bootstrap_mode(artifact: &str, binary_inputs: &[&ResolvedInput]) -> IResult<ImportedImage> {
     let temp_base = fsutil::temp_root_dir(ROOT_DIR).map_err(map_fsutil_error)?;
-    let now = current_epoch_nanos()?;
+    let now = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
     let temp_root = temp_base.join(format!("image-bootstrap-{artifact}-{now}"));
     let rootfs_dir = temp_root.join("rootfs");
     let tar_path = temp_root.join("rootfs.tar");
@@ -444,7 +443,7 @@ fn publish_output(
         "image_digest": imported.image_digest,
     });
 
-    write_atomic(
+    fsutil::write_atomic(
         &object_path,
         &serde_json::to_string_pretty(&payload).map_err(|error| {
             ImageError::PublishFailed(format!(
@@ -452,7 +451,8 @@ fn publish_output(
                 output_id
             ))
         })?,
-    )?;
+    )
+    .map_err(map_fsutil_error)?;
 
     let input_names = binary_inputs
         .iter()
@@ -474,7 +474,7 @@ fn publish_output(
         input_ids
     );
     let meta_path = layout.meta.join(format!("{output_id}.ncl"));
-    write_atomic(&meta_path, &meta_content)?;
+    fsutil::write_atomic(&meta_path, &meta_content).map_err(map_fsutil_error)?;
 
     let ref_path = layout.refs.join(output_id);
     let ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(output_id);
@@ -763,45 +763,8 @@ fn command_details(output: &std::process::Output) -> String {
     }
 }
 
-fn write_atomic(path: &Path, content: &str) -> IResult<()> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            ImageError::FsFailed(format!(
-                "invalid file name for atomic write path '{}'",
-                path.display()
-            ))
-        })?;
-
-    let tmp_name = format!(".{file_name}.tmp");
-    let tmp_path = path.with_file_name(tmp_name);
-
-    fs::write(&tmp_path, content).map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to write temporary file '{}': {error}",
-            tmp_path.display()
-        ))
-    })?;
-
-    fs::rename(&tmp_path, path).map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to move temporary file '{}' to '{}': {error}",
-            tmp_path.display(),
-            path.display()
-        ))
-    })
-}
-
 fn q(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"<serialization-error>\"".to_string())
-}
-
-fn current_epoch_nanos() -> IResult<u128> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .map_err(|error| ImageError::FsFailed(format!("system time before UNIX_EPOCH: {error}")))
 }
 
 fn map_error(error: ImageError) -> BuilderError {

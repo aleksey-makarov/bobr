@@ -1,6 +1,6 @@
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
-use mbuild_core::{Builder, BuilderError};
+use mbuild_core::{Builder, BuilderError, fsutil};
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use serde::Deserialize;
@@ -16,7 +16,6 @@ use std::os::unix::fs as unix_fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tar::Archive;
 use xz2::read::XzDecoder;
 use zip::read::ZipArchive;
@@ -319,7 +318,7 @@ fn ensure_cached_blob(
     let mut failures = Vec::new();
 
     for (index, url) in urls.iter().enumerate() {
-        let now_nanos = current_epoch_nanos()?;
+        let now_nanos = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
         let tmp_path = layout
             .builder_root
             .join(format!(".download-{}-{}-{}.blob", hash.value, index, now_nanos));
@@ -522,7 +521,7 @@ fn publish_file_output(
     cached_blob: &Path,
     source_url: &str,
 ) -> FResult<()> {
-    let now_nanos = current_epoch_nanos()?;
+    let now_nanos = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
     let tmp_path = layout
         .root
         .join(format!(".fetch-file-{}-{}.tmp", output_id, now_nanos));
@@ -548,7 +547,7 @@ fn publish_file_output(
     replace_path(&tmp_path, &object_path)?;
 
     let meta_path = layout.meta.join(format!("{output_id}.ncl"));
-    write_atomic(
+    fsutil::write_atomic(
         &meta_path,
         &render_meta_ncl(
             output_id,
@@ -559,7 +558,8 @@ fn publish_file_output(
             None,
             false,
         ),
-    )?;
+    )
+    .map_err(map_fsutil_error)?;
 
     let ref_path = layout.refs.join(output_id);
     let ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(output_id);
@@ -583,7 +583,7 @@ fn publish_archive_output(
     format: ArchiveFormat,
     source_url: &str,
 ) -> FResult<()> {
-    let now_nanos = current_epoch_nanos()?;
+    let now_nanos = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
     let tmp_dir = layout
         .root
         .join(format!(".fetch-archive-{}-{}.dir", output_id, now_nanos));
@@ -596,7 +596,7 @@ fn publish_archive_output(
     replace_path(&tmp_dir, &object_path)?;
 
     let meta_path = layout.meta.join(format!("{output_id}.ncl"));
-    write_atomic(
+    fsutil::write_atomic(
         &meta_path,
         &render_meta_ncl(
             output_id,
@@ -607,7 +607,8 @@ fn publish_archive_output(
             Some(format),
             normalized_root,
         ),
-    )?;
+    )
+    .map_err(map_fsutil_error)?;
 
     let ref_path = layout.refs.join(output_id);
     let ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(output_id);
@@ -1070,45 +1071,8 @@ fn create_symlink(_target: &Path, _link_path: &Path) -> FResult<()> {
     ))
 }
 
-fn write_atomic(path: &Path, content: &str) -> FResult<()> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            FetchError::FsFailed(format!(
-                "invalid file name for atomic write path '{}'",
-                path.display()
-            ))
-        })?;
-
-    let tmp_name = format!(".{file_name}.tmp");
-    let tmp_path = path.with_file_name(tmp_name);
-
-    fs::write(&tmp_path, content).map_err(|error| {
-        FetchError::FsFailed(format!(
-            "failed to write temporary file '{}': {error}",
-            tmp_path.display()
-        ))
-    })?;
-
-    fs::rename(&tmp_path, path).map_err(|error| {
-        FetchError::FsFailed(format!(
-            "failed to move temporary file '{}' to '{}': {error}",
-            tmp_path.display(),
-            path.display()
-        ))
-    })
-}
-
 fn q(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"<serialization-error>\"".to_string())
-}
-
-fn current_epoch_nanos() -> FResult<u128> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .map_err(|error| FetchError::FsFailed(format!("system time before UNIX_EPOCH: {error}")))
 }
 
 struct WorkspaceLayout {
@@ -1154,6 +1118,10 @@ fn ensure_dir(path: &Path, label: &str) -> FResult<()> {
             path.display()
         ))
     })
+}
+
+fn map_fsutil_error(error: fsutil::FsUtilError) -> FetchError {
+    FetchError::FsFailed(error.to_string())
 }
 
 fn map_error(error: FetchError) -> BuilderError {

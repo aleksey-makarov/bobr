@@ -10,7 +10,6 @@ use std::os::unix::fs as unix_fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const ROOT_DIR: &str = ".mbuild";
 const OBJECTS_DIR: &str = "objects";
@@ -178,7 +177,7 @@ fn publish_one(
 ) -> TResult<()> {
     validate_name(output_name)?;
 
-    let now_nanos = current_epoch_nanos()?;
+    let now_nanos = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
     let tmp_path = fsutil::temp_root_dir(ROOT_DIR)
         .map_err(map_fsutil_error)?
         .join(format!("text-{}-{}.obj", output_name, now_nanos));
@@ -213,10 +212,11 @@ fn publish_one(
     replace_path(&tmp_path, &object_path)?;
 
     let meta_path = layout.meta.join(format!("{output_name}.ncl"));
-    write_atomic(
+    fsutil::write_atomic(
         &meta_path,
         &render_meta_ncl(output_name, artifact_kind, source_text.len()),
-    )?;
+    )
+    .map_err(map_fsutil_error)?;
 
     let ref_path = layout.refs.join(output_name);
     let ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(output_name);
@@ -332,43 +332,6 @@ fn create_symlink(_target: &Path, _link_path: &Path) -> TResult<()> {
     Err(TextError::FsFailed(
         "symlink refs are currently supported only on unix hosts".to_string(),
     ))
-}
-
-fn write_atomic(path: &Path, content: &str) -> TResult<()> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            TextError::FsFailed(format!(
-                "invalid file name for atomic write path '{}'",
-                path.display()
-            ))
-        })?;
-
-    let tmp_name = format!(".{file_name}.tmp");
-    let tmp_path = path.with_file_name(tmp_name);
-
-    fs::write(&tmp_path, content).map_err(|error| {
-        TextError::FsFailed(format!(
-            "failed to write temporary file '{}': {error}",
-            tmp_path.display()
-        ))
-    })?;
-
-    fs::rename(&tmp_path, path).map_err(|error| {
-        TextError::FsFailed(format!(
-            "failed to move temporary file '{}' to '{}': {error}",
-            tmp_path.display(),
-            path.display()
-        ))
-    })
-}
-
-fn current_epoch_nanos() -> TResult<u128> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .map_err(|error| TextError::FsFailed(format!("system time before UNIX_EPOCH: {error}")))
 }
 
 fn q(value: &str) -> String {

@@ -1,4 +1,4 @@
-use mbuild_core::{Builder, BuilderError, VerbSpec};
+use mbuild_core::{Builder, BuilderError, VerbSpec, fsutil};
 use serde::Deserialize;
 use serde_json::Value;
 use std::env;
@@ -8,7 +8,6 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const ROOT_DIR: &str = ".mbuild";
 const BUILDER_DIR: &str = "github";
@@ -242,7 +241,7 @@ fn publish_output(
         )));
     }
 
-    let now_nanos = current_epoch_nanos()?;
+    let now_nanos = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
     let tmp_base = layout
         .root
         .join(format!(".publish-{}-{}", output_id, now_nanos));
@@ -310,10 +309,11 @@ fn publish_output(
     replace_dir(&tmp_dir, &object_path)?;
 
     let meta_path = layout.meta.join(format!("{output_id}.ncl"));
-    write_atomic(
+    fsutil::write_atomic(
         &meta_path,
         &render_meta_ncl(output_id, "source-tree", owner, repo, rev),
-    )?;
+    )
+    .map_err(map_fsutil_error)?;
 
     let ref_path = layout.refs.join(output_id);
     let ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(output_id);
@@ -546,41 +546,8 @@ fn q(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"<serialization-error>\"".to_string())
 }
 
-fn write_atomic(path: &Path, content: &str) -> GResult<()> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            GithubError::FsFailed(format!(
-                "invalid file name for atomic write path '{}'",
-                path.display()
-            ))
-        })?;
-
-    let tmp_name = format!(".{file_name}.tmp");
-    let tmp_path = path.with_file_name(tmp_name);
-
-    fs::write(&tmp_path, content).map_err(|error| {
-        GithubError::FsFailed(format!(
-            "failed to write temporary file '{}': {error}",
-            tmp_path.display()
-        ))
-    })?;
-
-    fs::rename(&tmp_path, path).map_err(|error| {
-        GithubError::FsFailed(format!(
-            "failed to move temporary file '{}' to '{}': {error}",
-            tmp_path.display(),
-            path.display()
-        ))
-    })
-}
-
-fn current_epoch_nanos() -> GResult<u128> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .map_err(|error| GithubError::FsFailed(format!("system time before UNIX_EPOCH: {error}")))
+fn map_fsutil_error(error: fsutil::FsUtilError) -> GithubError {
+    GithubError::FsFailed(error.to_string())
 }
 
 struct WorkspaceLayout {

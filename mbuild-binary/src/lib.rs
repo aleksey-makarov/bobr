@@ -9,7 +9,6 @@ use std::os::unix::fs as unix_fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const ROOT_DIR: &str = ".mbuild";
 const OBJECTS_DIR: &str = "objects";
@@ -273,7 +272,9 @@ fn prepare_build_context(
     let script_execution =
         resolve_script_execution(artifact, &recipe, &inputs).map_err(map_error)?;
 
-    let timestamp = current_epoch_nanos().map_err(map_error)?;
+    let timestamp = fsutil::current_epoch_nanos()
+        .map_err(map_fsutil_error)
+        .map_err(map_error)?;
     let temp_outputs_root = fsutil::temp_root_dir(ROOT_DIR)
         .map_err(map_fsutil_error)
         .map_err(map_error)?
@@ -378,10 +379,11 @@ fn publish_outputs(ctx: &BuildContext) -> BResult<()> {
         replace_dir(&tmp_output, &object_path)?;
 
         let meta_path = ctx.layout.meta.join(format!("{output_name}.ncl"));
-        write_atomic(
+        fsutil::write_atomic(
             &meta_path,
             &render_meta_ncl(output_name, "binary-output", &ctx.inputs, ctx.uid, ctx.gid),
-        )?;
+        )
+        .map_err(map_fsutil_error)?;
 
         let ref_path = ctx.layout.refs.join(output_name);
         let ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(output_name);
@@ -561,7 +563,7 @@ fn command_details(output: &std::process::Output) -> String {
 
 fn write_temp_script(artifact_name: &str, script: &str) -> BResult<PathBuf> {
     let tmp_dir = fsutil::temp_root_dir(ROOT_DIR).map_err(map_fsutil_error)?;
-    let now = current_epoch_nanos()?;
+    let now = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
     let path = tmp_dir.join(format!("mbuild-binary-{artifact_name}-{now}.script"));
 
     fs::write(&path, script).map_err(|error| {
@@ -682,45 +684,8 @@ fn create_symlink(_target: &Path, _link_path: &Path) -> BResult<()> {
     ))
 }
 
-fn write_atomic(path: &Path, content: &str) -> BResult<()> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            BinaryError::FsFailed(format!(
-                "invalid file name for atomic write path '{}'",
-                path.display()
-            ))
-        })?;
-
-    let tmp_name = format!(".{file_name}.tmp");
-    let tmp_path = path.with_file_name(tmp_name);
-
-    fs::write(&tmp_path, content).map_err(|error| {
-        BinaryError::FsFailed(format!(
-            "failed to write temporary file '{}': {error}",
-            tmp_path.display()
-        ))
-    })?;
-
-    fs::rename(&tmp_path, path).map_err(|error| {
-        BinaryError::FsFailed(format!(
-            "failed to move temporary file '{}' to '{}': {error}",
-            tmp_path.display(),
-            path.display()
-        ))
-    })
-}
-
 fn q(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"<serialization-error>\"".to_string())
-}
-
-fn current_epoch_nanos() -> BResult<u128> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .map_err(|error| BinaryError::FsFailed(format!("system time before UNIX_EPOCH: {error}")))
 }
 
 fn current_uid_gid() -> (u32, u32) {
