@@ -1,4 +1,4 @@
-use mbuild_core::{Builder, BuilderError};
+use mbuild_core::{Builder, BuilderError, fsutil};
 use serde::Deserialize;
 use serde_json::Value;
 use std::env;
@@ -274,7 +274,8 @@ fn prepare_build_context(
         resolve_script_execution(artifact, &recipe, &inputs).map_err(map_error)?;
 
     let timestamp = current_epoch_nanos().map_err(map_error)?;
-    let temp_outputs_root = temp_root_dir()
+    let temp_outputs_root = fsutil::temp_root_dir(ROOT_DIR)
+        .map_err(map_fsutil_error)
         .map_err(map_error)?
         .join(format!("binary-{}-{}", artifact, timestamp));
 
@@ -343,7 +344,7 @@ fn prepare_outputs(ctx: &mut BuildContext) -> BResult<()> {
 
 fn cleanup_temp_outputs(ctx: &BuildContext) -> BResult<()> {
     if ctx.temp_outputs_root.exists() {
-        remove_dir_force(&ctx.temp_outputs_root)?;
+        fsutil::remove_dir_force(&ctx.temp_outputs_root).map_err(map_fsutil_error)?;
     }
     Ok(())
 }
@@ -559,7 +560,7 @@ fn command_details(output: &std::process::Output) -> String {
 }
 
 fn write_temp_script(artifact_name: &str, script: &str) -> BResult<PathBuf> {
-    let tmp_dir = temp_root_dir()?;
+    let tmp_dir = fsutil::temp_root_dir(ROOT_DIR).map_err(map_fsutil_error)?;
     let now = current_epoch_nanos()?;
     let path = tmp_dir.join(format!("mbuild-binary-{artifact_name}-{now}.script"));
 
@@ -615,7 +616,7 @@ fn replace_dir(tmp_dir: &Path, destination: &Path) -> BResult<()> {
 fn recreate_empty_dir(path: &Path) -> BResult<()> {
     if path.exists() {
         if path.is_dir() {
-            remove_dir_force(path)?;
+            fsutil::remove_dir_force(path).map_err(map_fsutil_error)?;
         } else {
             fs::remove_file(path).map_err(|error| {
                 BinaryError::FsFailed(format!(
@@ -775,86 +776,8 @@ fn ensure_dir(path: &Path, label: &str) -> BResult<()> {
     })
 }
 
-fn temp_root_dir() -> BResult<PathBuf> {
-    let cwd = env::current_dir()
-        .map_err(|error| BinaryError::FsFailed(format!("failed to get current directory: {error}")))?;
-    let path = cwd.join(ROOT_DIR).join("tmp");
-    fs::create_dir_all(&path).map_err(|error| {
-        BinaryError::FsFailed(format!(
-            "failed to create temp root directory '{}': {error}",
-            path.display()
-        ))
-    })?;
-    Ok(path)
-}
-
-fn remove_dir_force(path: &Path) -> BResult<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    make_tree_writable(path)?;
-    fs::remove_dir_all(path).map_err(|error| {
-        BinaryError::FsFailed(format!(
-            "failed to remove directory '{}': {error}",
-            path.display()
-        ))
-    })
-}
-
-#[cfg(unix)]
-fn make_tree_writable(path: &Path) -> BResult<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        BinaryError::FsFailed(format!(
-            "failed to inspect path '{}': {error}",
-            path.display()
-        ))
-    })?;
-
-    if metadata.file_type().is_symlink() {
-        return Ok(());
-    }
-
-    let mode = metadata.permissions().mode();
-    let desired = if metadata.is_dir() {
-        mode | 0o700
-    } else {
-        mode | 0o600
-    };
-    if desired != mode {
-        fs::set_permissions(path, fs::Permissions::from_mode(desired)).map_err(|error| {
-            BinaryError::FsFailed(format!(
-                "failed to adjust permissions for '{}': {error}",
-                path.display()
-            ))
-        })?;
-    }
-
-    if metadata.is_dir() {
-        for entry in fs::read_dir(path).map_err(|error| {
-            BinaryError::FsFailed(format!(
-                "failed to read directory '{}': {error}",
-                path.display()
-            ))
-        })? {
-            let entry = entry.map_err(|error| {
-                BinaryError::FsFailed(format!(
-                    "failed to read directory entry in '{}': {error}",
-                    path.display()
-                ))
-            })?;
-            make_tree_writable(&entry.path())?;
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn make_tree_writable(path: &Path) -> BResult<()> {
-    let _ = path;
-    Ok(())
+fn map_fsutil_error(error: fsutil::FsUtilError) -> BinaryError {
+    BinaryError::FsFailed(error.to_string())
 }
 
 fn map_error(error: BinaryError) -> BuilderError {

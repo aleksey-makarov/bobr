@@ -1,4 +1,4 @@
-use mbuild_core::{Builder, BuilderError};
+use mbuild_core::{Builder, BuilderError, fsutil};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -162,13 +162,13 @@ struct ImportedImage {
 }
 
 fn run_bootstrap_mode(artifact: &str, binary_inputs: &[&ResolvedInput]) -> IResult<ImportedImage> {
-    let temp_base = temp_root_dir()?;
+    let temp_base = fsutil::temp_root_dir(ROOT_DIR).map_err(map_fsutil_error)?;
     let now = current_epoch_nanos()?;
     let temp_root = temp_base.join(format!("image-bootstrap-{artifact}-{now}"));
     let rootfs_dir = temp_root.join("rootfs");
     let tar_path = temp_root.join("rootfs.tar");
 
-    recreate_empty_dir_force(&temp_root)?;
+    fsutil::recreate_empty_dir_force(&temp_root).map_err(map_fsutil_error)?;
     recreate_empty_dir(&rootfs_dir)?;
 
     let build_result = (|| {
@@ -190,7 +190,7 @@ fn run_bootstrap_mode(artifact: &str, binary_inputs: &[&ResolvedInput]) -> IResu
         })
     })();
 
-    let cleanup_result = remove_dir_force(&temp_root);
+    let cleanup_result = fsutil::remove_dir_force(&temp_root).map_err(map_fsutil_error);
     match (build_result, cleanup_result) {
         (Ok(imported), Ok(())) => Ok(imported),
         (Err(error), Ok(())) => Err(error),
@@ -718,97 +718,8 @@ fn recreate_empty_dir(path: &Path) -> IResult<()> {
     })
 }
 
-fn recreate_empty_dir_force(path: &Path) -> IResult<()> {
-    if path.exists() {
-        remove_dir_force(path)?;
-    }
-    recreate_empty_dir(path)
-}
-
-fn remove_dir_force(path: &Path) -> IResult<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    make_tree_writable(path)?;
-    fs::remove_dir_all(path).map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to remove directory '{}': {error}",
-            path.display()
-        ))
-    })
-}
-
-#[cfg(unix)]
-fn make_tree_writable(path: &Path) -> IResult<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    if !path.exists() {
-        return Ok(());
-    }
-
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to inspect path '{}': {error}",
-            path.display()
-        ))
-    })?;
-
-    if metadata.file_type().is_symlink() {
-        return Ok(());
-    }
-
-    let mode = metadata.permissions().mode();
-    let desired = if metadata.is_dir() {
-        mode | 0o700
-    } else {
-        mode | 0o600
-    };
-    if desired != mode {
-        fs::set_permissions(path, fs::Permissions::from_mode(desired)).map_err(|error| {
-            ImageError::FsFailed(format!(
-                "failed to adjust permissions for '{}': {error}",
-                path.display()
-            ))
-        })?;
-    }
-
-    if metadata.is_dir() {
-        for entry in fs::read_dir(path).map_err(|error| {
-            ImageError::FsFailed(format!(
-                "failed to read directory '{}': {error}",
-                path.display()
-            ))
-        })? {
-            let entry = entry.map_err(|error| {
-                ImageError::FsFailed(format!(
-                    "failed to read directory entry in '{}': {error}",
-                    path.display()
-                ))
-            })?;
-            make_tree_writable(&entry.path())?;
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn make_tree_writable(path: &Path) -> IResult<()> {
-    let _ = path;
-    Ok(())
-}
-
-fn temp_root_dir() -> IResult<PathBuf> {
-    let cwd = env::current_dir()
-        .map_err(|error| ImageError::FsFailed(format!("failed to get current directory: {error}")))?;
-    let path = cwd.join(ROOT_DIR).join("tmp");
-    fs::create_dir_all(&path).map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to create temp root directory '{}': {error}",
-            path.display()
-        ))
-    })?;
-    Ok(path)
+fn map_fsutil_error(error: fsutil::FsUtilError) -> ImageError {
+    ImageError::FsFailed(error.to_string())
 }
 
 fn workspace_layout() -> IResult<WorkspaceLayout> {

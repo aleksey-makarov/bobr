@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+pub mod fsutil;
+
 #[derive(Debug)]
 pub enum BuilderError {
     UnsupportedVerb(String),

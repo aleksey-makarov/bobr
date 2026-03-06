@@ -1,4 +1,4 @@
-use mbuild_core::{Builder, BuilderError};
+use mbuild_core::{Builder, BuilderError, fsutil};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -179,7 +179,9 @@ fn publish_one(
     validate_name(output_name)?;
 
     let now_nanos = current_epoch_nanos()?;
-    let tmp_path = temp_root_dir()?.join(format!("text-{}-{}.obj", output_name, now_nanos));
+    let tmp_path = fsutil::temp_root_dir(ROOT_DIR)
+        .map_err(map_fsutil_error)?
+        .join(format!("text-{}-{}.obj", output_name, now_nanos));
 
     if tmp_path.exists() {
         fs::remove_file(&tmp_path).map_err(|error| {
@@ -411,17 +413,8 @@ fn ensure_dir(path: &Path, label: &str) -> TResult<()> {
     })
 }
 
-fn temp_root_dir() -> TResult<PathBuf> {
-    let cwd = env::current_dir()
-        .map_err(|error| TextError::FsFailed(format!("failed to get current directory: {error}")))?;
-    let path = cwd.join(ROOT_DIR).join("tmp");
-    fs::create_dir_all(&path).map_err(|error| {
-        TextError::FsFailed(format!(
-            "failed to create temp root directory '{}': {error}",
-            path.display()
-        ))
-    })?;
-    Ok(path)
+fn map_fsutil_error(error: fsutil::FsUtilError) -> TextError {
+    TextError::FsFailed(error.to_string())
 }
 
 fn map_error(error: TextError) -> BuilderError {
