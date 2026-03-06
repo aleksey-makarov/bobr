@@ -127,7 +127,7 @@ impl Builder for ImageBuilder {
             ));
         }
 
-        let imported = run_bootstrap_mode(artifact, &layout, &binary_inputs).map_err(map_error)?;
+        let imported = run_bootstrap_mode(artifact, &binary_inputs).map_err(map_error)?;
         publish_output(&layout, &output_id, &binary_inputs, &imported).map_err(map_error)?;
 
         println!("build: ok");
@@ -161,37 +161,42 @@ struct ImportedImage {
     image_digest: String,
 }
 
-fn run_bootstrap_mode(
-    artifact: &str,
-    layout: &WorkspaceLayout,
-    binary_inputs: &[&ResolvedInput],
-) -> IResult<ImportedImage> {
+fn run_bootstrap_mode(artifact: &str, binary_inputs: &[&ResolvedInput]) -> IResult<ImportedImage> {
+    let temp_base = temp_root_dir()?;
     let now = current_epoch_nanos()?;
-    let temp_root = layout.root.join(format!(".tmp-image-bootstrap-{artifact}-{now}"));
+    let temp_root = temp_base.join(format!("image-bootstrap-{artifact}-{now}"));
     let rootfs_dir = temp_root.join("rootfs");
     let tar_path = temp_root.join("rootfs.tar");
 
-    recreate_empty_dir(&temp_root)?;
+    recreate_empty_dir_force(&temp_root)?;
     recreate_empty_dir(&rootfs_dir)?;
 
-    let mut seen: HashMap<PathBuf, EntryKind> = HashMap::new();
-    for input in binary_inputs {
-        copy_input_tree(input, &rootfs_dir, &mut seen)?;
+    let build_result = (|| {
+        let mut seen: HashMap<PathBuf, EntryKind> = HashMap::new();
+        for input in binary_inputs {
+            copy_input_tree(input, &rootfs_dir, &mut seen)?;
+        }
+
+        create_rootfs_tar(&rootfs_dir, &tar_path)?;
+
+        let image_ref = format!("localhost/{BUILDER_PREFIX}:{artifact}-{now}");
+        let image_id = podman_import(&tar_path, &image_ref)?;
+        let image_digest = podman_image_digest(&image_ref)?;
+
+        Ok(ImportedImage {
+            image_ref,
+            image_id,
+            image_digest,
+        })
+    })();
+
+    let cleanup_result = remove_dir_force(&temp_root);
+    match (build_result, cleanup_result) {
+        (Ok(imported), Ok(())) => Ok(imported),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
+        (Err(error), Err(_cleanup_error)) => Err(error),
     }
-
-    create_rootfs_tar(&rootfs_dir, &tar_path)?;
-
-    let image_ref = format!("localhost/{BUILDER_PREFIX}:{artifact}-{now}");
-    let image_id = podman_import(&tar_path, &image_ref)?;
-    let image_digest = podman_image_digest(&image_ref)?;
-
-    remove_dir_best_effort(&temp_root);
-
-    Ok(ImportedImage {
-        image_ref,
-        image_id,
-        image_digest,
-    })
 }
 
 fn resolve_outputs(artifact: &str, recipe: &ImageRecipe) -> IResult<Vec<String>> {
@@ -686,12 +691,6 @@ fn replace_symlink(target: &Path, link_path: &Path) -> IResult<()> {
     create_symlink(target, link_path)
 }
 
-fn remove_dir_best_effort(path: &Path) {
-    if path.exists() {
-        let _ = fs::remove_dir_all(path);
-    }
-}
-
 fn recreate_empty_dir(path: &Path) -> IResult<()> {
     if path.exists() {
         if path.is_dir() {
@@ -717,6 +716,99 @@ fn recreate_empty_dir(path: &Path) -> IResult<()> {
             path.display()
         ))
     })
+}
+
+fn recreate_empty_dir_force(path: &Path) -> IResult<()> {
+    if path.exists() {
+        remove_dir_force(path)?;
+    }
+    recreate_empty_dir(path)
+}
+
+fn remove_dir_force(path: &Path) -> IResult<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    make_tree_writable(path)?;
+    fs::remove_dir_all(path).map_err(|error| {
+        ImageError::FsFailed(format!(
+            "failed to remove directory '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+#[cfg(unix)]
+fn make_tree_writable(path: &Path) -> IResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        ImageError::FsFailed(format!(
+            "failed to inspect path '{}': {error}",
+            path.display()
+        ))
+    })?;
+
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    let mode = metadata.permissions().mode();
+    let desired = if metadata.is_dir() {
+        mode | 0o700
+    } else {
+        mode | 0o600
+    };
+    if desired != mode {
+        fs::set_permissions(path, fs::Permissions::from_mode(desired)).map_err(|error| {
+            ImageError::FsFailed(format!(
+                "failed to adjust permissions for '{}': {error}",
+                path.display()
+            ))
+        })?;
+    }
+
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).map_err(|error| {
+            ImageError::FsFailed(format!(
+                "failed to read directory '{}': {error}",
+                path.display()
+            ))
+        })? {
+            let entry = entry.map_err(|error| {
+                ImageError::FsFailed(format!(
+                    "failed to read directory entry in '{}': {error}",
+                    path.display()
+                ))
+            })?;
+            make_tree_writable(&entry.path())?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn make_tree_writable(path: &Path) -> IResult<()> {
+    let _ = path;
+    Ok(())
+}
+
+fn temp_root_dir() -> IResult<PathBuf> {
+    let cwd = env::current_dir()
+        .map_err(|error| ImageError::FsFailed(format!("failed to get current directory: {error}")))?;
+    let path = cwd.join(ROOT_DIR).join("tmp");
+    fs::create_dir_all(&path).map_err(|error| {
+        ImageError::FsFailed(format!(
+            "failed to create temp root directory '{}': {error}",
+            path.display()
+        ))
+    })?;
+    Ok(path)
 }
 
 fn workspace_layout() -> IResult<WorkspaceLayout> {

@@ -179,9 +179,7 @@ fn publish_one(
     validate_name(output_name)?;
 
     let now_nanos = current_epoch_nanos()?;
-    let tmp_path = layout
-        .root
-        .join(format!(".tmp-text-{}-{}.obj", output_name, now_nanos));
+    let tmp_path = temp_root_dir()?.join(format!("text-{}-{}.obj", output_name, now_nanos));
 
     if tmp_path.exists() {
         fs::remove_file(&tmp_path).map_err(|error| {
@@ -411,6 +409,19 @@ fn ensure_dir(path: &Path, label: &str) -> TResult<()> {
             path.display()
         ))
     })
+}
+
+fn temp_root_dir() -> TResult<PathBuf> {
+    let cwd = env::current_dir()
+        .map_err(|error| TextError::FsFailed(format!("failed to get current directory: {error}")))?;
+    let path = cwd.join(ROOT_DIR).join("tmp");
+    fs::create_dir_all(&path).map_err(|error| {
+        TextError::FsFailed(format!(
+            "failed to create temp root directory '{}': {error}",
+            path.display()
+        ))
+    })?;
+    Ok(path)
 }
 
 fn map_error(error: TextError) -> BuilderError {

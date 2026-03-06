@@ -54,7 +54,7 @@ Current `id` is equal to output artifact name.
    - derive `id` from object path name
    - read metadata from `.mbuild/meta/<id>.ncl`
    - validate payload shape by artifact type (for example, `build-script` must be file)
-4. Create temporary output root under `.mbuild/.tmp-binary-...`.
+4. Create temporary output root under `.mbuild/tmp/binary-...`.
 5. Write script to temporary executable file on host.
 6. Resolve execution mode:
    - inline script from recipe, or
