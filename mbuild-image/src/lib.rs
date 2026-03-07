@@ -219,27 +219,26 @@ fn run_layered_mode(
     base_input: &ResolvedInput,
     binary_inputs: &[&ResolvedInput],
 ) -> IResult<ImportedImage> {
+    let temp_base = fsutil::temp_root_dir(ROOT_DIR).map_err(map_fsutil_error)?;
     let now = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
+    let temp_root = temp_base.join(format!("image-layer-{artifact}-{now}"));
+    let layer_root = temp_root.join("layer-root");
     let container_name = format!("{BUILDER_PREFIX}-layer-{artifact}-{now}");
     let image_ref = format!("localhost/{BUILDER_PREFIX}:{artifact}-{now}");
     let base_ref = read_container_image_ref(base_input)?;
 
+    fsutil::recreate_empty_dir_force(&temp_root).map_err(map_fsutil_error)?;
+    fsutil::recreate_empty_dir(&layer_root).map_err(map_fsutil_error)?;
+
+    let mut seen: HashMap<PathBuf, EntryKind> = HashMap::new();
+    for input in binary_inputs {
+        copy_input_tree(input, &layer_root, &mut seen)?;
+    }
+
     podman_create_named(&container_name, &base_ref)?;
 
-    let mut mounted = false;
     let build_result = (|| {
-        let mount_path = podman_mount(&container_name)?;
-        mounted = true;
-        let rootfs_dir = PathBuf::from(mount_path);
-
-        let mut seen: HashMap<PathBuf, EntryKind> = HashMap::new();
-        for input in binary_inputs {
-            copy_input_tree(input, &rootfs_dir, &mut seen)?;
-        }
-
-        podman_unmount(&container_name)?;
-        mounted = false;
-
+        podman_cp_to_root(&container_name, &layer_root)?;
         let image_id = podman_commit(&container_name, &image_ref)?;
         let image_digest = podman_image_digest(&image_ref)?;
         Ok(ImportedImage {
@@ -249,14 +248,10 @@ fn run_layered_mode(
         })
     })();
 
-    let unmount_result = if mounted {
-        podman_unmount(&container_name)
-    } else {
-        Ok(())
-    };
     let remove_result = podman_rm_force(&container_name);
+    let temp_cleanup_result = fsutil::remove_dir_force(&temp_root).map_err(map_fsutil_error);
 
-    match (build_result, unmount_result, remove_result) {
+    match (build_result, remove_result, temp_cleanup_result) {
         (Ok(imported), Ok(()), Ok(())) => Ok(imported),
         (Err(error), _, _) => Err(error),
         (Ok(_), Err(error), _) => Err(error),
@@ -527,34 +522,19 @@ fn podman_create_named(container_name: &str, base_ref: &str) -> IResult<String> 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn podman_mount(container_name: &str) -> IResult<String> {
+fn podman_cp_to_root(container_name: &str, source_root: &Path) -> IResult<()> {
+    let source_arg = format!("{}/.", source_root.display());
+    let destination_arg = format!("{container_name}:/");
     let output = ProcessCommand::new("podman")
-        .arg("mount")
-        .arg(container_name)
+        .arg("cp")
+        .arg(&source_arg)
+        .arg(&destination_arg)
         .output()
-        .map_err(|error| ImageError::BuildFailed(format!("failed to execute podman mount: {error}")))?;
+        .map_err(|error| ImageError::BuildFailed(format!("failed to execute podman cp: {error}")))?;
 
     if !output.status.success() {
         return Err(ImageError::BuildFailed(format!(
-            "podman mount failed with exit status {}: {}",
-            output.status.code().unwrap_or(1),
-            command_details(&output)
-        )));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn podman_unmount(container_name: &str) -> IResult<()> {
-    let output = ProcessCommand::new("podman")
-        .arg("unmount")
-        .arg(container_name)
-        .output()
-        .map_err(|error| ImageError::BuildFailed(format!("failed to execute podman unmount: {error}")))?;
-
-    if !output.status.success() {
-        return Err(ImageError::BuildFailed(format!(
-            "podman unmount failed with exit status {}: {}",
+            "podman cp failed with exit status {}: {}",
             output.status.code().unwrap_or(1),
             command_details(&output)
         )));
