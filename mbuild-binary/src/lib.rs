@@ -5,8 +5,6 @@ use std::env;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
@@ -39,8 +37,6 @@ struct BinaryRecipe {
     inputs: Vec<String>,
     #[serde(default)]
     outputs: Vec<String>,
-    #[serde(default)]
-    script: Option<String>,
 }
 
 #[derive(Debug)]
@@ -57,12 +53,9 @@ struct ResolvedMeta {
     artifact_kind: String,
 }
 
-enum ScriptExecution {
-    Inline(PathBuf),
-    BuildScriptInput {
-        script_host_path: PathBuf,
-        source_input_name: String,
-    },
+struct ScriptExecution {
+    script_host_path: PathBuf,
+    source_input_name: String,
 }
 
 pub struct BinaryBuilder;
@@ -77,15 +70,12 @@ impl Builder for BinaryBuilder {
         prepare_outputs(&mut ctx).map_err(map_error)?;
 
         let build_result = run_container_build(&ctx);
-
         if let Err(error) = build_result {
-            let _ = cleanup_inline_script(&ctx.script_execution);
             let _ = cleanup_temp_outputs(&ctx);
             return Err(map_error(error));
         }
 
         publish_outputs(&ctx).map_err(map_error)?;
-        cleanup_inline_script(&ctx.script_execution).map_err(map_error)?;
         cleanup_temp_outputs(&ctx).map_err(map_error)?;
 
         println!("build: ok");
@@ -98,14 +88,8 @@ impl Builder for BinaryBuilder {
         &self,
         recipe: &Value,
     ) -> Result<Vec<(&'static str, String)>, BuilderError> {
-        let recipe = parse_recipe(recipe)?;
-        let script_mode = if recipe.script.is_some() {
-            "inline"
-        } else {
-            "input"
-        };
-
-        Ok(vec![("script_mode", script_mode.to_string())])
+        let _ = parse_recipe(recipe)?;
+        Ok(vec![("script_mode", "input".to_string())])
     }
 }
 
@@ -132,14 +116,6 @@ fn validate_recipe(recipe: &BinaryRecipe) -> BResult<()> {
         validate_artifact_name(name)?;
     }
 
-    if let Some(script) = &recipe.script {
-        if !script.starts_with("#!") {
-            return Err(BinaryError::InvalidRecipe(
-                "script must start with shebang (`#!`)".to_string(),
-            ));
-        }
-    }
-
     Ok(())
 }
 
@@ -149,13 +125,11 @@ fn validate_artifact_name(name: &str) -> BResult<()> {
             "input/output name must not be empty".to_string(),
         ));
     }
-
     if name == "." || name == ".." {
         return Err(BinaryError::InvalidRecipe(format!(
             "invalid input/output name '{name}'"
         )));
     }
-
     if !name
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
@@ -165,7 +139,6 @@ fn validate_artifact_name(name: &str) -> BResult<()> {
             name
         )));
     }
-
     Ok(())
 }
 
@@ -197,32 +170,23 @@ fn run_container_build(ctx: &BuildContext) -> BResult<()> {
             .arg(format!("{}:/out/{}:rw", host_path.display(), output_name));
     }
 
-    match &ctx.script_execution {
-        ScriptExecution::Inline(script_path) => {
-            let script_mount = format!("{}:/__mbuild_binary_script:ro", script_path.display());
-            process
-                .arg("--volume")
-                .arg(script_mount)
-                .arg(STANDARD_IMAGE)
-                .arg("/__mbuild_binary_script");
-        }
-        ScriptExecution::BuildScriptInput {
-            script_host_path,
-            source_input_name,
-        } => {
-            let script_mount = format!("{}:/__mbuild_binary_script:ro", script_host_path.display());
-            let primary_output = ctx.outputs.first().cloned().unwrap_or_default();
-            process
-                .arg("--volume")
-                .arg(script_mount)
-                .arg("--env")
-                .arg(format!("MBUILD_SOURCE_INPUT={source_input_name}"))
-                .arg("--env")
-                .arg(format!("MBUILD_PRIMARY_OUTPUT={primary_output}"))
-                .arg(STANDARD_IMAGE)
-                .arg("/__mbuild_binary_script");
-        }
-    }
+    let script_mount = format!(
+        "{}:/__mbuild_binary_script:ro",
+        ctx.script_execution.script_host_path.display()
+    );
+    let primary_output = ctx.outputs.first().cloned().unwrap_or_default();
+    process
+        .arg("--volume")
+        .arg(script_mount)
+        .arg("--env")
+        .arg(format!(
+            "MBUILD_SOURCE_INPUT={}",
+            ctx.script_execution.source_input_name
+        ))
+        .arg("--env")
+        .arg(format!("MBUILD_PRIMARY_OUTPUT={primary_output}"))
+        .arg(STANDARD_IMAGE)
+        .arg("/__mbuild_binary_script");
 
     let output = process.output().map_err(|error| {
         BinaryError::PodmanFailed(format!("failed to execute podman run: {error}"))
@@ -269,8 +233,7 @@ fn prepare_build_context(
         recipe.outputs.clone()
     };
 
-    let script_execution =
-        resolve_script_execution(artifact, &recipe, &inputs).map_err(map_error)?;
+    let script_execution = resolve_script_execution(&inputs).map_err(map_error)?;
 
     let timestamp = fsutil::current_epoch_nanos()
         .map_err(map_fsutil_error)
@@ -294,16 +257,7 @@ fn prepare_build_context(
     })
 }
 
-fn resolve_script_execution(
-    artifact: &str,
-    recipe: &BinaryRecipe,
-    inputs: &[ResolvedInput],
-) -> BResult<ScriptExecution> {
-    if let Some(script) = &recipe.script {
-        let script_path = write_temp_script(artifact, script)?;
-        return Ok(ScriptExecution::Inline(script_path));
-    }
-
+fn resolve_script_execution(inputs: &[ResolvedInput]) -> BResult<ScriptExecution> {
     let build_scripts: Vec<&ResolvedInput> = inputs
         .iter()
         .filter(|input| input.artifact_kind == KIND_BUILD_SCRIPT)
@@ -315,19 +269,18 @@ fn resolve_script_execution(
 
     if build_scripts.len() != 1 {
         return Err(BinaryError::InvalidRecipe(format!(
-            "recipe without inline script requires exactly one '{KIND_BUILD_SCRIPT}' input; found {}",
+            "binary recipe requires exactly one '{KIND_BUILD_SCRIPT}' input; found {}",
             build_scripts.len()
         )));
     }
-
     if sources.len() != 1 {
         return Err(BinaryError::InvalidRecipe(format!(
-            "recipe without inline script requires exactly one '{KIND_SOURCE_TREE}' input; found {}",
+            "binary recipe requires exactly one '{KIND_SOURCE_TREE}' input; found {}",
             sources.len()
         )));
     }
 
-    Ok(ScriptExecution::BuildScriptInput {
+    Ok(ScriptExecution {
         script_host_path: build_scripts[0].object_path.clone(),
         source_input_name: sources[0].name.clone(),
     })
@@ -335,32 +288,16 @@ fn resolve_script_execution(
 
 fn prepare_outputs(ctx: &mut BuildContext) -> BResult<()> {
     fsutil::recreate_empty_dir(&ctx.temp_outputs_root).map_err(map_fsutil_error)?;
-
     for output_name in &ctx.outputs {
         fsutil::recreate_empty_dir(&ctx.temp_outputs_root.join(output_name))
             .map_err(map_fsutil_error)?;
     }
-
     Ok(())
 }
 
 fn cleanup_temp_outputs(ctx: &BuildContext) -> BResult<()> {
     if ctx.temp_outputs_root.exists() {
         fsutil::remove_dir_force(&ctx.temp_outputs_root).map_err(map_fsutil_error)?;
-    }
-    Ok(())
-}
-
-fn cleanup_inline_script(script_execution: &ScriptExecution) -> BResult<()> {
-    if let ScriptExecution::Inline(path) = script_execution {
-        if path.exists() {
-            fs::remove_file(path).map_err(|error| {
-                BinaryError::FsFailed(format!(
-                    "failed to remove temporary script '{}': {error}",
-                    path.display()
-                ))
-            })?;
-        }
     }
     Ok(())
 }
@@ -396,7 +333,6 @@ fn publish_outputs(ctx: &BuildContext) -> BResult<()> {
         println!("meta: {}", meta_path.display());
         println!("ref: {}", ref_path.display());
     }
-
     Ok(())
 }
 
@@ -502,7 +438,6 @@ fn parse_meta(path: &Path) -> BResult<ResolvedMeta> {
             path.display()
         ))
     })?;
-
     let artifact_kind = extract_ncl_string_field(&content, "artifact_kind").ok_or_else(|| {
         BinaryError::InputResolutionFailed(format!(
             "meta '{}' does not define string field 'artifact_kind'",
@@ -560,32 +495,6 @@ fn command_details(output: &std::process::Output) -> String {
     } else {
         "command failed without output".to_string()
     }
-}
-
-fn write_temp_script(artifact_name: &str, script: &str) -> BResult<PathBuf> {
-    let tmp_dir = fsutil::temp_root_dir(ROOT_DIR).map_err(map_fsutil_error)?;
-    let now = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
-    let path = tmp_dir.join(format!("mbuild-binary-{artifact_name}-{now}.script"));
-
-    fs::write(&path, script).map_err(|error| {
-        BinaryError::FsFailed(format!(
-            "failed to write temporary script '{}': {error}",
-            path.display()
-        ))
-    })?;
-
-    #[cfg(unix)]
-    {
-        let perms = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(&path, perms).map_err(|error| {
-            BinaryError::FsFailed(format!(
-                "failed to set executable permissions on '{}': {error}",
-                path.display()
-            ))
-        })?;
-    }
-
-    Ok(path)
 }
 
 fn replace_dir(tmp_dir: &Path, destination: &Path) -> BResult<()> {
@@ -670,7 +579,6 @@ fn q(value: &str) -> String {
 fn current_uid_gid() -> (u32, u32) {
     #[cfg(unix)]
     {
-        // Safe: libc returns process credentials and has no side effects.
         let uid = unsafe { libc::geteuid() };
         let gid = unsafe { libc::getegid() };
         (uid, gid)
@@ -690,9 +598,8 @@ struct WorkspaceLayout {
 }
 
 fn workspace_layout() -> BResult<WorkspaceLayout> {
-    let cwd = env::current_dir().map_err(|error| {
-        BinaryError::FsFailed(format!("failed to get current directory: {error}"))
-    })?;
+    let cwd = env::current_dir()
+        .map_err(|error| BinaryError::FsFailed(format!("failed to get current directory: {error}")))?;
     let root = cwd.join(ROOT_DIR);
 
     Ok(WorkspaceLayout {
