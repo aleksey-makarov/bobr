@@ -119,20 +119,30 @@ impl Builder for ImageBuilder {
             ));
         }
 
-        if base_count == 1 {
-            return Err(BuilderError::NotImplemented(
-                "layered mode is not implemented yet; bootstrap mode (no base image input) is available"
-                    .to_string(),
-            ));
-        }
+        let base_input = inputs
+            .iter()
+            .find(|input| input.artifact_kind == KIND_CONTAINER_IMAGE);
 
-        let imported = run_bootstrap_mode(artifact, &binary_inputs).map_err(map_error)?;
-        publish_output(&layout, &output_id, &binary_inputs, &imported).map_err(map_error)?;
+        let (mode, imported) = if let Some(base) = base_input {
+            (
+                "layered",
+                run_layered_mode(artifact, base, &binary_inputs).map_err(map_error)?,
+            )
+        } else {
+            (
+                "bootstrap",
+                run_bootstrap_mode(artifact, &binary_inputs).map_err(map_error)?,
+            )
+        };
+
+        let all_inputs: Vec<&ResolvedInput> = inputs.iter().collect();
+        publish_output(&layout, &output_id, &all_inputs, mode, base_input, &imported)
+            .map_err(map_error)?;
 
         println!("build: ok");
         println!("artifact: {artifact}");
         println!("output: {output_id}");
-        println!("mode: bootstrap");
+        println!("mode: {mode}");
         println!("image_ref: {}", imported.image_ref);
         if !imported.image_digest.is_empty() {
             println!("image_digest: {}", imported.image_digest);
@@ -158,6 +168,12 @@ struct ImportedImage {
     image_ref: String,
     image_id: String,
     image_digest: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContainerImageRefPayload {
+    kind: String,
+    image_ref: String,
 }
 
 fn run_bootstrap_mode(artifact: &str, binary_inputs: &[&ResolvedInput]) -> IResult<ImportedImage> {
@@ -195,6 +211,56 @@ fn run_bootstrap_mode(artifact: &str, binary_inputs: &[&ResolvedInput]) -> IResu
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
         (Err(error), Err(_cleanup_error)) => Err(error),
+    }
+}
+
+fn run_layered_mode(
+    artifact: &str,
+    base_input: &ResolvedInput,
+    binary_inputs: &[&ResolvedInput],
+) -> IResult<ImportedImage> {
+    let now = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
+    let container_name = format!("{BUILDER_PREFIX}-layer-{artifact}-{now}");
+    let image_ref = format!("localhost/{BUILDER_PREFIX}:{artifact}-{now}");
+    let base_ref = read_container_image_ref(base_input)?;
+
+    podman_create_named(&container_name, &base_ref)?;
+
+    let mut mounted = false;
+    let build_result = (|| {
+        let mount_path = podman_mount(&container_name)?;
+        mounted = true;
+        let rootfs_dir = PathBuf::from(mount_path);
+
+        let mut seen: HashMap<PathBuf, EntryKind> = HashMap::new();
+        for input in binary_inputs {
+            copy_input_tree(input, &rootfs_dir, &mut seen)?;
+        }
+
+        podman_unmount(&container_name)?;
+        mounted = false;
+
+        let image_id = podman_commit(&container_name, &image_ref)?;
+        let image_digest = podman_image_digest(&image_ref)?;
+        Ok(ImportedImage {
+            image_ref,
+            image_id,
+            image_digest,
+        })
+    })();
+
+    let unmount_result = if mounted {
+        podman_unmount(&container_name)
+    } else {
+        Ok(())
+    };
+    let remove_result = podman_rm_force(&container_name);
+
+    match (build_result, unmount_result, remove_result) {
+        (Ok(imported), Ok(()), Ok(())) => Ok(imported),
+        (Err(error), _, _) => Err(error),
+        (Ok(_), Err(error), _) => Err(error),
+        (Ok(_), Ok(()), Err(error)) => Err(error),
     }
 }
 
@@ -275,18 +341,14 @@ fn copy_dir_recursive(
 
         if file_type.is_dir() {
             register_path(seen, &rel_path, EntryKind::Directory, source_name)?;
-            fs::create_dir_all(&target_path).map_err(|error| {
-                ImageError::BuildFailed(format!(
-                    "failed to create target directory '{}': {error}",
-                    target_path.display()
-                ))
-            })?;
+            ensure_target_directory(&target_path, source_name)?;
             copy_dir_recursive(root, &path, destination_root, seen, source_name)?;
             continue;
         }
 
         if file_type.is_file() {
             register_path(seen, &rel_path, EntryKind::File, source_name)?;
+            ensure_target_absent(&target_path, source_name)?;
             if let Some(parent) = target_path.parent() {
                 fs::create_dir_all(parent).map_err(|error| {
                     ImageError::BuildFailed(format!(
@@ -313,6 +375,7 @@ fn copy_dir_recursive(
 
         if file_type.is_symlink() {
             register_path(seen, &rel_path, EntryKind::Symlink, source_name)?;
+            ensure_target_absent(&target_path, source_name)?;
             if let Some(parent) = target_path.parent() {
                 fs::create_dir_all(parent).map_err(|error| {
                     ImageError::BuildFailed(format!(
@@ -339,6 +402,44 @@ fn copy_dir_recursive(
         )));
     }
 
+    Ok(())
+}
+
+fn ensure_target_directory(path: &Path, source_name: &str) -> IResult<()> {
+    if path.exists() {
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            ImageError::BuildFailed(format!(
+                "failed to inspect target path '{}' from input '{}': {error}",
+                path.display(),
+                source_name
+            ))
+        })?;
+        if metadata.file_type().is_dir() {
+            return Ok(());
+        }
+        return Err(ImageError::BuildFailed(format!(
+            "path conflict at '{}' while installing input '{}': target exists and is not a directory",
+            path.display(),
+            source_name
+        )));
+    }
+
+    fs::create_dir_all(path).map_err(|error| {
+        ImageError::BuildFailed(format!(
+            "failed to create target directory '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn ensure_target_absent(path: &Path, source_name: &str) -> IResult<()> {
+    if path.exists() || path.is_symlink() {
+        return Err(ImageError::BuildFailed(format!(
+            "path conflict at '{}' while installing input '{}': target already exists",
+            path.display(),
+            source_name
+        )));
+    }
     Ok(())
 }
 
@@ -406,6 +507,100 @@ fn podman_import(tar_path: &Path, image_ref: &str) -> IResult<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn podman_create_named(container_name: &str, base_ref: &str) -> IResult<String> {
+    let output = ProcessCommand::new("podman")
+        .arg("create")
+        .arg("--name")
+        .arg(container_name)
+        .arg(base_ref)
+        .output()
+        .map_err(|error| ImageError::BuildFailed(format!("failed to execute podman create: {error}")))?;
+
+    if !output.status.success() {
+        return Err(ImageError::BuildFailed(format!(
+            "podman create failed with exit status {}: {}",
+            output.status.code().unwrap_or(1),
+            command_details(&output)
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn podman_mount(container_name: &str) -> IResult<String> {
+    let output = ProcessCommand::new("podman")
+        .arg("mount")
+        .arg(container_name)
+        .output()
+        .map_err(|error| ImageError::BuildFailed(format!("failed to execute podman mount: {error}")))?;
+
+    if !output.status.success() {
+        return Err(ImageError::BuildFailed(format!(
+            "podman mount failed with exit status {}: {}",
+            output.status.code().unwrap_or(1),
+            command_details(&output)
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn podman_unmount(container_name: &str) -> IResult<()> {
+    let output = ProcessCommand::new("podman")
+        .arg("unmount")
+        .arg(container_name)
+        .output()
+        .map_err(|error| ImageError::BuildFailed(format!("failed to execute podman unmount: {error}")))?;
+
+    if !output.status.success() {
+        return Err(ImageError::BuildFailed(format!(
+            "podman unmount failed with exit status {}: {}",
+            output.status.code().unwrap_or(1),
+            command_details(&output)
+        )));
+    }
+
+    Ok(())
+}
+
+fn podman_commit(container_name: &str, image_ref: &str) -> IResult<String> {
+    let output = ProcessCommand::new("podman")
+        .arg("commit")
+        .arg(container_name)
+        .arg(image_ref)
+        .output()
+        .map_err(|error| ImageError::BuildFailed(format!("failed to execute podman commit: {error}")))?;
+
+    if !output.status.success() {
+        return Err(ImageError::BuildFailed(format!(
+            "podman commit failed with exit status {}: {}",
+            output.status.code().unwrap_or(1),
+            command_details(&output)
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn podman_rm_force(container_name: &str) -> IResult<()> {
+    let output = ProcessCommand::new("podman")
+        .arg("rm")
+        .arg("-f")
+        .arg(container_name)
+        .output()
+        .map_err(|error| ImageError::BuildFailed(format!("failed to execute podman rm: {error}")))?;
+
+    if !output.status.success() {
+        return Err(ImageError::BuildFailed(format!(
+            "podman rm failed with exit status {}: {}",
+            output.status.code().unwrap_or(1),
+            command_details(&output)
+        )));
+    }
+
+    Ok(())
+}
+
 fn podman_image_digest(image_ref: &str) -> IResult<String> {
     let output = ProcessCommand::new("podman")
         .arg("image")
@@ -430,7 +625,9 @@ fn podman_image_digest(image_ref: &str) -> IResult<String> {
 fn publish_output(
     layout: &WorkspaceLayout,
     output_id: &str,
-    binary_inputs: &[&ResolvedInput],
+    inputs: &[&ResolvedInput],
+    mode: &str,
+    base_input: Option<&ResolvedInput>,
     imported: &ImportedImage,
 ) -> IResult<()> {
     validate_name(output_id)?;
@@ -454,24 +651,35 @@ fn publish_output(
     )
     .map_err(map_fsutil_error)?;
 
-    let input_names = binary_inputs
+    let input_names = inputs
         .iter()
         .map(|input| q(&input.name))
         .collect::<Vec<_>>()
         .join(", ");
-    let input_ids = binary_inputs
+    let input_ids = inputs
         .iter()
         .map(|input| q(&input.id))
         .collect::<Vec<_>>()
         .join(", ");
+    let base_fields = if let Some(base) = base_input {
+        format!(
+            "    base_input = {},\n    base_input_id = {},\n",
+            q(&base.name),
+            q(&base.id)
+        )
+    } else {
+        String::new()
+    };
     let meta_content = format!(
-        "{{\n  id = {},\n  artifact_kind = \"container-image\",\n  producer = {{\n    builder = \"image\",\n    mode = \"bootstrap\",\n  }},\n  attrs = {{\n    image_ref = {},\n    image_id = {},\n    image_digest = {},\n    inputs = [{}],\n    input_ids = [{}],\n  }},\n}}\n",
+        "{{\n  id = {},\n  artifact_kind = \"container-image\",\n  producer = {{\n    builder = \"image\",\n    mode = {},\n  }},\n  attrs = {{\n    image_ref = {},\n    image_id = {},\n    image_digest = {},\n    inputs = [{}],\n    input_ids = [{}],\n{}  }},\n}}\n",
         q(output_id),
+        q(mode),
         q(&imported.image_ref),
         q(&imported.image_id),
         q(&imported.image_digest),
         input_names,
-        input_ids
+        input_ids,
+        base_fields
     );
     let meta_path = layout.meta.join(format!("{output_id}.ncl"));
     fsutil::write_atomic(&meta_path, &meta_content).map_err(map_fsutil_error)?;
@@ -565,6 +773,21 @@ fn resolve_inputs(layout: &WorkspaceLayout, recipe: &ImageRecipe) -> IResult<Vec
             )));
         }
 
+        if meta.artifact_kind == KIND_BINARY_OUTPUT && !object_path.is_dir() {
+            return Err(ImageError::InputResolutionFailed(format!(
+                "binary-output input '{}' must resolve to a directory: {}",
+                input,
+                object_path.display()
+            )));
+        }
+        if meta.artifact_kind == KIND_CONTAINER_IMAGE && !object_path.is_file() {
+            return Err(ImageError::InputResolutionFailed(format!(
+                "container-image input '{}' must resolve to a file: {}",
+                input,
+                object_path.display()
+            )));
+        }
+
         resolved.push(ResolvedInput {
             name: input.clone(),
             id,
@@ -573,6 +796,39 @@ fn resolve_inputs(layout: &WorkspaceLayout, recipe: &ImageRecipe) -> IResult<Vec
         });
     }
     Ok(resolved)
+}
+
+fn read_container_image_ref(input: &ResolvedInput) -> IResult<String> {
+    let payload_text = fs::read_to_string(&input.object_path).map_err(|error| {
+        ImageError::InputResolutionFailed(format!(
+            "failed to read container-image payload '{}': {error}",
+            input.object_path.display()
+        ))
+    })?;
+
+    let payload =
+        serde_json::from_str::<ContainerImageRefPayload>(&payload_text).map_err(|error| {
+            ImageError::InputResolutionFailed(format!(
+                "failed to parse container-image payload '{}': {error}",
+                input.object_path.display()
+            ))
+        })?;
+
+    if payload.kind != "container-image-ref" {
+        return Err(ImageError::InputResolutionFailed(format!(
+            "unexpected container-image payload kind '{}' in '{}'",
+            payload.kind,
+            input.object_path.display()
+        )));
+    }
+    if payload.image_ref.trim().is_empty() {
+        return Err(ImageError::InputResolutionFailed(format!(
+            "container-image payload '{}' contains empty image_ref",
+            input.object_path.display()
+        )));
+    }
+
+    Ok(payload.image_ref)
 }
 
 fn read_ref_target(ref_path: &Path) -> IResult<PathBuf> {
