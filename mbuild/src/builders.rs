@@ -2,7 +2,7 @@ use mbuild_binary::BinaryBuilder;
 use mbuild_core::Builder;
 use mbuild_fetch::FetchBuilder;
 use mbuild_github::GithubBuilder;
-use mbuild_image::ImageBuilder;
+use mbuild_image::{ContainerImageBuilder, ImageBuilder};
 use mbuild_text::TextBuilder;
 
 static GITHUB_BUILDER: GithubBuilder = GithubBuilder;
@@ -10,14 +10,16 @@ static BINARY_BUILDER: BinaryBuilder = BinaryBuilder;
 static TEXT_BUILDER: TextBuilder = TextBuilder;
 static FETCH_BUILDER: FetchBuilder = FetchBuilder;
 static IMAGE_BUILDER: ImageBuilder = ImageBuilder;
+static CONTAINER_IMAGE_BUILDER: ContainerImageBuilder = ContainerImageBuilder;
 
-pub fn registered_builders() -> [&'static dyn Builder; 5] {
+pub fn registered_builders() -> [&'static dyn Builder; 6] {
     [
         &GITHUB_BUILDER,
         &BINARY_BUILDER,
         &TEXT_BUILDER,
         &FETCH_BUILDER,
         &IMAGE_BUILDER,
+        &CONTAINER_IMAGE_BUILDER,
     ]
 }
 

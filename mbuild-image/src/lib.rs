@@ -39,6 +39,15 @@ struct ImageRecipe {
     outputs: Vec<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ContainerImageRecipe {
+    #[serde(rename = "type")]
+    recipe_type: String,
+    image: String,
+    digest: String,
+    outputs: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EntryKind {
     Directory,
@@ -69,6 +78,7 @@ struct WorkspaceLayout {
 }
 
 pub struct ImageBuilder;
+pub struct ContainerImageBuilder;
 
 impl Builder for ImageBuilder {
     fn get_type(&self) -> &'static str {
@@ -163,11 +173,53 @@ impl Builder for ImageBuilder {
     }
 }
 
+impl Builder for ContainerImageBuilder {
+    fn get_type(&self) -> &'static str {
+        "container-image"
+    }
+
+    fn run_build(&self, artifact: &str, recipe: &Value) -> Result<(), BuilderError> {
+        let recipe = parse_container_image_recipe(recipe)?;
+        let layout = workspace_layout().map_err(map_error)?;
+        ensure_base_dirs(&layout).map_err(map_error)?;
+
+        let output_id = resolve_container_image_output(artifact, &recipe).map_err(map_error)?;
+        let inspected = inspect_local_container_image(&recipe.image, &recipe.digest).map_err(map_error)?;
+        publish_container_image_output(&layout, &output_id, &recipe, &inspected).map_err(map_error)?;
+
+        println!("build: ok");
+        println!("artifact: {artifact}");
+        println!("output: {output_id}");
+        println!("image_ref: {}", inspected.image_ref);
+        println!("image_digest: {}", recipe.digest);
+
+        Ok(())
+    }
+
+    fn summarize_recipe(
+        &self,
+        recipe: &Value,
+    ) -> Result<Vec<(&'static str, String)>, BuilderError> {
+        let recipe = parse_container_image_recipe(recipe)?;
+        Ok(vec![
+            ("image", recipe.image),
+            ("digest", recipe.digest),
+            ("outputs", recipe.outputs.len().to_string()),
+        ])
+    }
+}
+
 #[derive(Debug)]
 struct ImportedImage {
     image_ref: String,
     image_id: String,
     image_digest: String,
+}
+
+#[derive(Debug)]
+struct LocalImageInspect {
+    image_ref: String,
+    image_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,6 +324,87 @@ fn resolve_outputs(artifact: &str, recipe: &ImageRecipe) -> IResult<Vec<String>>
 
     validate_name(&recipe.outputs[0])?;
     Ok(recipe.outputs.clone())
+}
+
+fn resolve_container_image_output(artifact: &str, recipe: &ContainerImageRecipe) -> IResult<String> {
+    if recipe.outputs.len() != 1 {
+        return Err(ImageError::InvalidRecipe(
+            "container-image recipe outputs must contain exactly one name".to_string(),
+        ));
+    }
+
+    let output = &recipe.outputs[0];
+    validate_name(output)?;
+    if output != artifact {
+        return Err(ImageError::InvalidRecipe(format!(
+            "artifact '{}' must match its only output '{}'",
+            artifact, output
+        )));
+    }
+    Ok(output.clone())
+}
+
+#[derive(Debug, Deserialize)]
+struct PodmanImageInspectRecord {
+    #[serde(rename = "Id")]
+    id: String,
+    #[serde(rename = "RepoDigests", default)]
+    repo_digests: Vec<String>,
+}
+
+fn inspect_local_container_image(image: &str, digest: &str) -> IResult<LocalImageInspect> {
+    let output = ProcessCommand::new("podman")
+        .arg("image")
+        .arg("inspect")
+        .arg(image)
+        .arg("--format")
+        .arg("json")
+        .output()
+        .map_err(|error| {
+            ImageError::BuildFailed(format!("failed to execute podman image inspect: {error}"))
+        })?;
+
+    if !output.status.success() {
+        return Err(ImageError::BuildFailed(format!(
+            "podman image '{}' with digest '{}' is not available locally: {}",
+            image,
+            digest,
+            command_details(&output)
+        )));
+    }
+
+    let records: Vec<PodmanImageInspectRecord> =
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            ImageError::BuildFailed(format!(
+                "failed to parse podman inspect output for image '{}': {error}",
+                image
+            ))
+        })?;
+
+    let record = records.first().ok_or_else(|| {
+        ImageError::BuildFailed(format!(
+            "podman inspect returned no records for image '{}'",
+            image
+        ))
+    })?;
+
+    let expected_suffix = format!("@{digest}");
+    let matching_ref = record
+        .repo_digests
+        .iter()
+        .find(|value| value.ends_with(&expected_suffix))
+        .cloned()
+        .ok_or_else(|| {
+            ImageError::BuildFailed(format!(
+                "local image '{}' does not match required digest '{}'",
+                image, digest
+            ))
+        })?;
+
+    Ok(LocalImageInspect {
+        image_ref: matching_ref,
+        image_id: record.id.clone(),
+    })
 }
 
 fn copy_input_tree(
@@ -605,6 +738,57 @@ fn podman_image_digest(image_ref: &str) -> IResult<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn publish_container_image_output(
+    layout: &WorkspaceLayout,
+    output_id: &str,
+    recipe: &ContainerImageRecipe,
+    inspected: &LocalImageInspect,
+) -> IResult<()> {
+    validate_name(output_id)?;
+
+    let object_path = layout.objects.join(output_id);
+    let payload = serde_json::json!({
+        "kind": "container-image-ref",
+        "image_ref": inspected.image_ref,
+        "image_id": inspected.image_id,
+        "image_digest": recipe.digest,
+    });
+
+    fsutil::write_atomic(
+        &object_path,
+        &serde_json::to_string_pretty(&payload).map_err(|error| {
+            ImageError::PublishFailed(format!(
+                "failed to serialize image reference payload for '{}': {error}",
+                output_id
+            ))
+        })?,
+    )
+    .map_err(map_fsutil_error)?;
+
+    let meta_content = format!(
+        "{{\n  id = {},\n  artifact_kind = \"container-image\",\n  producer = {{\n    builder = \"container-image\",\n  }},\n  attrs = {{\n    image = {},\n    image_ref = {},\n    image_id = {},\n    image_digest = {},\n  }},\n}}\n",
+        q(output_id),
+        q(&recipe.image),
+        q(&inspected.image_ref),
+        q(&inspected.image_id),
+        q(&recipe.digest)
+    );
+    let meta_path = layout.meta.join(format!("{output_id}.ncl"));
+    fsutil::write_atomic(&meta_path, &meta_content).map_err(map_fsutil_error)?;
+
+    let ref_path = layout.refs.join(output_id);
+    let ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(output_id);
+    replace_symlink(&ref_target, &ref_path)?;
+
+    println!("publish: ok");
+    println!("output: {output_id}");
+    println!("object: {}", object_path.display());
+    println!("meta: {}", meta_path.display());
+    println!("ref: {}", ref_path.display());
+
+    Ok(())
+}
+
 fn publish_output(
     layout: &WorkspaceLayout,
     output_id: &str,
@@ -689,6 +873,17 @@ fn parse_recipe(value: &Value) -> Result<ImageRecipe, BuilderError> {
         })
 }
 
+fn parse_container_image_recipe(value: &Value) -> Result<ContainerImageRecipe, BuilderError> {
+    serde_json::from_value::<ContainerImageRecipe>(value.clone())
+        .map_err(|error| {
+            BuilderError::InvalidRecipe(format!("invalid container-image recipe: {error}"))
+        })
+        .and_then(|recipe| {
+            validate_container_image_recipe(&recipe).map_err(map_error)?;
+            Ok(recipe)
+        })
+}
+
 fn validate_recipe(recipe: &ImageRecipe) -> IResult<()> {
     if recipe.recipe_type != "image" {
         return Err(ImageError::InvalidRecipe(
@@ -703,6 +898,47 @@ fn validate_recipe(recipe: &ImageRecipe) -> IResult<()> {
         validate_name(output)?;
     }
     Ok(())
+}
+
+fn validate_container_image_recipe(recipe: &ContainerImageRecipe) -> IResult<()> {
+    if recipe.recipe_type != "container-image" {
+        return Err(ImageError::InvalidRecipe(
+            "type must be 'container-image'".to_string(),
+        ));
+    }
+
+    if recipe.image.trim().is_empty() {
+        return Err(ImageError::InvalidRecipe(
+            "image must not be empty".to_string(),
+        ));
+    }
+
+    if !is_valid_sha256_digest(&recipe.digest) {
+        return Err(ImageError::InvalidRecipe(format!(
+            "invalid digest '{}'; expected format: sha256:<64 hex chars>",
+            recipe.digest
+        )));
+    }
+
+    if recipe.outputs.is_empty() {
+        return Err(ImageError::InvalidRecipe(
+            "container-image recipe requires outputs".to_string(),
+        ));
+    }
+    for output in &recipe.outputs {
+        validate_name(output)?;
+    }
+
+    Ok(())
+}
+
+fn is_valid_sha256_digest(value: &str) -> bool {
+    const PREFIX: &str = "sha256:";
+    if !value.starts_with(PREFIX) {
+        return false;
+    }
+    let hex = &value[PREFIX.len()..];
+    hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn validate_name(name: &str) -> IResult<()> {
