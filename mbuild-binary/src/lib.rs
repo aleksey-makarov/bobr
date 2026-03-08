@@ -12,10 +12,9 @@ const ROOT_DIR: &str = ".mbuild";
 const OBJECTS_DIR: &str = "objects";
 const META_DIR: &str = "meta";
 const REFS_DIR: &str = "refs";
-const STANDARD_IMAGE: &str = "localhost/mbuild-binary:bookworm-toolchain";
-
 const KIND_SOURCE_TREE: &str = "source-tree";
 const KIND_BUILD_SCRIPT: &str = "build-script";
+const KIND_CONTAINER_IMAGE: &str = "container-image";
 
 type BResult<T> = Result<T, BinaryError>;
 
@@ -45,17 +44,23 @@ struct ResolvedInput {
     object_path: PathBuf,
     id: String,
     artifact_kind: String,
+    image_ref: Option<String>,
 }
 
 #[derive(Debug)]
 struct ResolvedMeta {
     id: String,
     artifact_kind: String,
+    image_ref: Option<String>,
 }
 
 struct ScriptExecution {
     script_host_path: PathBuf,
     source_input_name: String,
+}
+
+struct ContainerExecution {
+    image_ref: String,
 }
 
 pub struct BinaryBuilder;
@@ -80,7 +85,7 @@ impl Builder for BinaryBuilder {
 
         println!("build: ok");
         println!("artifact: {}", ctx.artifact_name);
-        println!("image: {STANDARD_IMAGE}");
+        println!("image: {}", ctx.container_execution.image_ref);
         Ok(())
     }
 
@@ -153,7 +158,7 @@ fn run_container_build(ctx: &BuildContext) -> BResult<()> {
         .arg(format!("{}:{}", ctx.uid, ctx.gid));
 
     for input in &ctx.inputs {
-        if input.artifact_kind == KIND_BUILD_SCRIPT {
+        if input.artifact_kind == KIND_BUILD_SCRIPT || input.artifact_kind == KIND_CONTAINER_IMAGE {
             continue;
         }
         process.arg("--volume").arg(format!(
@@ -185,7 +190,7 @@ fn run_container_build(ctx: &BuildContext) -> BResult<()> {
         ))
         .arg("--env")
         .arg(format!("MBUILD_PRIMARY_OUTPUT={primary_output}"))
-        .arg(STANDARD_IMAGE)
+        .arg(&ctx.container_execution.image_ref)
         .arg("/__mbuild_binary_script");
 
     let output = process.output().map_err(|error| {
@@ -214,6 +219,7 @@ struct BuildContext {
     outputs: Vec<String>,
     temp_outputs_root: PathBuf,
     script_execution: ScriptExecution,
+    container_execution: ContainerExecution,
     uid: u32,
     gid: u32,
 }
@@ -234,6 +240,7 @@ fn prepare_build_context(
     };
 
     let script_execution = resolve_script_execution(&inputs).map_err(map_error)?;
+    let container_execution = resolve_container_execution(&inputs).map_err(map_error)?;
 
     let timestamp = fsutil::current_epoch_nanos()
         .map_err(map_fsutil_error)
@@ -252,6 +259,7 @@ fn prepare_build_context(
         outputs,
         temp_outputs_root,
         script_execution,
+        container_execution,
         uid,
         gid,
     })
@@ -284,6 +292,37 @@ fn resolve_script_execution(inputs: &[ResolvedInput]) -> BResult<ScriptExecution
         script_host_path: build_scripts[0].object_path.clone(),
         source_input_name: sources[0].name.clone(),
     })
+}
+
+fn resolve_container_execution(inputs: &[ResolvedInput]) -> BResult<ContainerExecution> {
+    let container_images: Vec<&ResolvedInput> = inputs
+        .iter()
+        .filter(|input| input.artifact_kind == KIND_CONTAINER_IMAGE)
+        .collect();
+
+    if container_images.len() != 1 {
+        return Err(BinaryError::InvalidRecipe(format!(
+            "binary recipe requires exactly one '{KIND_CONTAINER_IMAGE}' input; found {}",
+            container_images.len()
+        )));
+    }
+
+    let image = container_images[0];
+    let image_ref = image.image_ref.clone().ok_or_else(|| {
+        BinaryError::InputResolutionFailed(format!(
+            "container-image input '{}' does not define image_ref in metadata",
+            image.name
+        ))
+    })?;
+
+    if image_ref.trim().is_empty() {
+        return Err(BinaryError::InputResolutionFailed(format!(
+            "container-image input '{}' has empty image_ref in metadata",
+            image.name
+        )));
+    }
+
+    Ok(ContainerExecution { image_ref })
 }
 
 fn prepare_outputs(ctx: &mut BuildContext) -> BResult<()> {
@@ -371,6 +410,14 @@ fn resolve_inputs(layout: &WorkspaceLayout, recipe: &BinaryRecipe) -> BResult<Ve
                     object_path.display()
                 )));
             }
+        } else if meta.artifact_kind == KIND_CONTAINER_IMAGE {
+            if !object_path.is_file() {
+                return Err(BinaryError::InputResolutionFailed(format!(
+                    "container-image input '{}' must resolve to a file: {}",
+                    input,
+                    object_path.display()
+                )));
+            }
         } else if !object_path.is_dir() {
             return Err(BinaryError::InputResolutionFailed(format!(
                 "input '{}' must resolve to a directory: {}",
@@ -384,6 +431,7 @@ fn resolve_inputs(layout: &WorkspaceLayout, recipe: &BinaryRecipe) -> BResult<Ve
             object_path,
             id,
             artifact_kind: meta.artifact_kind,
+            image_ref: meta.image_ref,
         });
     }
 
@@ -444,8 +492,13 @@ fn parse_meta(path: &Path) -> BResult<ResolvedMeta> {
             path.display()
         ))
     })?;
+    let image_ref = extract_ncl_string_field(&content, "image_ref");
 
-    Ok(ResolvedMeta { id, artifact_kind })
+    Ok(ResolvedMeta {
+        id,
+        artifact_kind,
+        image_ref,
+    })
 }
 
 fn extract_ncl_string_field(content: &str, field: &str) -> Option<String> {
