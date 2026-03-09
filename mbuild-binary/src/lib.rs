@@ -281,9 +281,9 @@ fn resolve_script_execution(inputs: &[ResolvedInput]) -> BResult<ScriptExecution
             build_scripts.len()
         )));
     }
-    if sources.len() != 1 {
+    if sources.is_empty() {
         return Err(BinaryError::InvalidRecipe(format!(
-            "binary recipe requires exactly one '{KIND_SOURCE_TREE}' input; found {}",
+            "binary recipe requires at least one '{KIND_SOURCE_TREE}' input; found {}",
             sources.len()
         )));
     }
