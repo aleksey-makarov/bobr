@@ -45,6 +45,7 @@ struct ResolvedInput {
     id: String,
     artifact_kind: String,
     image_ref: Option<String>,
+    is_file: bool,
 }
 
 #[derive(Debug)]
@@ -161,11 +162,19 @@ fn run_container_build(ctx: &BuildContext) -> BResult<()> {
         if input.artifact_kind == KIND_BUILD_SCRIPT || input.artifact_kind == KIND_CONTAINER_IMAGE {
             continue;
         }
-        process.arg("--volume").arg(format!(
-            "{}:/in/{}:O",
-            input.object_path.display(),
-            input.name
-        ));
+        if input.is_file {
+            process.arg("--volume").arg(format!(
+                "{}:/in/{}:ro",
+                input.object_path.display(),
+                input.name
+            ));
+        } else {
+            process.arg("--volume").arg(format!(
+                "{}:/in/{}:O",
+                input.object_path.display(),
+                input.name
+            ));
+        }
     }
 
     for output_name in &ctx.outputs {
@@ -418,9 +427,9 @@ fn resolve_inputs(layout: &WorkspaceLayout, recipe: &BinaryRecipe) -> BResult<Ve
                     object_path.display()
                 )));
             }
-        } else if !object_path.is_dir() {
+        } else if !object_path.is_file() && !object_path.is_dir() {
             return Err(BinaryError::InputResolutionFailed(format!(
-                "input '{}' must resolve to a directory: {}",
+                "input '{}' must resolve to a regular file or directory: {}",
                 input,
                 object_path.display()
             )));
@@ -428,6 +437,7 @@ fn resolve_inputs(layout: &WorkspaceLayout, recipe: &BinaryRecipe) -> BResult<Ve
 
         resolved.push(ResolvedInput {
             name: input.clone(),
+            is_file: object_path.is_file(),
             object_path,
             id,
             artifact_kind: meta.artifact_kind,
