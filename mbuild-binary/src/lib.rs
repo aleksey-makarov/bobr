@@ -12,6 +12,7 @@ const ROOT_DIR: &str = ".mbuild";
 const OBJECTS_DIR: &str = "objects";
 const META_DIR: &str = "meta";
 const REFS_DIR: &str = "refs";
+const LOGS_DIR: &str = "logs";
 const KIND_SOURCE_TREE: &str = "source-tree";
 const KIND_BUILD_SCRIPT: &str = "build-script";
 const KIND_CONTAINER_IMAGE: &str = "container-image";
@@ -205,17 +206,26 @@ fn run_container_build(ctx: &BuildContext) -> BResult<()> {
     let output = process.output().map_err(|error| {
         BinaryError::PodmanFailed(format!("failed to execute podman run: {error}"))
     })?;
+    let log_path = write_run_log(ctx, &output);
 
     if !output.status.success() {
+        let log_hint = match &log_path {
+            Some(path) => format!(" (log: {})", path.display()),
+            None => String::new(),
+        };
         return Err(BinaryError::BuildFailed(format!(
-            "podman run failed with exit status {}: {}",
+            "podman run failed with exit status {}: {}{}",
             output.status.code().unwrap_or(1),
-            command_details(&output)
+            command_details(&output),
+            log_hint,
         )));
     }
 
     if !output.stdout.is_empty() {
         println!("{}", String::from_utf8_lossy(&output.stdout).trim_end());
+    }
+    if let Some(path) = log_path {
+        println!("log: {}", path.display());
     }
 
     Ok(())
@@ -560,6 +570,64 @@ fn command_details(output: &std::process::Output) -> String {
     }
 }
 
+fn write_run_log(ctx: &BuildContext, output: &std::process::Output) -> Option<PathBuf> {
+    let artifact_logs_dir = ctx.layout.logs.join(&ctx.artifact_name);
+    if let Err(error) = fs::create_dir_all(&artifact_logs_dir) {
+        eprintln!(
+            "warning: failed to create logs directory '{}': {}",
+            artifact_logs_dir.display(),
+            error
+        );
+        return None;
+    }
+
+    let timestamp = match fsutil::current_epoch_nanos() {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("warning: failed to get current time for log file: {error}");
+            return None;
+        }
+    };
+
+    let run_log_path = artifact_logs_dir.join(format!("run-{timestamp}.log"));
+    let latest_log_path = artifact_logs_dir.join("latest.log");
+    let exit_code = output
+        .status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    let log_content = format!(
+        "artifact: {}\nimage_ref: {}\nscript: {}\nsource_input: {}\nexit_code: {}\nstatus_success: {}\n\n=== stdout ===\n{}\n\n=== stderr ===\n{}\n",
+        ctx.artifact_name,
+        ctx.container_execution.image_ref,
+        ctx.script_execution.script_host_path.display(),
+        ctx.script_execution.source_input_name,
+        exit_code,
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    if let Err(error) = fsutil::write_atomic(&run_log_path, &log_content) {
+        eprintln!(
+            "warning: failed to write run log '{}': {}",
+            run_log_path.display(),
+            error
+        );
+        return None;
+    }
+
+    if let Err(error) = fsutil::write_atomic(&latest_log_path, &log_content) {
+        eprintln!(
+            "warning: failed to write latest log '{}': {}",
+            latest_log_path.display(),
+            error
+        );
+    }
+
+    Some(run_log_path)
+}
+
 fn replace_dir(tmp_dir: &Path, destination: &Path) -> BResult<()> {
     if destination.exists() {
         if destination.is_dir() {
@@ -658,6 +726,7 @@ struct WorkspaceLayout {
     objects: PathBuf,
     meta: PathBuf,
     refs: PathBuf,
+    logs: PathBuf,
 }
 
 fn workspace_layout() -> BResult<WorkspaceLayout> {
@@ -670,6 +739,7 @@ fn workspace_layout() -> BResult<WorkspaceLayout> {
         objects: root.join(OBJECTS_DIR),
         meta: root.join(META_DIR),
         refs: root.join(REFS_DIR),
+        logs: root.join(LOGS_DIR),
     })
 }
 
@@ -678,6 +748,7 @@ fn ensure_base_dirs(layout: &WorkspaceLayout) -> BResult<()> {
     ensure_dir(&layout.objects, "objects")?;
     ensure_dir(&layout.meta, "meta")?;
     ensure_dir(&layout.refs, "refs")?;
+    ensure_dir(&layout.logs, "logs")?;
     Ok(())
 }
 
