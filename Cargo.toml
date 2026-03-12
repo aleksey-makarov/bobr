@@ -7,6 +7,7 @@ members = [
   "mbuild-text",
   "mbuild-binary",
   "mbuild-image",
+  "fsobj-hash",
 ]
 
 resolver = "3"

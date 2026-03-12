@@ -447,6 +447,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fsobj-hash"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+ "tar",
+ "tempfile",
+]
+
+[[package]]
 name = "futures-channel"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
