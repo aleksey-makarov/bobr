@@ -1131,7 +1131,10 @@ dependencies = [
 name = "mbuild-core"
 version = "0.1.0"
 dependencies = [
+ "fsobj-hash",
  "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

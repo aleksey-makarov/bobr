@@ -1,18 +1,19 @@
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
+use mbuild_core::cas::{
+    CasError, PublishOutputRequest, StoreLayout, publish_output as publish_cas_output,
+};
 use mbuild_core::{Builder, BuilderError, fsutil};
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fmt;
 use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
-#[cfg(unix)]
-use std::os::unix::fs as unix_fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
@@ -23,9 +24,7 @@ use zip::read::ZipArchive;
 const ROOT_DIR: &str = ".mbuild";
 const BUILDER_DIR: &str = "fetch";
 const CACHE_DIR: &str = "cache";
-const OBJECTS_DIR: &str = "objects";
-const META_DIR: &str = "meta";
-const REFS_DIR: &str = "refs";
+const TMP_DIR: &str = "tmp";
 const REDIRECT_LIMIT: usize = 10;
 const USER_AGENT: &str = "mbuild-fetch/0.1";
 
@@ -129,7 +128,7 @@ impl Builder for FetchBuilder {
         });
 
         for output_id in &outputs {
-            publish_output(
+            publish_fetch_output(
                 &layout,
                 output_id,
                 &recipe,
@@ -195,7 +194,9 @@ fn validate_recipe(recipe: &FetchRecipe) -> FResult<()> {
 
     let urls = recipe.url.as_list();
     if urls.is_empty() {
-        return Err(FetchError::InvalidRecipe("url list must not be empty".to_string()));
+        return Err(FetchError::InvalidRecipe(
+            "url list must not be empty".to_string(),
+        ));
     }
     for url in &urls {
         if !url.starts_with("http://") && !url.starts_with("https://") {
@@ -319,9 +320,10 @@ fn ensure_cached_blob(
 
     for (index, url) in urls.iter().enumerate() {
         let now_nanos = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
-        let tmp_path = layout
-            .builder_root
-            .join(format!(".download-{}-{}-{}.blob", hash.value, index, now_nanos));
+        let tmp_path = layout.builder_root.join(format!(
+            ".download-{}-{}-{}.blob",
+            hash.value, index, now_nanos
+        ));
 
         println!("download_attempt: {}", url);
         if let Err(error) = download_to_file(url, &tmp_path) {
@@ -487,7 +489,7 @@ fn hex_char(nibble: u8) -> char {
     }
 }
 
-fn publish_output(
+fn publish_fetch_output(
     layout: &WorkspaceLayout,
     output_id: &str,
     recipe: &FetchRecipe,
@@ -509,7 +511,14 @@ fn publish_output(
             source_url,
         )
     } else {
-        publish_file_output(layout, output_id, recipe, artifact_kind, cached_blob, source_url)
+        publish_file_output(
+            layout,
+            output_id,
+            recipe,
+            artifact_kind,
+            cached_blob,
+            source_url,
+        )
     }
 }
 
@@ -523,7 +532,7 @@ fn publish_file_output(
 ) -> FResult<()> {
     let now_nanos = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
     let tmp_path = layout
-        .root
+        .tmp
         .join(format!(".fetch-file-{}-{}.tmp", output_id, now_nanos));
 
     if tmp_path.exists() {
@@ -543,33 +552,34 @@ fn publish_file_output(
         ))
     })?;
 
-    let object_path = layout.objects.join(output_id);
-    replace_path(&tmp_path, &object_path)?;
+    let mut attrs = Map::new();
+    attrs.insert(
+        "source_url".to_string(),
+        Value::String(source_url.to_string()),
+    );
+    attrs.insert(
+        "declared_hash".to_string(),
+        Value::String(recipe.hash.clone()),
+    );
+    attrs.insert("unpack".to_string(), Value::Bool(false));
 
-    let meta_path = layout.meta.join(format!("{output_id}.ncl"));
-    fsutil::write_atomic(
-        &meta_path,
-        &render_meta_ncl(
-            output_id,
-            artifact_kind,
-            recipe,
-            object_path.as_path(),
-            source_url,
-            None,
-            false,
-        ),
+    let published = publish_cas_output(
+        &layout.store,
+        PublishOutputRequest {
+            output_name: output_id.to_string(),
+            staged_path: tmp_path,
+            artifact_kind: artifact_kind.to_string(),
+            producer_builder: "fetch".to_string(),
+            input_artifact_hashes: vec![],
+            attrs,
+        },
     )
-    .map_err(map_fsutil_error)?;
-
-    let ref_path = layout.refs.join(output_id);
-    let ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(output_id);
-    replace_symlink(&ref_target, &ref_path)?;
+    .map_err(map_cas_error)?;
 
     println!("publish: ok");
     println!("output: {output_id}");
-    println!("object: {}", object_path.display());
-    println!("meta: {}", meta_path.display());
-    println!("ref: {}", ref_path.display());
+    println!("object_hash: {}", published.object_hash);
+    println!("artifact_hash: {}", published.artifact_hash);
 
     Ok(())
 }
@@ -585,40 +595,54 @@ fn publish_archive_output(
 ) -> FResult<()> {
     let now_nanos = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
     let tmp_dir = layout
-        .root
+        .tmp
         .join(format!(".fetch-archive-{}-{}.dir", output_id, now_nanos));
 
     fsutil::recreate_empty_dir(&tmp_dir).map_err(map_fsutil_error)?;
     extract_archive(cached_blob, format.clone(), &tmp_dir)?;
     let normalized_root = normalize_extracted_root(&tmp_dir)?;
 
-    let object_path = layout.objects.join(output_id);
-    replace_path(&tmp_dir, &object_path)?;
-
-    let meta_path = layout.meta.join(format!("{output_id}.ncl"));
-    fsutil::write_atomic(
-        &meta_path,
-        &render_meta_ncl(
-            output_id,
-            artifact_kind,
-            recipe,
-            object_path.as_path(),
-            source_url,
-            Some(format),
-            normalized_root,
+    let mut attrs = Map::new();
+    attrs.insert(
+        "source_url".to_string(),
+        Value::String(source_url.to_string()),
+    );
+    attrs.insert(
+        "declared_hash".to_string(),
+        Value::String(recipe.hash.clone()),
+    );
+    attrs.insert("unpack".to_string(), Value::Bool(true));
+    attrs.insert(
+        "archive_format".to_string(),
+        Value::String(
+            match format {
+                ArchiveFormat::TarGz => "tar-gz",
+                ArchiveFormat::TarXz => "tar-xz",
+                ArchiveFormat::TarBz2 => "tar-bz2",
+                ArchiveFormat::Zip => "zip",
+            }
+            .to_string(),
         ),
-    )
-    .map_err(map_fsutil_error)?;
+    );
+    attrs.insert("normalized_root".to_string(), Value::Bool(normalized_root));
 
-    let ref_path = layout.refs.join(output_id);
-    let ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(output_id);
-    replace_symlink(&ref_target, &ref_path)?;
+    let published = publish_cas_output(
+        &layout.store,
+        PublishOutputRequest {
+            output_name: output_id.to_string(),
+            staged_path: tmp_dir,
+            artifact_kind: artifact_kind.to_string(),
+            producer_builder: "fetch".to_string(),
+            input_artifact_hashes: vec![],
+            attrs,
+        },
+    )
+    .map_err(map_cas_error)?;
 
     println!("publish: ok");
     println!("output: {output_id}");
-    println!("object: {}", object_path.display());
-    println!("meta: {}", meta_path.display());
-    println!("ref: {}", ref_path.display());
+    println!("object_hash: {}", published.object_hash);
+    println!("artifact_hash: {}", published.artifact_hash);
 
     Ok(())
 }
@@ -780,43 +804,6 @@ fn extract_zip(archive_path: &Path, destination: &Path) -> FResult<()> {
     Ok(())
 }
 
-fn render_meta_ncl(
-    id: &str,
-    artifact_kind: &str,
-    recipe: &FetchRecipe,
-    object_path: &Path,
-    source_url: &str,
-    resolved_archive_format: Option<ArchiveFormat>,
-    normalized_root: bool,
-) -> String {
-    let object_kind = if object_path.is_dir() {
-        "directory"
-    } else {
-        "file"
-    };
-    let archive_format = resolved_archive_format
-        .as_ref()
-        .map(|fmt| match fmt {
-            ArchiveFormat::TarGz => "tar-gz",
-            ArchiveFormat::TarXz => "tar-xz",
-            ArchiveFormat::TarBz2 => "tar-bz2",
-            ArchiveFormat::Zip => "zip",
-        })
-        .unwrap_or("");
-
-    format!(
-        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"fetch\",\n    url = {},\n    hash = {},\n  }},\n  attrs = {{\n    unpack = {},\n    archive_format = {},\n    normalized_root = {},\n    object_kind = {},\n  }},\n}}\n",
-        q(id),
-        q(artifact_kind),
-        q(source_url),
-        q(&recipe.hash),
-        if recipe.unpack { "true" } else { "false" },
-        q(archive_format),
-        if normalized_root { "true" } else { "false" },
-        q(object_kind),
-    )
-}
-
 fn normalize_extracted_root(directory: &Path) -> FResult<bool> {
     let mut entries = fs::read_dir(directory)
         .map_err(|error| {
@@ -959,7 +946,9 @@ fn detect_archive_format_from_url(url: &str) -> Option<ArchiveFormat> {
     if url_lower.ends_with(".tar.xz") {
         return Some(ArchiveFormat::TarXz);
     }
-    if url_lower.ends_with(".tar.bz2") || url_lower.ends_with(".tbz2") || url_lower.ends_with(".tbz")
+    if url_lower.ends_with(".tar.bz2")
+        || url_lower.ends_with(".tbz2")
+        || url_lower.ends_with(".tbz")
     {
         return Some(ArchiveFormat::TarBz2);
     }
@@ -969,92 +958,11 @@ fn detect_archive_format_from_url(url: &str) -> Option<ArchiveFormat> {
     None
 }
 
-fn replace_path(tmp_path: &Path, destination: &Path) -> FResult<()> {
-    if destination.exists() {
-        if destination.is_dir() {
-            fs::remove_dir_all(destination).map_err(|error| {
-                FetchError::FsFailed(format!(
-                    "failed to remove existing directory '{}': {error}",
-                    destination.display()
-                ))
-            })?;
-        } else {
-            fs::remove_file(destination).map_err(|error| {
-                FetchError::FsFailed(format!(
-                    "failed to remove existing file '{}': {error}",
-                    destination.display()
-                ))
-            })?;
-        }
-    }
-
-    fs::rename(tmp_path, destination).map_err(|error| {
-        FetchError::FsFailed(format!(
-            "failed to publish '{}' -> '{}': {error}",
-            tmp_path.display(),
-            destination.display()
-        ))
-    })
-}
-
-fn replace_symlink(target: &Path, link_path: &Path) -> FResult<()> {
-    if link_path.exists() || link_path.is_symlink() {
-        let metadata = fs::symlink_metadata(link_path).map_err(|error| {
-            FetchError::FsFailed(format!(
-                "failed to inspect existing ref '{}': {error}",
-                link_path.display()
-            ))
-        })?;
-
-        if metadata.file_type().is_dir() {
-            fs::remove_dir_all(link_path).map_err(|error| {
-                FetchError::FsFailed(format!(
-                    "failed to remove existing ref directory '{}': {error}",
-                    link_path.display()
-                ))
-            })?;
-        } else {
-            fs::remove_file(link_path).map_err(|error| {
-                FetchError::FsFailed(format!(
-                    "failed to remove existing ref '{}': {error}",
-                    link_path.display()
-                ))
-            })?;
-        }
-    }
-
-    create_symlink(target, link_path)
-}
-
-#[cfg(unix)]
-fn create_symlink(target: &Path, link_path: &Path) -> FResult<()> {
-    unix_fs::symlink(target, link_path).map_err(|error| {
-        FetchError::FsFailed(format!(
-            "failed to create ref symlink '{}' -> '{}': {error}",
-            link_path.display(),
-            target.display()
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn create_symlink(_target: &Path, _link_path: &Path) -> FResult<()> {
-    Err(FetchError::FsFailed(
-        "symlink refs are currently supported only on unix hosts".to_string(),
-    ))
-}
-
-fn q(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"<serialization-error>\"".to_string())
-}
-
 struct WorkspaceLayout {
-    root: PathBuf,
     builder_root: PathBuf,
     cache: PathBuf,
-    objects: PathBuf,
-    meta: PathBuf,
-    refs: PathBuf,
+    tmp: PathBuf,
+    store: StoreLayout,
 }
 
 fn workspace_layout() -> FResult<WorkspaceLayout> {
@@ -1065,22 +973,17 @@ fn workspace_layout() -> FResult<WorkspaceLayout> {
     let builder_root = root.join(BUILDER_DIR);
 
     Ok(WorkspaceLayout {
-        root: root.clone(),
         builder_root: builder_root.clone(),
         cache: builder_root.join(CACHE_DIR),
-        objects: root.join(OBJECTS_DIR),
-        meta: root.join(META_DIR),
-        refs: root.join(REFS_DIR),
+        tmp: builder_root.join(TMP_DIR),
+        store: StoreLayout::discover(&root).map_err(map_cas_error)?,
     })
 }
 
 fn ensure_base_dirs(layout: &WorkspaceLayout) -> FResult<()> {
-    ensure_dir(&layout.root, "mbuild root")?;
     ensure_dir(&layout.builder_root, "fetch builder root")?;
     ensure_dir(&layout.cache, "fetch cache")?;
-    ensure_dir(&layout.objects, "objects")?;
-    ensure_dir(&layout.meta, "meta")?;
-    ensure_dir(&layout.refs, "refs")?;
+    ensure_dir(&layout.tmp, "fetch temp")?;
     Ok(())
 }
 
@@ -1094,6 +997,10 @@ fn ensure_dir(path: &Path, label: &str) -> FResult<()> {
 }
 
 fn map_fsutil_error(error: fsutil::FsUtilError) -> FetchError {
+    FetchError::FsFailed(error.to_string())
+}
+
+fn map_cas_error(error: CasError) -> FetchError {
     FetchError::FsFailed(error.to_string())
 }
 

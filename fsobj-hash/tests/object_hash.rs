@@ -15,7 +15,10 @@ fn display_uses_prefixed_lowercase_hex() {
 
 #[test]
 fn parse_rejects_missing_prefix() {
-    assert!(ObjectHash::from_str("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef").is_err());
+    assert!(
+        ObjectHash::from_str("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .is_err()
+    );
 }
 
 #[test]
@@ -25,8 +28,10 @@ fn parse_rejects_wrong_length() {
 
 #[test]
 fn parse_rejects_uppercase_hex() {
-    assert!(ObjectHash::from_str(
-        "sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
-    )
-    .is_err());
+    assert!(
+        ObjectHash::from_str(
+            "sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"
+        )
+        .is_err()
+    );
 }

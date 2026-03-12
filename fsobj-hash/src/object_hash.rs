@@ -51,7 +51,10 @@ impl FromStr for ObjectHash {
         if hex.len() != 64 {
             return Err(ParseObjectHashError::InvalidLength);
         }
-        if !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        if !hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
             return Err(ParseObjectHashError::InvalidHex);
         }
 

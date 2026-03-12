@@ -137,7 +137,9 @@ fn build_directory(
             let node = match pending.clone() {
                 PendingEntry::File(file) => Node::File(file),
                 PendingEntry::Symlink(link) => Node::Symlink(link),
-                PendingEntry::Directory => build_directory(entries.clone(), child_names, &child_path),
+                PendingEntry::Directory => {
+                    build_directory(entries.clone(), child_names, &child_path)
+                }
             };
             out.push(DirectoryEntry {
                 name: name.clone(),

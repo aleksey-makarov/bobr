@@ -10,7 +10,10 @@ use tempfile::tempdir;
 fn empty_directory_matches_empty_tar() {
     let dir = tempdir().unwrap();
     let tar = tar_bytes(|_| {});
-    assert_eq!(hash_path(dir.path()).unwrap(), hash_tar_reader(Cursor::new(tar)).unwrap());
+    assert_eq!(
+        hash_path(dir.path()).unwrap(),
+        hash_tar_reader(Cursor::new(tar)).unwrap()
+    );
 }
 
 #[test]
@@ -26,7 +29,10 @@ fn nested_directory_matches_tar() {
         append_file(builder, "root.txt", 0o644, b"world");
     });
 
-    assert_eq!(hash_path(dir.path()).unwrap(), hash_tar_reader(Cursor::new(tar)).unwrap());
+    assert_eq!(
+        hash_path(dir.path()).unwrap(),
+        hash_tar_reader(Cursor::new(tar)).unwrap()
+    );
 }
 
 #[test]
@@ -42,7 +48,10 @@ fn symlink_and_exec_bits_match_between_path_and_tar() {
         append_symlink(builder, "lib", "lib64");
     });
 
-    assert_eq!(hash_path(dir.path()).unwrap(), hash_tar_reader(Cursor::new(tar)).unwrap());
+    assert_eq!(
+        hash_path(dir.path()).unwrap(),
+        hash_tar_reader(Cursor::new(tar)).unwrap()
+    );
 }
 
 fn tar_bytes<F>(f: F) -> Vec<u8>
@@ -71,5 +80,7 @@ fn append_symlink(builder: &mut Builder<Vec<u8>>, path: &str, target: &str) {
     header.set_entry_type(EntryType::Symlink);
     header.set_link_name(target).unwrap();
     header.set_cksum();
-    builder.append_data(&mut header, path, std::io::empty()).unwrap();
+    builder
+        .append_data(&mut header, path, std::io::empty())
+        .unwrap();
 }

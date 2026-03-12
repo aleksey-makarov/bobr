@@ -1,5 +1,6 @@
 use serde_json::Value;
 
+pub mod cas;
 pub mod fsutil;
 
 #[derive(Debug)]
@@ -19,7 +20,10 @@ pub struct VerbSpec {
 pub trait Builder {
     fn get_type(&self) -> &'static str;
     fn run_build(&self, artifact: &str, recipe: &Value) -> Result<(), BuilderError>;
-    fn summarize_recipe(&self, _recipe: &Value) -> Result<Vec<(&'static str, String)>, BuilderError> {
+    fn summarize_recipe(
+        &self,
+        _recipe: &Value,
+    ) -> Result<Vec<(&'static str, String)>, BuilderError> {
         Ok(vec![])
     }
 

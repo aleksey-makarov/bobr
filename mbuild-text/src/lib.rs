@@ -1,20 +1,18 @@
+use mbuild_core::cas::{CasError, PublishOutputRequest, StoreLayout, publish_output};
 use mbuild_core::{Builder, BuilderError, fsutil};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fmt;
 use std::fs;
 #[cfg(unix)]
-use std::os::unix::fs as unix_fs;
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 const ROOT_DIR: &str = ".mbuild";
-const OBJECTS_DIR: &str = "objects";
-const META_DIR: &str = "meta";
-const REFS_DIR: &str = "refs";
+const BUILDER_DIR: &str = "text";
+const TMP_DIR: &str = "tmp";
 
 #[derive(Debug)]
 enum TextError {
@@ -178,8 +176,8 @@ fn publish_one(
     validate_name(output_name)?;
 
     let now_nanos = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
-    let tmp_path = fsutil::temp_root_dir(ROOT_DIR)
-        .map_err(map_fsutil_error)?
+    let tmp_path = layout
+        .tmp
         .join(format!("text-{}-{}.obj", output_name, now_nanos));
 
     if tmp_path.exists() {
@@ -208,34 +206,31 @@ fn publish_one(
         })?;
     }
 
-    let object_path = layout.objects.join(output_name);
-    replace_path(&tmp_path, &object_path)?;
+    let mut attrs = Map::new();
+    attrs.insert(
+        "source_bytes".to_string(),
+        Value::from(source_text.len() as u64),
+    );
 
-    let meta_path = layout.meta.join(format!("{output_name}.ncl"));
-    fsutil::write_atomic(
-        &meta_path,
-        &render_meta_ncl(output_name, artifact_kind, source_text.len()),
+    let published = publish_output(
+        &layout.store,
+        PublishOutputRequest {
+            output_name: output_name.to_string(),
+            staged_path: tmp_path,
+            artifact_kind: artifact_kind.to_string(),
+            producer_builder: "text".to_string(),
+            input_artifact_hashes: vec![],
+            attrs,
+        },
     )
-    .map_err(map_fsutil_error)?;
-
-    let ref_path = layout.refs.join(output_name);
-    let ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(output_name);
-    replace_symlink(&ref_target, &ref_path)?;
+    .map_err(map_cas_error)?;
 
     println!("publish: ok");
     println!("output: {output_name}");
     println!("source_bytes: {}", source_text.len());
-    println!("object: {}", object_path.display());
+    println!("object_hash: {}", published.object_hash);
+    println!("artifact_hash: {}", published.artifact_hash);
     Ok(())
-}
-
-fn render_meta_ncl(id: &str, artifact_kind: &str, source_bytes: usize) -> String {
-    format!(
-        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"text\",\n  }},\n  attrs = {{\n    source_bytes = {},\n  }},\n}}\n",
-        q(id),
-        q(artifact_kind),
-        source_bytes
-    )
 }
 
 fn validate_name(name: &str) -> TResult<()> {
@@ -259,90 +254,10 @@ fn validate_name(name: &str) -> TResult<()> {
     Ok(())
 }
 
-fn replace_path(tmp_path: &Path, destination: &Path) -> TResult<()> {
-    if destination.exists() {
-        if destination.is_dir() {
-            fs::remove_dir_all(destination).map_err(|error| {
-                TextError::PublishFailed(format!(
-                    "failed to remove previous object directory '{}': {error}",
-                    destination.display()
-                ))
-            })?;
-        } else {
-            fs::remove_file(destination).map_err(|error| {
-                TextError::PublishFailed(format!(
-                    "failed to remove previous object file '{}': {error}",
-                    destination.display()
-                ))
-            })?;
-        }
-    }
-
-    fs::rename(tmp_path, destination).map_err(|error| {
-        TextError::PublishFailed(format!(
-            "failed to publish object '{}' -> '{}': {error}",
-            tmp_path.display(),
-            destination.display()
-        ))
-    })
-}
-
-fn replace_symlink(target: &Path, link_path: &Path) -> TResult<()> {
-    if link_path.exists() || link_path.is_symlink() {
-        let metadata = fs::symlink_metadata(link_path).map_err(|error| {
-            TextError::FsFailed(format!(
-                "failed to inspect existing ref '{}': {error}",
-                link_path.display()
-            ))
-        })?;
-
-        if metadata.file_type().is_dir() {
-            fs::remove_dir_all(link_path).map_err(|error| {
-                TextError::FsFailed(format!(
-                    "failed to remove existing ref directory '{}': {error}",
-                    link_path.display()
-                ))
-            })?;
-        } else {
-            fs::remove_file(link_path).map_err(|error| {
-                TextError::FsFailed(format!(
-                    "failed to remove existing ref '{}': {error}",
-                    link_path.display()
-                ))
-            })?;
-        }
-    }
-
-    create_symlink(target, link_path)
-}
-
-#[cfg(unix)]
-fn create_symlink(target: &Path, link_path: &Path) -> TResult<()> {
-    unix_fs::symlink(target, link_path).map_err(|error| {
-        TextError::FsFailed(format!(
-            "failed to create ref symlink '{}' -> '{}': {error}",
-            link_path.display(),
-            target.display()
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn create_symlink(_target: &Path, _link_path: &Path) -> TResult<()> {
-    Err(TextError::FsFailed(
-        "symlink refs are currently supported only on unix hosts".to_string(),
-    ))
-}
-
-fn q(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"<serialization-error>\"".to_string())
-}
-
 struct WorkspaceLayout {
-    root: PathBuf,
-    objects: PathBuf,
-    meta: PathBuf,
-    refs: PathBuf,
+    builder_root: PathBuf,
+    tmp: PathBuf,
+    store: StoreLayout,
 }
 
 fn workspace_layout() -> TResult<WorkspaceLayout> {
@@ -350,20 +265,18 @@ fn workspace_layout() -> TResult<WorkspaceLayout> {
         TextError::FsFailed(format!("failed to get current directory: {error}"))
     })?;
     let root = cwd.join(ROOT_DIR);
+    let builder_root = root.join(BUILDER_DIR);
 
     Ok(WorkspaceLayout {
-        root: root.clone(),
-        objects: root.join(OBJECTS_DIR),
-        meta: root.join(META_DIR),
-        refs: root.join(REFS_DIR),
+        builder_root: builder_root.clone(),
+        tmp: builder_root.join(TMP_DIR),
+        store: StoreLayout::discover(&root).map_err(map_cas_error)?,
     })
 }
 
 fn ensure_base_dirs(layout: &WorkspaceLayout) -> TResult<()> {
-    ensure_dir(&layout.root, "mbuild root")?;
-    ensure_dir(&layout.objects, "objects")?;
-    ensure_dir(&layout.meta, "meta")?;
-    ensure_dir(&layout.refs, "refs")?;
+    ensure_dir(&layout.builder_root, "text builder root")?;
+    ensure_dir(&layout.tmp, "text temp")?;
     Ok(())
 }
 
@@ -378,6 +291,10 @@ fn ensure_dir(path: &Path, label: &str) -> TResult<()> {
 
 fn map_fsutil_error(error: fsutil::FsUtilError) -> TextError {
     TextError::FsFailed(error.to_string())
+}
+
+fn map_cas_error(error: CasError) -> TextError {
+    TextError::PublishFailed(error.to_string())
 }
 
 fn map_error(error: TextError) -> BuilderError {

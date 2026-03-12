@@ -4,13 +4,29 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
-    UnsupportedRootSymlink { path: PathBuf },
-    UnsupportedFileType { path: PathBuf },
+    UnsupportedRootSymlink {
+        path: PathBuf,
+    },
+    UnsupportedFileType {
+        path: PathBuf,
+    },
     TarRead(std::io::Error),
-    InvalidArchivePath { path: PathBuf, reason: InvalidPathReason },
-    DuplicateEntry { path: PathBuf },
-    KindConflict { path: PathBuf, existing: EntryKind, new: EntryKind },
-    UnsupportedTarEntry { path: PathBuf, kind: TarEntryKind },
+    InvalidArchivePath {
+        path: PathBuf,
+        reason: InvalidPathReason,
+    },
+    DuplicateEntry {
+        path: PathBuf,
+    },
+    KindConflict {
+        path: PathBuf,
+        existing: EntryKind,
+        new: EntryKind,
+    },
+    UnsupportedTarEntry {
+        path: PathBuf,
+        kind: TarEntryKind,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,8 +103,16 @@ impl fmt::Display for Error {
             Self::DuplicateEntry { path } => {
                 write!(f, "duplicate archive entry: {}", path.display())
             }
-            Self::KindConflict { path, existing, new } => {
-                write!(f, "kind conflict for '{}': existing {existing}, new {new}", path.display())
+            Self::KindConflict {
+                path,
+                existing,
+                new,
+            } => {
+                write!(
+                    f,
+                    "kind conflict for '{}': existing {existing}, new {new}",
+                    path.display()
+                )
             }
             Self::UnsupportedTarEntry { path, kind } => {
                 write!(f, "unsupported tar entry at '{}': {kind}", path.display())

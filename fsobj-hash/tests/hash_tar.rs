@@ -124,7 +124,9 @@ fn append_dir(builder: &mut Builder<Vec<u8>>, path: &str, mode: u32) {
     header.set_mode(mode);
     header.set_entry_type(EntryType::Directory);
     header.set_cksum();
-    builder.append_data(&mut header, path, std::io::empty()).unwrap();
+    builder
+        .append_data(&mut header, path, std::io::empty())
+        .unwrap();
 }
 
 fn append_symlink(builder: &mut Builder<Vec<u8>>, path: &str, target: &str) {
@@ -134,7 +136,9 @@ fn append_symlink(builder: &mut Builder<Vec<u8>>, path: &str, target: &str) {
     header.set_entry_type(EntryType::Symlink);
     header.set_link_name(target).unwrap();
     header.set_cksum();
-    builder.append_data(&mut header, path, std::io::empty()).unwrap();
+    builder
+        .append_data(&mut header, path, std::io::empty())
+        .unwrap();
 }
 
 fn raw_tar_with_single_file(path: &[u8], contents: &[u8]) -> Vec<u8> {

@@ -46,7 +46,10 @@ fn nested_tree_is_path_independent() {
         fs::write(root.join("b/y"), b"two").unwrap();
     }
 
-    assert_eq!(hash_path(left.path()).unwrap(), hash_path(right.path()).unwrap());
+    assert_eq!(
+        hash_path(left.path()).unwrap(),
+        hash_path(right.path()).unwrap()
+    );
 }
 
 #[test]
