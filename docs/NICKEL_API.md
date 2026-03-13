@@ -7,24 +7,24 @@ This document defines the intended user-facing Nickel model for `mbuild`.
 It connects:
 
 - the term-centric execution model from [`TERM_MODEL.md`](./TERM_MODEL.md);
-- the CAS and identity model from [`CAS.md`](./CAS.md).
+- the object store and metadata model from [`CAS.md`](./CAS.md).
 
 The Nickel layer should expose a pure API for composing builder terms. Users write
-Nickel programs in terms of artifacts, builder operations, and output bundles. The
-Nickel API must not expose store paths, object hashes, artifact hashes, or cache
-management details.
+Nickel programs in terms of objects, builder operations, and output bundles. The
+Nickel API must not expose store paths, object hashes, cache management details,
+or low-level publication mechanics.
 
 ## Core Model
 
-### Artifact
+### Object
 
-At the Nickel layer, an `Artifact` is a pure value denoting a build result.
+At the Nickel layer, an object is a pure value denoting a build result.
 
 It is not:
 
 - a store path;
-- a realized object;
-- a CAS record on disk.
+- a realized payload in `.mbuild/objects`;
+- a metadata record on disk.
 
 Instead, it is the user-facing handle for a build result inside the Nickel term graph.
 
@@ -43,9 +43,9 @@ Conceptual examples:
 'Binary {
   outputs = ["out", "dev"],
   optimize = "size",
-  image = imageArtifact,
-  script = builderScriptArtifact,
-  sources = [source1Artifact, source2Artifact],
+  image = imageObject,
+  script = builderScriptObject,
+  sources = [source1Object, source2Object],
 }
 ```
 
@@ -54,25 +54,56 @@ Rules:
 - each builder operation has exactly one record payload;
 - builder-specific inputs are represented by typed fields in that payload;
 - builder-specific configuration also lives in ordinary payload fields;
-- untyped arrays of artifact names are replaced with typed artifact arguments;
-- builder terms are pure and do not execute by themselves.
+- untyped arrays of object names are replaced with typed object arguments;
+- builder terms are pure and do not execute by themselves;
+- builder payloads must not contain publication metadata such as names or aliases.
+
+## Top-Level Build Request
+
+The runtime entrypoint is one evaluated request, not a bare builder term.
+
+Minimal conceptual shape:
+
+```nickel
+{
+  meta = {
+    name = "buildscript-coreutils",
+    description = "...",
+    aliases = [],
+  },
+  build = 'Text {
+    kind = "build-script",
+    source = "...",
+  },
+}
+```
+
+Semantics:
+
+- `build` is the pure build term interpreted by Rust;
+- `meta` is publication metadata used to publish refs and human-facing descriptions;
+- `meta` is not part of builder semantics;
+- `meta` does not affect object identity.
+
+This lets the runtime create rich publication records without polluting builder
+terms with non-semantic metadata.
 
 ## Builder Results
 
 ### Single-output builders
 
-A single-output builder returns an `Artifact`.
+A single-output builder returns one object.
 
 Conceptually:
 
-- `mFetch : FetchPayload -> Artifact SourceTree`
-- `mText : TextPayload -> Artifact BuildScript`
+- `mFetch : FetchPayload -> Object SourceTree`
+- `mText : TextPayload -> Object BuildScript`
 
 The exact Nickel type syntax may differ, but the semantic model should be this direct.
 
 ### Multi-output builders
 
-Multi-output builders return a bundle record whose fields are artifact terms.
+Multi-output builders return a bundle record whose fields are object terms.
 
 Example:
 
@@ -92,7 +123,7 @@ let zstd = mBinary {
 Rules:
 
 - one builder term may expose multiple output projections;
-- each projection is itself an artifact term;
+- each projection is itself an object term;
 - users consume projections like ordinary record fields;
 - field names on the bundle are the builder-declared output labels.
 
@@ -103,7 +134,7 @@ operation.
 
 `pkgs` is a Nickel record that contains:
 
-- artifact terms;
+- object terms;
 - bundle records returned by multi-output builders;
 - helper values and configuration records.
 
@@ -131,9 +162,9 @@ pkgs
 Important properties:
 
 - names in `pkgs` are for composition and convenience;
-- names are not artifact identity;
-- names are not part of CAS semantics;
-- dependency structure comes from embedded artifact terms, not from global string lookup.
+- names are not object identity;
+- names are not part of store semantics;
+- dependency structure comes from embedded object terms, not from global string lookup.
 
 ## Extensible Builder Operations
 
@@ -150,35 +181,35 @@ global set of builder operations.
 
 ## Typed Builder Inputs
 
-Builder payloads should carry typed artifact inputs.
+Builder payloads should carry typed object inputs.
 
 Example intent:
 
 - `Binary` takes:
   - builder-specific payload fields;
-  - one image artifact;
-  - one build-script artifact;
-  - an array of source artifacts;
+  - one image object;
+  - one build-script object;
+  - an array of source objects;
 - `Fetch` takes:
-  - builder-specific payload fields and no artifact dependencies;
+  - builder-specific payload fields and no object dependencies;
 - `Image` takes:
   - builder-specific payload fields;
-  - zero or one base image artifact, depending on mode;
-  - an array of binary-output artifacts.
+  - zero or one base image object, depending on mode;
+  - an array of binary-output objects.
 
 Output typing may remain weaker than input typing in early versions. That is acceptable.
 
-## Selected Closed Artifact Term
+## Selected Request
 
-The Rust interpreter should receive one selected closed artifact term.
+The Rust interpreter should receive one selected build request.
 
 This means:
 
 - the default top-level entrypoint is `./.mbuild/recipe.ncl`;
-- that file may either define one term directly or select one term from a larger package set;
+- that file is expected to evaluate to one request with fields `meta` and `build`;
 - a caller may alternatively provide another Nickel file path;
-- the final selected term is closed before interpretation;
-- Rust interprets that one selected term recursively.
+- the final selected `build` term is closed before interpretation;
+- Rust interprets that `build` term recursively and uses `meta` only for publication.
 
 The interpreter should not depend on a persistent global namespace of names in the store.
 
@@ -187,18 +218,19 @@ The interpreter should not depend on a persistent global namespace of names in t
 The Nickel API does not expose:
 
 - object hashes;
-- artifact hashes;
 - store paths;
 - cache lookup;
-- store refs.
+- publication files;
+- ref layouts.
 
-Those belong to the interpreter and CAS layers.
+Those belong to the interpreter and store layers.
 
-The interpreter is responsible for translating Nickel artifact terms into:
+The interpreter is responsible for translating Nickel object terms into:
 
 - realized objects in `.mbuild/objects`;
-- realized artifact records in `.mbuild/artifacts`;
-- optional human-facing refs.
+- technical metadata in `.mbuild/meta`;
+- publication records in `.mbuild/meta-refs`;
+- human-facing object refs in `.mbuild/object-refs`.
 
 ## Minimal API Direction
 
@@ -207,8 +239,8 @@ The intended user-facing API direction is:
 - constructor-like functions or tagged values for each registered builder;
 - builder-specific record payloads;
 - bundles for multi-output builders;
-- package sets composed from artifact terms;
-- one selected closed artifact term passed into Rust.
+- package sets composed from object terms;
+- one selected request passed into Rust.
 
 This is the minimum model needed before specifying lower-level encoding or Rust/Nickel
 FFI details.
@@ -218,8 +250,8 @@ FFI details.
 This document does not define:
 
 - the exact Nickel syntax for open builder operation rows;
-- the exact `Artifact` type encoding in Nickel;
+- the exact `Object` type encoding in Nickel;
 - the exact contracts for every builder payload;
 - the Rust-side representation of evaluated Nickel values;
 - the exact bundle typing strategy for multi-output builders;
-- the exact CLI spelling used to choose the selected term.
+- the exact CLI spelling used to choose the selected request.

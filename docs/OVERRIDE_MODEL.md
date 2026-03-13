@@ -9,7 +9,7 @@ The key design choice is:
 
 - override lives in the Nickel layer;
 - Rust does not implement override semantics directly;
-- Rust receives the final selected closed artifact term after all overrides have
+- Rust receives the final selected build request after all overrides have
   already been applied.
 
 This keeps override as a pure source-level transformation and keeps CAS, hashing,
@@ -21,11 +21,11 @@ This document is consistent with:
 
 - [`TERM_MODEL.md`](./TERM_MODEL.md): terms are pure Nickel programs interpreted by Rust;
 - [`NICKEL_API.md`](./NICKEL_API.md): users compose builder terms and bundles in Nickel;
-- [`NICKEL_SKETCH.md`](./NICKEL_SKETCH.md): package sets expose artifacts and bundle projections;
-- [`CAS.md`](./CAS.md): object and artifact identity are runtime concerns, not user-facing API.
+- [`NICKEL_SKETCH.md`](./NICKEL_SKETCH.md): package sets expose objects and bundle projections;
+- [`CAS.md`](./CAS.md): object identity and metadata handling are runtime concerns, not user-facing API.
 
 Override should therefore be understood as a Nickel-level operation that produces a
-new term or package value before interpretation.
+new request or package value before interpretation.
 
 ## Core Idea
 
@@ -36,8 +36,8 @@ Conceptually:
 - users define package values in Nickel;
 - those values are parameterized by arguments and dependencies;
 - `override` creates a new package value with modified arguments;
-- the resulting package yields a different final artifact term;
-- Rust interprets only that final artifact term.
+- the resulting package yields a different final build request;
+- Rust interprets only that final request's `build` term.
 
 Rust does not need to know whether a term came from:
 
@@ -45,7 +45,7 @@ Rust does not need to know whether a term came from:
 - one override;
 - several nested overrides.
 
-It only sees the final term and computes identity from that term and its dependencies.
+It only sees the final request and computes object identity from the resulting payloads.
 
 ## What Override Operates On
 
@@ -54,10 +54,9 @@ Override should operate on Nickel package abstractions, not directly on the CAS 
 In particular, override should not manipulate:
 
 - object hashes;
-- artifact hashes;
 - store refs;
 - object records;
-- artifact records.
+- metadata records.
 
 Instead, override should work on:
 
@@ -69,7 +68,7 @@ Instead, override should work on:
 ## Recommended Package Shape
 
 To support ergonomic override, a package should conceptually be more than a bare
-artifact term.
+build term.
 
 The intended direction is that a package definition is parameterized and can be
 reinstantiated with changed arguments.
@@ -129,7 +128,7 @@ pkgs.zstd.override {
 ```
 
 This should produce a new package value whose generated term points to different
-artifact dependencies.
+object dependencies.
 
 ## Interaction with Multi-Output Bundles
 
@@ -162,8 +161,8 @@ Its job begins only after the final term is selected.
 Operationally:
 
 1. Nickel evaluates package definitions and overrides.
-2. Nickel produces a final selected closed artifact term.
-3. Rust interprets that term recursively.
+2. Nickel produces a final selected build request.
+3. Rust interprets that request recursively.
 4. Rust computes hashes and performs CAS/cache lookup.
 5. Rust executes builders only when needed.
 

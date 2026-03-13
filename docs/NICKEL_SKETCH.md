@@ -11,7 +11,7 @@ term model concrete enough to reason about:
 - typed builder inputs;
 - multi-output bundles;
 - package-set composition;
-- the idea of selecting one closed artifact term for interpretation.
+- the idea of selecting one evaluated build request for interpretation.
 
 ## Core Intuition
 
@@ -38,25 +38,25 @@ pkgs
 Here:
 
 - `mFetch`, `mText`, `mBinary` are builder operations;
-- `pkgs.zstdSrc`, `pkgs.zstdScript`, `pkgs.zstd` are artifact terms;
+- `pkgs.zstdSrc`, `pkgs.zstdScript`, `pkgs.zstd` are object terms;
 - `pkgs.zstdTerm` is a multi-output bundle;
 - `.out` and `.dev` are output projections.
 
-## Artifact and Bundle Sketch
+## Object and Bundle Sketch
 
 This is pseudo-Nickel, not final syntax:
 
 ```nickel
-let Artifact = 'Artifact in
+let Object = 'Object in
 let Bundle = 'Bundle in
 ...
 ```
 
 The exact encoding is undecided, but semantically:
 
-- an `Artifact` is a pure term denoting one build result;
-- a `Bundle` is a record whose fields are `Artifact`s;
-- a single-output builder returns an `Artifact`;
+- an `Object` is a pure term denoting one build result;
+- a `Bundle` is a record whose fields are `Object`s;
+- a single-output builder returns an `Object`;
 - a multi-output builder returns a `Bundle`.
 
 ## Builder Operation Sketch
@@ -75,23 +75,23 @@ let mFetch = fun payload =>
 
 Intended meaning:
 
-- no artifact inputs;
-- one output artifact, usually a `source-tree` or `fetched-file`.
+- no object inputs;
+- one output object, usually a `source-tree` or `fetched-file`.
 
 ### Text
 
 ```nickel
 let mText = fun payload =>
   'Text {
-    artifact_kind = payload.artifact_kind,
+    kind = payload.kind,
     source = payload.source,
   }
 ```
 
 Intended meaning:
 
-- no artifact inputs;
-- one output artifact, for example a `build-script`.
+- no object inputs;
+- one output object, for example a `build-script`.
 
 ### Binary
 
@@ -109,10 +109,10 @@ let mBinary = fun payload =>
 Intended meaning:
 
 - builder-specific configuration fields;
-- one image artifact;
-- one build-script artifact;
-- an array of source artifacts;
-- one or more output artifacts, exposed as a bundle.
+- one image object;
+- one build-script object;
+- an array of source objects;
+- one or more output objects, exposed as a bundle.
 
 ### Image
 
@@ -128,9 +128,9 @@ let mImage = fun payload =>
 Intended meaning:
 
 - builder-specific configuration fields;
-- optional or required base image artifact, depending on mode;
-- an array of binary-output artifacts;
-- one output artifact, usually a container image.
+- optional or required base image object, depending on mode;
+- an array of binary-output objects;
+- one output object, usually a container image.
 
 ## Multi-Output Bundle Sketch
 
@@ -155,7 +155,7 @@ The important part is not the exact `outputs = [...]` syntax, but the semantics:
 
 - one builder term may declare several named outputs;
 - the user receives a bundle with those names as fields;
-- each field behaves like an ordinary artifact term.
+- each field behaves like an ordinary object term.
 
 ## Typed Input Direction
 
@@ -166,24 +166,25 @@ Conceptually:
 ```nickel
 let BinaryPayload = {
   outputs | Array String,
-  image | Artifact,
-  script | Artifact,
-  sources | Array Artifact,
+  image | Object,
+  script | Object,
+  sources | Array Object,
 }
 ```
 
-This sketch does **not** yet encode artifact sub-kinds precisely. It only shows
+This sketch does **not** yet encode object sub-kinds precisely. It only shows
+This sketch does **not** yet encode object sub-kinds precisely. It only shows
 the structural direction:
 
 - image is not mixed into a generic string list;
 - script is not mixed into a generic string list;
-- source artifacts are grouped as source artifacts.
+- source objects are grouped as source objects.
 
 A later design iteration may refine this toward:
 
-- `Artifact Image`
-- `Artifact BuildScript`
-- `Artifact SourceTree`
+- `Object Image`
+- `Object BuildScript`
+- `Object SourceTree`
 
 if Nickel typing and ergonomics make that practical.
 
@@ -199,7 +200,7 @@ let rec pkgs = {
   },
 
   buildscriptAutotools = mText {
-    artifact_kind = "build-script",
+    kind = "build-script",
     source = "#!/usr/bin/env bash\n...",
   },
 
@@ -227,12 +228,12 @@ Properties of this example:
 
 - `pkgs` is a convenience composition layer;
 - package field names are not identity;
-- dependency edges come from nested artifact terms;
-- the selected top-level artifact can be any projection, for example `pkgs.zstd`.
+- dependency edges come from nested object terms;
+- the selected top-level object can be any projection, for example `pkgs.zstd`.
 
-## Selected Closed Artifact Term
+## Selected Build Request
 
-The Rust interpreter is expected to receive one selected closed artifact term.
+The Rust interpreter is expected to receive one selected evaluated build request.
 
 Conceptually:
 
@@ -246,21 +247,31 @@ or:
 import "./custom-entry.ncl"
 ```
 
-Where the imported file is expected to evaluate to one selected closed artifact term,
+Where the imported file is expected to evaluate to one selected build request,
 for example:
 
 ```nickel
-let rec pkgs = { ... } in pkgs.zstd
+{
+  meta = {
+    name = "zstd",
+  },
+  build = let rec pkgs = { ... } in pkgs.zstd,
+}
 ```
 
 or:
 
 ```nickel
-let rec pkgs = { ... } in pkgs.zstdTerm.dev
+{
+  meta = {
+    name = "zstd-dev",
+  },
+  build = let rec pkgs = { ... } in pkgs.zstdTerm.dev,
+}
 ```
 
 The interpreter does not need the whole package namespace as a runtime lookup table.
-It only needs the selected closed term and the terms reachable from it.
+It only needs the selected request and the terms reachable from its `build` field.
 
 ## What This Sketch Intentionally Avoids
 

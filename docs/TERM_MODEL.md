@@ -8,16 +8,16 @@ The core idea is term-centric:
 
 - Nickel defines a pure program made of builder terms.
 - Primitive operations of that program are builder operations.
-- Rust receives one selected closed artifact term and interprets it.
+- Rust receives one selected evaluated build request, extracts its `build` term, and interprets it.
 - Store layout, hashing, and caching are implementation details of the interpreter.
 
 This is intentionally different from the current name-addressed recipe model.
 
 ## Layers
 
-There are three conceptually separate layers.
+There are four conceptually separate layers.
 
-### 1. Nickel language layer
+### 1. Nickel term layer
 
 Nickel is used to define a pure build program.
 
@@ -25,29 +25,67 @@ That program is composed from:
 
 - builder operations;
 - typed builder configuration values;
-- typed artifact dependencies;
+- typed object dependencies;
 - package sets and helper combinators.
 
 At this layer, users should think in terms of composing terms, not in terms of
-store paths, artifact hashes, or cache lookup.
+store paths, object hashes, or cache lookup.
 
-### 2. Interpreter layer
+### 2. Request layer
 
-Rust acts as an interpreter for the Nickel term.
+The runtime entrypoint is not a bare build term.
+
+Nickel evaluates to one build request of the conceptual shape:
+
+```nickel
+{
+  meta = {
+    name = "buildscript-coreutils",
+    description = "...",
+    aliases = [],
+  },
+  build = 'Text {
+    kind = "build-script",
+    source = "...",
+  },
+}
+```
+
+The key rule is:
+
+- `meta` is publication metadata;
+- `build` is the pure build term.
+
+This keeps builder operations pure and reusable while still giving the runtime a
+place to obtain publication metadata.
+
+### 3. Interpreter layer
+
+Rust acts as an interpreter for the Nickel build term.
 
 The interpreter is responsible for:
 
 - recursively evaluating dependencies embedded in the term structure;
 - validating builder-specific inputs;
-- computing hashes for builder invocations and resulting payloads;
-- checking whether results already exist in the store;
+- computing object hashes for resulting payloads;
+- checking whether objects already exist in the store;
 - executing builders on cache miss;
-- publishing resulting objects and artifacts into the CAS store.
+- publishing resulting objects, object metadata, and publication metadata.
 
-This means that store identity, object hashing, artifact hashing, caching, and
-reuse are runtime semantics of the interpreter, not part of the Nickel API.
+This means that store identity, object hashing, caching, and reuse are runtime
+semantics of the interpreter, not part of the Nickel API.
 
-### 3. Store layer
+The interpreter receives one selected request.
+
+From that request it extracts:
+
+- publication metadata in `meta`;
+- the build term in `build`.
+
+Builders consume only the build term and runtime context. They do not consume
+publication metadata directly.
+
+### 4. Store layer
 
 The CAS store is a persistence and caching mechanism for evaluated results.
 
@@ -58,7 +96,8 @@ Nickel authors describe _what to build_. The interpreter decides:
 - how to hash it;
 - how to cache it;
 - where to store it;
-- whether it needs to be rebuilt.
+- how to attach technical metadata;
+- how to publish it under human-facing names.
 
 ## Builder Terms
 
@@ -72,9 +111,9 @@ Example shape:
 'Binary {
   outputs = ["out", "dev"],
   optimize = "size",
-  image = imageArtifact,
-  script = builderScriptArtifact,
-  sources = [source1Artifact, source2Artifact],
+  image = imageObject,
+  script = builderScriptObject,
+  sources = [source1Object, source2Object],
 }
 ```
 
@@ -82,21 +121,22 @@ Important properties:
 
 - builder inputs and configuration live together as typed fields in the payload record;
 - the payload is one record, even if the conceptual operation has several arguments;
-- builder operations are pure terms and do not execute anything by themselves.
+- builder operations are pure terms and do not execute anything by themselves;
+- builder payloads do not contain publication metadata such as names.
 
-## Artifacts in Nickel
+## Objects in Nickel
 
-At the Nickel layer, an artifact is not a store object yet.
+At the Nickel layer, a built object is not a store object yet.
 
 It is better understood as a pure value that denotes a build result produced by
 some builder term.
 
 This document intentionally separates:
 
-- Nickel artifact terms;
-- realized artifacts stored in the CAS store.
+- Nickel object terms;
+- realized objects stored in the CAS store.
 
-The same word "artifact" may be used for both in discussion, but the distinction
+The same word "object" may be used for both in discussion, but the distinction
 must remain clear in implementation.
 
 ## Multi-Output Builders
@@ -108,7 +148,7 @@ Instead, the preferred model is:
 
 - a builder operation returns a bundle;
 - the bundle exposes named output projections;
-- each projection is itself an artifact term.
+- each projection is itself an object term.
 
 Example:
 
@@ -140,7 +180,7 @@ trying to infer the intended output from the field name.
 
 ## Package Sets
 
-`pkgs` is expected to be a Nickel record containing artifact terms or bundle
+`pkgs` is expected to be a Nickel record containing object terms or bundle
 projections.
 
 Example shape:
@@ -164,7 +204,7 @@ pkgs
 Important points:
 
 - package fields are a convenience layer for composition;
-- names in `pkgs` are not the runtime identity of artifacts;
+- names in `pkgs` are not object identity;
 - the dependency graph is induced by term structure, not by a global namespace lookup.
 
 ## Dependency Graph and Evaluation
@@ -173,48 +213,48 @@ The dependency graph exists structurally inside the term.
 
 For example, a binary builder term that embeds:
 
-- an image artifact term;
-- a build-script artifact term;
-- an array of source artifact terms;
+- an image object term;
+- a build-script object term;
+- an array of source object terms;
 
 already defines its dependency edges.
 
 The interpreter therefore does not need to build the graph from package names.
-It discovers the graph by recursively traversing the selected closed term.
+It discovers the graph by recursively traversing the selected closed `build` term.
 
 Cycle detection is still a runtime responsibility of the interpreter.
 The language model does not need to guarantee acyclicity statically.
 
-## Entry Term Selection
+## Entry Request Selection
 
 The intended CLI model is:
 
 - by default, `mbuild` reads `./.mbuild/recipe.ncl`;
-- that file is expected to evaluate to one selected closed artifact term or bundle projection;
+- that file is expected to evaluate to one selected request with fields `meta` and `build`;
 - the user may alternatively pass another Nickel file path on the command line.
 
 This entrypoint selection happens before interpretation.
 
-Rust still receives only one selected closed artifact term.
+Rust still receives only one selected request.
 
 ## Interpreter Algorithm
 
-Given one selected closed artifact term, the interpreter works conceptually as follows:
+Given one selected request, the interpreter works conceptually as follows:
 
-1. Receive the selected Nickel term.
-2. Inspect the top-level builder operation or output projection.
-3. Recursively interpret all embedded dependency terms.
-4. Obtain realized dependency artifacts for the current builder invocation.
-5. Compute the stable identity of the current builder invocation from:
-   - builder operation tag;
-   - typed builder payload;
-   - realized input artifacts;
-   - selected output projection, if applicable.
-6. Check the CAS store for an existing realized result.
-7. On cache hit, return the realized artifact.
-8. On cache miss, execute the corresponding registered builder.
-9. Publish resulting objects and artifact metadata to the CAS store.
-10. Return the realized artifact or output bundle to the caller.
+1. Receive the selected Nickel request.
+2. Extract the `meta` record and the `build` term.
+3. Inspect the top-level builder operation or output projection.
+4. Recursively interpret all embedded dependency terms.
+5. Obtain realized dependency objects for the current builder invocation.
+6. Compute the stable identity of the current result from the produced payload only.
+7. Check the CAS store for an existing object with the same `object-hash`.
+8. On cache hit, return the realized object.
+9. On cache miss, execute the corresponding registered builder.
+10. Publish:
+    - the resulting object in `objects/`;
+    - technical metadata in `meta/`;
+    - publication metadata and refs from the request `meta`.
+11. Return the realized object or output bundle to the caller.
 
 This is a recursive interpreter model, not a global name-resolution model.
 
@@ -238,48 +278,22 @@ be hard-coded into one permanently closed global enum design.
 
 ## Typed Builder Inputs
 
-The current model of untyped arrays of artifact names should evolve toward
+The current model of untyped arrays of object names should evolve toward
 builder-specific typed inputs.
 
 Example intent:
 
 - `Binary` takes:
   - builder-specific configuration fields in its payload record,
-  - one image artifact,
-  - one build-script artifact,
-  - an array of source artifacts;
+  - one image object,
+  - one build-script object,
+  - an array of source objects;
 - `Fetch` takes:
   - only builder-specific scalar/record fields in its payload record;
 - `Image` takes:
   - builder-specific configuration fields in its payload record,
-  - a base image artifact or image bundle input,
-  - an array of binary-output artifacts.
+  - a base image object or image bundle input,
+  - an array of binary-output objects.
 
 This should be expressed at the Nickel API level by the structure of each builder
 payload record and the contracts or types attached to it.
-
-## What Is Out of Scope Here
-
-This document does not define:
-
-- the exact CAS object or artifact JSON schema;
-- the exact hash canonicalization rules;
-- the exact on-disk store layout;
-- the final set of builder operation tags;
-- the exact encoding of open builder operation rows in Nickel;
-- the exact shape of the Rust/Nickel boundary.
-
-Those belong to lower-level design documents.
-
-## Design Direction
-
-The intended direction from this point is:
-
-1. define the user-facing Nickel model for builder terms and bundles;
-2. define the minimal artifact term abstraction exposed in Nickel;
-3. define how one closed artifact term is passed to Rust;
-4. implement a Rust interpreter for recursive term evaluation;
-5. attach CAS storage and caching semantics behind that interpreter.
-
-This keeps the user model simple and pushes operational complexity into the runtime,
-where it belongs.
