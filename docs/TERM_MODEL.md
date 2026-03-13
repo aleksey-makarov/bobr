@@ -70,7 +70,7 @@ The interpreter is responsible for:
 - computing object hashes for resulting payloads;
 - checking whether objects already exist in the store;
 - executing builders on cache miss;
-- publishing resulting objects, object metadata, and publication metadata.
+- publishing resulting objects and publication metadata.
 
 This means that store identity, object hashing, caching, and reuse are runtime
 semantics of the interpreter, not part of the Nickel API.
@@ -96,7 +96,7 @@ Nickel authors describe _what to build_. The interpreter decides:
 - how to hash it;
 - how to cache it;
 - where to store it;
-- how to attach technical metadata;
+- how to attach metadata to publications;
 - how to publish it under human-facing names.
 
 ## Builder Terms
@@ -169,37 +169,10 @@ Here `mFetch`, `mText`, `mBinary`, and similar names should be understood as
 convenient user-facing helper names for builder operations. Their concrete
 pseudo-definition is sketched later in [`NICKEL_SKETCH.md`](./NICKEL_SKETCH.md).
 
-This preserves the important semantics:
-
-- there is one underlying builder term;
-- that term may produce multiple outputs;
-- downstream users consume explicit output projections.
-
-This is preferred over assigning the same raw term to multiple package fields and
-trying to infer the intended output from the field name.
-
 ## Package Sets
 
 `pkgs` is expected to be a Nickel record containing object terms or bundle
 projections.
-
-Example shape:
-
-```nickel
-let rec pkgs = {
-  zstdSrc = mFetch { ... },
-  zstdScript = mText { ... },
-  zstdTerm = mBinary {
-    outputs = ["out", "dev"],
-    image = pkgs.bootstrapImage,
-    script = pkgs.zstdScript,
-    sources = [pkgs.zstdSrc],
-  },
-  zstd = pkgs.zstdTerm.out,
-  zstd_dev = pkgs.zstdTerm.dev,
-} in
-pkgs
-```
 
 Important points:
 
@@ -210,14 +183,6 @@ Important points:
 ## Dependency Graph and Evaluation
 
 The dependency graph exists structurally inside the term.
-
-For example, a binary builder term that embeds:
-
-- an image object term;
-- a build-script object term;
-- an array of source object terms;
-
-already defines its dependency edges.
 
 The interpreter therefore does not need to build the graph from package names.
 It discovers the graph by recursively traversing the selected closed `build` term.
@@ -252,8 +217,8 @@ Given one selected request, the interpreter works conceptually as follows:
 9. On cache miss, execute the corresponding registered builder.
 10. Publish:
     - the resulting object in `objects/`;
-    - technical metadata in `meta/`;
-    - publication metadata and refs from the request `meta`.
+    - one publication record in `meta-refs/`;
+    - one object ref in `object-refs/`.
 11. Return the realized object or output bundle to the caller.
 
 This is a recursive interpreter model, not a global name-resolution model.
@@ -267,14 +232,6 @@ The intended direction is:
 - Nickel terms use tagged builder operations;
 - the concrete set of supported tags is determined by registered builders in `mbuild`;
 - Rust maintains a registry from builder tag to interpreter implementation.
-
-Conceptually:
-
-- the language-level representation is open to extension;
-- the runtime can only interpret the operations that are actually registered.
-
-This gives an extensible architecture without requiring every possible builder to
-be hard-coded into one permanently closed global enum design.
 
 ## Typed Builder Inputs
 
@@ -294,6 +251,3 @@ Example intent:
   - builder-specific configuration fields in its payload record,
   - a base image object or image bundle input,
   - an array of binary-output objects.
-
-This should be expressed at the Nickel API level by the structure of each builder
-payload record and the contracts or types attached to it.

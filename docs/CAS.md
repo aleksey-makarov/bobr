@@ -7,10 +7,9 @@ entity:
 
 - `objects`: content-addressed payloads.
 
-Everything else is metadata:
+Everything else is non-identity publication state:
 
-- `meta`: technical metadata attached to an object;
-- `meta-refs`: publication metadata attached to a published name;
+- `meta-refs`: JSON metadata attached to one published name;
 - `object-refs`: human-facing symlinks to payload objects.
 
 The key rule is:
@@ -24,10 +23,9 @@ Locked decisions for v1:
 - scope: local store only;
 - internal runtime format for metadata: JSON;
 - object identity is only `object-hash`;
-- technical metadata is keyed by `object-hash`, but is not identity-bearing;
-- publication metadata is keyed by published name, but is not identity-bearing;
+- all metadata is non-identity and keyed by published name;
 - builders consume objects and metadata, not refs;
-- `meta-refs` and `object-refs` are human-facing publication state and are not used by builder dependency resolution;
+- `meta-refs` and `object-refs` are publication state and are not used by builder dependency resolution;
 - no `-name-version` in canonical store identity;
 - migration is a hard cutover;
 - `container-image` objects are descriptor files in v1;
@@ -39,10 +37,8 @@ Locked decisions for v1:
 .mbuild/
   objects/
     <object-hash>         # file or directory, this is the payload
-  meta/
-    <object-hash>.json    # technical metadata for one object
   meta-refs/
-    <name>.json           # publication metadata for one published name
+    <name>.json           # metadata for one published name
   object-refs/
     <name>                # human-facing symlink to ../objects/<object-hash>
   .. other builder-specific files and dirs ..
@@ -50,13 +46,12 @@ Locked decisions for v1:
 
 Notes:
 
-- This section defines only the CAS namespace and the publication/ref namespaces.
+- This section defines only the CAS namespace and the publication namespaces.
 - It does not define the full `.mbuild/` layout.
 - Each builder may own a same-named subdirectory under `.mbuild/` for builder-specific
   runtime state, temporary files, logs, and caches.
 - `.mbuild/objects/<object-hash>` is the payload itself, not a wrapper directory.
-- `.mbuild/meta/<object-hash>.json` is metadata about one object, not a second store entity.
-- `.mbuild/meta-refs/<name>.json` is metadata about one publication of an object.
+- `.mbuild/meta-refs/<name>.json` is mutable publication state, not a store entity.
 - refs are convenience views for a human or external scripts, not runtime dependency state.
 - old `.mbuild/artifacts`, old `.mbuild/meta`, and old `.mbuild/refs` layouts are not part of the new design.
 
@@ -99,43 +94,7 @@ Consequences:
 - identical payload with different provenance is still the same object;
 - payload deduplication happens automatically.
 
-## Metadata Records
-
-### Object metadata
-
-Object metadata is stored at:
-
-```text
-.mbuild/meta/<object-hash>.json
-```
-
-Recommended shape:
-
-```json
-{
-  "schema": "mbuild-meta-v1",
-  "object_hash": "sha256:...",
-  "kind": "build-script|source-tree|fetched-file|binary-output|container-image|...",
-  "producer": {
-    "builder": "text|fetch|binary|image|container-image|github"
-  },
-  "input_object_hashes": [
-    "sha256:..."
-  ],
-  "attrs": {}
-}
-```
-
-Rules:
-
-- the file is keyed by `object-hash`, not by its own hash;
-- object kind is derived from `.mbuild/objects/<object-hash>`, not duplicated here;
-- it may contain technical metadata and provenance;
-- it must not contain publication names or aliases;
-- it must not define identity;
-- it may be rewritten if the implementation later decides to normalize or enrich metadata for the same object.
-
-### Publication metadata
+## Publication Records
 
 Publication metadata is stored at:
 
@@ -147,10 +106,18 @@ Recommended shape:
 
 ```json
 {
-  "schema": "mbuild-publication-v1",
-  "name": "buildscript-coreutils",
+  "schema": "mbuild-meta-ref-v1",
   "object_hash": "sha256:...",
+  "kind": "build-script|source-tree|fetched-file|binary-output|container-image|...",
+  "producer": {
+    "builder": "text|fetch|binary|image|container-image|github"
+  },
+  "input_object_hashes": [
+    "sha256:..."
+  ],
+  "attrs": {},
   "meta": {
+    "name": "buildscript-coreutils",
     "description": "...",
     "aliases": []
   }
@@ -159,11 +126,12 @@ Recommended shape:
 
 Rules:
 
-- publication metadata is keyed by published name;
-- it may contain any human-facing fields derived from the Nickel request;
+- each file is keyed by the published name;
+- it may contain both builder-produced technical metadata and human-facing metadata derived from Nickel;
 - it must point at one `object_hash`;
 - it is mutable publication state, not a CAS entity;
-- multiple publication records may point at the same object.
+- multiple publication records may point at the same object;
+- the same `object_hash` may appear in publication records with different builders or provenance.
 
 ### Object refs
 
@@ -194,15 +162,15 @@ Resolution flow:
 
 1. Rust receives one selected evaluated build request from the Nickel layer.
 2. That request contains:
-   - publication metadata in `meta`;
+   - requested publication metadata in `meta`;
    - one selected closed build term in `build`.
 3. The interpreter recursively evaluates embedded dependency terms.
-4. Dependency evaluation yields realized input objects plus their technical metadata.
+4. Dependency evaluation yields realized input objects plus any metadata already attached to their selected publications.
 5. Runtime passes those resolved inputs into the builder.
 6. When the builder publishes an output, runtime creates:
    - a new object in `objects/`;
-   - technical metadata in `meta/`;
-   - publication records and refs from the request metadata.
+   - one publication record in `meta-refs/` that merges builder-produced metadata with request `meta`;
+   - one ref in `object-refs/`.
 
 There is no persistent runtime namespace of names inside the store.
 
@@ -212,17 +180,17 @@ Builders never receive refs as their contract.
 
 Builders should operate on:
 
-- object metadata for semantic input validation;
+- metadata attached to selected input publications for semantic input validation;
 - object payload paths for actual file access;
-- object metadata as the output publication unit.
+- metadata records as the output publication unit.
 
 Conceptually:
 
 - builders consume objects;
 - builders read payloads through their `object-hash`;
 - builders emit new payloads, which become objects;
-- builders emit technical metadata records that point to those objects;
-- runtime handles publication metadata and refs.
+- builders emit metadata for the new publication;
+- runtime merges that with request `meta` and writes `meta-refs`.
 
 ## `container-image` Representation
 
@@ -241,8 +209,8 @@ JSON descriptor, for example:
 Rules:
 
 - the payload is still an object and gets an `object-hash` like any other file;
-- `meta/<object-hash>.json` carries the semantic type and provenance;
-- `binary` consumes the resolved object plus its metadata;
+- the publication record carries semantic type and provenance;
+- `binary` consumes the resolved object plus its selected publication metadata;
 - a future OCI-in-store design may replace only the object payload representation.
 
 ## Builder-Specific Expectations
@@ -258,13 +226,13 @@ Rules:
 
 - output is usually a file object;
 - executable mode for `build-script` must be part of object hashing;
-- object metadata attrs may include stable fields such as `source_bytes`.
+- publication metadata attrs may include stable fields such as `source_bytes`.
 
 ### `fetch`
 
 - downloaded blob cache remains in `.mbuild/fetch/cache`;
 - unpacked or raw result becomes an object;
-- object metadata attrs should carry:
+- publication metadata attrs should carry:
   - source URL that succeeded;
   - declared hash from recipe;
   - unpack flag;
@@ -275,7 +243,7 @@ Rules:
 
 - mirror state remains external in `.mbuild/github/mirrors`;
 - exported checkout becomes a directory object;
-- object metadata attrs should carry:
+- publication metadata attrs should carry:
   - owner;
   - repo;
   - rev.
@@ -285,7 +253,7 @@ Rules:
 - builder-specific runtime state lives under `.mbuild/binary/`;
 - output staging remains in `.mbuild/binary/tmp`;
 - each declared output directory becomes an object;
-- object metadata attrs should carry:
+- publication metadata attrs should carry:
   - install ownership policy;
   - ordered input object hashes;
   - any stable install-related data needed by downstream image assembly;
@@ -294,7 +262,7 @@ Rules:
 ### `image` and `container-image`
 
 - output payload is a file object containing the image descriptor in v1;
-- object metadata carries semantic type and provenance;
+- publication metadata carries semantic type and provenance;
 - output names do not affect object identity.
 
 ## CLI Implications
@@ -326,13 +294,13 @@ Additional commands may exist for:
 - object kind;
 - builder;
 - input object count;
-- published names that currently point at this object, if available.
+- the current publication name and selected metadata, if available.
 
 The exact CLI spelling is not fixed by this document.
 
 ## Cutover Rules
 
-- new runtime reads and writes only the new object/meta/publication layout;
+- new runtime reads and writes only the new object/publication layout;
 - old `.mbuild/artifacts`, old `.mbuild/meta`, and old `.mbuild/refs` are ignored;
 - old name-addressed payloads are ignored;
 - no automatic migration is required;
@@ -350,17 +318,12 @@ The exact CLI spelling is not fixed by this document.
 - changing symlink target changes `object-hash`;
 - changing uid/gid/mtime does not change `object-hash`.
 
-### Object metadata
-
-- the same object may have technical metadata written at `.mbuild/meta/<object-hash>.json`;
-- changing metadata does not change `object-hash`;
-- technical metadata does not contain publication names.
-
 ### Publication metadata and refs
 
 - building a named request updates `.mbuild/meta-refs/<name>.json`;
 - building a named request updates `.mbuild/object-refs/<name>`;
 - multiple names may point at the same `object-hash`;
+- the same `object-hash` may appear in publication records with different builders or provenance;
 - changing publication metadata does not change `object-hash`;
 - removing refs does not change store semantics;
 - runtime resolves dependencies from the selected term structure, not from refs.
@@ -370,7 +333,7 @@ The exact CLI spelling is not fixed by this document.
 - `text` preserves executable build scripts through object hashing;
 - `fetch` deduplicates identical payloads under the same `object-hash`;
 - `binary` consumes resolved objects and reads payloads through `object-hash`;
-- `image` and `container-image` publish descriptor file objects and matching object metadata.
+- `image` and `container-image` publish descriptor file objects and matching publication records.
 
 ### Cutover
 

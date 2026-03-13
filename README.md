@@ -9,11 +9,11 @@ extensible through a runtime registry, and Nix-like package-level override stays
 in the Nickel layer instead of leaking into the execution model.
 
 Realized results are stored in a local content-addressed store where identity is
-determined only by payload content. Technical metadata and publication metadata
-are kept separately and do not participate in identity, while builder-specific
-runtime state lives under per-builder directories in `.mbuild/`. Hashing,
-caching, dependency resolution, and store publication are interpreter details
-rather than part of the user-facing Nickel API.
+determined only by payload content. All metadata remains non-identity data and
+is attached at publication time, while builder-specific runtime state lives
+under per-builder directories in `.mbuild/`. Hashing, caching, dependency
+resolution, and store publication are interpreter details rather than part of
+the user-facing Nickel API.
 
 For the current architecture notes and design drafts, start with
 [`docs/INDEX.md`](./docs/INDEX.md).

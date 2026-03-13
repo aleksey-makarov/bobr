@@ -15,7 +15,7 @@
    Read this before the CAS details if you want the concrete object hashing rules. It defines the standalone structural hashing model shared by filesystem paths and tar archives.
 
 5. [CAS.md](./CAS.md)  
-   Read this after the term model is clear. It defines the content-addressed store, object identity by content, object metadata, publication metadata, refs, and builder-specific runtime state boundaries.
+   Read this after the term model is clear. It defines the content-addressed store, object identity by content, publication records, refs, and builder-specific runtime state boundaries.
 
 6. [OVERRIDE_MODEL.md](./OVERRIDE_MODEL.md)  
    Read this last as a forward-looking extension. It describes how Nix-like override support can live in the Nickel layer without changing the core interpreter/CAS split.

@@ -7,7 +7,7 @@ This document defines the intended user-facing Nickel model for `mbuild`.
 It connects:
 
 - the term-centric execution model from [`TERM_MODEL.md`](./TERM_MODEL.md);
-- the object store and metadata model from [`CAS.md`](./CAS.md).
+- the object store and publication model from [`CAS.md`](./CAS.md).
 
 The Nickel layer should expose a pure API for composing builder terms. Users write
 Nickel programs in terms of objects, builder operations, and output bundles. The
@@ -81,11 +81,11 @@ Minimal conceptual shape:
 Semantics:
 
 - `build` is the pure build term interpreted by Rust;
-- `meta` is publication metadata used to publish refs and human-facing descriptions;
+- `meta` is metadata used to publish refs and human-facing descriptions;
 - `meta` is not part of builder semantics;
 - `meta` does not affect object identity.
 
-This lets the runtime create rich publication records without polluting builder
+This lets the runtime create publication records without polluting builder
 terms with non-semantic metadata.
 
 ## Builder Results
@@ -98,8 +98,6 @@ Conceptually:
 
 - `mFetch : FetchPayload -> Object SourceTree`
 - `mText : TextPayload -> Object BuildScript`
-
-The exact Nickel type syntax may differ, but the semantic model should be this direct.
 
 ### Multi-output builders
 
@@ -127,9 +125,6 @@ Rules:
 - users consume projections like ordinary record fields;
 - field names on the bundle are the builder-declared output labels.
 
-This is the preferred user-facing API over an explicit `selectOutput(term, "out")`
-operation.
-
 ## Package Sets
 
 `pkgs` is a Nickel record that contains:
@@ -137,27 +132,6 @@ operation.
 - object terms;
 - bundle records returned by multi-output builders;
 - helper values and configuration records.
-
-Example:
-
-```nickel
-let rec pkgs = {
-  bootstrapImage = mContainerImage { ... },
-  zstdSrc = mFetch { ... },
-  zstdScript = mText { ... },
-
-  zstdTerm = mBinary {
-    outputs = ["out", "dev"],
-    image = pkgs.bootstrapImage,
-    script = pkgs.zstdScript,
-    sources = [pkgs.zstdSrc],
-  },
-
-  zstd = pkgs.zstdTerm.out,
-  zstd_dev = pkgs.zstdTerm.dev,
-} in
-pkgs
-```
 
 Important properties:
 
@@ -175,9 +149,6 @@ The design direction is:
 - the Nickel layer uses tagged builder operations;
 - the concrete supported builder tags are determined by the registered builders in `mbuild`;
 - Rust maintains a registry from builder tag to interpreter implementation.
-
-This means the user-facing language model should not assume one permanently closed
-global set of builder operations.
 
 ## Typed Builder Inputs
 
@@ -228,7 +199,6 @@ Those belong to the interpreter and store layers.
 The interpreter is responsible for translating Nickel object terms into:
 
 - realized objects in `.mbuild/objects`;
-- technical metadata in `.mbuild/meta`;
 - publication records in `.mbuild/meta-refs`;
 - human-facing object refs in `.mbuild/object-refs`.
 
