@@ -115,7 +115,6 @@ Recommended shape:
 {
   "schema": "mbuild-meta-v1",
   "object_hash": "sha256:...",
-  "object_kind": "file|directory",
   "kind": "build-script|source-tree|fetched-file|binary-output|container-image|...",
   "producer": {
     "builder": "text|fetch|binary|image|container-image|github"
@@ -130,6 +129,7 @@ Recommended shape:
 Rules:
 
 - the file is keyed by `object-hash`, not by its own hash;
+- object kind is derived from `.mbuild/objects/<object-hash>`, not duplicated here;
 - it may contain technical metadata and provenance;
 - it must not contain publication names or aliases;
 - it must not define identity;
