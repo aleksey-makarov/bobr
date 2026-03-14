@@ -2,12 +2,11 @@
 
 ## Summary
 
-`mbuild` evaluates Nickel build terms and realizes their results as content-addressed
-objects.
+`mbuild` realizes build requests as content-addressed objects.
 
-Nickel defines the build program. Rust interprets one selected evaluated build
-request. Store layout, hashing, build recording, and caching are interpreter
-concerns.
+Nickel may define the build program, but `mbuild` itself consumes an already
+materialized build request. Store layout, hashing, build recording, and caching
+are interpreter concerns.
 
 ## Layers
 
@@ -25,7 +24,7 @@ hashes, build keys, or cache lookup.
 
 ### 2. Request Layer
 
-The runtime entrypoint is one build request, not a bare build term.
+A build request is the runtime entrypoint, not a bare build term.
 
 A build request has the shape:
 
@@ -143,13 +142,11 @@ names.
 
 Cycle detection is a runtime responsibility of the interpreter.
 
-## Entry Request Selection
+## Request Selection
 
-`mbuild` reads `./.mbuild/recipe.ncl` by default.
-
-That file evaluates to one request with fields `meta` and `build`.
-
-Another Nickel file may be selected explicitly.
+`mbuild` reads one serialized build request either from
+`./.mbuild/request.json` by default or from an explicitly selected
+build-request JSON file.
 
 ## Interpreter Algorithm
 

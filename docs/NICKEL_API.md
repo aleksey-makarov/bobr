@@ -49,7 +49,7 @@ Rules:
 
 ## Top-Level Build Request
 
-The runtime entrypoint is one evaluated build request.
+The runtime entrypoint is one build request.
 
 Shape:
 
@@ -73,6 +73,7 @@ Semantics:
 - `meta` is metadata used to publish refs and human-facing descriptions
 - `meta` does not affect object identity
 - `meta` does not affect build-record identity
+- `mbuild` consumes this request as plain data and does not evaluate Nickel itself
 
 ## Builder Results
 
@@ -136,8 +137,9 @@ Examples:
 
 The Rust interpreter receives one selected build request.
 
-By default `mbuild` reads `./.mbuild/recipe.ncl`. Another Nickel file may be
-selected explicitly.
+`mbuild` reads one serialized build request either from
+`./.mbuild/request.json` by default or from an explicitly selected
+build-request JSON file.
 
 The selected request contains `meta` and `build`. Rust interprets `build`
 recursively and uses `meta` only for publication.

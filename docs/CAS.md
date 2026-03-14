@@ -254,8 +254,9 @@ record carries the semantic type and provenance for that object.
 
 ## CLI View
 
-`mbuild` reads one evaluated build request from `./.mbuild/recipe.ncl` by
-default. Another Nickel file may be passed explicitly.
+`mbuild` reads one serialized build request either from
+`./.mbuild/request.json` by default or from an explicitly selected
+build-request JSON file.
 
 The selected request has fields:
 
