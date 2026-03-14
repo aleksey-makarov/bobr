@@ -533,6 +533,419 @@ mod tests {
     }
 
     #[test]
+    fn publish_output_writes_build_record_and_refs() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let stage = temp.path().join("script.sh");
+        fs::write(&stage, b"echo hi\n").unwrap();
+        let published = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "script".to_string(),
+                staged_path: stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_object_hashes: vec![parse_object_hash(
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                )],
+                attrs: Map::from_iter([
+                    ("source_bytes".to_string(), Value::from(8)),
+                    ("generated".to_string(), Value::from(false)),
+                ]),
+            },
+        )
+        .unwrap();
+
+        let build_path = layout
+            .builds
+            .join(format!("{}.json", published.build_key.to_prefixed_hex()));
+        assert!(build_path.exists());
+
+        let build_json: Value = serde_json::from_slice(&fs::read(&build_path).unwrap()).unwrap();
+        assert_eq!(build_json["schema"], Value::String(BUILD_SCHEMA.to_string()));
+        assert_eq!(
+            build_json["object_hash"],
+            Value::String(published.object_hash.to_string())
+        );
+        assert_eq!(build_json["kind"], Value::String("build-script".to_string()));
+        assert_eq!(
+            build_json["producer"]["builder"],
+            Value::String("text".to_string())
+        );
+        assert_eq!(
+            build_json["input_object_hashes"],
+            Value::Array(vec![Value::String(
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                    .to_string(),
+            )])
+        );
+        assert_eq!(build_json["attrs"]["source_bytes"], Value::from(8));
+        assert_eq!(build_json["attrs"]["generated"], Value::from(false));
+
+        assert_eq!(
+            fs::read_link(layout.meta_refs.join("script.json")).unwrap(),
+            PathBuf::from("..")
+                .join(BUILDS_DIR)
+                .join(format!("{}.json", published.build_key.to_prefixed_hex()))
+        );
+        assert_eq!(
+            fs::read_link(layout.object_refs.join("script")).unwrap(),
+            PathBuf::from("..")
+                .join(OBJECTS_DIR)
+                .join(published.object_hash.to_prefixed_hex())
+        );
+    }
+
+    #[test]
+    fn same_object_different_metadata_produces_different_build_key() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let first_stage = temp.path().join("first.txt");
+        fs::write(&first_stage, b"hello").unwrap();
+        let first = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "first".to_string(),
+                staged_path: first_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_object_hashes: vec![],
+                attrs: Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
+            },
+        )
+        .unwrap();
+
+        let second_stage = temp.path().join("second.txt");
+        fs::write(&second_stage, b"hello").unwrap();
+        let second = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "second".to_string(),
+                staged_path: second_stage,
+                kind: "source-tree".to_string(),
+                producer_builder: "text".to_string(),
+                input_object_hashes: vec![],
+                attrs: Map::from_iter([(String::from("source_bytes"), Value::from(6))]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.object_hash, second.object_hash);
+        assert_ne!(first.build_key, second.build_key);
+    }
+
+    #[test]
+    fn build_key_changes_when_kind_changes() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let first_stage = temp.path().join("first.txt");
+        fs::write(&first_stage, b"hello").unwrap();
+        let first = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "kind-a".to_string(),
+                staged_path: first_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_object_hashes: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        let second_stage = temp.path().join("second.txt");
+        fs::write(&second_stage, b"hello").unwrap();
+        let second = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "kind-b".to_string(),
+                staged_path: second_stage,
+                kind: "source-tree".to_string(),
+                producer_builder: "text".to_string(),
+                input_object_hashes: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.object_hash, second.object_hash);
+        assert_ne!(first.build_key, second.build_key);
+    }
+
+    #[test]
+    fn build_key_changes_when_producer_builder_changes() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let first_stage = temp.path().join("first.txt");
+        fs::write(&first_stage, b"hello").unwrap();
+        let first = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "producer-a".to_string(),
+                staged_path: first_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_object_hashes: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        let second_stage = temp.path().join("second.txt");
+        fs::write(&second_stage, b"hello").unwrap();
+        let second = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "producer-b".to_string(),
+                staged_path: second_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "fetch".to_string(),
+                input_object_hashes: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.object_hash, second.object_hash);
+        assert_ne!(first.build_key, second.build_key);
+    }
+
+    #[test]
+    fn publish_output_replaces_existing_refs() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let first_stage = temp.path().join("first.txt");
+        fs::write(&first_stage, b"hello").unwrap();
+        let first = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "shared".to_string(),
+                staged_path: first_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_object_hashes: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        let second_stage = temp.path().join("second.txt");
+        fs::write(&second_stage, b"hello world").unwrap();
+        let second = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "shared".to_string(),
+                staged_path: second_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_object_hashes: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        assert_ne!(first.object_hash, second.object_hash);
+        assert_ne!(first.build_key, second.build_key);
+        assert_eq!(
+            fs::read_link(layout.object_refs.join("shared")).unwrap(),
+            PathBuf::from("..")
+                .join(OBJECTS_DIR)
+                .join(second.object_hash.to_prefixed_hex())
+        );
+        assert_eq!(
+            fs::read_link(layout.meta_refs.join("shared.json")).unwrap(),
+            PathBuf::from("..")
+                .join(BUILDS_DIR)
+                .join(format!("{}.json", second.build_key.to_prefixed_hex()))
+        );
+    }
+
+    #[test]
+    fn invalid_output_name_is_rejected() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        for invalid_name in ["", ".", "..", "bad/name", "bad name"] {
+            let stage = temp.path().join(format!(
+                "invalid-{}.txt",
+                invalid_name.replace(['/', ' '], "_")
+            ));
+            fs::write(&stage, b"hello").unwrap();
+
+            let error = publish_output(
+                &layout,
+                PublishOutputRequest {
+                    output_name: invalid_name.to_string(),
+                    staged_path: stage,
+                    kind: "build-script".to_string(),
+                    producer_builder: "text".to_string(),
+                    input_object_hashes: vec![],
+                    attrs: Map::new(),
+                },
+            )
+            .unwrap_err();
+
+            assert!(matches!(error, CasError::InvalidInput(_)));
+        }
+    }
+
+    #[test]
+    fn publish_output_accepts_directory_objects() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let stage_dir = temp.path().join("tree");
+        fs::create_dir_all(stage_dir.join("bin")).unwrap();
+        fs::write(stage_dir.join("bin").join("tool"), b"echo hi\n").unwrap();
+
+        let published = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "tree".to_string(),
+                staged_path: stage_dir,
+                kind: "source-tree".to_string(),
+                producer_builder: "fetch".to_string(),
+                input_object_hashes: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        let object_path = layout.objects.join(published.object_hash.to_prefixed_hex());
+        assert!(object_path.is_dir());
+        assert!(object_path.join("bin").join("tool").exists());
+        assert!(
+            layout
+                .builds
+                .join(format!("{}.json", published.build_key.to_prefixed_hex()))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn existing_object_reuse_removes_staged_path() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let first_stage = temp.path().join("first.txt");
+        fs::write(&first_stage, b"hello").unwrap();
+        publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "first".to_string(),
+                staged_path: first_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_object_hashes: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        let second_stage = temp.path().join("second.txt");
+        fs::write(&second_stage, b"hello").unwrap();
+        let second_stage_path = second_stage.clone();
+        publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "second".to_string(),
+                staged_path: second_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_object_hashes: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        assert!(!second_stage_path.exists());
+    }
+
+    #[test]
+    fn build_key_changes_when_input_object_hash_order_changes() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let hash_a = parse_object_hash(
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        );
+        let hash_b = parse_object_hash(
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        );
+
+        let first_stage = temp.path().join("first.txt");
+        fs::write(&first_stage, b"hello").unwrap();
+        let first = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "ordered-ab".to_string(),
+                staged_path: first_stage,
+                kind: "binary-output".to_string(),
+                producer_builder: "binary".to_string(),
+                input_object_hashes: vec![hash_a, hash_b],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        let second_stage = temp.path().join("second.txt");
+        fs::write(&second_stage, b"hello").unwrap();
+        let second = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "ordered-ba".to_string(),
+                staged_path: second_stage,
+                kind: "binary-output".to_string(),
+                producer_builder: "binary".to_string(),
+                input_object_hashes: vec![hash_b, hash_a],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.object_hash, second.object_hash);
+        assert_ne!(first.build_key, second.build_key);
+    }
+
+    #[test]
+    fn discover_in_cwd_creates_full_layout() {
+        let temp = tempdir().unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let layout = StoreLayout::discover_in_cwd().unwrap();
+
+        std::env::set_current_dir(old_cwd).unwrap();
+
+        assert_eq!(layout.root, temp.path().join(ROOT_DIR));
+        assert!(layout.objects.is_dir());
+        assert!(layout.builds.is_dir());
+        assert!(layout.meta_refs.is_dir());
+        assert!(layout.object_refs.is_dir());
+    }
+
+    #[test]
+    fn build_key_display_and_parse_roundtrip() {
+        let key = BuildKey::from_str(
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+
+        assert_eq!(
+            key.to_string(),
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            BuildKey::from_str(&key.to_string()).unwrap().as_bytes(),
+            key.as_bytes()
+        );
+    }
+
+    #[test]
     fn executable_bit_changes_object_hash_but_not_store_layout_rules() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
