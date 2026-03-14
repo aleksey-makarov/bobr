@@ -91,7 +91,7 @@ struct FetchRecipe {
     #[serde(default)]
     archive_format: Option<ArchiveFormat>,
     #[serde(default)]
-    artifact_kind: Option<String>,
+    kind: Option<String>,
     #[serde(default)]
     outputs: Vec<String>,
 }
@@ -119,7 +119,7 @@ impl Builder for FetchBuilder {
         let (cached_blob, source_url) =
             ensure_cached_blob(&layout, &urls, &expected_hash).map_err(map_error)?;
 
-        let artifact_kind = recipe.artifact_kind.clone().unwrap_or_else(|| {
+        let kind = recipe.kind.clone().unwrap_or_else(|| {
             if recipe.unpack {
                 "source-tree".to_string()
             } else {
@@ -132,7 +132,7 @@ impl Builder for FetchBuilder {
                 &layout,
                 output_id,
                 &recipe,
-                &artifact_kind,
+                &kind,
                 &cached_blob,
                 &source_url,
             )
@@ -493,7 +493,7 @@ fn publish_fetch_output(
     layout: &WorkspaceLayout,
     output_id: &str,
     recipe: &FetchRecipe,
-    artifact_kind: &str,
+    kind: &str,
     cached_blob: &Path,
     source_url: &str,
 ) -> FResult<()> {
@@ -505,7 +505,7 @@ fn publish_fetch_output(
             layout,
             output_id,
             recipe,
-            artifact_kind,
+            kind,
             cached_blob,
             format,
             source_url,
@@ -515,7 +515,7 @@ fn publish_fetch_output(
             layout,
             output_id,
             recipe,
-            artifact_kind,
+            kind,
             cached_blob,
             source_url,
         )
@@ -526,7 +526,7 @@ fn publish_file_output(
     layout: &WorkspaceLayout,
     output_id: &str,
     recipe: &FetchRecipe,
-    artifact_kind: &str,
+    kind: &str,
     cached_blob: &Path,
     source_url: &str,
 ) -> FResult<()> {
@@ -568,9 +568,9 @@ fn publish_file_output(
         PublishOutputRequest {
             output_name: output_id.to_string(),
             staged_path: tmp_path,
-            artifact_kind: artifact_kind.to_string(),
+            kind: kind.to_string(),
             producer_builder: "fetch".to_string(),
-            input_artifact_hashes: vec![],
+            input_object_hashes: vec![],
             attrs,
         },
     )
@@ -579,7 +579,7 @@ fn publish_file_output(
     println!("publish: ok");
     println!("output: {output_id}");
     println!("object_hash: {}", published.object_hash);
-    println!("artifact_hash: {}", published.artifact_hash);
+    println!("build_key: {}", published.build_key);
 
     Ok(())
 }
@@ -588,7 +588,7 @@ fn publish_archive_output(
     layout: &WorkspaceLayout,
     output_id: &str,
     recipe: &FetchRecipe,
-    artifact_kind: &str,
+    kind: &str,
     cached_blob: &Path,
     format: ArchiveFormat,
     source_url: &str,
@@ -631,9 +631,9 @@ fn publish_archive_output(
         PublishOutputRequest {
             output_name: output_id.to_string(),
             staged_path: tmp_dir,
-            artifact_kind: artifact_kind.to_string(),
+            kind: kind.to_string(),
             producer_builder: "fetch".to_string(),
-            input_artifact_hashes: vec![],
+            input_object_hashes: vec![],
             attrs,
         },
     )
@@ -642,7 +642,7 @@ fn publish_archive_output(
     println!("publish: ok");
     println!("output: {output_id}");
     println!("object_hash: {}", published.object_hash);
-    println!("artifact_hash: {}", published.artifact_hash);
+    println!("build_key: {}", published.build_key);
 
     Ok(())
 }

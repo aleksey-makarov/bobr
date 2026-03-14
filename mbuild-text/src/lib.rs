@@ -41,7 +41,7 @@ type TResult<T> = Result<T, TextError>;
 struct TextRecipe {
     #[serde(rename = "type")]
     recipe_type: String,
-    artifact_kind: String,
+    kind: String,
     #[serde(default)]
     outputs: Vec<String>,
     #[serde(default)]
@@ -65,8 +65,7 @@ impl Builder for TextBuilder {
         let outputs = resolve_outputs(artifact, &recipe).map_err(map_error)?;
 
         for (output_name, source_text) in outputs {
-            publish_one(&layout, &output_name, &recipe.artifact_kind, &source_text)
-                .map_err(map_error)?;
+            publish_one(&layout, &output_name, &recipe.kind, &source_text).map_err(map_error)?;
         }
 
         println!("build: ok");
@@ -80,7 +79,7 @@ impl Builder for TextBuilder {
         recipe: &Value,
     ) -> Result<Vec<(&'static str, String)>, BuilderError> {
         let recipe = parse_recipe(recipe)?;
-        Ok(vec![("artifact_kind", recipe.artifact_kind)])
+        Ok(vec![("kind", recipe.kind)])
     }
 }
 
@@ -98,9 +97,9 @@ fn validate_recipe(recipe: &TextRecipe) -> TResult<()> {
         return Err(TextError::InvalidRecipe("type must be 'text'".to_string()));
     }
 
-    if recipe.artifact_kind.is_empty() {
+    if recipe.kind.is_empty() {
         return Err(TextError::InvalidRecipe(
-            "artifact_kind must not be empty".to_string(),
+            "kind must not be empty".to_string(),
         ));
     }
 
@@ -170,7 +169,7 @@ fn resolve_outputs(artifact: &str, recipe: &TextRecipe) -> TResult<Vec<(String, 
 fn publish_one(
     layout: &WorkspaceLayout,
     output_name: &str,
-    artifact_kind: &str,
+    kind: &str,
     source_text: &str,
 ) -> TResult<()> {
     validate_name(output_name)?;
@@ -196,7 +195,7 @@ fn publish_one(
         ))
     })?;
     #[cfg(unix)]
-    if artifact_kind == "build-script" {
+    if kind == "build-script" {
         let perms = fs::Permissions::from_mode(0o755);
         fs::set_permissions(&tmp_path, perms).map_err(|error| {
             TextError::PublishFailed(format!(
@@ -217,9 +216,9 @@ fn publish_one(
         PublishOutputRequest {
             output_name: output_name.to_string(),
             staged_path: tmp_path,
-            artifact_kind: artifact_kind.to_string(),
+            kind: kind.to_string(),
             producer_builder: "text".to_string(),
-            input_artifact_hashes: vec![],
+            input_object_hashes: vec![],
             attrs,
         },
     )
@@ -229,7 +228,7 @@ fn publish_one(
     println!("output: {output_name}");
     println!("source_bytes: {}", source_text.len());
     println!("object_hash: {}", published.object_hash);
-    println!("artifact_hash: {}", published.artifact_hash);
+    println!("build_key: {}", published.build_key);
     Ok(())
 }
 

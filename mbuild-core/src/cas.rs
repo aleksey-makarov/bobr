@@ -10,17 +10,17 @@ use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-const ARTIFACT_SCHEMA: &str = "mbuild-artifact-v1";
+const BUILD_SCHEMA: &str = "mbuild-build-v1";
 const ROOT_DIR: &str = ".mbuild";
 const OBJECTS_DIR: &str = "objects";
-const ARTIFACTS_DIR: &str = "artifacts";
+const BUILDS_DIR: &str = "builds";
 const OBJECT_REFS_DIR: &str = "object-refs";
-const ARTIFACT_REFS_DIR: &str = "artifact-refs";
+const META_REFS_DIR: &str = "meta-refs";
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ArtifactHash([u8; 32]);
+pub struct BuildKey([u8; 32]);
 
-impl ArtifactHash {
+impl BuildKey {
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -39,7 +39,7 @@ impl ArtifactHash {
     }
 }
 
-impl fmt::Display for ArtifactHash {
+impl fmt::Display for BuildKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("sha256:")?;
         for byte in self.0 {
@@ -49,22 +49,22 @@ impl fmt::Display for ArtifactHash {
     }
 }
 
-impl fmt::Debug for ArtifactHash {
+impl fmt::Debug for BuildKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ArtifactHash")
+        f.debug_tuple("BuildKey")
             .field(&self.to_prefixed_hex())
             .finish()
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParseArtifactHashError {
+pub enum ParseBuildKeyError {
     MissingPrefix,
     InvalidLength,
     InvalidHex,
 }
 
-impl fmt::Display for ParseArtifactHashError {
+impl fmt::Display for ParseBuildKeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingPrefix => f.write_str("missing sha256: prefix"),
@@ -74,29 +74,29 @@ impl fmt::Display for ParseArtifactHashError {
     }
 }
 
-impl std::error::Error for ParseArtifactHashError {}
+impl std::error::Error for ParseBuildKeyError {}
 
-impl FromStr for ArtifactHash {
-    type Err = ParseArtifactHashError;
+impl FromStr for BuildKey {
+    type Err = ParseBuildKeyError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let hex = s
             .strip_prefix("sha256:")
-            .ok_or(ParseArtifactHashError::MissingPrefix)?;
+            .ok_or(ParseBuildKeyError::MissingPrefix)?;
         if hex.len() != 64 {
-            return Err(ParseArtifactHashError::InvalidLength);
+            return Err(ParseBuildKeyError::InvalidLength);
         }
         if !hex
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
-            return Err(ParseArtifactHashError::InvalidHex);
+            return Err(ParseBuildKeyError::InvalidHex);
         }
 
         let mut bytes = [0u8; 32];
         for (idx, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
-            let hi = decode_nibble(chunk[0]).ok_or(ParseArtifactHashError::InvalidHex)?;
-            let lo = decode_nibble(chunk[1]).ok_or(ParseArtifactHashError::InvalidHex)?;
+            let hi = decode_nibble(chunk[0]).ok_or(ParseBuildKeyError::InvalidHex)?;
+            let lo = decode_nibble(chunk[1]).ok_or(ParseBuildKeyError::InvalidHex)?;
             bytes[idx] = (hi << 4) | lo;
         }
         Ok(Self(bytes))
@@ -136,9 +136,9 @@ impl std::error::Error for CasError {}
 pub struct StoreLayout {
     pub root: PathBuf,
     pub objects: PathBuf,
-    pub artifacts: PathBuf,
+    pub builds: PathBuf,
     pub object_refs: PathBuf,
-    pub artifact_refs: PathBuf,
+    pub meta_refs: PathBuf,
 }
 
 impl StoreLayout {
@@ -146,9 +146,9 @@ impl StoreLayout {
         let layout = Self {
             root: root.to_path_buf(),
             objects: root.join(OBJECTS_DIR),
-            artifacts: root.join(ARTIFACTS_DIR),
+            builds: root.join(BUILDS_DIR),
             object_refs: root.join(OBJECT_REFS_DIR),
-            artifact_refs: root.join(ARTIFACT_REFS_DIR),
+            meta_refs: root.join(META_REFS_DIR),
         };
         layout.ensure()?;
         Ok(layout)
@@ -163,9 +163,9 @@ impl StoreLayout {
     fn ensure(&self) -> Result<(), CasError> {
         ensure_dir(&self.root, "mbuild root")?;
         ensure_dir(&self.objects, "objects")?;
-        ensure_dir(&self.artifacts, "artifacts")?;
+        ensure_dir(&self.builds, "builds")?;
         ensure_dir(&self.object_refs, "object-refs")?;
-        ensure_dir(&self.artifact_refs, "artifact-refs")?;
+        ensure_dir(&self.meta_refs, "meta-refs")?;
         Ok(())
     }
 }
@@ -174,16 +174,16 @@ impl StoreLayout {
 pub struct PublishOutputRequest {
     pub output_name: String,
     pub staged_path: PathBuf,
-    pub artifact_kind: String,
+    pub kind: String,
     pub producer_builder: String,
-    pub input_artifact_hashes: Vec<ArtifactHash>,
+    pub input_object_hashes: Vec<ObjectHash>,
     pub attrs: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct PublishedOutput {
     pub object_hash: ObjectHash,
-    pub artifact_hash: ArtifactHash,
+    pub build_key: BuildKey,
 }
 
 pub fn publish_output(
@@ -193,45 +193,39 @@ pub fn publish_output(
     validate_output_name(&request.output_name)?;
     let object_hash = import_object(layout, &request.staged_path)?;
 
-    let artifact_value = artifact_json_value(
-        &request.artifact_kind,
+    let build_value = build_json_value(
+        &request.kind,
         object_hash,
         &request.producer_builder,
-        &request.input_artifact_hashes,
+        &request.input_object_hashes,
         request.attrs,
     );
-    let canonical = canonical_json_bytes(&artifact_value)?;
-    let artifact_hash = ArtifactHash(Sha256::digest(&canonical).into());
-    let artifact_path = layout
-        .artifacts
-        .join(format!("{}.json", artifact_hash.to_prefixed_hex()));
+    let canonical = canonical_json_bytes(&build_value)?;
+    let build_key = BuildKey(Sha256::digest(&canonical).into());
+    let build_path = layout
+        .builds
+        .join(format!("{}.json", build_key.to_prefixed_hex()));
     fsutil::write_atomic(
-        &artifact_path,
+        &build_path,
         std::str::from_utf8(&canonical).map_err(|error| {
             CasError::Serialization(format!(
-                "failed to encode canonical artifact JSON as UTF-8: {error}"
+                "failed to encode canonical build JSON as UTF-8: {error}"
             ))
         })?,
     )
     .map_err(map_fsutil_error)?;
 
     let object_ref_path = layout.object_refs.join(&request.output_name);
-    let object_ref_target = PathBuf::from("..")
-        .join(OBJECTS_DIR)
-        .join(object_hash.to_prefixed_hex());
+    let object_ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(object_hash.to_prefixed_hex());
     replace_symlink(&object_ref_target, &object_ref_path)?;
 
-    let artifact_ref_path = layout
-        .artifact_refs
-        .join(format!("{}.json", request.output_name));
-    let artifact_ref_target = PathBuf::from("..")
-        .join(ARTIFACTS_DIR)
-        .join(format!("{}.json", artifact_hash.to_prefixed_hex()));
-    replace_symlink(&artifact_ref_target, &artifact_ref_path)?;
+    let meta_ref_path = layout.meta_refs.join(format!("{}.json", request.output_name));
+    let meta_ref_target = PathBuf::from("..").join(BUILDS_DIR).join(format!("{}.json", build_key.to_prefixed_hex()));
+    replace_symlink(&meta_ref_target, &meta_ref_path)?;
 
     Ok(PublishedOutput {
         object_hash,
-        artifact_hash,
+        build_key,
     })
 }
 
@@ -259,11 +253,11 @@ fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectHash,
     Ok(object_hash)
 }
 
-fn artifact_json_value(
-    artifact_kind: &str,
+fn build_json_value(
+    kind: &str,
     object_hash: ObjectHash,
     producer_builder: &str,
-    input_artifact_hashes: &[ArtifactHash],
+    input_object_hashes: &[ObjectHash],
     attrs: Map<String, Value>,
 ) -> Value {
     let mut producer = Map::new();
@@ -272,27 +266,24 @@ fn artifact_json_value(
         Value::String(producer_builder.to_string()),
     );
 
-    let input_hashes = input_artifact_hashes
+    let input_hashes = input_object_hashes
         .iter()
-        .map(|hash| Value::String(hash.to_prefixed_hex()))
+        .map(|hash| Value::String(hash.to_string()))
         .collect::<Vec<_>>();
 
     let mut root = Map::new();
     root.insert(
         "schema".to_string(),
-        Value::String(ARTIFACT_SCHEMA.to_string()),
+        Value::String(BUILD_SCHEMA.to_string()),
     );
-    root.insert(
-        "artifact_kind".to_string(),
-        Value::String(artifact_kind.to_string()),
-    );
+    root.insert("kind".to_string(), Value::String(kind.to_string()));
     root.insert(
         "object_hash".to_string(),
-        Value::String(object_hash.to_prefixed_hex()),
+        Value::String(object_hash.to_string()),
     );
     root.insert("producer".to_string(), Value::Object(producer));
     root.insert(
-        "input_artifact_hashes".to_string(),
+        "input_object_hashes".to_string(),
         Value::Array(input_hashes),
     );
     root.insert("attrs".to_string(), Value::Object(attrs));
@@ -459,7 +450,7 @@ mod tests {
         let mut attrs_a = Map::new();
         attrs_a.insert("z".to_string(), Value::from(1));
         attrs_a.insert("a".to_string(), Value::from(true));
-        let left = artifact_json_value(
+        let left = build_json_value(
             "text",
             parse_object_hash(
                 "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -472,7 +463,7 @@ mod tests {
         let mut attrs_b = Map::new();
         attrs_b.insert("a".to_string(), Value::from(true));
         attrs_b.insert("z".to_string(), Value::from(1));
-        let right = artifact_json_value(
+        let right = build_json_value(
             "text",
             parse_object_hash(
                 "sha256:1111111111111111111111111111111111111111111111111111111111111111",
@@ -500,9 +491,9 @@ mod tests {
             PublishOutputRequest {
                 output_name: "hello".to_string(),
                 staged_path: first_stage,
-                artifact_kind: "build-script".to_string(),
+                kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
-                input_artifact_hashes: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
             },
         )
@@ -510,34 +501,76 @@ mod tests {
 
         let second_stage = temp.path().join("second.txt");
         fs::write(&second_stage, b"hello").unwrap();
-        #[cfg(unix)]
-        fs::set_permissions(&second_stage, fs::Permissions::from_mode(0o755)).unwrap();
         let second = publish_output(
             &layout,
             PublishOutputRequest {
-                output_name: "hello-exec".to_string(),
+                output_name: "hello-copy".to_string(),
                 staged_path: second_stage,
-                artifact_kind: "build-script".to_string(),
+                kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
-                input_artifact_hashes: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
             },
         )
         .unwrap();
 
+        assert_eq!(first.object_hash, second.object_hash);
+        assert_eq!(first.build_key, second.build_key);
+        assert!(layout.objects.join(first.object_hash.to_prefixed_hex()).exists());
+        assert!(
+            layout
+                .builds
+                .join(format!("{}.json", second.build_key.to_prefixed_hex()))
+                .exists()
+        );
+        assert_eq!(
+            fs::read_link(layout.meta_refs.join("hello-copy.json")).unwrap(),
+            PathBuf::from("..").join(BUILDS_DIR).join(format!(
+                "{}.json",
+                second.build_key.to_prefixed_hex()
+            ))
+        );
+    }
+
+    #[test]
+    fn executable_bit_changes_object_hash_but_not_store_layout_rules() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let first_stage = temp.path().join("plain.txt");
+        fs::write(&first_stage, b"hello").unwrap();
+        let first = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "plain".to_string(),
+                staged_path: first_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_object_hashes: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        let exec_stage = temp.path().join("exec.txt");
+        fs::write(&exec_stage, b"hello").unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&exec_stage, fs::Permissions::from_mode(0o755)).unwrap();
+        let second = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "exec".to_string(),
+                staged_path: exec_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_object_hashes: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
         assert_ne!(first.object_hash, second.object_hash);
-        assert!(
-            layout
-                .objects
-                .join(first.object_hash.to_prefixed_hex())
-                .exists()
-        );
-        assert!(
-            layout
-                .artifacts
-                .join(format!("{}.json", second.artifact_hash.to_prefixed_hex()))
-                .exists()
-        );
+        assert_ne!(first.build_key, second.build_key);
     }
 
     fn parse_object_hash(value: &str) -> ObjectHash {
