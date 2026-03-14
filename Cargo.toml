@@ -2,11 +2,7 @@
 members = [
   "mbuild",
   "mbuild-core",
-  "mbuild-github",
-  "mbuild-fetch",
   "mbuild-text",
-  "mbuild-binary",
-  "mbuild-image",
   "fsobj-hash",
 ]
 
