@@ -1,38 +1,28 @@
-# Nickel API Model for `mbuild`
+# Nickel API Model
 
 ## Summary
 
-This document defines the intended user-facing Nickel model for `mbuild`.
+The Nickel API exposes pure builder terms, object bundles, package sets, and one
+top-level build request.
 
-It connects:
+It does not expose store paths, object hashes, build keys, cache management, or
+low-level publication mechanics.
 
-- the term-centric execution model from [`TERM_MODEL.md`](./TERM_MODEL.md);
-- the object store and publication model from [`CAS.md`](./CAS.md).
-
-The Nickel layer should expose a pure API for composing builder terms. Users write
-Nickel programs in terms of objects, builder operations, and output bundles. The
-Nickel API must not expose store paths, object hashes, cache management details,
-or low-level publication mechanics.
-
-## Core Model
-
-### Object
+## Objects
 
 At the Nickel layer, an object is a pure value denoting a build result.
 
 It is not:
 
-- a store path;
-- a realized payload in `.mbuild/objects`;
-- a metadata record on disk.
+- a store path
+- a realized payload in `.mbuild/objects`
+- a build record in `.mbuild/builds`
 
-Instead, it is the user-facing handle for a build result inside the Nickel term graph.
-
-### Builder operation
+## Builder Operations
 
 A builder operation is a tagged enum variant with a single record payload.
 
-Conceptual examples:
+Examples:
 
 ```nickel
 'Fetch {
@@ -51,18 +41,17 @@ Conceptual examples:
 
 Rules:
 
-- each builder operation has exactly one record payload;
-- builder-specific inputs are represented by typed fields in that payload;
-- builder-specific configuration also lives in ordinary payload fields;
-- untyped arrays of object names are replaced with typed object arguments;
-- builder terms are pure and do not execute by themselves;
-- builder payloads must not contain publication metadata such as names or aliases.
+- each builder operation has exactly one record payload
+- builder-specific inputs are represented by typed fields in that payload
+- builder-specific configuration also lives in ordinary payload fields
+- builder terms are pure and do not execute by themselves
+- builder payloads do not contain publication metadata
 
 ## Top-Level Build Request
 
-The runtime entrypoint is one evaluated request, not a bare builder term.
+The runtime entrypoint is one evaluated build request.
 
-Minimal conceptual shape:
+Shape:
 
 ```nickel
 {
@@ -80,13 +69,10 @@ Minimal conceptual shape:
 
 Semantics:
 
-- `build` is the pure build term interpreted by Rust;
-- `meta` is metadata used to publish refs and human-facing descriptions;
-- `meta` is not part of builder semantics;
-- `meta` does not affect object identity.
-
-This lets the runtime create publication records without polluting builder
-terms with non-semantic metadata.
+- `build` is the pure build term interpreted by Rust
+- `meta` is metadata used to publish refs and human-facing descriptions
+- `meta` does not affect object identity
+- `meta` does not affect build-record identity
 
 ## Builder Results
 
@@ -94,7 +80,7 @@ terms with non-semantic metadata.
 
 A single-output builder returns one object.
 
-Conceptually:
+Examples:
 
 - `mFetch : FetchPayload -> Object SourceTree`
 - `mText : TextPayload -> Object BuildScript`
@@ -118,110 +104,49 @@ let zstd = mBinary {
 }
 ```
 
-Rules:
-
-- one builder term may expose multiple output projections;
-- each projection is itself an object term;
-- users consume projections like ordinary record fields;
-- field names on the bundle are the builder-declared output labels.
-
 ## Package Sets
 
-`pkgs` is a Nickel record that contains:
+`pkgs` is a Nickel record containing:
 
-- object terms;
-- bundle records returned by multi-output builders;
-- helper values and configuration records.
+- object terms
+- bundle records returned by multi-output builders
+- helper values and configuration records
 
-Important properties:
-
-- names in `pkgs` are for composition and convenience;
-- names are not object identity;
-- names are not part of store semantics;
-- dependency structure comes from embedded object terms, not from global string lookup.
+Names in `pkgs` are composition conveniences. They are not object identity and
+not build-record identity.
 
 ## Extensible Builder Operations
 
-The set of primitive builder operations is intended to be extensible.
+The set of primitive builder operations is defined by the builders registered in
+`mbuild`.
 
-The design direction is:
-
-- the Nickel layer uses tagged builder operations;
-- the concrete supported builder tags are determined by the registered builders in `mbuild`;
-- Rust maintains a registry from builder tag to interpreter implementation.
+Rust maintains a registry from builder tag to interpreter implementation.
 
 ## Typed Builder Inputs
 
-Builder payloads should carry typed object inputs.
+Builder payloads carry typed object inputs.
 
-Example intent:
+Examples:
 
-- `Binary` takes:
-  - builder-specific payload fields;
-  - one image object;
-  - one build-script object;
-  - an array of source objects;
-- `Fetch` takes:
-  - builder-specific payload fields and no object dependencies;
-- `Image` takes:
-  - builder-specific payload fields;
-  - zero or one base image object, depending on mode;
-  - an array of binary-output objects.
-
-Output typing may remain weaker than input typing in early versions. That is acceptable.
+- `Binary` takes payload fields, one image object, one build-script object, and an array of source objects
+- `Fetch` takes payload fields and no object dependencies
+- `Image` takes payload fields, zero or one base image object, and an array of binary-output objects
 
 ## Selected Request
 
-The Rust interpreter should receive one selected build request.
+The Rust interpreter receives one selected build request.
 
-This means:
+By default `mbuild` reads `./.mbuild/recipe.ncl`. Another Nickel file may be
+selected explicitly.
 
-- the default top-level entrypoint is `./.mbuild/recipe.ncl`;
-- that file is expected to evaluate to one request with fields `meta` and `build`;
-- a caller may alternatively provide another Nickel file path;
-- the final selected `build` term is closed before interpretation;
-- Rust interprets that `build` term recursively and uses `meta` only for publication.
+The selected request contains `meta` and `build`. Rust interprets `build`
+recursively and uses `meta` only for publication.
 
-The interpreter should not depend on a persistent global namespace of names in the store.
+## Relationship to the Store
 
-## Relationship to CAS
+The interpreter translates Nickel object terms into:
 
-The Nickel API does not expose:
-
-- object hashes;
-- store paths;
-- cache lookup;
-- publication files;
-- ref layouts.
-
-Those belong to the interpreter and store layers.
-
-The interpreter is responsible for translating Nickel object terms into:
-
-- realized objects in `.mbuild/objects`;
-- publication records in `.mbuild/meta-refs`;
-- human-facing object refs in `.mbuild/object-refs`.
-
-## Minimal API Direction
-
-The intended user-facing API direction is:
-
-- constructor-like functions or tagged values for each registered builder;
-- builder-specific record payloads;
-- bundles for multi-output builders;
-- package sets composed from object terms;
-- one selected request passed into Rust.
-
-This is the minimum model needed before specifying lower-level encoding or Rust/Nickel
-FFI details.
-
-## Out of Scope
-
-This document does not define:
-
-- the exact Nickel syntax for open builder operation rows;
-- the exact `Object` type encoding in Nickel;
-- the exact contracts for every builder payload;
-- the Rust-side representation of evaluated Nickel values;
-- the exact bundle typing strategy for multi-output builders;
-- the exact CLI spelling used to choose the selected request.
+- realized objects in `.mbuild/objects`
+- build records in `.mbuild/builds`
+- human-facing metadata refs in `.mbuild/meta-refs`
+- human-facing object refs in `.mbuild/object-refs`

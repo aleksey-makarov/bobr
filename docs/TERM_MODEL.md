@@ -1,41 +1,33 @@
-# Term-Centric Build Model for `mbuild`
+# Term-Centric Build Model
 
 ## Summary
 
-This document describes the intended high-level execution model for `mbuild`.
+`mbuild` evaluates Nickel build terms and realizes their results as content-addressed
+objects.
 
-The core idea is term-centric:
-
-- Nickel defines a pure program made of builder terms.
-- Primitive operations of that program are builder operations.
-- Rust receives one selected evaluated build request, extracts its `build` term, and interprets it.
-- Store layout, hashing, and caching are implementation details of the interpreter.
-
-This is intentionally different from the current name-addressed recipe model.
+Nickel defines the build program. Rust interprets one selected evaluated build
+request. Store layout, hashing, build recording, and caching are interpreter
+concerns.
 
 ## Layers
 
-There are four conceptually separate layers.
+### 1. Term Layer
 
-### 1. Nickel term layer
+Nickel defines a pure build program composed from:
 
-Nickel is used to define a pure build program.
+- builder operations
+- typed builder configuration values
+- typed object dependencies
+- package sets and helper combinators
 
-That program is composed from:
+At this layer, users compose terms. They do not refer to store paths, object
+hashes, build keys, or cache lookup.
 
-- builder operations;
-- typed builder configuration values;
-- typed object dependencies;
-- package sets and helper combinators.
+### 2. Request Layer
 
-At this layer, users should think in terms of composing terms, not in terms of
-store paths, object hashes, or cache lookup.
+The runtime entrypoint is one build request, not a bare build term.
 
-### 2. Request layer
-
-The runtime entrypoint is not a bare build term.
-
-Nickel evaluates to one build request of the conceptual shape:
+A build request has the shape:
 
 ```nickel
 {
@@ -51,61 +43,40 @@ Nickel evaluates to one build request of the conceptual shape:
 }
 ```
 
-The key rule is:
+`meta` is publication metadata.
 
-- `meta` is publication metadata;
-- `build` is the pure build term.
+`build` is the pure build term.
 
-This keeps builder operations pure and reusable while still giving the runtime a
-place to obtain publication metadata.
+### 3. Interpreter Layer
 
-### 3. Interpreter layer
+Rust interprets the `build` term recursively.
 
-Rust acts as an interpreter for the Nickel build term.
+The interpreter:
 
-The interpreter is responsible for:
+- evaluates dependency terms
+- validates builder-specific inputs
+- computes object hashes from produced payloads
+- computes build keys for interpreted builder invocations
+- reuses existing build records on matching `build_key`
+- executes builders on cache miss
+- publishes resulting objects and build refs
 
-- recursively evaluating dependencies embedded in the term structure;
-- validating builder-specific inputs;
-- computing object hashes for resulting payloads;
-- checking whether objects already exist in the store;
-- executing builders on cache miss;
-- publishing resulting objects and publication metadata.
+### 4. Store Layer
 
-This means that store identity, object hashing, caching, and reuse are runtime
-semantics of the interpreter, not part of the Nickel API.
+The store persists realized objects, build records, and publication refs.
 
-The interpreter receives one selected request.
+Nickel authors describe what to build. The interpreter decides:
 
-From that request it extracts:
-
-- publication metadata in `meta`;
-- the build term in `build`.
-
-Builders consume only the build term and runtime context. They do not consume
-publication metadata directly.
-
-### 4. Store layer
-
-The CAS store is a persistence and caching mechanism for evaluated results.
-
-The store is not the programming model exposed to the Nickel author.
-
-Nickel authors describe _what to build_. The interpreter decides:
-
-- how to hash it;
-- how to cache it;
-- where to store it;
-- how to attach metadata to publications;
-- how to publish it under human-facing names.
+- how to hash results
+- how to key build records
+- where to store results
+- how to publish them under names
 
 ## Builder Terms
 
-Builder operations are the primitive operations of the Nickel program.
+Builder operations are tagged enum values with one record payload.
 
-The intended representation is a tagged enum value with a single record payload.
-
-Example shape:
+Example:
 
 ```nickel
 'Binary {
@@ -117,38 +88,28 @@ Example shape:
 }
 ```
 
-Important properties:
+Properties:
 
-- builder inputs and configuration live together as typed fields in the payload record;
-- the payload is one record, even if the conceptual operation has several arguments;
-- builder operations are pure terms and do not execute anything by themselves;
-- builder payloads do not contain publication metadata such as names.
+- builder inputs and configuration live together in the payload record
+- the payload is one record
+- builder operations are pure terms and do not execute anything by themselves
+- builder payloads do not contain publication metadata such as names
 
 ## Objects in Nickel
 
-At the Nickel layer, a built object is not a store object yet.
+At the Nickel layer, an object is a pure value denoting a build result.
 
-It is better understood as a pure value that denotes a build result produced by
-some builder term.
+It is distinct from:
 
-This document intentionally separates:
-
-- Nickel object terms;
-- realized objects stored in the CAS store.
-
-The same word "object" may be used for both in discussion, but the distinction
-must remain clear in implementation.
+- a realized store object in `.mbuild/objects`
+- a build record in `.mbuild/builds`
 
 ## Multi-Output Builders
 
-Multi-output builders should not expose a raw opaque term plus an explicit
-`selectOutput` operation as the primary user-facing API.
+A multi-output builder returns a bundle.
 
-Instead, the preferred model is:
-
-- a builder operation returns a bundle;
-- the bundle exposes named output projections;
-- each projection is itself an object term.
+The bundle exposes named output projections, and each projection is itself an
+object term.
 
 Example:
 
@@ -165,89 +126,64 @@ let zstd = mBinary {
 }
 ```
 
-Here `mFetch`, `mText`, `mBinary`, and similar names should be understood as
-convenient user-facing helper names for builder operations. Their concrete
-pseudo-definition is sketched later in [`NICKEL_SKETCH.md`](./NICKEL_SKETCH.md).
-
 ## Package Sets
 
-`pkgs` is expected to be a Nickel record containing object terms or bundle
-projections.
+`pkgs` is a Nickel record containing object terms or bundle projections.
 
-Important points:
+Package field names are a composition convenience. They are not object identity
+and they are not build-record identity.
 
-- package fields are a convenience layer for composition;
-- names in `pkgs` are not object identity;
-- the dependency graph is induced by term structure, not by a global namespace lookup.
-
-## Dependency Graph and Evaluation
+## Dependency Graph
 
 The dependency graph exists structurally inside the term.
 
-The interpreter therefore does not need to build the graph from package names.
-It discovers the graph by recursively traversing the selected closed `build` term.
+The interpreter discovers the graph by recursively traversing the selected
+closed `build` term. It does not resolve dependencies from a global namespace of
+names.
 
-Cycle detection is still a runtime responsibility of the interpreter.
-The language model does not need to guarantee acyclicity statically.
+Cycle detection is a runtime responsibility of the interpreter.
 
 ## Entry Request Selection
 
-The intended CLI model is:
+`mbuild` reads `./.mbuild/recipe.ncl` by default.
 
-- by default, `mbuild` reads `./.mbuild/recipe.ncl`;
-- that file is expected to evaluate to one selected request with fields `meta` and `build`;
-- the user may alternatively pass another Nickel file path on the command line.
+That file evaluates to one request with fields `meta` and `build`.
 
-This entrypoint selection happens before interpretation.
-
-Rust still receives only one selected request.
+Another Nickel file may be selected explicitly.
 
 ## Interpreter Algorithm
 
-Given one selected request, the interpreter works conceptually as follows:
+Given one selected request, the interpreter:
 
-1. Receive the selected Nickel request.
-2. Extract the `meta` record and the `build` term.
-3. Inspect the top-level builder operation or output projection.
-4. Recursively interpret all embedded dependency terms.
-5. Obtain realized dependency objects for the current builder invocation.
-6. Compute the stable identity of the current result from the produced payload only.
-7. Check the CAS store for an existing object with the same `object-hash`.
-8. On cache hit, return the realized object.
-9. On cache miss, execute the corresponding registered builder.
-10. Publish:
-    - the resulting object in `objects/`;
-    - one publication record in `meta-refs/`;
-    - one object ref in `object-refs/`.
-11. Return the realized object or output bundle to the caller.
+1. receives the request
+2. extracts `meta` and `build`
+3. inspects the top-level builder operation or output projection
+4. recursively interprets embedded dependency terms
+5. obtains realized dependency objects through their build records
+6. computes the stable identity of the current result from the produced payload only
+7. computes a `build_key` for the current interpreted builder invocation
+8. reuses an existing build record on matching `build_key`
+9. executes the registered builder on cache miss
+10. publishes:
+   - the resulting object in `objects/`
+   - one build record in `builds/`
+   - one metadata ref in `meta-refs/`
+   - one object ref in `object-refs/`
+11. returns the realized object or output bundle
 
-This is a recursive interpreter model, not a global name-resolution model.
+## Extensible Builder Operations
 
-## Extensible Primitive Operations
+The set of builder operations is open.
 
-The set of primitive builder operations should be extensible.
-
-The intended direction is:
-
-- Nickel terms use tagged builder operations;
-- the concrete set of supported tags is determined by registered builders in `mbuild`;
-- Rust maintains a registry from builder tag to interpreter implementation.
+Nickel terms use tagged builder operations, and Rust maintains a registry from
+builder tag to interpreter implementation.
 
 ## Typed Builder Inputs
 
-The current model of untyped arrays of object names should evolve toward
-builder-specific typed inputs.
+Builder payloads carry typed object inputs.
 
-Example intent:
+Examples:
 
-- `Binary` takes:
-  - builder-specific configuration fields in its payload record,
-  - one image object,
-  - one build-script object,
-  - an array of source objects;
-- `Fetch` takes:
-  - only builder-specific scalar/record fields in its payload record;
-- `Image` takes:
-  - builder-specific configuration fields in its payload record,
-  - a base image object or image bundle input,
-  - an array of binary-output objects.
+- `Binary` takes builder-specific payload fields, one image object, one build-script object, and an array of source objects
+- `Fetch` takes builder-specific payload fields and no object dependencies
+- `Image` takes builder-specific payload fields, zero or one base image object, and an array of binary-output objects

@@ -1,23 +1,6 @@
-# Pseudo-Nickel Sketch for `mbuild`
+# Nickel Examples
 
-## Purpose
-
-This document is a sketch of the intended user-facing Nickel API.
-
-It is intentionally not a final syntax specification. The goal is to make the
-term model concrete enough to reason about:
-
-- builder operations;
-- typed builder inputs;
-- multi-output bundles;
-- package-set composition;
-- the idea of selecting one evaluated build request for interpretation.
-
-## Core Intuition
-
-Users write pure Nickel expressions that compose builder operations.
-
-They should be able to think in this style:
+## Package Composition
 
 ```nickel
 let rec pkgs = {
@@ -35,33 +18,14 @@ let rec pkgs = {
 pkgs
 ```
 
-Here:
+In this example:
 
-- `mFetch`, `mText`, `mBinary` are builder operations;
-- `pkgs.zstdSrc`, `pkgs.zstdScript`, `pkgs.zstd` are object terms;
-- `pkgs.zstdTerm` is a multi-output bundle;
-- `.out` and `.dev` are output projections.
+- `mFetch`, `mText`, and `mBinary` are builder operations
+- `pkgs.zstdSrc`, `pkgs.zstdScript`, and `pkgs.zstd` are object terms
+- `pkgs.zstdTerm` is a multi-output bundle
+- `.out` and `.dev` are output projections
 
-## Object and Bundle Sketch
-
-This is pseudo-Nickel, not final syntax:
-
-```nickel
-let Object = 'Object in
-let Bundle = 'Bundle in
-...
-```
-
-The exact encoding is undecided, but semantically:
-
-- an `Object` is a pure term denoting one build result;
-- a `Bundle` is a record whose fields are `Object`s;
-- a single-output builder returns an `Object`;
-- a multi-output builder returns a `Bundle`.
-
-## Builder Operation Sketch
-
-Builder operations are tagged values with one record payload.
+## Builder Operations
 
 ### Fetch
 
@@ -73,11 +37,6 @@ let mFetch = fun payload =>
   }
 ```
 
-Intended meaning:
-
-- no object inputs;
-- one output object, usually a `source-tree` or `fetched-file`.
-
 ### Text
 
 ```nickel
@@ -87,11 +46,6 @@ let mText = fun payload =>
     source = payload.source,
   }
 ```
-
-Intended meaning:
-
-- no object inputs;
-- one output object, for example a `build-script`.
 
 ### Binary
 
@@ -106,14 +60,6 @@ let mBinary = fun payload =>
   }
 ```
 
-Intended meaning:
-
-- builder-specific configuration fields;
-- one image object;
-- one build-script object;
-- an array of source objects;
-- one or more output objects, exposed as a bundle.
-
 ### Image
 
 ```nickel
@@ -125,43 +71,7 @@ let mImage = fun payload =>
   }
 ```
 
-Intended meaning:
-
-- builder-specific configuration fields;
-- optional or required base image object, depending on mode;
-- an array of binary-output objects;
-- one output object, usually a container image.
-
-## Multi-Output Bundle Sketch
-
-The preferred model is that a multi-output builder returns a bundle directly.
-
-Conceptually:
-
-```nickel
-let zstdTerm = mBinary {
-  outputs = ["out", "dev"],
-  image = bootstrapImage,
-  script = zstdScript,
-  sources = [zstdSrc],
-} in
-{
-  zstd = zstdTerm.out,
-  zstd_dev = zstdTerm.dev,
-}
-```
-
-The important part is not the exact `outputs = [...]` syntax, but the semantics:
-
-- one builder term may declare several named outputs;
-- the user receives a bundle with those names as fields;
-- each field behaves like an ordinary object term.
-
-## Typed Input Direction
-
-The intent is to replace untyped input lists with builder-specific typed fields.
-
-Conceptually:
+## Typed Inputs
 
 ```nickel
 let BinaryPayload = {
@@ -172,25 +82,18 @@ let BinaryPayload = {
 }
 ```
 
-This sketch does **not** yet encode object sub-kinds precisely. It only shows
-This sketch does **not** yet encode object sub-kinds precisely. It only shows
-the structural direction:
+## Build Request Example
 
-- image is not mixed into a generic string list;
-- script is not mixed into a generic string list;
-- source objects are grouped as source objects.
+```nickel
+{
+  meta = {
+    name = "zstd",
+  },
+  build = let rec pkgs = { ... } in pkgs.zstd,
+}
+```
 
-A later design iteration may refine this toward:
-
-- `Object Image`
-- `Object BuildScript`
-- `Object SourceTree`
-
-if Nickel typing and ergonomics make that practical.
-
-## Package Set Sketch
-
-Here is a larger pseudo-example:
+## Larger Example
 
 ```nickel
 let rec pkgs = {
@@ -221,66 +124,10 @@ let rec pkgs = {
   zstd = pkgs.zstdTerm.out,
   zstd_dev = pkgs.zstdTerm.dev,
 } in
-pkgs
-```
-
-Properties of this example:
-
-- `pkgs` is a convenience composition layer;
-- package field names are not identity;
-- dependency edges come from nested object terms;
-- the selected top-level object can be any projection, for example `pkgs.zstd`.
-
-## Selected Build Request
-
-The Rust interpreter is expected to receive one selected evaluated build request.
-
-Conceptually:
-
-```nickel
-import "./.mbuild/recipe.ncl"
-```
-
-or:
-
-```nickel
-import "./custom-entry.ncl"
-```
-
-Where the imported file is expected to evaluate to one selected build request,
-for example:
-
-```nickel
 {
   meta = {
     name = "zstd",
   },
-  build = let rec pkgs = { ... } in pkgs.zstd,
+  build = pkgs.zstd,
 }
 ```
-
-or:
-
-```nickel
-{
-  meta = {
-    name = "zstd-dev",
-  },
-  build = let rec pkgs = { ... } in pkgs.zstdTerm.dev,
-}
-```
-
-The interpreter does not need the whole package namespace as a runtime lookup table.
-It only needs the selected request and the terms reachable from its `build` field.
-
-## What This Sketch Intentionally Avoids
-
-This sketch does not yet commit to:
-
-- exact Nickel contracts or type aliases;
-- exact syntax for bundle typing;
-- exact syntax for registered open builder rows;
-- exact Rust/Nickel value boundary;
-- exact encoding of single-output builders versus one-field bundles.
-
-Those should be decided only after the user-facing model is judged ergonomic enough.
