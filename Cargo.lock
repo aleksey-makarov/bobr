@@ -319,6 +319,8 @@ dependencies = [
  "clap",
  "mbuild-core",
  "mbuild-text",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

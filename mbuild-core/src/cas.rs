@@ -1,3 +1,4 @@
+use crate::builder::{BuildRecord, ProducerInfo, PublishedBuild, StagedBuildResult};
 use crate::fsutil;
 use fsobj_hash::{ObjectHash, hash_path};
 use serde_json::{Map, Value};
@@ -11,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 const BUILD_SCHEMA: &str = "mbuild-build-v1";
+const INVOCATION_SCHEMA: &str = "mbuild-build-invocation-v1";
 const ROOT_DIR: &str = ".mbuild";
 const OBJECTS_DIR: &str = "objects";
 const BUILDS_DIR: &str = "builds";
@@ -173,6 +175,7 @@ impl StoreLayout {
 #[derive(Debug)]
 pub struct PublishOutputRequest {
     pub output_name: String,
+    pub build_key: BuildKey,
     pub staged_path: PathBuf,
     pub kind: String,
     pub producer_builder: String,
@@ -190,46 +193,131 @@ pub fn publish_output(
     layout: &StoreLayout,
     request: PublishOutputRequest,
 ) -> Result<PublishedOutput, CasError> {
-    validate_output_name(&request.output_name)?;
-    let object_hash = import_object(layout, &request.staged_path)?;
-
-    let build_value = build_json_value(
-        &request.kind,
-        object_hash,
-        &request.producer_builder,
-        &request.input_object_hashes,
-        request.attrs,
-    );
-    let canonical = canonical_json_bytes(&build_value)?;
-    let build_key = BuildKey(Sha256::digest(&canonical).into());
-    let build_path = layout
-        .builds
-        .join(format!("{}.json", build_key.to_prefixed_hex()));
-    fsutil::write_atomic(
-        &build_path,
-        std::str::from_utf8(&canonical).map_err(|error| {
-            CasError::Serialization(format!(
-                "failed to encode canonical build JSON as UTF-8: {error}"
-            ))
-        })?,
-    )
-    .map_err(map_fsutil_error)?;
-
-    let object_ref_path = layout.object_refs.join(&request.output_name);
-    let object_ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(object_hash.to_prefixed_hex());
-    replace_symlink(&object_ref_target, &object_ref_path)?;
-
-    let meta_ref_path = layout.meta_refs.join(format!("{}.json", request.output_name));
-    let meta_ref_target = PathBuf::from("..").join(BUILDS_DIR).join(format!("{}.json", build_key.to_prefixed_hex()));
-    replace_symlink(&meta_ref_target, &meta_ref_path)?;
+    let staged = StagedBuildResult {
+        kind: request.kind,
+        producer: ProducerInfo {
+            builder: request.producer_builder,
+        },
+        input_object_hashes: request.input_object_hashes,
+        attrs: request.attrs,
+        staged_path: request.staged_path,
+    };
+    let published = materialize_build(layout, request.build_key, staged)?;
+    publish_refs(layout, &request.output_name, &published)?;
 
     Ok(PublishedOutput {
-        object_hash,
-        build_key,
+        object_hash: published.record.object_hash,
+        build_key: published.record.build_key,
     })
 }
 
-fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectHash, CasError> {
+pub fn compute_build_key(
+    builder_tag: &str,
+    normalized_payload: &Value,
+    input_object_hashes: &[ObjectHash],
+) -> Result<BuildKey, CasError> {
+    let input_hashes = input_object_hashes
+        .iter()
+        .map(|hash| Value::String(hash.to_string()))
+        .collect::<Vec<_>>();
+
+    let mut root = Map::new();
+    root.insert(
+        "schema".to_string(),
+        Value::String(INVOCATION_SCHEMA.to_string()),
+    );
+    root.insert(
+        "builder_tag".to_string(),
+        Value::String(builder_tag.to_string()),
+    );
+    root.insert("payload".to_string(), normalized_payload.clone());
+    root.insert(
+        "input_object_hashes".to_string(),
+        Value::Array(input_hashes),
+    );
+
+    let canonical = canonical_json_bytes(&Value::Object(root))?;
+    Ok(BuildKey(Sha256::digest(&canonical).into()))
+}
+
+pub fn load_build_record(
+    layout: &StoreLayout,
+    build_key: BuildKey,
+) -> Result<Option<BuildRecord>, CasError> {
+    let build_path = layout
+        .builds
+        .join(format!("{}.json", build_key.to_prefixed_hex()));
+    if !build_path.exists() {
+        return Ok(None);
+    }
+
+    let bytes = fs::read(&build_path).map_err(|error| {
+        CasError::Io(format!(
+            "failed to read build record '{}': {error}",
+            build_path.display()
+        ))
+    })?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        CasError::Serialization(format!(
+            "failed to parse build record '{}': {error}",
+            build_path.display()
+        ))
+    })?;
+    Ok(Some(parse_build_record_value(build_key, &value)?))
+}
+
+pub fn materialize_build(
+    layout: &StoreLayout,
+    build_key: BuildKey,
+    staged: StagedBuildResult,
+) -> Result<PublishedBuild, CasError> {
+    let object_hash = import_object(layout, &staged.staged_path)?;
+    let record = BuildRecord {
+        build_key,
+        object_hash,
+        kind: staged.kind,
+        producer: staged.producer,
+        input_object_hashes: staged.input_object_hashes,
+        attrs: staged.attrs,
+    };
+    write_build_record(layout, &record)?;
+
+    Ok(PublishedBuild {
+        object_path: layout.objects.join(object_hash.to_prefixed_hex()),
+        record,
+    })
+}
+
+pub fn publish_refs(
+    layout: &StoreLayout,
+    output_name: &str,
+    published: &PublishedBuild,
+) -> Result<(), CasError> {
+    validate_output_name(output_name)?;
+
+    let object_ref_path = layout.object_refs.join(output_name);
+    let object_ref_target = PathBuf::from("..")
+        .join(OBJECTS_DIR)
+        .join(published.record.object_hash.to_prefixed_hex());
+    replace_symlink(&object_ref_target, &object_ref_path)?;
+
+    let meta_ref_path = layout.meta_refs.join(format!("{output_name}.json"));
+    let meta_ref_target = PathBuf::from("..")
+        .join(BUILDS_DIR)
+        .join(format!("{}.json", published.record.build_key.to_prefixed_hex()));
+    replace_symlink(&meta_ref_target, &meta_ref_path)?;
+    Ok(())
+}
+
+pub fn object_path(layout: &StoreLayout, object_hash: ObjectHash) -> PathBuf {
+    layout.objects.join(object_hash.to_prefixed_hex())
+}
+
+pub fn build_path(layout: &StoreLayout, build_key: BuildKey) -> PathBuf {
+    layout.builds.join(format!("{}.json", build_key.to_prefixed_hex()))
+}
+
+pub fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectHash, CasError> {
     let object_hash = hash_path(staged_path).map_err(|error| {
         CasError::Hashing(format!(
             "failed to hash staged object '{}': {error}",
@@ -251,6 +339,21 @@ fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectHash,
     })?;
 
     Ok(object_hash)
+}
+
+fn write_build_record(layout: &StoreLayout, record: &BuildRecord) -> Result<(), CasError> {
+    let build_value = build_record_json_value(record);
+    let canonical = canonical_json_bytes(&build_value)?;
+    let build_path = build_path(layout, record.build_key);
+    fsutil::write_atomic(
+        &build_path,
+        std::str::from_utf8(&canonical).map_err(|error| {
+            CasError::Serialization(format!(
+                "failed to encode canonical build JSON as UTF-8: {error}"
+            ))
+        })?,
+    )
+    .map_err(map_fsutil_error)
 }
 
 fn build_json_value(
@@ -288,6 +391,96 @@ fn build_json_value(
     );
     root.insert("attrs".to_string(), Value::Object(attrs));
     Value::Object(root)
+}
+
+fn build_record_json_value(record: &BuildRecord) -> Value {
+    build_json_value(
+        &record.kind,
+        record.object_hash,
+        &record.producer.builder,
+        &record.input_object_hashes,
+        record.attrs.clone(),
+    )
+}
+
+fn parse_build_record_value(build_key: BuildKey, value: &Value) -> Result<BuildRecord, CasError> {
+    let object = value.as_object().ok_or_else(|| {
+        CasError::Serialization("build record root must be a JSON object".to_string())
+    })?;
+
+    let schema = object
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CasError::Serialization("build record is missing 'schema'".to_string()))?;
+    if schema != BUILD_SCHEMA {
+        return Err(CasError::Serialization(format!(
+            "unsupported build record schema '{schema}'"
+        )));
+    }
+
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CasError::Serialization("build record is missing 'kind'".to_string()))?
+        .to_string();
+
+    let object_hash = object
+        .get("object_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CasError::Serialization("build record is missing 'object_hash'".to_string()))
+        .and_then(parse_object_hash_result)?;
+
+    let producer_obj = object
+        .get("producer")
+        .and_then(Value::as_object)
+        .ok_or_else(|| CasError::Serialization("build record is missing 'producer'".to_string()))?;
+    let builder = producer_obj
+        .get("builder")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            CasError::Serialization("build record producer is missing 'builder'".to_string())
+        })?
+        .to_string();
+
+    let input_object_hashes = object
+        .get("input_object_hashes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            CasError::Serialization("build record is missing 'input_object_hashes'".to_string())
+        })?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| {
+                    CasError::Serialization(
+                        "build record input_object_hashes must contain strings".to_string(),
+                    )
+                })
+                .and_then(parse_object_hash_result)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let attrs = object
+        .get("attrs")
+        .and_then(Value::as_object)
+        .ok_or_else(|| CasError::Serialization("build record is missing 'attrs'".to_string()))?
+        .clone();
+
+    Ok(BuildRecord {
+        build_key,
+        object_hash,
+        kind,
+        producer: ProducerInfo { builder },
+        input_object_hashes,
+        attrs,
+    })
+}
+
+fn parse_object_hash_result(value: &str) -> Result<ObjectHash, CasError> {
+    value.parse::<ObjectHash>().map_err(|error| {
+        CasError::Serialization(format!("invalid object hash '{value}' in build record: {error}"))
+    })
 }
 
 fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, CasError> {
@@ -440,6 +633,7 @@ fn map_fsutil_error(error: fsutil::FsUtilError) -> CasError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -490,6 +684,7 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "hello".to_string(),
+                build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -505,6 +700,7 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "hello-copy".to_string(),
+                build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -543,6 +739,13 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "script".to_string(),
+                build_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "echo hi\n" }),
+                    &[parse_object_hash(
+                        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                    )],
+                ),
                 staged_path: stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -598,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn same_object_different_metadata_produces_different_build_key() {
+    fn same_object_different_payload_produces_different_build_key() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
@@ -608,6 +811,11 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "first".to_string(),
+                build_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "hello" }),
+                    &[],
+                ),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -623,6 +831,11 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "second".to_string(),
+                build_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "source-tree", "source": "hello" }),
+                    &[],
+                ),
                 staged_path: second_stage,
                 kind: "source-tree".to_string(),
                 producer_builder: "text".to_string(),
@@ -647,6 +860,7 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "kind-a".to_string(),
+                build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -662,6 +876,7 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "kind-b".to_string(),
+                build_key: build_key_for("Text", json!({ "kind": "source-tree" }), &[]),
                 staged_path: second_stage,
                 kind: "source-tree".to_string(),
                 producer_builder: "text".to_string(),
@@ -676,7 +891,7 @@ mod tests {
     }
 
     #[test]
-    fn build_key_changes_when_producer_builder_changes() {
+    fn build_key_changes_when_builder_tag_changes() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
@@ -686,6 +901,7 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "producer-a".to_string(),
+                build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -701,6 +917,7 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "producer-b".to_string(),
+                build_key: build_key_for("Fetch", json!({ "kind": "build-script" }), &[]),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "fetch".to_string(),
@@ -725,6 +942,11 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "shared".to_string(),
+                build_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "hello" }),
+                    &[],
+                ),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -740,6 +962,11 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "shared".to_string(),
+                build_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "hello world" }),
+                    &[],
+                ),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -781,6 +1008,7 @@ mod tests {
                 &layout,
                 PublishOutputRequest {
                     output_name: invalid_name.to_string(),
+                    build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                     staged_path: stage,
                     kind: "build-script".to_string(),
                     producer_builder: "text".to_string(),
@@ -807,6 +1035,7 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "tree".to_string(),
+                build_key: build_key_for("Fetch", json!({ "kind": "source-tree" }), &[]),
                 staged_path: stage_dir,
                 kind: "source-tree".to_string(),
                 producer_builder: "fetch".to_string(),
@@ -838,6 +1067,7 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "first".to_string(),
+                build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -854,6 +1084,7 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "second".to_string(),
+                build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -883,6 +1114,11 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "ordered-ab".to_string(),
+                build_key: build_key_for(
+                    "Binary",
+                    json!({ "kind": "binary-output" }),
+                    &[hash_a, hash_b],
+                ),
                 staged_path: first_stage,
                 kind: "binary-output".to_string(),
                 producer_builder: "binary".to_string(),
@@ -898,6 +1134,11 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "ordered-ba".to_string(),
+                build_key: build_key_for(
+                    "Binary",
+                    json!({ "kind": "binary-output" }),
+                    &[hash_b, hash_a],
+                ),
                 staged_path: second_stage,
                 kind: "binary-output".to_string(),
                 producer_builder: "binary".to_string(),
@@ -946,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn executable_bit_changes_object_hash_but_not_store_layout_rules() {
+    fn executable_bit_changes_object_hash_for_distinct_invocations() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
@@ -956,6 +1197,11 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "plain".to_string(),
+                build_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "hello", "variant": "plain" }),
+                    &[],
+                ),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -973,6 +1219,11 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "exec".to_string(),
+                build_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "hello", "variant": "exec" }),
+                    &[],
+                ),
                 staged_path: exec_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -988,5 +1239,13 @@ mod tests {
 
     fn parse_object_hash(value: &str) -> ObjectHash {
         ObjectHash::from_str(value).unwrap()
+    }
+
+    fn build_key_for(
+        builder_tag: &str,
+        payload: Value,
+        input_object_hashes: &[ObjectHash],
+    ) -> BuildKey {
+        compute_build_key(builder_tag, &payload, input_object_hashes).unwrap()
     }
 }

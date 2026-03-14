@@ -1,20 +1,21 @@
 use crate::BuilderError;
 use crate::cas::BuildKey;
 use fsobj_hash::ObjectHash;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct BuildRequest {
     pub meta: BuildMeta,
     pub build: Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct BuildMeta {
     pub name: String,
+    #[serde(default)]
     pub extra: Map<String, Value>,
 }
 

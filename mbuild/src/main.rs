@@ -1,58 +1,50 @@
-use clap::{Parser, Subcommand};
+use clap::Parser;
+use std::env;
 use std::fmt;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-mod builders;
+use mbuild::runtime;
 
 type MResult<T> = Result<T, MbuildError>;
 
 #[derive(Debug)]
 enum MbuildError {
-    InvalidCommand(String),
-    NotImplemented(String),
+    InvalidInput(String),
+    BuildFailed(String),
 }
 
 impl MbuildError {
     fn class(&self) -> &'static str {
         match self {
-            Self::InvalidCommand(_) => "invalid-command",
-            Self::NotImplemented(_) => "not-implemented",
+            Self::InvalidInput(_) => "invalid-input",
+            Self::BuildFailed(_) => "build-failed",
         }
     }
 
     fn message(&self) -> &str {
         match self {
-            Self::InvalidCommand(message) | Self::NotImplemented(message) => message,
+            Self::InvalidInput(message) | Self::BuildFailed(message) => message,
         }
     }
 }
 
 impl fmt::Display for MbuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message())
+        f.write_str(self.message())
     }
 }
 
 #[derive(Parser, Debug)]
 #[command(name = "mbuild")]
-#[command(about = "Unified mbuild CLI (term runtime pending)")]
+#[command(about = "mbuild runtime for BuildRequest JSON")]
 struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand, Debug)]
-enum Command {
-    Build { artifact_name: String },
-    Verbs { target: String },
-    Info { artifact_name: String },
-    #[command(external_subcommand)]
-    External(Vec<String>),
+    request_file: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli.command) {
+    match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error[{}]: {}", error.class(), error);
@@ -61,64 +53,28 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(command: Command) -> MResult<()> {
-    match command {
-        Command::Build { artifact_name } => run_build(&artifact_name),
-        Command::Verbs { target } => run_verbs(&target),
-        Command::Info { artifact_name } => run_info(&artifact_name),
-        Command::External(args) => run_artifact_form(&args),
-    }
+fn run(cli: Cli) -> MResult<()> {
+    let workspace_root = env::current_dir()
+        .map_err(|error| MbuildError::InvalidInput(format!("failed to get current directory: {error}")))?;
+    let request_path = cli
+        .request_file
+        .unwrap_or_else(|| PathBuf::from(".mbuild/request.json"));
+    let published =
+        runtime::run_workspace_build(&workspace_root, &request_path).map_err(map_runtime_error)?;
+
+    println!("build_key: {}", published.record.build_key);
+    println!("object_hash: {}", published.record.object_hash);
+    println!("object_path: {}", published.object_path.display());
+    Ok(())
 }
 
-fn run_artifact_form(args: &[String]) -> MResult<()> {
-    if args.is_empty() {
-        return Err(MbuildError::InvalidCommand(
-            "expected '<artifact> [verb]'".to_string(),
-        ));
+fn map_runtime_error(error: runtime::RuntimeError) -> MbuildError {
+    match error {
+        runtime::RuntimeError::InvalidRequest(_)
+        | runtime::RuntimeError::UnknownBuilder(_)
+        | runtime::RuntimeError::RecipeLoad(_) => MbuildError::InvalidInput(error.to_string()),
+        runtime::RuntimeError::Build(_) | runtime::RuntimeError::Store(_) => {
+            MbuildError::BuildFailed(error.to_string())
+        }
     }
-    if args.len() > 2 {
-        return Err(MbuildError::InvalidCommand(format!(
-            "too many positional arguments; expected '<artifact> [verb]', got: '{}'",
-            args.join(" ")
-        )));
-    }
-
-    let artifact_name = &args[0];
-    let verb = args.get(1).map(String::as_str).unwrap_or("build");
-    match verb {
-        "build" => run_build(artifact_name),
-        _ => Err(MbuildError::InvalidCommand(format!(
-            "verb '{}' is not supported by the current transitional CLI",
-            verb
-        ))),
-    }
-}
-
-fn run_build(artifact_name: &str) -> MResult<()> {
-    Err(MbuildError::NotImplemented(format!(
-        "term-based runtime is not implemented yet; build '{}' cannot be executed through the CLI in this step",
-        artifact_name
-    )))
-}
-
-fn run_info(artifact_name: &str) -> MResult<()> {
-    Err(MbuildError::NotImplemented(format!(
-        "term-based runtime is not implemented yet; info '{}' is unavailable in this step",
-        artifact_name
-    )))
-}
-
-fn run_verbs(target: &str) -> MResult<()> {
-    if let Some(builder) = builders::get_builder(target) {
-        println!("builder: {}", builder.spec().tag);
-        println!("verbs: build");
-        return Ok(());
-    }
-
-    let tags = builders::supported_builder_tags();
-    Err(MbuildError::InvalidCommand(format!(
-        "unknown builder '{}'; supported builders: {}",
-        target,
-        tags.join(", ")
-    )))
 }
