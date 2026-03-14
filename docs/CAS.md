@@ -31,7 +31,10 @@ and refs do not participate in object identity.
 `objects/<object-hash>` is the payload itself, either a file or a directory.
 
 `builds/<build_key>.json` is the persistent record of one interpreted builder
-invocation.
+invocation. `build_key` is computed from the interpreted invocation itself:
+builder tag, normalized payload, resolved input object hashes, and selected
+output projection when projection exists. `object_hash` is stored inside the
+record and does not participate in `build_key`.
 
 `meta-refs/<name>.json` is a human-facing symlink to a build record.
 
@@ -108,6 +111,8 @@ Example shape:
 Rules:
 
 - each build record is keyed by `build_key`
+- `build_key` is computed before builder execution from the interpreted invocation
+- `build_key` does not depend on `object_hash`
 - a build record contains the metadata needed for further interpretation
 - a build record points at exactly one `object_hash`
 - multiple build records may point at the same object
@@ -168,11 +173,13 @@ The runtime then:
 
 1. recursively evaluates dependency terms inside `build`
 2. resolves input objects through their build records
-3. invokes the appropriate builder
-4. stores the produced payload in `objects/`
-5. writes one build record in `builds/`
-6. updates one symlink in `meta-refs/`
-7. updates one symlink in `object-refs/`
+3. computes `build_key` from the interpreted invocation
+4. reuses an existing build record on matching `build_key`
+5. executes the appropriate builder on cache miss
+6. stores the produced payload in `objects/`
+7. writes one build record in `builds/`
+8. updates one symlink in `meta-refs/`
+9. updates one symlink in `object-refs/`
 
 Builders do not read refs. Builders do not receive publication names as part of
 build semantics.

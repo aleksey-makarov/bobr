@@ -55,10 +55,10 @@ The interpreter:
 
 - evaluates dependency terms
 - validates builder-specific inputs
-- computes object hashes from produced payloads
-- computes build keys for interpreted builder invocations
+- computes `build_key` from builder tag, normalized payload, resolved input object hashes, and selected output projection when projection exists
 - reuses existing build records on matching `build_key`
 - executes builders on cache miss
+- computes object hashes from produced payloads on cache miss
 - publishes resulting objects and build refs
 
 ### 4. Store Layer
@@ -160,10 +160,10 @@ Given one selected request, the interpreter:
 3. inspects the top-level builder operation or output projection
 4. recursively interprets embedded dependency terms
 5. obtains realized dependency objects through their build records
-6. computes the stable identity of the current result from the produced payload only
-7. computes a `build_key` for the current interpreted builder invocation
-8. reuses an existing build record on matching `build_key`
-9. executes the registered builder on cache miss
+6. computes a `build_key` for the current interpreted builder invocation from builder tag, normalized payload, resolved input object hashes, and selected output projection when projection exists
+7. reuses an existing build record on matching `build_key`
+8. executes the registered builder on cache miss
+9. computes the stable identity of the current result from the produced payload only on cache miss
 10. publishes:
    - the resulting object in `objects/`
    - one build record in `builds/`
