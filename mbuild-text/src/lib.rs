@@ -134,3 +134,156 @@ fn map_error(error: TextError) -> BuilderError {
         TextError::InvalidConfig(message) => BuilderError::InvalidRecipe(message),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mbuild_core::Builder;
+    use tempfile::tempdir;
+
+    fn build_context(root: &std::path::Path) -> BuildContext {
+        BuildContext {
+            workspace_root: root.to_path_buf(),
+            builder_root: root.join("text"),
+            temp_root: root.join("text").join("tmp"),
+        }
+    }
+
+    #[test]
+    fn build_typed_creates_staged_file_and_attrs() {
+        let builder = TextBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let result = builder
+            .build_typed(
+                TextConfig {
+                    kind: "plain-text".to_string(),
+                    source: "hello".to_string(),
+                },
+                ResolvedInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+
+        assert_eq!(result.kind, "plain-text");
+        assert_eq!(result.producer.builder, "text");
+        assert!(result.input_object_hashes.is_empty());
+        assert_eq!(result.attrs["source_bytes"], Value::from(5));
+        assert_eq!(fs::read_to_string(&result.staged_path).unwrap(), "hello");
+    }
+
+    #[test]
+    fn build_script_sets_executable_bit() {
+        let builder = TextBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let result = builder
+            .build_typed(
+                TextConfig {
+                    kind: "build-script".to_string(),
+                    source: "#!/bin/sh\necho hi\n".to_string(),
+                },
+                ResolvedInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&result.staged_path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111);
+        }
+    }
+
+    #[test]
+    fn non_build_script_does_not_set_executable_bit() {
+        let builder = TextBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let result = builder
+            .build_typed(
+                TextConfig {
+                    kind: "plain-text".to_string(),
+                    source: "hello".to_string(),
+                },
+                ResolvedInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&result.staged_path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0);
+        }
+    }
+
+    #[test]
+    fn text_builder_rejects_non_empty_inputs() {
+        let builder = TextBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        let mut inputs = ResolvedInputs::empty();
+        inputs.insert(
+            "script",
+            mbuild_core::ResolvedInputValue::Many(Vec::new()),
+        );
+
+        let error = builder
+            .build_typed(
+                TextConfig {
+                    kind: "plain-text".to_string(),
+                    source: "hello".to_string(),
+                },
+                inputs,
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, BuilderError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn text_builder_rejects_empty_kind() {
+        let builder = TextBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let error = builder
+            .build_typed(
+                TextConfig {
+                    kind: "".to_string(),
+                    source: "hello".to_string(),
+                },
+                ResolvedInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, BuilderError::InvalidRecipe(_)));
+    }
+
+    #[test]
+    fn build_erased_rejects_unknown_config_field() {
+        let builder = TextBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let error = builder
+            .build_erased(
+                serde_json::json!({
+                    "kind": "plain-text",
+                    "source": "hello",
+                    "extra": true
+                }),
+                ResolvedInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, BuilderError::InvalidRecipe(_)));
+    }
+}

@@ -236,6 +236,34 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn resolved_inputs_missing_and_wrong_arity_are_errors() {
+        let object = sample_object();
+        let mut inputs = ResolvedInputs::empty();
+        inputs.insert("script", ResolvedInputValue::One(object));
+
+        assert!(matches!(
+            inputs.optional("script"),
+            Err(BuilderError::ExecutionFailed(_))
+        ));
+        assert!(matches!(
+            inputs.many("script"),
+            Err(BuilderError::ExecutionFailed(_))
+        ));
+        assert!(matches!(
+            inputs.one("missing"),
+            Err(BuilderError::ExecutionFailed(_))
+        ));
+        assert!(matches!(
+            inputs.optional("missing"),
+            Err(BuilderError::ExecutionFailed(_))
+        ));
+        assert!(matches!(
+            inputs.many("missing"),
+            Err(BuilderError::ExecutionFailed(_))
+        ));
+    }
+
     struct DummyBuilder;
 
     static DUMMY_SPEC: BuilderSpec = BuilderSpec {
@@ -300,5 +328,12 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(error, BuilderError::InvalidRecipe(_)));
+    }
+
+    #[test]
+    fn typed_builder_adapter_exposes_typed_spec() {
+        let builder = DummyBuilder;
+        assert_eq!(Builder::spec(&builder).tag, "Dummy");
+        assert!(Builder::spec(&builder).inputs.is_empty());
     }
 }

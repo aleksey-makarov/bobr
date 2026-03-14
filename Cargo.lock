@@ -339,6 +339,7 @@ dependencies = [
  "mbuild-core",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
