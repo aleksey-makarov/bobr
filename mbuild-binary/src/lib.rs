@@ -1,59 +1,53 @@
-use mbuild_core::{Builder, BuilderError, fsutil};
+use mbuild_core::{
+    BuildContext, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo,
+    ResolvedInputs, ResolvedObject, StagedBuildResult, TypedBuilder, fsutil,
+};
 use serde::Deserialize;
-use serde_json::Value;
-use std::env;
+use serde_json::{Map, Value};
+use std::fmt;
 use std::fs;
-#[cfg(unix)]
-use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
-const ROOT_DIR: &str = ".mbuild";
-const OBJECTS_DIR: &str = "objects";
-const META_DIR: &str = "meta";
-const REFS_DIR: &str = "refs";
-const LOGS_DIR: &str = "logs";
 const KIND_SOURCE_TREE: &str = "source-tree";
 const KIND_BUILD_SCRIPT: &str = "build-script";
 const KIND_CONTAINER_IMAGE: &str = "container-image";
-
-type BResult<T> = Result<T, BinaryError>;
+const OUTPUT_DIR_NAME: &str = "out";
 
 #[derive(Debug)]
 enum BinaryError {
-    InvalidRecipe(String),
+    InvalidConfig(String),
     InputResolutionFailed(String),
     PodmanFailed(String),
     BuildFailed(String),
-    PublishFailed(String),
     FsFailed(String),
 }
 
+impl BinaryError {
+    fn message(&self) -> &str {
+        match self {
+            Self::InvalidConfig(message)
+            | Self::InputResolutionFailed(message)
+            | Self::PodmanFailed(message)
+            | Self::BuildFailed(message)
+            | Self::FsFailed(message) => message,
+        }
+    }
+}
+
+impl fmt::Display for BinaryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+type BResult<T> = Result<T, BinaryError>;
+
 #[derive(Debug, Deserialize)]
-struct BinaryRecipe {
-    #[serde(rename = "type")]
-    recipe_type: String,
-    #[serde(default)]
-    inputs: Vec<String>,
-    #[serde(default)]
-    outputs: Vec<String>,
-}
-
-#[derive(Debug)]
-struct ResolvedInput {
-    name: String,
-    object_path: PathBuf,
-    id: String,
-    artifact_kind: String,
-    image_ref: Option<String>,
-    is_file: bool,
-}
-
-#[derive(Debug)]
-struct ResolvedMeta {
-    id: String,
-    artifact_kind: String,
-    image_ref: Option<String>,
+#[serde(deny_unknown_fields)]
+pub struct BinaryConfig {
+    kind: String,
+    optimize: String,
 }
 
 struct ScriptExecution {
@@ -67,89 +61,180 @@ struct ContainerExecution {
 
 pub struct BinaryBuilder;
 
-impl Builder for BinaryBuilder {
-    fn get_type(&self) -> &'static str {
-        "binary"
+static BINARY_INPUTS: &[InputSlot] = &[
+    InputSlot {
+        name: "image",
+        arity: InputArity::One,
+        allowed_kinds: &[KIND_CONTAINER_IMAGE],
+    },
+    InputSlot {
+        name: "script",
+        arity: InputArity::One,
+        allowed_kinds: &[KIND_BUILD_SCRIPT],
+    },
+    InputSlot {
+        name: "sources",
+        arity: InputArity::Many,
+        allowed_kinds: &[KIND_SOURCE_TREE],
+    },
+];
+
+static BINARY_SPEC: BuilderSpec = BuilderSpec {
+    tag: "Binary",
+    inputs: BINARY_INPUTS,
+};
+
+impl TypedBuilder for BinaryBuilder {
+    type Config = BinaryConfig;
+
+    fn spec(&self) -> &'static BuilderSpec {
+        &BINARY_SPEC
     }
 
-    fn run_build(&self, artifact: &str, recipe: &Value) -> Result<(), BuilderError> {
-        let mut ctx = prepare_build_context(artifact, recipe)?;
-        prepare_outputs(&mut ctx).map_err(map_error)?;
+    fn build_typed(
+        &self,
+        config: Self::Config,
+        inputs: ResolvedInputs,
+        cx: &mut BuildContext,
+    ) -> Result<StagedBuildResult, BuilderError> {
+        validate_config(&config).map_err(map_error)?;
+        let image = inputs.one("image")?;
+        let script = inputs.one("script")?;
+        let sources = inputs.many("sources")?;
+        if sources.is_empty() {
+            return Err(BuilderError::ExecutionFailed(
+                "Binary builder requires at least one source-tree input".to_string(),
+            ));
+        }
 
-        let build_result = run_container_build(&ctx);
+        let script_execution = resolve_script_execution(script, sources).map_err(map_error)?;
+        let container_execution = resolve_container_execution(image).map_err(map_error)?;
+
+        fsutil::recreate_empty_dir_force(&cx.temp_root)
+            .map_err(map_fsutil_error)
+            .map_err(map_error)?;
+        let output_path = cx.temp_root.join(OUTPUT_DIR_NAME);
+        fsutil::recreate_empty_dir(&output_path)
+            .map_err(map_fsutil_error)
+            .map_err(map_error)?;
+
+        let build_result = run_container_build(
+            &container_execution,
+            &script_execution,
+            sources,
+            &output_path,
+            current_uid_gid(),
+            &cx.builder_root,
+        );
+
         if let Err(error) = build_result {
-            let _ = cleanup_temp_outputs(&ctx);
+            let _ = fsutil::remove_dir_force(&cx.temp_root);
             return Err(map_error(error));
         }
 
-        publish_outputs(&ctx).map_err(map_error)?;
-        cleanup_temp_outputs(&ctx).map_err(map_error)?;
+        let mut attrs = Map::new();
+        attrs.insert("optimize".to_string(), Value::String(config.optimize));
+        attrs.insert(
+            "install".to_string(),
+            serde_json::json!({
+                "owners": [
+                    {
+                        "path": "**",
+                        "uid": 0,
+                        "gid": 0,
+                    }
+                ]
+            }),
+        );
 
-        println!("build: ok");
-        println!("artifact: {}", ctx.artifact_name);
-        println!("image: {}", ctx.container_execution.image_ref);
-        Ok(())
-    }
+        let mut input_object_hashes = Vec::with_capacity(2 + sources.len());
+        input_object_hashes.push(image.object_hash);
+        input_object_hashes.push(script.object_hash);
+        input_object_hashes.extend(sources.iter().map(|source| source.object_hash));
 
-    fn summarize_recipe(
-        &self,
-        recipe: &Value,
-    ) -> Result<Vec<(&'static str, String)>, BuilderError> {
-        let _ = parse_recipe(recipe)?;
-        Ok(vec![("script_mode", "input".to_string())])
-    }
-}
-
-fn parse_recipe(value: &Value) -> Result<BinaryRecipe, BuilderError> {
-    serde_json::from_value::<BinaryRecipe>(value.clone())
-        .map_err(|error| BuilderError::InvalidRecipe(format!("invalid binary recipe: {error}")))
-        .and_then(|recipe| {
-            validate_recipe(&recipe).map_err(map_error)?;
-            Ok(recipe)
+        Ok(StagedBuildResult {
+            kind: config.kind,
+            producer: ProducerInfo {
+                builder: "binary".to_string(),
+            },
+            input_object_hashes,
+            attrs,
+            staged_path: output_path,
         })
+    }
 }
 
-fn validate_recipe(recipe: &BinaryRecipe) -> BResult<()> {
-    if recipe.recipe_type != "binary" {
-        return Err(BinaryError::InvalidRecipe(
-            "type must be 'binary'".to_string(),
+fn validate_config(config: &BinaryConfig) -> BResult<()> {
+    if config.kind.trim().is_empty() {
+        return Err(BinaryError::InvalidConfig(
+            "kind must not be empty".to_string(),
         ));
     }
-
-    for name in &recipe.inputs {
-        validate_artifact_name(name)?;
-    }
-    for name in &recipe.outputs {
-        validate_artifact_name(name)?;
-    }
-
-    Ok(())
-}
-
-fn validate_artifact_name(name: &str) -> BResult<()> {
-    if name.is_empty() {
-        return Err(BinaryError::InvalidRecipe(
-            "input/output name must not be empty".to_string(),
+    if config.optimize.trim().is_empty() {
+        return Err(BinaryError::InvalidConfig(
+            "optimize must not be empty".to_string(),
         ));
-    }
-    if name == "." || name == ".." {
-        return Err(BinaryError::InvalidRecipe(format!(
-            "invalid input/output name '{name}'"
-        )));
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
-    {
-        return Err(BinaryError::InvalidRecipe(format!(
-            "invalid input/output name '{}'; allowed chars: [A-Za-z0-9._-]",
-            name
-        )));
     }
     Ok(())
 }
 
-fn run_container_build(ctx: &BuildContext) -> BResult<()> {
+fn resolve_script_execution(script: &ResolvedObject, sources: &[ResolvedObject]) -> BResult<ScriptExecution> {
+    if !script.object_path.is_file() {
+        return Err(BinaryError::InputResolutionFailed(format!(
+            "build-script input must resolve to a file: {}",
+            script.object_path.display()
+        )));
+    }
+    if let Some(source) = sources.iter().find(|source| !source.object_path.is_dir()) {
+        return Err(BinaryError::InputResolutionFailed(format!(
+            "source-tree input must resolve to a directory: {}",
+            source.object_path.display()
+        )));
+    }
+
+    Ok(ScriptExecution {
+        script_host_path: script.object_path.clone(),
+        source_input_name: "sources0".to_string(),
+    })
+}
+
+fn resolve_container_execution(image: &ResolvedObject) -> BResult<ContainerExecution> {
+    if !image.object_path.is_file() {
+        return Err(BinaryError::InputResolutionFailed(format!(
+            "container-image input must resolve to a file: {}",
+            image.object_path.display()
+        )));
+    }
+
+    let image_ref = image
+        .attrs
+        .get("image_ref")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            BinaryError::InputResolutionFailed(
+                "container-image input does not define string attr 'image_ref'".to_string(),
+            )
+        })?;
+
+    if image_ref.trim().is_empty() {
+        return Err(BinaryError::InputResolutionFailed(
+            "container-image input has empty attr 'image_ref'".to_string(),
+        ));
+    }
+
+    Ok(ContainerExecution {
+        image_ref: image_ref.to_string(),
+    })
+}
+
+fn run_container_build(
+    container: &ContainerExecution,
+    script: &ScriptExecution,
+    sources: &[ResolvedObject],
+    output_path: &Path,
+    (uid, gid): (u32, u32),
+    builder_root: &Path,
+) -> BResult<()> {
     let mut process = ProcessCommand::new("podman");
     process
         .arg("run")
@@ -157,56 +242,45 @@ fn run_container_build(ctx: &BuildContext) -> BResult<()> {
         .arg("--network=none")
         .arg("--userns=keep-id")
         .arg("--user")
-        .arg(format!("{}:{}", ctx.uid, ctx.gid));
+        .arg(format!("{}:{}", uid, gid));
 
-    for input in &ctx.inputs {
-        if input.artifact_kind == KIND_BUILD_SCRIPT || input.artifact_kind == KIND_CONTAINER_IMAGE {
-            continue;
-        }
-        if input.is_file {
-            process.arg("--volume").arg(format!(
-                "{}:/in/{}:ro",
-                input.object_path.display(),
-                input.name
-            ));
-        } else {
-            process.arg("--volume").arg(format!(
-                "{}:/in/{}:O",
-                input.object_path.display(),
-                input.name
-            ));
-        }
+    for (index, source) in sources.iter().enumerate() {
+        process.arg("--volume").arg(format!(
+            "{}:/in/sources{}:O",
+            source.object_path.display(),
+            index
+        ));
     }
 
-    for output_name in &ctx.outputs {
-        let host_path = ctx.temp_outputs_root.join(output_name);
-        process
-            .arg("--volume")
-            .arg(format!("{}:/out/{}:rw", host_path.display(), output_name));
-    }
+    process.arg("--volume").arg(format!(
+        "{}:/out/{}:rw",
+        output_path.display(),
+        OUTPUT_DIR_NAME
+    ));
 
-    let script_mount = format!(
+    process.arg("--volume").arg(format!(
         "{}:/__mbuild_binary_script:ro",
-        ctx.script_execution.script_host_path.display()
-    );
-    let primary_output = ctx.outputs.first().cloned().unwrap_or_default();
+        script.script_host_path.display()
+    ));
+
     process
-        .arg("--volume")
-        .arg(script_mount)
         .arg("--env")
-        .arg(format!(
-            "MBUILD_SOURCE_INPUT={}",
-            ctx.script_execution.source_input_name
-        ))
+        .arg(format!("MBUILD_SOURCE_INPUT={}", script.source_input_name))
         .arg("--env")
-        .arg(format!("MBUILD_PRIMARY_OUTPUT={primary_output}"))
-        .arg(&ctx.container_execution.image_ref)
+        .arg(format!("MBUILD_PRIMARY_OUTPUT={OUTPUT_DIR_NAME}"))
+        .arg(&container.image_ref)
         .arg("/__mbuild_binary_script");
 
     let output = process.output().map_err(|error| {
         BinaryError::PodmanFailed(format!("failed to execute podman run: {error}"))
     })?;
-    let log_path = write_run_log(ctx, &output);
+    let log_path = write_run_log(
+        builder_root,
+        &container.image_ref,
+        &script.script_host_path,
+        &script.source_input_name,
+        &output,
+    );
 
     if !output.status.success() {
         let log_hint = match &log_path {
@@ -221,361 +295,28 @@ fn run_container_build(ctx: &BuildContext) -> BResult<()> {
         )));
     }
 
-    if !output.stdout.is_empty() {
-        println!("{}", String::from_utf8_lossy(&output.stdout).trim_end());
-    }
-    if let Some(path) = log_path {
-        println!("log: {}", path.display());
+    if !output_path.is_dir() {
+        return Err(BinaryError::BuildFailed(format!(
+            "binary builder did not produce output directory '{}'",
+            output_path.display()
+        )));
     }
 
     Ok(())
 }
 
-struct BuildContext {
-    artifact_name: String,
-    layout: WorkspaceLayout,
-    inputs: Vec<ResolvedInput>,
-    outputs: Vec<String>,
-    temp_outputs_root: PathBuf,
-    script_execution: ScriptExecution,
-    container_execution: ContainerExecution,
-    uid: u32,
-    gid: u32,
-}
-
-fn prepare_build_context(
-    artifact: &str,
-    recipe_value: &Value,
-) -> Result<BuildContext, BuilderError> {
-    let recipe = parse_recipe(recipe_value)?;
-    let layout = workspace_layout().map_err(map_error)?;
-    ensure_base_dirs(&layout).map_err(map_error)?;
-
-    let inputs = resolve_inputs(&layout, &recipe).map_err(map_error)?;
-    let outputs = if recipe.outputs.is_empty() {
-        vec![artifact.to_string()]
-    } else {
-        recipe.outputs.clone()
-    };
-
-    let script_execution = resolve_script_execution(&inputs).map_err(map_error)?;
-    let container_execution = resolve_container_execution(&inputs).map_err(map_error)?;
-
-    let timestamp = fsutil::current_epoch_nanos()
-        .map_err(map_fsutil_error)
-        .map_err(map_error)?;
-    let temp_outputs_root = fsutil::temp_root_dir(ROOT_DIR)
-        .map_err(map_fsutil_error)
-        .map_err(map_error)?
-        .join(format!("binary-{}-{}", artifact, timestamp));
-
-    let (uid, gid) = current_uid_gid();
-
-    Ok(BuildContext {
-        artifact_name: artifact.to_string(),
-        layout,
-        inputs,
-        outputs,
-        temp_outputs_root,
-        script_execution,
-        container_execution,
-        uid,
-        gid,
-    })
-}
-
-fn resolve_script_execution(inputs: &[ResolvedInput]) -> BResult<ScriptExecution> {
-    let build_scripts: Vec<&ResolvedInput> = inputs
-        .iter()
-        .filter(|input| input.artifact_kind == KIND_BUILD_SCRIPT)
-        .collect();
-    let sources: Vec<&ResolvedInput> = inputs
-        .iter()
-        .filter(|input| input.artifact_kind == KIND_SOURCE_TREE)
-        .collect();
-
-    if build_scripts.len() != 1 {
-        return Err(BinaryError::InvalidRecipe(format!(
-            "binary recipe requires exactly one '{KIND_BUILD_SCRIPT}' input; found {}",
-            build_scripts.len()
-        )));
-    }
-    if sources.is_empty() {
-        return Err(BinaryError::InvalidRecipe(format!(
-            "binary recipe requires at least one '{KIND_SOURCE_TREE}' input; found {}",
-            sources.len()
-        )));
-    }
-
-    Ok(ScriptExecution {
-        script_host_path: build_scripts[0].object_path.clone(),
-        source_input_name: sources[0].name.clone(),
-    })
-}
-
-fn resolve_container_execution(inputs: &[ResolvedInput]) -> BResult<ContainerExecution> {
-    let container_images: Vec<&ResolvedInput> = inputs
-        .iter()
-        .filter(|input| input.artifact_kind == KIND_CONTAINER_IMAGE)
-        .collect();
-
-    if container_images.len() != 1 {
-        return Err(BinaryError::InvalidRecipe(format!(
-            "binary recipe requires exactly one '{KIND_CONTAINER_IMAGE}' input; found {}",
-            container_images.len()
-        )));
-    }
-
-    let image = container_images[0];
-    let image_ref = image.image_ref.clone().ok_or_else(|| {
-        BinaryError::InputResolutionFailed(format!(
-            "container-image input '{}' does not define image_ref in metadata",
-            image.name
-        ))
-    })?;
-
-    if image_ref.trim().is_empty() {
-        return Err(BinaryError::InputResolutionFailed(format!(
-            "container-image input '{}' has empty image_ref in metadata",
-            image.name
-        )));
-    }
-
-    Ok(ContainerExecution { image_ref })
-}
-
-fn prepare_outputs(ctx: &mut BuildContext) -> BResult<()> {
-    fsutil::recreate_empty_dir(&ctx.temp_outputs_root).map_err(map_fsutil_error)?;
-    for output_name in &ctx.outputs {
-        fsutil::recreate_empty_dir(&ctx.temp_outputs_root.join(output_name))
-            .map_err(map_fsutil_error)?;
-    }
-    Ok(())
-}
-
-fn cleanup_temp_outputs(ctx: &BuildContext) -> BResult<()> {
-    if ctx.temp_outputs_root.exists() {
-        fsutil::remove_dir_force(&ctx.temp_outputs_root).map_err(map_fsutil_error)?;
-    }
-    Ok(())
-}
-
-fn publish_outputs(ctx: &BuildContext) -> BResult<()> {
-    for output_name in &ctx.outputs {
-        let tmp_output = ctx.temp_outputs_root.join(output_name);
-        if !tmp_output.is_dir() {
-            return Err(BinaryError::PublishFailed(format!(
-                "declared output '{}' was not created as a directory: {}",
-                output_name,
-                tmp_output.display()
-            )));
-        }
-
-        let object_path = ctx.layout.objects.join(output_name);
-        replace_dir(&tmp_output, &object_path)?;
-
-        let meta_path = ctx.layout.meta.join(format!("{output_name}.ncl"));
-        fsutil::write_atomic(
-            &meta_path,
-            &render_meta_ncl(output_name, "binary-output", &ctx.inputs, ctx.uid, ctx.gid),
-        )
-        .map_err(map_fsutil_error)?;
-
-        let ref_path = ctx.layout.refs.join(output_name);
-        let ref_target = PathBuf::from("..").join(OBJECTS_DIR).join(output_name);
-        replace_symlink(&ref_target, &ref_path)?;
-
-        println!("publish: ok");
-        println!("output: {output_name}");
-        println!("object: {}", object_path.display());
-        println!("meta: {}", meta_path.display());
-        println!("ref: {}", ref_path.display());
-    }
-    Ok(())
-}
-
-fn resolve_inputs(layout: &WorkspaceLayout, recipe: &BinaryRecipe) -> BResult<Vec<ResolvedInput>> {
-    let mut resolved = Vec::with_capacity(recipe.inputs.len());
-
-    for input in &recipe.inputs {
-        let ref_path = layout.refs.join(input);
-        let object_path = read_ref_target(&ref_path)?;
-        let id = object_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| {
-                BinaryError::InputResolutionFailed(format!(
-                    "failed to derive object id from ref target '{}'",
-                    object_path.display()
-                ))
-            })?
-            .to_string();
-
-        let meta_path = layout.meta.join(format!("{id}.ncl"));
-        let meta = parse_meta(&meta_path)?;
-
-        if meta.id != id {
-            return Err(BinaryError::InputResolutionFailed(format!(
-                "meta id '{}' does not match ref-resolved object id '{}'",
-                meta.id, id
-            )));
-        }
-
-        if meta.artifact_kind == KIND_BUILD_SCRIPT {
-            if !object_path.is_file() {
-                return Err(BinaryError::InputResolutionFailed(format!(
-                    "build-script input '{}' must resolve to a file: {}",
-                    input,
-                    object_path.display()
-                )));
-            }
-        } else if meta.artifact_kind == KIND_CONTAINER_IMAGE {
-            if !object_path.is_file() {
-                return Err(BinaryError::InputResolutionFailed(format!(
-                    "container-image input '{}' must resolve to a file: {}",
-                    input,
-                    object_path.display()
-                )));
-            }
-        } else if !object_path.is_file() && !object_path.is_dir() {
-            return Err(BinaryError::InputResolutionFailed(format!(
-                "input '{}' must resolve to a regular file or directory: {}",
-                input,
-                object_path.display()
-            )));
-        }
-
-        resolved.push(ResolvedInput {
-            name: input.clone(),
-            is_file: object_path.is_file(),
-            object_path,
-            id,
-            artifact_kind: meta.artifact_kind,
-            image_ref: meta.image_ref,
-        });
-    }
-
-    Ok(resolved)
-}
-
-fn read_ref_target(ref_path: &Path) -> BResult<PathBuf> {
-    if !ref_path.exists() {
-        return Err(BinaryError::InputResolutionFailed(format!(
-            "input ref does not exist: {}",
-            ref_path.display()
-        )));
-    }
-
-    let target = fs::read_link(ref_path).map_err(|error| {
-        BinaryError::InputResolutionFailed(format!(
-            "failed to read ref symlink '{}': {error}",
-            ref_path.display()
-        ))
-    })?;
-
-    let resolved_target = if target.is_absolute() {
-        target
-    } else {
-        ref_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(target)
-    };
-
-    if !resolved_target.exists() {
-        return Err(BinaryError::InputResolutionFailed(format!(
-            "input ref target does not exist: {}",
-            resolved_target.display()
-        )));
-    }
-
-    Ok(resolved_target)
-}
-
-fn parse_meta(path: &Path) -> BResult<ResolvedMeta> {
-    let content = fs::read_to_string(path).map_err(|error| {
-        BinaryError::InputResolutionFailed(format!(
-            "failed to read meta file '{}': {error}",
-            path.display()
-        ))
-    })?;
-
-    let id = extract_ncl_string_field(&content, "id").ok_or_else(|| {
-        BinaryError::InputResolutionFailed(format!(
-            "meta '{}' does not define string field 'id'",
-            path.display()
-        ))
-    })?;
-    let artifact_kind = extract_ncl_string_field(&content, "artifact_kind").ok_or_else(|| {
-        BinaryError::InputResolutionFailed(format!(
-            "meta '{}' does not define string field 'artifact_kind'",
-            path.display()
-        ))
-    })?;
-    let image_ref = extract_ncl_string_field(&content, "image_ref");
-
-    Ok(ResolvedMeta {
-        id,
-        artifact_kind,
-        image_ref,
-    })
-}
-
-fn extract_ncl_string_field(content: &str, field: &str) -> Option<String> {
-    let key = format!("{field} = \"");
-    let start = content.find(&key)? + key.len();
-    let rest = &content[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
-}
-
-fn render_meta_ncl(
-    id: &str,
-    artifact_kind: &str,
-    inputs: &[ResolvedInput],
-    owner_uid: u32,
-    owner_gid: u32,
-) -> String {
-    let inputs_list = inputs
-        .iter()
-        .map(|input| q(&input.name))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let input_ids = inputs
-        .iter()
-        .map(|input| q(&input.id))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    format!(
-        "{{\n  id = {},\n  artifact_kind = {},\n  producer = {{\n    builder = \"binary\",\n  }},\n  attrs = {{\n    inputs = [{}],\n    input_ids = [{}],\n    install = {{\n      owners = [\n        {{ path = \"**\", uid = {}, gid = {} }},\n      ],\n    }},\n  }},\n}}\n",
-        q(id),
-        q(artifact_kind),
-        inputs_list,
-        input_ids,
-        owner_uid,
-        owner_gid
-    )
-}
-
-fn command_details(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if !stderr.trim().is_empty() {
-        stderr.trim().to_string()
-    } else if !stdout.trim().is_empty() {
-        stdout.trim().to_string()
-    } else {
-        "command failed without output".to_string()
-    }
-}
-
-fn write_run_log(ctx: &BuildContext, output: &std::process::Output) -> Option<PathBuf> {
-    let artifact_logs_dir = ctx.layout.logs.join(&ctx.artifact_name);
-    if let Err(error) = fs::create_dir_all(&artifact_logs_dir) {
+fn write_run_log(
+    builder_root: &Path,
+    image_ref: &str,
+    script_path: &Path,
+    source_input_name: &str,
+    output: &std::process::Output,
+) -> Option<PathBuf> {
+    let logs_dir = builder_root.join("logs");
+    if let Err(error) = fs::create_dir_all(&logs_dir) {
         eprintln!(
-            "warning: failed to create logs directory '{}': {}",
-            artifact_logs_dir.display(),
+            "warning: failed to create binary logs directory '{}': {}",
+            logs_dir.display(),
             error
         );
         return None;
@@ -584,25 +325,22 @@ fn write_run_log(ctx: &BuildContext, output: &std::process::Output) -> Option<Pa
     let timestamp = match fsutil::current_epoch_nanos() {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("warning: failed to get current time for log file: {error}");
+            eprintln!("warning: failed to get current time for binary log file: {error}");
             return None;
         }
     };
 
-    let run_log_path = artifact_logs_dir.join(format!("run-{timestamp}.log"));
-    let latest_log_path = artifact_logs_dir.join("latest.log");
-    let exit_code = output
-        .status
-        .code()
-        .map(|code| code.to_string())
-        .unwrap_or_else(|| "signal".to_string());
+    let run_log_path = logs_dir.join(format!("run-{timestamp}.log"));
     let log_content = format!(
-        "artifact: {}\nimage_ref: {}\nscript: {}\nsource_input: {}\nexit_code: {}\nstatus_success: {}\n\n=== stdout ===\n{}\n\n=== stderr ===\n{}\n",
-        ctx.artifact_name,
-        ctx.container_execution.image_ref,
-        ctx.script_execution.script_host_path.display(),
-        ctx.script_execution.source_input_name,
-        exit_code,
+        "image_ref: {}\nscript: {}\nsource_input: {}\nexit_code: {}\nstatus_success: {}\n\n=== stdout ===\n{}\n\n=== stderr ===\n{}\n",
+        image_ref,
+        script_path.display(),
+        source_input_name,
+        output
+            .status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".to_string()),
         output.status.success(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
@@ -610,101 +348,39 @@ fn write_run_log(ctx: &BuildContext, output: &std::process::Output) -> Option<Pa
 
     if let Err(error) = fsutil::write_atomic(&run_log_path, &log_content) {
         eprintln!(
-            "warning: failed to write run log '{}': {}",
+            "warning: failed to write binary run log '{}': {}",
             run_log_path.display(),
             error
         );
         return None;
     }
 
-    if let Err(error) = fsutil::write_atomic(&latest_log_path, &log_content) {
-        eprintln!(
-            "warning: failed to write latest log '{}': {}",
-            latest_log_path.display(),
-            error
-        );
-    }
-
     Some(run_log_path)
 }
 
-fn replace_dir(tmp_dir: &Path, destination: &Path) -> BResult<()> {
-    if destination.exists() {
-        if destination.is_dir() {
-            fs::remove_dir_all(destination).map_err(|error| {
-                BinaryError::PublishFailed(format!(
-                    "failed to remove previous object directory '{}': {error}",
-                    destination.display()
-                ))
-            })?;
-        } else {
-            fs::remove_file(destination).map_err(|error| {
-                BinaryError::PublishFailed(format!(
-                    "failed to remove previous object file '{}': {error}",
-                    destination.display()
-                ))
-            })?;
-        }
+fn command_details(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => "command failed without output".to_string(),
+        (false, true) => format!("stdout: {stdout}"),
+        (true, false) => format!("stderr: {stderr}"),
+        (false, false) => format!("stdout: {stdout}; stderr: {stderr}"),
     }
-
-    fs::rename(tmp_dir, destination).map_err(|error| {
-        BinaryError::PublishFailed(format!(
-            "failed to publish output '{}' -> '{}': {error}",
-            tmp_dir.display(),
-            destination.display()
-        ))
-    })
 }
 
-fn replace_symlink(target: &Path, link_path: &Path) -> BResult<()> {
-    if link_path.exists() || link_path.is_symlink() {
-        let metadata = fs::symlink_metadata(link_path).map_err(|error| {
-            BinaryError::FsFailed(format!(
-                "failed to inspect existing ref '{}': {error}",
-                link_path.display()
-            ))
-        })?;
+fn map_fsutil_error(error: fsutil::FsUtilError) -> BinaryError {
+    BinaryError::FsFailed(error.to_string())
+}
 
-        if metadata.file_type().is_dir() {
-            fs::remove_dir_all(link_path).map_err(|error| {
-                BinaryError::FsFailed(format!(
-                    "failed to remove existing ref directory '{}': {error}",
-                    link_path.display()
-                ))
-            })?;
-        } else {
-            fs::remove_file(link_path).map_err(|error| {
-                BinaryError::FsFailed(format!(
-                    "failed to remove existing ref '{}': {error}",
-                    link_path.display()
-                ))
-            })?;
-        }
+fn map_error(error: BinaryError) -> BuilderError {
+    match error {
+        BinaryError::InvalidConfig(message) => BuilderError::InvalidRecipe(message),
+        BinaryError::InputResolutionFailed(message)
+        | BinaryError::PodmanFailed(message)
+        | BinaryError::BuildFailed(message)
+        | BinaryError::FsFailed(message) => BuilderError::ExecutionFailed(message),
     }
-
-    create_symlink(target, link_path)
-}
-
-#[cfg(unix)]
-fn create_symlink(target: &Path, link_path: &Path) -> BResult<()> {
-    unix_fs::symlink(target, link_path).map_err(|error| {
-        BinaryError::FsFailed(format!(
-            "failed to create ref symlink '{}' -> '{}': {error}",
-            link_path.display(),
-            target.display()
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn create_symlink(_target: &Path, _link_path: &Path) -> BResult<()> {
-    Err(BinaryError::FsFailed(
-        "symlink refs are currently supported only on unix hosts".to_string(),
-    ))
-}
-
-fn q(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"<serialization-error>\"".to_string())
 }
 
 fn current_uid_gid() -> (u32, u32) {
@@ -721,57 +397,257 @@ fn current_uid_gid() -> (u32, u32) {
     }
 }
 
-struct WorkspaceLayout {
-    root: PathBuf,
-    objects: PathBuf,
-    meta: PathBuf,
-    refs: PathBuf,
-    logs: PathBuf,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mbuild_core::{BuildKey, Builder, ObjectHash, ResolvedInputValue};
+    use std::env;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Mutex, OnceLock};
+    use tempfile::tempdir;
 
-fn workspace_layout() -> BResult<WorkspaceLayout> {
-    let cwd = env::current_dir()
-        .map_err(|error| BinaryError::FsFailed(format!("failed to get current directory: {error}")))?;
-    let root = cwd.join(ROOT_DIR);
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
-    Ok(WorkspaceLayout {
-        root: root.clone(),
-        objects: root.join(OBJECTS_DIR),
-        meta: root.join(META_DIR),
-        refs: root.join(REFS_DIR),
-        logs: root.join(LOGS_DIR),
-    })
-}
+    fn build_context(root: &Path) -> BuildContext {
+        BuildContext {
+            workspace_root: root.to_path_buf(),
+            builder_root: root.join(".mbuild").join("builder-state").join("binary"),
+            temp_root: root.join(".mbuild").join("builder-state").join("binary").join("tmp"),
+        }
+    }
 
-fn ensure_base_dirs(layout: &WorkspaceLayout) -> BResult<()> {
-    ensure_dir(&layout.root, "mbuild root")?;
-    ensure_dir(&layout.objects, "objects")?;
-    ensure_dir(&layout.meta, "meta")?;
-    ensure_dir(&layout.refs, "refs")?;
-    ensure_dir(&layout.logs, "logs")?;
-    Ok(())
-}
+    fn install_fake_podman(dir: &Path) {
+        let script_path = dir.join("podman");
+        fs::write(
+            &script_path,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = run ]; then
+  shift 1
+  source_input=""
+  declare -A in_mounts
+  out_host=""
+  image_ref=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --volume)
+        spec="$2"
+        host="${spec%%:*}"
+        rest="${spec#*:}"
+        mount="${rest%%:*}"
+        if [[ "$mount" == /in/* ]]; then
+          name="${mount#/in/}"
+          in_mounts["$name"]="$host"
+        elif [ "$mount" = "/out/out" ]; then
+          out_host="$host"
+        fi
+        shift 2
+        ;;
+      --env)
+        kv="$2"
+        case "$kv" in
+          MBUILD_SOURCE_INPUT=*) source_input="${kv#*=}" ;;
+        esac
+        shift 2
+        ;;
+      --rm|--network=none|--userns=keep-id)
+        shift 1
+        ;;
+      --user)
+        shift 2
+        ;;
+      *)
+        if [ -z "$image_ref" ]; then
+          image_ref="$1"
+        fi
+        shift 1
+        ;;
+    esac
+  done
+  mkdir -p "$out_host/copied"
+  cp -R "${in_mounts[$source_input]}/." "$out_host/copied/"
+  printf '%s\n' "$image_ref" > "$out_host/image-ref.txt"
+  exit 0
+fi
 
-fn ensure_dir(path: &Path, label: &str) -> BResult<()> {
-    fs::create_dir_all(path).map_err(|error| {
-        BinaryError::FsFailed(format!(
-            "failed to create or access {label} directory '{}': {error}",
-            path.display()
-        ))
-    })
-}
+echo unexpected podman invocation: "$@" >&2
+exit 1
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script_path, permissions).unwrap();
+        }
+    }
 
-fn map_fsutil_error(error: fsutil::FsUtilError) -> BinaryError {
-    BinaryError::FsFailed(error.to_string())
-}
+    fn with_fake_podman<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = env_lock().lock().unwrap();
+        let temp = tempdir().unwrap();
+        install_fake_podman(temp.path());
+        let previous_path = env::var_os("PATH");
+        let new_path = match &previous_path {
+            Some(existing) => {
+                let mut joined = temp.path().as_os_str().to_os_string();
+                joined.push(":");
+                joined.push(existing);
+                joined
+            }
+            None => temp.path().as_os_str().to_os_string(),
+        };
+        unsafe { env::set_var("PATH", &new_path) };
+        let result = f();
+        match previous_path {
+            Some(path) => unsafe { env::set_var("PATH", path) },
+            None => unsafe { env::remove_var("PATH") },
+        }
+        result
+    }
 
-fn map_error(error: BinaryError) -> BuilderError {
-    match error {
-        BinaryError::InvalidRecipe(message) => BuilderError::InvalidRecipe(message),
-        BinaryError::InputResolutionFailed(message)
-        | BinaryError::PodmanFailed(message)
-        | BinaryError::BuildFailed(message)
-        | BinaryError::PublishFailed(message)
-        | BinaryError::FsFailed(message) => BuilderError::ExecutionFailed(message),
+    fn resolved_object(root: &Path, kind: &str, name: &str, attrs: Map<String, Value>) -> ResolvedObject {
+        let object_path = root.join(name);
+        if kind == KIND_SOURCE_TREE {
+            fs::create_dir_all(&object_path).unwrap();
+            fs::write(object_path.join("README.txt"), b"hello source\n").unwrap();
+        } else {
+            fs::write(&object_path, b"payload\n").unwrap();
+            #[cfg(unix)]
+            if kind == KIND_BUILD_SCRIPT {
+                let mut permissions = fs::metadata(&object_path).unwrap().permissions();
+                permissions.set_mode(0o755);
+                fs::set_permissions(&object_path, permissions).unwrap();
+            }
+        }
+        ResolvedObject {
+            object_hash: match kind {
+                KIND_CONTAINER_IMAGE => "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                KIND_BUILD_SCRIPT => "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                _ => "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            }
+            .parse::<ObjectHash>()
+            .unwrap(),
+            build_key: match kind {
+                KIND_CONTAINER_IMAGE => "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                KIND_BUILD_SCRIPT => "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                _ => "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            }
+            .parse::<BuildKey>()
+            .unwrap(),
+            kind: kind.to_string(),
+            attrs,
+            object_path,
+        }
+    }
+
+    fn sample_inputs(root: &Path) -> ResolvedInputs {
+        let mut inputs = ResolvedInputs::empty();
+        let mut image_attrs = Map::new();
+        image_attrs.insert(
+            "image_ref".to_string(),
+            Value::String("docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+        );
+        inputs.insert(
+            "image",
+            ResolvedInputValue::One(resolved_object(root, KIND_CONTAINER_IMAGE, "image.json", image_attrs)),
+        );
+        inputs.insert(
+            "script",
+            ResolvedInputValue::One(resolved_object(root, KIND_BUILD_SCRIPT, "script.sh", Map::new())),
+        );
+        inputs.insert(
+            "sources",
+            ResolvedInputValue::Many(vec![resolved_object(root, KIND_SOURCE_TREE, "src", Map::new())]),
+        );
+        inputs
+    }
+
+    #[test]
+    fn binary_builder_runs_fake_podman_and_materializes_output_dir() {
+        with_fake_podman(|| {
+            let temp = tempdir().unwrap();
+            let mut cx = build_context(temp.path());
+            let result = BinaryBuilder
+                .build_typed(
+                    BinaryConfig {
+                        kind: "binary-output".to_string(),
+                        optimize: "size".to_string(),
+                    },
+                    sample_inputs(temp.path()),
+                    &mut cx,
+                )
+                .unwrap();
+
+            assert_eq!(result.kind, "binary-output");
+            assert_eq!(result.producer.builder, "binary");
+            assert_eq!(result.attrs["optimize"], Value::String("size".to_string()));
+            assert_eq!(result.input_object_hashes.len(), 3);
+            assert!(result.staged_path.is_dir());
+            assert_eq!(
+                fs::read_to_string(result.staged_path.join("copied").join("README.txt")).unwrap(),
+                "hello source\n"
+            );
+            assert_eq!(
+                fs::read_to_string(result.staged_path.join("image-ref.txt")).unwrap(),
+                "docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            );
+        });
+    }
+
+    #[test]
+    fn binary_builder_rejects_missing_image_ref_attr() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        let mut inputs = ResolvedInputs::empty();
+        inputs.insert(
+            "image",
+            ResolvedInputValue::One(resolved_object(temp.path(), KIND_CONTAINER_IMAGE, "image.json", Map::new())),
+        );
+        inputs.insert(
+            "script",
+            ResolvedInputValue::One(resolved_object(temp.path(), KIND_BUILD_SCRIPT, "script.sh", Map::new())),
+        );
+        inputs.insert(
+            "sources",
+            ResolvedInputValue::Many(vec![resolved_object(temp.path(), KIND_SOURCE_TREE, "src", Map::new())]),
+        );
+
+        let error = BinaryBuilder
+            .build_typed(
+                BinaryConfig {
+                    kind: "binary-output".to_string(),
+                    optimize: "size".to_string(),
+                },
+                inputs,
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, BuilderError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn build_erased_rejects_unknown_config_field() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let error = BinaryBuilder
+            .build_erased(
+                serde_json::json!({
+                    "kind": "binary-output",
+                    "optimize": "size",
+                    "extra": true,
+                }),
+                sample_inputs(temp.path()),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, BuilderError::InvalidRecipe(_)));
     }
 }

@@ -2,6 +2,7 @@
 members = [
   "mbuild",
   "mbuild-core",
+  "mbuild-binary",
   "mbuild-fetch",
   "mbuild-image",
   "mbuild-text",
