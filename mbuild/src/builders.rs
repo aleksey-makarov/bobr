@@ -1,16 +1,17 @@
 use mbuild_binary::BinaryBuilder;
 use mbuild_core::Builder;
 use mbuild_fetch::FetchBuilder;
-use mbuild_image::ContainerImageBuilder;
+use mbuild_image::{ContainerImageBuilder, ImageBuilder};
 use mbuild_text::TextBuilder;
 
 static FETCH_BUILDER: FetchBuilder = FetchBuilder;
 static CONTAINER_IMAGE_BUILDER: ContainerImageBuilder = ContainerImageBuilder;
 static BINARY_BUILDER: BinaryBuilder = BinaryBuilder;
+static IMAGE_BUILDER: ImageBuilder = ImageBuilder;
 static TEXT_BUILDER: TextBuilder = TextBuilder;
 
-pub fn registered_builders() -> [&'static dyn Builder; 4] {
-    [&TEXT_BUILDER, &FETCH_BUILDER, &CONTAINER_IMAGE_BUILDER, &BINARY_BUILDER]
+pub fn registered_builders() -> [&'static dyn Builder; 5] {
+    [&TEXT_BUILDER, &FETCH_BUILDER, &CONTAINER_IMAGE_BUILDER, &BINARY_BUILDER, &IMAGE_BUILDER]
 }
 
 pub fn get_builder(tag: &str) -> Option<&'static dyn Builder> {
