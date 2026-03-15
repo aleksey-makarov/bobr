@@ -2,6 +2,7 @@
 members = [
   "mbuild",
   "mbuild-core",
+  "mbuild-fetch",
   "mbuild-text",
   "fsobj-hash",
 ]

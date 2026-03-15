@@ -1,15 +1,14 @@
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
-use mbuild_core::cas::{
-    CasError, PublishOutputRequest, StoreLayout, publish_output as publish_cas_output,
+use mbuild_core::{
+    BuildContext, BuilderError, BuilderSpec, InputSlot, ProducerInfo, ResolvedInputs,
+    StagedBuildResult, TypedBuilder, fsutil,
 };
-use mbuild_core::{Builder, BuilderError, fsutil};
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::env;
 use std::fmt;
 use std::fs;
 use std::fs::File;
@@ -21,16 +20,13 @@ use tar::Archive;
 use xz2::read::XzDecoder;
 use zip::read::ZipArchive;
 
-const ROOT_DIR: &str = ".mbuild";
-const BUILDER_DIR: &str = "fetch";
 const CACHE_DIR: &str = "cache";
-const TMP_DIR: &str = "tmp";
 const REDIRECT_LIMIT: usize = 10;
 const USER_AGENT: &str = "mbuild-fetch/0.1";
 
 #[derive(Debug)]
 enum FetchError {
-    InvalidRecipe(String),
+    InvalidConfig(String),
     NetworkFailed(String),
     ExtractFailed(String),
     FsFailed(String),
@@ -39,7 +35,7 @@ enum FetchError {
 impl FetchError {
     fn message(&self) -> &str {
         match self {
-            Self::InvalidRecipe(message)
+            Self::InvalidConfig(message)
             | Self::NetworkFailed(message)
             | Self::ExtractFailed(message)
             | Self::FsFailed(message) => message,
@@ -55,7 +51,7 @@ impl fmt::Display for FetchError {
 
 type FResult<T> = Result<T, FetchError>;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum ArchiveFormat {
     TarGz,
@@ -81,9 +77,8 @@ impl UrlField {
 }
 
 #[derive(Debug, Deserialize)]
-struct FetchRecipe {
-    #[serde(rename = "type")]
-    recipe_type: String,
+#[serde(deny_unknown_fields)]
+pub struct FetchConfig {
     url: UrlField,
     hash: String,
     #[serde(default = "default_unpack")]
@@ -92,160 +87,10 @@ struct FetchRecipe {
     archive_format: Option<ArchiveFormat>,
     #[serde(default)]
     kind: Option<String>,
-    #[serde(default)]
-    outputs: Vec<String>,
 }
 
 fn default_unpack() -> bool {
     true
-}
-
-pub struct FetchBuilder;
-
-impl Builder for FetchBuilder {
-    fn get_type(&self) -> &'static str {
-        "fetch"
-    }
-
-    fn run_build(&self, artifact: &str, recipe: &Value) -> Result<(), BuilderError> {
-        let recipe = parse_recipe(recipe)?;
-        let layout = workspace_layout().map_err(map_error)?;
-        ensure_base_dirs(&layout).map_err(map_error)?;
-        let urls = recipe.url.as_list();
-
-        let outputs = output_ids(artifact, &recipe);
-        let expected_hash = parse_hash(&recipe.hash).map_err(map_error)?;
-
-        let (cached_blob, source_url) =
-            ensure_cached_blob(&layout, &urls, &expected_hash).map_err(map_error)?;
-
-        let kind = recipe.kind.clone().unwrap_or_else(|| {
-            if recipe.unpack {
-                "source-tree".to_string()
-            } else {
-                "fetched-file".to_string()
-            }
-        });
-
-        for output_id in &outputs {
-            publish_fetch_output(
-                &layout,
-                output_id,
-                &recipe,
-                &kind,
-                &cached_blob,
-                &source_url,
-            )
-            .map_err(map_error)?;
-        }
-
-        println!("build: ok");
-        println!("artifact: {artifact}");
-        println!("source_url: {source_url}");
-        println!("urls_count: {}", urls.len());
-        println!("hash: {}", recipe.hash);
-        println!("unpack: {}", recipe.unpack);
-        println!("outputs: {}", outputs.join(", "));
-        Ok(())
-    }
-
-    fn summarize_recipe(
-        &self,
-        recipe: &Value,
-    ) -> Result<Vec<(&'static str, String)>, BuilderError> {
-        let recipe = parse_recipe(recipe)?;
-        let urls = recipe.url.as_list();
-        let first_url = urls
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "<none>".to_string());
-        Ok(vec![
-            ("url", first_url),
-            ("urls_count", urls.len().to_string()),
-            ("hash", recipe.hash),
-            ("unpack", recipe.unpack.to_string()),
-        ])
-    }
-}
-
-fn output_ids(artifact: &str, recipe: &FetchRecipe) -> Vec<String> {
-    if recipe.outputs.is_empty() {
-        vec![artifact.to_string()]
-    } else {
-        recipe.outputs.clone()
-    }
-}
-
-fn parse_recipe(value: &Value) -> Result<FetchRecipe, BuilderError> {
-    serde_json::from_value::<FetchRecipe>(value.clone())
-        .map_err(|error| BuilderError::InvalidRecipe(format!("invalid fetch recipe: {error}")))
-        .and_then(|recipe| {
-            validate_recipe(&recipe).map_err(map_error)?;
-            Ok(recipe)
-        })
-}
-
-fn validate_recipe(recipe: &FetchRecipe) -> FResult<()> {
-    if recipe.recipe_type != "fetch" {
-        return Err(FetchError::InvalidRecipe(
-            "type must be 'fetch'".to_string(),
-        ));
-    }
-
-    let urls = recipe.url.as_list();
-    if urls.is_empty() {
-        return Err(FetchError::InvalidRecipe(
-            "url list must not be empty".to_string(),
-        ));
-    }
-    for url in &urls {
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            return Err(FetchError::InvalidRecipe(format!(
-                "url '{}' must start with http:// or https://",
-                url
-            )));
-        }
-    }
-
-    parse_hash(&recipe.hash)?;
-
-    if !recipe.unpack && recipe.archive_format.is_some() {
-        return Err(FetchError::InvalidRecipe(
-            "archive_format must not be set when unpack = false".to_string(),
-        ));
-    }
-
-    for output in &recipe.outputs {
-        validate_name(output)?;
-    }
-
-    Ok(())
-}
-
-fn validate_name(name: &str) -> FResult<()> {
-    if name.is_empty() {
-        return Err(FetchError::InvalidRecipe(
-            "artifact/output name must not be empty".to_string(),
-        ));
-    }
-
-    if name == "." || name == ".." {
-        return Err(FetchError::InvalidRecipe(format!(
-            "invalid artifact/output name '{name}'"
-        )));
-    }
-
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
-    {
-        return Err(FetchError::InvalidRecipe(format!(
-            "invalid artifact/output name '{}'; allowed chars: [A-Za-z0-9._-]",
-            name
-        )));
-    }
-
-    Ok(())
 }
 
 #[derive(Debug)]
@@ -254,9 +99,123 @@ struct ParsedHash {
     value: String,
 }
 
+pub struct FetchBuilder;
+
+static FETCH_SPEC: BuilderSpec = BuilderSpec {
+    tag: "Fetch",
+    inputs: &[] as &[InputSlot],
+};
+
+impl TypedBuilder for FetchBuilder {
+    type Config = FetchConfig;
+
+    fn spec(&self) -> &'static BuilderSpec {
+        &FETCH_SPEC
+    }
+
+    fn build_typed(
+        &self,
+        config: Self::Config,
+        inputs: ResolvedInputs,
+        cx: &mut BuildContext,
+    ) -> Result<StagedBuildResult, BuilderError> {
+        validate_config(&config).map_err(map_error)?;
+        if !inputs.is_empty() {
+            return Err(BuilderError::ExecutionFailed(
+                "Fetch builder does not accept input objects".to_string(),
+            ));
+        }
+
+        let cache_dir = cx.builder_root.join(CACHE_DIR);
+        ensure_dir(&cx.builder_root, "fetch builder root").map_err(map_error)?;
+        ensure_dir(&cache_dir, "fetch cache").map_err(map_error)?;
+        ensure_dir(&cx.temp_root, "fetch temp").map_err(map_error)?;
+
+        let urls = config.url.as_list();
+        let expected_hash = parse_hash(&config.hash).map_err(map_error)?;
+        let (cached_blob, source_url) =
+            ensure_cached_blob(&cache_dir, &cx.builder_root, &urls, &expected_hash)
+                .map_err(map_error)?;
+
+        let kind = config.kind.clone().unwrap_or_else(|| {
+            if config.unpack {
+                "source-tree".to_string()
+            } else {
+                "fetched-file".to_string()
+            }
+        });
+
+        let (staged_path, mut attrs) = if config.unpack {
+            let format =
+                select_archive_format(&config, &cached_blob, &source_url).map_err(map_error)?;
+            let (path, normalized_root) =
+                stage_archive_output(&cx.temp_root, &cached_blob, format.clone()).map_err(map_error)?;
+            let mut attrs = Map::new();
+            attrs.insert(
+                "archive_format".to_string(),
+                Value::String(archive_format_name(&format).to_string()),
+            );
+            attrs.insert("normalized_root".to_string(), Value::Bool(normalized_root));
+            attrs.insert("unpack".to_string(), Value::Bool(true));
+            (path, attrs)
+        } else {
+            let path = stage_file_output(&cx.temp_root, &cached_blob).map_err(map_error)?;
+            let mut attrs = Map::new();
+            attrs.insert("unpack".to_string(), Value::Bool(false));
+            (path, attrs)
+        };
+
+        attrs.insert(
+            "source_url".to_string(),
+            Value::String(source_url.to_string()),
+        );
+        attrs.insert(
+            "declared_hash".to_string(),
+            Value::String(config.hash.clone()),
+        );
+
+        Ok(StagedBuildResult {
+            kind,
+            producer: ProducerInfo {
+                builder: "fetch".to_string(),
+            },
+            input_object_hashes: vec![],
+            attrs,
+            staged_path,
+        })
+    }
+}
+
+fn validate_config(config: &FetchConfig) -> FResult<()> {
+    let urls = config.url.as_list();
+    if urls.is_empty() {
+        return Err(FetchError::InvalidConfig(
+            "url list must not be empty".to_string(),
+        ));
+    }
+    for url in &urls {
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err(FetchError::InvalidConfig(format!(
+                "url '{}' must start with http:// or https://",
+                url
+            )));
+        }
+    }
+
+    parse_hash(&config.hash)?;
+
+    if !config.unpack && config.archive_format.is_some() {
+        return Err(FetchError::InvalidConfig(
+            "archive_format must not be set when unpack = false".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn parse_hash(value: &str) -> FResult<ParsedHash> {
     let (algorithm, hash_value) = value.split_once(':').ok_or_else(|| {
-        FetchError::InvalidRecipe(
+        FetchError::InvalidConfig(
             "hash must be in form '<algo>:<hex>' (supported: md5, sha256)".to_string(),
         )
     })?;
@@ -265,20 +224,20 @@ fn parse_hash(value: &str) -> FResult<ParsedHash> {
     match normalized_algorithm.as_str() {
         "md5" => {
             if hash_value.len() != 32 || !hash_value.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(FetchError::InvalidRecipe(
+                return Err(FetchError::InvalidConfig(
                     "md5 hash must be 32 hex characters".to_string(),
                 ));
             }
         }
         "sha256" => {
             if hash_value.len() != 64 || !hash_value.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(FetchError::InvalidRecipe(
+                return Err(FetchError::InvalidConfig(
                     "sha256 hash must be 64 hex characters".to_string(),
                 ));
             }
         }
         _ => {
-            return Err(FetchError::InvalidRecipe(
+            return Err(FetchError::InvalidConfig(
                 "unsupported hash algorithm; supported: md5, sha256".to_string(),
             ));
         }
@@ -291,19 +250,18 @@ fn parse_hash(value: &str) -> FResult<ParsedHash> {
 }
 
 fn ensure_cached_blob(
-    layout: &WorkspaceLayout,
+    cache_root: &Path,
+    builder_root: &Path,
     urls: &[String],
     hash: &ParsedHash,
 ) -> FResult<(PathBuf, String)> {
-    let algo_dir = layout.cache.join(&hash.algorithm);
+    let algo_dir = cache_root.join(&hash.algorithm);
     ensure_dir(&algo_dir, "fetch cache algo")?;
     let cache_path = algo_dir.join(format!("{}.blob", hash.value));
 
     if cache_path.exists() {
         let existing_hash = compute_hash(&cache_path, &hash.algorithm)?;
         if existing_hash == hash.value {
-            println!("cache: hit");
-            println!("cached_blob: {}", cache_path.display());
             return Ok((cache_path, urls[0].clone()));
         }
 
@@ -315,17 +273,15 @@ fn ensure_cached_blob(
         })?;
     }
 
-    println!("cache: miss");
     let mut failures = Vec::new();
 
     for (index, url) in urls.iter().enumerate() {
         let now_nanos = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
-        let tmp_path = layout.builder_root.join(format!(
+        let tmp_path = builder_root.join(format!(
             ".download-{}-{}-{}.blob",
             hash.value, index, now_nanos
         ));
 
-        println!("download_attempt: {}", url);
         if let Err(error) = download_to_file(url, &tmp_path) {
             failures.push(format!("{url}: {}", error.message()));
             let _ = fs::remove_file(&tmp_path);
@@ -350,7 +306,6 @@ fn ensure_cached_blob(
             ))
         })?;
 
-        println!("cached_blob: {}", cache_path.display());
         return Ok((cache_path, url.clone()));
     }
 
@@ -411,7 +366,7 @@ fn compute_hash(path: &Path, algorithm: &str) -> FResult<String> {
     match algorithm {
         "sha256" => compute_sha256(path),
         "md5" => compute_md5(path),
-        _ => Err(FetchError::InvalidRecipe(format!(
+        _ => Err(FetchError::InvalidConfig(format!(
             "unsupported hash algorithm '{}'",
             algorithm
         ))),
@@ -489,52 +444,8 @@ fn hex_char(nibble: u8) -> char {
     }
 }
 
-fn publish_fetch_output(
-    layout: &WorkspaceLayout,
-    output_id: &str,
-    recipe: &FetchRecipe,
-    kind: &str,
-    cached_blob: &Path,
-    source_url: &str,
-) -> FResult<()> {
-    validate_name(output_id)?;
-
-    if recipe.unpack {
-        let format = select_archive_format(recipe, cached_blob, source_url)?;
-        publish_archive_output(
-            layout,
-            output_id,
-            recipe,
-            kind,
-            cached_blob,
-            format,
-            source_url,
-        )
-    } else {
-        publish_file_output(
-            layout,
-            output_id,
-            recipe,
-            kind,
-            cached_blob,
-            source_url,
-        )
-    }
-}
-
-fn publish_file_output(
-    layout: &WorkspaceLayout,
-    output_id: &str,
-    recipe: &FetchRecipe,
-    kind: &str,
-    cached_blob: &Path,
-    source_url: &str,
-) -> FResult<()> {
-    let now_nanos = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
-    let tmp_path = layout
-        .tmp
-        .join(format!(".fetch-file-{}-{}.tmp", output_id, now_nanos));
-
+fn stage_file_output(temp_root: &Path, cached_blob: &Path) -> FResult<PathBuf> {
+    let tmp_path = temp_root.join("fetch-file.out");
     if tmp_path.exists() {
         fs::remove_file(&tmp_path).map_err(|error| {
             FetchError::FsFailed(format!(
@@ -552,99 +463,19 @@ fn publish_file_output(
         ))
     })?;
 
-    let mut attrs = Map::new();
-    attrs.insert(
-        "source_url".to_string(),
-        Value::String(source_url.to_string()),
-    );
-    attrs.insert(
-        "declared_hash".to_string(),
-        Value::String(recipe.hash.clone()),
-    );
-    attrs.insert("unpack".to_string(), Value::Bool(false));
-
-    let published = publish_cas_output(
-        &layout.store,
-        PublishOutputRequest {
-            output_name: output_id.to_string(),
-            staged_path: tmp_path,
-            kind: kind.to_string(),
-            producer_builder: "fetch".to_string(),
-            input_object_hashes: vec![],
-            attrs,
-        },
-    )
-    .map_err(map_cas_error)?;
-
-    println!("publish: ok");
-    println!("output: {output_id}");
-    println!("object_hash: {}", published.object_hash);
-    println!("build_key: {}", published.build_key);
-
-    Ok(())
+    Ok(tmp_path)
 }
 
-fn publish_archive_output(
-    layout: &WorkspaceLayout,
-    output_id: &str,
-    recipe: &FetchRecipe,
-    kind: &str,
+fn stage_archive_output(
+    temp_root: &Path,
     cached_blob: &Path,
     format: ArchiveFormat,
-    source_url: &str,
-) -> FResult<()> {
-    let now_nanos = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
-    let tmp_dir = layout
-        .tmp
-        .join(format!(".fetch-archive-{}-{}.dir", output_id, now_nanos));
-
+) -> FResult<(PathBuf, bool)> {
+    let tmp_dir = temp_root.join("fetch-archive.dir");
     fsutil::recreate_empty_dir(&tmp_dir).map_err(map_fsutil_error)?;
-    extract_archive(cached_blob, format.clone(), &tmp_dir)?;
+    extract_archive(cached_blob, format, &tmp_dir)?;
     let normalized_root = normalize_extracted_root(&tmp_dir)?;
-
-    let mut attrs = Map::new();
-    attrs.insert(
-        "source_url".to_string(),
-        Value::String(source_url.to_string()),
-    );
-    attrs.insert(
-        "declared_hash".to_string(),
-        Value::String(recipe.hash.clone()),
-    );
-    attrs.insert("unpack".to_string(), Value::Bool(true));
-    attrs.insert(
-        "archive_format".to_string(),
-        Value::String(
-            match format {
-                ArchiveFormat::TarGz => "tar-gz",
-                ArchiveFormat::TarXz => "tar-xz",
-                ArchiveFormat::TarBz2 => "tar-bz2",
-                ArchiveFormat::Zip => "zip",
-            }
-            .to_string(),
-        ),
-    );
-    attrs.insert("normalized_root".to_string(), Value::Bool(normalized_root));
-
-    let published = publish_cas_output(
-        &layout.store,
-        PublishOutputRequest {
-            output_name: output_id.to_string(),
-            staged_path: tmp_dir,
-            kind: kind.to_string(),
-            producer_builder: "fetch".to_string(),
-            input_object_hashes: vec![],
-            attrs,
-        },
-    )
-    .map_err(map_cas_error)?;
-
-    println!("publish: ok");
-    println!("output: {output_id}");
-    println!("object_hash: {}", published.object_hash);
-    println!("build_key: {}", published.build_key);
-
-    Ok(())
+    Ok((tmp_dir, normalized_root))
 }
 
 fn extract_archive(archive_path: &Path, format: ArchiveFormat, destination: &Path) -> FResult<()> {
@@ -871,11 +702,11 @@ fn normalize_extracted_root(directory: &Path) -> FResult<bool> {
 }
 
 fn select_archive_format(
-    recipe: &FetchRecipe,
+    config: &FetchConfig,
     cached_blob: &Path,
     source_url: &str,
 ) -> FResult<ArchiveFormat> {
-    if let Some(format) = &recipe.archive_format {
+    if let Some(format) = &config.archive_format {
         return Ok(format.clone());
     }
 
@@ -887,7 +718,7 @@ fn select_archive_format(
         return Ok(format);
     }
 
-    Err(FetchError::InvalidRecipe(format!(
+    Err(FetchError::InvalidConfig(format!(
         "unable to detect archive format for url '{}'; set archive_format explicitly or use unpack = false",
         source_url
     )))
@@ -958,33 +789,13 @@ fn detect_archive_format_from_url(url: &str) -> Option<ArchiveFormat> {
     None
 }
 
-struct WorkspaceLayout {
-    builder_root: PathBuf,
-    cache: PathBuf,
-    tmp: PathBuf,
-    store: StoreLayout,
-}
-
-fn workspace_layout() -> FResult<WorkspaceLayout> {
-    let cwd = env::current_dir().map_err(|error| {
-        FetchError::FsFailed(format!("failed to get current directory: {error}"))
-    })?;
-    let root = cwd.join(ROOT_DIR);
-    let builder_root = root.join(BUILDER_DIR);
-
-    Ok(WorkspaceLayout {
-        builder_root: builder_root.clone(),
-        cache: builder_root.join(CACHE_DIR),
-        tmp: builder_root.join(TMP_DIR),
-        store: StoreLayout::discover(&root).map_err(map_cas_error)?,
-    })
-}
-
-fn ensure_base_dirs(layout: &WorkspaceLayout) -> FResult<()> {
-    ensure_dir(&layout.builder_root, "fetch builder root")?;
-    ensure_dir(&layout.cache, "fetch cache")?;
-    ensure_dir(&layout.tmp, "fetch temp")?;
-    Ok(())
+fn archive_format_name(format: &ArchiveFormat) -> &'static str {
+    match format {
+        ArchiveFormat::TarGz => "tar-gz",
+        ArchiveFormat::TarXz => "tar-xz",
+        ArchiveFormat::TarBz2 => "tar-bz2",
+        ArchiveFormat::Zip => "zip",
+    }
 }
 
 fn ensure_dir(path: &Path, label: &str) -> FResult<()> {
@@ -1000,15 +811,275 @@ fn map_fsutil_error(error: fsutil::FsUtilError) -> FetchError {
     FetchError::FsFailed(error.to_string())
 }
 
-fn map_cas_error(error: CasError) -> FetchError {
-    FetchError::FsFailed(error.to_string())
-}
-
 fn map_error(error: FetchError) -> BuilderError {
     match error {
-        FetchError::InvalidRecipe(message) => BuilderError::InvalidRecipe(message),
+        FetchError::InvalidConfig(message) => BuilderError::InvalidRecipe(message),
         FetchError::NetworkFailed(message)
         | FetchError::ExtractFailed(message)
         | FetchError::FsFailed(message) => BuilderError::ExecutionFailed(message),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mbuild_core::{BuildKey, Builder, ObjectHash, ResolvedInputValue};
+    use sha2::Digest;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::thread;
+    use tempfile::tempdir;
+
+    fn build_context(root: &Path) -> BuildContext {
+        BuildContext {
+            workspace_root: root.to_path_buf(),
+            builder_root: root.join(".mbuild").join("builder-state").join("fetch"),
+            temp_root: root.join(".mbuild").join("builder-state").join("fetch").join("tmp"),
+        }
+    }
+
+    fn spawn_http_server(body: Vec<u8>, content_type: &'static str) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}/payload", addr);
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            drain_request(&mut stream);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: {}\r\nConnection: close\r\n\r\n",
+                body.len(),
+                content_type
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(&body).unwrap();
+            stream.flush().unwrap();
+        });
+        (url, handle)
+    }
+
+    fn drain_request(stream: &mut TcpStream) {
+        let mut buf = [0u8; 1024];
+        let mut request = Vec::new();
+        loop {
+            let read = stream.read(&mut buf).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+    }
+
+    fn sample_input() -> ResolvedInputs {
+        let mut inputs = ResolvedInputs::empty();
+        inputs.insert(
+            "unexpected",
+            ResolvedInputValue::One(mbuild_core::ResolvedObject {
+                object_hash: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                    .parse::<ObjectHash>()
+                    .unwrap(),
+                build_key:
+                    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                        .parse::<BuildKey>()
+                        .unwrap(),
+                kind: "source-tree".to_string(),
+                attrs: Map::new(),
+                object_path: PathBuf::from("/tmp/input"),
+            }),
+        );
+        inputs
+    }
+
+    fn tar_gz_with_wrapped_root() -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+
+        let mut header = tar::Header::new_gnu();
+        let body = b"hello archive\n";
+        header.set_path("pkg-1.0/README.txt").unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, &body[..]).unwrap();
+
+        let encoder = tar.into_inner().unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn fetch_builder_downloads_file_and_reports_attrs() {
+        let temp = tempdir().unwrap();
+        let payload = b"hello fetch\n".to_vec();
+        let hash = format!("sha256:{}", bytes_to_hex(&Sha256::digest(&payload)));
+        let (url, handle) = spawn_http_server(payload.clone(), "application/octet-stream");
+
+        let mut cx = build_context(temp.path());
+        let builder = FetchBuilder;
+        let result = builder
+            .build_typed(
+                FetchConfig {
+                    url: UrlField::One(url.clone()),
+                    hash: hash.clone(),
+                    unpack: false,
+                    archive_format: None,
+                    kind: None,
+                },
+                ResolvedInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+
+        handle.join().unwrap();
+
+        assert_eq!(result.kind, "fetched-file");
+        assert_eq!(result.producer.builder, "fetch");
+        assert_eq!(fs::read(&result.staged_path).unwrap(), payload);
+        assert_eq!(result.attrs["source_url"], Value::String(url));
+        assert_eq!(result.attrs["declared_hash"], Value::String(hash));
+        assert_eq!(result.attrs["unpack"], Value::Bool(false));
+    }
+
+    #[test]
+    fn fetch_builder_unpacks_tar_gz_and_sets_archive_attrs() {
+        let temp = tempdir().unwrap();
+        let payload = tar_gz_with_wrapped_root();
+        let hash = format!("sha256:{}", bytes_to_hex(&Sha256::digest(&payload)));
+        let (url, handle) = spawn_http_server(payload, "application/gzip");
+
+        let mut cx = build_context(temp.path());
+        let builder = FetchBuilder;
+        let result = builder
+            .build_typed(
+                FetchConfig {
+                    url: UrlField::One(url.clone()),
+                    hash: hash.clone(),
+                    unpack: true,
+                    archive_format: None,
+                    kind: None,
+                },
+                ResolvedInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+
+        handle.join().unwrap();
+
+        assert_eq!(result.kind, "source-tree");
+        assert!(result.staged_path.is_dir());
+        assert_eq!(
+            fs::read_to_string(result.staged_path.join("README.txt")).unwrap(),
+            "hello archive\n"
+        );
+        assert_eq!(result.attrs["source_url"], Value::String(url));
+        assert_eq!(result.attrs["declared_hash"], Value::String(hash));
+        assert_eq!(result.attrs["unpack"], Value::Bool(true));
+        assert_eq!(
+            result.attrs["archive_format"],
+            Value::String("tar-gz".to_string())
+        );
+        assert_eq!(result.attrs["normalized_root"], Value::Bool(true));
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(result.staged_path.join("README.txt"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o644);
+        }
+    }
+
+    #[test]
+    fn fetch_builder_reuses_cached_blob_without_second_server() {
+        let temp = tempdir().unwrap();
+        let payload = b"hello cached fetch\n".to_vec();
+        let hash = format!("sha256:{}", bytes_to_hex(&Sha256::digest(&payload)));
+        let (url, handle) = spawn_http_server(payload.clone(), "application/octet-stream");
+
+        let builder = FetchBuilder;
+        let mut first_cx = build_context(temp.path());
+        let first = builder
+            .build_typed(
+                FetchConfig {
+                    url: UrlField::One(url.clone()),
+                    hash: hash.clone(),
+                    unpack: false,
+                    archive_format: None,
+                    kind: None,
+                },
+                ResolvedInputs::empty(),
+                &mut first_cx,
+            )
+            .unwrap();
+        handle.join().unwrap();
+
+        let mut second_cx = build_context(temp.path());
+        let second = builder
+            .build_typed(
+                FetchConfig {
+                    url: UrlField::One(url),
+                    hash,
+                    unpack: false,
+                    archive_format: None,
+                    kind: None,
+                },
+                ResolvedInputs::empty(),
+                &mut second_cx,
+            )
+            .unwrap();
+
+        assert_eq!(fs::read(&first.staged_path).unwrap(), payload);
+        assert_eq!(fs::read(&second.staged_path).unwrap(), payload);
+        let cache_blob = first_cx.builder_root.join("cache").join("sha256");
+        assert_eq!(fs::read_dir(cache_blob).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn fetch_builder_rejects_non_empty_inputs() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        let builder = FetchBuilder;
+        let error = builder
+            .build_typed(
+                FetchConfig {
+                    url: UrlField::One("https://example.invalid/archive.tar.gz".to_string()),
+                    hash: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                        .to_string(),
+                    unpack: false,
+                    archive_format: None,
+                    kind: None,
+                },
+                sample_input(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, BuilderError::ExecutionFailed(_)));
+        assert!(error.to_string().contains("does not accept input objects"));
+    }
+
+    #[test]
+    fn build_erased_rejects_unknown_config_field() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        let builder = FetchBuilder;
+
+        let error = builder
+            .build_erased(
+                serde_json::json!({
+                    "url": "https://example.invalid/archive.tar.gz",
+                    "hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                    "extra": true
+                }),
+                ResolvedInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, BuilderError::InvalidRecipe(_)));
+        assert!(error.to_string().contains("unknown field"));
     }
 }
