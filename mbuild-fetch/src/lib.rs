@@ -830,6 +830,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::thread;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn build_context(root: &Path) -> BuildContext {
@@ -840,8 +841,20 @@ mod tests {
         }
     }
 
-    fn spawn_http_server(body: Vec<u8>, content_type: &'static str) -> (String, thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    fn spawn_http_server(body: Vec<u8>, content_type: &'static str) -> Result<(String, thread::JoinHandle<()>), std::io::Error> {
+        let listener = (0..10)
+            .find_map(|attempt| match TcpListener::bind("127.0.0.1:0") {
+                Ok(listener) => Some(Ok(listener)),
+                Err(error)
+                    if attempt < 9
+                        && matches!(error.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::AddrInUse) =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                    None
+                }
+                Err(error) => Some(Err(error)),
+            })
+            .unwrap_or_else(|| Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "failed to bind test HTTP listener")))?;
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{}/payload", addr);
         let handle = thread::spawn(move || {
@@ -856,7 +869,7 @@ mod tests {
             stream.write_all(&body).unwrap();
             stream.flush().unwrap();
         });
-        (url, handle)
+        Ok((url, handle))
     }
 
     fn drain_request(stream: &mut TcpStream) {
@@ -915,7 +928,14 @@ mod tests {
         let temp = tempdir().unwrap();
         let payload = b"hello fetch\n".to_vec();
         let hash = format!("sha256:{}", bytes_to_hex(&Sha256::digest(&payload)));
-        let (url, handle) = spawn_http_server(payload.clone(), "application/octet-stream");
+        let (url, handle) = match spawn_http_server(payload.clone(), "application/octet-stream") {
+            Ok(server) => server,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping fetch unit test because TCP bind is not permitted in this environment: {error}");
+                return;
+            }
+            Err(error) => panic!("failed to start test HTTP server: {error}"),
+        };
 
         let mut cx = build_context(temp.path());
         let builder = FetchBuilder;
@@ -948,7 +968,14 @@ mod tests {
         let temp = tempdir().unwrap();
         let payload = tar_gz_with_wrapped_root();
         let hash = format!("sha256:{}", bytes_to_hex(&Sha256::digest(&payload)));
-        let (url, handle) = spawn_http_server(payload, "application/gzip");
+        let (url, handle) = match spawn_http_server(payload, "application/gzip") {
+            Ok(server) => server,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping fetch archive unit test because TCP bind is not permitted in this environment: {error}");
+                return;
+            }
+            Err(error) => panic!("failed to start test HTTP server: {error}"),
+        };
 
         let mut cx = build_context(temp.path());
         let builder = FetchBuilder;
@@ -997,7 +1024,14 @@ mod tests {
         let temp = tempdir().unwrap();
         let payload = b"hello cached fetch\n".to_vec();
         let hash = format!("sha256:{}", bytes_to_hex(&Sha256::digest(&payload)));
-        let (url, handle) = spawn_http_server(payload.clone(), "application/octet-stream");
+        let (url, handle) = match spawn_http_server(payload.clone(), "application/octet-stream") {
+            Ok(server) => server,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping fetch unit test because TCP bind is not permitted in this environment: {error}");
+                return;
+            }
+            Err(error) => panic!("failed to start test HTTP server: {error}"),
+        };
 
         let builder = FetchBuilder;
         let mut first_cx = build_context(temp.path());

@@ -782,6 +782,7 @@ dependencies = [
  "clap",
  "mbuild-core",
  "mbuild-fetch",
+ "mbuild-image",
  "mbuild-text",
  "serde_json",
  "sha2",
@@ -815,6 +816,16 @@ dependencies = [
  "tempfile",
  "xz2",
  "zip",
+]
+
+[[package]]
+name = "mbuild-image"
+version = "0.1.0"
+dependencies = [
+ "mbuild-core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
