@@ -166,7 +166,7 @@ the build term structure.
 
 The runtime receives one evaluated build request with fields:
 
-- `meta`: publication metadata requested by Nickel
+- `meta`: publication metadata requested by the recipe producer
 - `build`: one closed build term
 
 The runtime then:

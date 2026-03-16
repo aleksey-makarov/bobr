@@ -25,11 +25,6 @@ A builder operation is a tagged enum variant with a single record payload.
 Examples:
 
 ```nickel
-'Fetch {
-  url = [...],
-  hash = "sha256:...",
-}
-
 'Binary {
   outputs = ["out", "dev"],
   optimize = "size",
@@ -129,17 +124,19 @@ Builder payloads carry typed object inputs.
 
 Examples:
 
-- `Binary` takes payload fields, one image object, one build-script object, and an array of source objects
+- `Binary` takes payload fields, one container-image object, one build-script
+  object, and an array of source-tree objects
 - `Fetch` takes payload fields and no object dependencies
-- `Image` takes payload fields, zero or one base image object, and an array of binary-output objects
+- `Image` takes payload fields, zero or one base image object, and an array of
+  binary-output objects
 
 ## Selected Request
 
 The Rust interpreter receives one selected build request.
 
 `mbuild` reads one serialized build request either from
-`./.mbuild/request.json` by default or from an explicitly selected
-build-request JSON file.
+`./.mbuild/request.json` by default or from an explicitly selected build-request
+JSON file.
 
 The selected request contains `meta` and `build`. Rust interprets `build`
 recursively and uses `meta` only for publication.

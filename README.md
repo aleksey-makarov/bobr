@@ -3,10 +3,11 @@
 `mbuild` is a term-centric build system with modular builder components.
 
 Users describe builds in Nickel as pure compositions of typed builder terms and
-multi-output bundles. The `mbuild` runtime interprets one selected build request
-from `./.mbuild/recipe.ncl` or another entry file. Builder operations are
-extensible through a runtime registry, and package-level override stays in the
-Nickel layer instead of leaking into the execution model.
+multi-output bundles. `mbuild` itself interprets one selected serialized build
+request from `./.mbuild/request.json` by default or from an explicitly selected
+build-request JSON file. Builder operations are extensible through a runtime
+registry, and package-level override stays in the Nickel layer instead of
+leaking into the execution model.
 
 Realized results are stored in a local content-addressed store where object
 identity is determined only by payload content. Builder invocations are recorded

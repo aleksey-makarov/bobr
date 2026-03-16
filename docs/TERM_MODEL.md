@@ -2,11 +2,11 @@
 
 ## Summary
 
-`mbuild` realizes build requests as content-addressed objects.
+`mbuild` realizes one selected build request as one published object.
 
-Nickel may define the build program, but `mbuild` itself consumes an already
-materialized build request. Store layout, hashing, build recording, and caching
-are interpreter concerns.
+Nickel may define the build program, but `mbuild` itself consumes plain
+build-request data. Store layout, hashing, build recording, cache lookup, and
+publication are interpreter concerns.
 
 ## Layers
 
@@ -19,14 +19,14 @@ Nickel defines a pure build program composed from:
 - typed object dependencies
 - package sets and helper combinators
 
-At this layer, users compose terms. They do not refer to store paths, object
-hashes, build keys, or cache lookup.
+At this layer, users compose terms. They do not refer to store paths,
+`object_hash`, `build_key`, or cache lookup.
 
 ### 2. Request Layer
 
-A build request is the runtime entrypoint, not a bare build term.
+A build request is the runtime entrypoint.
 
-A build request has the shape:
+Shape:
 
 ```nickel
 {
@@ -48,17 +48,18 @@ A build request has the shape:
 
 ### 3. Interpreter Layer
 
-Rust interprets the `build` term recursively.
+Rust interprets the selected `build` term recursively.
 
 The interpreter:
 
 - evaluates dependency terms
 - validates builder-specific inputs
-- computes `build_key` from builder tag, normalized payload, resolved input object hashes, and selected output projection when projection exists
-- reuses existing build records on matching `build_key`
+- computes `build_key` from builder tag, normalized payload, and resolved input
+  object hashes
+- reuses an existing build record on matching `build_key`
 - executes builders on cache miss
-- computes object hashes from produced payloads on cache miss
-- publishes resulting objects and build refs
+- computes `object_hash` from produced payloads on cache miss
+- publishes the resulting object and refs
 
 ### 4. Store Layer
 
@@ -90,7 +91,6 @@ Example:
 Properties:
 
 - builder inputs and configuration live together in the payload record
-- the payload is one record
 - builder operations are pure terms and do not execute anything by themselves
 - builder payloads do not contain publication metadata such as names
 
@@ -129,7 +129,7 @@ let zstd = mBinary {
 
 `pkgs` is a Nickel record containing object terms or bundle projections.
 
-Package field names are a composition convenience. They are not object identity
+Package field names are composition conveniences. They are not object identity
 and they are not build-record identity.
 
 ## Dependency Graph
@@ -145,8 +145,8 @@ Cycle detection is a runtime responsibility of the interpreter.
 ## Request Selection
 
 `mbuild` reads one serialized build request either from
-`./.mbuild/request.json` by default or from an explicitly selected
-build-request JSON file.
+`./.mbuild/request.json` by default or from an explicitly selected build-request
+JSON file.
 
 ## Interpreter Algorithm
 
@@ -157,15 +157,18 @@ Given one selected request, the interpreter:
 3. inspects the top-level builder operation or output projection
 4. recursively interprets embedded dependency terms
 5. obtains realized dependency objects through their build records
-6. computes a `build_key` for the current interpreted builder invocation from builder tag, normalized payload, resolved input object hashes, and selected output projection when projection exists
+6. computes a `build_key` for the current interpreted builder invocation from
+   builder tag, normalized payload, resolved input object hashes, and selected
+   output projection when projection exists
 7. reuses an existing build record on matching `build_key`
 8. executes the registered builder on cache miss
-9. computes the stable identity of the current result from the produced payload only on cache miss
+9. computes the stable identity of the current result from the produced payload
+   only on cache miss
 10. publishes:
-   - the resulting object in `objects/`
-   - one build record in `builds/`
-   - one metadata ref in `meta-refs/`
-   - one object ref in `object-refs/`
+    - the resulting object in `objects/`
+    - one build record in `builds/`
+    - one metadata ref in `meta-refs/`
+    - one object ref in `object-refs/`
 11. returns the realized object or output bundle
 
 ## Extensible Builder Operations
@@ -181,6 +184,8 @@ Builder payloads carry typed object inputs.
 
 Examples:
 
-- `Binary` takes builder-specific payload fields, one image object, one build-script object, and an array of source objects
+- `Binary` takes builder-specific payload fields, one container-image object,
+  one build-script object, and an array of source-tree objects
 - `Fetch` takes builder-specific payload fields and no object dependencies
-- `Image` takes builder-specific payload fields, zero or one base image object, and an array of binary-output objects
+- `Image` takes builder-specific payload fields, zero or one base image object,
+  and an array of binary-output objects
