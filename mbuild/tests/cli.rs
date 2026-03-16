@@ -95,6 +95,50 @@ fn write_binary_request_json(path: &std::path::Path, name: &str, image: &str, di
     .unwrap();
 }
 
+fn write_unknown_builder_request_json(path: &std::path::Path) {
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "meta": { "name": "unknown" },
+            "build": {
+                "UnknownBuilder": {}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn write_binary_wrong_kind_request_json(path: &std::path::Path, name: &str) {
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "meta": { "name": name },
+            "build": {
+                "Binary": {
+                    "kind": "binary-output",
+                    "optimize": "size",
+                    "image": {
+                        "Text": {
+                            "kind": "plain-text",
+                            "source": "not an image"
+                        }
+                    },
+                    "script": {
+                        "Text": {
+                            "kind": "build-script",
+                            "source": "#!/bin/sh\nexit 0\n"
+                        }
+                    },
+                    "sources": []
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
 fn spawn_http_server(body: Vec<u8>, content_type: &'static str) -> Result<(String, thread::JoinHandle<()>), std::io::Error> {
     let listener = (0..10)
         .find_map(|attempt| match TcpListener::bind("127.0.0.1:0") {
@@ -545,4 +589,40 @@ fn cli_executes_image_request_with_fake_podman_and_nested_binary() {
     let image_ref = descriptor["image_ref"].as_str().unwrap();
     assert!(image_ref.starts_with("localhost/mbuild-image:bootstrap-"), "{image_ref}");
     assert_eq!(descriptor["image_digest"], serde_json::Value::String("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string()));
+}
+
+#[test]
+fn cli_rejects_unknown_builder_request() {
+    let workspace = tempdir().unwrap();
+    let request_path = workspace.path().join("unknown.json");
+    write_unknown_builder_request_json(&request_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&request_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{:?}", output);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("error[invalid-input]:"), "{stderr}");
+    assert!(stderr.contains("UnknownBuilder"), "{stderr}");
+}
+
+#[test]
+fn cli_rejects_binary_request_with_wrong_input_kind() {
+    let workspace = tempdir().unwrap();
+    let request_path = workspace.path().join("binary-wrong-kind.json");
+    write_binary_wrong_kind_request_json(&request_path, "wrong-kind");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&request_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{:?}", output);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("error[invalid-input]:"), "{stderr}");
+    assert!(stderr.contains("input slot 'image' rejects kind 'plain-text'"), "{stderr}");
 }

@@ -22,13 +22,107 @@ fn env_lock() -> &'static Mutex<()> {
 
 fn install_fake_podman(dir: &Path, inspect_json: &str) {
     let script_path = dir.join("podman");
-    fs::write(
-        &script_path,
-        format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\nif [ \"$1\" = image ] && [ \"$2\" = inspect ]; then\n  cat <<'JSON'\n{inspect_json}\nJSON\nelse\n  echo unexpected podman invocation: \"$@\" >&2\n  exit 1\nfi\n"
-        ),
-    )
-    .unwrap();
+    let script = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = image ] && [ "${{2:-}}" = inspect ]; then
+  target="${{3:-}}"
+  if [[ "$target" == localhost/mbuild-image:* ]]; then
+    cat <<JSON
+[{{"Id":"sha256:generated-image","RepoDigests":["${{target}}@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]}}]
+JSON
+  else
+    cat <<'JSON'
+{inspect_json}
+JSON
+  fi
+  exit 0
+fi
+if [ "${{1:-}}" = import ]; then
+  echo sha256:imported-image
+  exit 0
+fi
+if [ "${{1:-}}" = create ]; then
+  echo ctr-test
+  exit 0
+fi
+if [ "${{1:-}}" = cp ]; then
+  exit 0
+fi
+if [ "${{1:-}}" = commit ]; then
+  echo sha256:committed-image
+  exit 0
+fi
+if [ "${{1:-}}" = rm ]; then
+  exit 0
+fi
+if [ "${{1:-}}" = run ]; then
+  shift 1
+  source_input=""
+  declare -A in_mounts
+  out_host=""
+  image_ref=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --volume)
+        spec="$2"
+        if [[ "$spec" =~ ^(.*):(/[^:]+):(.*)$ ]]; then
+          host="${{BASH_REMATCH[1]}}"
+          mount="${{BASH_REMATCH[2]}}"
+        else
+          echo invalid volume spec: "$spec" >&2
+          exit 1
+        fi
+        if [[ "$mount" == /in/* ]]; then
+          name="${{mount#/in/}}"
+          in_mounts["$name"]="$host"
+        elif [ "$mount" = "/out/out" ]; then
+          out_host="$host"
+        fi
+        shift 2
+        ;;
+      --env)
+        kv="$2"
+        case "$kv" in
+          MBUILD_SOURCE_INPUT=*) source_input="${{kv#*=}}" ;;
+        esac
+        shift 2
+        ;;
+      --rm|--network=none|--userns=keep-id)
+        shift 1
+        ;;
+      --user)
+        shift 2
+        ;;
+      *)
+        if [ -z "$image_ref" ]; then
+          image_ref="$1"
+        fi
+        shift 1
+        ;;
+    esac
+  done
+  if [ -z "$source_input" ]; then
+    for key in "${{!in_mounts[@]}}"; do
+      source_input="$key"
+      break
+    done
+  fi
+  if [ -z "$source_input" ] || [ -z "${{in_mounts[$source_input]+x}}" ]; then
+    echo missing source input mount >&2
+    exit 1
+  fi
+  mkdir -p "$out_host/copied"
+  cp -R "${{in_mounts[$source_input]}}/." "$out_host/copied/"
+  printf '%s\n' "$image_ref" > "$out_host/image-ref.txt"
+  exit 0
+fi
+
+echo unexpected podman invocation: "$@" >&2
+exit 1
+"#
+    );
+    fs::write(&script_path, script).unwrap();
     #[cfg(unix)]
     {
         let mut permissions = fs::metadata(&script_path).unwrap().permissions();
@@ -38,7 +132,9 @@ fn install_fake_podman(dir: &Path, inspect_json: &str) {
 }
 
 fn with_fake_podman<T>(inspect_json: &str, f: impl FnOnce() -> T) -> T {
-    let _guard = env_lock().lock().unwrap();
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp = tempdir().unwrap();
     install_fake_podman(temp.path(), inspect_json);
     let previous_path = env::var_os("PATH");
@@ -126,6 +222,44 @@ fn write_fetch_request_json(path: &Path, name: &str, url: &str, hash: &str, unpa
                     "url": url,
                     "hash": hash,
                     "unpack": unpack
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn write_binary_request_json(path: &Path, name: &str, image: &str, digest: &str, source_url: &str, source_hash: &str) {
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&json!({
+            "meta": { "name": name },
+            "build": {
+                "Binary": {
+                    "kind": "binary-output",
+                    "optimize": "size",
+                    "image": {
+                        "ContainerImage": {
+                            "image": image,
+                            "digest": digest
+                        }
+                    },
+                    "script": {
+                        "Text": {
+                            "kind": "build-script",
+                            "source": "#!/bin/sh\nexit 0\n"
+                        }
+                    },
+                    "sources": [
+                        {
+                            "Fetch": {
+                                "url": source_url,
+                                "hash": source_hash,
+                                "unpack": true
+                            }
+                        }
+                    ]
                 }
             }
         }))
@@ -327,6 +461,63 @@ fn workspace_build_executes_container_image_request_and_persists_full_record() {
 }
 
 #[test]
+fn repeated_nested_binary_request_reuses_all_build_records_and_objects() {
+    with_fake_podman(
+        r#"[{"Id":"sha256:imageid","RepoDigests":["docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]"#,
+        || {
+            let workspace = tempdir().unwrap();
+            let request_path = workspace.path().join("binary-request.json");
+            let source_tar = {
+                let encoder = flate2::write::GzEncoder::new(
+                    Vec::new(),
+                    flate2::Compression::default(),
+                );
+                let mut tar = tar::Builder::new(encoder);
+                let body = b"hello cached binary\n";
+                let mut header = tar::Header::new_gnu();
+                header.set_path("pkg/README.txt").unwrap();
+                header.set_size(body.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                tar.append(&header, &body[..]).unwrap();
+                tar.into_inner().unwrap().finish().unwrap()
+            };
+            let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
+                Ok(server) => server,
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+                Err(error) => panic!("failed to start test HTTP server: {error}"),
+            };
+            let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
+            write_binary_request_json(
+                &request_path,
+                "cached-binary",
+                "docker.io/library/buildpack-deps:bookworm",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                &url,
+                &source_hash,
+            );
+
+            let first = run_workspace_build(workspace.path(), &request_path).unwrap();
+            handle.join().unwrap();
+
+            let objects_dir = workspace.path().join(".mbuild").join("objects");
+            let builds_dir = workspace.path().join(".mbuild").join("builds");
+            let first_object_count = fs::read_dir(&objects_dir).unwrap().count();
+            let first_build_count = fs::read_dir(&builds_dir).unwrap().count();
+
+            let second = run_workspace_build(workspace.path(), &request_path).unwrap();
+
+            assert_eq!(first.record.build_key, second.record.build_key);
+            assert_eq!(first.record.object_hash, second.record.object_hash);
+            assert_eq!(fs::read_dir(objects_dir).unwrap().count(), first_object_count);
+            assert_eq!(fs::read_dir(builds_dir).unwrap().count(), first_build_count);
+            assert_eq!(first_build_count, 4);
+            assert_eq!(first_object_count, 4);
+        },
+    );
+}
+
+#[test]
 fn load_build_request_reads_modern_json_shape() {
     let workspace = tempdir().unwrap();
     let request_path = workspace.path().join("request.json");
@@ -345,6 +536,3 @@ fn load_build_request_reads_modern_json_shape() {
         })
     );
 }
-
-
-

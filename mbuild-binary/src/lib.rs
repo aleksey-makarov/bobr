@@ -427,6 +427,10 @@ mod tests {
             r#"#!/usr/bin/env bash
 set -euo pipefail
 if [ "${1:-}" = run ]; then
+  if [ "${MBUILD_TEST_BINARY_PODMAN_FAIL:-}" = "1" ]; then
+    echo simulated podman run failure >&2
+    exit 42
+  fi
   shift 1
   source_input=""
   declare -A in_mounts
@@ -649,5 +653,29 @@ exit 1
             .unwrap_err();
 
         assert!(matches!(error, BuilderError::InvalidRecipe(_)));
+    }
+
+    #[test]
+    fn binary_builder_reports_podman_run_failure() {
+        with_fake_podman(|| {
+            let temp = tempdir().unwrap();
+            let mut cx = build_context(temp.path());
+            unsafe { env::set_var("MBUILD_TEST_BINARY_PODMAN_FAIL", "1") };
+            let error = BinaryBuilder
+                .build_typed(
+                    BinaryConfig {
+                        kind: "binary-output".to_string(),
+                        optimize: "size".to_string(),
+                    },
+                    sample_inputs(temp.path()),
+                    &mut cx,
+                )
+                .unwrap_err();
+            unsafe { env::remove_var("MBUILD_TEST_BINARY_PODMAN_FAIL") };
+
+            assert!(matches!(error, BuilderError::ExecutionFailed(_)));
+            let message = error.to_string();
+            assert!(message.contains("podman run"), "{message}");
+        });
     }
 }

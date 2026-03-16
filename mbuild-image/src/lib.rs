@@ -775,6 +775,10 @@ JSON
   exit 0
 fi
 if [ "${1:-}" = import ]; then
+  if [ "${MBUILD_TEST_IMAGE_IMPORT_FAIL:-}" = "1" ]; then
+    echo simulated podman import failure >&2
+    exit 42
+  fi
   echo sha256:imported-image
   exit 0
 fi
@@ -1110,5 +1114,53 @@ exit 1
             .unwrap_err();
 
         assert!(matches!(error, BuilderError::InvalidRecipe(_)));
+    }
+
+    #[test]
+    fn image_builder_rejects_invalid_mode() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        let mut inputs = ResolvedInputs::empty();
+        inputs.insert("base", mbuild_core::ResolvedInputValue::Optional(None));
+        inputs.insert(
+            "inputs",
+            ResolvedInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
+        );
+
+        let error = ImageBuilder
+            .build_typed(
+                ImageConfig {
+                    mode: Some("invalid".to_string()),
+                },
+                inputs,
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, BuilderError::InvalidRecipe(_)));
+    }
+
+    #[test]
+    fn image_builder_reports_podman_import_failure() {
+        with_fake_podman(&base_inspect_json(), || {
+            let temp = tempdir().unwrap();
+            let mut cx = build_context(temp.path());
+            let mut inputs = ResolvedInputs::empty();
+            inputs.insert("base", mbuild_core::ResolvedInputValue::Optional(None));
+            inputs.insert(
+                "inputs",
+                ResolvedInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
+            );
+
+            unsafe { env::set_var("MBUILD_TEST_IMAGE_IMPORT_FAIL", "1") };
+            let error = ImageBuilder
+                .build_typed(ImageConfig { mode: None }, inputs, &mut cx)
+                .unwrap_err();
+            unsafe { env::remove_var("MBUILD_TEST_IMAGE_IMPORT_FAIL") };
+
+            assert!(matches!(error, BuilderError::ExecutionFailed(_)));
+            let message = error.to_string();
+            assert!(message.contains("podman import"), "{message}");
+        });
     }
 }
