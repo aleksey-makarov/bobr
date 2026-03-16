@@ -759,99 +759,10 @@ mod tests {
 
     fn install_fake_podman(dir: &Path, base_inspect_json: &str) {
         let script_path = dir.join("podman");
-        let script = r#"#!/usr/bin/env bash
-set -euo pipefail
-if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then
-  target="${3:-}"
-  if [[ "$target" == __GENERATED_PREFIX__:∗ ]]; then
-    cat <<JSON
-[{"Id":"sha256:generated-image","RepoDigests":["${target}@__GENERATED_DIGEST__"]}]
-JSON
-  else
-    cat <<'JSON'
-__BASE_INSPECT_JSON__
-JSON
-  fi
-  exit 0
-fi
-if [ "${1:-}" = import ]; then
-  if [ "${MBUILD_TEST_IMAGE_IMPORT_FAIL:-}" = "1" ]; then
-    echo simulated podman import failure >&2
-    exit 42
-  fi
-  echo sha256:imported-image
-  exit 0
-fi
-if [ "${1:-}" = create ]; then
-  echo ctr-test
-  exit 0
-fi
-if [ "${1:-}" = cp ]; then
-  exit 0
-fi
-if [ "${1:-}" = commit ]; then
-  echo sha256:committed-image
-  exit 0
-fi
-if [ "${1:-}" = rm ]; then
-  exit 0
-fi
-if [ "${1:-}" = run ]; then
-  shift 1
-  source_input=""
-  declare -A in_mounts
-  out_host=""
-  image_ref=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --volume)
-        spec="$2"
-        host="${spec%%:*}"
-        rest="${spec#*:}"
-        mount="${rest%%:*}"
-        if [[ "$mount" == /in/* ]]; then
-          name="${mount#/in/}"
-          in_mounts["$name"]="$host"
-        elif [ "$mount" = "/out/out" ]; then
-          out_host="$host"
-        fi
-        shift 2
-        ;;
-      --env)
-        kv="$2"
-        case "$kv" in
-          MBUILD_SOURCE_INPUT=*) source_input="${kv#*=}" ;;
-        esac
-        shift 2
-        ;;
-      --rm|--network=none|--userns=keep-id)
-        shift 1
-        ;;
-      --user)
-        shift 2
-        ;;
-      *)
-        if [ -z "$image_ref" ]; then
-          image_ref="$1"
-        fi
-        shift 1
-        ;;
-    esac
-  done
-  mkdir -p "$out_host/copied"
-  cp -R "${in_mounts[$source_input]}/." "$out_host/copied/"
-  printf '%s
-' "$image_ref" > "$out_host/image-ref.txt"
-  exit 0
-fi
-
-echo unexpected podman invocation: "$@" >&2
-exit 1
-"#
-        .replace("__BASE_INSPECT_JSON__", base_inspect_json)
-        .replace("__GENERATED_PREFIX__", GENERATED_IMAGE_PREFIX)
-        .replace("__GENERATED_DIGEST__", GENERATED_DIGEST)
-        .replace("∗", "*");
+        let script = include_str!("../tests/assets/fake_podman_full.sh")
+            .replace("__BASE_INSPECT_JSON__", base_inspect_json)
+            .replace("__GENERATED_PREFIX__", GENERATED_IMAGE_PREFIX)
+            .replace("__GENERATED_DIGEST__", GENERATED_DIGEST);
         fs::write(&script_path, script).unwrap();
         #[cfg(unix)]
         {
