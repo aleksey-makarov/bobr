@@ -99,7 +99,7 @@ Example shape:
   "object_hash": "sha256:...",
   "kind": "build-script|source-tree|fetched-file|binary-output|container-image|...",
   "producer": {
-    "builder": "text|fetch|binary|image|container-image|github"
+    "builder": "text|fetch|binary|image|container-image"
   },
   "input_object_hashes": [
     "sha256:..."
@@ -230,12 +230,6 @@ record carries the semantic type and provenance for that object.
 - unpacked or raw result becomes an object
 - build attrs carry source URL, declared hash, unpack flag, archive format,
   and normalized-root information
-
-### `github`
-
-- mirror state lives in `.mbuild/github/mirrors`
-- exported checkout becomes a directory object
-- build attrs carry owner, repo, and rev
 
 ### `binary`
 
