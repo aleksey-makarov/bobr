@@ -1,89 +1,119 @@
 # Nickel Examples
 
-## Package Composition
+## Minimal Self-Contained Recipe
 
 ```nickel
-let rec pkgs = {
-  bootstrapImage = mContainerImage "bootstrap-image" {
-    image = "docker.io/library/buildpack-deps:bookworm",
-    digest = "sha256:...",
-  },
+let store = import "./store.ncl" in
+store.text "hello-script" {
+  kind = "build-script",
+  source = "#!/usr/bin/env bash\necho hello\n",
+}
+```
 
-  bashSrc = mFetch "bash-src-5.3" {
-    url = [
-      "https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz",
-      "https://mirrors.kernel.org/gnu/bash/bash-5.3.tar.gz",
-    ],
-    hash = "sha256:...",
-  },
+This entry file evaluates to one primitive STORE action. `mbuild` evaluates the
+file to that action and interprets it directly.
 
-  bashScript = mText "buildscript-bash-stage2" {
-    kind = "build-script",
-    source = "#!/usr/bin/env bash\n...",
-  },
+## Monadic Dependency Sequencing
 
-  bashStage2 = mBinary "bash-stage2" {
-    optimize = "size",
-  } pkgs.bootstrapImage pkgs.bashScript [pkgs.bashSrc],
-} in
-pkgs
+```nickel
+let store = import "./store.ncl" in
+store.bind (store.fetch "bash-src-5.3" {
+  url = ["https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz"],
+  hash = "sha256:...",
+}) (fun bashSrc =>
+store.bind (store.text "buildscript-bash-stage2" {
+  kind = "build-script",
+  source = "#!/usr/bin/env bash\n...",
+}) (fun bashScript =>
+store.bind (store.container_image "bootstrap-image" {
+  image = "docker.io/library/buildpack-deps:bookworm",
+  digest = "sha256:...",
+}) (fun bootstrapImage =>
+store.binary "bash-stage2" {
+  optimize = "size",
+} bootstrapImage bashScript [bashSrc])))
 ```
 
 In this example:
 
-- every primitive builder call carries an explicit publication name
-- every primitive builder call evaluates to a `Built` value
-- downstream calls consume upstream `Built` values directly
+- the entry file itself decides what to build
+- `mbuild` does not select a package field
+- dependency recursion is expressed through `bind`
+- `binary` receives already-realized `Build` values
 
-## Accessing Builder-Generated Metadata
+## Reading Builder-Generated Metadata
+
+Because continuations receive realized `Build` values, Nickel code can inspect
+builder-generated metadata before constructing the next action:
 
 ```nickel
-let rec pkgs = {
-  bootstrapImage = mContainerImage "bootstrap-image" {
-    image = "docker.io/library/buildpack-deps:bookworm",
-    digest = "sha256:...",
-  },
-
-  bootstrapDigest = pkgs.bootstrapImage.attrs.image_digest,
-  bootstrapRef = pkgs.bootstrapImage.attrs.image_ref,
-} in
-pkgs
+let store = import "./store.ncl" in
+store.bind (store.container_image "bootstrap-image" {
+  image = "docker.io/library/buildpack-deps:bookworm",
+  digest = "sha256:...",
+}) (fun bootstrapImage =>
+  let imageRef = bootstrapImage.attrs.image_ref in
+  let imageDigest = bootstrapImage.attrs.image_digest in
+  store.text "bootstrap-info" {
+    kind = "text-file",
+    source = "ref=" ++ imageRef ++ "\ndigest=" ++ imageDigest ++ "\n",
+  })
 ```
 
-Builder-generated metadata is available through `Built` values, not through
+Builder-generated metadata is available through `Build` values, not through
 human-facing refs.
 
-## Builder Operations
+## STORE Library Sketch
 
-### Fetch
-
-```nickel
-let mFetch = fun name => fun payload =>
-  builtin.fetch name payload
-```
-
-### Text
+Conceptually, a Nickel STORE helper module looks like:
 
 ```nickel
-let mText = fun name => fun payload =>
-  builtin.text name payload
+{
+  return = fun x => 'Return x,
+
+  bind = fun action cont =>
+    'Bind { action = action, cont = cont },
+
+  map = fun f action =>
+    'Bind { action = action, cont = fun x => 'Return (f x) },
+
+  sequence = fun actions =>
+    std.array.fold_right
+      (fun action acc =>
+        'Bind {
+          action = action,
+          cont = fun x =>
+            'Bind {
+              action = acc,
+              cont = fun xs => 'Return ([x] ++ xs),
+            },
+        })
+      ('Return [])
+      actions,
+
+  text = fun name payload =>
+    'Text { name = name, payload = payload },
+
+  fetch = fun name payload =>
+    'Fetch { name = name, payload = payload },
+
+  container_image = fun name payload =>
+    'ContainerImage { name = name, payload = payload },
+
+  binary = fun name payload image script sources =>
+    'Binary {
+      name = name,
+      payload = payload,
+      image = image,
+      script = script,
+      sources = sources,
+    },
+}
 ```
 
-### Binary
+Rust interprets these action variants and returns realized `Build` records.
 
-```nickel
-let mBinary = fun name => fun payload => fun image => fun script => fun sources =>
-  builtin.binary name payload image script sources
-```
-
-### Image
-
-```nickel
-let mImage = fun name => fun payload => fun base => fun inputs =>
-  builtin.image name payload base inputs
-```
-
-## `Built` Shape
+## `Build` Shape
 
 Conceptually, a realized value has the same shape as one build record:
 
@@ -97,30 +127,4 @@ Conceptually, a realized value has the same shape as one build record:
     image_digest = "sha256:...",
   },
 }
-```
-
-## Bash Stage 2 Sketch
-
-```nickel
-let rec pkgs = {
-  bootstrapImage = mContainerImage "bootstrap-image" {
-    image = "docker.io/library/buildpack-deps:bookworm",
-    digest = "sha256:...",
-  },
-
-  bashSrc = mFetch "bash-src-5.3" {
-    url = ["https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz"],
-    hash = "sha256:...",
-  },
-
-  bashScript = mText "buildscript-bash-stage2" {
-    kind = "build-script",
-    source = "#!/usr/bin/env bash\n...",
-  },
-
-  bashStage2 = mBinary "bash-stage2" {
-    optimize = "size",
-  } pkgs.bootstrapImage pkgs.bashScript [pkgs.bashSrc],
-} in
-pkgs.bashStage2
 ```

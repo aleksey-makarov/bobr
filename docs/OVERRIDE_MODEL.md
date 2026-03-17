@@ -5,13 +5,13 @@
 Override is a Nickel-level operation.
 
 Rust does not implement override as a runtime primitive. Rust embeds Nickel,
-evaluates the overridden builder program, and interprets the resulting STORE
-operations.
+evaluates the overridden STORE program, and interprets the resulting STORE
+actions.
 
 ## Core Rule
 
-Override transforms package definitions, helper values, or builder arguments in
-Nickel.
+Override transforms recipe definitions, helper values, or primitive builder
+helper arguments in Nickel.
 
 It does not directly manipulate:
 
@@ -25,9 +25,9 @@ It does not directly manipulate:
 Override may change:
 
 - builder payload fields
-- dependency selection
+- dependency sequencing
 - explicit publication names
-- helper values used to construct builder calls
+- helper values used to construct STORE actions
 
 Examples:
 
@@ -42,7 +42,7 @@ pkgs // {
 ```nickel
 pkgs // {
   bashStage2 = mkBashStage2 {
-    image = pkgs.altBootstrapImage,
+    baseImageAction = pkgs.altBootstrapImage,
   }
 }
 ```
@@ -60,12 +60,13 @@ pkgs // {
 Operationally:
 
 1. Nickel evaluates package definitions and overrides.
-2. Rust interprets the resulting primitive STORE operations.
-3. Rust computes `build_key` from builder tag, normalized payload, and ordered
+2. Nickel produces one top-level STORE action.
+3. Rust interprets the resulting STORE action tree.
+4. Rust computes `build_key` from builder tag, normalized payload, and ordered
    `input_build_keys`.
-4. Rust reuses or executes builders.
-5. Rust implicitly updates publication refs from the explicit name argument of
-   each primitive builder call.
+5. Rust reuses or executes builders.
+6. Rust implicitly updates publication refs from the explicit name carried by
+   each primitive builder action.
 
 ## Effect on Identity
 

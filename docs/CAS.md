@@ -2,8 +2,8 @@
 
 ## Summary
 
-`mbuild` stores payloads as content-addressed objects and stores realized builder
-results as build records.
+`mbuild` stores payloads as content-addressed objects and stores realized
+builder results as build records.
 
 - `objects/` holds payloads addressed by `object_hash`.
 - `builds/` holds build records addressed by `build_key`.
@@ -31,8 +31,8 @@ participate in object identity or build-record identity.
 
 `objects/<object_hash>` is the payload itself, either a file or a directory.
 
-`builds/<build_key>.json` stores one realized `Built` value. The language-level
-`Built` value and the on-disk build record have the same shape.
+`builds/<build_key>.json` stores one realized `Build` value. The language-level
+`Build` value and the on-disk build record have the same shape.
 
 `meta-refs/<name>.json` is a human-facing symlink to the selected build record.
 
@@ -88,7 +88,7 @@ Build records are stored at:
 ```
 
 A build record is the canonical realized result of one builder invocation.
-Language-level `Built` values have this exact shape.
+Language-level `Build` values have this exact shape.
 
 Example shape:
 
@@ -119,9 +119,9 @@ Rules:
 - a build record points at exactly one `object_hash`
 - multiple build records may point at the same object
 - builder-generated semantic metadata lives in the build record
-- downstream builder calls consume `Built` values, not raw store paths
+- downstream builder calls consume `Build` values, not raw store paths
 
-`Built` includes machine-facing semantic data such as:
+`Build` includes machine-facing semantic data such as:
 
 - `build_key`
 - `object_hash`
@@ -130,7 +130,7 @@ Rules:
 - optionally `producer` and `input_build_keys` if they are exposed by the
   language
 
-`object_path` is a runtime detail. It is not part of the language-level `Built`
+`object_path` is a runtime detail. It is not part of the language-level `Build`
 value.
 
 ## Publication Refs
@@ -178,29 +178,55 @@ These refs are human-facing only:
 ## Runtime Responsibilities
 
 The store does not define dependency semantics. Dependency structure comes from
-the Nickel program interpreted by Rust.
+the Nickel STORE program interpreted by Rust.
 
-Rust embeds the Nickel layer and evaluates primitive STORE operations.
-Operationally, every primitive builder operation has a publication name as its
-first argument, but Rust builder implementations do not receive that name.
-Instead, the interpreter uses the name after evaluating the builder node to
-update publication refs.
+`mbuild` loads one recipe entry file, evaluates it to a top-level STORE action,
+and interprets the resulting action tree. STORE recursion is expressed in
+Nickel through `bind`, not through recursive store lookups by name.
 
-For one primitive builder call, the interpreter:
+For one primitive builder action, the interpreter:
 
-1. evaluates dependency arguments to `Built`
-2. collects ordered `input_build_keys`
-3. computes `build_key`
-4. reuses an existing build record on matching `build_key`
-5. executes the appropriate Rust builder on cache miss
-6. stores the produced payload in `objects/`
-7. writes one build record in `builds/`
-8. updates `meta-refs/<name>.json`
-9. updates `object-refs/<name>`
-10. returns the realized `Built` value
+1. receives a builder action whose dependency fields are already realized
+   `Build` values
+2. validates builder-specific input kinds and required attrs
+3. collects ordered `input_build_keys`
+4. computes `build_key`
+5. reuses an existing build record on matching `build_key`
+6. executes the appropriate Rust builder on cache miss
+7. stores the produced payload in `objects/`
+8. writes one build record in `builds/`
+9. updates `meta-refs/<name>.json`
+10. updates `object-refs/<name>`
+11. returns the realized `Build` value
 
 Rust builders do not receive publication names as part of build semantics.
 Names are consumed only by the interpreter for implicit publication.
+
+## Monadic Execution Example
+
+Conceptually, a recipe may evaluate to a STORE program like:
+
+```nickel
+let store = import "./store.ncl" in
+store.bind (store.fetch "bash-src-5.3" { ... }) (fun bashSrc =>
+store.bind (store.text "buildscript-bash-stage2" { ... }) (fun bashScript =>
+store.bind (store.container_image "bootstrap-image" { ... }) (fun bootstrapImage =>
+store.binary "bash-stage2" { optimize = "size" } bootstrapImage bashScript [bashSrc])))
+```
+
+Execution alternates between Nickel and Rust:
+
+1. Nickel evaluates the entry file to the first STORE action.
+2. Rust interprets that action.
+3. If the action is `Bind`, Rust interprets the left side, obtains a Nickel
+   value, applies the continuation inside Nickel, and gets the next STORE
+   action.
+4. When Rust encounters a primitive builder action, it performs the build/store
+   steps listed above and returns a realized `Build` record back to Nickel.
+5. Nickel code may inspect `Build` metadata before constructing the next action.
+
+This is how dependency recursion is expressed without giving Rust builders
+access to authored recipe metadata or to human-facing refs.
 
 ## Builder Data Model
 
@@ -208,12 +234,12 @@ Rust builders consume:
 
 - builder-specific configuration
 - resolved input payload paths
-- resolved input `Built` records for semantic validation
+- resolved input `Build` records for semantic validation
 
 Rust builders produce:
 
 - a payload that becomes one object
-- builder-generated semantic metadata that becomes part of `Built`
+- builder-generated semantic metadata that becomes part of `Build`
 
 The interpreter writes the build record and updates both publication ref
 namespaces.
@@ -233,7 +259,7 @@ descriptor, for example:
 ```
 
 The descriptor file is hashed like any other file object. The corresponding
-`Built` record carries the semantic type and builder-generated metadata for that
+`Build` record carries the semantic type and builder-generated metadata for that
 object.
 
 ## Builder-Specific Conventions
@@ -255,10 +281,10 @@ object.
 
 - runtime state lives in `.mbuild/binary/`
 - output staging lives in `.mbuild/binary/tmp`
-- one builder call produces one `Built` result
+- run logs live in `.mbuild/binary/logs`
+- one builder call produces one `Build` result
 - build attrs carry stable install-related data needed by downstream image
   assembly
-- run logs live in `.mbuild/binary/logs`
 
 ### `image` and `container-image`
 

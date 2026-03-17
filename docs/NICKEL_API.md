@@ -2,8 +2,9 @@
 
 ## Summary
 
-The Nickel API exposes primitive builder operations and realized `Built` values.
-Rust embeds Nickel and interprets these builder operations with STORE semantics.
+The Nickel API exposes a STORE action language and realized `Build` values.
+Rust embeds Nickel, evaluates the entry recipe to the first STORE action, and
+interprets the resulting action tree.
 
 The Nickel layer does not expose:
 
@@ -12,20 +13,38 @@ The Nickel layer does not expose:
 - explicit publication operations
 - low-level CAS internals
 
-## Primitive Builder Operations
+## Entry Contract
 
-Primitive builder operations are named STORE actions.
+`mbuild` executes one Nickel entry file.
+
+The top-level result of that file must be a STORE action. The normal case is a
+`STORE Build` action.
+
+`mbuild` does not select a package field or interpret package-set structure on
+its own. If a recipe uses a recursive `pkgs` record, the recipe itself must
+select which STORE program to return.
+
+## Core STORE Combinators
+
+Conceptual API:
+
+- `return : a -> STORE a`
+- `bind : STORE a -> (a -> STORE b) -> STORE b`
+- `map : (a -> b) -> STORE a -> STORE b`
+- `sequence : Array (STORE a) -> STORE (Array a)`
+
+`bind` is the mechanism that sequences build dependencies. Primitive builder
+helpers consume already-realized `Build` values, not unresolved STORE actions.
+
+## Primitive Builder Helpers
 
 Canonical forms:
 
-- `mText : String -> TextPayload -> Built`
-- `mFetch : String -> FetchPayload -> Built`
-- `mContainerImage : String -> ContainerImagePayload -> Built`
-- `mBinary : String -> BinaryPayload -> Built -> Built -> Array Built -> Built`
-- `mImage : String -> ImagePayload -> Optional Built -> Array Built -> Built`
-
-Operationally these are STORE actions interpreted by Rust. After evaluation,
-the resulting Nickel value is a pure `Built` value.
+- `text : String -> TextPayload -> STORE Build`
+- `fetch : String -> FetchPayload -> STORE Build`
+- `container_image : String -> ContainerImagePayload -> STORE Build`
+- `binary : String -> BinaryPayload -> Build -> Build -> Array Build -> STORE Build`
+- `image : String -> ImagePayload -> Optional Build -> Array Build -> STORE Build`
 
 The first argument is the publication name:
 
@@ -40,35 +59,39 @@ Builder-specific configuration is carried by ordinary payload records.
 Examples:
 
 ```nickel
-mText "buildscript-bash-stage2" {
+store.text "buildscript-bash-stage2" {
   kind = "build-script",
   source = "#!/usr/bin/env bash\n...",
 }
 ```
 
 ```nickel
-mFetch "bash-src-5.3" {
+store.fetch "bash-src-5.3" {
   url = ["https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz"],
   hash = "sha256:...",
 }
 ```
 
+A primitive builder helper that depends on previously built values is normally
+used under `bind`:
+
 ```nickel
-mBinary "bash-stage2" {
-  optimize = "size",
-} bootstrapImage bashScript [bashSrc]
+store.bind (store.fetch "bash-src-5.3" { ... }) (fun bashSrc =>
+store.bind (store.text "buildscript-bash-stage2" { ... }) (fun bashScript =>
+store.bind (store.container_image "bootstrap-image" { ... }) (fun bootstrapImage =>
+store.binary "bash-stage2" { optimize = "size" } bootstrapImage bashScript [bashSrc])))
 ```
 
 Builder payloads do not contain publication names.
 
-## `Built` Values
+## `Build` Values
 
-A `Built` value is the realized result of one builder invocation.
+A `Build` value is the realized result of one builder invocation.
 
 It is exactly the corresponding build record stored in
 `.mbuild/builds/<build_key>.json`.
 
-At minimum, a `Built` value exposes:
+At minimum, a `Build` value exposes:
 
 - `build_key`
 - `object_hash`
@@ -79,35 +102,20 @@ This lets Nickel code inspect builder-generated metadata from dependency values.
 
 Examples:
 
-- `pkgs.bootstrapImage.kind`
-- `pkgs.bootstrapImage.attrs.image_ref`
-- `pkgs.bootstrapImage.attrs.image_digest`
-
-## Package Sets
-
-`pkgs` is a recursive Nickel record used for package composition.
-
-Fields in `pkgs` may refer to:
-
-- builder calls
-- helper values
-- configuration records
-- previously computed `Built` values
-
-Package-set field names are a composition mechanism. They are not store
-identity and they do not replace explicit publication names authored for
-builder calls.
+- `bootstrapImage.kind`
+- `bootstrapImage.attrs.image_ref`
+- `bootstrapImage.attrs.image_digest`
 
 ## Implicit Publication
 
 Publication is implicit in primitive builder evaluation.
 
-Evaluating a primitive builder call with publication name `name` updates:
+Evaluating a primitive builder action with publication name `name` updates:
 
 - `.mbuild/meta-refs/<name>.json`
 - `.mbuild/object-refs/<name>`
 
-The returned value is still the same `Built` record.
+The returned value is still the same `Build` record.
 
 ## Relationship to the Store
 

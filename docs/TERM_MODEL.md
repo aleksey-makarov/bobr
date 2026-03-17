@@ -2,42 +2,46 @@
 
 ## Summary
 
-`mbuild` embeds Nickel in Rust and interprets a STORE build language.
-Primitive builder operations are evaluated by Rust, produce `Built` values, and
-perform store effects during evaluation.
+`mbuild` embeds Nickel in Rust and interprets a STORE action language.
+Nickel code builds STORE action trees. Rust evaluates the entry recipe to the
+first action and then interprets the action tree step by step.
 
-A `Built` value is the realized result of one builder invocation. It is exactly
-the corresponding build record stored in `.mbuild/builds/<build_key>.json`.
+A realized `Build` value is the canonical build record stored in
+`.mbuild/builds/<build_key>.json`.
 
 ## Layers
 
 ### 1. Nickel Layer
 
-Nickel defines package sets, helper functions, overrides, and builder calls.
-Nickel code manipulates:
+Nickel defines:
 
-- builder configuration values
-- `Built` values
-- recursive package sets and helper combinators
+- pure helper values
+- package sets and helper functions
+- overrides
+- STORE programs built from `return`, `bind`, and primitive builder actions
 
-At this layer, users compose build programs and may inspect builder-generated
-metadata through previously computed `Built` values.
+The top-level entry file must evaluate to one STORE action. `mbuild` does not
+select a package field on its own. Any package-set selection is a frontend
+concern inside the Nickel program.
 
-### 2. STORE Layer
+Nickel may inspect builder-generated metadata through previously computed
+`Build` values.
 
-Primitive builder operations are STORE actions.
-Operationally, they have the form:
+### 2. STORE Interpreter Layer
 
-- `Text : String -> TextPayload -> STORE Built`
-- `Fetch : String -> FetchPayload -> STORE Built`
-- `ContainerImage : String -> ContainerImagePayload -> STORE Built`
-- `Binary : String -> BinaryPayload -> Built -> Built -> Array Built -> STORE Built`
-- `Image : String -> ImagePayload -> Optional Built -> Array Built -> STORE Built`
+Rust loads the entry file, evaluates it to weak head normal form, and then
+interprets the resulting STORE action tree.
 
-The first argument is the publication name. It is consumed by the interpreter,
-not by the Rust builder implementation.
+At this layer, Rust understands the following action shapes conceptually:
 
-After evaluation, the resulting Nickel value is a pure `Built` record.
+- `Return value`
+- `Bind { action, cont }`
+- primitive builder actions such as `Text`, `Fetch`, `ContainerImage`,
+  `Binary`, and `Image`
+
+Rust builder implementations do not evaluate Nickel code directly. They are
+invoked only by the STORE interpreter after the interpreter has decoded one
+primitive builder action and its already-realized `Build` inputs.
 
 ### 3. Store Layer
 
@@ -47,14 +51,31 @@ The store persists:
 - realized build records in `.mbuild/builds`
 - human-facing publication refs in `.mbuild/meta-refs` and `.mbuild/object-refs`
 
-## `Built`
+## STORE Programs
 
-`Built` is the canonical realized result of one builder invocation.
+User-facing builder helpers have conceptual types like:
+
+- `text : String -> TextPayload -> STORE Build`
+- `fetch : String -> FetchPayload -> STORE Build`
+- `container_image : String -> ContainerImagePayload -> STORE Build`
+- `binary : String -> BinaryPayload -> Build -> Build -> Array Build -> STORE Build`
+- `image : String -> ImagePayload -> Optional Build -> Array Build -> STORE Build`
+
+The first argument is the publication name. It is consumed by the interpreter,
+not by the Rust builder implementation.
+
+Primitive builder actions do not recursively run dependency actions on their
+own. If a dependency itself must be built, the Nickel program sequences that
+work explicitly with `bind`.
+
+## `Build`
+
+`Build` is the canonical realized result of one builder invocation.
 
 Its contents are exactly the contents of the corresponding build record stored
 under `.mbuild/builds/<build_key>.json`.
 
-A `Built` value contains at least:
+A `Build` value contains at least:
 
 - `build_key`
 - `object_hash`
@@ -66,7 +87,7 @@ It may also expose:
 - `producer`
 - `input_build_keys`
 
-`Built` does not contain runtime-only fields such as local object paths.
+`Build` does not contain runtime-only fields such as local object paths.
 
 ## Build Keys
 
@@ -88,7 +109,7 @@ This makes `build_key` a graph identity rather than a payload identity.
 
 ## Dependency Semantics
 
-Downstream builder calls consume `Built` values as inputs.
+Downstream builder actions consume `Build` values as inputs.
 
 This gives Nickel access to builder-generated metadata such as:
 
@@ -104,46 +125,89 @@ recipe metadata directly.
 
 Publication is implicit in STORE semantics.
 
-Every primitive builder call carries a publication name as its first argument.
-After the interpreter computes or reuses the corresponding `Built` value, it
-updates:
+Every primitive builder action carries a publication name. After the
+interpreter computes or reuses the corresponding `Build` value, it updates:
 
 - `meta-refs/<name>.json -> ../builds/<build_key>.json`
 - `object-refs/<name> -> ../objects/<object_hash>`
 
 There is no separate user-facing `Publish` operation in the language surface.
-Publication is part of evaluating a named STORE action.
+Publication is part of evaluating a named primitive builder action.
 
 ## Interpreter Algorithm
 
-For one primitive builder call, the interpreter:
+### Entry Evaluation
 
-1. evaluates dependency arguments to `Built`
-2. validates builder-specific input kinds and required attrs
-3. computes ordered `input_build_keys`
-4. computes `build_key` from builder tag, normalized payload, and
-   `input_build_keys`
-5. reuses an existing build record on cache hit
-6. executes the registered Rust builder on cache miss
-7. computes `object_hash` from the produced payload on cache miss
-8. writes the payload into `objects/`
-9. writes one build record into `builds/`
+For one recipe entry file, `mbuild`:
+
+1. loads the Nickel file
+2. evaluates it to weak head normal form
+3. expects a top-level STORE action
+4. interprets the resulting action tree
+
+Relative Nickel imports work normally through the standard Nickel import rules.
+No package-selection mechanism is part of `mbuild` itself.
+
+### `Bind` Evaluation
+
+When the interpreter sees:
+
+```nickel
+'Bind { action = a, cont = k }
+```
+
+it:
+
+1. interprets `a`
+2. obtains a Nickel value `x`
+3. applies `k x` inside Nickel
+4. evaluates the resulting term to the next STORE action
+5. continues interpretation
+
+This is how dependency recursion is expressed.
+
+### Primitive Builder Action Evaluation
+
+For one primitive builder action, the interpreter:
+
+1. decodes the publication name and builder payload
+2. decodes already-realized input `Build` values
+3. validates input kinds and required attrs
+4. computes ordered `input_build_keys`
+5. computes `build_key`
+6. reuses an existing build record on cache hit
+7. executes the registered Rust builder on cache miss
+8. stores the produced payload in `objects/`
+9. writes one build record in `builds/`
 10. updates publication refs for the supplied name
-11. returns the resulting `Built`
+11. returns the resulting `Build`
 
-## Extensible Builder Operations
+## Worked Example
 
-The set of primitive builder operations is open.
+Consider a recipe entry file like:
 
-Nickel uses primitive builder calls, and Rust maintains a registry from builder
-kind to implementation.
+```nickel
+let store = import "./store.ncl" in
+store.bind (store.fetch "bash-src-5.3" { ... }) (fun bashSrc =>
+store.bind (store.text "buildscript-bash-stage2" { ... }) (fun bashScript =>
+store.bind (store.container_image "bootstrap-image" { ... }) (fun bootstrapImage =>
+store.binary "bash-stage2" { optimize = "size" } bootstrapImage bashScript [bashSrc])))
+```
 
-## Named Nodes and Anonymous Subexpressions
+Execution proceeds as follows:
 
-A builder call always carries an explicit publication name.
+1. Nickel evaluates the file to the first `Bind` node.
+2. Rust interprets the left `fetch` action and returns a realized `Build` for
+   `bashSrc`.
+3. Rust applies the continuation to that `Build` value inside Nickel.
+4. Nickel evaluates the continuation result to the next `Bind` node.
+5. Rust interprets the `text` action and returns a realized `Build` for
+   `bashScript`.
+6. The process repeats for `container_image`.
+7. Eventually Nickel produces a primitive `binary` action whose dependency
+   fields already contain the three realized `Build` values.
+8. Rust interprets that `binary` action, computes or reuses its build result,
+   updates refs for `bash-stage2`, and returns the final `Build`.
 
-Publication names are therefore authored at the language level instead of being
-inferred from store paths or from package-set field positions.
-
-Anonymous helper expressions may still exist in Nickel, but publication is tied
-to primitive builder calls rather than to arbitrary syntax nodes.
+The interpreter alternates between Nickel evaluation and Rust-side STORE
+execution until it reaches `Return` or a final primitive builder result.
