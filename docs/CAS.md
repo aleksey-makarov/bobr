@@ -2,50 +2,48 @@
 
 ## Summary
 
-`mbuild` stores realized build results as content-addressed objects and stores
-builder invocations as persistent build records.
+`mbuild` stores payloads as content-addressed objects and stores realized builder
+results as build records.
 
 - `objects/` holds payloads addressed by `object_hash`.
 - `builds/` holds build records addressed by `build_key`.
-- `meta-refs/` holds symlinks from published name to build record.
-- `object-refs/` holds symlinks from published name to payload object.
+- `meta-refs/` holds human-facing symlinks from published name to build record.
+- `object-refs/` holds human-facing symlinks from published name to payload
+  object.
 
-Object identity depends only on payload content. Names, provenance, builder attrs,
-and refs do not participate in object identity.
+Object identity depends only on payload content. Publication names do not
+participate in object identity or build-record identity.
 
 ## Layout
 
 ```text
 .mbuild/
   objects/
-    <object-hash>
+    <object_hash>
   builds/
     <build_key>.json
   meta-refs/
     <name>.json -> ../builds/<build_key>.json
   object-refs/
-    <name> -> ../objects/<object-hash>
+    <name> -> ../objects/<object_hash>
   .. builder-specific files and dirs ..
 ```
 
-`objects/<object-hash>` is the payload itself, either a file or a directory.
+`objects/<object_hash>` is the payload itself, either a file or a directory.
 
-`builds/<build_key>.json` is the persistent record of one interpreted builder
-invocation. `build_key` is computed from the interpreted invocation itself:
-builder tag, normalized payload, resolved input object hashes, and selected
-output projection when projection exists. `object_hash` is stored inside the
-record and does not participate in `build_key`.
+`builds/<build_key>.json` stores one realized `Built` value. The language-level
+`Built` value and the on-disk build record have the same shape.
 
-`meta-refs/<name>.json` is a human-facing symlink to a build record.
+`meta-refs/<name>.json` is a human-facing symlink to the selected build record.
 
-`object-refs/<name>` is a human-facing symlink to the payload object.
+`object-refs/<name>` is a human-facing symlink to the selected payload object.
 
-Each builder owns a same-named subdirectory under `.mbuild/` for builder-specific
-runtime state, temporary files, logs, and caches.
+Each builder owns a same-named subdirectory under `.mbuild/` for builder-
+specific runtime state, temporary files, logs, and caches.
 
 ## Object Identity
 
-`object-hash` is the hash of payload content only.
+`object_hash` is the hash of payload content only.
 
 Hashing rules:
 
@@ -58,7 +56,7 @@ Hashing rules:
   - relative paths
   - entry kinds: file, directory, symlink
   - executable bit for regular files
-  - file content digest for files
+  - file content digests for files
   - symlink target bytes for symlinks
 - directory traversal order is strict lexicographic order by relative path
 
@@ -69,14 +67,15 @@ The hash excludes:
 - xattrs and ACLs
 - inode or device data
 - symlink mode
-- recipe names
 - publication names
-- provenance metadata
+- authored recipe metadata
+- builder provenance metadata
 - builder attrs
 
 Consequences:
 
-- identical payloads built in different temp directories have the same `object-hash`
+- identical payloads built in different temp directories have the same
+  `object_hash`
 - identical payloads produced by different builders are the same object
 - one object may be published under many names
 
@@ -88,20 +87,21 @@ Build records are stored at:
 .mbuild/builds/<build_key>.json
 ```
 
-A build record describes one interpreted builder invocation and the object it
-produced.
+A build record is the canonical realized result of one builder invocation.
+Language-level `Built` values have this exact shape.
 
 Example shape:
 
 ```json
 {
   "schema": "mbuild-build-v1",
+  "build_key": "sha256:...",
   "object_hash": "sha256:...",
   "kind": "build-script|source-tree|fetched-file|binary-output|container-image|...",
   "producer": {
     "builder": "text|fetch|binary|image|container-image"
   },
-  "input_object_hashes": [
+  "input_build_keys": [
     "sha256:..."
   ],
   "attrs": {}
@@ -111,12 +111,27 @@ Example shape:
 Rules:
 
 - each build record is keyed by `build_key`
-- `build_key` is computed before builder execution from the interpreted invocation
+- `build_key` is computed before builder execution from:
+  - builder tag
+  - normalized payload
+  - ordered `input_build_keys`
 - `build_key` does not depend on `object_hash`
-- a build record contains the metadata needed for further interpretation
 - a build record points at exactly one `object_hash`
 - multiple build records may point at the same object
-- the same object may appear in build records with different builders or provenance
+- builder-generated semantic metadata lives in the build record
+- downstream builder calls consume `Built` values, not raw store paths
+
+`Built` includes machine-facing semantic data such as:
+
+- `build_key`
+- `object_hash`
+- `kind`
+- `attrs`
+- optionally `producer` and `input_build_keys` if they are exposed by the
+  language
+
+`object_path` is a runtime detail. It is not part of the language-level `Built`
+value.
 
 ## Publication Refs
 
@@ -131,12 +146,13 @@ Stored at:
 Purpose:
 
 - human-facing lookup from published name to build record
-- access to builder metadata for the published name
-- publication of one selected name or alias
+- stable publication of one selected name or alias
+- convenient inspection of the currently published realized result
 
 These refs are publication state:
 
 - they are not part of object identity
+- they are not part of build-record identity
 - builders do not read them directly
 - removing them does not invalidate objects or build records
 
@@ -145,7 +161,7 @@ These refs are publication state:
 Stored at:
 
 ```text
-.mbuild/object-refs/<name> -> ../objects/<object-hash>
+.mbuild/object-refs/<name> -> ../objects/<object_hash>
 ```
 
 Purpose:
@@ -161,48 +177,51 @@ These refs are human-facing only:
 
 ## Runtime Responsibilities
 
-The store does not define dependency semantics. Dependency resolution comes from
-the build term structure.
+The store does not define dependency semantics. Dependency structure comes from
+the Nickel program interpreted by Rust.
 
-The runtime receives one evaluated build request with fields:
+Rust embeds the Nickel layer and evaluates primitive STORE operations.
+Operationally, every primitive builder operation has a publication name as its
+first argument, but Rust builder implementations do not receive that name.
+Instead, the interpreter uses the name after evaluating the builder node to
+update publication refs.
 
-- `meta`: publication metadata requested by the recipe producer
-- `build`: one closed build term
+For one primitive builder call, the interpreter:
 
-The runtime then:
-
-1. recursively evaluates dependency terms inside `build`
-2. resolves input objects through their build records
-3. computes `build_key` from the interpreted invocation
+1. evaluates dependency arguments to `Built`
+2. collects ordered `input_build_keys`
+3. computes `build_key`
 4. reuses an existing build record on matching `build_key`
-5. executes the appropriate builder on cache miss
+5. executes the appropriate Rust builder on cache miss
 6. stores the produced payload in `objects/`
 7. writes one build record in `builds/`
-8. updates one symlink in `meta-refs/`
-9. updates one symlink in `object-refs/`
+8. updates `meta-refs/<name>.json`
+9. updates `object-refs/<name>`
+10. returns the realized `Built` value
 
-Builders do not read refs. Builders do not receive publication names as part of
-build semantics.
+Rust builders do not receive publication names as part of build semantics.
+Names are consumed only by the interpreter for implicit publication.
 
 ## Builder Data Model
 
-Builders consume:
+Rust builders consume:
 
-- input object hashes
-- input payload paths
-- input build records for semantic validation
+- builder-specific configuration
+- resolved input payload paths
+- resolved input `Built` records for semantic validation
 
-Builders produce:
+Rust builders produce:
 
 - a payload that becomes one object
-- a build record describing the invocation result
+- builder-generated semantic metadata that becomes part of `Built`
 
-The runtime writes the build record and updates both publication ref namespaces.
+The interpreter writes the build record and updates both publication ref
+namespaces.
 
 ## Container Image Objects
 
-A `container-image` object is a file object whose contents are a JSON descriptor,
-for example:
+A `container-image` object is a file object whose contents are a JSON
+descriptor, for example:
 
 ```json
 {
@@ -213,8 +232,9 @@ for example:
 }
 ```
 
-The descriptor file is hashed like any other file object. The corresponding build
-record carries the semantic type and provenance for that object.
+The descriptor file is hashed like any other file object. The corresponding
+`Built` record carries the semantic type and builder-generated metadata for that
+object.
 
 ## Builder-Specific Conventions
 
@@ -228,43 +248,20 @@ record carries the semantic type and provenance for that object.
 
 - downloaded blob cache lives in `.mbuild/fetch/cache`
 - unpacked or raw result becomes an object
-- build attrs carry source URL, declared hash, unpack flag, archive format,
-  and normalized-root information
+- build attrs carry source URL, declared hash, unpack flag, archive format, and
+  normalized-root information
 
 ### `binary`
 
 - runtime state lives in `.mbuild/binary/`
 - output staging lives in `.mbuild/binary/tmp`
-- each declared output directory becomes an object
-- build attrs carry install policy, ordered input object hashes, and
-  stable install-related data needed by downstream image assembly
+- one builder call produces one `Built` result
+- build attrs carry stable install-related data needed by downstream image
+  assembly
 - run logs live in `.mbuild/binary/logs`
 
 ### `image` and `container-image`
 
 - output payload is a file object containing the image descriptor
 - build metadata carries semantic type and provenance
-- output names do not affect object identity
-
-## CLI View
-
-`mbuild` reads one serialized build request either from
-`./.mbuild/request.json` by default or from an explicitly selected
-build-request JSON file.
-
-The selected request has fields:
-
-- `meta`
-- `build`
-
-The default action is to build `build`, create a build record, and publish `meta`
-through `meta-refs` and `object-refs`.
-
-`info` shows at least:
-
-- current `object-hash`
-- current `build_key`
-- object kind
-- builder
-- input object count
-- the current publication name and selected metadata
+- publication names do not affect `build_key`

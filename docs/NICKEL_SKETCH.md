@@ -4,130 +4,123 @@
 
 ```nickel
 let rec pkgs = {
-  zstdSrc = mFetch { ... },
-  zstdScript = mText { ... },
-  zstdTerm = mBinary {
-    outputs = ["out", "dev"],
-    image = pkgs.bootstrapImage,
-    script = pkgs.zstdScript,
-    sources = [pkgs.zstdSrc],
+  bootstrapImage = mContainerImage "bootstrap-image" {
+    image = "docker.io/library/buildpack-deps:bookworm",
+    digest = "sha256:...",
   },
-  zstd = pkgs.zstdTerm.out,
-  zstd_dev = pkgs.zstdTerm.dev,
+
+  bashSrc = mFetch "bash-src-5.3" {
+    url = [
+      "https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz",
+      "https://mirrors.kernel.org/gnu/bash/bash-5.3.tar.gz",
+    ],
+    hash = "sha256:...",
+  },
+
+  bashScript = mText "buildscript-bash-stage2" {
+    kind = "build-script",
+    source = "#!/usr/bin/env bash\n...",
+  },
+
+  bashStage2 = mBinary "bash-stage2" {
+    optimize = "size",
+  } pkgs.bootstrapImage pkgs.bashScript [pkgs.bashSrc],
 } in
 pkgs
 ```
 
 In this example:
 
-- `mFetch`, `mText`, and `mBinary` are builder operations
-- `pkgs.zstdSrc`, `pkgs.zstdScript`, and `pkgs.zstd` are object terms
-- `pkgs.zstdTerm` is a multi-output bundle
-- `.out` and `.dev` are output projections
+- every primitive builder call carries an explicit publication name
+- every primitive builder call evaluates to a `Built` value
+- downstream calls consume upstream `Built` values directly
+
+## Accessing Builder-Generated Metadata
+
+```nickel
+let rec pkgs = {
+  bootstrapImage = mContainerImage "bootstrap-image" {
+    image = "docker.io/library/buildpack-deps:bookworm",
+    digest = "sha256:...",
+  },
+
+  bootstrapDigest = pkgs.bootstrapImage.attrs.image_digest,
+  bootstrapRef = pkgs.bootstrapImage.attrs.image_ref,
+} in
+pkgs
+```
+
+Builder-generated metadata is available through `Built` values, not through
+human-facing refs.
 
 ## Builder Operations
 
 ### Fetch
 
 ```nickel
-let mFetch = fun payload =>
-  'Fetch {
-    url = payload.url,
-    hash = payload.hash,
-  }
+let mFetch = fun name => fun payload =>
+  builtin.fetch name payload
 ```
 
 ### Text
 
 ```nickel
-let mText = fun payload =>
-  'Text {
-    kind = payload.kind,
-    source = payload.source,
-  }
+let mText = fun name => fun payload =>
+  builtin.text name payload
 ```
 
 ### Binary
 
 ```nickel
-let mBinary = fun payload =>
-  'Binary {
-    outputs = payload.outputs,
-    optimize = payload.optimize,
-    image = payload.image,
-    script = payload.script,
-    sources = payload.sources,
-  }
+let mBinary = fun name => fun payload => fun image => fun script => fun sources =>
+  builtin.binary name payload image script sources
 ```
 
 ### Image
 
 ```nickel
-let mImage = fun payload =>
-  'Image {
-    mode = payload.mode,
-    base = payload.base,
-    inputs = payload.inputs,
-  }
+let mImage = fun name => fun payload => fun base => fun inputs =>
+  builtin.image name payload base inputs
 ```
 
-## Typed Inputs
+## `Built` Shape
 
-```nickel
-let BinaryPayload = {
-  outputs | Array String,
-  image | Object,
-  script | Object,
-  sources | Array Object,
-}
-```
-
-## Build Request Example
+Conceptually, a realized value has the same shape as one build record:
 
 ```nickel
 {
-  meta = {
-    name = "zstd",
+  build_key = "sha256:...",
+  object_hash = "sha256:...",
+  kind = "container-image",
+  attrs = {
+    image_ref = "docker.io/...@sha256:...",
+    image_digest = "sha256:...",
   },
-  build = let rec pkgs = { ... } in pkgs.zstd,
 }
 ```
 
-## Larger Example
+## Bash Stage 2 Sketch
 
 ```nickel
 let rec pkgs = {
-  bootstrapImage = mContainerImage {
+  bootstrapImage = mContainerImage "bootstrap-image" {
     image = "docker.io/library/buildpack-deps:bookworm",
     digest = "sha256:...",
   },
 
-  buildscriptAutotools = mText {
+  bashSrc = mFetch "bash-src-5.3" {
+    url = ["https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz"],
+    hash = "sha256:...",
+  },
+
+  bashScript = mText "buildscript-bash-stage2" {
     kind = "build-script",
     source = "#!/usr/bin/env bash\n...",
   },
 
-  zstdSrc = mFetch {
-    url = [
-      "https://github.com/facebook/zstd/archive/refs/tags/v1.5.7.tar.gz",
-    ],
-    hash = "sha256:...",
-  },
-
-  zstdTerm = mBinary {
-    outputs = ["out", "dev"],
-    image = pkgs.bootstrapImage,
-    script = pkgs.buildscriptAutotools,
-    sources = [pkgs.zstdSrc],
-  },
-
-  zstd = pkgs.zstdTerm.out,
-  zstd_dev = pkgs.zstdTerm.dev,
+  bashStage2 = mBinary "bash-stage2" {
+    optimize = "size",
+  } pkgs.bootstrapImage pkgs.bashScript [pkgs.bashSrc],
 } in
-{
-  meta = {
-    name = "zstd",
-  },
-  build = pkgs.zstd,
-}
+pkgs.bashStage2
 ```

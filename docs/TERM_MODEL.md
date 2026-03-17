@@ -2,190 +2,148 @@
 
 ## Summary
 
-`mbuild` realizes one selected build request as one published object.
+`mbuild` embeds Nickel in Rust and interprets a STORE build language.
+Primitive builder operations are evaluated by Rust, produce `Built` values, and
+perform store effects during evaluation.
 
-Nickel may define the build program, but `mbuild` itself consumes plain
-build-request data. Store layout, hashing, build recording, cache lookup, and
-publication are interpreter concerns.
+A `Built` value is the realized result of one builder invocation. It is exactly
+the corresponding build record stored in `.mbuild/builds/<build_key>.json`.
 
 ## Layers
 
-### 1. Term Layer
+### 1. Nickel Layer
 
-Nickel defines a pure build program composed from:
+Nickel defines package sets, helper functions, overrides, and builder calls.
+Nickel code manipulates:
 
-- builder operations
-- typed builder configuration values
-- typed object dependencies
-- package sets and helper combinators
+- builder configuration values
+- `Built` values
+- recursive package sets and helper combinators
 
-At this layer, users compose terms. They do not refer to store paths,
-`object_hash`, `build_key`, or cache lookup.
+At this layer, users compose build programs and may inspect builder-generated
+metadata through previously computed `Built` values.
 
-### 2. Request Layer
+### 2. STORE Layer
 
-A build request is the runtime entrypoint.
+Primitive builder operations are STORE actions.
+Operationally, they have the form:
 
-Shape:
+- `Text : String -> TextPayload -> STORE Built`
+- `Fetch : String -> FetchPayload -> STORE Built`
+- `ContainerImage : String -> ContainerImagePayload -> STORE Built`
+- `Binary : String -> BinaryPayload -> Built -> Built -> Array Built -> STORE Built`
+- `Image : String -> ImagePayload -> Optional Built -> Array Built -> STORE Built`
 
-```nickel
-{
-  meta = {
-    name = "buildscript-coreutils",
-    description = "...",
-    aliases = [],
-  },
-  build = 'Text {
-    kind = "build-script",
-    source = "...",
-  },
-}
-```
+The first argument is the publication name. It is consumed by the interpreter,
+not by the Rust builder implementation.
 
-`meta` is publication metadata.
+After evaluation, the resulting Nickel value is a pure `Built` record.
 
-`build` is the pure build term.
+### 3. Store Layer
 
-### 3. Interpreter Layer
+The store persists:
 
-Rust interprets the selected `build` term recursively.
+- realized objects in `.mbuild/objects`
+- realized build records in `.mbuild/builds`
+- human-facing publication refs in `.mbuild/meta-refs` and `.mbuild/object-refs`
 
-The interpreter:
+## `Built`
 
-- evaluates dependency terms
-- validates builder-specific inputs
-- computes `build_key` from builder tag, normalized payload, and resolved input
-  object hashes
-- reuses an existing build record on matching `build_key`
-- executes builders on cache miss
-- computes `object_hash` from produced payloads on cache miss
-- publishes the resulting object and refs
+`Built` is the canonical realized result of one builder invocation.
 
-### 4. Store Layer
+Its contents are exactly the contents of the corresponding build record stored
+under `.mbuild/builds/<build_key>.json`.
 
-The store persists realized objects, build records, and publication refs.
+A `Built` value contains at least:
 
-Nickel authors describe what to build. The interpreter decides:
+- `build_key`
+- `object_hash`
+- `kind`
+- `attrs`
 
-- how to hash results
-- how to key build records
-- where to store results
-- how to publish them under names
+It may also expose:
 
-## Builder Terms
+- `producer`
+- `input_build_keys`
 
-Builder operations are tagged enum values with one record payload.
+`Built` does not contain runtime-only fields such as local object paths.
 
-Example:
+## Build Keys
 
-```nickel
-'Binary {
-  outputs = ["out", "dev"],
-  optimize = "size",
-  image = imageObject,
-  script = builderScriptObject,
-  sources = [source1Object, source2Object],
-}
-```
+`build_key` is the identity of one builder node in the dependency graph.
 
-Properties:
+It is computed from:
 
-- builder inputs and configuration live together in the payload record
-- builder operations are pure terms and do not execute anything by themselves
-- builder payloads do not contain publication metadata such as names
+- builder tag
+- normalized payload
+- ordered `input_build_keys`
 
-## Objects in Nickel
+It does not depend on:
 
-At the Nickel layer, an object is a pure value denoting a build result.
+- publication name
+- authored recipe metadata
+- `object_hash`
 
-It is distinct from:
+This makes `build_key` a graph identity rather than a payload identity.
 
-- a realized store object in `.mbuild/objects`
-- a build record in `.mbuild/builds`
+## Dependency Semantics
 
-## Multi-Output Builders
+Downstream builder calls consume `Built` values as inputs.
 
-A multi-output builder returns a bundle.
+This gives Nickel access to builder-generated metadata such as:
 
-The bundle exposes named output projections, and each projection is itself an
-object term.
+- `dep.kind`
+- `dep.attrs.image_ref`
+- `dep.attrs.image_digest`
 
-Example:
+If authored recipe metadata should influence the build, Nickel must explicitly
+place the relevant data into builder payloads. Rust builders do not receive
+recipe metadata directly.
 
-```nickel
-let zstd = mBinary {
-  outputs = ["out", "dev"],
-  image = bootstrapImage,
-  script = buildScript,
-  sources = [zstdSrc],
-} in
-{
-  zstd = zstd.out,
-  zstd_dev = zstd.dev,
-}
-```
+## Publication
 
-## Package Sets
+Publication is implicit in STORE semantics.
 
-`pkgs` is a Nickel record containing object terms or bundle projections.
+Every primitive builder call carries a publication name as its first argument.
+After the interpreter computes or reuses the corresponding `Built` value, it
+updates:
 
-Package field names are composition conveniences. They are not object identity
-and they are not build-record identity.
+- `meta-refs/<name>.json -> ../builds/<build_key>.json`
+- `object-refs/<name> -> ../objects/<object_hash>`
 
-## Dependency Graph
-
-The dependency graph exists structurally inside the term.
-
-The interpreter discovers the graph by recursively traversing the selected
-closed `build` term. It does not resolve dependencies from a global namespace of
-names.
-
-Cycle detection is a runtime responsibility of the interpreter.
-
-## Request Selection
-
-`mbuild` reads one serialized build request either from
-`./.mbuild/request.json` by default or from an explicitly selected build-request
-JSON file.
+There is no separate user-facing `Publish` operation in the language surface.
+Publication is part of evaluating a named STORE action.
 
 ## Interpreter Algorithm
 
-Given one selected request, the interpreter:
+For one primitive builder call, the interpreter:
 
-1. receives the request
-2. extracts `meta` and `build`
-3. inspects the top-level builder operation or output projection
-4. recursively interprets embedded dependency terms
-5. obtains realized dependency objects through their build records
-6. computes a `build_key` for the current interpreted builder invocation from
-   builder tag, normalized payload, resolved input object hashes, and selected
-   output projection when projection exists
-7. reuses an existing build record on matching `build_key`
-8. executes the registered builder on cache miss
-9. computes the stable identity of the current result from the produced payload
-   only on cache miss
-10. publishes:
-    - the resulting object in `objects/`
-    - one build record in `builds/`
-    - one metadata ref in `meta-refs/`
-    - one object ref in `object-refs/`
-11. returns the realized object or output bundle
+1. evaluates dependency arguments to `Built`
+2. validates builder-specific input kinds and required attrs
+3. computes ordered `input_build_keys`
+4. computes `build_key` from builder tag, normalized payload, and
+   `input_build_keys`
+5. reuses an existing build record on cache hit
+6. executes the registered Rust builder on cache miss
+7. computes `object_hash` from the produced payload on cache miss
+8. writes the payload into `objects/`
+9. writes one build record into `builds/`
+10. updates publication refs for the supplied name
+11. returns the resulting `Built`
 
 ## Extensible Builder Operations
 
-The set of builder operations is open.
+The set of primitive builder operations is open.
 
-Nickel terms use tagged builder operations, and Rust maintains a registry from
-builder tag to interpreter implementation.
+Nickel uses primitive builder calls, and Rust maintains a registry from builder
+kind to implementation.
 
-## Typed Builder Inputs
+## Named Nodes and Anonymous Subexpressions
 
-Builder payloads carry typed object inputs.
+A builder call always carries an explicit publication name.
 
-Examples:
+Publication names are therefore authored at the language level instead of being
+inferred from store paths or from package-set field positions.
 
-- `Binary` takes builder-specific payload fields, one container-image object,
-  one build-script object, and an array of source-tree objects
-- `Fetch` takes builder-specific payload fields and no object dependencies
-- `Image` takes builder-specific payload fields, zero or one base image object,
-  and an array of binary-output objects
+Anonymous helper expressions may still exist in Nickel, but publication is tied
+to primitive builder calls rather than to arbitrary syntax nodes.

@@ -2,150 +2,121 @@
 
 ## Summary
 
-The Nickel API exposes pure builder terms, object bundles, package sets, and one
-top-level build request.
+The Nickel API exposes primitive builder operations and realized `Built` values.
+Rust embeds Nickel and interprets these builder operations with STORE semantics.
 
-It does not expose store paths, object hashes, build keys, cache management, or
-low-level publication mechanics.
+The Nickel layer does not expose:
 
-## Objects
+- raw store paths
+- manual cache management
+- explicit publication operations
+- low-level CAS internals
 
-At the Nickel layer, an object is a pure value denoting a build result.
+## Primitive Builder Operations
 
-It is not:
+Primitive builder operations are named STORE actions.
 
-- a store path
-- a realized payload in `.mbuild/objects`
-- a build record in `.mbuild/builds`
+Canonical forms:
 
-## Builder Operations
+- `mText : String -> TextPayload -> Built`
+- `mFetch : String -> FetchPayload -> Built`
+- `mContainerImage : String -> ContainerImagePayload -> Built`
+- `mBinary : String -> BinaryPayload -> Built -> Built -> Array Built -> Built`
+- `mImage : String -> ImagePayload -> Optional Built -> Array Built -> Built`
 
-A builder operation is a tagged enum variant with a single record payload.
+Operationally these are STORE actions interpreted by Rust. After evaluation,
+the resulting Nickel value is a pure `Built` value.
+
+The first argument is the publication name:
+
+- it is used by the interpreter for implicit publication
+- it does not participate in `build_key`
+- Rust builders do not receive it in their builder-specific config
+
+## Builder Payloads
+
+Builder-specific configuration is carried by ordinary payload records.
 
 Examples:
 
 ```nickel
-'Binary {
-  outputs = ["out", "dev"],
+mText "buildscript-bash-stage2" {
+  kind = "build-script",
+  source = "#!/usr/bin/env bash\n...",
+}
+```
+
+```nickel
+mFetch "bash-src-5.3" {
+  url = ["https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz"],
+  hash = "sha256:...",
+}
+```
+
+```nickel
+mBinary "bash-stage2" {
   optimize = "size",
-  image = imageObject,
-  script = builderScriptObject,
-  sources = [source1Object, source2Object],
-}
+} bootstrapImage bashScript [bashSrc]
 ```
 
-Rules:
+Builder payloads do not contain publication names.
 
-- each builder operation has exactly one record payload
-- builder-specific inputs are represented by typed fields in that payload
-- builder-specific configuration also lives in ordinary payload fields
-- builder terms are pure and do not execute by themselves
-- builder payloads do not contain publication metadata
+## `Built` Values
 
-## Top-Level Build Request
+A `Built` value is the realized result of one builder invocation.
 
-The runtime entrypoint is one build request.
+It is exactly the corresponding build record stored in
+`.mbuild/builds/<build_key>.json`.
 
-Shape:
+At minimum, a `Built` value exposes:
 
-```nickel
-{
-  meta = {
-    name = "buildscript-coreutils",
-    description = "...",
-    aliases = [],
-  },
-  build = 'Text {
-    kind = "build-script",
-    source = "...",
-  },
-}
-```
+- `build_key`
+- `object_hash`
+- `kind`
+- `attrs`
 
-Semantics:
-
-- `build` is the pure build term interpreted by Rust
-- `meta` is metadata used to publish refs and human-facing descriptions
-- `meta` does not affect object identity
-- `meta` does not affect build-record identity
-- `mbuild` consumes this request as plain data and does not evaluate Nickel itself
-
-## Builder Results
-
-### Single-output builders
-
-A single-output builder returns one object.
+This lets Nickel code inspect builder-generated metadata from dependency values.
 
 Examples:
 
-- `mFetch : FetchPayload -> Object SourceTree`
-- `mText : TextPayload -> Object BuildScript`
-
-### Multi-output builders
-
-Multi-output builders return a bundle record whose fields are object terms.
-
-Example:
-
-```nickel
-let zstd = mBinary {
-  outputs = ["out", "dev"],
-  image = bootstrapImage,
-  script = buildScript,
-  sources = [zstdSrc],
-} in
-{
-  runtime = zstd.out,
-  dev = zstd.dev,
-}
-```
+- `pkgs.bootstrapImage.kind`
+- `pkgs.bootstrapImage.attrs.image_ref`
+- `pkgs.bootstrapImage.attrs.image_digest`
 
 ## Package Sets
 
-`pkgs` is a Nickel record containing:
+`pkgs` is a recursive Nickel record used for package composition.
 
-- object terms
-- bundle records returned by multi-output builders
-- helper values and configuration records
+Fields in `pkgs` may refer to:
 
-Names in `pkgs` are composition conveniences. They are not object identity and
-not build-record identity.
+- builder calls
+- helper values
+- configuration records
+- previously computed `Built` values
 
-## Extensible Builder Operations
+Package-set field names are a composition mechanism. They are not store
+identity and they do not replace explicit publication names authored for
+builder calls.
 
-The set of primitive builder operations is defined by the builders registered in
-`mbuild`.
+## Implicit Publication
 
-Rust maintains a registry from builder tag to interpreter implementation.
+Publication is implicit in primitive builder evaluation.
 
-## Typed Builder Inputs
+Evaluating a primitive builder call with publication name `name` updates:
 
-Builder payloads carry typed object inputs.
+- `.mbuild/meta-refs/<name>.json`
+- `.mbuild/object-refs/<name>`
 
-Examples:
-
-- `Binary` takes payload fields, one container-image object, one build-script
-  object, and an array of source-tree objects
-- `Fetch` takes payload fields and no object dependencies
-- `Image` takes payload fields, zero or one base image object, and an array of
-  binary-output objects
-
-## Selected Request
-
-The Rust interpreter receives one selected build request.
-
-`mbuild` reads one serialized build request either from
-`./.mbuild/request.json` by default or from an explicitly selected build-request
-JSON file.
-
-The selected request contains `meta` and `build`. Rust interprets `build`
-recursively and uses `meta` only for publication.
+The returned value is still the same `Built` record.
 
 ## Relationship to the Store
 
-The interpreter translates Nickel object terms into:
+The interpreter translates primitive builder evaluation into:
 
 - realized objects in `.mbuild/objects`
-- build records in `.mbuild/builds`
+- realized build records in `.mbuild/builds`
 - human-facing metadata refs in `.mbuild/meta-refs`
 - human-facing object refs in `.mbuild/object-refs`
+
+Authored recipe metadata does not belong to the store execution model unless it
+is explicitly placed into builder payloads.
