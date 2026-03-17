@@ -241,6 +241,10 @@ fn text_request_creates_store_entries_and_refs() {
     let build_file = build_path(workspace.path(), published.record.build_key);
     assert!(build_file.exists());
     let build_json: Value = serde_json::from_slice(&fs::read(&build_file).unwrap()).unwrap();
+    assert_eq!(
+        build_json["build_key"],
+        Value::String(published.record.build_key.to_string())
+    );
     assert_eq!(build_json["kind"], Value::String("build-script".to_string()));
     assert_eq!(
         build_json["producer"]["builder"],
@@ -250,6 +254,7 @@ fn text_request_creates_store_entries_and_refs() {
         build_json["object_hash"],
         Value::String(published.record.object_hash.to_string())
     );
+    assert_eq!(build_json["input_build_keys"], Value::Array(vec![]));
 
     assert_eq!(
         fs::read_link(workspace.path().join(".mbuild").join("meta-refs").join("hello.json")).unwrap(),
@@ -419,6 +424,17 @@ fn repeated_nested_binary_request_reuses_all_build_records_and_objects() {
             assert_eq!(fs::read_dir(builds_dir).unwrap().count(), first_build_count);
             assert_eq!(first_build_count, 4);
             assert_eq!(first_object_count, 4);
+
+            let binary_build_json: Value = serde_json::from_slice(
+                &fs::read(build_path(workspace.path(), first.record.build_key)).unwrap(),
+            )
+            .unwrap();
+            let input_build_keys = binary_build_json["input_build_keys"]
+                .as_array()
+                .expect("binary build record must encode input build keys");
+            assert_eq!(binary_build_json["build_key"], Value::String(first.record.build_key.to_string()));
+            assert_eq!(input_build_keys.len(), 3);
+            assert!(input_build_keys.iter().all(|value| matches!(value, Value::String(_))));
         },
     );
 }

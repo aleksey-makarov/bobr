@@ -147,17 +147,17 @@ impl TypedBuilder for BinaryBuilder {
             }),
         );
 
-        let mut input_object_hashes = Vec::with_capacity(2 + sources.len());
-        input_object_hashes.push(image.object_hash);
-        input_object_hashes.push(script.object_hash);
-        input_object_hashes.extend(sources.iter().map(|source| source.object_hash));
+        let mut input_build_keys = Vec::with_capacity(2 + sources.len());
+        input_build_keys.push(image.build_key);
+        input_build_keys.push(script.build_key);
+        input_build_keys.extend(sources.iter().map(|source| source.build_key));
 
         Ok(StagedBuildResult {
             kind: config.kind,
             producer: ProducerInfo {
                 builder: "binary".to_string(),
             },
-            input_object_hashes,
+            input_build_keys,
             attrs,
             staged_path: output_path,
         })
@@ -530,7 +530,7 @@ mod tests {
             assert_eq!(result.kind, "binary-output");
             assert_eq!(result.producer.builder, "binary");
             assert_eq!(result.attrs["optimize"], Value::String("size".to_string()));
-            assert_eq!(result.input_object_hashes.len(), 3);
+            assert_eq!(result.input_build_keys.len(), 3);
             assert!(result.staged_path.is_dir());
             assert_eq!(
                 fs::read_to_string(result.staged_path.join("copied").join("README.txt")).unwrap(),

@@ -178,7 +178,7 @@ impl TypedBuilder for ContainerImageBuilder {
             producer: ProducerInfo {
                 builder: "container-image".to_string(),
             },
-            input_object_hashes: vec![],
+            input_build_keys: vec![],
             attrs,
             staged_path,
         })
@@ -240,18 +240,18 @@ impl TypedBuilder for ImageBuilder {
             );
         }
 
-        let mut input_object_hashes = Vec::with_capacity(binaries.len() + usize::from(base.is_some()));
+        let mut input_build_keys = Vec::with_capacity(binaries.len() + usize::from(base.is_some()));
         if let Some(base) = base {
-            input_object_hashes.push(base.object_hash);
+            input_build_keys.push(base.build_key);
         }
-        input_object_hashes.extend(binaries.iter().map(|input| input.object_hash));
+        input_build_keys.extend(binaries.iter().map(|input| input.build_key));
 
         Ok(StagedBuildResult {
             kind: KIND_CONTAINER_IMAGE.to_string(),
             producer: ProducerInfo {
                 builder: "image".to_string(),
             },
-            input_object_hashes,
+            input_build_keys,
             attrs,
             staged_path,
         })
@@ -863,7 +863,7 @@ mod tests {
 
             assert_eq!(result.kind, KIND_CONTAINER_IMAGE);
             assert_eq!(result.producer.builder, "container-image");
-            assert_eq!(result.input_object_hashes.len(), 0);
+            assert_eq!(result.input_build_keys.len(), 0);
             assert_eq!(
                 result.attrs["image"],
                 Value::String("docker.io/library/buildpack-deps:bookworm".to_string())

@@ -115,7 +115,7 @@ impl TypedBuilder for TextBuilder {
             producer: ProducerInfo {
                 builder: BUILDER_NAME.to_string(),
             },
-            input_object_hashes: vec![],
+            input_build_keys: vec![],
             attrs,
             staged_path: tmp_path,
         })
@@ -168,7 +168,7 @@ mod tests {
 
         assert_eq!(result.kind, "plain-text");
         assert_eq!(result.producer.builder, "text");
-        assert!(result.input_object_hashes.is_empty());
+        assert!(result.input_build_keys.is_empty());
         assert_eq!(result.attrs["source_bytes"], Value::from(5));
         assert_eq!(fs::read_to_string(&result.staged_path).unwrap(), "hello");
     }

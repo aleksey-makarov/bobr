@@ -1,7 +1,7 @@
 use crate::builders;
 use mbuild_core::{
     BuildContext, BuildRequest, Builder, BuilderError, BuildKey, CasError, InputArity,
-    ObjectHash, PublishedBuild, ResolvedInputValue, ResolvedInputs, ResolvedObject, StoreLayout,
+    PublishedBuild, ResolvedInputValue, ResolvedInputs, ResolvedObject, StoreLayout,
     compute_build_key, load_build_record, materialize_build, object_path, publish_refs,
 };
 use serde_json::{Map, Value};
@@ -148,10 +148,10 @@ fn resolve_inputs(
     layout: &StoreLayout,
     builder: &'static dyn Builder,
     payload: &Map<String, Value>,
-) -> Result<(Value, ResolvedInputs, Vec<ObjectHash>), RuntimeError> {
+) -> Result<(Value, ResolvedInputs, Vec<BuildKey>), RuntimeError> {
     let mut config = payload.clone();
     let mut resolved = ResolvedInputs::empty();
-    let mut ordered_hashes = Vec::new();
+    let mut ordered_keys = Vec::new();
 
     for slot in builder.spec().inputs {
         match slot.arity {
@@ -165,7 +165,7 @@ fn resolve_inputs(
                 })?;
                 let published = interpret_build(workspace_root, layout, &term)?;
                 validate_allowed_kind(builder, slot.name, slot.allowed_kinds, &published.record.kind)?;
-                ordered_hashes.push(published.record.object_hash);
+                ordered_keys.push(published.record.build_key);
                 resolved.insert(slot.name, ResolvedInputValue::One(to_resolved_object(published)));
             }
             InputArity::Optional => {
@@ -177,7 +177,7 @@ fn resolve_inputs(
                         slot.allowed_kinds,
                         &published.record.kind,
                     )?;
-                    ordered_hashes.push(published.record.object_hash);
+                    ordered_keys.push(published.record.build_key);
                     resolved.insert(
                         slot.name,
                         ResolvedInputValue::Optional(Some(to_resolved_object(published))),
@@ -210,7 +210,7 @@ fn resolve_inputs(
                         slot.allowed_kinds,
                         &published.record.kind,
                     )?;
-                    ordered_hashes.push(published.record.object_hash);
+                    ordered_keys.push(published.record.build_key);
                     resolved_many.push(to_resolved_object(published));
                 }
                 resolved.insert(slot.name, ResolvedInputValue::Many(resolved_many));
@@ -218,7 +218,7 @@ fn resolve_inputs(
         }
     }
 
-    Ok((Value::Object(config), resolved, ordered_hashes))
+    Ok((Value::Object(config), resolved, ordered_keys))
 }
 
 fn validate_allowed_kind(

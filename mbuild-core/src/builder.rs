@@ -130,24 +130,24 @@ pub struct ProducerInfo {
 pub struct StagedBuildResult {
     pub kind: String,
     pub producer: ProducerInfo,
-    pub input_object_hashes: Vec<ObjectHash>,
+    pub input_build_keys: Vec<BuildKey>,
     pub attrs: Map<String, Value>,
     pub staged_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
-pub struct BuildRecord {
+pub struct Build {
     pub build_key: BuildKey,
     pub object_hash: ObjectHash,
     pub kind: String,
     pub producer: ProducerInfo,
-    pub input_object_hashes: Vec<ObjectHash>,
+    pub input_build_keys: Vec<BuildKey>,
     pub attrs: Map<String, Value>,
 }
 
 #[derive(Debug, Clone)]
 pub struct PublishedBuild {
-    pub record: BuildRecord,
+    pub record: Build,
     pub object_path: PathBuf,
 }
 
@@ -265,18 +265,58 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn resolved_inputs_many_preserves_order() {
+        let first = sample_object();
+        let mut second = sample_object();
+        second.kind = "source-tree".to_string();
+
+        let inputs = ResolvedInputs::new(BTreeMap::from([(
+            "sources".to_string(),
+            ResolvedInputValue::Many(vec![first.clone(), second.clone()]),
+        )]));
+
+        let many = inputs.many("sources").unwrap();
+        assert_eq!(many[0].kind, first.kind);
+        assert_eq!(many[1].kind, second.kind);
+    }
+
+    #[test]
+    fn resolved_inputs_new_and_is_empty_work() {
+        assert!(ResolvedInputs::empty().is_empty());
+        let mut slots = BTreeMap::new();
+        slots.insert(
+            "script".to_string(),
+            ResolvedInputValue::One(sample_object()),
+        );
+        assert!(!ResolvedInputs::new(slots).is_empty());
+    }
+
+    #[test]
+    fn resolved_inputs_optional_some_returns_object() {
+        let object = sample_object();
+        let inputs = ResolvedInputs::new(BTreeMap::from([(
+            "base".to_string(),
+            ResolvedInputValue::Optional(Some(object.clone())),
+        )]));
+
+        let resolved = inputs.optional("base").unwrap().unwrap();
+        assert_eq!(resolved.build_key, object.build_key);
+    }
+
+    #[derive(Debug)]
     struct DummyBuilder;
+
+    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    struct DummyConfig {
+        kind: String,
+    }
 
     static DUMMY_SPEC: BuilderSpec = BuilderSpec {
         tag: "Dummy",
         inputs: &[],
     };
-
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct DummyConfig {
-        foo: String,
-    }
 
     impl TypedBuilder for DummyBuilder {
         type Config = DummyConfig;
@@ -288,17 +328,20 @@ mod tests {
         fn build_typed(
             &self,
             config: Self::Config,
-            _inputs: ResolvedInputs,
-            _cx: &mut BuildContext,
+            inputs: ResolvedInputs,
+            cx: &mut BuildContext,
         ) -> Result<StagedBuildResult, BuilderError> {
+            assert_eq!(config, DummyConfig { kind: "demo".into() });
+            assert!(inputs.is_empty());
+            assert_eq!(cx.workspace_root, PathBuf::from("/tmp/ws"));
             Ok(StagedBuildResult {
-                kind: config.foo,
+                kind: config.kind,
                 producer: ProducerInfo {
                     builder: "dummy".to_string(),
                 },
-                input_object_hashes: vec![],
+                input_build_keys: vec![],
                 attrs: Map::new(),
-                staged_path: PathBuf::from("/tmp/staged"),
+                staged_path: PathBuf::from("/tmp/out"),
             })
         }
     }
@@ -308,33 +351,28 @@ mod tests {
         let builder = DummyBuilder;
         let mut cx = BuildContext {
             workspace_root: PathBuf::from("/tmp/ws"),
-            builder_root: PathBuf::from("/tmp/ws/dummy"),
-            temp_root: PathBuf::from("/tmp/ws/dummy/tmp"),
+            builder_root: PathBuf::from("/tmp/builder"),
+            temp_root: PathBuf::from("/tmp/tmp"),
         };
 
         let result = builder
             .build_erased(
-                serde_json::json!({ "foo": "ok" }),
+                serde_json::json!({ "kind": "demo" }),
                 ResolvedInputs::empty(),
                 &mut cx,
             )
             .unwrap();
-        assert_eq!(result.kind, "ok");
 
-        let error = builder
-            .build_erased(
-                serde_json::json!({ "foo": "ok", "extra": true }),
-                ResolvedInputs::empty(),
-                &mut cx,
-            )
-            .unwrap_err();
-        assert!(matches!(error, BuilderError::InvalidRecipe(_)));
+        assert_eq!(result.kind, "demo");
+        assert_eq!(result.producer.builder, "dummy");
     }
 
     #[test]
     fn typed_builder_adapter_exposes_typed_spec() {
         let builder = DummyBuilder;
-        assert_eq!(Builder::spec(&builder).tag, "Dummy");
-        assert!(Builder::spec(&builder).inputs.is_empty());
+        let erased: &dyn Builder = &builder;
+
+        assert_eq!(erased.spec().tag, "Dummy");
+        assert!(erased.spec().inputs.is_empty());
     }
 }

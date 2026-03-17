@@ -179,7 +179,7 @@ impl TypedBuilder for FetchBuilder {
             producer: ProducerInfo {
                 builder: "fetch".to_string(),
             },
-            input_object_hashes: vec![],
+            input_build_keys: vec![],
             attrs,
             staged_path,
         })
