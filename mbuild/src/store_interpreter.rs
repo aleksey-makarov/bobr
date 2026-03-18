@@ -37,6 +37,12 @@ impl BuilderRegistry for DefaultBuilderRegistry {
 
 static DEFAULT_REGISTRY: DefaultBuilderRegistry = DefaultBuilderRegistry;
 
+#[derive(Debug)]
+pub enum StoreOutcome {
+    Build(PublishedBuild),
+    Unit,
+}
+
 #[derive(Debug, Deserialize)]
 struct RunBuilderAction {
     name: String,
@@ -48,7 +54,7 @@ struct RunBuilderAction {
 pub fn run_store_recipe_in_workspace(
     workspace_root: &Path,
     recipe_path: &Path,
-) -> Result<PublishedBuild, RuntimeError> {
+) -> Result<StoreOutcome, RuntimeError> {
     run_store_recipe_in_workspace_with_registry(workspace_root, recipe_path, &DEFAULT_REGISTRY)
 }
 
@@ -56,7 +62,7 @@ fn run_store_recipe_in_workspace_with_registry(
     workspace_root: &Path,
     recipe_path: &Path,
     registry: &dyn BuilderRegistry,
-) -> Result<PublishedBuild, RuntimeError> {
+) -> Result<StoreOutcome, RuntimeError> {
     if !recipe_path.exists() {
         return Err(RuntimeError::RecipeLoad(format!(
             "recipe file '{}' does not exist",
@@ -84,8 +90,28 @@ fn run_store_recipe_in_workspace_with_registry(
         ))
     })?;
     let result = interpret_store(&mut program, workspace_root, &layout, registry, action)?;
-    let build = deserialize_nickel_value::<Build>(&mut program, result, "final STORE result as Build")?;
-    build_to_published(&layout, build)
+    final_store_result_to_outcome(&mut program, &layout, result)
+}
+
+fn final_store_result_to_outcome(
+    program: &mut Program<CacheImpl>,
+    layout: &StoreLayout,
+    value: NickelValue,
+) -> Result<StoreOutcome, RuntimeError> {
+    let value = program
+        .eval_closure(Closure::from(value))
+        .map_err(|error| RuntimeError::InvalidRequest(format!("STORE eval error: {error:?}")))?;
+
+    if value.is_null() {
+        return Ok(StoreOutcome::Unit);
+    }
+
+    let build = Build::deserialize(value).map_err(|error| {
+        RuntimeError::InvalidRequest(format!(
+            "final STORE result must decode as Build or null: {error}"
+        ))
+    })?;
+    Ok(StoreOutcome::Build(build_to_published(layout, build)?))
 }
 
 fn interpret_store(

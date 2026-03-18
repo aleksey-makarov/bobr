@@ -4,7 +4,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use mbuild::runtime;
+use mbuild::store_interpreter::{self, StoreOutcome};
 
 type MResult<T> = Result<T, MbuildError>;
 
@@ -37,9 +37,9 @@ impl fmt::Display for MbuildError {
 
 #[derive(Parser, Debug)]
 #[command(name = "mbuild")]
-#[command(about = "mbuild runtime for BuildRequest JSON")]
+#[command(about = "mbuild runtime for Nickel STORE recipes")]
 struct Cli {
-    request_file: Option<PathBuf>,
+    recipe_file: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -56,24 +56,30 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> MResult<()> {
     let workspace_root = env::current_dir()
         .map_err(|error| MbuildError::InvalidInput(format!("failed to get current directory: {error}")))?;
-    let request_path = cli
-        .request_file
-        .unwrap_or_else(|| PathBuf::from(".mbuild/request.json"));
-    let published =
-        runtime::run_workspace_build(&workspace_root, &request_path).map_err(map_runtime_error)?;
-
-    println!("build_key: {}", published.record.build_key);
-    println!("object_hash: {}", published.record.object_hash);
-    println!("object_path: {}", published.object_path.display());
+    let recipe_path = cli
+        .recipe_file
+        .unwrap_or_else(|| PathBuf::from(".mbuild/recipe.ncl"));
+    match store_interpreter::run_store_recipe_in_workspace(&workspace_root, &recipe_path)
+        .map_err(map_runtime_error)?
+    {
+        StoreOutcome::Build(published) => {
+            println!("build_key: {}", published.record.build_key);
+            println!("object_hash: {}", published.record.object_hash);
+            println!("object_path: {}", published.object_path.display());
+        }
+        StoreOutcome::Unit => println!("()"),
+    }
     Ok(())
 }
 
-fn map_runtime_error(error: runtime::RuntimeError) -> MbuildError {
+fn map_runtime_error(error: mbuild::RuntimeError) -> MbuildError {
     match error {
-        runtime::RuntimeError::InvalidRequest(_)
-        | runtime::RuntimeError::UnknownBuilder(_)
-        | runtime::RuntimeError::RecipeLoad(_) => MbuildError::InvalidInput(error.to_string()),
-        runtime::RuntimeError::Build(_) | runtime::RuntimeError::Store(_) => {
+        mbuild::RuntimeError::InvalidRequest(_)
+        | mbuild::RuntimeError::UnknownBuilder(_)
+        | mbuild::RuntimeError::RecipeLoad(_) => {
+            MbuildError::InvalidInput(error.to_string())
+        }
+        mbuild::RuntimeError::Build(_) | mbuild::RuntimeError::Store(_) => {
             MbuildError::BuildFailed(error.to_string())
         }
     }

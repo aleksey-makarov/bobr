@@ -1,158 +1,111 @@
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
-use sha2::Digest;
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
 
+const STORE_LIB: &str = include_str!("../ncl/store.ncl");
+const STORE_RECIPE_TEMPLATE: &str = include_str!("assets/store_recipe_full.ncl");
 
-
-
-fn write_image_request_json(path: &std::path::Path, name: &str, image: &str, digest: &str, source_url: &str, source_hash: &str) {
-    fs::write(
-        path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "meta": { "name": name },
-            "build": {
-                "Image": {
-                    "mode": "bootstrap",
-                    "inputs": [
-                        {
-                            "Binary": {
-                                "kind": "binary-output",
-                                "optimize": "size",
-                                "image": {
-                                    "ContainerImage": {
-                                        "image": image,
-                                        "digest": digest
-                                    }
-                                },
-                                "script": {
-                                    "Text": {
-                                        "kind": "build-script",
-                                        "source": "#!/bin/sh\nexit 0\n"
-                                    }
-                                },
-                                "sources": [
-                                    {
-                                        "Fetch": {
-                                            "url": source_url,
-                                            "hash": source_hash,
-                                            "unpack": true
-                                        }
-                                    }
-                                ]
-                            }
-                        }
-                    ]
-                }
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+fn nickel_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap()
 }
 
-fn write_binary_request_json(path: &std::path::Path, name: &str, image: &str, digest: &str, source_url: &str, source_hash: &str) {
-    fs::write(
-        path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "meta": { "name": name },
-            "build": {
-                "Binary": {
-                    "kind": "binary-output",
-                    "optimize": "size",
-                    "image": {
-                        "ContainerImage": {
-                            "image": image,
-                            "digest": digest
-                        }
-                    },
-                    "script": {
-                        "Text": {
-                            "kind": "build-script",
-                            "source": "#!/bin/sh\nexit 0\n"
-                        }
-                    },
-                    "sources": [
-                        {
-                            "Fetch": {
-                                "url": source_url,
-                                "hash": source_hash,
-                                "unpack": true
-                            }
-                        }
-                    ]
-                }
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+fn write_recipe(recipe_path: &std::path::Path, recipe_source: &str) {
+    if let Some(parent) = recipe_path.parent() {
+        fs::create_dir_all(parent).unwrap();
+        fs::write(parent.join("store.ncl"), STORE_LIB).unwrap();
+    }
+    fs::write(recipe_path, recipe_source).unwrap();
 }
 
-fn write_unknown_builder_request_json(path: &std::path::Path) {
-    fs::write(
-        path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "meta": { "name": "unknown" },
-            "build": {
-                "UnknownBuilder": {}
-            }
-        }))
-        .unwrap(),
+fn text_recipe(name: &str, kind: &str, source: &str) -> String {
+    format!(
+        "let store = import \"./store.ncl\" in\nstore.text {} {{\n  kind = {},\n  source = {},\n}}\n",
+        nickel_string(name),
+        nickel_string(kind),
+        nickel_string(source),
     )
-    .unwrap();
 }
 
-fn write_binary_wrong_kind_request_json(path: &std::path::Path, name: &str) {
-    fs::write(
-        path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "meta": { "name": name },
-            "build": {
-                "Binary": {
-                    "kind": "binary-output",
-                    "optimize": "size",
-                    "image": {
-                        "Text": {
-                            "kind": "plain-text",
-                            "source": "not an image"
-                        }
-                    },
-                    "script": {
-                        "Text": {
-                            "kind": "build-script",
-                            "source": "#!/bin/sh\nexit 0\n"
-                        }
-                    },
-                    "sources": []
-                }
-            }
-        }))
-        .unwrap(),
+fn container_image_recipe(name: &str, image: &str, digest: &str) -> String {
+    format!(
+        "let store = import \"./store.ncl\" in\nstore.container_image {} {{\n  image = {},\n  digest = {},\n}}\n",
+        nickel_string(name),
+        nickel_string(image),
+        nickel_string(digest),
     )
-    .unwrap();
 }
 
-fn spawn_http_server(body: Vec<u8>, content_type: &'static str) -> Result<(String, thread::JoinHandle<()>), std::io::Error> {
+fn binary_recipe(name: &str, image: &str, digest: &str, source_url: &str, source_hash: &str) -> String {
+    format!(
+        "let store = import \"./store.ncl\" in\nstore.bind (store.fetch \"source\" {{\n  url = {},\n  hash = {},\n  unpack = true,\n}}) (fun source =>\nstore.bind (store.text \"script\" {{\n  kind = \"build-script\",\n  source = \"#!/bin/sh\\nexit 0\\n\",\n}}) (fun script =>\nstore.bind (store.container_image \"base-image\" {{\n  image = {},\n  digest = {},\n}}) (fun image =>\nstore.binary {} {{\n  kind = \"binary-output\",\n  optimize = \"size\",\n}} image script [source])))\n",
+        nickel_string(source_url),
+        nickel_string(source_hash),
+        nickel_string(image),
+        nickel_string(digest),
+        nickel_string(name),
+    )
+}
+
+fn wrong_kind_binary_recipe(name: &str) -> String {
+    format!(
+        "let store = import \"./store.ncl\" in\nstore.bind (store.text \"not-image\" {{\n  kind = \"plain-text\",\n  source = \"not an image\",\n}}) (fun image =>\nstore.bind (store.text \"script\" {{\n  kind = \"build-script\",\n  source = \"#!/bin/sh\\nexit 0\\n\",\n}}) (fun script =>\nstore.binary {} {{\n  kind = \"binary-output\",\n  optimize = \"size\",\n}} image script []))\n",
+        nickel_string(name),
+    )
+}
+
+fn unknown_builder_recipe() -> &'static str {
+    "'RunBuilder {\n  name = \"unknown\",\n  tag = \"UnknownBuilder\",\n  config = {},\n  inputs = {},\n}\n"
+}
+
+fn install_fake_podman(dir: &std::path::Path, inspect_json: &str) {
+    let script_path = dir.join("podman");
+    let script = include_str!("assets/fake_podman_full.sh")
+        .replace("__INSPECT_JSON__", inspect_json)
+        .replace(
+            "__GENERATED_DIGEST__",
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        );
+    fs::write(&script_path, script).unwrap();
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).unwrap();
+    }
+}
+
+fn spawn_http_server(
+    body: Vec<u8>,
+    content_type: &'static str,
+) -> Result<(String, thread::JoinHandle<()>), std::io::Error> {
     let listener = (0..10)
         .find_map(|attempt| match TcpListener::bind("127.0.0.1:0") {
             Ok(listener) => Some(Ok(listener)),
             Err(error)
                 if attempt < 9
-                    && matches!(error.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::AddrInUse) =>
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::AddrInUse
+                    ) =>
             {
                 thread::sleep(Duration::from_millis(10));
                 None
             }
             Err(error) => Some(Err(error)),
         })
-        .unwrap_or_else(|| Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "failed to bind test HTTP listener")))?;
+        .unwrap_or_else(|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "failed to bind test HTTP listener",
+            ))
+        })?;
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{}/payload", addr);
     let handle = thread::spawn(move || {
@@ -185,67 +138,12 @@ fn drain_request(stream: &mut TcpStream) {
     }
 }
 
-fn write_container_image_request_json(path: &std::path::Path, name: &str, image: &str, digest: &str) {
-    fs::write(
-        path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "meta": { "name": name },
-            "build": {
-                "ContainerImage": {
-                    "image": image,
-                    "digest": digest
-                }
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-}
-
-fn install_fake_podman(dir: &std::path::Path, inspect_json: &str) -> std::path::PathBuf {
-    let script_path = dir.join("podman");
-    let script = include_str!("assets/fake_podman_full.sh")
-        .replace("__INSPECT_JSON__", inspect_json)
-        .replace(
-            "__GENERATED_DIGEST__",
-            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        );
-    fs::write(&script_path, script).unwrap();
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(&script_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).unwrap();
-    }
-    script_path
-}
-
-fn write_request_json(path: &std::path::Path, name: &str, kind: &str, source: &str) {
-    fs::write(
-        path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "meta": { "name": name },
-            "build": {
-                "Text": {
-                    "kind": kind,
-                    "source": source,
-                }
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-}
-
 #[test]
-fn cli_uses_default_dot_mbuild_request_json() {
+fn cli_uses_default_dot_mbuild_recipe_ncl() {
     let workspace = tempdir().unwrap();
-    fs::create_dir_all(workspace.path().join(".mbuild")).unwrap();
-    write_request_json(
-        &workspace.path().join(".mbuild").join("request.json"),
-        "default-request",
-        "plain-text",
-        "hello default",
+    write_recipe(
+        &workspace.path().join(".mbuild").join("recipe.ncl"),
+        &text_recipe("default-recipe", "plain-text", "hello default"),
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
@@ -261,13 +159,13 @@ fn cli_uses_default_dot_mbuild_request_json() {
 }
 
 #[test]
-fn cli_accepts_explicit_request_json_path() {
+fn cli_accepts_explicit_recipe_path() {
     let workspace = tempdir().unwrap();
-    let request_path = workspace.path().join("custom.json");
-    write_request_json(&request_path, "custom-request", "plain-text", "hello custom");
+    let recipe_path = workspace.path().join("custom.ncl");
+    write_recipe(&recipe_path, &text_recipe("custom-recipe", "plain-text", "hello custom"));
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&request_path)
+        .arg(&recipe_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -279,14 +177,32 @@ fn cli_accepts_explicit_request_json_path() {
 }
 
 #[test]
-fn cli_executes_container_image_request_with_fake_podman() {
+fn cli_prints_unit_for_return_null() {
     let workspace = tempdir().unwrap();
-    let request_path = workspace.path().join("container-image.json");
-    write_container_image_request_json(
-        &request_path,
-        "bootstrap-image",
-        "docker.io/library/buildpack-deps:bookworm",
-        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    let recipe_path = workspace.path().join("unit.ncl");
+    write_recipe(&recipe_path, "'Return null\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "()\n");
+}
+
+#[test]
+fn cli_executes_container_image_recipe_with_fake_podman() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("container-image.ncl");
+    write_recipe(
+        &recipe_path,
+        &container_image_recipe(
+            "bootstrap-image",
+            "docker.io/library/buildpack-deps:bookworm",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
     );
 
     let fake_bin_dir = workspace.path().join("fake-bin");
@@ -307,7 +223,7 @@ fn cli_executes_container_image_request_with_fake_podman() {
     };
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&request_path)
+        .arg(&recipe_path)
         .env("PATH", path_value)
         .current_dir(workspace.path())
         .output()
@@ -321,14 +237,16 @@ fn cli_executes_container_image_request_with_fake_podman() {
 }
 
 #[test]
-fn cli_rejects_container_image_request_when_digest_does_not_match() {
+fn cli_rejects_container_image_recipe_when_digest_does_not_match() {
     let workspace = tempdir().unwrap();
-    let request_path = workspace.path().join("container-image-bad.json");
-    write_container_image_request_json(
-        &request_path,
-        "bootstrap-image",
-        "docker.io/library/buildpack-deps:bookworm",
-        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    let recipe_path = workspace.path().join("container-image-bad.ncl");
+    write_recipe(
+        &recipe_path,
+        &container_image_recipe(
+            "bootstrap-image",
+            "docker.io/library/buildpack-deps:bookworm",
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ),
     );
 
     let fake_bin_dir = workspace.path().join("fake-bin");
@@ -349,7 +267,7 @@ fn cli_rejects_container_image_request_when_digest_does_not_match() {
     };
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&request_path)
+        .arg(&recipe_path)
         .env("PATH", path_value)
         .current_dir(workspace.path())
         .output()
@@ -362,7 +280,7 @@ fn cli_rejects_container_image_request_when_digest_does_not_match() {
 }
 
 #[test]
-fn cli_executes_binary_request_with_fake_podman_and_nested_inputs() {
+fn cli_executes_binary_recipe_with_fake_podman_and_nested_inputs() {
     let workspace = tempdir().unwrap();
     let source_tar = {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -382,16 +300,18 @@ fn cli_executes_binary_request_with_fake_podman_and_nested_inputs() {
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
         Err(error) => panic!("failed to start test HTTP server: {error}"),
     };
-    let source_hash = format!("sha256:{:x}", sha2::Sha256::digest(&source_tar));
+    let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
 
-    let request_path = workspace.path().join("binary.json");
-    write_binary_request_json(
-        &request_path,
-        "zstd-bin",
-        "docker.io/library/buildpack-deps:bookworm",
-        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        &url,
-        &source_hash,
+    let recipe_path = workspace.path().join("binary.ncl");
+    write_recipe(
+        &recipe_path,
+        &binary_recipe(
+            "zstd-bin",
+            "docker.io/library/buildpack-deps:bookworm",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &url,
+            &source_hash,
+        ),
     );
 
     let fake_bin_dir = workspace.path().join("fake-bin");
@@ -412,7 +332,7 @@ fn cli_executes_binary_request_with_fake_podman_and_nested_inputs() {
     };
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&request_path)
+        .arg(&recipe_path)
         .env("PATH", path_value)
         .current_dir(workspace.path())
         .output()
@@ -422,14 +342,24 @@ fn cli_executes_binary_request_with_fake_podman_and_nested_inputs() {
     assert!(output.status.success(), "{:?}", output);
 
     let object_path = workspace.path().join(".mbuild").join("object-refs").join("zstd-bin");
-    let resolved = workspace.path().join(".mbuild").join("object-refs").join(fs::read_link(&object_path).unwrap());
+    let resolved = workspace
+        .path()
+        .join(".mbuild")
+        .join("object-refs")
+        .join(fs::read_link(&object_path).unwrap());
     let object_dir = fs::canonicalize(resolved).unwrap();
-    assert_eq!(fs::read_to_string(object_dir.join("copied").join("README.txt")).unwrap(), "hello binary\n");
-    assert_eq!(fs::read_to_string(object_dir.join("image-ref.txt")).unwrap(), "docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n");
+    assert_eq!(
+        fs::read_to_string(object_dir.join("copied").join("README.txt")).unwrap(),
+        "hello binary\n"
+    );
+    assert_eq!(
+        fs::read_to_string(object_dir.join("image-ref.txt")).unwrap(),
+        "docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+    );
 }
 
 #[test]
-fn cli_executes_image_request_with_fake_podman_and_nested_binary() {
+fn cli_executes_image_recipe_with_fake_podman_and_nested_binary() {
     let workspace = tempdir().unwrap();
     let source_tar = {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -449,16 +379,14 @@ fn cli_executes_image_request_with_fake_podman_and_nested_binary() {
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
         Err(error) => panic!("failed to start test HTTP server: {error}"),
     };
-    let source_hash = format!("sha256:{:x}", sha2::Sha256::digest(&source_tar));
+    let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
 
-    let request_path = workspace.path().join("image.json");
-    write_image_request_json(
-        &request_path,
-        "bootstrap-image-from-binary",
-        "docker.io/library/buildpack-deps:bookworm",
-        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        &url,
-        &source_hash,
+    let recipe_path = workspace.path().join("image.ncl");
+    write_recipe(
+        &recipe_path,
+        &STORE_RECIPE_TEMPLATE
+            .replace("__URL__", &url)
+            .replace("__SOURCE_HASH__", &source_hash),
     );
 
     let fake_bin_dir = workspace.path().join("fake-bin");
@@ -479,7 +407,7 @@ fn cli_executes_image_request_with_fake_podman_and_nested_binary() {
     };
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&request_path)
+        .arg(&recipe_path)
         .env("PATH", path_value)
         .current_dir(workspace.path())
         .output()
@@ -488,24 +416,36 @@ fn cli_executes_image_request_with_fake_podman_and_nested_binary() {
 
     assert!(output.status.success(), "{:?}", output);
 
-    let ref_path = workspace.path().join(".mbuild").join("object-refs").join("bootstrap-image-from-binary");
+    let ref_path = workspace.path().join(".mbuild").join("object-refs").join("final-image");
     let descriptor_path = fs::canonicalize(ref_path).unwrap();
     let descriptor: serde_json::Value = serde_json::from_slice(&fs::read(&descriptor_path).unwrap()).unwrap();
-    assert_eq!(descriptor["schema"], serde_json::Value::String("mbuild-container-image-object-v1".to_string()));
-    assert_eq!(descriptor["storage"], serde_json::Value::String("external-podman".to_string()));
+    assert_eq!(
+        descriptor["schema"],
+        serde_json::Value::String("mbuild-container-image-object-v1".to_string())
+    );
+    assert_eq!(
+        descriptor["storage"],
+        serde_json::Value::String("external-podman".to_string())
+    );
     let image_ref = descriptor["image_ref"].as_str().unwrap();
     assert!(image_ref.starts_with("localhost/mbuild-image:bootstrap-"), "{image_ref}");
-    assert_eq!(descriptor["image_digest"], serde_json::Value::String("sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string()));
+    assert_eq!(
+        descriptor["image_digest"],
+        serde_json::Value::String(
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                .to_string(),
+        )
+    );
 }
 
 #[test]
-fn cli_rejects_unknown_builder_request() {
+fn cli_rejects_unknown_builder_recipe() {
     let workspace = tempdir().unwrap();
-    let request_path = workspace.path().join("unknown.json");
-    write_unknown_builder_request_json(&request_path);
+    let recipe_path = workspace.path().join("unknown.ncl");
+    write_recipe(&recipe_path, unknown_builder_recipe());
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&request_path)
+        .arg(&recipe_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -513,17 +453,17 @@ fn cli_rejects_unknown_builder_request() {
     assert!(!output.status.success(), "{:?}", output);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]:"), "{stderr}");
-    assert!(stderr.contains("UnknownBuilder"), "{stderr}");
+    assert!(stderr.contains("unknown builder tag 'UnknownBuilder'"), "{stderr}");
 }
 
 #[test]
-fn cli_rejects_binary_request_with_wrong_input_kind() {
+fn cli_rejects_binary_recipe_with_wrong_input_kind() {
     let workspace = tempdir().unwrap();
-    let request_path = workspace.path().join("binary-wrong-kind.json");
-    write_binary_wrong_kind_request_json(&request_path, "wrong-kind");
+    let recipe_path = workspace.path().join("binary-wrong-kind.ncl");
+    write_recipe(&recipe_path, &wrong_kind_binary_recipe("wrong-kind"));
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&request_path)
+        .arg(&recipe_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -532,4 +472,22 @@ fn cli_rejects_binary_request_with_wrong_input_kind() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]:"), "{stderr}");
     assert!(stderr.contains("input slot 'image' rejects kind 'plain-text'"), "{stderr}");
+}
+
+#[test]
+fn cli_rejects_non_store_toplevel_value() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("not-store.ncl");
+    write_recipe(&recipe_path, "42\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{:?}", output);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("error[invalid-input]:"), "{stderr}");
+    assert!(stderr.contains("expected STORE action enum variant"), "{stderr}");
 }

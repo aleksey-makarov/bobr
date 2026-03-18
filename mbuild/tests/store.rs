@@ -1,4 +1,4 @@
-use mbuild::store_interpreter::run_store_recipe_in_workspace;
+use mbuild::store_interpreter::{StoreOutcome, run_store_recipe_in_workspace};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::env;
@@ -148,7 +148,10 @@ fn store_recipe_executes_all_real_builders() {
                 .replace("__SOURCE_HASH__", &source_hash);
             let recipe_path = write_store_recipe(workspace.path(), &recipe_source);
 
-            let published = run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap();
+            let published = match run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap() {
+                StoreOutcome::Build(published) => published,
+                StoreOutcome::Unit => panic!("expected final STORE result to be Build"),
+            };
             handle.join().unwrap();
 
             assert_eq!(published.record.kind, "container-image");
