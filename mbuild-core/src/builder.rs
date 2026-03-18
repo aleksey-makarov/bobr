@@ -1,7 +1,7 @@
 use crate::BuilderError;
 use crate::cas::BuildKey;
 use fsobj_hash::ObjectHash;
-use serde::{Deserialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -121,7 +121,7 @@ pub struct BuildContext {
     pub temp_root: PathBuf,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProducerInfo {
     pub builder: String,
 }
@@ -135,14 +135,36 @@ pub struct StagedBuildResult {
     pub staged_path: PathBuf,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Build {
     pub build_key: BuildKey,
+    #[serde(with = "serde_object_hash")]
     pub object_hash: ObjectHash,
     pub kind: String,
     pub producer: ProducerInfo,
     pub input_build_keys: Vec<BuildKey>,
     pub attrs: Map<String, Value>,
+}
+
+mod serde_object_hash {
+    use fsobj_hash::ObjectHash;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+    use std::str::FromStr;
+
+    pub fn serialize<S>(value: &ObjectHash, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<ObjectHash, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        ObjectHash::from_str(&value).map_err(D::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone)]

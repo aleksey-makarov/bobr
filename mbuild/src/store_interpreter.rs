@@ -1,0 +1,658 @@
+use crate::builders;
+use crate::runtime::{
+    RuntimeError, build_to_published, execute_builder_node, map_store_error, to_resolved_object,
+    validate_allowed_kind,
+};
+use mbuild_core::{Build, Builder, PublishedBuild, ResolvedInputValue, ResolvedInputs, StoreLayout, load_build_record, publish_refs};
+use nickel_lang_core::{
+    error::NullReporter,
+    eval::{Closure, cache::CacheImpl, value::NickelValue},
+    identifier::LocIdent,
+    mk_app,
+    program::Program,
+    term::{RecordOpKind, ToSci, UnaryOp, make as mk_term},
+};
+use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde_json::{Map, Value};
+use std::path::Path;
+use std::str::FromStr;
+
+pub trait BuilderRegistry {
+    fn get_builder(&self, tag: &str) -> Option<&'static dyn Builder>;
+    fn supported_builder_tags(&self) -> Vec<&'static str>;
+}
+
+struct DefaultBuilderRegistry;
+
+impl BuilderRegistry for DefaultBuilderRegistry {
+    fn get_builder(&self, tag: &str) -> Option<&'static dyn Builder> {
+        builders::get_builder(tag)
+    }
+
+    fn supported_builder_tags(&self) -> Vec<&'static str> {
+        builders::supported_builder_tags()
+    }
+}
+
+static DEFAULT_REGISTRY: DefaultBuilderRegistry = DefaultBuilderRegistry;
+
+#[derive(Debug, Deserialize)]
+struct RunBuilderAction {
+    name: String,
+    tag: String,
+    config: Value,
+    inputs: Map<String, Value>,
+}
+
+pub fn run_store_recipe_in_workspace(
+    workspace_root: &Path,
+    recipe_path: &Path,
+) -> Result<PublishedBuild, RuntimeError> {
+    run_store_recipe_in_workspace_with_registry(workspace_root, recipe_path, &DEFAULT_REGISTRY)
+}
+
+fn run_store_recipe_in_workspace_with_registry(
+    workspace_root: &Path,
+    recipe_path: &Path,
+    registry: &dyn BuilderRegistry,
+) -> Result<PublishedBuild, RuntimeError> {
+    if !recipe_path.exists() {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "recipe file '{}' does not exist",
+            recipe_path.display()
+        )));
+    }
+
+    let layout = StoreLayout::discover(&workspace_root.join(".mbuild")).map_err(map_store_error)?;
+    let mut program: Program<CacheImpl> = Program::new_from_file(
+        recipe_path,
+        std::io::sink(),
+        NullReporter {},
+    )
+    .map_err(|error| {
+        RuntimeError::RecipeLoad(format!(
+            "failed to load Nickel recipe '{}': {error:?}",
+            recipe_path.display()
+        ))
+    })?;
+
+    let action = program.eval().map_err(|error| {
+        RuntimeError::RecipeLoad(format!(
+            "failed to evaluate Nickel recipe '{}': {error:?}",
+            recipe_path.display()
+        ))
+    })?;
+    let result = interpret_store(&mut program, workspace_root, &layout, registry, action)?;
+    let build = deserialize_nickel_value::<Build>(&mut program, result, "final STORE result as Build")?;
+    build_to_published(&layout, build)
+}
+
+fn interpret_store(
+    program: &mut Program<CacheImpl>,
+    workspace_root: &Path,
+    layout: &StoreLayout,
+    registry: &dyn BuilderRegistry,
+    value: NickelValue,
+) -> Result<NickelValue, RuntimeError> {
+    let value = program
+        .eval_closure(Closure::from(value))
+        .map_err(|error| RuntimeError::InvalidRequest(format!("STORE eval error: {error:?}")))?;
+
+    let action = value.as_enum_variant().ok_or_else(|| {
+        RuntimeError::InvalidRequest(format!(
+            "expected STORE action enum variant, got {:?}",
+            value.type_of()
+        ))
+    })?;
+
+    match action.tag.label() {
+        "Return" => Ok(action.arg.clone().unwrap_or_else(NickelValue::null)),
+        "Bind" => {
+            let record = action
+                .arg
+                .clone()
+                .ok_or_else(|| RuntimeError::InvalidRequest("'Bind requires an argument".to_string()))?;
+            let action_term = record_access_term(record.clone(), "action");
+            let result = interpret_store(program, workspace_root, layout, registry, action_term)?;
+            let cont_term = record_access_term(record, "cont");
+            let next = mk_app!(cont_term, result);
+            interpret_store(program, workspace_root, layout, registry, next)
+        }
+        "RunBuilder" => {
+            let record = action.arg.clone().ok_or_else(|| {
+                RuntimeError::InvalidRequest("'RunBuilder requires an argument".to_string())
+            })?;
+            let run = parse_run_builder_action(program, record)?;
+            let builder = registry.get_builder(&run.tag).ok_or_else(|| {
+                RuntimeError::UnknownBuilder(format!(
+                    "unknown builder tag '{}'; supported builders: {}",
+                    run.tag,
+                    registry.supported_builder_tags().join(", ")
+                ))
+            })?;
+            let inputs = resolve_action_inputs(layout, builder, run.inputs)?;
+            let published = execute_builder_node(workspace_root, layout, builder, run.config, inputs)?;
+            publish_refs(layout, &run.name, &published).map_err(map_store_error)?;
+            build_to_nickel_value(&published.record)
+        }
+        other => Err(RuntimeError::InvalidRequest(format!(
+            "unknown STORE action tag '{other}'"
+        ))),
+    }
+}
+
+fn parse_run_builder_action(
+    program: &mut Program<CacheImpl>,
+    record: NickelValue,
+) -> Result<RunBuilderAction, RuntimeError> {
+    let inputs = eval_record_field_json(program, record.clone(), "inputs", "RunBuilder.inputs")?;
+    let inputs = inputs.as_object().cloned().ok_or_else(|| {
+        RuntimeError::InvalidRequest(
+            "failed to decode RunBuilder.inputs: expected a JSON object".to_string(),
+        )
+    })?;
+
+    Ok(RunBuilderAction {
+        name: eval_record_field(program, record.clone(), "name", "RunBuilder.name as string")?,
+        tag: eval_record_field(program, record.clone(), "tag", "RunBuilder.tag as string")?,
+        config: eval_record_field_json(program, record, "config", "RunBuilder.config")?,
+        inputs,
+    })
+}
+
+fn resolve_action_inputs(
+    layout: &StoreLayout,
+    builder: &'static dyn Builder,
+    mut raw_inputs: Map<String, Value>,
+) -> Result<ResolvedInputs, RuntimeError> {
+    let mut resolved = ResolvedInputs::empty();
+
+    for slot in builder.spec().inputs {
+        let value = raw_inputs.remove(slot.name).ok_or_else(|| {
+            RuntimeError::InvalidRequest(format!(
+                "STORE action for builder '{}' is missing input slot '{}'",
+                builder.spec().tag,
+                slot.name,
+            ))
+        })?;
+
+        match slot.arity {
+            mbuild_core::InputArity::One => {
+                let object = resolve_input_build(layout, builder, slot.name, value)?;
+                validate_allowed_kind(builder, slot.name, slot.allowed_kinds, &object.kind)?;
+                resolved.insert(slot.name, ResolvedInputValue::One(object));
+            }
+            mbuild_core::InputArity::Optional => {
+                if value.is_null() {
+                    resolved.insert(slot.name, ResolvedInputValue::Optional(None));
+                } else {
+                    let object = resolve_input_build(layout, builder, slot.name, value)?;
+                    validate_allowed_kind(builder, slot.name, slot.allowed_kinds, &object.kind)?;
+                    resolved.insert(slot.name, ResolvedInputValue::Optional(Some(object)));
+                }
+            }
+            mbuild_core::InputArity::Many => {
+                let values = value.as_array().ok_or_else(|| {
+                    RuntimeError::InvalidRequest(format!(
+                        "STORE action input slot '{}' for builder '{}' must be an array of Build values",
+                        slot.name,
+                        builder.spec().tag,
+                    ))
+                })?;
+                let mut objects = Vec::with_capacity(values.len());
+                for value in values {
+                    let object = resolve_input_build(layout, builder, slot.name, value.clone())?;
+                    validate_allowed_kind(builder, slot.name, slot.allowed_kinds, &object.kind)?;
+                    objects.push(object);
+                }
+                resolved.insert(slot.name, ResolvedInputValue::Many(objects));
+            }
+        }
+    }
+
+    if !raw_inputs.is_empty() {
+        let mut extra = raw_inputs.keys().cloned().collect::<Vec<_>>();
+        extra.sort();
+        return Err(RuntimeError::InvalidRequest(format!(
+            "STORE action for builder '{}' contains unexpected input slots: {}",
+            builder.spec().tag,
+            extra.join(", ")
+        )));
+    }
+
+    Ok(resolved)
+}
+
+fn resolve_input_build(
+    layout: &StoreLayout,
+    builder: &'static dyn Builder,
+    slot_name: &str,
+    value: Value,
+) -> Result<mbuild_core::ResolvedObject, RuntimeError> {
+    let supplied: Build = serde_json::from_value(value).map_err(|error| {
+        RuntimeError::InvalidRequest(format!(
+            "STORE action input slot '{}' for builder '{}' must contain a Build value: {error}",
+            slot_name,
+            builder.spec().tag,
+        ))
+    })?;
+
+    let canonical = load_build_record(layout, supplied.build_key)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            RuntimeError::Store(format!(
+                "input build '{}' for builder '{}' slot '{}' is missing from store",
+                supplied.build_key,
+                builder.spec().tag,
+                slot_name,
+            ))
+        })?;
+
+    if canonical != supplied {
+        return Err(RuntimeError::InvalidRequest(format!(
+            "STORE action input build '{}' for builder '{}' slot '{}' does not match store record",
+            supplied.build_key,
+            builder.spec().tag,
+            slot_name,
+        )));
+    }
+
+    let published = build_to_published(layout, canonical)?;
+    Ok(to_resolved_object(published))
+}
+
+fn build_to_nickel_value(build: &Build) -> Result<NickelValue, RuntimeError> {
+    NickelValue::deserialize(serde_json::to_value(build).map_err(|error| {
+        RuntimeError::InvalidRequest(format!("failed to serialize Build for Nickel: {error}"))
+    })?)
+    .map_err(|error| RuntimeError::InvalidRequest(format!("failed to encode Build for Nickel: {error}")))
+}
+
+fn record_access_term(record: NickelValue, field: &str) -> NickelValue {
+    mk_term::op1(UnaryOp::RecordAccess(LocIdent::from(field)), record)
+}
+
+fn eval_record_field<T: DeserializeOwned>(
+    program: &mut Program<CacheImpl>,
+    record: NickelValue,
+    field: &str,
+    expected: &str,
+) -> Result<T, RuntimeError> {
+    let value = record_access_term(record, field);
+    deserialize_nickel_value(program, value, expected)
+}
+
+fn eval_record_field_json(
+    program: &mut Program<CacheImpl>,
+    record: NickelValue,
+    field: &str,
+    expected: &str,
+) -> Result<Value, RuntimeError> {
+    let value = record_access_term(record, field);
+    nickel_value_to_json(program, value, expected)
+}
+
+fn deserialize_nickel_value<T: DeserializeOwned>(
+    program: &mut Program<CacheImpl>,
+    value: NickelValue,
+    expected: &str,
+) -> Result<T, RuntimeError> {
+    let evaled = program
+        .eval_closure(Closure::from(value))
+        .map_err(|error| RuntimeError::InvalidRequest(format!("STORE eval error: {error:?}")))?;
+    T::deserialize(evaled).map_err(|error| {
+        RuntimeError::InvalidRequest(format!("failed to decode {expected}: {error}"))
+    })
+}
+
+fn nickel_value_to_json(
+    program: &mut Program<CacheImpl>,
+    value: NickelValue,
+    expected: &str,
+) -> Result<Value, RuntimeError> {
+    let evaled = program
+        .eval_closure(Closure::from(value))
+        .map_err(|error| RuntimeError::InvalidRequest(format!("STORE eval error: {error:?}")))?;
+    nickel_value_to_json_inner(program, evaled, expected)
+}
+
+fn nickel_value_to_json_inner(
+    program: &mut Program<CacheImpl>,
+    value: NickelValue,
+    expected: &str,
+) -> Result<Value, RuntimeError> {
+    if value.is_null() {
+        return Ok(Value::Null);
+    }
+
+    if let Some(boolean) = value.as_bool() {
+        return Ok(Value::Bool(boolean));
+    }
+
+    if let Some(number) = value.as_number() {
+        let rendered = number.to_sci().to_string();
+        let number = serde_json::Number::from_str(&rendered).map_err(|error| {
+            RuntimeError::InvalidRequest(format!(
+                "failed to decode {expected}: number '{rendered}' is not representable as JSON number: {error}"
+            ))
+        })?;
+        return Ok(Value::Number(number));
+    }
+
+    if let Some(string) = value.as_string() {
+        return Ok(Value::String(string.to_string()));
+    }
+
+    if let Some(array) = value.as_array() {
+        let mut values = Vec::with_capacity(array.len());
+        for element in array.iter() {
+            values.push(nickel_value_to_json(program, element.clone(), expected)?);
+        }
+        return Ok(Value::Array(values));
+    }
+
+    if let Some(record) = value.as_record() {
+        let mut object = Map::new();
+        for id in record.field_names(RecordOpKind::IgnoreEmptyOpt) {
+            let Some(field) = record.get(id).cloned() else {
+                continue;
+            };
+            let Some(field_value) = field.value else {
+                continue;
+            };
+            object.insert(
+                id.into_label(),
+                nickel_value_to_json(program, field_value, expected)?,
+            );
+        }
+        return Ok(Value::Object(object));
+    }
+
+    if let Some(enum_variant) = value.as_enum_variant() {
+        if enum_variant.arg.is_none() {
+            return Ok(Value::String(enum_variant.tag.label().to_string()));
+        }
+    }
+
+    Err(RuntimeError::InvalidRequest(format!(
+        "failed to decode {expected}: unsupported Nickel value kind {:?}",
+        value.type_of()
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mbuild_core::{BuildContext, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo, TypedBuilder};
+    use std::fs;
+    use tempfile::tempdir;
+
+    const STORE_LIB: &str = include_str!("../ncl/store.ncl");
+
+    #[derive(Debug)]
+    struct DummyLeafBuilder;
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DummyLeafConfig {
+        kind: String,
+        text: String,
+    }
+
+    static DUMMY_LEAF_SPEC: BuilderSpec = BuilderSpec {
+        tag: "DummyLeaf",
+        inputs: &[],
+    };
+
+    impl TypedBuilder for DummyLeafBuilder {
+        type Config = DummyLeafConfig;
+
+        fn spec(&self) -> &'static BuilderSpec {
+            &DUMMY_LEAF_SPEC
+        }
+
+        fn build_typed(
+            &self,
+            config: Self::Config,
+            inputs: ResolvedInputs,
+            cx: &mut BuildContext,
+        ) -> Result<mbuild_core::StagedBuildResult, BuilderError> {
+            if !inputs.is_empty() {
+                return Err(BuilderError::ExecutionFailed(
+                    "DummyLeaf does not accept inputs".to_string(),
+                ));
+            }
+            fs::create_dir_all(&cx.temp_root).map_err(|error| {
+                BuilderError::ExecutionFailed(format!("failed to create temp dir: {error}"))
+            })?;
+            let staged = cx.temp_root.join("dummy-leaf.txt");
+            fs::write(&staged, &config.text).map_err(|error| {
+                BuilderError::ExecutionFailed(format!("failed to write dummy leaf: {error}"))
+            })?;
+            Ok(mbuild_core::StagedBuildResult {
+                kind: config.kind,
+                producer: ProducerInfo {
+                    builder: "dummy-leaf".to_string(),
+                },
+                input_build_keys: vec![],
+                attrs: Map::from_iter([(
+                    "echo".to_string(),
+                    Value::String(config.text),
+                )]),
+                staged_path: staged,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct DummyConsumerBuilder;
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DummyConsumerConfig {
+        kind: String,
+    }
+
+    static DUMMY_CONSUMER_INPUTS: &[InputSlot] = &[
+        InputSlot {
+            name: "base",
+            arity: InputArity::One,
+            allowed_kinds: &["dummy-leaf"],
+        },
+        InputSlot {
+            name: "maybe",
+            arity: InputArity::Optional,
+            allowed_kinds: &["dummy-leaf"],
+        },
+        InputSlot {
+            name: "others",
+            arity: InputArity::Many,
+            allowed_kinds: &["dummy-leaf"],
+        },
+    ];
+
+    static DUMMY_CONSUMER_SPEC: BuilderSpec = BuilderSpec {
+        tag: "DummyConsumer",
+        inputs: DUMMY_CONSUMER_INPUTS,
+    };
+
+    impl TypedBuilder for DummyConsumerBuilder {
+        type Config = DummyConsumerConfig;
+
+        fn spec(&self) -> &'static BuilderSpec {
+            &DUMMY_CONSUMER_SPEC
+        }
+
+        fn build_typed(
+            &self,
+            config: Self::Config,
+            inputs: ResolvedInputs,
+            cx: &mut BuildContext,
+        ) -> Result<mbuild_core::StagedBuildResult, BuilderError> {
+            let base = inputs.one("base")?;
+            let maybe = inputs.optional("maybe")?;
+            let others = inputs.many("others")?;
+            fs::create_dir_all(&cx.temp_root).map_err(|error| {
+                BuilderError::ExecutionFailed(format!("failed to create temp dir: {error}"))
+            })?;
+            let staged = cx.temp_root.join("dummy-consumer.txt");
+            fs::write(
+                &staged,
+                format!("base={} maybe={} others={}", base.kind, maybe.is_some(), others.len()),
+            )
+            .map_err(|error| {
+                BuilderError::ExecutionFailed(format!("failed to write dummy consumer: {error}"))
+            })?;
+            Ok(mbuild_core::StagedBuildResult {
+                kind: config.kind,
+                producer: ProducerInfo {
+                    builder: "dummy-consumer".to_string(),
+                },
+                input_build_keys: vec![
+                    base.build_key,
+                    maybe.map(|value| value.build_key).unwrap_or(base.build_key),
+                ],
+                attrs: Map::from_iter([(
+                    "base_kind".to_string(),
+                    Value::String(base.kind.clone()),
+                )]),
+                staged_path: staged,
+            })
+        }
+    }
+
+    static DUMMY_LEAF: DummyLeafBuilder = DummyLeafBuilder;
+    static DUMMY_CONSUMER: DummyConsumerBuilder = DummyConsumerBuilder;
+
+    struct DummyRegistry;
+
+    impl BuilderRegistry for DummyRegistry {
+        fn get_builder(&self, tag: &str) -> Option<&'static dyn Builder> {
+            match tag {
+                "DummyLeaf" => Some(&DUMMY_LEAF),
+                "DummyConsumer" => Some(&DUMMY_CONSUMER),
+                _ => None,
+            }
+        }
+
+        fn supported_builder_tags(&self) -> Vec<&'static str> {
+            vec!["DummyLeaf", "DummyConsumer"]
+        }
+    }
+
+    fn eval_source_with_registry(
+        source: &str,
+        workspace_root: &Path,
+        registry: &dyn BuilderRegistry,
+    ) -> Result<Build, RuntimeError> {
+        let layout = StoreLayout::discover(&workspace_root.join(".mbuild")).map_err(map_store_error)?;
+        let mut program: Program<CacheImpl> = Program::new_from_source(
+            std::io::Cursor::new(source.as_bytes()),
+            "<test>",
+            std::io::sink(),
+            NullReporter {},
+        )
+        .map_err(|error| RuntimeError::RecipeLoad(format!("failed to load inline Nickel test program: {error:?}")))?;
+        let action = program.eval().map_err(|error| {
+            RuntimeError::RecipeLoad(format!("failed to evaluate inline Nickel test program: {error:?}"))
+        })?;
+        let result = interpret_store(&mut program, workspace_root, &layout, registry, action)?;
+        deserialize_nickel_value::<Build>(&mut program, result, "final STORE result as Build")
+    }
+
+    fn store_program(body: &str) -> String {
+        format!("let store = {} in {}", STORE_LIB, body)
+    }
+
+    #[test]
+    fn bind_passes_build_metadata_into_next_action() {
+        let workspace = tempdir().unwrap();
+        let program = store_program(
+            r#"
+store.bind (store.run_builder "first" "DummyLeaf" { kind = "dummy-leaf", text = "hello" } {}) (fun first =>
+  store.run_builder "second" "DummyLeaf" { kind = "dummy-leaf", text = first.attrs.echo } {})
+"#,
+        );
+
+        let result = eval_source_with_registry(&program, workspace.path(), &DummyRegistry).unwrap();
+
+        assert_eq!(result.kind, "dummy-leaf");
+        assert_eq!(result.attrs["echo"], Value::String("hello".to_string()));
+        assert!(workspace
+            .path()
+            .join(".mbuild")
+            .join("meta-refs")
+            .join("first.json")
+            .exists());
+        assert!(workspace
+            .path()
+            .join(".mbuild")
+            .join("meta-refs")
+            .join("second.json")
+            .exists());
+    }
+
+    #[test]
+    fn run_builder_rejects_unknown_tag() {
+        let workspace = tempdir().unwrap();
+        let program = store_program(r#"store.run_builder "missing" "NoSuchBuilder" {} {}"#);
+
+        let error = eval_source_with_registry(&program, workspace.path(), &DummyRegistry).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::UnknownBuilder(_)));
+    }
+
+    #[test]
+    fn run_builder_validates_allowed_kinds() {
+        let workspace = tempdir().unwrap();
+        let program = store_program(
+            r#"
+store.bind (store.run_builder "leaf" "DummyLeaf" { kind = "other-kind", text = "hello" } {}) (fun leaf =>
+  store.run_builder "consumer" "DummyConsumer" { kind = "dummy-output" } {
+    base = leaf,
+    maybe = null,
+    others = [],
+  })
+"#,
+        );
+
+        let error = eval_source_with_registry(&program, workspace.path(), &DummyRegistry).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::InvalidRequest(_)));
+        assert!(error.to_string().contains("rejects kind 'other-kind'"));
+    }
+
+    #[test]
+    fn run_builder_rejects_missing_or_extra_slots() {
+        let workspace = tempdir().unwrap();
+        let missing_program = store_program(
+            r#"
+store.bind (store.run_builder "leaf" "DummyLeaf" { kind = "dummy-leaf", text = "hello" } {}) (fun leaf =>
+  store.run_builder "consumer" "DummyConsumer" { kind = "dummy-output" } {
+    base = leaf,
+    others = [],
+  })
+"#,
+        );
+        let missing_error =
+            eval_source_with_registry(&missing_program, workspace.path(), &DummyRegistry).unwrap_err();
+        assert!(missing_error.to_string().contains("missing input slot 'maybe'"));
+
+        let extra_workspace = tempdir().unwrap();
+        let extra_program = store_program(
+            r#"
+store.bind (store.run_builder "leaf" "DummyLeaf" { kind = "dummy-leaf", text = "hello" } {}) (fun leaf =>
+  store.run_builder "consumer" "DummyConsumer" { kind = "dummy-output" } {
+    base = leaf,
+    maybe = null,
+    others = [],
+    unexpected = leaf,
+  })
+"#,
+        );
+        let extra_error =
+            eval_source_with_registry(&extra_program, extra_workspace.path(), &DummyRegistry).unwrap_err();
+        assert!(extra_error.to_string().contains("unexpected input slots: unexpected"));
+    }
+}

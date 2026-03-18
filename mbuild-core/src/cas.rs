@@ -1,6 +1,7 @@
 use crate::builder::{Build, ProducerInfo, PublishedBuild, StagedBuildResult};
 use crate::fsutil;
 use fsobj_hash::{ObjectHash, hash_path};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::env;
@@ -56,6 +57,25 @@ impl fmt::Debug for BuildKey {
         f.debug_tuple("BuildKey")
             .field(&self.to_prefixed_hex())
             .finish()
+    }
+}
+
+impl Serialize for BuildKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for BuildKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::builders;
 use mbuild_core::{
-    BuildContext, BuildRequest, Builder, BuilderError, BuildKey, CasError, InputArity,
+    Build, BuildContext, BuildRequest, Builder, BuilderError, BuildKey, CasError, InputArity,
     PublishedBuild, ResolvedInputValue, ResolvedInputs, ResolvedObject, StoreLayout,
     compute_build_key, load_build_record, materialize_build, object_path, publish_refs,
 };
@@ -94,27 +94,8 @@ fn interpret_build(
     build: &Value,
 ) -> Result<PublishedBuild, RuntimeError> {
     let (builder, payload) = resolve_builder_and_payload(build)?;
-    let (config, inputs, input_hashes) = resolve_inputs(workspace_root, layout, builder, payload)?;
-    let build_key =
-        compute_build_key(builder.spec().tag, &config, &input_hashes).map_err(map_store_error)?;
-
-    if let Some(record) = load_build_record(layout, build_key).map_err(map_store_error)? {
-        let object_path = object_path(layout, record.object_hash);
-        if !object_path.exists() {
-            return Err(RuntimeError::Store(format!(
-                "build '{}' points to missing object '{}'",
-                build_key,
-                object_path.display()
-            )));
-        }
-        return Ok(PublishedBuild { record, object_path });
-    }
-
-    let mut context = build_context(workspace_root, layout, builder.spec().tag, build_key);
-    let staged = builder
-        .build_erased(config, inputs, &mut context)
-        .map_err(map_builder_error)?;
-    materialize_build(layout, build_key, staged).map_err(map_store_error)
+    let (config, inputs) = resolve_inputs(workspace_root, layout, builder, payload)?;
+    execute_builder_node(workspace_root, layout, builder, config, inputs)
 }
 
 fn resolve_builder_and_payload<'a>(
@@ -148,10 +129,9 @@ fn resolve_inputs(
     layout: &StoreLayout,
     builder: &'static dyn Builder,
     payload: &Map<String, Value>,
-) -> Result<(Value, ResolvedInputs, Vec<BuildKey>), RuntimeError> {
+) -> Result<(Value, ResolvedInputs), RuntimeError> {
     let mut config = payload.clone();
     let mut resolved = ResolvedInputs::empty();
-    let mut ordered_keys = Vec::new();
 
     for slot in builder.spec().inputs {
         match slot.arity {
@@ -165,7 +145,6 @@ fn resolve_inputs(
                 })?;
                 let published = interpret_build(workspace_root, layout, &term)?;
                 validate_allowed_kind(builder, slot.name, slot.allowed_kinds, &published.record.kind)?;
-                ordered_keys.push(published.record.build_key);
                 resolved.insert(slot.name, ResolvedInputValue::One(to_resolved_object(published)));
             }
             InputArity::Optional => {
@@ -177,7 +156,6 @@ fn resolve_inputs(
                         slot.allowed_kinds,
                         &published.record.kind,
                     )?;
-                    ordered_keys.push(published.record.build_key);
                     resolved.insert(
                         slot.name,
                         ResolvedInputValue::Optional(Some(to_resolved_object(published))),
@@ -210,7 +188,6 @@ fn resolve_inputs(
                         slot.allowed_kinds,
                         &published.record.kind,
                     )?;
-                    ordered_keys.push(published.record.build_key);
                     resolved_many.push(to_resolved_object(published));
                 }
                 resolved.insert(slot.name, ResolvedInputValue::Many(resolved_many));
@@ -218,10 +195,90 @@ fn resolve_inputs(
         }
     }
 
-    Ok((Value::Object(config), resolved, ordered_keys))
+    Ok((Value::Object(config), resolved))
 }
 
-fn validate_allowed_kind(
+pub(crate) fn execute_builder_node(
+    workspace_root: &Path,
+    layout: &StoreLayout,
+    builder: &'static dyn Builder,
+    config: Value,
+    inputs: ResolvedInputs,
+) -> Result<PublishedBuild, RuntimeError> {
+    let input_build_keys = collect_input_build_keys(builder, &inputs)?;
+    let build_key =
+        compute_build_key(builder.spec().tag, &config, &input_build_keys).map_err(map_store_error)?;
+
+    if let Some(record) = load_build_record(layout, build_key).map_err(map_store_error)? {
+        let object_path = object_path(layout, record.object_hash);
+        if !object_path.exists() {
+            return Err(RuntimeError::Store(format!(
+                "build '{}' points to missing object '{}'",
+                build_key,
+                object_path.display()
+            )));
+        }
+        return Ok(PublishedBuild { record, object_path });
+    }
+
+    let mut context = build_context(workspace_root, layout, builder.spec().tag, build_key);
+    let staged = builder
+        .build_erased(config, inputs, &mut context)
+        .map_err(map_builder_error)?;
+    materialize_build(layout, build_key, staged).map_err(map_store_error)
+}
+
+pub(crate) fn build_to_published(
+    layout: &StoreLayout,
+    build: Build,
+) -> Result<PublishedBuild, RuntimeError> {
+    let object_path = object_path(layout, build.object_hash);
+    if !object_path.exists() {
+        return Err(RuntimeError::Store(format!(
+            "build '{}' points to missing object '{}'",
+            build.build_key,
+            object_path.display()
+        )));
+    }
+
+    Ok(PublishedBuild {
+        record: build,
+        object_path,
+    })
+}
+
+pub(crate) fn collect_input_build_keys(
+    builder: &dyn Builder,
+    inputs: &ResolvedInputs,
+) -> Result<Vec<BuildKey>, RuntimeError> {
+    let mut ordered = Vec::new();
+
+    for slot in builder.spec().inputs {
+        match slot.arity {
+            InputArity::One => {
+                ordered.push(inputs.one(slot.name).map_err(map_builder_error)?.build_key)
+            }
+            InputArity::Optional => {
+                if let Some(object) = inputs.optional(slot.name).map_err(map_builder_error)? {
+                    ordered.push(object.build_key);
+                }
+            }
+            InputArity::Many => {
+                ordered.extend(
+                    inputs
+                        .many(slot.name)
+                        .map_err(map_builder_error)?
+                        .iter()
+                        .map(|object| object.build_key),
+                );
+            }
+        }
+    }
+
+    Ok(ordered)
+}
+
+pub(crate) fn validate_allowed_kind(
     builder: &dyn Builder,
     slot_name: &str,
     allowed_kinds: &[&str],
@@ -239,7 +296,7 @@ fn validate_allowed_kind(
     )))
 }
 
-fn to_resolved_object(published: PublishedBuild) -> ResolvedObject {
+pub(crate) fn to_resolved_object(published: PublishedBuild) -> ResolvedObject {
     ResolvedObject {
         object_hash: published.record.object_hash,
         build_key: published.record.build_key,
@@ -249,7 +306,7 @@ fn to_resolved_object(published: PublishedBuild) -> ResolvedObject {
     }
 }
 
-fn build_context(
+pub(crate) fn build_context(
     workspace_root: &Path,
     layout: &StoreLayout,
     builder_tag: &str,
@@ -266,11 +323,11 @@ fn build_context(
     }
 }
 
-fn map_builder_error(error: BuilderError) -> RuntimeError {
+pub(crate) fn map_builder_error(error: BuilderError) -> RuntimeError {
     RuntimeError::Build(error.to_string())
 }
 
-fn map_store_error(error: CasError) -> RuntimeError {
+pub(crate) fn map_store_error(error: CasError) -> RuntimeError {
     RuntimeError::Store(error.to_string())
 }
 
