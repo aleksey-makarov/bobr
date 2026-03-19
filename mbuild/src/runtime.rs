@@ -3,6 +3,7 @@ use mbuild_core::{
     ResolvedInputs, ResolvedObject, StoreLayout, compute_build_key, load_build_record,
     materialize_build, object_path,
 };
+use nickel_lang_core::{error::Error as NickelError, files::Files as NickelFiles};
 use serde_json::Value;
 use std::fmt;
 use std::path::Path;
@@ -12,6 +13,10 @@ pub enum RuntimeError {
     InvalidRequest(String),
     UnknownBuilder(String),
     RecipeLoad(String),
+    RecipeDiagnostic {
+        files: NickelFiles,
+        error: NickelError,
+    },
     Build(String),
     Store(String),
 }
@@ -22,6 +27,7 @@ impl RuntimeError {
             Self::InvalidRequest(_) => "invalid-request",
             Self::UnknownBuilder(_) => "unknown-builder",
             Self::RecipeLoad(_) => "recipe-load",
+            Self::RecipeDiagnostic { .. } => "recipe-diagnostic",
             Self::Build(_) => "build",
             Self::Store(_) => "store",
         }
@@ -34,6 +40,7 @@ impl RuntimeError {
             | Self::RecipeLoad(message)
             | Self::Build(message)
             | Self::Store(message) => message,
+            Self::RecipeDiagnostic { .. } => "Nickel recipe error",
         }
     }
 }

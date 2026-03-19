@@ -200,6 +200,26 @@ fn cli_prints_unit_for_return_null() {
 }
 
 #[test]
+fn cli_reports_recipe_parse_errors_with_nickel_diagnostics() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("bad-syntax.ncl");
+    write_recipe(&recipe_path, "let = 1\n");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{:?}", output);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("error: unexpected token"), "{stderr}");
+    assert!(stderr.contains("bad-syntax.ncl:1:5"), "{stderr}");
+    assert!(!stderr.contains("ParseErrors("), "{stderr}");
+    assert!(!stderr.contains("error[invalid-input]:"), "{stderr}");
+}
+
+#[test]
 fn cli_executes_container_image_recipe_with_fake_podman() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("container-image.ncl");

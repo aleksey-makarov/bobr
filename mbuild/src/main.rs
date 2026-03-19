@@ -1,4 +1,5 @@
 use clap::Parser;
+use nickel_lang_core::error::report::{ColorOpt, ErrorFormat, report};
 use std::env;
 use std::fmt;
 use std::path::PathBuf;
@@ -10,6 +11,10 @@ type MResult<T> = Result<T, MbuildError>;
 
 #[derive(Debug)]
 enum MbuildError {
+    NickelRecipe {
+        files: nickel_lang_core::files::Files,
+        error: nickel_lang_core::error::Error,
+    },
     InvalidInput(String),
     BuildFailed(String),
 }
@@ -17,6 +22,7 @@ enum MbuildError {
 impl MbuildError {
     fn class(&self) -> &'static str {
         match self {
+            Self::NickelRecipe { .. } => "recipe-diagnostic",
             Self::InvalidInput(_) => "invalid-input",
             Self::BuildFailed(_) => "build-failed",
         }
@@ -24,6 +30,7 @@ impl MbuildError {
 
     fn message(&self) -> &str {
         match self {
+            Self::NickelRecipe { .. } => "Nickel recipe error",
             Self::InvalidInput(message) | Self::BuildFailed(message) => message,
         }
     }
@@ -47,7 +54,12 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error[{}]: {}", error.class(), error);
+            match error {
+                MbuildError::NickelRecipe { mut files, error } => {
+                    report(&mut files, error, ErrorFormat::Text, ColorOpt::Auto);
+                }
+                other => eprintln!("error[{}]: {}", other.class(), other),
+            }
             ExitCode::from(1)
         }
     }
@@ -75,6 +87,9 @@ fn run(cli: Cli) -> MResult<()> {
 
 fn map_runtime_error(error: mbuild::RuntimeError) -> MbuildError {
     match error {
+        mbuild::RuntimeError::RecipeDiagnostic { files, error } => {
+            MbuildError::NickelRecipe { files, error }
+        }
         mbuild::RuntimeError::InvalidRequest(_)
         | mbuild::RuntimeError::UnknownBuilder(_)
         | mbuild::RuntimeError::RecipeLoad(_) => MbuildError::InvalidInput(error.to_string()),
