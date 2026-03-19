@@ -11,7 +11,13 @@ static IMAGE_BUILDER: ImageBuilder = ImageBuilder;
 static TEXT_BUILDER: TextBuilder = TextBuilder;
 
 pub fn registered_builders() -> [&'static dyn Builder; 5] {
-    [&TEXT_BUILDER, &FETCH_BUILDER, &CONTAINER_IMAGE_BUILDER, &BINARY_BUILDER, &IMAGE_BUILDER]
+    [
+        &TEXT_BUILDER,
+        &FETCH_BUILDER,
+        &CONTAINER_IMAGE_BUILDER,
+        &BINARY_BUILDER,
+        &IMAGE_BUILDER,
+    ]
 }
 
 pub fn get_builder(tag: &str) -> Option<&'static dyn Builder> {

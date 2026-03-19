@@ -353,7 +353,12 @@ mod tests {
             inputs: ResolvedInputs,
             cx: &mut BuildContext,
         ) -> Result<StagedBuildResult, BuilderError> {
-            assert_eq!(config, DummyConfig { kind: "demo".into() });
+            assert_eq!(
+                config,
+                DummyConfig {
+                    kind: "demo".into()
+                }
+            );
             assert!(inputs.is_empty());
             assert_eq!(cx.workspace_root, PathBuf::from("/tmp/ws"));
             Ok(StagedBuildResult {

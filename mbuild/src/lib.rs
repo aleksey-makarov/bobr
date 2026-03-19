@@ -1,5 +1,5 @@
 pub mod builders;
-pub mod store_interpreter;
 mod runtime;
+pub mod store_interpreter;
 
 pub use runtime::RuntimeError;

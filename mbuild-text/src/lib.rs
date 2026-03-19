@@ -124,7 +124,9 @@ impl TypedBuilder for TextBuilder {
 
 fn validate_config(config: &TextConfig) -> TResult<()> {
     if config.kind.is_empty() {
-        return Err(TextError::InvalidConfig("kind must not be empty".to_string()));
+        return Err(TextError::InvalidConfig(
+            "kind must not be empty".to_string(),
+        ));
     }
     Ok(())
 }
@@ -192,7 +194,10 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let mode = fs::metadata(&result.staged_path).unwrap().permissions().mode();
+            let mode = fs::metadata(&result.staged_path)
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o111, 0o111);
         }
     }
@@ -216,7 +221,10 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let mode = fs::metadata(&result.staged_path).unwrap().permissions().mode();
+            let mode = fs::metadata(&result.staged_path)
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o111, 0);
         }
     }
@@ -227,10 +235,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
         let mut inputs = ResolvedInputs::empty();
-        inputs.insert(
-            "script",
-            mbuild_core::ResolvedInputValue::Many(Vec::new()),
-        );
+        inputs.insert("script", mbuild_core::ResolvedInputValue::Many(Vec::new()));
 
         let error = builder
             .build_typed(

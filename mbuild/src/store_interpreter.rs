@@ -3,20 +3,25 @@ use crate::runtime::{
     RuntimeError, build_to_published, execute_builder_node, map_store_error, to_resolved_object,
     validate_allowed_kind,
 };
-use mbuild_core::{Build, Builder, PublishedBuild, ResolvedInputValue, ResolvedInputs, StoreLayout, load_build_record, publish_refs};
+use mbuild_core::{
+    Build, Builder, PublishedBuild, ResolvedInputValue, ResolvedInputs, StoreLayout,
+    load_build_record, publish_refs,
+};
 use nickel_lang_core::{
+    cache::{CacheHub, ImportResolver, SourcePath},
     error::NullReporter,
-    eval::{Closure, cache::CacheImpl, value::NickelValue},
+    eval::{
+        Closure, Environment, VirtualMachine, VmContext, cache::CacheImpl, env_add,
+        value::NickelValue,
+    },
+    files::FileId,
     identifier::LocIdent,
     mk_app,
-    program::Program,
     term::{RecordOpKind, ToSci, UnaryOp, make as mk_term},
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
-use std::fs;
-use std::io::Cursor;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -39,11 +44,122 @@ impl BuilderRegistry for DefaultBuilderRegistry {
 
 static DEFAULT_REGISTRY: DefaultBuilderRegistry = DefaultBuilderRegistry;
 const STORE_LIB: &str = include_str!("../ncl/store.ncl");
+const STORE_BINDING: &str = "store";
 
 #[derive(Debug)]
 pub enum StoreOutcome {
     Build(PublishedBuild),
     Unit,
+}
+
+struct NickelRuntime {
+    vm_ctxt: VmContext<CacheHub, CacheImpl>,
+    initial_env: Environment,
+}
+
+impl NickelRuntime {
+    fn from_recipe_file(recipe_path: &Path) -> Result<(Self, NickelValue), RuntimeError> {
+        let mut cache = CacheHub::new();
+        let main_id = cache
+            .sources
+            .add_file(recipe_path, nickel_lang_core::cache::InputFormat::Nickel)
+            .map_err(|error| {
+                RuntimeError::RecipeLoad(format!(
+                    "failed to load Nickel recipe '{}': {error}",
+                    recipe_path.display()
+                ))
+            })?;
+
+        Self::build(cache, main_id).map_err(|error| {
+            RuntimeError::RecipeLoad(format!(
+                "failed to evaluate Nickel recipe '{}': {error}",
+                recipe_path.display()
+            ))
+        })
+    }
+
+    #[cfg(test)]
+    fn from_source(name: &str, source: &str) -> Result<(Self, NickelValue), RuntimeError> {
+        let mut cache = CacheHub::new();
+        let main_id = cache
+            .sources
+            .add_string(SourcePath::Generated(name.to_string()), source.to_string());
+        Self::build(cache, main_id).map_err(|error| {
+            RuntimeError::RecipeLoad(format!(
+                "failed to load inline Nickel test program: {error}"
+            ))
+        })
+    }
+
+    fn build(mut cache: CacheHub, main_id: FileId) -> Result<(Self, NickelValue), String> {
+        let store_id = cache.sources.add_string(
+            SourcePath::Generated("mbuild-store".to_string()),
+            STORE_LIB.to_string(),
+        );
+        let mut vm_ctxt = VmContext::new(cache, std::io::sink(), NullReporter {});
+
+        Self::prepare_store_binding(&mut vm_ctxt, store_id)?;
+        let prepared_main = vm_ctxt
+            .prepare_eval(main_id)
+            .map_err(|error| format!("{error:?}"))?;
+
+        let mut initial_env = vm_ctxt.import_resolver.mk_eval_env(&mut vm_ctxt.cache);
+        let store_term = vm_ctxt
+            .import_resolver
+            .get(store_id)
+            .ok_or_else(|| "embedded STORE API is missing from Nickel import resolver".to_string())?
+            .clone();
+        env_add(
+            &mut vm_ctxt.cache,
+            &mut initial_env,
+            LocIdent::from(STORE_BINDING),
+            store_term,
+            Environment::new(),
+        );
+
+        Ok((
+            Self {
+                vm_ctxt,
+                initial_env,
+            },
+            prepared_main,
+        ))
+    }
+
+    fn prepare_store_binding(
+        vm_ctxt: &mut VmContext<CacheHub, CacheImpl>,
+        store_id: FileId,
+    ) -> Result<(), String> {
+        vm_ctxt
+            .import_resolver
+            .prepare_stdlib(&mut vm_ctxt.pos_table)
+            .map_err(|error| format!("{error:?}"))?;
+        vm_ctxt
+            .import_resolver
+            .prepare(&mut vm_ctxt.pos_table, store_id)
+            .map_err(|error| format!("{error:?}"))?;
+        vm_ctxt
+            .import_resolver
+            .closurize(&mut vm_ctxt.cache, store_id)
+            .map_err(|error| format!("{error:?}"))?;
+
+        let (mut slice, asts) = vm_ctxt.import_resolver.split_asts();
+        asts.add_type_binding(slice.reborrow(), LocIdent::from(STORE_BINDING), store_id)
+            .map_err(|error| format!("{error:?}"))?;
+        Ok(())
+    }
+
+    fn eval_value(&mut self, value: NickelValue) -> Result<NickelValue, RuntimeError> {
+        self.eval_closure(Closure::from(value))
+    }
+
+    fn eval_closure(&mut self, closure: Closure) -> Result<NickelValue, RuntimeError> {
+        let mut vm = VirtualMachine::new_empty_env(&mut self.vm_ctxt)
+            .with_initial_env(self.initial_env.clone());
+        vm.eval_closure(closure)
+            .map(|closure| closure.value)
+            .map_err(|error| RuntimeError::InvalidRequest(format!("STORE eval error: {error:?}")))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,48 +190,23 @@ fn run_store_recipe_in_workspace_with_registry(
     }
 
     let layout = StoreLayout::discover(&workspace_root.join(".mbuild")).map_err(map_store_error)?;
-    let recipe_source = fs::read_to_string(recipe_path).map_err(|error| {
+    let (mut runtime, action) = NickelRuntime::from_recipe_file(recipe_path)?;
+    let action = runtime.eval_value(action).map_err(|error| {
         RuntimeError::RecipeLoad(format!(
-            "failed to read Nickel recipe '{}': {error}",
+            "failed to evaluate Nickel recipe '{}': {error}",
             recipe_path.display()
         ))
     })?;
-    let wrapped_source = wrap_recipe_with_store_api(&recipe_source);
-    let mut program: Program<CacheImpl> = Program::new_from_source(
-        Cursor::new(wrapped_source),
-        recipe_path,
-        std::io::sink(),
-        NullReporter {},
-    )
-    .map_err(|error| {
-        RuntimeError::RecipeLoad(format!(
-            "failed to load Nickel recipe '{}': {error:?}",
-            recipe_path.display()
-        ))
-    })?;
-
-    let action = program.eval().map_err(|error| {
-        RuntimeError::RecipeLoad(format!(
-            "failed to evaluate Nickel recipe '{}': {error:?}",
-            recipe_path.display()
-        ))
-    })?;
-    let result = interpret_store(&mut program, workspace_root, &layout, registry, action)?;
-    final_store_result_to_outcome(&mut program, &layout, result)
-}
-
-fn wrap_recipe_with_store_api(recipe_source: &str) -> String {
-    format!("let store = ({STORE_LIB}) in\n(\n{recipe_source}\n)\n")
+    let result = interpret_store(&mut runtime, workspace_root, &layout, registry, action)?;
+    final_store_result_to_outcome(&mut runtime, &layout, result)
 }
 
 fn final_store_result_to_outcome(
-    program: &mut Program<CacheImpl>,
+    runtime: &mut NickelRuntime,
     layout: &StoreLayout,
     value: NickelValue,
 ) -> Result<StoreOutcome, RuntimeError> {
-    let value = program
-        .eval_closure(Closure::from(value))
-        .map_err(|error| RuntimeError::InvalidRequest(format!("STORE eval error: {error:?}")))?;
+    let value = runtime.eval_value(value)?;
 
     if value.is_null() {
         return Ok(StoreOutcome::Unit);
@@ -130,15 +221,13 @@ fn final_store_result_to_outcome(
 }
 
 fn interpret_store(
-    program: &mut Program<CacheImpl>,
+    runtime: &mut NickelRuntime,
     workspace_root: &Path,
     layout: &StoreLayout,
     registry: &dyn BuilderRegistry,
     value: NickelValue,
 ) -> Result<NickelValue, RuntimeError> {
-    let value = program
-        .eval_closure(Closure::from(value))
-        .map_err(|error| RuntimeError::InvalidRequest(format!("STORE eval error: {error:?}")))?;
+    let value = runtime.eval_value(value)?;
 
     let action = value.as_enum_variant().ok_or_else(|| {
         RuntimeError::InvalidRequest(format!(
@@ -150,21 +239,20 @@ fn interpret_store(
     match action.tag.label() {
         "Return" => Ok(action.arg.clone().unwrap_or_else(NickelValue::null)),
         "Bind" => {
-            let record = action
-                .arg
-                .clone()
-                .ok_or_else(|| RuntimeError::InvalidRequest("'Bind requires an argument".to_string()))?;
+            let record = action.arg.clone().ok_or_else(|| {
+                RuntimeError::InvalidRequest("'Bind requires an argument".to_string())
+            })?;
             let action_term = record_access_term(record.clone(), "action");
-            let result = interpret_store(program, workspace_root, layout, registry, action_term)?;
+            let result = interpret_store(runtime, workspace_root, layout, registry, action_term)?;
             let cont_term = record_access_term(record, "cont");
             let next = mk_app!(cont_term, result);
-            interpret_store(program, workspace_root, layout, registry, next)
+            interpret_store(runtime, workspace_root, layout, registry, next)
         }
         "RunBuilder" => {
             let record = action.arg.clone().ok_or_else(|| {
                 RuntimeError::InvalidRequest("'RunBuilder requires an argument".to_string())
             })?;
-            let run = parse_run_builder_action(program, record)?;
+            let run = parse_run_builder_action(runtime, record)?;
             let builder = registry.get_builder(&run.tag).ok_or_else(|| {
                 RuntimeError::UnknownBuilder(format!(
                     "unknown builder tag '{}'; supported builders: {}",
@@ -173,7 +261,8 @@ fn interpret_store(
                 ))
             })?;
             let inputs = resolve_action_inputs(layout, builder, run.inputs)?;
-            let published = execute_builder_node(workspace_root, layout, builder, run.config, inputs)?;
+            let published =
+                execute_builder_node(workspace_root, layout, builder, run.config, inputs)?;
             publish_refs(layout, &run.name, &published).map_err(map_store_error)?;
             build_to_nickel_value(&published.record)
         }
@@ -184,10 +273,10 @@ fn interpret_store(
 }
 
 fn parse_run_builder_action(
-    program: &mut Program<CacheImpl>,
+    runtime: &mut NickelRuntime,
     record: NickelValue,
 ) -> Result<RunBuilderAction, RuntimeError> {
-    let inputs = eval_record_field_json(program, record.clone(), "inputs", "RunBuilder.inputs")?;
+    let inputs = eval_record_field_json(runtime, record.clone(), "inputs", "RunBuilder.inputs")?;
     let inputs = inputs.as_object().cloned().ok_or_else(|| {
         RuntimeError::InvalidRequest(
             "failed to decode RunBuilder.inputs: expected a JSON object".to_string(),
@@ -195,9 +284,9 @@ fn parse_run_builder_action(
     })?;
 
     Ok(RunBuilderAction {
-        name: eval_record_field(program, record.clone(), "name", "RunBuilder.name as string")?,
-        tag: eval_record_field(program, record.clone(), "tag", "RunBuilder.tag as string")?,
-        config: eval_record_field_json(program, record, "config", "RunBuilder.config")?,
+        name: eval_record_field(runtime, record.clone(), "name", "RunBuilder.name as string")?,
+        tag: eval_record_field(runtime, record.clone(), "tag", "RunBuilder.tag as string")?,
+        config: eval_record_field_json(runtime, record, "config", "RunBuilder.config")?,
         inputs,
     })
 }
@@ -307,7 +396,9 @@ fn build_to_nickel_value(build: &Build) -> Result<NickelValue, RuntimeError> {
     NickelValue::deserialize(serde_json::to_value(build).map_err(|error| {
         RuntimeError::InvalidRequest(format!("failed to serialize Build for Nickel: {error}"))
     })?)
-    .map_err(|error| RuntimeError::InvalidRequest(format!("failed to encode Build for Nickel: {error}")))
+    .map_err(|error| {
+        RuntimeError::InvalidRequest(format!("failed to encode Build for Nickel: {error}"))
+    })
 }
 
 fn record_access_term(record: NickelValue, field: &str) -> NickelValue {
@@ -315,51 +406,47 @@ fn record_access_term(record: NickelValue, field: &str) -> NickelValue {
 }
 
 fn eval_record_field<T: DeserializeOwned>(
-    program: &mut Program<CacheImpl>,
+    runtime: &mut NickelRuntime,
     record: NickelValue,
     field: &str,
     expected: &str,
 ) -> Result<T, RuntimeError> {
     let value = record_access_term(record, field);
-    deserialize_nickel_value(program, value, expected)
+    deserialize_nickel_value(runtime, value, expected)
 }
 
 fn eval_record_field_json(
-    program: &mut Program<CacheImpl>,
+    runtime: &mut NickelRuntime,
     record: NickelValue,
     field: &str,
     expected: &str,
 ) -> Result<Value, RuntimeError> {
     let value = record_access_term(record, field);
-    nickel_value_to_json(program, value, expected)
+    nickel_value_to_json(runtime, value, expected)
 }
 
 fn deserialize_nickel_value<T: DeserializeOwned>(
-    program: &mut Program<CacheImpl>,
+    runtime: &mut NickelRuntime,
     value: NickelValue,
     expected: &str,
 ) -> Result<T, RuntimeError> {
-    let evaled = program
-        .eval_closure(Closure::from(value))
-        .map_err(|error| RuntimeError::InvalidRequest(format!("STORE eval error: {error:?}")))?;
+    let evaled = runtime.eval_value(value)?;
     T::deserialize(evaled).map_err(|error| {
         RuntimeError::InvalidRequest(format!("failed to decode {expected}: {error}"))
     })
 }
 
 fn nickel_value_to_json(
-    program: &mut Program<CacheImpl>,
+    runtime: &mut NickelRuntime,
     value: NickelValue,
     expected: &str,
 ) -> Result<Value, RuntimeError> {
-    let evaled = program
-        .eval_closure(Closure::from(value))
-        .map_err(|error| RuntimeError::InvalidRequest(format!("STORE eval error: {error:?}")))?;
-    nickel_value_to_json_inner(program, evaled, expected)
+    let evaled = runtime.eval_value(value)?;
+    nickel_value_to_json_inner(runtime, evaled, expected)
 }
 
 fn nickel_value_to_json_inner(
-    program: &mut Program<CacheImpl>,
+    runtime: &mut NickelRuntime,
     value: NickelValue,
     expected: &str,
 ) -> Result<Value, RuntimeError> {
@@ -388,7 +475,7 @@ fn nickel_value_to_json_inner(
     if let Some(array) = value.as_array() {
         let mut values = Vec::with_capacity(array.len());
         for element in array.iter() {
-            values.push(nickel_value_to_json(program, element.clone(), expected)?);
+            values.push(nickel_value_to_json(runtime, element.clone(), expected)?);
         }
         return Ok(Value::Array(values));
     }
@@ -404,7 +491,7 @@ fn nickel_value_to_json_inner(
             };
             object.insert(
                 id.into_label(),
-                nickel_value_to_json(program, field_value, expected)?,
+                nickel_value_to_json(runtime, field_value, expected)?,
             );
         }
         return Ok(Value::Object(object));
@@ -425,11 +512,11 @@ fn nickel_value_to_json_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{BuildContext, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo, TypedBuilder};
+    use mbuild_core::{
+        BuildContext, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo, TypedBuilder,
+    };
     use std::fs;
     use tempfile::tempdir;
-
-    const STORE_LIB: &str = include_str!("../ncl/store.ncl");
 
     #[derive(Debug)]
     struct DummyLeafBuilder;
@@ -477,10 +564,7 @@ mod tests {
                     builder: "dummy-leaf".to_string(),
                 },
                 input_build_keys: vec![],
-                attrs: Map::from_iter([(
-                    "echo".to_string(),
-                    Value::String(config.text),
-                )]),
+                attrs: Map::from_iter([("echo".to_string(), Value::String(config.text))]),
                 staged_path: staged,
             })
         }
@@ -540,7 +624,12 @@ mod tests {
             let staged = cx.temp_root.join("dummy-consumer.txt");
             fs::write(
                 &staged,
-                format!("base={} maybe={} others={}", base.kind, maybe.is_some(), others.len()),
+                format!(
+                    "base={} maybe={} others={}",
+                    base.kind,
+                    maybe.is_some(),
+                    others.len()
+                ),
             )
             .map_err(|error| {
                 BuilderError::ExecutionFailed(format!("failed to write dummy consumer: {error}"))
@@ -587,23 +676,20 @@ mod tests {
         workspace_root: &Path,
         registry: &dyn BuilderRegistry,
     ) -> Result<Build, RuntimeError> {
-        let layout = StoreLayout::discover(&workspace_root.join(".mbuild")).map_err(map_store_error)?;
-        let mut program: Program<CacheImpl> = Program::new_from_source(
-            std::io::Cursor::new(source.as_bytes()),
-            "<test>",
-            std::io::sink(),
-            NullReporter {},
-        )
-        .map_err(|error| RuntimeError::RecipeLoad(format!("failed to load inline Nickel test program: {error:?}")))?;
-        let action = program.eval().map_err(|error| {
-            RuntimeError::RecipeLoad(format!("failed to evaluate inline Nickel test program: {error:?}"))
+        let layout =
+            StoreLayout::discover(&workspace_root.join(".mbuild")).map_err(map_store_error)?;
+        let (mut runtime, action) = NickelRuntime::from_source("<test>", source)?;
+        let action = runtime.eval_value(action).map_err(|error| {
+            RuntimeError::RecipeLoad(format!(
+                "failed to evaluate inline Nickel test program: {error}"
+            ))
         })?;
-        let result = interpret_store(&mut program, workspace_root, &layout, registry, action)?;
-        deserialize_nickel_value::<Build>(&mut program, result, "final STORE result as Build")
+        let result = interpret_store(&mut runtime, workspace_root, &layout, registry, action)?;
+        deserialize_nickel_value::<Build>(&mut runtime, result, "final STORE result as Build")
     }
 
     fn store_program(body: &str) -> String {
-        format!("let store = {} in {}", STORE_LIB, body)
+        body.to_string()
     }
 
     #[test]
@@ -620,18 +706,22 @@ store.bind (store.run_builder "first" "DummyLeaf" { kind = "dummy-leaf", text = 
 
         assert_eq!(result.kind, "dummy-leaf");
         assert_eq!(result.attrs["echo"], Value::String("hello".to_string()));
-        assert!(workspace
-            .path()
-            .join(".mbuild")
-            .join("meta-refs")
-            .join("first.json")
-            .exists());
-        assert!(workspace
-            .path()
-            .join(".mbuild")
-            .join("meta-refs")
-            .join("second.json")
-            .exists());
+        assert!(
+            workspace
+                .path()
+                .join(".mbuild")
+                .join("meta-refs")
+                .join("first.json")
+                .exists()
+        );
+        assert!(
+            workspace
+                .path()
+                .join(".mbuild")
+                .join("meta-refs")
+                .join("second.json")
+                .exists()
+        );
     }
 
     #[test]
@@ -639,7 +729,8 @@ store.bind (store.run_builder "first" "DummyLeaf" { kind = "dummy-leaf", text = 
         let workspace = tempdir().unwrap();
         let program = store_program(r#"store.run_builder "missing" "NoSuchBuilder" {} {}"#);
 
-        let error = eval_source_with_registry(&program, workspace.path(), &DummyRegistry).unwrap_err();
+        let error =
+            eval_source_with_registry(&program, workspace.path(), &DummyRegistry).unwrap_err();
 
         assert!(matches!(error, RuntimeError::UnknownBuilder(_)));
     }
@@ -658,7 +749,8 @@ store.bind (store.run_builder "leaf" "DummyLeaf" { kind = "other-kind", text = "
 "#,
         );
 
-        let error = eval_source_with_registry(&program, workspace.path(), &DummyRegistry).unwrap_err();
+        let error =
+            eval_source_with_registry(&program, workspace.path(), &DummyRegistry).unwrap_err();
 
         assert!(matches!(error, RuntimeError::InvalidRequest(_)));
         assert!(error.to_string().contains("rejects kind 'other-kind'"));
@@ -677,8 +769,13 @@ store.bind (store.run_builder "leaf" "DummyLeaf" { kind = "dummy-leaf", text = "
 "#,
         );
         let missing_error =
-            eval_source_with_registry(&missing_program, workspace.path(), &DummyRegistry).unwrap_err();
-        assert!(missing_error.to_string().contains("missing input slot 'maybe'"));
+            eval_source_with_registry(&missing_program, workspace.path(), &DummyRegistry)
+                .unwrap_err();
+        assert!(
+            missing_error
+                .to_string()
+                .contains("missing input slot 'maybe'")
+        );
 
         let extra_workspace = tempdir().unwrap();
         let extra_program = store_program(
@@ -693,7 +790,12 @@ store.bind (store.run_builder "leaf" "DummyLeaf" { kind = "dummy-leaf", text = "
 "#,
         );
         let extra_error =
-            eval_source_with_registry(&extra_program, extra_workspace.path(), &DummyRegistry).unwrap_err();
-        assert!(extra_error.to_string().contains("unexpected input slots: unexpected"));
+            eval_source_with_registry(&extra_program, extra_workspace.path(), &DummyRegistry)
+                .unwrap_err();
+        assert!(
+            extra_error
+                .to_string()
+                .contains("unexpected input slots: unexpected")
+        );
     }
 }

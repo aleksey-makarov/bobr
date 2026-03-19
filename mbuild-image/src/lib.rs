@@ -1,6 +1,6 @@
 use mbuild_core::{
-    BuildContext, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo,
-    ResolvedInputs, ResolvedObject, StagedBuildResult, TypedBuilder, fsutil,
+    BuildContext, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo, ResolvedInputs,
+    ResolvedObject, StagedBuildResult, TypedBuilder, fsutil,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -15,7 +15,8 @@ const DESCRIPTOR_SCHEMA: &str = "mbuild-container-image-object-v1";
 const DESCRIPTOR_STORAGE: &str = "external-podman";
 const GENERATED_IMAGE_PREFIX: &str = "localhost/mbuild-image";
 #[cfg(test)]
-const GENERATED_DIGEST: &str = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const GENERATED_DIGEST: &str =
+    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
 #[derive(Debug)]
 enum ContainerImageError {
@@ -218,9 +219,10 @@ impl TypedBuilder for ImageBuilder {
             _ => unreachable!(),
         };
 
-        let staged_path = write_descriptor(&cx.temp_root, &imported.image_ref, &imported.image_digest)
-            .map_err(ImageError::FsFailed)
-            .map_err(map_image_error)?;
+        let staged_path =
+            write_descriptor(&cx.temp_root, &imported.image_ref, &imported.image_digest)
+                .map_err(ImageError::FsFailed)
+                .map_err(map_image_error)?;
 
         let mut attrs = Map::new();
         attrs.insert("mode".to_string(), Value::String(mode.to_string()));
@@ -315,13 +317,15 @@ fn validate_image_config(
     Ok(())
 }
 
-fn effective_image_mode(config: &ImageConfig, base: Option<&ResolvedObject>) -> IResult<&'static str> {
+fn effective_image_mode(
+    config: &ImageConfig,
+    base: Option<&ResolvedObject>,
+) -> IResult<&'static str> {
     match (config.mode.as_deref(), base.is_some()) {
         (Some("bootstrap"), false) => Ok("bootstrap"),
         (Some("layered"), true) => Ok("layered"),
         (Some("bootstrap"), true) => Err(ImageError::InvalidConfig(
-            "image mode 'bootstrap' is incompatible with a base container-image input"
-                .to_string(),
+            "image mode 'bootstrap' is incompatible with a base container-image input".to_string(),
         )),
         (Some("layered"), false) => Err(ImageError::InvalidConfig(
             "image mode 'layered' requires a base container-image input".to_string(),
@@ -345,7 +349,8 @@ fn inspect_local_container_image_with_expected_digest(
     image: &str,
     digest: &str,
 ) -> CIResult<LocalImageInspect> {
-    let inspected = inspect_local_image(image).map_err(|message| ContainerImageError::BuildFailed(message))?;
+    let inspected =
+        inspect_local_image(image).map_err(|message| ContainerImageError::BuildFailed(message))?;
     if !inspected.image_ref.ends_with(&format!("@{digest}")) {
         return Err(ContainerImageError::BuildFailed(format!(
             "local image '{}' does not match required digest '{}'",
@@ -396,17 +401,23 @@ fn inspect_local_image(image: &str) -> Result<LocalImageInspect, String> {
         ));
     }
 
-    let records: Vec<PodmanImageInspectRecord> = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("failed to parse podman inspect output for image '{}': {error}", image))?;
+    let records: Vec<PodmanImageInspectRecord> =
+        serde_json::from_slice(&output.stdout).map_err(|error| {
+            format!(
+                "failed to parse podman inspect output for image '{}': {error}",
+                image
+            )
+        })?;
 
     let record = records
         .first()
         .ok_or_else(|| format!("podman inspect returned no records for image '{}'", image))?;
-    let image_ref = record
-        .repo_digests
-        .first()
-        .cloned()
-        .ok_or_else(|| format!("podman inspect returned no repo digests for image '{}'", image))?;
+    let image_ref = record.repo_digests.first().cloned().ok_or_else(|| {
+        format!(
+            "podman inspect returned no repo digests for image '{}'",
+            image
+        )
+    })?;
 
     Ok(LocalImageInspect {
         image_ref,
@@ -450,7 +461,8 @@ fn run_layered_mode(
         inspect_generated_image(&image_ref)
     })();
     let _ = podman_rm(&container_id);
-    let _ = fsutil::recreate_empty_dir_force(&temp_root.join("layered-work")).map_err(map_fsutil_error_to_image);
+    let _ = fsutil::recreate_empty_dir_force(&temp_root.join("layered-work"))
+        .map_err(map_fsutil_error_to_image);
     result
 }
 
@@ -479,7 +491,9 @@ fn podman_import(tar_path: &Path, image_ref: &str) -> IResult<()> {
         .arg(tar_path)
         .arg(image_ref)
         .output()
-        .map_err(|error| ImageError::BuildFailed(format!("failed to execute podman import: {error}")))?;
+        .map_err(|error| {
+            ImageError::BuildFailed(format!("failed to execute podman import: {error}"))
+        })?;
     if !output.status.success() {
         return Err(ImageError::BuildFailed(format!(
             "podman import failed: {}",
@@ -494,7 +508,9 @@ fn podman_create(base_ref: &str) -> IResult<String> {
         .arg("create")
         .arg(base_ref)
         .output()
-        .map_err(|error| ImageError::BuildFailed(format!("failed to execute podman create: {error}")))?;
+        .map_err(|error| {
+            ImageError::BuildFailed(format!("failed to execute podman create: {error}"))
+        })?;
     if !output.status.success() {
         return Err(ImageError::BuildFailed(format!(
             "podman create failed: {}",
@@ -518,7 +534,9 @@ fn podman_cp(binary_dir: &Path, container_id: &str) -> IResult<()> {
         .arg(source)
         .arg(destination)
         .output()
-        .map_err(|error| ImageError::BuildFailed(format!("failed to execute podman cp: {error}")))?;
+        .map_err(|error| {
+            ImageError::BuildFailed(format!("failed to execute podman cp: {error}"))
+        })?;
     if !output.status.success() {
         return Err(ImageError::BuildFailed(format!(
             "podman cp failed: {}",
@@ -534,7 +552,9 @@ fn podman_commit(container_id: &str, image_ref: &str) -> IResult<()> {
         .arg(container_id)
         .arg(image_ref)
         .output()
-        .map_err(|error| ImageError::BuildFailed(format!("failed to execute podman commit: {error}")))?;
+        .map_err(|error| {
+            ImageError::BuildFailed(format!("failed to execute podman commit: {error}"))
+        })?;
     if !output.status.success() {
         return Err(ImageError::BuildFailed(format!(
             "podman commit failed: {}",
@@ -549,7 +569,9 @@ fn podman_rm(container_id: &str) -> IResult<()> {
         .arg("rm")
         .arg(container_id)
         .output()
-        .map_err(|error| ImageError::BuildFailed(format!("failed to execute podman rm: {error}")))?;
+        .map_err(|error| {
+            ImageError::BuildFailed(format!("failed to execute podman rm: {error}"))
+        })?;
     if !output.status.success() {
         return Err(ImageError::BuildFailed(format!(
             "podman rm failed: {}",
@@ -581,12 +603,18 @@ fn merge_directory(source: &Path, destination: &Path) -> IResult<()> {
 
 fn copy_path_recursive(source: &Path, destination: &Path) -> IResult<()> {
     let metadata = fs::symlink_metadata(source).map_err(|error| {
-        ImageError::FsFailed(format!("failed to inspect path '{}': {error}", source.display()))
+        ImageError::FsFailed(format!(
+            "failed to inspect path '{}': {error}",
+            source.display()
+        ))
     })?;
 
     if metadata.file_type().is_symlink() {
         let target = fs::read_link(source).map_err(|error| {
-            ImageError::FsFailed(format!("failed to read symlink '{}': {error}", source.display()))
+            ImageError::FsFailed(format!(
+                "failed to read symlink '{}': {error}",
+                source.display()
+            ))
         })?;
         replace_path(destination)?;
         create_symlink(&target, destination)?;
@@ -595,13 +623,22 @@ fn copy_path_recursive(source: &Path, destination: &Path) -> IResult<()> {
 
     if metadata.is_dir() {
         fs::create_dir_all(destination).map_err(|error| {
-            ImageError::FsFailed(format!("failed to create directory '{}': {error}", destination.display()))
+            ImageError::FsFailed(format!(
+                "failed to create directory '{}': {error}",
+                destination.display()
+            ))
         })?;
         for entry in fs::read_dir(source).map_err(|error| {
-            ImageError::FsFailed(format!("failed to read directory '{}': {error}", source.display()))
+            ImageError::FsFailed(format!(
+                "failed to read directory '{}': {error}",
+                source.display()
+            ))
         })? {
             let entry = entry.map_err(|error| {
-                ImageError::FsFailed(format!("failed to read directory entry in '{}': {error}", source.display()))
+                ImageError::FsFailed(format!(
+                    "failed to read directory entry in '{}': {error}",
+                    source.display()
+                ))
             })?;
             copy_path_recursive(&entry.path(), &destination.join(entry.file_name()))?;
         }
@@ -610,7 +647,10 @@ fn copy_path_recursive(source: &Path, destination: &Path) -> IResult<()> {
 
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|error| {
-            ImageError::FsFailed(format!("failed to create directory '{}': {error}", parent.display()))
+            ImageError::FsFailed(format!(
+                "failed to create directory '{}': {error}",
+                parent.display()
+            ))
         })?;
     }
     replace_path(destination)?;
@@ -629,15 +669,24 @@ fn replace_path(path: &Path) -> IResult<()> {
         return Ok(());
     }
     let metadata = fs::symlink_metadata(path).map_err(|error| {
-        ImageError::FsFailed(format!("failed to inspect existing path '{}': {error}", path.display()))
+        ImageError::FsFailed(format!(
+            "failed to inspect existing path '{}': {error}",
+            path.display()
+        ))
     })?;
     if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
         fs::remove_dir_all(path).map_err(|error| {
-            ImageError::FsFailed(format!("failed to remove directory '{}': {error}", path.display()))
+            ImageError::FsFailed(format!(
+                "failed to remove directory '{}': {error}",
+                path.display()
+            ))
         })?;
     } else {
         fs::remove_file(path).map_err(|error| {
-            ImageError::FsFailed(format!("failed to remove file '{}': {error}", path.display()))
+            ImageError::FsFailed(format!(
+                "failed to remove file '{}': {error}",
+                path.display()
+            ))
         })?;
     }
     Ok(())
@@ -692,9 +741,8 @@ fn write_descriptor(temp_root: &Path, image_ref: &str, digest: &str) -> Result<P
         "image_ref": image_ref,
         "image_digest": digest,
     });
-    let text = serde_json::to_string_pretty(&payload).map_err(|error| {
-        format!("failed to serialize container-image descriptor: {error}")
-    })?;
+    let text = serde_json::to_string_pretty(&payload)
+        .map_err(|error| format!("failed to serialize container-image descriptor: {error}"))?;
     fsutil::write_atomic(&staged_path, &text).map_err(|error| error.to_string())?;
     Ok(staged_path)
 }
@@ -830,7 +878,10 @@ mod tests {
         let mut attrs = Map::new();
         attrs.insert(
             "image_ref".to_string(),
-            Value::String(format!("docker.io/library/buildpack-deps@{}", sample_digest())),
+            Value::String(format!(
+                "docker.io/library/buildpack-deps@{}",
+                sample_digest()
+            )),
         );
         ResolvedObject {
             object_hash: "sha256:3333333333333333333333333333333333333333333333333333333333333333"
@@ -874,8 +925,14 @@ mod tests {
             );
             let descriptor: Value =
                 serde_json::from_slice(&fs::read(&result.staged_path).unwrap()).unwrap();
-            assert_eq!(descriptor["schema"], Value::String(DESCRIPTOR_SCHEMA.to_string()));
-            assert_eq!(descriptor["storage"], Value::String(DESCRIPTOR_STORAGE.to_string()));
+            assert_eq!(
+                descriptor["schema"],
+                Value::String(DESCRIPTOR_SCHEMA.to_string())
+            );
+            assert_eq!(
+                descriptor["storage"],
+                Value::String(DESCRIPTOR_STORAGE.to_string())
+            );
             assert_eq!(
                 descriptor["image_digest"],
                 Value::String(sample_digest().to_string())
@@ -908,7 +965,10 @@ mod tests {
             );
             let descriptor: Value =
                 serde_json::from_slice(&fs::read(&result.staged_path).unwrap()).unwrap();
-            assert_eq!(descriptor["schema"], Value::String(DESCRIPTOR_SCHEMA.to_string()));
+            assert_eq!(
+                descriptor["schema"],
+                Value::String(DESCRIPTOR_SCHEMA.to_string())
+            );
             assert_eq!(
                 descriptor["image_digest"],
                 Value::String(GENERATED_DIGEST.to_string())
@@ -944,7 +1004,10 @@ mod tests {
             assert_eq!(result.attrs["mode"], Value::String("layered".to_string()));
             assert_eq!(
                 result.attrs["base_image_ref"],
-                Value::String(format!("docker.io/library/buildpack-deps@{}", sample_digest()))
+                Value::String(format!(
+                    "docker.io/library/buildpack-deps@{}",
+                    sample_digest()
+                ))
             );
         });
     }
@@ -1002,7 +1065,11 @@ mod tests {
         );
 
         let error = ImageBuilder
-            .build_erased(json!({ "mode": "bootstrap", "extra": true }), inputs, &mut cx)
+            .build_erased(
+                json!({ "mode": "bootstrap", "extra": true }),
+                inputs,
+                &mut cx,
+            )
             .unwrap_err();
 
         assert!(matches!(error, BuilderError::InvalidRecipe(_)));

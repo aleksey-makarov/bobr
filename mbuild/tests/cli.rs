@@ -40,7 +40,13 @@ fn container_image_recipe(name: &str, image: &str, digest: &str) -> String {
     )
 }
 
-fn binary_recipe(name: &str, image: &str, digest: &str, source_url: &str, source_hash: &str) -> String {
+fn binary_recipe(
+    name: &str,
+    image: &str,
+    digest: &str,
+    source_url: &str,
+    source_hash: &str,
+) -> String {
     format!(
         "store.bind (store.fetch \"source\" {{\n  url = {},\n  hash = {},\n  unpack = true,\n}}) (fun source =>\nstore.bind (store.text \"script\" {{\n  kind = \"build-script\",\n  source = \"#!/bin/sh\\nexit 0\\n\",\n}}) (fun script =>\nstore.bind (store.container_image \"base-image\" {{\n  image = {},\n  digest = {},\n}}) (fun image =>\nstore.binary {} {{\n  kind = \"binary-output\",\n  optimize = \"size\",\n}} image script [source])))\n",
         nickel_string(source_url),
@@ -160,7 +166,10 @@ fn cli_uses_default_dot_mbuild_recipe_ncl() {
 fn cli_accepts_explicit_recipe_path() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("custom.ncl");
-    write_recipe(&recipe_path, &text_recipe("custom-recipe", "plain-text", "hello custom"));
+    write_recipe(
+        &recipe_path,
+        &text_recipe("custom-recipe", "plain-text", "hello custom"),
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
         .arg(&recipe_path)
@@ -231,7 +240,11 @@ fn cli_executes_container_image_recipe_with_fake_podman() {
 
     let refs_dir = workspace.path().join(".mbuild").join("object-refs");
     let published_path = fs::read_link(refs_dir.join("bootstrap-image")).unwrap();
-    assert!(published_path.to_string_lossy().contains("../objects/sha256:"));
+    assert!(
+        published_path
+            .to_string_lossy()
+            .contains("../objects/sha256:")
+    );
 }
 
 #[test]
@@ -274,7 +287,10 @@ fn cli_rejects_container_image_recipe_when_digest_does_not_match() {
     assert!(!output.status.success(), "{:?}", output);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[build-failed]:"), "{stderr}");
-    assert!(stderr.contains("does not match required digest"), "{stderr}");
+    assert!(
+        stderr.contains("does not match required digest"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -339,7 +355,11 @@ fn cli_executes_binary_recipe_with_fake_podman_and_nested_inputs() {
 
     assert!(output.status.success(), "{:?}", output);
 
-    let object_path = workspace.path().join(".mbuild").join("object-refs").join("zstd-bin");
+    let object_path = workspace
+        .path()
+        .join(".mbuild")
+        .join("object-refs")
+        .join("zstd-bin");
     let resolved = workspace
         .path()
         .join(".mbuild")
@@ -414,9 +434,14 @@ fn cli_executes_image_recipe_with_fake_podman_and_nested_binary() {
 
     assert!(output.status.success(), "{:?}", output);
 
-    let ref_path = workspace.path().join(".mbuild").join("object-refs").join("final-image");
+    let ref_path = workspace
+        .path()
+        .join(".mbuild")
+        .join("object-refs")
+        .join("final-image");
     let descriptor_path = fs::canonicalize(ref_path).unwrap();
-    let descriptor: serde_json::Value = serde_json::from_slice(&fs::read(&descriptor_path).unwrap()).unwrap();
+    let descriptor: serde_json::Value =
+        serde_json::from_slice(&fs::read(&descriptor_path).unwrap()).unwrap();
     assert_eq!(
         descriptor["schema"],
         serde_json::Value::String("mbuild-container-image-object-v1".to_string())
@@ -426,12 +451,14 @@ fn cli_executes_image_recipe_with_fake_podman_and_nested_binary() {
         serde_json::Value::String("external-podman".to_string())
     );
     let image_ref = descriptor["image_ref"].as_str().unwrap();
-    assert!(image_ref.starts_with("localhost/mbuild-image:bootstrap-"), "{image_ref}");
+    assert!(
+        image_ref.starts_with("localhost/mbuild-image:bootstrap-"),
+        "{image_ref}"
+    );
     assert_eq!(
         descriptor["image_digest"],
         serde_json::Value::String(
-            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-                .to_string(),
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string(),
         )
     );
 }
@@ -451,7 +478,10 @@ fn cli_rejects_unknown_builder_recipe() {
     assert!(!output.status.success(), "{:?}", output);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]:"), "{stderr}");
-    assert!(stderr.contains("unknown builder tag 'UnknownBuilder'"), "{stderr}");
+    assert!(
+        stderr.contains("unknown builder tag 'UnknownBuilder'"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -469,7 +499,10 @@ fn cli_rejects_binary_recipe_with_wrong_input_kind() {
     assert!(!output.status.success(), "{:?}", output);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]:"), "{stderr}");
-    assert!(stderr.contains("input slot 'image' rejects kind 'plain-text'"), "{stderr}");
+    assert!(
+        stderr.contains("input slot 'image' rejects kind 'plain-text'"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -487,5 +520,8 @@ fn cli_rejects_non_store_toplevel_value() {
     assert!(!output.status.success(), "{:?}", output);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]:"), "{stderr}");
-    assert!(stderr.contains("expected STORE action enum variant"), "{stderr}");
+    assert!(
+        stderr.contains("expected STORE action enum variant"),
+        "{stderr}"
+    );
 }

@@ -54,8 +54,9 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> MResult<()> {
-    let workspace_root = env::current_dir()
-        .map_err(|error| MbuildError::InvalidInput(format!("failed to get current directory: {error}")))?;
+    let workspace_root = env::current_dir().map_err(|error| {
+        MbuildError::InvalidInput(format!("failed to get current directory: {error}"))
+    })?;
     let recipe_path = cli
         .recipe_file
         .unwrap_or_else(|| PathBuf::from(".mbuild/recipe.ncl"));
@@ -76,9 +77,7 @@ fn map_runtime_error(error: mbuild::RuntimeError) -> MbuildError {
     match error {
         mbuild::RuntimeError::InvalidRequest(_)
         | mbuild::RuntimeError::UnknownBuilder(_)
-        | mbuild::RuntimeError::RecipeLoad(_) => {
-            MbuildError::InvalidInput(error.to_string())
-        }
+        | mbuild::RuntimeError::RecipeLoad(_) => MbuildError::InvalidInput(error.to_string()),
         mbuild::RuntimeError::Build(_) | mbuild::RuntimeError::Store(_) => {
             MbuildError::BuildFailed(error.to_string())
         }

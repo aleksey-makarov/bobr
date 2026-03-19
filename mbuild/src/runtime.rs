@@ -1,5 +1,5 @@
 use mbuild_core::{
-    Build, BuildContext, Builder, BuilderError, BuildKey, CasError, InputArity, PublishedBuild,
+    Build, BuildContext, BuildKey, Builder, BuilderError, CasError, InputArity, PublishedBuild,
     ResolvedInputs, ResolvedObject, StoreLayout, compute_build_key, load_build_record,
     materialize_build, object_path,
 };
@@ -54,8 +54,8 @@ pub(crate) fn execute_builder_node(
     inputs: ResolvedInputs,
 ) -> Result<PublishedBuild, RuntimeError> {
     let input_build_keys = collect_input_build_keys(builder, &inputs)?;
-    let build_key =
-        compute_build_key(builder.spec().tag, &config, &input_build_keys).map_err(map_store_error)?;
+    let build_key = compute_build_key(builder.spec().tag, &config, &input_build_keys)
+        .map_err(map_store_error)?;
 
     if let Some(record) = load_build_record(layout, build_key).map_err(map_store_error)? {
         let object_path = object_path(layout, record.object_hash);
@@ -66,7 +66,10 @@ pub(crate) fn execute_builder_node(
                 object_path.display()
             )));
         }
-        return Ok(PublishedBuild { record, object_path });
+        return Ok(PublishedBuild {
+            record,
+            object_path,
+        });
     }
 
     let mut context = build_context(workspace_root, layout, builder.spec().tag, build_key);

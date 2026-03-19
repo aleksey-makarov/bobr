@@ -62,20 +62,31 @@ fn with_fake_podman<T>(inspect_json: &str, f: impl FnOnce() -> T) -> T {
     result
 }
 
-fn spawn_http_server(body: Vec<u8>, content_type: &'static str) -> Result<(String, thread::JoinHandle<()>), std::io::Error> {
+fn spawn_http_server(
+    body: Vec<u8>,
+    content_type: &'static str,
+) -> Result<(String, thread::JoinHandle<()>), std::io::Error> {
     let listener = (0..10)
         .find_map(|attempt| match TcpListener::bind("127.0.0.1:0") {
             Ok(listener) => Some(Ok(listener)),
             Err(error)
                 if attempt < 9
-                    && matches!(error.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::AddrInUse) =>
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::AddrInUse
+                    ) =>
             {
                 thread::sleep(Duration::from_millis(10));
                 None
             }
             Err(error) => Some(Err(error)),
         })
-        .unwrap_or_else(|| Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "failed to bind test HTTP listener")))?;
+        .unwrap_or_else(|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "failed to bind test HTTP listener",
+            ))
+        })?;
     let addr = listener.local_addr().unwrap();
     let url = format!("http://{}/payload", addr);
     let handle = thread::spawn(move || {
@@ -121,10 +132,8 @@ fn store_recipe_executes_all_real_builders() {
         || {
             let workspace = tempdir().unwrap();
             let source_tar = {
-                let encoder = flate2::write::GzEncoder::new(
-                    Vec::new(),
-                    flate2::Compression::default(),
-                );
+                let encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
                 let mut tar = tar::Builder::new(encoder);
                 let body = b"hello from store loop\n";
                 let mut header = tar::Header::new_gnu();
@@ -146,29 +155,37 @@ fn store_recipe_executes_all_real_builders() {
                 .replace("__SOURCE_HASH__", &source_hash);
             let recipe_path = write_store_recipe(workspace.path(), &recipe_source);
 
-            let published = match run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap() {
-                StoreOutcome::Build(published) => published,
-                StoreOutcome::Unit => panic!("expected final STORE result to be Build"),
-            };
+            let published =
+                match run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap() {
+                    StoreOutcome::Build(published) => published,
+                    StoreOutcome::Unit => panic!("expected final STORE result to be Build"),
+                };
             handle.join().unwrap();
 
             assert_eq!(published.record.kind, "container-image");
             assert_eq!(published.record.producer.builder, "image");
-            assert_eq!(published.record.attrs["mode"], Value::String("bootstrap".to_string()));
+            assert_eq!(
+                published.record.attrs["mode"],
+                Value::String("bootstrap".to_string())
+            );
 
             for name in ["source", "script", "base-image", "binary", "final-image"] {
-                assert!(workspace
-                    .path()
-                    .join(".mbuild")
-                    .join("meta-refs")
-                    .join(format!("{name}.json"))
-                    .exists());
-                assert!(workspace
-                    .path()
-                    .join(".mbuild")
-                    .join("object-refs")
-                    .join(name)
-                    .exists());
+                assert!(
+                    workspace
+                        .path()
+                        .join(".mbuild")
+                        .join("meta-refs")
+                        .join(format!("{name}.json"))
+                        .exists()
+                );
+                assert!(
+                    workspace
+                        .path()
+                        .join(".mbuild")
+                        .join("object-refs")
+                        .join(name)
+                        .exists()
+                );
             }
 
             let builds_dir = workspace.path().join(".mbuild").join("builds");
@@ -176,5 +193,31 @@ fn store_recipe_executes_all_real_builders() {
             assert_eq!(fs::read_dir(&builds_dir).unwrap().count(), 5);
             assert_eq!(fs::read_dir(&objects_dir).unwrap().count(), 5);
         },
+    );
+}
+
+#[test]
+fn store_binding_is_visible_in_imported_modules() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = write_store_recipe(workspace.path(), "import \"./pkg.ncl\"\n");
+    fs::write(
+        workspace.path().join("pkg.ncl"),
+        "store.text \"hello\" {\n  kind = \"plain-text\",\n  source = \"hi from import\\n\",\n}\n",
+    )
+    .unwrap();
+
+    let published = match run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap() {
+        StoreOutcome::Build(published) => published,
+        StoreOutcome::Unit => panic!("expected final STORE result to be Build"),
+    };
+
+    assert_eq!(published.record.kind, "plain-text");
+    assert!(
+        workspace
+            .path()
+            .join(".mbuild")
+            .join("meta-refs")
+            .join("hello.json")
+            .exists()
     );
 }

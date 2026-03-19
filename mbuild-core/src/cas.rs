@@ -251,10 +251,7 @@ pub fn compute_build_key(
         Value::String(builder_tag.to_string()),
     );
     root.insert("payload".to_string(), normalized_payload.clone());
-    root.insert(
-        "input_build_keys".to_string(),
-        Value::Array(input_keys),
-    );
+    root.insert("input_build_keys".to_string(), Value::Array(input_keys));
 
     let canonical = canonical_json_bytes(&Value::Object(root))?;
     Ok(BuildKey(Sha256::digest(&canonical).into()))
@@ -322,9 +319,10 @@ pub fn publish_refs(
     replace_symlink(&object_ref_target, &object_ref_path)?;
 
     let meta_ref_path = layout.meta_refs.join(format!("{output_name}.json"));
-    let meta_ref_target = PathBuf::from("..")
-        .join(BUILDS_DIR)
-        .join(format!("{}.json", published.record.build_key.to_prefixed_hex()));
+    let meta_ref_target = PathBuf::from("..").join(BUILDS_DIR).join(format!(
+        "{}.json",
+        published.record.build_key.to_prefixed_hex()
+    ));
     replace_symlink(&meta_ref_target, &meta_ref_path)?;
     Ok(())
 }
@@ -334,7 +332,9 @@ pub fn object_path(layout: &StoreLayout, object_hash: ObjectHash) -> PathBuf {
 }
 
 pub fn build_path(layout: &StoreLayout, build_key: BuildKey) -> PathBuf {
-    layout.builds.join(format!("{}.json", build_key.to_prefixed_hex()))
+    layout
+        .builds
+        .join(format!("{}.json", build_key.to_prefixed_hex()))
 }
 
 pub fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectHash, CasError> {
@@ -410,10 +410,7 @@ fn build_json_value(
         Value::String(object_hash.to_string()),
     );
     root.insert("producer".to_string(), Value::Object(producer));
-    root.insert(
-        "input_build_keys".to_string(),
-        Value::Array(input_keys),
-    );
+    root.insert("input_build_keys".to_string(), Value::Array(input_keys));
     root.insert("attrs".to_string(), Value::Object(attrs));
     Value::Object(root)
 }
@@ -517,13 +514,17 @@ fn parse_build_record_value(build_key: BuildKey, value: &Value) -> Result<Build,
 
 fn parse_object_hash_result(value: &str) -> Result<ObjectHash, CasError> {
     value.parse::<ObjectHash>().map_err(|error| {
-        CasError::Serialization(format!("invalid object hash '{value}' in build record: {error}"))
+        CasError::Serialization(format!(
+            "invalid object hash '{value}' in build record: {error}"
+        ))
     })
 }
 
 fn parse_build_key_result(value: &str) -> Result<BuildKey, CasError> {
     value.parse::<BuildKey>().map_err(|error| {
-        CasError::Serialization(format!("invalid build key '{value}' in build record: {error}"))
+        CasError::Serialization(format!(
+            "invalid build key '{value}' in build record: {error}"
+        ))
     })
 }
 
@@ -761,7 +762,12 @@ mod tests {
 
         assert_eq!(first.object_hash, second.object_hash);
         assert_eq!(first.build_key, second.build_key);
-        assert!(layout.objects.join(first.object_hash.to_prefixed_hex()).exists());
+        assert!(
+            layout
+                .objects
+                .join(first.object_hash.to_prefixed_hex())
+                .exists()
+        );
         assert!(
             layout
                 .builds
@@ -770,10 +776,9 @@ mod tests {
         );
         assert_eq!(
             fs::read_link(layout.meta_refs.join("hello-copy.json")).unwrap(),
-            PathBuf::from("..").join(BUILDS_DIR).join(format!(
-                "{}.json",
-                second.build_key.to_prefixed_hex()
-            ))
+            PathBuf::from("..")
+                .join(BUILDS_DIR)
+                .join(format!("{}.json", second.build_key.to_prefixed_hex()))
         );
     }
 
@@ -815,7 +820,10 @@ mod tests {
         assert!(build_path.exists());
 
         let build_json: Value = serde_json::from_slice(&fs::read(&build_path).unwrap()).unwrap();
-        assert_eq!(build_json["schema"], Value::String(BUILD_SCHEMA.to_string()));
+        assert_eq!(
+            build_json["schema"],
+            Value::String(BUILD_SCHEMA.to_string())
+        );
         assert_eq!(
             build_json["build_key"],
             Value::String(published.build_key.to_string())
@@ -824,7 +832,10 @@ mod tests {
             build_json["object_hash"],
             Value::String(published.object_hash.to_string())
         );
-        assert_eq!(build_json["kind"], Value::String("build-script".to_string()));
+        assert_eq!(
+            build_json["kind"],
+            Value::String("build-script".to_string())
+        );
         assert_eq!(
             build_json["producer"]["builder"],
             Value::String("text".to_string())
@@ -1298,11 +1309,7 @@ mod tests {
         BuildKey::from_str(value).unwrap()
     }
 
-    fn build_key_for(
-        builder_tag: &str,
-        payload: Value,
-        input_build_keys: &[BuildKey],
-    ) -> BuildKey {
+    fn build_key_for(builder_tag: &str, payload: Value, input_build_keys: &[BuildKey]) -> BuildKey {
         compute_build_key(builder_tag, &payload, input_build_keys).unwrap()
     }
 }

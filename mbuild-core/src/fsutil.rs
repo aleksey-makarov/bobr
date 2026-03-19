@@ -27,9 +27,8 @@ pub fn temp_root_dir(root_dir: &str) -> Result<PathBuf, FsUtilError> {
         ));
     }
 
-    let cwd = env::current_dir().map_err(|error| {
-        FsUtilError::Io(format!("failed to get current directory: {error}"))
-    })?;
+    let cwd = env::current_dir()
+        .map_err(|error| FsUtilError::Io(format!("failed to get current directory: {error}")))?;
     let path = cwd.join(root_dir).join("tmp");
     fs::create_dir_all(&path).map_err(|error| {
         FsUtilError::Io(format!(
@@ -55,7 +54,10 @@ pub fn recreate_empty_dir_force(path: &Path) -> Result<(), FsUtilError> {
     }
 
     fs::create_dir_all(path).map_err(|error| {
-        FsUtilError::Io(format!("failed to create directory '{}': {error}", path.display()))
+        FsUtilError::Io(format!(
+            "failed to create directory '{}': {error}",
+            path.display()
+        ))
     })
 }
 
@@ -79,7 +81,10 @@ pub fn recreate_empty_dir(path: &Path) -> Result<(), FsUtilError> {
     }
 
     fs::create_dir_all(path).map_err(|error| {
-        FsUtilError::Io(format!("failed to create directory '{}': {error}", path.display()))
+        FsUtilError::Io(format!(
+            "failed to create directory '{}': {error}",
+            path.display()
+        ))
     })
 }
 
@@ -97,12 +102,15 @@ pub fn remove_dir_force(path: &Path) -> Result<(), FsUtilError> {
 }
 
 pub fn write_atomic(path: &Path, content: &str) -> Result<(), FsUtilError> {
-    let file_name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
-        FsUtilError::Io(format!(
-            "invalid file name for atomic write path '{}'",
-            path.display()
-        ))
-    })?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            FsUtilError::Io(format!(
+                "invalid file name for atomic write path '{}'",
+                path.display()
+            ))
+        })?;
 
     let tmp_name = format!(".{file_name}.tmp");
     let tmp_path = path.with_file_name(tmp_name);
@@ -133,7 +141,10 @@ pub fn current_epoch_nanos() -> Result<u128, FsUtilError> {
 #[cfg(unix)]
 fn make_tree_writable(path: &Path) -> Result<(), FsUtilError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
-        FsUtilError::Io(format!("failed to inspect path '{}': {error}", path.display()))
+        FsUtilError::Io(format!(
+            "failed to inspect path '{}': {error}",
+            path.display()
+        ))
     })?;
 
     if metadata.file_type().is_symlink() {

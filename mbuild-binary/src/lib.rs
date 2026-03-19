@@ -1,6 +1,6 @@
 use mbuild_core::{
-    BuildContext, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo,
-    ResolvedInputs, ResolvedObject, StagedBuildResult, TypedBuilder, fsutil,
+    BuildContext, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo, ResolvedInputs,
+    ResolvedObject, StagedBuildResult, TypedBuilder, fsutil,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -178,7 +178,10 @@ fn validate_config(config: &BinaryConfig) -> BResult<()> {
     Ok(())
 }
 
-fn resolve_script_execution(script: &ResolvedObject, sources: &[ResolvedObject]) -> BResult<ScriptExecution> {
+fn resolve_script_execution(
+    script: &ResolvedObject,
+    sources: &[ResolvedObject],
+) -> BResult<ScriptExecution> {
     if !script.object_path.is_file() {
         return Err(BinaryError::InputResolutionFailed(format!(
             "build-script input must resolve to a file: {}",
@@ -416,13 +419,21 @@ mod tests {
         BuildContext {
             workspace_root: root.to_path_buf(),
             builder_root: root.join(".mbuild").join("builder-state").join("binary"),
-            temp_root: root.join(".mbuild").join("builder-state").join("binary").join("tmp"),
+            temp_root: root
+                .join(".mbuild")
+                .join("builder-state")
+                .join("binary")
+                .join("tmp"),
         }
     }
 
     fn install_fake_podman(dir: &Path) {
         let script_path = dir.join("podman");
-        fs::write(&script_path, include_str!("../tests/assets/fake_podman_run.sh")).unwrap();
+        fs::write(
+            &script_path,
+            include_str!("../tests/assets/fake_podman_run.sh"),
+        )
+        .unwrap();
         #[cfg(unix)]
         {
             let mut permissions = fs::metadata(&script_path).unwrap().permissions();
@@ -454,7 +465,12 @@ mod tests {
         result
     }
 
-    fn resolved_object(root: &Path, kind: &str, name: &str, attrs: Map<String, Value>) -> ResolvedObject {
+    fn resolved_object(
+        root: &Path,
+        kind: &str,
+        name: &str,
+        attrs: Map<String, Value>,
+    ) -> ResolvedObject {
         let object_path = root.join(name);
         if kind == KIND_SOURCE_TREE {
             fs::create_dir_all(&object_path).unwrap();
@@ -470,15 +486,23 @@ mod tests {
         }
         ResolvedObject {
             object_hash: match kind {
-                KIND_CONTAINER_IMAGE => "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-                KIND_BUILD_SCRIPT => "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                KIND_CONTAINER_IMAGE => {
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                }
+                KIND_BUILD_SCRIPT => {
+                    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                }
                 _ => "sha256:3333333333333333333333333333333333333333333333333333333333333333",
             }
             .parse::<ObjectHash>()
             .unwrap(),
             build_key: match kind {
-                KIND_CONTAINER_IMAGE => "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                KIND_BUILD_SCRIPT => "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                KIND_CONTAINER_IMAGE => {
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+                KIND_BUILD_SCRIPT => {
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                }
                 _ => "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             }
             .parse::<BuildKey>()
@@ -498,15 +522,30 @@ mod tests {
         );
         inputs.insert(
             "image",
-            ResolvedInputValue::One(resolved_object(root, KIND_CONTAINER_IMAGE, "image.json", image_attrs)),
+            ResolvedInputValue::One(resolved_object(
+                root,
+                KIND_CONTAINER_IMAGE,
+                "image.json",
+                image_attrs,
+            )),
         );
         inputs.insert(
             "script",
-            ResolvedInputValue::One(resolved_object(root, KIND_BUILD_SCRIPT, "script.sh", Map::new())),
+            ResolvedInputValue::One(resolved_object(
+                root,
+                KIND_BUILD_SCRIPT,
+                "script.sh",
+                Map::new(),
+            )),
         );
         inputs.insert(
             "sources",
-            ResolvedInputValue::Many(vec![resolved_object(root, KIND_SOURCE_TREE, "src", Map::new())]),
+            ResolvedInputValue::Many(vec![resolved_object(
+                root,
+                KIND_SOURCE_TREE,
+                "src",
+                Map::new(),
+            )]),
         );
         inputs
     }
@@ -550,15 +589,30 @@ mod tests {
         let mut inputs = ResolvedInputs::empty();
         inputs.insert(
             "image",
-            ResolvedInputValue::One(resolved_object(temp.path(), KIND_CONTAINER_IMAGE, "image.json", Map::new())),
+            ResolvedInputValue::One(resolved_object(
+                temp.path(),
+                KIND_CONTAINER_IMAGE,
+                "image.json",
+                Map::new(),
+            )),
         );
         inputs.insert(
             "script",
-            ResolvedInputValue::One(resolved_object(temp.path(), KIND_BUILD_SCRIPT, "script.sh", Map::new())),
+            ResolvedInputValue::One(resolved_object(
+                temp.path(),
+                KIND_BUILD_SCRIPT,
+                "script.sh",
+                Map::new(),
+            )),
         );
         inputs.insert(
             "sources",
-            ResolvedInputValue::Many(vec![resolved_object(temp.path(), KIND_SOURCE_TREE, "src", Map::new())]),
+            ResolvedInputValue::Many(vec![resolved_object(
+                temp.path(),
+                KIND_SOURCE_TREE,
+                "src",
+                Map::new(),
+            )]),
         );
 
         let error = BinaryBuilder

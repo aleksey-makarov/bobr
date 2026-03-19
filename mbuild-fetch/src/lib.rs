@@ -149,7 +149,8 @@ impl TypedBuilder for FetchBuilder {
             let format =
                 select_archive_format(&config, &cached_blob, &source_url).map_err(map_error)?;
             let (path, normalized_root) =
-                stage_archive_output(&cx.temp_root, &cached_blob, format.clone()).map_err(map_error)?;
+                stage_archive_output(&cx.temp_root, &cached_blob, format.clone())
+                    .map_err(map_error)?;
             let mut attrs = Map::new();
             attrs.insert(
                 "archive_format".to_string(),
@@ -837,24 +838,39 @@ mod tests {
         BuildContext {
             workspace_root: root.to_path_buf(),
             builder_root: root.join(".mbuild").join("builder-state").join("fetch"),
-            temp_root: root.join(".mbuild").join("builder-state").join("fetch").join("tmp"),
+            temp_root: root
+                .join(".mbuild")
+                .join("builder-state")
+                .join("fetch")
+                .join("tmp"),
         }
     }
 
-    fn spawn_http_server(body: Vec<u8>, content_type: &'static str) -> Result<(String, thread::JoinHandle<()>), std::io::Error> {
+    fn spawn_http_server(
+        body: Vec<u8>,
+        content_type: &'static str,
+    ) -> Result<(String, thread::JoinHandle<()>), std::io::Error> {
         let listener = (0..10)
             .find_map(|attempt| match TcpListener::bind("127.0.0.1:0") {
                 Ok(listener) => Some(Ok(listener)),
                 Err(error)
                     if attempt < 9
-                        && matches!(error.kind(), std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::AddrInUse) =>
+                        && matches!(
+                            error.kind(),
+                            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::AddrInUse
+                        ) =>
                 {
                     thread::sleep(Duration::from_millis(10));
                     None
                 }
                 Err(error) => Some(Err(error)),
             })
-            .unwrap_or_else(|| Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "failed to bind test HTTP listener")))?;
+            .unwrap_or_else(|| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "failed to bind test HTTP listener",
+                ))
+            })?;
         let addr = listener.local_addr().unwrap();
         let url = format!("http://{}/payload", addr);
         let handle = thread::spawn(move || {
@@ -892,9 +908,10 @@ mod tests {
         inputs.insert(
             "unexpected",
             ResolvedInputValue::One(mbuild_core::ResolvedObject {
-                object_hash: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-                    .parse::<ObjectHash>()
-                    .unwrap(),
+                object_hash:
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                        .parse::<ObjectHash>()
+                        .unwrap(),
                 build_key:
                     "sha256:2222222222222222222222222222222222222222222222222222222222222222"
                         .parse::<BuildKey>()
@@ -931,7 +948,9 @@ mod tests {
         let (url, handle) = match spawn_http_server(payload.clone(), "application/octet-stream") {
             Ok(server) => server,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!("skipping fetch unit test because TCP bind is not permitted in this environment: {error}");
+                eprintln!(
+                    "skipping fetch unit test because TCP bind is not permitted in this environment: {error}"
+                );
                 return;
             }
             Err(error) => panic!("failed to start test HTTP server: {error}"),
@@ -971,7 +990,9 @@ mod tests {
         let (url, handle) = match spawn_http_server(payload, "application/gzip") {
             Ok(server) => server,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!("skipping fetch archive unit test because TCP bind is not permitted in this environment: {error}");
+                eprintln!(
+                    "skipping fetch archive unit test because TCP bind is not permitted in this environment: {error}"
+                );
                 return;
             }
             Err(error) => panic!("failed to start test HTTP server: {error}"),
@@ -1027,7 +1048,9 @@ mod tests {
         let (url, handle) = match spawn_http_server(payload.clone(), "application/octet-stream") {
             Ok(server) => server,
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!("skipping fetch unit test because TCP bind is not permitted in this environment: {error}");
+                eprintln!(
+                    "skipping fetch unit test because TCP bind is not permitted in this environment: {error}"
+                );
                 return;
             }
             Err(error) => panic!("failed to start test HTTP server: {error}"),

@@ -171,7 +171,13 @@ fn container_image_recipe(name: &str, image: &str, digest: &str) -> String {
     )
 }
 
-fn binary_recipe(name: &str, image: &str, digest: &str, source_url: &str, source_hash: &str) -> String {
+fn binary_recipe(
+    name: &str,
+    image: &str,
+    digest: &str,
+    source_url: &str,
+    source_hash: &str,
+) -> String {
     format!(
         "store.bind (store.fetch \"source\" {{\n  url = {},\n  hash = {},\n  unpack = true,\n}}) (fun source =>\nstore.bind (store.text \"script\" {{\n  kind = \"build-script\",\n  source = \"#!/bin/sh\\nexit 0\\n\",\n}}) (fun script =>\nstore.bind (store.container_image \"base-image\" {{\n  image = {},\n  digest = {},\n}}) (fun image =>\nstore.binary {} {{\n  kind = \"binary-output\",\n  optimize = \"size\",\n}} image script [source])))\n",
         nickel_string(source_url),
@@ -191,7 +197,8 @@ fn store_text_recipe_creates_store_entries_and_refs() {
         &text_recipe("hello", "build-script", "#!/bin/sh\necho hi\n"),
     );
 
-    let published = expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
+    let published =
+        expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
 
     assert!(published.object_path.exists());
     assert_eq!(
@@ -200,7 +207,10 @@ fn store_text_recipe_creates_store_entries_and_refs() {
     );
     #[cfg(unix)]
     {
-        let mode = fs::metadata(&published.object_path).unwrap().permissions().mode();
+        let mode = fs::metadata(&published.object_path)
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o111, 0o111);
     }
 
@@ -211,7 +221,10 @@ fn store_text_recipe_creates_store_entries_and_refs() {
         build_json["build_key"],
         Value::String(published.record.build_key.to_string())
     );
-    assert_eq!(build_json["kind"], Value::String("build-script".to_string()));
+    assert_eq!(
+        build_json["kind"],
+        Value::String("build-script".to_string())
+    );
     assert_eq!(
         build_json["producer"]["builder"],
         Value::String("text".to_string())
@@ -223,13 +236,25 @@ fn store_text_recipe_creates_store_entries_and_refs() {
     assert_eq!(build_json["input_build_keys"], Value::Array(vec![]));
 
     assert_eq!(
-        fs::read_link(workspace.path().join(".mbuild").join("meta-refs").join("hello.json"))
-            .unwrap(),
+        fs::read_link(
+            workspace
+                .path()
+                .join(".mbuild")
+                .join("meta-refs")
+                .join("hello.json")
+        )
+        .unwrap(),
         PathBuf::from(format!("../builds/{}.json", published.record.build_key))
     );
     assert_eq!(
-        fs::read_link(workspace.path().join(".mbuild").join("object-refs").join("hello"))
-            .unwrap(),
+        fs::read_link(
+            workspace
+                .path()
+                .join(".mbuild")
+                .join("object-refs")
+                .join("hello")
+        )
+        .unwrap(),
         PathBuf::from(format!("../objects/{}", published.record.object_hash))
     );
 }
@@ -238,10 +263,15 @@ fn store_text_recipe_creates_store_entries_and_refs() {
 fn repeated_store_text_recipe_reuses_same_build_record_and_object() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("recipe.ncl");
-    write_recipe(&recipe_path, &text_recipe("cached", "plain-text", "hello cache"));
+    write_recipe(
+        &recipe_path,
+        &text_recipe("cached", "plain-text", "hello cache"),
+    );
 
-    let first = expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
-    let second = expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
+    let first =
+        expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
+    let second =
+        expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
 
     assert_eq!(first.record.build_key, second.record.build_key);
     assert_eq!(first.record.object_hash, second.record.object_hash);
@@ -270,9 +300,13 @@ fn store_recipe_executes_fetch_recipe_end_to_end() {
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
         Err(error) => panic!("failed to start test HTTP server: {error}"),
     };
-    write_recipe(&request_path, &fetch_recipe("fetched-file", &url, &hash, false));
+    write_recipe(
+        &request_path,
+        &fetch_recipe("fetched-file", &url, &hash, false),
+    );
 
-    let published = expect_build(run_store_recipe_in_workspace(workspace.path(), &request_path).unwrap());
+    let published =
+        expect_build(run_store_recipe_in_workspace(workspace.path(), &request_path).unwrap());
     handle.join().unwrap();
 
     assert_eq!(published.record.kind, "fetched-file");
@@ -298,7 +332,9 @@ fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
                 ),
             );
 
-            let published = expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
+            let published = expect_build(
+                run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
+            );
 
             assert_eq!(published.record.kind, "container-image");
             assert_eq!(published.record.producer.builder, "container-image");
@@ -319,11 +355,13 @@ fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
             assert_eq!(
                 published.record.attrs["image_digest"],
                 Value::String(
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
                 )
             );
 
-            let descriptor: Value = serde_json::from_slice(&fs::read(&published.object_path).unwrap()).unwrap();
+            let descriptor: Value =
+                serde_json::from_slice(&fs::read(&published.object_path).unwrap()).unwrap();
             assert_eq!(
                 descriptor["schema"],
                 Value::String("mbuild-container-image-object-v1".to_string())
@@ -341,13 +379,18 @@ fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
             assert_eq!(
                 descriptor["image_digest"],
                 Value::String(
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
                 )
             );
 
             let build_file = build_path(workspace.path(), published.record.build_key);
-            let build_json: Value = serde_json::from_slice(&fs::read(&build_file).unwrap()).unwrap();
-            assert_eq!(build_json["kind"], Value::String("container-image".to_string()));
+            let build_json: Value =
+                serde_json::from_slice(&fs::read(&build_file).unwrap()).unwrap();
+            assert_eq!(
+                build_json["kind"],
+                Value::String("container-image".to_string())
+            );
             assert_eq!(
                 build_json["producer"]["builder"],
                 Value::String("container-image".to_string())
@@ -373,7 +416,8 @@ fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
             assert_eq!(
                 build_json["attrs"]["image_digest"],
                 Value::String(
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
                 )
             );
         },
@@ -388,7 +432,8 @@ fn repeated_nested_binary_recipe_reuses_all_build_records_and_objects() {
             let workspace = tempdir().unwrap();
             let recipe_path = workspace.path().join("binary-recipe.ncl");
             let source_tar = {
-                let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                let encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
                 let mut tar = tar::Builder::new(encoder);
                 let body = b"hello cached binary\n";
                 let mut header = tar::Header::new_gnu();
@@ -416,7 +461,9 @@ fn repeated_nested_binary_recipe_reuses_all_build_records_and_objects() {
                 ),
             );
 
-            let first = expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
+            let first = expect_build(
+                run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
+            );
             handle.join().unwrap();
 
             let objects_dir = workspace.path().join(".mbuild").join("objects");
@@ -424,11 +471,16 @@ fn repeated_nested_binary_recipe_reuses_all_build_records_and_objects() {
             let first_object_count = fs::read_dir(&objects_dir).unwrap().count();
             let first_build_count = fs::read_dir(&builds_dir).unwrap().count();
 
-            let second = expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
+            let second = expect_build(
+                run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
+            );
 
             assert_eq!(first.record.build_key, second.record.build_key);
             assert_eq!(first.record.object_hash, second.record.object_hash);
-            assert_eq!(fs::read_dir(objects_dir).unwrap().count(), first_object_count);
+            assert_eq!(
+                fs::read_dir(objects_dir).unwrap().count(),
+                first_object_count
+            );
             assert_eq!(fs::read_dir(builds_dir).unwrap().count(), first_build_count);
             assert_eq!(first_build_count, 4);
             assert_eq!(first_object_count, 4);
@@ -445,7 +497,11 @@ fn repeated_nested_binary_recipe_reuses_all_build_records_and_objects() {
                 Value::String(first.record.build_key.to_string())
             );
             assert_eq!(input_build_keys.len(), 3);
-            assert!(input_build_keys.iter().all(|value| matches!(value, Value::String(_))));
+            assert!(
+                input_build_keys
+                    .iter()
+                    .all(|value| matches!(value, Value::String(_)))
+            );
         },
     );
 }
@@ -457,10 +513,8 @@ fn store_recipe_executes_all_real_builders_via_full_template() {
         || {
             let workspace = tempdir().unwrap();
             let source_tar = {
-                let encoder = flate2::write::GzEncoder::new(
-                    Vec::new(),
-                    flate2::Compression::default(),
-                );
+                let encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
                 let mut tar = tar::Builder::new(encoder);
                 let body = b"hello from store loop\n";
                 let mut header = tar::Header::new_gnu();
@@ -483,26 +537,35 @@ fn store_recipe_executes_all_real_builders_via_full_template() {
             let recipe_path = workspace.path().join("full.ncl");
             write_recipe(&recipe_path, &recipe_source);
 
-            let published = expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
+            let published = expect_build(
+                run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
+            );
             handle.join().unwrap();
 
             assert_eq!(published.record.kind, "container-image");
             assert_eq!(published.record.producer.builder, "image");
-            assert_eq!(published.record.attrs["mode"], Value::String("bootstrap".to_string()));
+            assert_eq!(
+                published.record.attrs["mode"],
+                Value::String("bootstrap".to_string())
+            );
 
             for name in ["source", "script", "base-image", "binary", "final-image"] {
-                assert!(workspace
-                    .path()
-                    .join(".mbuild")
-                    .join("meta-refs")
-                    .join(format!("{name}.json"))
-                    .exists());
-                assert!(workspace
-                    .path()
-                    .join(".mbuild")
-                    .join("object-refs")
-                    .join(name)
-                    .exists());
+                assert!(
+                    workspace
+                        .path()
+                        .join(".mbuild")
+                        .join("meta-refs")
+                        .join(format!("{name}.json"))
+                        .exists()
+                );
+                assert!(
+                    workspace
+                        .path()
+                        .join(".mbuild")
+                        .join("object-refs")
+                        .join(name)
+                        .exists()
+                );
             }
         },
     );
