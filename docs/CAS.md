@@ -26,6 +26,9 @@ participate in object identity or build-record identity.
     <name>.json -> ../builds/<build_key>.json
   object-refs/
     <name> -> ../objects/<object_hash>
+  logs/
+    runs/
+      <YYMMDDHHMMSS>-<pid>.jsonl
   .. builder-specific files and dirs ..
 ```
 
@@ -47,6 +50,20 @@ Internal CAS identifiers use bare lowercase hex:
 
 Each builder owns a same-named subdirectory under `.mbuild/` for builder-
 specific runtime state, temporary files, logs, and caches.
+
+`logs/runs/<YYMMDDHHMMSS>-<pid>.jsonl` is the event log for one `mbuild`
+invocation.
+
+Builder raw logs live under:
+
+```text
+.mbuild/builder-state/<builder>/logs/<name>/<YYMMDDHHMMSS>-<short-build-key>-<label>.log
+```
+
+These raw logs contain captured stdout/stderr for external builder commands.
+For example, `binary` writes raw logs for `podman run`, and `image` writes raw
+logs for `podman import`, `podman create`, `podman cp`, `podman commit`, and
+`podman inspect`.
 
 ## Object Identity
 
@@ -249,6 +266,33 @@ Rust builders produce:
 
 The interpreter writes the build record and updates both publication ref
 namespaces.
+
+## Logging And Progress
+
+`mbuild` emits two kinds of logs:
+
+- an **event log**, which is the structured JSONL record of one `mbuild` run
+- **raw logs**, which are the captured stdout/stderr logs of external commands
+
+The event log records lifecycle events such as:
+
+- `start`
+- `cache-hit`
+- `cache-miss`
+- `run`
+- `publish`
+- `done`
+- `fail`
+
+Each event entry stores the builder tag, published name, `build_key`, a short
+message, and optional data such as `object_hash`, `raw_log_path`, and
+structured details.
+
+By default, `mbuild` also prints concise live progress lines to `stderr` while
+the run is in progress. The final `Build` summary remains on `stdout`.
+
+`mbuild --quiet` disables live progress output but still writes both the event
+log and all raw logs.
 
 ## Container Image Objects
 

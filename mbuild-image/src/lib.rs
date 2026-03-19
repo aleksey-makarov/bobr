@@ -1,6 +1,6 @@
 use mbuild_core::{
-    BuildContext, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo, ResolvedInputs,
-    ResolvedObject, StagedBuildResult, TypedBuilder, fsutil,
+    BuildContext, BuildLogLevel, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo,
+    ResolvedInputs, ResolvedObject, StagedBuildResult, TypedBuilder, fsutil,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -154,9 +154,14 @@ impl TypedBuilder for ContainerImageBuilder {
         fsutil::recreate_empty_dir_force(&cx.temp_root)
             .map_err(map_fsutil_error_to_container)
             .map_err(map_container_image_error)?;
+        cx.log_event(
+            BuildLogLevel::Info,
+            "inspect",
+            format!("inspecting local image '{}'", config.image),
+        );
 
         let inspected =
-            inspect_local_container_image_with_expected_digest(&config.image, &config.digest)
+            inspect_local_container_image_with_expected_digest(cx, &config.image, &config.digest)
                 .map_err(map_container_image_error)?;
         let staged_path = write_descriptor(&cx.temp_root, &inspected.image_ref, &config.digest)
             .map_err(ContainerImageError::FsFailed)
@@ -208,13 +213,16 @@ impl TypedBuilder for ImageBuilder {
             .map_err(map_image_error)?;
 
         let mode = effective_image_mode(&config, base).map_err(map_image_error)?;
+        cx.log_event(
+            BuildLogLevel::Info,
+            "prepare",
+            format!("building image in '{}' mode", mode),
+        );
         let imported = match mode {
-            "bootstrap" => run_bootstrap_mode(&cx.temp_root, &cx.builder_root, binaries)
-                .map_err(map_image_error)?,
+            "bootstrap" => run_bootstrap_mode(cx, binaries).map_err(map_image_error)?,
             "layered" => {
                 let base = base.unwrap();
-                run_layered_mode(&cx.temp_root, &cx.builder_root, base, binaries)
-                    .map_err(map_image_error)?
+                run_layered_mode(cx, base, binaries).map_err(map_image_error)?
             }
             _ => unreachable!(),
         };
@@ -346,11 +354,12 @@ fn is_valid_sha256_digest(value: &str) -> bool {
 }
 
 fn inspect_local_container_image_with_expected_digest(
+    cx: &BuildContext,
     image: &str,
     digest: &str,
 ) -> CIResult<LocalImageInspect> {
-    let inspected =
-        inspect_local_image(image).map_err(|message| ContainerImageError::BuildFailed(message))?;
+    let inspected = inspect_local_image(cx, image)
+        .map_err(|message| ContainerImageError::BuildFailed(message))?;
     if !inspected.image_ref.ends_with(&format!("@{digest}")) {
         return Err(ContainerImageError::BuildFailed(format!(
             "local image '{}' does not match required digest '{}'",
@@ -363,8 +372,8 @@ fn inspect_local_container_image_with_expected_digest(
     })
 }
 
-fn inspect_generated_image(image_ref: &str) -> IResult<ImportedImage> {
-    let inspected = inspect_local_image(image_ref).map_err(ImageError::BuildFailed)?;
+fn inspect_generated_image(cx: &BuildContext, image_ref: &str) -> IResult<ImportedImage> {
+    let inspected = inspect_local_image(cx, image_ref).map_err(ImageError::BuildFailed)?;
     let digest = inspected
         .image_ref
         .rsplit_once('@')
@@ -383,15 +392,17 @@ fn inspect_generated_image(image_ref: &str) -> IResult<ImportedImage> {
     })
 }
 
-fn inspect_local_image(image: &str) -> Result<LocalImageInspect, String> {
-    let output = ProcessCommand::new("podman")
-        .arg("image")
-        .arg("inspect")
-        .arg(image)
-        .arg("--format")
-        .arg("json")
-        .output()
-        .map_err(|error| format!("failed to execute podman image inspect: {error}"))?;
+fn inspect_local_image(cx: &BuildContext, image: &str) -> Result<LocalImageInspect, String> {
+    let output = run_podman_command(cx, "podman-image-inspect", "podman image inspect", {
+        let mut command = ProcessCommand::new("podman");
+        command
+            .arg("image")
+            .arg("inspect")
+            .arg(image)
+            .arg("--format")
+            .arg("json");
+        command
+    })?;
 
     if !output.status.success() {
         return Err(format!(
@@ -425,13 +436,9 @@ fn inspect_local_image(image: &str) -> Result<LocalImageInspect, String> {
     })
 }
 
-fn run_bootstrap_mode(
-    temp_root: &Path,
-    _builder_root: &Path,
-    binaries: &[ResolvedObject],
-) -> IResult<ImportedImage> {
-    let rootfs_dir = temp_root.join("rootfs");
-    let tar_path = temp_root.join("rootfs.tar");
+fn run_bootstrap_mode(cx: &BuildContext, binaries: &[ResolvedObject]) -> IResult<ImportedImage> {
+    let rootfs_dir = cx.temp_root.join("rootfs");
+    let tar_path = cx.temp_root.join("rootfs.tar");
     fsutil::recreate_empty_dir_force(&rootfs_dir).map_err(map_fsutil_error_to_image)?;
 
     for binary in binaries {
@@ -440,28 +447,27 @@ fn run_bootstrap_mode(
 
     create_rootfs_tar(&rootfs_dir, &tar_path)?;
     let image_ref = generated_image_ref("bootstrap").map_err(map_fsutil_error_to_image)?;
-    podman_import(&tar_path, &image_ref)?;
-    inspect_generated_image(&image_ref)
+    podman_import(cx, &tar_path, &image_ref)?;
+    inspect_generated_image(cx, &image_ref)
 }
 
 fn run_layered_mode(
-    temp_root: &Path,
-    _builder_root: &Path,
+    cx: &BuildContext,
     base: &ResolvedObject,
     binaries: &[ResolvedObject],
 ) -> IResult<ImportedImage> {
     let base_ref = resolve_image_ref(base)?;
-    let container_id = podman_create(&base_ref)?;
+    let container_id = podman_create(cx, &base_ref)?;
     let result = (|| {
         for binary in binaries {
-            podman_cp(binary.object_path.as_path(), &container_id)?;
+            podman_cp(cx, binary.object_path.as_path(), &container_id)?;
         }
         let image_ref = generated_image_ref("layered").map_err(map_fsutil_error_to_image)?;
-        podman_commit(&container_id, &image_ref)?;
-        inspect_generated_image(&image_ref)
+        podman_commit(cx, &container_id, &image_ref)?;
+        inspect_generated_image(cx, &image_ref)
     })();
-    let _ = podman_rm(&container_id);
-    let _ = fsutil::recreate_empty_dir_force(&temp_root.join("layered-work"))
+    let _ = podman_rm(cx, &container_id);
+    let _ = fsutil::recreate_empty_dir_force(&cx.temp_root.join("layered-work"))
         .map_err(map_fsutil_error_to_image);
     result
 }
@@ -485,15 +491,13 @@ fn generated_image_ref(mode: &str) -> Result<String, fsutil::FsUtilError> {
     Ok(format!("{GENERATED_IMAGE_PREFIX}:{mode}-{now}"))
 }
 
-fn podman_import(tar_path: &Path, image_ref: &str) -> IResult<()> {
-    let output = ProcessCommand::new("podman")
-        .arg("import")
-        .arg(tar_path)
-        .arg(image_ref)
-        .output()
-        .map_err(|error| {
-            ImageError::BuildFailed(format!("failed to execute podman import: {error}"))
-        })?;
+fn podman_import(cx: &BuildContext, tar_path: &Path, image_ref: &str) -> IResult<()> {
+    let output = run_podman_command(cx, "podman-import", "podman import", {
+        let mut command = ProcessCommand::new("podman");
+        command.arg("import").arg(tar_path).arg(image_ref);
+        command
+    })
+    .map_err(ImageError::BuildFailed)?;
     if !output.status.success() {
         return Err(ImageError::BuildFailed(format!(
             "podman import failed: {}",
@@ -503,14 +507,13 @@ fn podman_import(tar_path: &Path, image_ref: &str) -> IResult<()> {
     Ok(())
 }
 
-fn podman_create(base_ref: &str) -> IResult<String> {
-    let output = ProcessCommand::new("podman")
-        .arg("create")
-        .arg(base_ref)
-        .output()
-        .map_err(|error| {
-            ImageError::BuildFailed(format!("failed to execute podman create: {error}"))
-        })?;
+fn podman_create(cx: &BuildContext, base_ref: &str) -> IResult<String> {
+    let output = run_podman_command(cx, "podman-create", "podman create", {
+        let mut command = ProcessCommand::new("podman");
+        command.arg("create").arg(base_ref);
+        command
+    })
+    .map_err(ImageError::BuildFailed)?;
     if !output.status.success() {
         return Err(ImageError::BuildFailed(format!(
             "podman create failed: {}",
@@ -526,17 +529,15 @@ fn podman_create(base_ref: &str) -> IResult<String> {
     Ok(container_id)
 }
 
-fn podman_cp(binary_dir: &Path, container_id: &str) -> IResult<()> {
+fn podman_cp(cx: &BuildContext, binary_dir: &Path, container_id: &str) -> IResult<()> {
     let source = format!("{}/.", binary_dir.display());
     let destination = format!("{}:/", container_id);
-    let output = ProcessCommand::new("podman")
-        .arg("cp")
-        .arg(source)
-        .arg(destination)
-        .output()
-        .map_err(|error| {
-            ImageError::BuildFailed(format!("failed to execute podman cp: {error}"))
-        })?;
+    let output = run_podman_command(cx, "podman-cp", "podman cp", {
+        let mut command = ProcessCommand::new("podman");
+        command.arg("cp").arg(source).arg(destination);
+        command
+    })
+    .map_err(ImageError::BuildFailed)?;
     if !output.status.success() {
         return Err(ImageError::BuildFailed(format!(
             "podman cp failed: {}",
@@ -546,15 +547,13 @@ fn podman_cp(binary_dir: &Path, container_id: &str) -> IResult<()> {
     Ok(())
 }
 
-fn podman_commit(container_id: &str, image_ref: &str) -> IResult<()> {
-    let output = ProcessCommand::new("podman")
-        .arg("commit")
-        .arg(container_id)
-        .arg(image_ref)
-        .output()
-        .map_err(|error| {
-            ImageError::BuildFailed(format!("failed to execute podman commit: {error}"))
-        })?;
+fn podman_commit(cx: &BuildContext, container_id: &str, image_ref: &str) -> IResult<()> {
+    let output = run_podman_command(cx, "podman-commit", "podman commit", {
+        let mut command = ProcessCommand::new("podman");
+        command.arg("commit").arg(container_id).arg(image_ref);
+        command
+    })
+    .map_err(ImageError::BuildFailed)?;
     if !output.status.success() {
         return Err(ImageError::BuildFailed(format!(
             "podman commit failed: {}",
@@ -564,14 +563,13 @@ fn podman_commit(container_id: &str, image_ref: &str) -> IResult<()> {
     Ok(())
 }
 
-fn podman_rm(container_id: &str) -> IResult<()> {
-    let output = ProcessCommand::new("podman")
-        .arg("rm")
-        .arg(container_id)
-        .output()
-        .map_err(|error| {
-            ImageError::BuildFailed(format!("failed to execute podman rm: {error}"))
-        })?;
+fn podman_rm(cx: &BuildContext, container_id: &str) -> IResult<()> {
+    let output = run_podman_command(cx, "podman-rm", "podman rm", {
+        let mut command = ProcessCommand::new("podman");
+        command.arg("rm").arg(container_id);
+        command
+    })
+    .map_err(ImageError::BuildFailed)?;
     if !output.status.success() {
         return Err(ImageError::BuildFailed(format!(
             "podman rm failed: {}",
@@ -758,6 +756,65 @@ fn command_details(output: &std::process::Output) -> String {
     }
 }
 
+fn run_podman_command(
+    cx: &BuildContext,
+    label: &str,
+    display_name: &str,
+    mut command: ProcessCommand,
+) -> Result<std::process::Output, String> {
+    cx.log_event(
+        BuildLogLevel::Info,
+        label,
+        format!("running {display_name}"),
+    );
+    let output = command
+        .output()
+        .map_err(|error| format!("failed to execute {display_name}: {error}"))?;
+    let raw_log_path = write_podman_raw_log(cx, label, display_name, &output);
+
+    if output.status.success() {
+        cx.log_event_with_details(
+            BuildLogLevel::Info,
+            label,
+            format!("{display_name} completed"),
+            None,
+            raw_log_path,
+            Map::new(),
+        );
+    } else {
+        cx.log_event_with_details(
+            BuildLogLevel::Error,
+            "command-fail",
+            format!("{display_name} failed: {}", command_details(&output)),
+            None,
+            raw_log_path,
+            Map::new(),
+        );
+    }
+
+    Ok(output)
+}
+
+fn write_podman_raw_log(
+    cx: &BuildContext,
+    label: &str,
+    display_name: &str,
+    output: &std::process::Output,
+) -> Option<PathBuf> {
+    let log_content = format!(
+        "command: {display_name}\nexit_code: {}\nstatus_success: {}\n\n=== stdout ===\n{}\n\n=== stderr ===\n{}\n",
+        output
+            .status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "signal".to_string()),
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    cx.write_raw_log(label, &log_content)
+}
+
 fn map_fsutil_error_to_container(error: fsutil::FsUtilError) -> ContainerImageError {
     ContainerImageError::FsFailed(error.to_string())
 }
@@ -798,11 +855,16 @@ mod tests {
     }
 
     fn build_context(root: &Path) -> BuildContext {
-        BuildContext {
-            workspace_root: root.to_path_buf(),
-            builder_root: root.join("builder"),
-            temp_root: root.join("tmp"),
-        }
+        BuildContext::with_noop_logger(
+            root.to_path_buf(),
+            root.join("builder"),
+            root.join("tmp"),
+            "1111111111111111111111111111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+            "Image",
+            "image-test",
+        )
     }
 
     fn install_fake_podman(dir: &Path, base_inspect_json: &str) {

@@ -136,6 +136,32 @@ fn build_path(root: &Path, build_key: impl ToString) -> PathBuf {
         .join(format!("{}.json", build_key.to_string()))
 }
 
+fn latest_run_log(root: &Path) -> PathBuf {
+    let runs_dir = root.join(".mbuild").join("logs").join("runs");
+    fs::read_dir(&runs_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .max_by_key(|path| fs::metadata(path).unwrap().modified().unwrap())
+        .expect("expected at least one run log")
+}
+
+fn collect_log_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if !root.exists() {
+        return out;
+    }
+    for entry in fs::read_dir(root).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(collect_log_files(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
+}
+
 fn expect_build(outcome: StoreOutcome) -> mbuild_core::PublishedBuild {
     match outcome {
         StoreOutcome::Build(published) => published,
@@ -257,6 +283,11 @@ fn store_text_recipe_creates_store_entries_and_refs() {
         .unwrap(),
         PathBuf::from(format!("../objects/{}", published.record.object_hash))
     );
+    let run_log = fs::read_to_string(latest_run_log(workspace.path())).unwrap();
+    assert!(run_log.contains("\"phase\":\"start\""), "{run_log}");
+    assert!(run_log.contains("\"phase\":\"cache-miss\""), "{run_log}");
+    assert!(run_log.contains("\"phase\":\"publish\""), "{run_log}");
+    assert!(run_log.contains("\"phase\":\"done\""), "{run_log}");
 }
 
 #[test]
@@ -287,6 +318,8 @@ fn repeated_store_text_recipe_reuses_same_build_record_and_object() {
             .count(),
         1
     );
+    let run_log = fs::read_to_string(latest_run_log(workspace.path())).unwrap();
+    assert!(run_log.contains("\"phase\":\"cache-hit\""), "{run_log}");
 }
 
 #[test]
@@ -419,6 +452,11 @@ fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_string(),
                 )
+            );
+            let run_log = fs::read_to_string(latest_run_log(workspace.path())).unwrap();
+            assert!(
+                run_log.contains("\"phase\":\"podman-image-inspect\""),
+                "{run_log}"
             );
         },
     );
@@ -567,6 +605,39 @@ fn store_recipe_executes_all_real_builders_via_full_template() {
                         .exists()
                 );
             }
+            let binary_logs = collect_log_files(
+                &workspace
+                    .path()
+                    .join(".mbuild")
+                    .join("builder-state")
+                    .join("binary")
+                    .join("logs"),
+            );
+            assert!(
+                binary_logs.iter().any(|path| path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .contains("podman-run")),
+                "{binary_logs:?}"
+            );
+            let image_logs = collect_log_files(
+                &workspace
+                    .path()
+                    .join(".mbuild")
+                    .join("builder-state")
+                    .join("image")
+                    .join("logs"),
+            );
+            assert!(
+                image_logs.iter().any(|path| {
+                    path.file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .contains("podman-import")
+                }),
+                "{image_logs:?}"
+            );
         },
     );
 }

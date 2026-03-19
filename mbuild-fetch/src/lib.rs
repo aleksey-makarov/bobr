@@ -1,8 +1,8 @@
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use mbuild_core::{
-    BuildContext, BuilderError, BuilderSpec, InputSlot, ProducerInfo, ResolvedInputs,
-    StagedBuildResult, TypedBuilder, fsutil,
+    BuildContext, BuildLogLevel, BuilderError, BuilderSpec, InputSlot, ProducerInfo,
+    ResolvedInputs, StagedBuildResult, TypedBuilder, fsutil,
 };
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
@@ -132,9 +132,14 @@ impl TypedBuilder for FetchBuilder {
         ensure_dir(&cx.temp_root, "fetch temp").map_err(map_error)?;
 
         let urls = config.url.as_list();
+        cx.log_event(
+            BuildLogLevel::Info,
+            "fetch",
+            format!("resolving {} candidate URL(s)", urls.len()),
+        );
         let expected_hash = parse_hash(&config.hash).map_err(map_error)?;
         let (cached_blob, source_url) =
-            ensure_cached_blob(&cache_dir, &cx.builder_root, &urls, &expected_hash)
+            ensure_cached_blob(&cache_dir, &cx.builder_root, cx, &urls, &expected_hash)
                 .map_err(map_error)?;
 
         let kind = config.kind.clone().unwrap_or_else(|| {
@@ -146,6 +151,11 @@ impl TypedBuilder for FetchBuilder {
         });
 
         let (staged_path, mut attrs) = if config.unpack {
+            cx.log_event(
+                BuildLogLevel::Info,
+                "unpack",
+                format!("unpacking fetched blob from '{}'", source_url),
+            );
             let format =
                 select_archive_format(&config, &cached_blob, &source_url).map_err(map_error)?;
             let (path, normalized_root) =
@@ -253,6 +263,7 @@ fn parse_hash(value: &str) -> FResult<ParsedHash> {
 fn ensure_cached_blob(
     cache_root: &Path,
     builder_root: &Path,
+    cx: &BuildContext,
     urls: &[String],
     hash: &ParsedHash,
 ) -> FResult<(PathBuf, String)> {
@@ -263,6 +274,11 @@ fn ensure_cached_blob(
     if cache_path.exists() {
         let existing_hash = compute_hash(&cache_path, &hash.algorithm)?;
         if existing_hash == hash.value {
+            cx.log_event(
+                BuildLogLevel::Info,
+                "cache-hit",
+                format!("reusing cached blob '{}'", cache_path.display()),
+            );
             return Ok((cache_path, urls[0].clone()));
         }
 
@@ -277,6 +293,11 @@ fn ensure_cached_blob(
     let mut failures = Vec::new();
 
     for (index, url) in urls.iter().enumerate() {
+        cx.log_event(
+            BuildLogLevel::Info,
+            "download-attempt",
+            format!("attempting download from '{}'", url),
+        );
         let now_nanos = fsutil::current_epoch_nanos().map_err(map_fsutil_error)?;
         let tmp_path = builder_root.join(format!(
             ".download-{}-{}-{}.blob",
@@ -299,6 +320,11 @@ fn ensure_cached_blob(
             continue;
         }
 
+        cx.log_event(
+            BuildLogLevel::Info,
+            "download-success",
+            format!("downloaded and cached blob from '{}'", url),
+        );
         fs::rename(&tmp_path, &cache_path).map_err(|error| {
             FetchError::FsFailed(format!(
                 "failed to move downloaded blob '{}' -> '{}': {error}",
@@ -835,15 +861,19 @@ mod tests {
     use tempfile::tempdir;
 
     fn build_context(root: &Path) -> BuildContext {
-        BuildContext {
-            workspace_root: root.to_path_buf(),
-            builder_root: root.join(".mbuild").join("builder-state").join("fetch"),
-            temp_root: root
-                .join(".mbuild")
+        BuildContext::with_noop_logger(
+            root.to_path_buf(),
+            root.join(".mbuild").join("builder-state").join("fetch"),
+            root.join(".mbuild")
                 .join("builder-state")
                 .join("fetch")
                 .join("tmp"),
-        }
+            "1111111111111111111111111111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+            "Fetch",
+            "fetch-test",
+        )
     }
 
     fn spawn_http_server(

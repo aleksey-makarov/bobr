@@ -1,13 +1,15 @@
 use mbuild_core::{
-    BuildContext, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo, ResolvedInputs,
-    ResolvedObject, StagedBuildResult, TypedBuilder, fsutil,
+    BuildContext, BuildLogLevel, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo,
+    ResolvedInputs, ResolvedObject, StagedBuildResult, TypedBuilder, fsutil,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+
+#[cfg(test)]
+use std::fs;
 
 const KIND_SOURCE_TREE: &str = "source-tree";
 const KIND_BUILD_SCRIPT: &str = "build-script";
@@ -109,6 +111,14 @@ impl TypedBuilder for BinaryBuilder {
 
         let script_execution = resolve_script_execution(script, sources).map_err(map_error)?;
         let container_execution = resolve_container_execution(image).map_err(map_error)?;
+        cx.log_event(
+            BuildLogLevel::Info,
+            "prepare",
+            format!(
+                "resolved container image, build script, and {} source input(s)",
+                sources.len()
+            ),
+        );
 
         fsutil::recreate_empty_dir_force(&cx.temp_root)
             .map_err(map_fsutil_error)
@@ -124,7 +134,7 @@ impl TypedBuilder for BinaryBuilder {
             sources,
             &output_path,
             current_uid_gid(),
-            &cx.builder_root,
+            cx,
         );
 
         if let Err(error) = build_result {
@@ -236,8 +246,13 @@ fn run_container_build(
     sources: &[ResolvedObject],
     output_path: &Path,
     (uid, gid): (u32, u32),
-    builder_root: &Path,
+    cx: &BuildContext,
 ) -> BResult<()> {
+    cx.log_event(
+        BuildLogLevel::Info,
+        "podman-run",
+        format!("running podman with image '{}'", container.image_ref),
+    );
     let mut process = ProcessCommand::new("podman");
     process
         .arg("run")
@@ -278,7 +293,7 @@ fn run_container_build(
         BinaryError::PodmanFailed(format!("failed to execute podman run: {error}"))
     })?;
     let log_path = write_run_log(
-        builder_root,
+        cx,
         &container.image_ref,
         &script.script_host_path,
         &script.source_input_name,
@@ -286,6 +301,14 @@ fn run_container_build(
     );
 
     if !output.status.success() {
+        cx.log_event_with_details(
+            BuildLogLevel::Error,
+            "command-fail",
+            format!("podman run failed: {}", command_details(&output)),
+            None,
+            log_path.clone(),
+            Map::new(),
+        );
         let log_hint = match &log_path {
             Some(path) => format!(" (log: {})", path.display()),
             None => String::new(),
@@ -305,35 +328,25 @@ fn run_container_build(
         )));
     }
 
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        "podman-run",
+        "podman run completed",
+        None,
+        log_path,
+        Map::new(),
+    );
+
     Ok(())
 }
 
 fn write_run_log(
-    builder_root: &Path,
+    cx: &BuildContext,
     image_ref: &str,
     script_path: &Path,
     source_input_name: &str,
     output: &std::process::Output,
 ) -> Option<PathBuf> {
-    let logs_dir = builder_root.join("logs");
-    if let Err(error) = fs::create_dir_all(&logs_dir) {
-        eprintln!(
-            "warning: failed to create binary logs directory '{}': {}",
-            logs_dir.display(),
-            error
-        );
-        return None;
-    }
-
-    let timestamp = match fsutil::current_epoch_nanos() {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!("warning: failed to get current time for binary log file: {error}");
-            return None;
-        }
-    };
-
-    let run_log_path = logs_dir.join(format!("run-{timestamp}.log"));
     let log_content = format!(
         "image_ref: {}\nscript: {}\nsource_input: {}\nexit_code: {}\nstatus_success: {}\n\n=== stdout ===\n{}\n\n=== stderr ===\n{}\n",
         image_ref,
@@ -348,17 +361,7 @@ fn write_run_log(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-
-    if let Err(error) = fsutil::write_atomic(&run_log_path, &log_content) {
-        eprintln!(
-            "warning: failed to write binary run log '{}': {}",
-            run_log_path.display(),
-            error
-        );
-        return None;
-    }
-
-    Some(run_log_path)
+    cx.write_raw_log("podman-run", &log_content)
 }
 
 fn command_details(output: &std::process::Output) -> String {
@@ -416,15 +419,19 @@ mod tests {
     }
 
     fn build_context(root: &Path) -> BuildContext {
-        BuildContext {
-            workspace_root: root.to_path_buf(),
-            builder_root: root.join(".mbuild").join("builder-state").join("binary"),
-            temp_root: root
-                .join(".mbuild")
+        BuildContext::with_noop_logger(
+            root.to_path_buf(),
+            root.join(".mbuild").join("builder-state").join("binary"),
+            root.join(".mbuild")
                 .join("builder-state")
                 .join("binary")
                 .join("tmp"),
-        }
+            "1111111111111111111111111111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+            "Binary",
+            "binary-test",
+        )
     }
 
     fn install_fake_podman(dir: &Path) {

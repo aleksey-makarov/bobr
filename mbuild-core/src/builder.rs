@@ -4,7 +4,9 @@ use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BuildRequest {
@@ -114,11 +116,202 @@ pub enum ResolvedInputValue {
     Many(Vec<ResolvedObject>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildLogLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+impl fmt::Display for BuildLogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Info => f.write_str("info"),
+            Self::Warn => f.write_str("warn"),
+            Self::Error => f.write_str("error"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
+pub struct BuildLogEvent {
+    pub level: BuildLogLevel,
+    pub phase: String,
+    pub builder: String,
+    pub name: String,
+    pub build_key: BuildKey,
+    pub message: String,
+    pub object_hash: Option<ObjectHash>,
+    pub raw_log_path: Option<PathBuf>,
+    pub details: Map<String, Value>,
+}
+
+pub trait BuildLogger: fmt::Debug + Send + Sync {
+    fn log_event(&self, event: BuildLogEvent);
+
+    fn allocate_raw_log_path(
+        &self,
+        builder: &str,
+        name: &str,
+        build_key: BuildKey,
+        label: &str,
+    ) -> Result<PathBuf, String>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopBuildLogger;
+
+impl BuildLogger for NoopBuildLogger {
+    fn log_event(&self, _event: BuildLogEvent) {}
+
+    fn allocate_raw_log_path(
+        &self,
+        _builder: &str,
+        _name: &str,
+        _build_key: BuildKey,
+        _label: &str,
+    ) -> Result<PathBuf, String> {
+        Err("no build logger configured".to_string())
+    }
+}
+
+#[derive(Clone)]
 pub struct BuildContext {
     pub workspace_root: PathBuf,
     pub builder_root: PathBuf,
     pub temp_root: PathBuf,
+    pub build_key: BuildKey,
+    pub builder_tag: String,
+    pub build_name: String,
+    logger: Arc<dyn BuildLogger>,
+}
+
+impl fmt::Debug for BuildContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BuildContext")
+            .field("workspace_root", &self.workspace_root)
+            .field("builder_root", &self.builder_root)
+            .field("temp_root", &self.temp_root)
+            .field("build_key", &self.build_key)
+            .field("builder_tag", &self.builder_tag)
+            .field("build_name", &self.build_name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BuildContext {
+    pub fn with_noop_logger(
+        workspace_root: PathBuf,
+        builder_root: PathBuf,
+        temp_root: PathBuf,
+        build_key: BuildKey,
+        builder_tag: impl Into<String>,
+        build_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            workspace_root,
+            builder_root,
+            temp_root,
+            build_key,
+            builder_tag: builder_tag.into(),
+            build_name: build_name.into(),
+            logger: Arc::new(NoopBuildLogger),
+        }
+    }
+
+    pub fn with_logger(mut self, logger: Arc<dyn BuildLogger>) -> Self {
+        self.logger = logger;
+        self
+    }
+
+    pub fn log_event(
+        &self,
+        level: BuildLogLevel,
+        phase: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        self.log_event_with_details(level, phase, message, None, None, Map::new());
+    }
+
+    pub fn log_event_with_details(
+        &self,
+        level: BuildLogLevel,
+        phase: impl Into<String>,
+        message: impl Into<String>,
+        object_hash: Option<ObjectHash>,
+        raw_log_path: Option<PathBuf>,
+        details: Map<String, Value>,
+    ) {
+        self.logger.log_event(BuildLogEvent {
+            level,
+            phase: phase.into(),
+            builder: self.builder_tag.clone(),
+            name: self.build_name.clone(),
+            build_key: self.build_key,
+            message: message.into(),
+            object_hash,
+            raw_log_path,
+            details,
+        });
+    }
+
+    pub fn allocate_raw_log_path(&self, label: &str) -> Result<PathBuf, BuilderError> {
+        self.logger
+            .allocate_raw_log_path(&self.builder_tag, &self.build_name, self.build_key, label)
+            .map_err(BuilderError::ExecutionFailed)
+    }
+
+    pub fn write_raw_log(&self, label: &str, content: &str) -> Option<PathBuf> {
+        let path = match self.allocate_raw_log_path(label) {
+            Ok(path) => path,
+            Err(_) => return None,
+        };
+
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            self.log_event(
+                BuildLogLevel::Warn,
+                "log-warning",
+                format!(
+                    "failed to create raw log directory '{}': {error}",
+                    parent.display()
+                ),
+            );
+            return None;
+        }
+
+        if let Err(error) = crate::fsutil::write_atomic(&path, content) {
+            self.log_event(
+                BuildLogLevel::Warn,
+                "log-warning",
+                format!("failed to write raw log '{}': {error}", path.display()),
+            );
+            return None;
+        }
+
+        Some(path)
+    }
+
+    pub fn logger(&self) -> &dyn BuildLogger {
+        self.logger.as_ref()
+    }
+
+    pub fn builder_tag(&self) -> &str {
+        &self.builder_tag
+    }
+
+    pub fn build_name(&self) -> &str {
+        &self.build_name
+    }
+
+    pub fn build_key(&self) -> BuildKey {
+        self.build_key
+    }
+
+    pub fn builder_root(&self) -> &Path {
+        &self.builder_root
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -376,11 +569,16 @@ mod tests {
     #[test]
     fn typed_builder_adapter_decodes_config() {
         let builder = DummyBuilder;
-        let mut cx = BuildContext {
-            workspace_root: PathBuf::from("/tmp/ws"),
-            builder_root: PathBuf::from("/tmp/builder"),
-            temp_root: PathBuf::from("/tmp/tmp"),
-        };
+        let mut cx = BuildContext::with_noop_logger(
+            PathBuf::from("/tmp/ws"),
+            PathBuf::from("/tmp/builder"),
+            PathBuf::from("/tmp/tmp"),
+            "1111111111111111111111111111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+            "Dummy",
+            "dummy",
+        );
 
         let result = builder
             .build_erased(

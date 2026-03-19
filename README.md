@@ -18,6 +18,9 @@ own. Dependency sequencing is expressed in Nickel through monadic combinators.
 A primitive builder action consumes already-realized `Build` values and returns
 one `STORE Build` action.
 
+By default, `mbuild` prints concise live build progress to `stderr`. The final
+result still goes to `stdout` only. Use `--quiet` to suppress live progress.
+
 A realized `Build` value is the canonical build record stored under
 `.mbuild/builds/<build_key>.json`.
 
@@ -27,5 +30,16 @@ separately under stable build keys, and published names resolve through
 metadata refs and object refs. Hashing, build recording, dependency resolution,
 and publication are interpreter details rather than part of the user-facing
 Nickel API.
+
+Each `mbuild` invocation also writes persistent logs:
+
+- one structured event log under `.mbuild/logs/runs/<YYMMDDHHMMSS>-<pid>.jsonl`
+- raw external-command logs under
+  `.mbuild/builder-state/<builder>/logs/<name>/`
+
+The event log records build lifecycle events such as `start`, `cache-hit`,
+`cache-miss`, `run`, `publish`, `done`, and `fail`. Raw logs contain the
+captured stdout/stderr of external commands such as `podman run`,
+`podman import`, or `podman inspect`.
 
 For the architecture documents, start with [`docs/INDEX.md`](./docs/INDEX.md).

@@ -5,7 +5,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use mbuild::store_interpreter::{self, StoreOutcome};
+use mbuild::store_interpreter::{self, StoreOutcome, StoreRunOptions};
 
 type MResult<T> = Result<T, MbuildError>;
 
@@ -46,6 +46,9 @@ impl fmt::Display for MbuildError {
 #[command(name = "mbuild")]
 #[command(about = "mbuild runtime for Nickel STORE recipes")]
 struct Cli {
+    #[arg(long, help = "suppress live build progress on stderr")]
+    quiet: bool,
+
     recipe_file: Option<PathBuf>,
 }
 
@@ -72,8 +75,14 @@ fn run(cli: Cli) -> MResult<()> {
     let recipe_path = cli
         .recipe_file
         .unwrap_or_else(|| PathBuf::from(".mbuild/recipe.ncl"));
-    match store_interpreter::run_store_recipe_in_workspace(&workspace_root, &recipe_path)
-        .map_err(map_runtime_error)?
+    match store_interpreter::run_store_recipe_in_workspace_with_options(
+        &workspace_root,
+        &recipe_path,
+        StoreRunOptions {
+            emit_progress: !cli.quiet,
+        },
+    )
+    .map_err(map_runtime_error)?
     {
         StoreOutcome::Build(published) => {
             println!("build_key: {}", published.record.build_key);

@@ -156,12 +156,15 @@ fn cli_uses_default_dot_mbuild_recipe_ncl() {
         .unwrap();
 
     assert!(output.status.success(), "{:?}", output);
+    let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("build_key: "));
     assert!(stdout.contains("object_hash: "));
     assert!(!stdout.contains("build_key: sha256:"));
     assert!(!stdout.contains("object_hash: sha256:"));
     assert!(stdout.contains("object_path:"));
+    assert!(stderr.contains("[start] Text default-recipe"), "{stderr}");
+    assert!(stderr.contains("[done] Text default-recipe"), "{stderr}");
 }
 
 #[test]
@@ -180,11 +183,33 @@ fn cli_accepts_explicit_recipe_path() {
         .unwrap();
 
     assert!(output.status.success(), "{:?}", output);
+    let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("build_key: "));
     assert!(stdout.contains("object_hash: "));
     assert!(!stdout.contains("build_key: sha256:"));
     assert!(!stdout.contains("object_hash: sha256:"));
+    assert!(stderr.contains("[start] Text custom-recipe"), "{stderr}");
+}
+
+#[test]
+fn cli_quiet_suppresses_live_progress() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("quiet.ncl");
+    write_recipe(
+        &recipe_path,
+        &text_recipe("quiet-recipe", "plain-text", "hello quiet"),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg("--quiet")
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
 }
 
 #[test]

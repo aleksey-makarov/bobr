@@ -1,6 +1,6 @@
 use mbuild_core::{
-    BuildContext, BuilderError, BuilderSpec, ProducerInfo, ResolvedInputs, StagedBuildResult,
-    TypedBuilder, fsutil,
+    BuildContext, BuildLogLevel, BuilderError, BuilderSpec, ProducerInfo, ResolvedInputs,
+    StagedBuildResult, TypedBuilder, fsutil,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -65,6 +65,12 @@ impl TypedBuilder for TextBuilder {
                 "Text builder does not accept input objects".to_string(),
             ));
         }
+
+        cx.log_event(
+            BuildLogLevel::Info,
+            "stage",
+            format!("writing text output of kind '{}'", config.kind),
+        );
 
         fs::create_dir_all(&cx.temp_root).map_err(|error| {
             BuilderError::ExecutionFailed(format!(
@@ -144,11 +150,16 @@ mod tests {
     use tempfile::tempdir;
 
     fn build_context(root: &std::path::Path) -> BuildContext {
-        BuildContext {
-            workspace_root: root.to_path_buf(),
-            builder_root: root.join("text"),
-            temp_root: root.join("text").join("tmp"),
-        }
+        BuildContext::with_noop_logger(
+            root.to_path_buf(),
+            root.join("text"),
+            root.join("text").join("tmp"),
+            "1111111111111111111111111111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+            "Text",
+            "text-test",
+        )
     }
 
     #[test]

@@ -1,11 +1,12 @@
 use crate::builders;
+use crate::logging::{BuildRunLogger, RunOptions};
 use crate::runtime::{
-    RuntimeError, build_to_published, execute_builder_node, map_store_error, to_resolved_object,
-    validate_allowed_kind,
+    RuntimeError, build_to_published, execute_builder_node, log_runtime_event, map_store_error,
+    to_resolved_object, validate_allowed_kind,
 };
 use mbuild_core::{
-    Build, Builder, PublishedBuild, ResolvedInputValue, ResolvedInputs, StoreLayout,
-    load_build_record, publish_refs,
+    Build, BuildLogLevel, BuildLogger, Builder, PublishedBuild, ResolvedInputValue, ResolvedInputs,
+    StoreLayout, load_build_record, publish_refs,
 };
 use nickel_lang_core::{
     cache::{CacheHub, ImportResolver, SourcePath},
@@ -24,6 +25,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 
 pub trait BuilderRegistry {
     fn get_builder(&self, tag: &str) -> Option<&'static dyn Builder>;
@@ -50,6 +52,11 @@ const STORE_BINDING: &str = "store";
 pub enum StoreOutcome {
     Build(PublishedBuild),
     Unit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StoreRunOptions {
+    pub emit_progress: bool,
 }
 
 struct NickelRuntime {
@@ -200,13 +207,31 @@ pub fn run_store_recipe_in_workspace(
     workspace_root: &Path,
     recipe_path: &Path,
 ) -> Result<StoreOutcome, RuntimeError> {
-    run_store_recipe_in_workspace_with_registry(workspace_root, recipe_path, &DEFAULT_REGISTRY)
+    run_store_recipe_in_workspace_with_options(
+        workspace_root,
+        recipe_path,
+        StoreRunOptions::default(),
+    )
+}
+
+pub fn run_store_recipe_in_workspace_with_options(
+    workspace_root: &Path,
+    recipe_path: &Path,
+    options: StoreRunOptions,
+) -> Result<StoreOutcome, RuntimeError> {
+    run_store_recipe_in_workspace_with_registry(
+        workspace_root,
+        recipe_path,
+        &DEFAULT_REGISTRY,
+        options,
+    )
 }
 
 fn run_store_recipe_in_workspace_with_registry(
     workspace_root: &Path,
     recipe_path: &Path,
     registry: &dyn BuilderRegistry,
+    options: StoreRunOptions,
 ) -> Result<StoreOutcome, RuntimeError> {
     if !recipe_path.exists() {
         return Err(RuntimeError::RecipeLoad(format!(
@@ -216,9 +241,25 @@ fn run_store_recipe_in_workspace_with_registry(
     }
 
     let layout = StoreLayout::discover(&workspace_root.join(".mbuild")).map_err(map_store_error)?;
+    let logger: Arc<BuildRunLogger> = Arc::new(
+        BuildRunLogger::new(
+            &layout.root,
+            RunOptions {
+                emit_progress: options.emit_progress,
+            },
+        )
+        .map_err(RuntimeError::Store)?,
+    );
     let (mut runtime, action) = NickelRuntime::from_recipe_file(recipe_path)?;
     let action = runtime.eval_value(action)?;
-    let result = interpret_store(&mut runtime, workspace_root, &layout, registry, action)?;
+    let result = interpret_store(
+        &mut runtime,
+        workspace_root,
+        &layout,
+        logger,
+        registry,
+        action,
+    )?;
     final_store_result_to_outcome(&mut runtime, &layout, result)
 }
 
@@ -245,6 +286,7 @@ fn interpret_store(
     runtime: &mut NickelRuntime,
     workspace_root: &Path,
     layout: &StoreLayout,
+    logger: Arc<BuildRunLogger>,
     registry: &dyn BuilderRegistry,
     value: NickelValue,
 ) -> Result<NickelValue, RuntimeError> {
@@ -264,10 +306,17 @@ fn interpret_store(
                 RuntimeError::InvalidRequest("'Bind requires an argument".to_string())
             })?;
             let action_term = record_access_term(record.clone(), "action");
-            let result = interpret_store(runtime, workspace_root, layout, registry, action_term)?;
+            let result = interpret_store(
+                runtime,
+                workspace_root,
+                layout,
+                logger.clone(),
+                registry,
+                action_term,
+            )?;
             let cont_term = record_access_term(record, "cont");
             let next = mk_app!(cont_term, result);
-            interpret_store(runtime, workspace_root, layout, registry, next)
+            interpret_store(runtime, workspace_root, layout, logger, registry, next)
         }
         "RunBuilder" => {
             let record = action.arg.clone().ok_or_else(|| {
@@ -282,9 +331,39 @@ fn interpret_store(
                 ))
             })?;
             let inputs = resolve_action_inputs(layout, builder, run.inputs)?;
-            let published =
-                execute_builder_node(workspace_root, layout, builder, run.config, inputs)?;
+            let published = execute_builder_node(
+                workspace_root,
+                layout,
+                builder,
+                &run.name,
+                logger.clone(),
+                run.config,
+                inputs,
+            )?;
             publish_refs(layout, &run.name, &published).map_err(map_store_error)?;
+            log_runtime_event(
+                logger.as_ref(),
+                BuildLogLevel::Info,
+                "publish",
+                builder.spec().tag,
+                &run.name,
+                published.record.build_key,
+                format!(
+                    "published '{}' -> {}",
+                    run.name, published.record.object_hash
+                ),
+            );
+            logger.as_ref().log_event(mbuild_core::BuildLogEvent {
+                level: BuildLogLevel::Info,
+                phase: "done".to_string(),
+                builder: builder.spec().tag.to_string(),
+                name: run.name.clone(),
+                build_key: published.record.build_key,
+                message: "builder node completed".to_string(),
+                object_hash: Some(published.record.object_hash),
+                raw_log_path: None,
+                details: Map::new(),
+            });
             build_to_nickel_value(&published.record)
         }
         other => Err(RuntimeError::InvalidRequest(format!(
@@ -699,13 +778,29 @@ mod tests {
     ) -> Result<Build, RuntimeError> {
         let layout =
             StoreLayout::discover(&workspace_root.join(".mbuild")).map_err(map_store_error)?;
+        let logger = Arc::new(
+            BuildRunLogger::new(
+                &layout.root,
+                RunOptions {
+                    emit_progress: false,
+                },
+            )
+            .map_err(RuntimeError::Store)?,
+        );
         let (mut runtime, action) = NickelRuntime::from_source("<test>", source)?;
         let action = runtime.eval_value(action).map_err(|error| {
             RuntimeError::RecipeLoad(format!(
                 "failed to evaluate inline Nickel test program: {error}"
             ))
         })?;
-        let result = interpret_store(&mut runtime, workspace_root, &layout, registry, action)?;
+        let result = interpret_store(
+            &mut runtime,
+            workspace_root,
+            &layout,
+            logger,
+            registry,
+            action,
+        )?;
         deserialize_nickel_value::<Build>(&mut runtime, result, "final STORE result as Build")
     }
 
