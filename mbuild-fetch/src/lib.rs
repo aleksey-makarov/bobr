@@ -908,14 +908,12 @@ mod tests {
         inputs.insert(
             "unexpected",
             ResolvedInputValue::One(mbuild_core::ResolvedObject {
-                object_hash:
-                    "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-                        .parse::<ObjectHash>()
-                        .unwrap(),
-                build_key:
-                    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-                        .parse::<BuildKey>()
-                        .unwrap(),
+                object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                    .parse::<ObjectHash>()
+                    .unwrap(),
+                build_key: "2222222222222222222222222222222222222222222222222222222222222222"
+                    .parse::<BuildKey>()
+                    .unwrap(),
                 kind: "source-tree".to_string(),
                 attrs: Map::new(),
                 object_path: PathBuf::from("/tmp/input"),

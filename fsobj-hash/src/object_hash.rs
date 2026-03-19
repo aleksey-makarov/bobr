@@ -17,15 +17,10 @@ impl ObjectHash {
         }
         out
     }
-
-    pub fn to_prefixed_hex(&self) -> String {
-        format!("sha256:{}", self.to_hex())
-    }
 }
 
 impl fmt::Display for ObjectHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("sha256:")?;
         for byte in self.0 {
             write!(f, "{byte:02x}")?;
         }
@@ -35,9 +30,7 @@ impl fmt::Display for ObjectHash {
 
 impl fmt::Debug for ObjectHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ObjectHash")
-            .field(&self.to_prefixed_hex())
-            .finish()
+        f.debug_tuple("ObjectHash").field(&self.to_hex()).finish()
     }
 }
 
@@ -45,13 +38,10 @@ impl FromStr for ObjectHash {
     type Err = ParseObjectHashError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let hex = s
-            .strip_prefix("sha256:")
-            .ok_or(ParseObjectHashError::MissingPrefix)?;
-        if hex.len() != 64 {
+        if s.len() != 64 {
             return Err(ParseObjectHashError::InvalidLength);
         }
-        if !hex
+        if !s
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
@@ -59,7 +49,7 @@ impl FromStr for ObjectHash {
         }
 
         let mut bytes = [0u8; 32];
-        for (idx, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        for (idx, chunk) in s.as_bytes().chunks_exact(2).enumerate() {
             let hi = decode_nibble(chunk[0]).ok_or(ParseObjectHashError::InvalidHex)?;
             let lo = decode_nibble(chunk[1]).ok_or(ParseObjectHashError::InvalidHex)?;
             bytes[idx] = (hi << 4) | lo;
@@ -78,7 +68,6 @@ fn decode_nibble(byte: u8) -> Option<u8> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseObjectHashError {
-    MissingPrefix,
     InvalidLength,
     InvalidHex,
 }
@@ -86,7 +75,6 @@ pub enum ParseObjectHashError {
 impl fmt::Display for ParseObjectHashError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingPrefix => f.write_str("missing sha256: prefix"),
             Self::InvalidLength => f.write_str("hash must contain 64 lowercase hex digits"),
             Self::InvalidHex => f.write_str("hash must contain only lowercase hex digits"),
         }

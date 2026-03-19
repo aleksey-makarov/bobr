@@ -860,10 +860,10 @@ mod tests {
         fs::create_dir_all(&object_path).unwrap();
         fs::write(object_path.join("README.txt"), b"hello image\n").unwrap();
         ResolvedObject {
-            object_hash: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+            object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
                 .parse::<ObjectHash>()
                 .unwrap(),
-            build_key: "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+            build_key: "2222222222222222222222222222222222222222222222222222222222222222"
                 .parse::<BuildKey>()
                 .unwrap(),
             kind: KIND_BINARY_OUTPUT.to_string(),
@@ -884,10 +884,10 @@ mod tests {
             )),
         );
         ResolvedObject {
-            object_hash: "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+            object_hash: "3333333333333333333333333333333333333333333333333333333333333333"
                 .parse::<ObjectHash>()
                 .unwrap(),
-            build_key: "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+            build_key: "4444444444444444444444444444444444444444444444444444444444444444"
                 .parse::<BuildKey>()
                 .unwrap(),
             kind: KIND_CONTAINER_IMAGE.to_string(),

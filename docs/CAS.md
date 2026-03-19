@@ -34,6 +34,13 @@ participate in object identity or build-record identity.
 `builds/<build_key>.json` stores one realized `Build` value. The language-level
 `Build` value and the on-disk build record have the same shape.
 
+Internal CAS identifiers use bare lowercase hex:
+
+- `object_hash` is a 64-character lowercase hex string
+- `build_key` is a 64-character lowercase hex string
+- algorithm-qualified strings such as `sha256:...` remain only for external
+  digests and declared fetch hashes
+
 `meta-refs/<name>.json` is a human-facing symlink to the selected build record.
 
 `object-refs/<name>` is a human-facing symlink to the selected payload object.
@@ -95,14 +102,14 @@ Example shape:
 ```json
 {
   "schema": "mbuild-build-v1",
-  "build_key": "sha256:...",
-  "object_hash": "sha256:...",
+  "build_key": "0123456789abcdef...",
+  "object_hash": "fedcba9876543210...",
   "kind": "build-script|source-tree|fetched-file|binary-output|container-image|...",
   "producer": {
     "builder": "text|fetch|binary|image|container-image"
   },
   "input_build_keys": [
-    "sha256:..."
+    "89abcdef01234567..."
   ],
   "attrs": {}
 }

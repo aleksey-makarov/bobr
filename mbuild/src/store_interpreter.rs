@@ -101,9 +101,9 @@ impl NickelRuntime {
         let mut vm_ctxt = VmContext::new(cache, std::io::sink(), NullReporter {});
 
         Self::prepare_store_binding(&mut vm_ctxt, store_id)?;
-        let prepared_main = vm_ctxt
-            .prepare_eval(main_id)
-            .map_err(|error| Self::recipe_error_from_files(vm_ctxt.import_resolver.files().clone(), error))?;
+        let prepared_main = vm_ctxt.prepare_eval(main_id).map_err(|error| {
+            Self::recipe_error_from_files(vm_ctxt.import_resolver.files().clone(), error)
+        })?;
 
         let mut initial_env = vm_ctxt.import_resolver.mk_eval_env(&mut vm_ctxt.cache);
         let store_term = vm_ctxt
@@ -139,16 +139,22 @@ impl NickelRuntime {
         vm_ctxt
             .import_resolver
             .prepare_stdlib(&mut vm_ctxt.pos_table)
-            .map_err(|error| Self::recipe_error_from_files(vm_ctxt.import_resolver.files().clone(), error))?;
+            .map_err(|error| {
+                Self::recipe_error_from_files(vm_ctxt.import_resolver.files().clone(), error)
+            })?;
         vm_ctxt
             .import_resolver
             .prepare(&mut vm_ctxt.pos_table, store_id)
-            .map_err(|error| Self::recipe_error_from_files(vm_ctxt.import_resolver.files().clone(), error))?;
+            .map_err(|error| {
+                Self::recipe_error_from_files(vm_ctxt.import_resolver.files().clone(), error)
+            })?;
         vm_ctxt
             .import_resolver
             .closurize(&mut vm_ctxt.cache, store_id)
             .map_err(|error| {
-                RuntimeError::RecipeLoad(format!("failed to closurize embedded STORE API: {error:?}"))
+                RuntimeError::RecipeLoad(format!(
+                    "failed to closurize embedded STORE API: {error:?}"
+                ))
             })?;
 
         let (mut slice, asts) = vm_ctxt.import_resolver.split_asts();
@@ -161,7 +167,10 @@ impl NickelRuntime {
         Ok(())
     }
 
-    fn recipe_error_from_files(files: nickel_lang_core::files::Files, error: NickelError) -> RuntimeError {
+    fn recipe_error_from_files(
+        files: nickel_lang_core::files::Files,
+        error: NickelError,
+    ) -> RuntimeError {
         RuntimeError::RecipeDiagnostic { files, error }
     }
 

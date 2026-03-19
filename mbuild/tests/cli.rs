@@ -157,8 +157,10 @@ fn cli_uses_default_dot_mbuild_recipe_ncl() {
 
     assert!(output.status.success(), "{:?}", output);
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("build_key: sha256:"));
-    assert!(stdout.contains("object_hash: sha256:"));
+    assert!(stdout.contains("build_key: "));
+    assert!(stdout.contains("object_hash: "));
+    assert!(!stdout.contains("build_key: sha256:"));
+    assert!(!stdout.contains("object_hash: sha256:"));
     assert!(stdout.contains("object_path:"));
 }
 
@@ -179,8 +181,10 @@ fn cli_accepts_explicit_recipe_path() {
 
     assert!(output.status.success(), "{:?}", output);
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("build_key: sha256:"));
-    assert!(stdout.contains("object_hash: sha256:"));
+    assert!(stdout.contains("build_key: "));
+    assert!(stdout.contains("object_hash: "));
+    assert!(!stdout.contains("build_key: sha256:"));
+    assert!(!stdout.contains("object_hash: sha256:"));
 }
 
 #[test]
@@ -260,8 +264,9 @@ fn cli_executes_container_image_recipe_with_fake_podman() {
 
     let refs_dir = workspace.path().join(".mbuild").join("object-refs");
     let published_path = fs::read_link(refs_dir.join("bootstrap-image")).unwrap();
+    assert!(published_path.to_string_lossy().contains("../objects/"));
     assert!(
-        published_path
+        !published_path
             .to_string_lossy()
             .contains("../objects/sha256:")
     );

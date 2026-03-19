@@ -116,8 +116,8 @@ Conceptually, a realized value has the same shape as one build record:
 
 ```nickel
 {
-  build_key = "sha256:...",
-  object_hash = "sha256:...",
+  build_key = "0123456789abcdef...",
+  object_hash = "fedcba9876543210...",
   kind = "container-image",
   attrs = {
     image_ref = "docker.io/...@sha256:...",

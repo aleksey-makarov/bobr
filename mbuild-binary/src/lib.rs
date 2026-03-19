@@ -487,23 +487,23 @@ mod tests {
         ResolvedObject {
             object_hash: match kind {
                 KIND_CONTAINER_IMAGE => {
-                    "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                    "1111111111111111111111111111111111111111111111111111111111111111"
                 }
                 KIND_BUILD_SCRIPT => {
-                    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                    "2222222222222222222222222222222222222222222222222222222222222222"
                 }
-                _ => "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                _ => "3333333333333333333333333333333333333333333333333333333333333333",
             }
             .parse::<ObjectHash>()
             .unwrap(),
             build_key: match kind {
                 KIND_CONTAINER_IMAGE => {
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 }
                 KIND_BUILD_SCRIPT => {
-                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 }
-                _ => "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                _ => "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             }
             .parse::<BuildKey>()
             .unwrap(),

@@ -36,15 +36,10 @@ impl BuildKey {
         }
         out
     }
-
-    pub fn to_prefixed_hex(&self) -> String {
-        format!("sha256:{}", self.to_hex())
-    }
 }
 
 impl fmt::Display for BuildKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("sha256:")?;
         for byte in self.0 {
             write!(f, "{byte:02x}")?;
         }
@@ -54,9 +49,7 @@ impl fmt::Display for BuildKey {
 
 impl fmt::Debug for BuildKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("BuildKey")
-            .field(&self.to_prefixed_hex())
-            .finish()
+        f.debug_tuple("BuildKey").field(&self.to_hex()).finish()
     }
 }
 
@@ -81,7 +74,6 @@ impl<'de> Deserialize<'de> for BuildKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseBuildKeyError {
-    MissingPrefix,
     InvalidLength,
     InvalidHex,
 }
@@ -89,7 +81,6 @@ pub enum ParseBuildKeyError {
 impl fmt::Display for ParseBuildKeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingPrefix => f.write_str("missing sha256: prefix"),
             Self::InvalidLength => f.write_str("hash must contain 64 lowercase hex digits"),
             Self::InvalidHex => f.write_str("hash must contain only lowercase hex digits"),
         }
@@ -102,13 +93,10 @@ impl FromStr for BuildKey {
     type Err = ParseBuildKeyError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let hex = s
-            .strip_prefix("sha256:")
-            .ok_or(ParseBuildKeyError::MissingPrefix)?;
-        if hex.len() != 64 {
+        if s.len() != 64 {
             return Err(ParseBuildKeyError::InvalidLength);
         }
-        if !hex
+        if !s
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
@@ -116,7 +104,7 @@ impl FromStr for BuildKey {
         }
 
         let mut bytes = [0u8; 32];
-        for (idx, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
+        for (idx, chunk) in s.as_bytes().chunks_exact(2).enumerate() {
             let hi = decode_nibble(chunk[0]).ok_or(ParseBuildKeyError::InvalidHex)?;
             let lo = decode_nibble(chunk[1]).ok_or(ParseBuildKeyError::InvalidHex)?;
             bytes[idx] = (hi << 4) | lo;
@@ -261,9 +249,7 @@ pub fn load_build_record(
     layout: &StoreLayout,
     build_key: BuildKey,
 ) -> Result<Option<Build>, CasError> {
-    let build_path = layout
-        .builds
-        .join(format!("{}.json", build_key.to_prefixed_hex()));
+    let build_path = layout.builds.join(format!("{}.json", build_key.to_hex()));
     if !build_path.exists() {
         return Ok(None);
     }
@@ -300,7 +286,7 @@ pub fn materialize_build(
     write_build_record(layout, &record)?;
 
     Ok(PublishedBuild {
-        object_path: layout.objects.join(object_hash.to_prefixed_hex()),
+        object_path: layout.objects.join(object_hash.to_hex()),
         record,
     })
 }
@@ -315,26 +301,23 @@ pub fn publish_refs(
     let object_ref_path = layout.object_refs.join(output_name);
     let object_ref_target = PathBuf::from("..")
         .join(OBJECTS_DIR)
-        .join(published.record.object_hash.to_prefixed_hex());
+        .join(published.record.object_hash.to_hex());
     replace_symlink(&object_ref_target, &object_ref_path)?;
 
     let meta_ref_path = layout.meta_refs.join(format!("{output_name}.json"));
-    let meta_ref_target = PathBuf::from("..").join(BUILDS_DIR).join(format!(
-        "{}.json",
-        published.record.build_key.to_prefixed_hex()
-    ));
+    let meta_ref_target = PathBuf::from("..")
+        .join(BUILDS_DIR)
+        .join(format!("{}.json", published.record.build_key.to_hex()));
     replace_symlink(&meta_ref_target, &meta_ref_path)?;
     Ok(())
 }
 
 pub fn object_path(layout: &StoreLayout, object_hash: ObjectHash) -> PathBuf {
-    layout.objects.join(object_hash.to_prefixed_hex())
+    layout.objects.join(object_hash.to_hex())
 }
 
 pub fn build_path(layout: &StoreLayout, build_key: BuildKey) -> PathBuf {
-    layout
-        .builds
-        .join(format!("{}.json", build_key.to_prefixed_hex()))
+    layout.builds.join(format!("{}.json", build_key.to_hex()))
 }
 
 pub fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectHash, CasError> {
@@ -344,7 +327,7 @@ pub fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectH
             staged_path.display()
         ))
     })?;
-    let destination = layout.objects.join(object_hash.to_prefixed_hex());
+    let destination = layout.objects.join(object_hash.to_hex());
     if destination.exists() {
         remove_path_force(staged_path)?;
         return Ok(object_hash);
@@ -686,18 +669,15 @@ mod tests {
 
     #[test]
     fn canonical_json_hash_is_stable_across_key_order() {
-        let build_key = parse_build_key(
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        );
+        let build_key =
+            parse_build_key("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
         let mut attrs_a = Map::new();
         attrs_a.insert("z".to_string(), Value::from(1));
         attrs_a.insert("a".to_string(), Value::from(true));
         let left = build_json_value(
             build_key,
             "text",
-            parse_object_hash(
-                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-            ),
+            parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111"),
             "text",
             &[],
             attrs_a,
@@ -709,9 +689,7 @@ mod tests {
         let right = build_json_value(
             build_key,
             "text",
-            parse_object_hash(
-                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-            ),
+            parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111"),
             "text",
             &[],
             attrs_b,
@@ -762,23 +740,18 @@ mod tests {
 
         assert_eq!(first.object_hash, second.object_hash);
         assert_eq!(first.build_key, second.build_key);
-        assert!(
-            layout
-                .objects
-                .join(first.object_hash.to_prefixed_hex())
-                .exists()
-        );
+        assert!(layout.objects.join(first.object_hash.to_hex()).exists());
         assert!(
             layout
                 .builds
-                .join(format!("{}.json", second.build_key.to_prefixed_hex()))
+                .join(format!("{}.json", second.build_key.to_hex()))
                 .exists()
         );
         assert_eq!(
             fs::read_link(layout.meta_refs.join("hello-copy.json")).unwrap(),
             PathBuf::from("..")
                 .join(BUILDS_DIR)
-                .join(format!("{}.json", second.build_key.to_prefixed_hex()))
+                .join(format!("{}.json", second.build_key.to_hex()))
         );
     }
 
@@ -797,14 +770,14 @@ mod tests {
                     "Text",
                     json!({ "kind": "build-script", "source": "echo hi\n" }),
                     &[parse_build_key(
-                        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                        "1111111111111111111111111111111111111111111111111111111111111111",
                     )],
                 ),
                 staged_path: stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![parse_build_key(
-                    "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                    "1111111111111111111111111111111111111111111111111111111111111111",
                 )],
                 attrs: Map::from_iter([
                     ("source_bytes".to_string(), Value::from(8)),
@@ -816,7 +789,7 @@ mod tests {
 
         let build_path = layout
             .builds
-            .join(format!("{}.json", published.build_key.to_prefixed_hex()));
+            .join(format!("{}.json", published.build_key.to_hex()));
         assert!(build_path.exists());
 
         let build_json: Value = serde_json::from_slice(&fs::read(&build_path).unwrap()).unwrap();
@@ -843,8 +816,7 @@ mod tests {
         assert_eq!(
             build_json["input_build_keys"],
             Value::Array(vec![Value::String(
-                "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-                    .to_string(),
+                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
             )])
         );
         assert_eq!(build_json["attrs"]["source_bytes"], Value::from(8));
@@ -854,13 +826,13 @@ mod tests {
             fs::read_link(layout.meta_refs.join("script.json")).unwrap(),
             PathBuf::from("..")
                 .join(BUILDS_DIR)
-                .join(format!("{}.json", published.build_key.to_prefixed_hex()))
+                .join(format!("{}.json", published.build_key.to_hex()))
         );
         assert_eq!(
             fs::read_link(layout.object_refs.join("script")).unwrap(),
             PathBuf::from("..")
                 .join(OBJECTS_DIR)
-                .join(published.object_hash.to_prefixed_hex())
+                .join(published.object_hash.to_hex())
         );
     }
 
@@ -1046,13 +1018,13 @@ mod tests {
             fs::read_link(layout.object_refs.join("shared")).unwrap(),
             PathBuf::from("..")
                 .join(OBJECTS_DIR)
-                .join(second.object_hash.to_prefixed_hex())
+                .join(second.object_hash.to_hex())
         );
         assert_eq!(
             fs::read_link(layout.meta_refs.join("shared.json")).unwrap(),
             PathBuf::from("..")
                 .join(BUILDS_DIR)
-                .join(format!("{}.json", second.build_key.to_prefixed_hex()))
+                .join(format!("{}.json", second.build_key.to_hex()))
         );
     }
 
@@ -1109,13 +1081,13 @@ mod tests {
         )
         .unwrap();
 
-        let object_path = layout.objects.join(published.object_hash.to_prefixed_hex());
+        let object_path = layout.objects.join(published.object_hash.to_hex());
         assert!(object_path.is_dir());
         assert!(object_path.join("bin").join("tool").exists());
         assert!(
             layout
                 .builds
-                .join(format!("{}.json", published.build_key.to_prefixed_hex()))
+                .join(format!("{}.json", published.build_key.to_hex()))
                 .exists()
         );
     }
@@ -1165,12 +1137,10 @@ mod tests {
     fn build_key_changes_when_input_build_key_order_changes() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
-        let key_a = parse_build_key(
-            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-        );
-        let key_b = parse_build_key(
-            "sha256:2222222222222222222222222222222222222222222222222222222222222222",
-        );
+        let key_a =
+            parse_build_key("1111111111111111111111111111111111111111111111111111111111111111");
+        let key_b =
+            parse_build_key("2222222222222222222222222222222222222222222222222222222222222222");
 
         let first_stage = temp.path().join("first.txt");
         fs::write(&first_stage, b"hello").unwrap();
@@ -1235,14 +1205,13 @@ mod tests {
 
     #[test]
     fn build_key_display_and_parse_roundtrip() {
-        let key = BuildKey::from_str(
-            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .unwrap();
+        let key =
+            BuildKey::from_str("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .unwrap();
 
         assert_eq!(
             key.to_string(),
-            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
         assert_eq!(
             BuildKey::from_str(&key.to_string()).unwrap().as_bytes(),
