@@ -12,6 +12,7 @@ use std::process::Command as ProcessCommand;
 use std::fs;
 
 const KIND_SOURCE_TREE: &str = "source-tree";
+const KIND_FETCHED_FILE: &str = "fetched-file";
 const KIND_BUILD_SCRIPT: &str = "build-script";
 const KIND_CONTAINER_IMAGE: &str = "container-image";
 const OUTPUT_DIR_NAME: &str = "out";
@@ -77,7 +78,7 @@ static BINARY_INPUTS: &[InputSlot] = &[
     InputSlot {
         name: "sources",
         arity: InputArity::Many,
-        allowed_kinds: &[KIND_SOURCE_TREE],
+        allowed_kinds: &[KIND_SOURCE_TREE, KIND_FETCHED_FILE],
     },
 ];
 
@@ -105,7 +106,7 @@ impl TypedBuilder for BinaryBuilder {
         let sources = inputs.many("sources")?;
         if sources.is_empty() {
             return Err(BuilderError::ExecutionFailed(
-                "Binary builder requires at least one source-tree input".to_string(),
+                "Binary builder requires at least one source input".to_string(),
             ));
         }
 
@@ -198,9 +199,19 @@ fn resolve_script_execution(
             script.object_path.display()
         )));
     }
-    if let Some(source) = sources.iter().find(|source| !source.object_path.is_dir()) {
+    if !sources[0].object_path.is_dir() {
         return Err(BinaryError::InputResolutionFailed(format!(
-            "source-tree input must resolve to a directory: {}",
+            "first source input must resolve to a directory: {}",
+            sources[0].object_path.display()
+        )));
+    }
+    if let Some(source) = sources
+        .iter()
+        .skip(1)
+        .find(|source| !source.object_path.is_dir() && !source.object_path.is_file())
+    {
+        return Err(BinaryError::InputResolutionFailed(format!(
+            "additional source inputs must resolve to directories or files: {}",
             source.object_path.display()
         )));
     }
@@ -263,11 +274,12 @@ fn run_container_build(
         .arg(format!("{}:{}", uid, gid));
 
     for (index, source) in sources.iter().enumerate() {
-        process.arg("--volume").arg(format!(
-            "{}:/in/sources{}:O",
-            source.object_path.display(),
-            index
-        ));
+        let mount_spec = if source.object_path.is_dir() {
+            format!("{}:/in/sources{}:O", source.object_path.display(), index)
+        } else {
+            format!("{}:/in/sources{}:ro", source.object_path.display(), index)
+        };
+        process.arg("--volume").arg(mount_spec);
     }
 
     process.arg("--volume").arg(format!(
@@ -557,6 +569,16 @@ mod tests {
         inputs
     }
 
+    fn sample_inputs_with_aux_file(root: &Path) -> ResolvedInputs {
+        let mut inputs = sample_inputs(root);
+        let mut sources = match inputs.many("sources").unwrap().to_vec() {
+            values => values,
+        };
+        sources.push(resolved_object(root, KIND_FETCHED_FILE, "patch.diff", Map::new()));
+        inputs.insert("sources", ResolvedInputValue::Many(sources));
+        inputs
+    }
+
     #[test]
     fn binary_builder_runs_fake_podman_and_materializes_output_dir() {
         with_fake_podman(|| {
@@ -586,6 +608,28 @@ mod tests {
                 fs::read_to_string(result.staged_path.join("image-ref.txt")).unwrap(),
                 "docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
             );
+        });
+    }
+
+    #[test]
+    fn binary_builder_accepts_fetched_file_as_auxiliary_source() {
+        with_fake_podman(|| {
+            let temp = tempdir().unwrap();
+            let mut cx = build_context(temp.path());
+            let result = BinaryBuilder
+                .build_typed(
+                    BinaryConfig {
+                        kind: "binary-output".to_string(),
+                        optimize: "size".to_string(),
+                    },
+                    sample_inputs_with_aux_file(temp.path()),
+                    &mut cx,
+                )
+                .unwrap();
+
+            assert_eq!(result.kind, "binary-output");
+            assert_eq!(result.input_build_keys.len(), 4);
+            assert!(result.staged_path.is_dir());
         });
     }
 

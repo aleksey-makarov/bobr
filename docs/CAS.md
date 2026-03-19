@@ -259,6 +259,12 @@ Rust builders consume:
 - resolved input payload paths
 - resolved input `Build` records for semantic validation
 
+For the `binary` builder specifically:
+
+- the first `sources` entry is the primary source tree
+- additional `sources` entries may be either source trees or fetched files
+- auxiliary fetched files are exposed to the build script under `/in/sourcesN`
+
 Rust builders produce:
 
 - a payload that becomes one object
