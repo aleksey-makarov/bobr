@@ -3,7 +3,6 @@
 ## Minimal Self-Contained Recipe
 
 ```nickel
-let store = import "./store.ncl" in
 store.text "hello-script" {
   kind = "build-script",
   source = "#!/usr/bin/env bash\necho hello\n",
@@ -16,7 +15,6 @@ file to that action and interprets it directly.
 ## Monadic Dependency Sequencing
 
 ```nickel
-let store = import "./store.ncl" in
 store.bind (store.fetch "bash-src-5.3" {
   url = ["https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz"],
   hash = "sha256:...",
@@ -47,7 +45,6 @@ Because continuations receive realized `Build` values, Nickel code can inspect
 builder-generated metadata before constructing the next action:
 
 ```nickel
-let store = import "./store.ncl" in
 store.bind (store.container_image "bootstrap-image" {
   image = "docker.io/library/buildpack-deps:bookworm",
   digest = "sha256:...",

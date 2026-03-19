@@ -207,7 +207,6 @@ Names are consumed only by the interpreter for implicit publication.
 Conceptually, a recipe may evaluate to a STORE program like:
 
 ```nickel
-let store = import "./store.ncl" in
 store.bind (store.fetch "bash-src-5.3" { ... }) (fun bashSrc =>
 store.bind (store.text "buildscript-bash-stage2" { ... }) (fun bashScript =>
 store.bind (store.container_image "bootstrap-image" { ... }) (fun bootstrapImage =>

@@ -1,4 +1,3 @@
-let store = import "./store.ncl" in
 store.bind (store.fetch "source" {
   url = "__URL__",
   hash = "__SOURCE_HASH__",

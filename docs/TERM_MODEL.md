@@ -187,7 +187,6 @@ For one primitive builder action, the interpreter:
 Consider a recipe entry file like:
 
 ```nickel
-let store = import "./store.ncl" in
 store.bind (store.fetch "bash-src-5.3" { ... }) (fun bashSrc =>
 store.bind (store.text "buildscript-bash-stage2" { ... }) (fun bashScript =>
 store.bind (store.container_image "bootstrap-image" { ... }) (fun bootstrapImage =>

@@ -13,7 +13,6 @@ use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
 
-const STORE_LIB: &str = include_str!("../ncl/store.ncl");
 const STORE_RECIPE_TEMPLATE: &str = include_str!("assets/store_recipe_full.ncl");
 
 fn env_lock() -> &'static Mutex<()> {
@@ -111,7 +110,6 @@ fn drain_request(stream: &mut TcpStream) {
 
 fn write_store_recipe(workspace: &Path, recipe_source: &str) -> PathBuf {
     let recipe_path = workspace.join("recipe.ncl");
-    fs::write(workspace.join("store.ncl"), STORE_LIB).unwrap();
     fs::write(&recipe_path, recipe_source).unwrap();
     recipe_path
 }

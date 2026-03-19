@@ -9,7 +9,6 @@ use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
 
-const STORE_LIB: &str = include_str!("../ncl/store.ncl");
 const STORE_RECIPE_TEMPLATE: &str = include_str!("assets/store_recipe_full.ncl");
 
 fn nickel_string(value: &str) -> String {
@@ -19,14 +18,13 @@ fn nickel_string(value: &str) -> String {
 fn write_recipe(recipe_path: &std::path::Path, recipe_source: &str) {
     if let Some(parent) = recipe_path.parent() {
         fs::create_dir_all(parent).unwrap();
-        fs::write(parent.join("store.ncl"), STORE_LIB).unwrap();
     }
     fs::write(recipe_path, recipe_source).unwrap();
 }
 
 fn text_recipe(name: &str, kind: &str, source: &str) -> String {
     format!(
-        "let store = import \"./store.ncl\" in\nstore.text {} {{\n  kind = {},\n  source = {},\n}}\n",
+        "store.text {} {{\n  kind = {},\n  source = {},\n}}\n",
         nickel_string(name),
         nickel_string(kind),
         nickel_string(source),
@@ -35,7 +33,7 @@ fn text_recipe(name: &str, kind: &str, source: &str) -> String {
 
 fn container_image_recipe(name: &str, image: &str, digest: &str) -> String {
     format!(
-        "let store = import \"./store.ncl\" in\nstore.container_image {} {{\n  image = {},\n  digest = {},\n}}\n",
+        "store.container_image {} {{\n  image = {},\n  digest = {},\n}}\n",
         nickel_string(name),
         nickel_string(image),
         nickel_string(digest),
@@ -44,7 +42,7 @@ fn container_image_recipe(name: &str, image: &str, digest: &str) -> String {
 
 fn binary_recipe(name: &str, image: &str, digest: &str, source_url: &str, source_hash: &str) -> String {
     format!(
-        "let store = import \"./store.ncl\" in\nstore.bind (store.fetch \"source\" {{\n  url = {},\n  hash = {},\n  unpack = true,\n}}) (fun source =>\nstore.bind (store.text \"script\" {{\n  kind = \"build-script\",\n  source = \"#!/bin/sh\\nexit 0\\n\",\n}}) (fun script =>\nstore.bind (store.container_image \"base-image\" {{\n  image = {},\n  digest = {},\n}}) (fun image =>\nstore.binary {} {{\n  kind = \"binary-output\",\n  optimize = \"size\",\n}} image script [source])))\n",
+        "store.bind (store.fetch \"source\" {{\n  url = {},\n  hash = {},\n  unpack = true,\n}}) (fun source =>\nstore.bind (store.text \"script\" {{\n  kind = \"build-script\",\n  source = \"#!/bin/sh\\nexit 0\\n\",\n}}) (fun script =>\nstore.bind (store.container_image \"base-image\" {{\n  image = {},\n  digest = {},\n}}) (fun image =>\nstore.binary {} {{\n  kind = \"binary-output\",\n  optimize = \"size\",\n}} image script [source])))\n",
         nickel_string(source_url),
         nickel_string(source_hash),
         nickel_string(image),
@@ -55,7 +53,7 @@ fn binary_recipe(name: &str, image: &str, digest: &str, source_url: &str, source
 
 fn wrong_kind_binary_recipe(name: &str) -> String {
     format!(
-        "let store = import \"./store.ncl\" in\nstore.bind (store.text \"not-image\" {{\n  kind = \"plain-text\",\n  source = \"not an image\",\n}}) (fun image =>\nstore.bind (store.text \"script\" {{\n  kind = \"build-script\",\n  source = \"#!/bin/sh\\nexit 0\\n\",\n}}) (fun script =>\nstore.binary {} {{\n  kind = \"binary-output\",\n  optimize = \"size\",\n}} image script []))\n",
+        "store.bind (store.text \"not-image\" {{\n  kind = \"plain-text\",\n  source = \"not an image\",\n}}) (fun image =>\nstore.bind (store.text \"script\" {{\n  kind = \"build-script\",\n  source = \"#!/bin/sh\\nexit 0\\n\",\n}}) (fun script =>\nstore.binary {} {{\n  kind = \"binary-output\",\n  optimize = \"size\",\n}} image script []))\n",
         nickel_string(name),
     )
 }

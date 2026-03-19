@@ -15,6 +15,8 @@ use nickel_lang_core::{
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
+use std::fs;
+use std::io::Cursor;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -36,6 +38,7 @@ impl BuilderRegistry for DefaultBuilderRegistry {
 }
 
 static DEFAULT_REGISTRY: DefaultBuilderRegistry = DefaultBuilderRegistry;
+const STORE_LIB: &str = include_str!("../ncl/store.ncl");
 
 #[derive(Debug)]
 pub enum StoreOutcome {
@@ -71,7 +74,15 @@ fn run_store_recipe_in_workspace_with_registry(
     }
 
     let layout = StoreLayout::discover(&workspace_root.join(".mbuild")).map_err(map_store_error)?;
-    let mut program: Program<CacheImpl> = Program::new_from_file(
+    let recipe_source = fs::read_to_string(recipe_path).map_err(|error| {
+        RuntimeError::RecipeLoad(format!(
+            "failed to read Nickel recipe '{}': {error}",
+            recipe_path.display()
+        ))
+    })?;
+    let wrapped_source = wrap_recipe_with_store_api(&recipe_source);
+    let mut program: Program<CacheImpl> = Program::new_from_source(
+        Cursor::new(wrapped_source),
         recipe_path,
         std::io::sink(),
         NullReporter {},
@@ -91,6 +102,10 @@ fn run_store_recipe_in_workspace_with_registry(
     })?;
     let result = interpret_store(&mut program, workspace_root, &layout, registry, action)?;
     final_store_result_to_outcome(&mut program, &layout, result)
+}
+
+fn wrap_recipe_with_store_api(recipe_source: &str) -> String {
+    format!("let store = ({STORE_LIB}) in\n(\n{recipe_source}\n)\n")
 }
 
 fn final_store_result_to_outcome(
