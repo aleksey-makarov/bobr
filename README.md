@@ -38,8 +38,10 @@ Each `mbuild` invocation also writes persistent logs:
   `.mbuild/builder-state/<builder>/logs/<name>/`
 
 The event log records build lifecycle events such as `start`, `cache-hit`,
-`cache-miss`, `run`, `publish`, `done`, and `fail`. Raw logs contain the
-captured stdout/stderr of external commands such as `podman run`,
+`cache-miss`, `run`, `publish`, `done`, and `fail`. For readability, the
+top-level `build_key` and `object_hash` fields in the event log are shortened;
+the full identifiers remain available in the event `details`. Raw logs contain
+the captured stdout/stderr of external commands such as `podman run`,
 `podman import`, or `podman inspect`.
 
 For the architecture documents, start with [`docs/INDEX.md`](./docs/INDEX.md).

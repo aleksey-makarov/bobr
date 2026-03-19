@@ -284,9 +284,10 @@ The event log records lifecycle events such as:
 - `done`
 - `fail`
 
-Each event entry stores the builder tag, published name, `build_key`, a short
-message, and optional data such as `object_hash`, `raw_log_path`, and
-structured details.
+Each event entry stores the builder tag, published name, shortened
+`build_key`, a short message, and optional data such as shortened
+`object_hash`, `raw_log_path`, and structured details. Full identifiers remain
+available in `details`.
 
 By default, `mbuild` also prints concise live progress lines to `stderr` while
 the run is in progress. The final `Build` summary remains on `stdout`.
