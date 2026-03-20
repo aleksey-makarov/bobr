@@ -65,6 +65,34 @@ For example, `binary` writes raw logs for `podman run`, and `image` writes raw
 logs for `podman import`, `podman create`, `podman cp`, `podman commit`, and
 `podman inspect`.
 
+## Image Layering Semantics
+
+`Image` consumes one optional base `container-image` and one or more
+`binary-output` directories.
+
+Two modes exist:
+
+- `bootstrap`: build a new image from scratch from the supplied
+  `binary-output` directories
+- `layered`: start from a base `container-image` and apply the supplied
+  `binary-output` directories on top
+
+Layering is conflict-aware.
+
+Rules:
+
+- directory over directory merge is allowed
+- any attempt to replace an existing non-directory path is a conflict
+- any file-vs-file replacement is a conflict
+- any file-vs-directory or directory-vs-file replacement is a conflict
+- any symlink-vs-existing-path replacement is a conflict
+
+As a consequence, `Image` never silently overwrites files coming from the base
+image or from earlier `binary-output` inputs. Path conflicts fail the build.
+
+This prevents accidental construction of hybrid images where runtime components
+from different systems are mixed by implicit overwrite.
+
 ## Object Identity
 
 `object_hash` is the hash of payload content only.
