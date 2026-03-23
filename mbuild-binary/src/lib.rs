@@ -105,11 +105,6 @@ impl TypedBuilder for BinaryBuilder {
         let image = inputs.one("image")?;
         let script = inputs.one("script")?;
         let sources = inputs.many("sources")?;
-        if sources.is_empty() {
-            return Err(BuilderError::ExecutionFailed(
-                "Binary builder requires at least one source input".to_string(),
-            ));
-        }
 
         let script_execution = resolve_script_execution(script, sources).map_err(map_error)?;
         let container_execution = resolve_container_execution(image).map_err(map_error)?;
@@ -200,26 +195,31 @@ fn resolve_script_execution(
             script.object_path.display()
         )));
     }
-    if !sources[0].object_path.is_dir() {
-        return Err(BinaryError::InputResolutionFailed(format!(
-            "first source input must resolve to a directory: {}",
-            sources[0].object_path.display()
-        )));
-    }
-    if let Some(source) = sources
-        .iter()
-        .skip(1)
-        .find(|source| !source.object_path.is_dir() && !source.object_path.is_file())
-    {
-        return Err(BinaryError::InputResolutionFailed(format!(
-            "additional source inputs must resolve to directories or files: {}",
-            source.object_path.display()
-        )));
+    if let Some((first, rest)) = sources.split_first() {
+        if !first.object_path.is_dir() {
+            return Err(BinaryError::InputResolutionFailed(format!(
+                "first source input must resolve to a directory: {}",
+                first.object_path.display()
+            )));
+        }
+        if let Some(source) = rest
+            .iter()
+            .find(|source| !source.object_path.is_dir() && !source.object_path.is_file())
+        {
+            return Err(BinaryError::InputResolutionFailed(format!(
+                "additional source inputs must resolve to directories or files: {}",
+                source.object_path.display()
+            )));
+        }
     }
 
     Ok(ScriptExecution {
         script_host_path: script.object_path.clone(),
-        source_input_name: "sources0".to_string(),
+        source_input_name: if sources.is_empty() {
+            String::new()
+        } else {
+            "sources0".to_string()
+        },
     })
 }
 
@@ -648,6 +648,52 @@ mod tests {
             assert!(result.staged_path.is_dir());
         });
     }
+
+    #[test]
+    fn binary_builder_accepts_zero_sources_for_source_free_artifacts() {
+        with_fake_podman(|| {
+            let temp = tempdir().unwrap();
+            let mut cx = build_context(temp.path());
+            let builder = BinaryBuilder;
+
+            let image = resolved_object(
+                temp.path(),
+                KIND_CONTAINER_IMAGE,
+                "image.json",
+                Map::from_iter([(
+                    "image_ref".to_string(),
+                    Value::String("docker.io/library/alpine@sha256:deadbeef".to_string()),
+                )]),
+            );
+            let script = resolved_object(
+                temp.path(),
+                KIND_BUILD_SCRIPT,
+                "script.sh",
+                Map::new(),
+            );
+
+            let inputs = ResolvedInputs::new(std::collections::BTreeMap::from([
+                ("image".to_string(), ResolvedInputValue::One(image.clone())),
+                ("script".to_string(), ResolvedInputValue::One(script.clone())),
+                ("sources".to_string(), ResolvedInputValue::Many(vec![])),
+            ]));
+
+            let result = builder
+                .build_typed(
+                    BinaryConfig {
+                        kind: "binary-output".to_string(),
+                        optimize: "size".to_string(),
+                    },
+                    inputs,
+                    &mut cx,
+                )
+                .unwrap();
+
+            assert_eq!(result.kind, "binary-output");
+            assert!(result.staged_path.is_dir());
+        });
+    }
+
 
     #[test]
     fn binary_builder_accepts_binary_output_as_auxiliary_source() {

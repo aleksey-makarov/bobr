@@ -716,6 +716,7 @@ fn create_rootfs_tar(rootfs_dir: &Path, tar_path: &Path) -> IResult<()> {
         ))
     })?;
     let mut builder = tar::Builder::new(tar_file);
+    builder.follow_symlinks(false);
     builder.append_dir_all(".", rootfs_dir).map_err(|error| {
         ImageError::FsFailed(format!(
             "failed to write rootfs tar '{}': {error}",

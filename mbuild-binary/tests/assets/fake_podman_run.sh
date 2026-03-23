@@ -56,12 +56,10 @@ if [ "${1:-}" = run ]; then
       break
     done
   fi
-  if [ -z "$source_input" ] || [ -z "${in_mounts[$source_input]+x}" ]; then
-    echo missing source input mount >&2
-    exit 1
-  fi
   mkdir -p "$out_host/copied"
-  cp -R "${in_mounts[$source_input]}/." "$out_host/copied/"
+  if [ -n "$source_input" ] && [ -n "${in_mounts[$source_input]+x}" ]; then
+    cp -R "${in_mounts[$source_input]}/." "$out_host/copied/"
+  fi
   printf '%s\n' "$image_ref" > "$out_host/image-ref.txt"
   exit 0
 fi

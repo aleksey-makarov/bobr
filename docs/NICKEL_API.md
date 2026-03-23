@@ -86,7 +86,8 @@ Builder payloads do not contain publication names.
 
 For `binary`, the `sources` array is ordered:
 
-- the first source is the primary source tree and becomes `MBUILD_SOURCE_INPUT`
+- the `sources` array may be empty for source-free filesystem artifact builders
+- if present, the first source is the primary source tree and becomes `MBUILD_SOURCE_INPUT`
 - additional source inputs may be `source-tree`, `fetched-file`, or `binary-output`
 - auxiliary directories are mounted as `/in/sourcesN`
 - auxiliary fetched files are mounted as `/in/sourcesN`
