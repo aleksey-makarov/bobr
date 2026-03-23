@@ -18,6 +18,7 @@ use nickel_lang_core::{
     files::FileId,
     identifier::LocIdent,
     mk_app,
+    serialize::{self, ExportFormat},
     term::{RecordOpKind, ToSci, UnaryOp, make as mk_term},
 };
 use serde::Deserialize;
@@ -193,6 +194,28 @@ impl NickelRuntime {
             .map(|closure| closure.value)
             .map_err(|error| Self::recipe_error_from_files(files, error.into()))
     }
+
+    fn eval_full_for_export(&mut self, value: NickelValue) -> Result<NickelValue, RuntimeError> {
+        let files = self.vm_ctxt.import_resolver.files().clone();
+        let mut vm = VirtualMachine::new_empty_env(&mut self.vm_ctxt)
+            .with_initial_env(self.initial_env.clone());
+        vm.eval_full_for_export_closure(Closure::from(value))
+            .map_err(|error| Self::recipe_error_from_files(files, error.into()))
+    }
+
+    fn export_value_to_string(
+        &mut self,
+        value: NickelValue,
+        format: ExportFormat,
+    ) -> Result<String, RuntimeError> {
+        let value = self.eval_full_for_export(value)?;
+        serialize::to_string(format, &value).map_err(|error| {
+            Self::recipe_error_from_files(
+                self.vm_ctxt.import_resolver.files().clone(),
+                NickelError::export_error(self.vm_ctxt.pos_table.clone(), error),
+            )
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -225,6 +248,14 @@ pub fn run_store_recipe_in_workspace_with_options(
         &DEFAULT_REGISTRY,
         options,
     )
+}
+
+pub fn export_recipe_with_store(
+    recipe_path: &Path,
+    format: ExportFormat,
+) -> Result<String, RuntimeError> {
+    let (mut runtime, value) = NickelRuntime::from_recipe_file(recipe_path)?;
+    runtime.export_value_to_string(value, format)
 }
 
 fn run_store_recipe_in_workspace_with_registry(
@@ -615,6 +646,7 @@ mod tests {
     use mbuild_core::{
         BuildContext, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo, TypedBuilder,
     };
+    use nickel_lang_core::serialize::ExportFormat;
     use std::fs;
     use tempfile::tempdir;
 
@@ -806,6 +838,45 @@ mod tests {
 
     fn store_program(body: &str) -> String {
         body.to_string()
+    }
+
+    #[test]
+    fn export_supports_plain_serializable_data_with_store_in_scope() {
+        let (mut runtime, value) = NickelRuntime::from_source(
+            "<export-test>",
+            r#"
+{
+  has_fetch = std.record.has_field "fetch" store,
+  has_bind = std.record.has_field "bind" store,
+}
+"#,
+        )
+        .unwrap();
+
+        let exported = runtime.export_value_to_string(value, ExportFormat::Json).unwrap();
+
+        assert_eq!(
+            exported,
+            "{\n  \"has_bind\": true,\n  \"has_fetch\": true\n}"
+        );
+    }
+
+    #[test]
+    fn export_rejects_non_serializable_store_values() {
+        let (mut runtime, value) = NickelRuntime::from_source(
+            "<export-nonserializable>",
+            r#"store.fetch "demo" { url = "https://example.invalid/demo.tar.gz", sha256 = "deadbeef" }"#,
+        )
+        .unwrap();
+
+        let error = runtime
+            .export_value_to_string(value, ExportFormat::Json)
+            .unwrap_err();
+
+        match error {
+            RuntimeError::RecipeDiagnostic { .. } => {}
+            other => panic!("expected RecipeDiagnostic, got {other:?}"),
+        }
     }
 
     #[test]

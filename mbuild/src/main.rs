@@ -1,5 +1,6 @@
-use clap::Parser;
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use nickel_lang_core::error::report::{ColorOpt, ErrorFormat, report};
+use nickel_lang_core::serialize::ExportFormat;
 use std::env;
 use std::fmt;
 use std::path::PathBuf;
@@ -42,19 +43,71 @@ impl fmt::Display for MbuildError {
     }
 }
 
-#[derive(Parser, Debug)]
-#[command(name = "mbuild")]
-#[command(about = "mbuild runtime for Nickel STORE recipes")]
-struct Cli {
+#[derive(Args, Debug, Default)]
+struct BuildCli {
     #[arg(long, help = "suppress live build progress on stderr")]
     quiet: bool,
 
     recipe_file: Option<PathBuf>,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum ExportCliFormat {
+    Text,
+    Json,
+    Yaml,
+    YamlDocuments,
+    Toml,
+}
+
+impl From<ExportCliFormat> for ExportFormat {
+    fn from(value: ExportCliFormat) -> Self {
+        match value {
+            ExportCliFormat::Text => ExportFormat::Text,
+            ExportCliFormat::Json => ExportFormat::Json,
+            ExportCliFormat::Yaml => ExportFormat::Yaml,
+            ExportCliFormat::YamlDocuments => ExportFormat::YamlDocuments,
+            ExportCliFormat::Toml => ExportFormat::Toml,
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+struct ExportCli {
+    #[arg(short = 'f', long = "format", default_value = "json")]
+    format: ExportCliFormat,
+
+    recipe_file: PathBuf,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    #[command(about = "build a Nickel STORE recipe")]
+    Build(BuildCli),
+    #[command(about = "export a Nickel file with the mbuild STORE environment preloaded")]
+    Export(ExportCli),
+}
+
+#[derive(Parser, Debug)]
+#[command(name = "mbuild")]
+#[command(about = "mbuild runtime for Nickel STORE recipes")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    #[command(flatten)]
+    build: BuildCli,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli) {
+    let result = match cli.command {
+        Some(Command::Build(build_cli)) => build(build_cli),
+        Some(Command::Export(export_cli)) => run_export(export_cli),
+        None => build(cli.build),
+    };
+
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             match error {
@@ -68,7 +121,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> MResult<()> {
+fn build(cli: BuildCli) -> MResult<()> {
     let workspace_root = env::current_dir().map_err(|error| {
         MbuildError::InvalidInput(format!("failed to get current directory: {error}"))
     })?;
@@ -91,6 +144,13 @@ fn run(cli: Cli) -> MResult<()> {
         }
         StoreOutcome::Unit => println!("()"),
     }
+    Ok(())
+}
+
+fn run_export(cli: ExportCli) -> MResult<()> {
+    let exported = store_interpreter::export_recipe_with_store(&cli.recipe_file, cli.format.into())
+        .map_err(map_runtime_error)?;
+    print!("{exported}");
     Ok(())
 }
 
