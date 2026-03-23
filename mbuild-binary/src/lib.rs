@@ -13,6 +13,7 @@ use std::fs;
 
 const KIND_SOURCE_TREE: &str = "source-tree";
 const KIND_FETCHED_FILE: &str = "fetched-file";
+const KIND_BINARY_OUTPUT: &str = "binary-output";
 const KIND_BUILD_SCRIPT: &str = "build-script";
 const KIND_CONTAINER_IMAGE: &str = "container-image";
 const OUTPUT_DIR_NAME: &str = "out";
@@ -78,7 +79,7 @@ static BINARY_INPUTS: &[InputSlot] = &[
     InputSlot {
         name: "sources",
         arity: InputArity::Many,
-        allowed_kinds: &[KIND_SOURCE_TREE, KIND_FETCHED_FILE],
+        allowed_kinds: &[KIND_SOURCE_TREE, KIND_FETCHED_FILE, KIND_BINARY_OUTPUT],
     },
 ];
 
@@ -491,7 +492,7 @@ mod tests {
         attrs: Map<String, Value>,
     ) -> ResolvedObject {
         let object_path = root.join(name);
-        if kind == KIND_SOURCE_TREE {
+        if kind == KIND_SOURCE_TREE || kind == KIND_BINARY_OUTPUT {
             fs::create_dir_all(&object_path).unwrap();
             fs::write(object_path.join("README.txt"), b"hello source\n").unwrap();
         } else {
@@ -579,6 +580,21 @@ mod tests {
         inputs
     }
 
+    fn sample_inputs_with_binary_output_aux(root: &Path) -> ResolvedInputs {
+        let mut inputs = sample_inputs(root);
+        let mut sources = match inputs.many("sources").unwrap().to_vec() {
+            values => values,
+        };
+        sources.push(resolved_object(
+            root,
+            KIND_BINARY_OUTPUT,
+            "linux-headers",
+            Map::new(),
+        ));
+        inputs.insert("sources", ResolvedInputValue::Many(sources));
+        inputs
+    }
+
     #[test]
     fn binary_builder_runs_fake_podman_and_materializes_output_dir() {
         with_fake_podman(|| {
@@ -623,6 +639,28 @@ mod tests {
                         optimize: "size".to_string(),
                     },
                     sample_inputs_with_aux_file(temp.path()),
+                    &mut cx,
+                )
+                .unwrap();
+
+            assert_eq!(result.kind, "binary-output");
+            assert_eq!(result.input_build_keys.len(), 4);
+            assert!(result.staged_path.is_dir());
+        });
+    }
+
+    #[test]
+    fn binary_builder_accepts_binary_output_as_auxiliary_source() {
+        with_fake_podman(|| {
+            let temp = tempdir().unwrap();
+            let mut cx = build_context(temp.path());
+            let result = BinaryBuilder
+                .build_typed(
+                    BinaryConfig {
+                        kind: "binary-output".to_string(),
+                        optimize: "size".to_string(),
+                    },
+                    sample_inputs_with_binary_output_aux(temp.path()),
                     &mut cx,
                 )
                 .unwrap();
