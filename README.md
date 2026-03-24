@@ -22,14 +22,18 @@ By default, `mbuild` prints concise live build progress to `stderr`. The final
 result still goes to `stdout` only. Use `--quiet` to suppress live progress.
 
 A realized `Build` value is the canonical build record stored under
-`.mbuild/builds/<build_key>.json`.
+`.mbuild/builds/<build_key>.json`. Build records carry a persistent
+`created_at` timestamp in RFC3339 UTC format. This timestamp does not affect
+`build_key`.
 
 Realized results are stored in a local content-addressed store where object
 identity is determined only by payload content. Builder invocations are recorded
 separately under stable build keys, and published names resolve through
-metadata refs and object refs. Hashing, build recording, dependency resolution,
-and publication are interpreter details rather than part of the user-facing
-Nickel API.
+metadata refs and object refs. The plain published name is always the current
+alias. Republishing a different build under the same name rotates the previous
+current refs into timestamp-suffixed history refs. Hashing, build recording,
+dependency resolution, and publication are interpreter details rather than part
+of the user-facing Nickel API.
 
 Each `mbuild` invocation also writes persistent logs:
 

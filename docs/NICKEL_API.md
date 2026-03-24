@@ -102,6 +102,7 @@ It is exactly the corresponding build record stored in
 At minimum, a `Build` value exposes:
 
 - `build_key`
+- `created_at`
 - `object_hash`
 - `kind`
 - `attrs`
@@ -122,6 +123,12 @@ Evaluating a primitive builder action with publication name `name` updates:
 
 - `.mbuild/meta-refs/<name>.json`
 - `.mbuild/object-refs/<name>`
+
+If the name already points at a different current build, the previous current
+refs are rotated into timestamp-suffixed history refs:
+
+- `.mbuild/meta-refs/<name>.<YYMMDDHHMMSS>.json`
+- `.mbuild/object-refs/<name>.<YYMMDDHHMMSS>`
 
 The returned value is still the same `Build` record.
 

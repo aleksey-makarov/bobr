@@ -44,9 +44,13 @@ Internal CAS identifiers use bare lowercase hex:
 - algorithm-qualified strings such as `sha256:...` remain only for external
   digests and declared fetch hashes
 
-`meta-refs/<name>.json` is a human-facing symlink to the selected build record.
+`meta-refs/<name>.json` is a human-facing symlink to the selected current build
+record. Historical generations are kept as timestamp-suffixed refs such as
+`meta-refs/<name>.<YYMMDDHHMMSS>.json`.
 
-`object-refs/<name>` is a human-facing symlink to the selected payload object.
+`object-refs/<name>` is a human-facing symlink to the selected current payload
+object. Historical generations mirror metadata refs under names such as
+`object-refs/<name>.<YYMMDDHHMMSS>`.
 
 Each builder owns a same-named subdirectory under `.mbuild/` for builder-
 specific runtime state, temporary files, logs, and caches.
@@ -146,8 +150,9 @@ Example shape:
 
 ```json
 {
-  "schema": "mbuild-build-v1",
+  "schema": "mbuild-build-v2",
   "build_key": "0123456789abcdef...",
+  "created_at": "2026-03-24T12:34:56.123456789Z",
   "object_hash": "fedcba9876543210...",
   "kind": "build-script|source-tree|fetched-file|binary-output|container-image|...",
   "producer": {
@@ -168,8 +173,11 @@ Rules:
   - normalized payload
   - ordered `input_build_keys`
 - `build_key` does not depend on `object_hash`
+- `build_key` does not depend on `created_at`
 - a build record points at exactly one `object_hash`
 - multiple build records may point at the same object
+- `created_at` records the first materialization time of that build record in
+  RFC3339 UTC format
 - builder-generated semantic metadata lives in the build record
 - downstream builder calls consume `Build` values, not raw store paths
 
@@ -193,6 +201,7 @@ Stored at:
 
 ```text
 .mbuild/meta-refs/<name>.json -> ../builds/<build_key>.json
+.mbuild/meta-refs/<name>.<YYMMDDHHMMSS>.json -> ../builds/<old_build_key>.json
 ```
 
 Purpose:
@@ -214,6 +223,7 @@ Stored at:
 
 ```text
 .mbuild/object-refs/<name> -> ../objects/<object_hash>
+.mbuild/object-refs/<name>.<YYMMDDHHMMSS> -> ../objects/<old_object_hash>
 ```
 
 Purpose:
@@ -246,9 +256,10 @@ For one primitive builder action, the interpreter:
 5. reuses an existing build record on matching `build_key`
 6. executes the appropriate Rust builder on cache miss
 7. stores the produced payload in `objects/`
-8. writes one build record in `builds/`
-9. updates `meta-refs/<name>.json`
-10. updates `object-refs/<name>`
+8. writes or reuses one build record in `builds/`, including `created_at`
+9. updates `meta-refs/<name>.json` and `object-refs/<name>`
+10. if the published name already pointed at a different build, rotates the old
+    current refs into timestamp-suffixed generation refs
 11. returns the realized `Build` value
 
 Rust builders do not receive publication names as part of build semantics.

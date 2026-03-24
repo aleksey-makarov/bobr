@@ -179,8 +179,10 @@ For one primitive builder action, the interpreter:
 7. executes the registered Rust builder on cache miss
 8. stores the produced payload in `objects/`
 9. writes one build record in `builds/`
-10. updates publication refs for the supplied name
-11. returns the resulting `Build`
+10. updates current publication refs for the supplied name
+11. rotates the previous current refs into timestamp-suffixed history refs if
+    the name already pointed at a different build
+12. returns the resulting `Build`
 
 ## Worked Example
 

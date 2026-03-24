@@ -11,6 +11,41 @@ use time::OffsetDateTime;
 use time::UtcOffset;
 use time::macros::format_description;
 
+#[derive(Debug, Clone)]
+pub struct RunTimestamp {
+    human: String,
+    rfc3339_utc: String,
+}
+
+impl RunTimestamp {
+    pub fn now() -> Self {
+        let now = current_timestamp_utc();
+        let human_format =
+            format_description!("[year repr:last_two][month][day][hour][minute][second]");
+        let rfc3339_format = format_description!(
+            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z"
+        );
+        let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+        let local = now.to_offset(offset);
+        Self {
+            human: local
+                .format(&human_format)
+                .unwrap_or_else(|_| "000000000000".to_string()),
+            rfc3339_utc: now
+                .format(&rfc3339_format)
+                .unwrap_or_else(|_| "1970-01-01T00:00:00.000000000Z".to_string()),
+        }
+    }
+
+    pub fn human(&self) -> &str {
+        &self.human
+    }
+
+    pub fn rfc3339_utc(&self) -> &str {
+        &self.rfc3339_utc
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunOptions {
     pub emit_progress: bool,
@@ -29,6 +64,7 @@ pub struct BuildRunLogger {
     store_root: PathBuf,
     event_log_path: PathBuf,
     emit_progress: bool,
+    run_timestamp: RunTimestamp,
     writer: Mutex<BufWriter<File>>,
     raw_log_counters: Mutex<BTreeMap<String, usize>>,
 }
@@ -43,23 +79,30 @@ impl BuildRunLogger {
             )
         })?;
 
-        let timestamp = human_timestamp();
+        let run_timestamp = RunTimestamp::now();
         let pid = std::process::id();
-        let (event_log_path, file) = create_run_log_file(&runs_dir, &format!("{timestamp}-{pid}"))
-            .map_err(|error| {
-                format!(
-                    "failed to create event log under '{}': {error}",
-                    runs_dir.display()
-                )
-            })?;
+        let (event_log_path, file) =
+            create_run_log_file(&runs_dir, &format!("{}-{pid}", run_timestamp.human())).map_err(
+                |error| {
+                    format!(
+                        "failed to create event log under '{}': {error}",
+                        runs_dir.display()
+                    )
+                },
+            )?;
 
         Ok(Self {
             store_root: store_root.to_path_buf(),
             event_log_path,
             emit_progress: options.emit_progress,
+            run_timestamp,
             writer: Mutex::new(BufWriter::new(file)),
             raw_log_counters: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    pub fn created_at(&self) -> &str {
+        self.run_timestamp.rfc3339_utc()
     }
 
     fn write_event(&self, event: &BuildLogEvent) -> Result<(), String> {
@@ -110,11 +153,10 @@ impl BuildLogger for BuildRunLogger {
             )
         })?;
 
-        let timestamp = human_timestamp();
         let short_build_key = short_build_key(build_key);
         let base = format!(
             "{}-{}-{}",
-            timestamp,
+            self.run_timestamp.human(),
             short_build_key,
             sanitize_component(label)
         );
@@ -154,7 +196,7 @@ impl EventLogRecord {
         }
 
         Self {
-            ts: human_timestamp(),
+            ts: current_human_timestamp(),
             level: event.level.to_string(),
             phase: event.phase.clone(),
             builder: event.builder.clone(),
@@ -222,13 +264,18 @@ fn sanitize_component(value: &str) -> String {
     }
 }
 
-fn human_timestamp() -> String {
+fn current_timestamp_utc() -> OffsetDateTime {
     let now = OffsetDateTime::from_unix_timestamp_nanos(
         (fsutil::current_epoch_nanos().unwrap_or(0) as i128)
             .try_into()
             .unwrap_or_default(),
     )
     .unwrap_or_else(|_| OffsetDateTime::now_utc());
+    now
+}
+
+fn current_human_timestamp() -> String {
+    let now = current_timestamp_utc();
     let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
     let local = now.to_offset(offset);
     let format = format_description!("[year repr:last_two][month][day][hour][minute][second]");

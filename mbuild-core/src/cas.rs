@@ -11,8 +11,12 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use time::OffsetDateTime;
+use time::UtcOffset;
+use time::format_description::well_known::Rfc3339;
+use time::macros::format_description;
 
-const BUILD_SCHEMA: &str = "mbuild-build-v1";
+const BUILD_SCHEMA: &str = "mbuild-build-v2";
 const INVOCATION_SCHEMA: &str = "mbuild-build-invocation-v1";
 const ROOT_DIR: &str = ".mbuild";
 const OBJECTS_DIR: &str = "objects";
@@ -184,6 +188,7 @@ impl StoreLayout {
 pub struct PublishOutputRequest {
     pub output_name: String,
     pub build_key: BuildKey,
+    pub created_at: String,
     pub staged_path: PathBuf,
     pub kind: String,
     pub producer_builder: String,
@@ -201,6 +206,27 @@ pub fn publish_output(
     layout: &StoreLayout,
     request: PublishOutputRequest,
 ) -> Result<PublishedOutput, CasError> {
+    if let Some(record) = load_build_record(layout, request.build_key)? {
+        let object_path = object_path(layout, record.object_hash);
+        if !object_path.exists() {
+            return Err(CasError::Io(format!(
+                "build '{}' points to missing object '{}'",
+                request.build_key,
+                object_path.display()
+            )));
+        }
+        remove_path_force(&request.staged_path)?;
+        let published = PublishedBuild {
+            record,
+            object_path,
+        };
+        publish_refs(layout, &request.output_name, &published)?;
+        return Ok(PublishedOutput {
+            object_hash: published.record.object_hash,
+            build_key: published.record.build_key,
+        });
+    }
+
     let staged = StagedBuildResult {
         kind: request.kind,
         producer: ProducerInfo {
@@ -210,7 +236,7 @@ pub fn publish_output(
         attrs: request.attrs,
         staged_path: request.staged_path,
     };
-    let published = materialize_build(layout, request.build_key, staged)?;
+    let published = materialize_build(layout, request.build_key, &request.created_at, staged)?;
     publish_refs(layout, &request.output_name, &published)?;
 
     Ok(PublishedOutput {
@@ -272,12 +298,14 @@ pub fn load_build_record(
 pub fn materialize_build(
     layout: &StoreLayout,
     build_key: BuildKey,
+    created_at: &str,
     staged: StagedBuildResult,
 ) -> Result<PublishedBuild, CasError> {
     let object_hash = import_object(layout, &staged.staged_path)?;
     let record = Build {
         build_key,
         object_hash,
+        created_at: Some(created_at.to_string()),
         kind: staged.kind,
         producer: staged.producer,
         input_build_keys: staged.input_build_keys,
@@ -298,17 +326,35 @@ pub fn publish_refs(
 ) -> Result<(), CasError> {
     validate_output_name(output_name)?;
 
-    let object_ref_path = layout.object_refs.join(output_name);
+    let current_meta_ref_path = layout.meta_refs.join(format!("{output_name}.json"));
+    let current_object_ref_path = layout.object_refs.join(output_name);
+
+    if let Some(current) = load_current_publication(layout, output_name)? {
+        if current.build.build_key != published.record.build_key {
+            let generation_name =
+                allocate_generation_name(layout, output_name, &generation_suffix(&current)?)?;
+
+            if let Some(target) = current.meta_target {
+                create_generation_ref(
+                    &target,
+                    &layout.meta_refs.join(format!("{generation_name}.json")),
+                )?;
+            }
+            if let Some(target) = current.object_target {
+                create_generation_ref(&target, &layout.object_refs.join(&generation_name))?;
+            }
+        }
+    }
+
     let object_ref_target = PathBuf::from("..")
         .join(OBJECTS_DIR)
         .join(published.record.object_hash.to_hex());
-    replace_symlink(&object_ref_target, &object_ref_path)?;
+    replace_symlink(&object_ref_target, &current_object_ref_path)?;
 
-    let meta_ref_path = layout.meta_refs.join(format!("{output_name}.json"));
     let meta_ref_target = PathBuf::from("..")
         .join(BUILDS_DIR)
         .join(format!("{}.json", published.record.build_key.to_hex()));
-    replace_symlink(&meta_ref_target, &meta_ref_path)?;
+    replace_symlink(&meta_ref_target, &current_meta_ref_path)?;
     Ok(())
 }
 
@@ -361,6 +407,7 @@ fn write_build_record(layout: &StoreLayout, record: &Build) -> Result<(), CasErr
 
 fn build_json_value(
     build_key: BuildKey,
+    created_at: Option<&str>,
     kind: &str,
     object_hash: ObjectHash,
     producer_builder: &str,
@@ -387,6 +434,12 @@ fn build_json_value(
         "build_key".to_string(),
         Value::String(build_key.to_string()),
     );
+    if let Some(created_at) = created_at {
+        root.insert(
+            "created_at".to_string(),
+            Value::String(created_at.to_string()),
+        );
+    }
     root.insert("kind".to_string(), Value::String(kind.to_string()));
     root.insert(
         "object_hash".to_string(),
@@ -401,6 +454,7 @@ fn build_json_value(
 fn build_record_json_value(record: &Build) -> Value {
     build_json_value(
         record.build_key,
+        record.created_at.as_deref(),
         &record.kind,
         record.object_hash,
         &record.producer.builder,
@@ -418,7 +472,7 @@ fn parse_build_record_value(build_key: BuildKey, value: &Value) -> Result<Build,
         .get("schema")
         .and_then(Value::as_str)
         .ok_or_else(|| CasError::Serialization("build record is missing 'schema'".to_string()))?;
-    if schema != BUILD_SCHEMA {
+    if schema != BUILD_SCHEMA && schema != "mbuild-build-v1" {
         return Err(CasError::Serialization(format!(
             "unsupported build record schema '{schema}'"
         )));
@@ -435,6 +489,16 @@ fn parse_build_record_value(build_key: BuildKey, value: &Value) -> Result<Build,
             build_key, encoded_build_key
         )));
     }
+
+    let created_at = object
+        .get("created_at")
+        .map(|value| {
+            value.as_str().ok_or_else(|| {
+                CasError::Serialization("build record created_at must be a string".to_string())
+            })
+        })
+        .transpose()?
+        .map(str::to_string);
 
     let kind = object
         .get("kind")
@@ -488,6 +552,7 @@ fn parse_build_record_value(build_key: BuildKey, value: &Value) -> Result<Build,
     Ok(Build {
         build_key,
         object_hash,
+        created_at,
         kind,
         producer: ProducerInfo { builder },
         input_build_keys,
@@ -587,6 +652,154 @@ fn validate_output_name(name: &str) -> Result<(), CasError> {
     Ok(())
 }
 
+#[derive(Debug)]
+struct CurrentPublication {
+    build: Build,
+    build_path: PathBuf,
+    meta_target: Option<PathBuf>,
+    object_target: Option<PathBuf>,
+}
+
+fn load_current_publication(
+    layout: &StoreLayout,
+    output_name: &str,
+) -> Result<Option<CurrentPublication>, CasError> {
+    let meta_ref_path = layout.meta_refs.join(format!("{output_name}.json"));
+    if !meta_ref_path.exists() && !meta_ref_path.is_symlink() {
+        return Ok(None);
+    }
+
+    let meta_target = fs::read_link(&meta_ref_path).map_err(|error| {
+        CasError::Io(format!(
+            "failed to read current meta ref '{}': {error}",
+            meta_ref_path.display()
+        ))
+    })?;
+    let meta_file_name = meta_target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            CasError::Serialization(format!(
+                "current meta ref '{}' points to invalid target '{}'",
+                meta_ref_path.display(),
+                meta_target.display()
+            ))
+        })?;
+    let build_key_str = meta_file_name.strip_suffix(".json").ok_or_else(|| {
+        CasError::Serialization(format!(
+            "current meta ref '{}' points to non-JSON build target '{}'",
+            meta_ref_path.display(),
+            meta_target.display()
+        ))
+    })?;
+    let build_key = parse_build_key_result(build_key_str)?;
+    let build_path = build_path(layout, build_key);
+    let build = load_build_record(layout, build_key)?.ok_or_else(|| {
+        CasError::Serialization(format!(
+            "current meta ref '{}' points to missing build '{}'",
+            meta_ref_path.display(),
+            build_key
+        ))
+    })?;
+
+    let object_ref_path = layout.object_refs.join(output_name);
+    let object_target = if object_ref_path.exists() || object_ref_path.is_symlink() {
+        Some(fs::read_link(&object_ref_path).map_err(|error| {
+            CasError::Io(format!(
+                "failed to read current object ref '{}': {error}",
+                object_ref_path.display()
+            ))
+        })?)
+    } else {
+        None
+    };
+
+    Ok(Some(CurrentPublication {
+        build,
+        build_path,
+        meta_target: Some(meta_target),
+        object_target,
+    }))
+}
+
+fn generation_suffix(current: &CurrentPublication) -> Result<String, CasError> {
+    if let Some(created_at) = &current.build.created_at {
+        return human_timestamp_from_rfc3339(created_at);
+    }
+
+    let modified = fs::metadata(&current.build_path)
+        .map_err(|error| {
+            CasError::Io(format!(
+                "failed to stat build record '{}' for generation timestamp: {error}",
+                current.build_path.display()
+            ))
+        })?
+        .modified()
+        .map_err(|error| {
+            CasError::Io(format!(
+                "failed to read mtime for build record '{}': {error}",
+                current.build_path.display()
+            ))
+        })?;
+    let parsed = OffsetDateTime::from(modified);
+    human_timestamp_from_datetime(parsed)
+}
+
+fn human_timestamp_from_rfc3339(value: &str) -> Result<String, CasError> {
+    let parsed = OffsetDateTime::parse(value, &Rfc3339).map_err(|error| {
+        CasError::Serialization(format!(
+            "invalid build record created_at '{value}': {error}"
+        ))
+    })?;
+    human_timestamp_from_datetime(parsed)
+}
+
+fn human_timestamp_from_datetime(parsed: OffsetDateTime) -> Result<String, CasError> {
+    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    let local = parsed.to_offset(offset);
+    let format = format_description!("[year repr:last_two][month][day][hour][minute][second]");
+    local.format(&format).map_err(|error| {
+        CasError::Serialization(format!("failed to format generation suffix: {error}"))
+    })
+}
+
+fn allocate_generation_name(
+    layout: &StoreLayout,
+    output_name: &str,
+    suffix: &str,
+) -> Result<String, CasError> {
+    for counter in 1..1000 {
+        let candidate = if counter == 1 {
+            format!("{output_name}.{suffix}")
+        } else {
+            format!("{output_name}.{suffix}.{counter}")
+        };
+        let meta_path = layout.meta_refs.join(format!("{candidate}.json"));
+        let object_path = layout.object_refs.join(&candidate);
+        if !(meta_path.exists()
+            || meta_path.is_symlink()
+            || object_path.exists()
+            || object_path.is_symlink())
+        {
+            return Ok(candidate);
+        }
+    }
+
+    Err(CasError::Io(format!(
+        "failed to allocate generation ref name for '{output_name}.{suffix}'"
+    )))
+}
+
+fn create_generation_ref(target: &Path, link_path: &Path) -> Result<(), CasError> {
+    if link_path.exists() || link_path.is_symlink() {
+        return Err(CasError::Io(format!(
+            "ref generation collision at '{}'",
+            link_path.display()
+        )));
+    }
+    create_symlink(target, link_path)
+}
+
 fn remove_path_force(path: &Path) -> Result<(), CasError> {
     if !path.exists() && !path.is_symlink() {
         return Ok(());
@@ -676,6 +889,7 @@ mod tests {
         attrs_a.insert("a".to_string(), Value::from(true));
         let left = build_json_value(
             build_key,
+            Some(sample_created_at()),
             "text",
             parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111"),
             "text",
@@ -688,6 +902,7 @@ mod tests {
         attrs_b.insert("z".to_string(), Value::from(1));
         let right = build_json_value(
             build_key,
+            Some(sample_created_at()),
             "text",
             parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111"),
             "text",
@@ -713,6 +928,7 @@ mod tests {
             PublishOutputRequest {
                 output_name: "hello".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -729,6 +945,7 @@ mod tests {
             PublishOutputRequest {
                 output_name: "hello-copy".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -773,6 +990,7 @@ mod tests {
                         "1111111111111111111111111111111111111111111111111111111111111111",
                     )],
                 ),
+                created_at: sample_created_at().to_string(),
                 staged_path: stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -800,6 +1018,10 @@ mod tests {
         assert_eq!(
             build_json["build_key"],
             Value::String(published.build_key.to_string())
+        );
+        assert_eq!(
+            build_json["created_at"],
+            Value::String(sample_created_at().to_string())
         );
         assert_eq!(
             build_json["object_hash"],
@@ -852,6 +1074,7 @@ mod tests {
                     json!({ "kind": "build-script", "source": "hello" }),
                     &[],
                 ),
+                created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -872,6 +1095,7 @@ mod tests {
                     json!({ "kind": "source-tree", "source": "hello" }),
                     &[],
                 ),
+                created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 kind: "source-tree".to_string(),
                 producer_builder: "text".to_string(),
@@ -897,6 +1121,7 @@ mod tests {
             PublishOutputRequest {
                 output_name: "kind-a".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -913,6 +1138,7 @@ mod tests {
             PublishOutputRequest {
                 output_name: "kind-b".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "source-tree" }), &[]),
+                created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 kind: "source-tree".to_string(),
                 producer_builder: "text".to_string(),
@@ -938,6 +1164,7 @@ mod tests {
             PublishOutputRequest {
                 output_name: "producer-a".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -954,6 +1181,7 @@ mod tests {
             PublishOutputRequest {
                 output_name: "producer-b".to_string(),
                 build_key: build_key_for("Fetch", json!({ "kind": "build-script" }), &[]),
+                created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "fetch".to_string(),
@@ -968,7 +1196,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_output_replaces_existing_refs() {
+    fn publish_output_rotates_existing_refs_into_generations() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
@@ -983,6 +1211,7 @@ mod tests {
                     json!({ "kind": "build-script", "source": "hello" }),
                     &[],
                 ),
+                created_at: "2026-03-24T12:34:56.123456789Z".to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -1003,6 +1232,7 @@ mod tests {
                     json!({ "kind": "build-script", "source": "hello world" }),
                     &[],
                 ),
+                created_at: "2026-03-24T12:35:30.123456789Z".to_string(),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -1012,6 +1242,7 @@ mod tests {
         )
         .unwrap();
 
+        let suffix = human_timestamp_from_rfc3339("2026-03-24T12:34:56.123456789Z").unwrap();
         assert_ne!(first.object_hash, second.object_hash);
         assert_ne!(first.build_key, second.build_key);
         assert_eq!(
@@ -1025,6 +1256,163 @@ mod tests {
             PathBuf::from("..")
                 .join(BUILDS_DIR)
                 .join(format!("{}.json", second.build_key.to_hex()))
+        );
+        assert_eq!(
+            fs::read_link(layout.object_refs.join(format!("shared.{suffix}"))).unwrap(),
+            PathBuf::from("..")
+                .join(OBJECTS_DIR)
+                .join(first.object_hash.to_hex())
+        );
+        assert_eq!(
+            fs::read_link(layout.meta_refs.join(format!("shared.{suffix}.json"))).unwrap(),
+            PathBuf::from("..")
+                .join(BUILDS_DIR)
+                .join(format!("{}.json", first.build_key.to_hex()))
+        );
+    }
+
+    #[test]
+    fn publish_output_same_build_key_does_not_create_generation_refs() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let first_stage = temp.path().join("first.txt");
+        fs::write(&first_stage, b"hello").unwrap();
+        let build_key = build_key_for(
+            "Text",
+            json!({ "kind": "build-script", "source": "hello" }),
+            &[],
+        );
+        let first = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "shared".to_string(),
+                build_key,
+                created_at: "2026-03-24T12:34:56.123456789Z".to_string(),
+                staged_path: first_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_build_keys: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        let second_stage = temp.path().join("second.txt");
+        fs::write(&second_stage, b"hello").unwrap();
+        let second = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "shared".to_string(),
+                build_key,
+                created_at: "2026-03-24T12:35:30.123456789Z".to_string(),
+                staged_path: second_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_build_keys: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(first.build_key, second.build_key);
+        assert_eq!(first.object_hash, second.object_hash);
+        let suffix = human_timestamp_from_rfc3339("2026-03-24T12:34:56.123456789Z").unwrap();
+        assert!(!layout.object_refs.join(format!("shared.{suffix}")).exists());
+        assert!(
+            !layout
+                .meta_refs
+                .join(format!("shared.{suffix}.json"))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn publish_output_generation_suffix_collisions_get_numeric_suffixes() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let first_stage = temp.path().join("first.txt");
+        fs::write(&first_stage, b"one").unwrap();
+        let first = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "shared".to_string(),
+                build_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "one" }),
+                    &[],
+                ),
+                created_at: "2026-03-24T12:34:56.100000000Z".to_string(),
+                staged_path: first_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_build_keys: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        let second_stage = temp.path().join("second.txt");
+        fs::write(&second_stage, b"two").unwrap();
+        let second = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "shared".to_string(),
+                build_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "two" }),
+                    &[],
+                ),
+                created_at: "2026-03-24T12:34:56.200000000Z".to_string(),
+                staged_path: second_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_build_keys: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        let third_stage = temp.path().join("third.txt");
+        fs::write(&third_stage, b"three").unwrap();
+        let third = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "shared".to_string(),
+                build_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "three" }),
+                    &[],
+                ),
+                created_at: "2026-03-24T12:34:56.300000000Z".to_string(),
+                staged_path: third_stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                input_build_keys: vec![],
+                attrs: Map::new(),
+            },
+        )
+        .unwrap();
+
+        let suffix = human_timestamp_from_rfc3339("2026-03-24T12:34:56.100000000Z").unwrap();
+        assert_eq!(
+            fs::read_link(layout.object_refs.join(format!("shared.{suffix}"))).unwrap(),
+            PathBuf::from("..")
+                .join(OBJECTS_DIR)
+                .join(first.object_hash.to_hex())
+        );
+        assert_eq!(
+            fs::read_link(layout.object_refs.join(format!("shared.{suffix}.2"))).unwrap(),
+            PathBuf::from("..")
+                .join(OBJECTS_DIR)
+                .join(second.object_hash.to_hex())
+        );
+        assert_eq!(
+            fs::read_link(layout.object_refs.join("shared")).unwrap(),
+            PathBuf::from("..")
+                .join(OBJECTS_DIR)
+                .join(third.object_hash.to_hex())
         );
     }
 
@@ -1045,6 +1433,7 @@ mod tests {
                 PublishOutputRequest {
                     output_name: invalid_name.to_string(),
                     build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                    created_at: sample_created_at().to_string(),
                     staged_path: stage,
                     kind: "build-script".to_string(),
                     producer_builder: "text".to_string(),
@@ -1072,6 +1461,7 @@ mod tests {
             PublishOutputRequest {
                 output_name: "tree".to_string(),
                 build_key: build_key_for("Fetch", json!({ "kind": "source-tree" }), &[]),
+                created_at: sample_created_at().to_string(),
                 staged_path: stage_dir,
                 kind: "source-tree".to_string(),
                 producer_builder: "fetch".to_string(),
@@ -1104,6 +1494,7 @@ mod tests {
             PublishOutputRequest {
                 output_name: "first".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -1121,6 +1512,7 @@ mod tests {
             PublishOutputRequest {
                 output_name: "second".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -1153,6 +1545,7 @@ mod tests {
                     json!({ "kind": "binary-output" }),
                     &[key_a, key_b],
                 ),
+                created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "binary-output".to_string(),
                 producer_builder: "binary".to_string(),
@@ -1173,6 +1566,7 @@ mod tests {
                     json!({ "kind": "binary-output" }),
                     &[key_b, key_a],
                 ),
+                created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 kind: "binary-output".to_string(),
                 producer_builder: "binary".to_string(),
@@ -1235,6 +1629,7 @@ mod tests {
                     json!({ "kind": "build-script", "source": "hello", "variant": "plain" }),
                     &[],
                 ),
+                created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -1257,6 +1652,7 @@ mod tests {
                     json!({ "kind": "build-script", "source": "hello", "variant": "exec" }),
                     &[],
                 ),
+                created_at: sample_created_at().to_string(),
                 staged_path: exec_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
@@ -1276,6 +1672,10 @@ mod tests {
 
     fn parse_build_key(value: &str) -> BuildKey {
         BuildKey::from_str(value).unwrap()
+    }
+
+    fn sample_created_at() -> &'static str {
+        "2026-03-24T12:34:56.123456789Z"
     }
 
     fn build_key_for(builder_tag: &str, payload: Value, input_build_keys: &[BuildKey]) -> BuildKey {

@@ -367,6 +367,7 @@ fn interpret_store(
                 layout,
                 builder,
                 &run.name,
+                logger.created_at(),
                 logger.clone(),
                 run.config,
                 inputs,
@@ -853,7 +854,9 @@ mod tests {
         )
         .unwrap();
 
-        let exported = runtime.export_value_to_string(value, ExportFormat::Json).unwrap();
+        let exported = runtime
+            .export_value_to_string(value, ExportFormat::Json)
+            .unwrap();
 
         assert_eq!(
             exported,

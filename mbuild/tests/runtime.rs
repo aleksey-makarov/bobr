@@ -247,6 +247,7 @@ fn store_text_recipe_creates_store_entries_and_refs() {
         build_json["build_key"],
         Value::String(published.record.build_key.to_string())
     );
+    assert!(build_json["created_at"].is_string(), "{build_json}");
     assert_eq!(
         build_json["kind"],
         Value::String("build-script".to_string())
@@ -420,6 +421,7 @@ fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
             let build_file = build_path(workspace.path(), published.record.build_key);
             let build_json: Value =
                 serde_json::from_slice(&fs::read(&build_file).unwrap()).unwrap();
+            assert!(build_json["created_at"].is_string(), "{build_json}");
             assert_eq!(
                 build_json["kind"],
                 Value::String("container-image".to_string())

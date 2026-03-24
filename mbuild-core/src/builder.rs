@@ -333,6 +333,8 @@ pub struct Build {
     pub build_key: BuildKey,
     #[serde(with = "serde_object_hash")]
     pub object_hash: ObjectHash,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
     pub kind: String,
     pub producer: ProducerInfo,
     pub input_build_keys: Vec<BuildKey>,

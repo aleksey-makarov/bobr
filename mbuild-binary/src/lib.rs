@@ -575,7 +575,12 @@ mod tests {
         let mut sources = match inputs.many("sources").unwrap().to_vec() {
             values => values,
         };
-        sources.push(resolved_object(root, KIND_FETCHED_FILE, "patch.diff", Map::new()));
+        sources.push(resolved_object(
+            root,
+            KIND_FETCHED_FILE,
+            "patch.diff",
+            Map::new(),
+        ));
         inputs.insert("sources", ResolvedInputValue::Many(sources));
         inputs
     }
@@ -665,16 +670,14 @@ mod tests {
                     Value::String("docker.io/library/alpine@sha256:deadbeef".to_string()),
                 )]),
             );
-            let script = resolved_object(
-                temp.path(),
-                KIND_BUILD_SCRIPT,
-                "script.sh",
-                Map::new(),
-            );
+            let script = resolved_object(temp.path(), KIND_BUILD_SCRIPT, "script.sh", Map::new());
 
             let inputs = ResolvedInputs::new(std::collections::BTreeMap::from([
                 ("image".to_string(), ResolvedInputValue::One(image.clone())),
-                ("script".to_string(), ResolvedInputValue::One(script.clone())),
+                (
+                    "script".to_string(),
+                    ResolvedInputValue::One(script.clone()),
+                ),
                 ("sources".to_string(), ResolvedInputValue::Many(vec![])),
             ]));
 
@@ -693,7 +696,6 @@ mod tests {
             assert!(result.staged_path.is_dir());
         });
     }
-
 
     #[test]
     fn binary_builder_accepts_binary_output_as_auxiliary_source() {

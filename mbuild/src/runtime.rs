@@ -59,6 +59,7 @@ pub(crate) fn execute_builder_node(
     layout: &StoreLayout,
     builder: &'static dyn Builder,
     build_name: &str,
+    created_at: &str,
     logger: Arc<dyn BuildLogger>,
     config: Value,
     inputs: ResolvedInputs,
@@ -149,7 +150,7 @@ pub(crate) fn execute_builder_node(
             );
             map_builder_error(error)
         })?;
-    let published = materialize_build(layout, build_key, staged).map_err(|error| {
+    let published = materialize_build(layout, build_key, created_at, staged).map_err(|error| {
         log_runtime_event(
             logger.as_ref(),
             BuildLogLevel::Error,
