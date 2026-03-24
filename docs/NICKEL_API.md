@@ -84,6 +84,10 @@ store.binary "bash-stage2" { optimize = "size" } bootstrapImage bashScript [bash
 
 Builder payloads do not contain publication names.
 
+`binary` also accepts an optional `script_config` field. When present, `mbuild`
+materializes it as a read-only config directory inside the container and sets
+`MBUILD_SCRIPT_CONFIG_DIR=/__mbuild_script_config`.
+
 For `binary`, the `sources` array is ordered:
 
 - the `sources` array may be empty for source-free filesystem artifact builders
@@ -91,6 +95,9 @@ For `binary`, the `sources` array is ordered:
 - additional source inputs may be `source-tree`, `fetched-file`, or `binary-output`
 - auxiliary directories are mounted as `/in/sourcesN`
 - auxiliary fetched files are mounted as `/in/sourcesN`
+- if `script_config` is present, records and arrays are lowered into a
+  directory tree under `/__mbuild_script_config`
+- string leaves become regular files with their exact contents
 
 ## `Build` Values
 

@@ -48,4 +48,10 @@ the full identifiers remain available in the event `details`. Raw logs contain
 the captured stdout/stderr of external commands such as `podman run`,
 `podman import`, or `podman inspect`.
 
+The `binary` builder also supports an optional structured `script_config`
+payload. When present, `mbuild` materializes it as a read-only directory inside
+the build container and exports `MBUILD_SCRIPT_CONFIG_DIR=/__mbuild_script_config`.
+This lets reusable recipe-level build scripts consume structured configuration
+without requiring a per-package generated shell script.
+
 For the architecture documents, start with [`docs/INDEX.md`](./docs/INDEX.md).

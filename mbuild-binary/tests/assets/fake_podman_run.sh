@@ -9,6 +9,8 @@ if [ "${1:-}" = run ]; then
   source_input=""
   declare -A in_mounts
   out_host=""
+  config_host=""
+  config_dir=""
   image_ref=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -26,6 +28,8 @@ if [ "${1:-}" = run ]; then
           in_mounts["$name"]="$host"
         elif [ "$mount" = "/out/out" ]; then
           out_host="$host"
+        elif [ "$mount" = "/__mbuild_script_config" ]; then
+          config_host="$host"
         fi
         shift 2
         ;;
@@ -33,6 +37,7 @@ if [ "${1:-}" = run ]; then
         kv="$2"
         case "$kv" in
           MBUILD_SOURCE_INPUT=*) source_input="${kv#*=}" ;;
+          MBUILD_SCRIPT_CONFIG_DIR=*) config_dir="${kv#*=}" ;;
         esac
         shift 2
         ;;
@@ -59,6 +64,11 @@ if [ "${1:-}" = run ]; then
   mkdir -p "$out_host/copied"
   if [ -n "$source_input" ] && [ -n "${in_mounts[$source_input]+x}" ]; then
     cp -R "${in_mounts[$source_input]}/." "$out_host/copied/"
+  fi
+  if [ -n "$config_host" ]; then
+    mkdir -p "$out_host/script-config"
+    cp -R "${config_host}/." "$out_host/script-config/" 2>/dev/null || true
+    printf '%s\n' "${config_dir:-}" > "$out_host/script-config-dir.txt"
   fi
   printf '%s\n' "$image_ref" > "$out_host/image-ref.txt"
   exit 0

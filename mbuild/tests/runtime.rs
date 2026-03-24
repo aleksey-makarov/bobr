@@ -204,13 +204,28 @@ fn binary_recipe(
     source_url: &str,
     source_hash: &str,
 ) -> String {
+    binary_recipe_with_script_config(name, image, digest, source_url, source_hash, None)
+}
+
+fn binary_recipe_with_script_config(
+    name: &str,
+    image: &str,
+    digest: &str,
+    source_url: &str,
+    source_hash: &str,
+    script_config: Option<&str>,
+) -> String {
+    let script_config_field = script_config
+        .map(|value| format!("  script_config = {value},\n"))
+        .unwrap_or_default();
     format!(
-        "store.bind (store.fetch \"source\" {{\n  url = {},\n  hash = {},\n  unpack = true,\n}}) (fun source =>\nstore.bind (store.text \"script\" {{\n  kind = \"build-script\",\n  source = \"#!/bin/sh\\nexit 0\\n\",\n}}) (fun script =>\nstore.bind (store.container_image \"base-image\" {{\n  image = {},\n  digest = {},\n}}) (fun image =>\nstore.binary {} {{\n  kind = \"binary-output\",\n  optimize = \"size\",\n}} image script [source])))\n",
+        "store.bind (store.fetch \"source\" {{\n  url = {},\n  hash = {},\n  unpack = true,\n}}) (fun source =>\nstore.bind (store.text \"script\" {{\n  kind = \"build-script\",\n  source = \"#!/bin/sh\\nexit 0\\n\",\n}}) (fun script =>\nstore.bind (store.container_image \"base-image\" {{\n  image = {},\n  digest = {},\n}}) (fun image =>\nstore.binary {} {{\n  kind = \"binary-output\",\n  optimize = \"size\",\n{}}} image script [source])))\n",
         nickel_string(source_url),
         nickel_string(source_hash),
         nickel_string(image),
         nickel_string(digest),
         nickel_string(name),
+        script_config_field,
     )
 }
 
@@ -541,6 +556,112 @@ fn repeated_nested_binary_recipe_reuses_all_build_records_and_objects() {
                 input_build_keys
                     .iter()
                     .all(|value| matches!(value, Value::String(_)))
+            );
+        },
+    );
+}
+
+#[test]
+fn binary_recipe_materializes_script_config_dir_end_to_end() {
+    with_fake_podman(
+        r#"[{"Id":"sha256:imageid","RepoDigests":["docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]"#,
+        || {
+            let workspace = tempdir().unwrap();
+            let recipe_path = workspace.path().join("binary-script-config.ncl");
+            let source_tar = {
+                let encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                let mut tar = tar::Builder::new(encoder);
+                let body = b"hello script config\n";
+                let mut header = tar::Header::new_gnu();
+                header.set_path("pkg/README.txt").unwrap();
+                header.set_size(body.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                tar.append(&header, &body[..]).unwrap();
+                tar.into_inner().unwrap().finish().unwrap()
+            };
+            let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
+                Ok(server) => server,
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+                Err(error) => panic!("failed to start test HTTP server: {error}"),
+            };
+            let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
+            write_recipe(
+                &recipe_path,
+                &binary_recipe_with_script_config(
+                    "binary-with-script-config",
+                    "docker.io/library/buildpack-deps:bookworm",
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    &url,
+                    &source_hash,
+                    Some(
+                        "{ configure_args = [\"--disable-nls\", \"--without-selinux\"], env = { CC = \"gcc\" }, pre_configure = \"echo pre\", post_install = \"echo post\" }",
+                    ),
+                ),
+            );
+
+            let published = expect_build(
+                run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
+            );
+            handle.join().unwrap();
+
+            assert_eq!(
+                fs::read_to_string(published.object_path.join("script-config-dir.txt")).unwrap(),
+                "/__mbuild_script_config\n"
+            );
+            assert_eq!(
+                fs::read_to_string(
+                    published
+                        .object_path
+                        .join("script-config")
+                        .join("configure_args")
+                        .join("00000000")
+                )
+                .unwrap(),
+                "--disable-nls"
+            );
+            assert_eq!(
+                fs::read_to_string(
+                    published
+                        .object_path
+                        .join("script-config")
+                        .join("configure_args")
+                        .join("00000001")
+                )
+                .unwrap(),
+                "--without-selinux"
+            );
+            assert_eq!(
+                fs::read_to_string(
+                    published
+                        .object_path
+                        .join("script-config")
+                        .join("env")
+                        .join("CC")
+                )
+                .unwrap(),
+                "gcc"
+            );
+            assert_eq!(
+                fs::read_to_string(
+                    published
+                        .object_path
+                        .join("script-config")
+                        .join("pre_configure")
+                )
+                .unwrap(),
+                "echo pre"
+            );
+            assert_eq!(
+                fs::read_to_string(
+                    published
+                        .object_path
+                        .join("script-config")
+                        .join("post_install")
+                )
+                .unwrap(),
+                "echo post"
             );
         },
     );

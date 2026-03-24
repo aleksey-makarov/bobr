@@ -5,11 +5,9 @@ use mbuild_core::{
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-
-#[cfg(test)]
-use std::fs;
 
 const KIND_SOURCE_TREE: &str = "source-tree";
 const KIND_FETCHED_FILE: &str = "fetched-file";
@@ -17,6 +15,9 @@ const KIND_BINARY_OUTPUT: &str = "binary-output";
 const KIND_BUILD_SCRIPT: &str = "build-script";
 const KIND_CONTAINER_IMAGE: &str = "container-image";
 const OUTPUT_DIR_NAME: &str = "out";
+const SCRIPT_CONFIG_DIR_NAME: &str = "script-config";
+const SCRIPT_CONFIG_MOUNT_PATH: &str = "/__mbuild_script_config";
+const SCRIPT_CONFIG_ENV_VAR: &str = "MBUILD_SCRIPT_CONFIG_DIR";
 
 #[derive(Debug)]
 enum BinaryError {
@@ -52,10 +53,13 @@ type BResult<T> = Result<T, BinaryError>;
 pub struct BinaryConfig {
     kind: String,
     optimize: String,
+    #[serde(default)]
+    script_config: Option<Value>,
 }
 
 struct ScriptExecution {
     script_host_path: PathBuf,
+    config_host_path: PathBuf,
     source_input_name: String,
 }
 
@@ -106,17 +110,6 @@ impl TypedBuilder for BinaryBuilder {
         let script = inputs.one("script")?;
         let sources = inputs.many("sources")?;
 
-        let script_execution = resolve_script_execution(script, sources).map_err(map_error)?;
-        let container_execution = resolve_container_execution(image).map_err(map_error)?;
-        cx.log_event(
-            BuildLogLevel::Info,
-            "prepare",
-            format!(
-                "resolved container image, build script, and {} source input(s)",
-                sources.len()
-            ),
-        );
-
         fsutil::recreate_empty_dir_force(&cx.temp_root)
             .map_err(map_fsutil_error)
             .map_err(map_error)?;
@@ -124,6 +117,23 @@ impl TypedBuilder for BinaryBuilder {
         fsutil::recreate_empty_dir(&output_path)
             .map_err(map_fsutil_error)
             .map_err(map_error)?;
+        let config_path = cx.temp_root.join(SCRIPT_CONFIG_DIR_NAME);
+        fsutil::recreate_empty_dir(&config_path)
+            .map_err(map_fsutil_error)
+            .map_err(map_error)?;
+        write_script_config(&config_path, config.script_config.as_ref()).map_err(map_error)?;
+
+        let script_execution =
+            resolve_script_execution(script, &config_path, sources).map_err(map_error)?;
+        let container_execution = resolve_container_execution(image).map_err(map_error)?;
+        cx.log_event(
+            BuildLogLevel::Info,
+            "prepare",
+            format!(
+                "resolved container image, build script, {} source input(s), and script config dir",
+                sources.len()
+            ),
+        );
 
         let build_result = run_container_build(
             &container_execution,
@@ -182,11 +192,13 @@ fn validate_config(config: &BinaryConfig) -> BResult<()> {
             "optimize must not be empty".to_string(),
         ));
     }
+    validate_script_config(config.script_config.as_ref())?;
     Ok(())
 }
 
 fn resolve_script_execution(
     script: &ResolvedObject,
+    script_config_dir: &Path,
     sources: &[ResolvedObject],
 ) -> BResult<ScriptExecution> {
     if !script.object_path.is_file() {
@@ -215,6 +227,7 @@ fn resolve_script_execution(
 
     Ok(ScriptExecution {
         script_host_path: script.object_path.clone(),
+        config_host_path: script_config_dir.to_path_buf(),
         source_input_name: if sources.is_empty() {
             String::new()
         } else {
@@ -293,12 +306,21 @@ fn run_container_build(
         "{}:/__mbuild_binary_script:ro",
         script.script_host_path.display()
     ));
+    process.arg("--volume").arg(format!(
+        "{}:{}:ro",
+        script.config_host_path.display(),
+        SCRIPT_CONFIG_MOUNT_PATH
+    ));
 
     process
         .arg("--env")
         .arg(format!("MBUILD_SOURCE_INPUT={}", script.source_input_name))
         .arg("--env")
         .arg(format!("MBUILD_PRIMARY_OUTPUT={OUTPUT_DIR_NAME}"))
+        .arg("--env")
+        .arg(format!(
+            "{SCRIPT_CONFIG_ENV_VAR}={SCRIPT_CONFIG_MOUNT_PATH}"
+        ))
         .arg(&container.image_ref)
         .arg("/__mbuild_binary_script");
 
@@ -413,6 +435,89 @@ fn current_uid_gid() -> (u32, u32) {
     #[cfg(not(unix))]
     {
         (0, 0)
+    }
+}
+
+fn validate_script_config(value: Option<&Value>) -> BResult<()> {
+    match value {
+        None | Some(Value::Null) => Ok(()),
+        Some(value) => validate_script_config_node(value, "<root>"),
+    }
+}
+
+fn validate_script_config_node(value: &Value, path: &str) -> BResult<()> {
+    match value {
+        Value::String(_) => Ok(()),
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                validate_script_config_node(item, &format!("{path}[{index}]"))?;
+            }
+            Ok(())
+        }
+        Value::Object(map) => {
+            for (key, item) in map {
+                validate_script_config_key(key, path)?;
+                validate_script_config_node(item, &format!("{path}.{key}"))?;
+            }
+            Ok(())
+        }
+        _ => Err(BinaryError::InvalidConfig(format!(
+            "script_config supports only records, arrays, and string leaves; invalid value at {path}"
+        ))),
+    }
+}
+
+fn validate_script_config_key(key: &str, path: &str) -> BResult<()> {
+    if key.is_empty()
+        || key == "."
+        || key == ".."
+        || !key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+    {
+        return Err(BinaryError::InvalidConfig(format!(
+            "script_config key '{}' at {} is invalid; allowed chars: [A-Za-z0-9._-]",
+            key, path
+        )));
+    }
+    Ok(())
+}
+
+fn write_script_config(root: &Path, value: Option<&Value>) -> BResult<()> {
+    match value {
+        None | Some(Value::Null) => Ok(()),
+        Some(value) => write_script_config_node(root, value, "<root>"),
+    }
+}
+
+fn write_script_config_node(path: &Path, value: &Value, debug_path: &str) -> BResult<()> {
+    match value {
+        Value::String(contents) => fs::write(path, contents).map_err(|error| {
+            BinaryError::FsFailed(format!(
+                "failed to write script_config leaf '{}' to '{}': {error}",
+                debug_path,
+                path.display()
+            ))
+        }),
+        Value::Array(items) => {
+            fsutil::recreate_empty_dir(path).map_err(map_fsutil_error)?;
+            for (index, item) in items.iter().enumerate() {
+                let child_path = path.join(format!("{index:08}"));
+                write_script_config_node(&child_path, item, &format!("{debug_path}[{index}]"))?;
+            }
+            Ok(())
+        }
+        Value::Object(map) => {
+            fsutil::recreate_empty_dir(path).map_err(map_fsutil_error)?;
+            for (key, item) in map {
+                let child_path = path.join(key);
+                write_script_config_node(&child_path, item, &format!("{debug_path}.{key}"))?;
+            }
+            Ok(())
+        }
+        _ => Err(BinaryError::InvalidConfig(format!(
+            "script_config supports only records, arrays, and string leaves; invalid value at {debug_path}"
+        ))),
     }
 }
 
@@ -610,6 +715,7 @@ mod tests {
                     BinaryConfig {
                         kind: "binary-output".to_string(),
                         optimize: "size".to_string(),
+                        script_config: None,
                     },
                     sample_inputs(temp.path()),
                     &mut cx,
@@ -633,6 +739,80 @@ mod tests {
     }
 
     #[test]
+    fn binary_builder_materializes_script_config_dir() {
+        with_fake_podman(|| {
+            let temp = tempdir().unwrap();
+            let mut cx = build_context(temp.path());
+            let result = BinaryBuilder
+                .build_typed(
+                    BinaryConfig {
+                        kind: "binary-output".to_string(),
+                        optimize: "size".to_string(),
+                        script_config: Some(serde_json::json!({
+                            "configure_args": ["--disable-nls", "--without-selinux"],
+                            "env": {
+                                "CC": "gcc",
+                                "CFLAGS": "-O2",
+                            },
+                            "pre_configure": "echo pre",
+                        })),
+                    },
+                    sample_inputs(temp.path()),
+                    &mut cx,
+                )
+                .unwrap();
+
+            assert_eq!(
+                fs::read_to_string(result.staged_path.join("script-config-dir.txt")).unwrap(),
+                format!("{SCRIPT_CONFIG_MOUNT_PATH}\n")
+            );
+            assert_eq!(
+                fs::read_to_string(
+                    result
+                        .staged_path
+                        .join("script-config")
+                        .join("configure_args")
+                        .join("00000000")
+                )
+                .unwrap(),
+                "--disable-nls"
+            );
+            assert_eq!(
+                fs::read_to_string(
+                    result
+                        .staged_path
+                        .join("script-config")
+                        .join("configure_args")
+                        .join("00000001")
+                )
+                .unwrap(),
+                "--without-selinux"
+            );
+            assert_eq!(
+                fs::read_to_string(
+                    result
+                        .staged_path
+                        .join("script-config")
+                        .join("env")
+                        .join("CC")
+                )
+                .unwrap(),
+                "gcc"
+            );
+            assert_eq!(
+                fs::read_to_string(
+                    result
+                        .staged_path
+                        .join("script-config")
+                        .join("pre_configure")
+                )
+                .unwrap(),
+                "echo pre"
+            );
+        });
+    }
+
+    #[test]
     fn binary_builder_accepts_fetched_file_as_auxiliary_source() {
         with_fake_podman(|| {
             let temp = tempdir().unwrap();
@@ -642,6 +822,7 @@ mod tests {
                     BinaryConfig {
                         kind: "binary-output".to_string(),
                         optimize: "size".to_string(),
+                        script_config: None,
                     },
                     sample_inputs_with_aux_file(temp.path()),
                     &mut cx,
@@ -686,6 +867,7 @@ mod tests {
                     BinaryConfig {
                         kind: "binary-output".to_string(),
                         optimize: "size".to_string(),
+                        script_config: None,
                     },
                     inputs,
                     &mut cx,
@@ -707,6 +889,7 @@ mod tests {
                     BinaryConfig {
                         kind: "binary-output".to_string(),
                         optimize: "size".to_string(),
+                        script_config: None,
                     },
                     sample_inputs_with_binary_output_aux(temp.path()),
                     &mut cx,
@@ -757,6 +940,7 @@ mod tests {
                 BinaryConfig {
                     kind: "binary-output".to_string(),
                     optimize: "size".to_string(),
+                    script_config: None,
                 },
                 inputs,
                 &mut cx,
@@ -764,6 +948,53 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, BuilderError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn binary_builder_rejects_non_string_script_config_leaves() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        let error = BinaryBuilder
+            .build_typed(
+                BinaryConfig {
+                    kind: "binary-output".to_string(),
+                    optimize: "size".to_string(),
+                    script_config: Some(serde_json::json!({
+                        "configure_args": ["--disable-nls"],
+                        "jobs": 4,
+                    })),
+                },
+                sample_inputs(temp.path()),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("script_config"), "{message}");
+        assert!(message.contains("string leaves"), "{message}");
+    }
+
+    #[test]
+    fn binary_builder_rejects_invalid_script_config_keys() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        let error = BinaryBuilder
+            .build_typed(
+                BinaryConfig {
+                    kind: "binary-output".to_string(),
+                    optimize: "size".to_string(),
+                    script_config: Some(serde_json::json!({
+                        "bad key": "value",
+                    })),
+                },
+                sample_inputs(temp.path()),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("script_config key"), "{message}");
+        assert!(message.contains("bad key"), "{message}");
     }
 
     #[test]
@@ -797,6 +1028,7 @@ mod tests {
                     BinaryConfig {
                         kind: "binary-output".to_string(),
                         optimize: "size".to_string(),
+                        script_config: None,
                     },
                     sample_inputs(temp.path()),
                     &mut cx,
