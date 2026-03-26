@@ -1,8 +1,8 @@
+use crate::resolved_inputs::{ResolvedInputs, ResolvedObject};
 use mbuild_core::{
     Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, Builder,
-    BuilderError, CasError, InputArity, PublishedBuild, ResolvedInputs, ResolvedObject,
-    StoreLayout, compute_build_key, compute_result_key, load_published_build, materialize_build,
-    object_path,
+    BuilderError, CasError, InputArity, PublishedBuild, StoreLayout, compute_build_key,
+    compute_result_key, load_published_build, materialize_build, object_path,
 };
 use nickel_lang_core::{error::Error as NickelError, files::Files as NickelFiles};
 use fsobj_hash::ObjectHash;
@@ -299,9 +299,7 @@ pub(crate) fn to_resolved_object(published: PublishedBuild) -> ResolvedObject {
     ResolvedObject {
         object_hash: published.build.object_hash,
         build_key: published.build.build_key,
-        result_key: published.result.result_key,
         kind: published.build.kind,
-        attrs: published.build.attrs,
         object_path: published.object_path,
     }
 }

@@ -1,12 +1,13 @@
 use crate::builders;
 use crate::logging::{BuildRunLogger, RunOptions};
+use crate::resolved_inputs::{ResolvedInputValue, ResolvedInputs, ResolvedObject};
 use crate::runtime::{
     RuntimeError, build_to_published, execute_builder_node, log_runtime_event, map_store_error,
     to_resolved_object, validate_allowed_kind,
 };
 use mbuild_core::{
-    Build, BuildLogLevel, BuildLogger, Builder, PublishedBuild, ResolvedInputValue, ResolvedInputs,
-    StoreLayout, load_published_build, publish_refs,
+    Build, BuildLogLevel, BuildLogger, Builder, PublishedBuild, StoreLayout, load_published_build,
+    publish_refs,
 };
 use nickel_lang_core::{
     cache::{CacheHub, ImportResolver, SourcePath},
@@ -491,7 +492,7 @@ fn resolve_input_build(
     builder: &'static dyn Builder,
     slot_name: &str,
     value: Value,
-) -> Result<mbuild_core::ResolvedObject, RuntimeError> {
+) -> Result<ResolvedObject, RuntimeError> {
     let supplied: Build = serde_json::from_value(value).map_err(|error| {
         RuntimeError::InvalidRequest(format!(
             "STORE action input slot '{}' for builder '{}' must contain a Build value: {error}",
