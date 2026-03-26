@@ -111,15 +111,22 @@ This makes `build_key` a graph identity rather than a payload identity.
 
 Downstream builder actions consume `Build` values as inputs.
 
-This gives Nickel access to builder-generated metadata such as:
+Nickel may inspect builder-generated metadata such as:
 
 - `dep.kind`
 - `dep.attrs.image_ref`
 - `dep.attrs.image_digest`
 
-If authored recipe metadata should influence the build, Nickel must explicitly
-place the relevant data into builder payloads. Rust builders do not receive
-recipe metadata directly.
+However, Rust-builder semantics are defined only by:
+
+- builder tag
+- builder payload/config
+- payload content of already-realized dependency objects
+
+Dependency metadata is observational only. If downstream behavior should depend
+on metadata such as `dep.kind` or `dep.attrs.*`, Nickel must copy that data
+explicitly into the downstream builder payload. A Rust builder whose behavior
+changes solely because dependency metadata differs is considered a model bug.
 
 ## Publication
 

@@ -115,6 +115,10 @@ At minimum, a `Build` value exposes:
 - `attrs`
 
 This lets Nickel code inspect builder-generated metadata from dependency values.
+This metadata is observational. If downstream build behavior should depend on
+it, Nickel must copy the relevant data explicitly into the downstream builder
+payload. Builders are defined to depend only on their payload/config and on the
+payload content of realized input objects.
 
 Examples:
 

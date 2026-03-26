@@ -18,6 +18,18 @@ own. Dependency sequencing is expressed in Nickel through monadic combinators.
 A primitive builder action consumes already-realized `Build` values and returns
 one `STORE Build` action.
 
+Build semantics are defined only by:
+
+- the primitive builder tag
+- the builder payload/config
+- the payload content of already-realized input objects
+
+Dependency metadata carried by `Build` values is observable in Nickel, but it
+is not part of Rust-builder semantics unless Nickel explicitly copies the
+relevant data into a downstream builder payload. A Rust builder whose behavior
+changes based on dependency metadata alone is considered a bug in the store
+model.
+
 By default, `mbuild` prints concise live build progress to `stderr`. The final
 result still goes to `stdout` only. Use `--quiet` to suppress live progress.
 

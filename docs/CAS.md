@@ -265,6 +265,14 @@ For one primitive builder action, the interpreter:
 Rust builders do not receive publication names as part of build semantics.
 Names are consumed only by the interpreter for implicit publication.
 
+Rust-builder semantics are defined only by builder config and by the payload
+content of already-realized input objects. Dependency metadata carried by
+`Build` values is visible to Nickel for inspection, but it is not a semantic
+input to Rust builders unless Nickel explicitly copies it into a downstream
+builder payload. A builder that changes behavior because dependency metadata
+differs, while payload objects and builder config stay the same, violates the
+store model.
+
 ## Monadic Execution Example
 
 Conceptually, a recipe may evaluate to a STORE program like:
