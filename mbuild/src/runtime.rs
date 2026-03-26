@@ -1,9 +1,11 @@
 use mbuild_core::{
     Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, Builder,
     BuilderError, CasError, InputArity, PublishedBuild, ResolvedInputs, ResolvedObject,
-    StoreLayout, compute_build_key, load_build_record, materialize_build, object_path,
+    StoreLayout, compute_build_key, compute_result_key, load_published_build, materialize_build,
+    object_path,
 };
 use nickel_lang_core::{error::Error as NickelError, files::Files as NickelFiles};
+use fsobj_hash::ObjectHash;
 use serde_json::Value;
 use std::fmt;
 use std::path::Path;
@@ -65,6 +67,7 @@ pub(crate) fn execute_builder_node(
     inputs: ResolvedInputs,
 ) -> Result<PublishedBuild, RuntimeError> {
     let input_build_keys = collect_input_build_keys(builder, &inputs)?;
+    let input_object_hashes = collect_input_object_hashes(builder, &inputs)?;
     let build_key = compute_build_key(builder.spec().tag, &config, &input_build_keys)
         .map_err(map_store_error)?;
     log_runtime_event(
@@ -77,8 +80,24 @@ pub(crate) fn execute_builder_node(
         "starting builder node",
     );
 
-    if let Some(record) = load_build_record(layout, build_key).map_err(map_store_error)? {
-        let object_path = object_path(layout, record.object_hash);
+    if let Some(published) = load_published_build(layout, build_key).map_err(map_store_error)? {
+        log_runtime_event(
+            logger.as_ref(),
+            BuildLogLevel::Info,
+            "cache-hit",
+            builder.spec().tag,
+            build_name,
+            build_key,
+            "reusing existing build ref",
+        );
+        return Ok(published);
+    }
+
+    let result_key = compute_result_key(builder.spec().tag, &config, &input_object_hashes)
+        .map_err(map_store_error)?;
+    if let Some(result) = mbuild_core::load_result_record(layout, result_key).map_err(map_store_error)?
+    {
+        let object_path = object_path(layout, result.object_hash);
         if !object_path.exists() {
             log_runtime_event(
                 logger.as_ref(),
@@ -87,25 +106,34 @@ pub(crate) fn execute_builder_node(
                 builder.spec().tag,
                 build_name,
                 build_key,
-                format!("build points to missing object '{}'", object_path.display()),
+                format!("result points to missing object '{}'", object_path.display()),
             );
             return Err(RuntimeError::Store(format!(
-                "build '{}' points to missing object '{}'",
-                build_key,
+                "result '{}' points to missing object '{}'",
+                result_key,
                 object_path.display()
             )));
         }
+        mbuild_core::store_build_ref(layout, build_key, result_key).map_err(map_store_error)?;
         log_runtime_event(
             logger.as_ref(),
             BuildLogLevel::Info,
-            "cache-hit",
+            "result-hit",
             builder.spec().tag,
             build_name,
             build_key,
-            "reusing existing build record",
+            "reusing existing canonical result",
         );
         return Ok(PublishedBuild {
-            record,
+            build: Build {
+                build_key,
+                object_hash: result.object_hash,
+                created_at: result.created_at.clone(),
+                kind: result.kind.clone(),
+                producer: result.producer.clone(),
+                attrs: result.attrs.clone(),
+            },
+            result,
             object_path,
         });
     }
@@ -150,7 +178,15 @@ pub(crate) fn execute_builder_node(
             );
             map_builder_error(error)
         })?;
-    let published = materialize_build(layout, build_key, created_at, staged).map_err(|error| {
+    let published = materialize_build(
+        layout,
+        build_key,
+        result_key,
+        created_at,
+        input_object_hashes,
+        staged,
+    )
+    .map_err(|error| {
         log_runtime_event(
             logger.as_ref(),
             BuildLogLevel::Error,
@@ -169,19 +205,14 @@ pub(crate) fn build_to_published(
     layout: &StoreLayout,
     build: Build,
 ) -> Result<PublishedBuild, RuntimeError> {
-    let object_path = object_path(layout, build.object_hash);
-    if !object_path.exists() {
-        return Err(RuntimeError::Store(format!(
-            "build '{}' points to missing object '{}'",
-            build.build_key,
-            object_path.display()
-        )));
-    }
-
-    Ok(PublishedBuild {
-        record: build,
-        object_path,
-    })
+    load_published_build(layout, build.build_key)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            RuntimeError::Store(format!(
+                "build '{}' is missing from store",
+                build.build_key
+            ))
+        })
 }
 
 pub(crate) fn collect_input_build_keys(
@@ -215,6 +246,37 @@ pub(crate) fn collect_input_build_keys(
     Ok(ordered)
 }
 
+pub(crate) fn collect_input_object_hashes(
+    builder: &dyn Builder,
+    inputs: &ResolvedInputs,
+) -> Result<Vec<ObjectHash>, RuntimeError> {
+    let mut ordered = Vec::new();
+
+    for slot in builder.spec().inputs {
+        match slot.arity {
+            InputArity::One => {
+                ordered.push(inputs.one(slot.name).map_err(map_builder_error)?.object_hash)
+            }
+            InputArity::Optional => {
+                if let Some(object) = inputs.optional(slot.name).map_err(map_builder_error)? {
+                    ordered.push(object.object_hash);
+                }
+            }
+            InputArity::Many => {
+                ordered.extend(
+                    inputs
+                        .many(slot.name)
+                        .map_err(map_builder_error)?
+                        .iter()
+                        .map(|object| object.object_hash),
+                );
+            }
+        }
+    }
+
+    Ok(ordered)
+}
+
 pub(crate) fn validate_allowed_kind(
     builder: &dyn Builder,
     slot_name: &str,
@@ -235,10 +297,11 @@ pub(crate) fn validate_allowed_kind(
 
 pub(crate) fn to_resolved_object(published: PublishedBuild) -> ResolvedObject {
     ResolvedObject {
-        object_hash: published.record.object_hash,
-        build_key: published.record.build_key,
-        kind: published.record.kind,
-        attrs: published.record.attrs,
+        object_hash: published.build.object_hash,
+        build_key: published.build.build_key,
+        result_key: published.result.result_key,
+        kind: published.build.kind,
+        attrs: published.build.attrs,
         object_path: published.object_path,
     }
 }

@@ -2,11 +2,13 @@
 
 ## Summary
 
-`mbuild` stores payloads as content-addressed objects and stores realized
-builder results as build records.
+`mbuild` stores payloads as content-addressed objects, stores canonical
+realized builder results as result records, and stores public build handles as
+symlink refs to those results.
 
 - `objects/` holds payloads addressed by `object_hash`.
-- `builds/` holds build records addressed by `build_key`.
+- `results/` holds canonical result records addressed by `result_key`.
+- `builds/` holds public build-handle refs addressed by `build_key`.
 - `meta-refs/` holds human-facing symlinks from published name to build record.
 - `object-refs/` holds human-facing symlinks from published name to payload
   object.
@@ -21,9 +23,11 @@ participate in object identity or build-record identity.
   objects/
     <object_hash>
   builds/
-    <build_key>.json
+    <build_key> -> ../results/<result_key>.json
+  results/
+    <result_key>.json
   meta-refs/
-    <name>.json -> ../builds/<build_key>.json
+    <name>.json -> ../builds/<build_key>
   object-refs/
     <name> -> ../objects/<object_hash>
   logs/
@@ -34,18 +38,21 @@ participate in object identity or build-record identity.
 
 `objects/<object_hash>` is the payload itself, either a file or a directory.
 
-`builds/<build_key>.json` stores one realized `Build` value. The language-level
-`Build` value and the on-disk build record have the same shape.
+`results/<result_key>.json` stores one canonical realized result record.
+`builds/<build_key>` stores the corresponding public build handle as a symlink
+to the canonical result record. The language-level `Build` value exposes the
+public `build_key`, not the internal `result_key`.
 
 Internal CAS identifiers use bare lowercase hex:
 
 - `object_hash` is a 64-character lowercase hex string
 - `build_key` is a 64-character lowercase hex string
+- `result_key` is a 64-character lowercase hex string
 - algorithm-qualified strings such as `sha256:...` remain only for external
   digests and declared fetch hashes
 
-`meta-refs/<name>.json` is a human-facing symlink to the selected current build
-record. Historical generations are kept as timestamp-suffixed refs such as
+`meta-refs/<name>.json` is a human-facing symlink to the selected current
+public build handle. Historical generations are kept as timestamp-suffixed refs such as
 `meta-refs/<name>.<YYMMDDHHMMSS>.json`.
 
 `object-refs/<name>` is a human-facing symlink to the selected current payload
@@ -140,25 +147,26 @@ Consequences:
 Build records are stored at:
 
 ```text
-.mbuild/builds/<build_key>.json
+.mbuild/results/<result_key>.json
 ```
 
-A build record is the canonical realized result of one builder invocation.
-Language-level `Build` values have this exact shape.
+A result record is the canonical realized result of one builder invocation.
+Language-level `Build` values are public handles layered on top of result
+records and therefore do not have the exact same on-disk shape.
 
 Example shape:
 
 ```json
 {
-  "schema": "mbuild-build-v2",
-  "build_key": "0123456789abcdef...",
+  "schema": "mbuild-result-v1",
+  "result_key": "0123456789abcdef...",
   "created_at": "2026-03-24T12:34:56.123456789Z",
   "object_hash": "fedcba9876543210...",
   "kind": "build-script|source-tree|fetched-file|binary-output|container-image|...",
   "producer": {
     "builder": "text|fetch|binary|image|container-image"
   },
-  "input_build_keys": [
+  "input_object_hashes": [
     "89abcdef01234567..."
   ],
   "attrs": {}
@@ -167,28 +175,32 @@ Example shape:
 
 Rules:
 
-- each build record is keyed by `build_key`
-- `build_key` is computed before builder execution from:
+- each result record is keyed by `result_key`
+- `result_key` is computed before builder execution from:
   - builder tag
   - normalized payload
-  - ordered `input_build_keys`
-- `build_key` does not depend on `object_hash`
-- `build_key` does not depend on `created_at`
-- a build record points at exactly one `object_hash`
-- multiple build records may point at the same object
-- `created_at` records the first materialization time of that build record in
+-  - ordered `input_object_hashes`
+- `result_key` does not depend on `object_hash`
+- `result_key` does not depend on `created_at`
+- a result record points at exactly one `object_hash`
+- multiple `build_key` refs may point at the same result record
+- `created_at` records the first materialization time of that result record in
   RFC3339 UTC format
-- builder-generated semantic metadata lives in the build record
+- builder-generated semantic metadata lives in the result record
 - downstream builder calls consume `Build` values, not raw store paths
 
-`Build` includes machine-facing semantic data such as:
+Public `Build` includes machine-facing semantic data such as:
 
 - `build_key`
 - `object_hash`
 - `kind`
 - `attrs`
-- optionally `producer` and `input_build_keys` if they are exposed by the
-  language
+- `producer`
+
+Canonical result records additionally include:
+
+- `result_key`
+- `input_object_hashes`
 
 `object_path` is a runtime detail. It is not part of the language-level `Build`
 value.
@@ -200,8 +212,8 @@ value.
 Stored at:
 
 ```text
-.mbuild/meta-refs/<name>.json -> ../builds/<build_key>.json
-.mbuild/meta-refs/<name>.<YYMMDDHHMMSS>.json -> ../builds/<old_build_key>.json
+.mbuild/meta-refs/<name>.json -> ../builds/<build_key>
+.mbuild/meta-refs/<name>.<YYMMDDHHMMSS>.json -> ../builds/<old_build_key>
 ```
 
 Purpose:
@@ -251,16 +263,19 @@ For one primitive builder action, the interpreter:
 1. receives a builder action whose dependency fields are already realized
    `Build` values
 2. validates builder-specific input kinds and required attrs
-3. collects ordered `input_build_keys`
+3. collects ordered `input_build_keys` and `input_object_hashes`
 4. computes `build_key`
-5. reuses an existing build record on matching `build_key`
-6. executes the appropriate Rust builder on cache miss
-7. stores the produced payload in `objects/`
-8. writes or reuses one build record in `builds/`, including `created_at`
-9. updates `meta-refs/<name>.json` and `object-refs/<name>`
-10. if the published name already pointed at a different build, rotates the old
+5. reuses an existing public build ref on matching `build_key`
+6. on `build_key` miss, computes `result_key`
+7. reuses an existing canonical result on matching `result_key`
+8. executes the appropriate Rust builder only when both lookups miss
+9. stores the produced payload in `objects/`
+10. writes or reuses one canonical result record in `results/`, including `created_at`
+11. updates or creates `builds/<build_key>` as a symlink to that result
+12. updates `meta-refs/<name>.json` and `object-refs/<name>`
+13. if the published name already pointed at a different result, rotates the old
     current refs into timestamp-suffixed generation refs
-11. returns the realized `Build` value
+14. returns the realized `Build` value
 
 Rust builders do not receive publication names as part of build semantics.
 Names are consumed only by the interpreter for implicit publication.

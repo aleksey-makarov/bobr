@@ -62,8 +62,9 @@ Operationally:
 1. Nickel evaluates package definitions and overrides.
 2. Nickel produces one top-level STORE action.
 3. Rust interprets the resulting STORE action tree.
-4. Rust computes `build_key` from builder tag, normalized payload, and ordered
-   `input_build_keys`.
+4. Rust computes public `build_key` from builder tag, normalized payload, and ordered
+   `input_build_keys`, and canonical `result_key` from ordered
+   `input_object_hashes`.
 5. Rust reuses or executes builders.
 6. Rust implicitly updates publication refs from the explicit name carried by
    each primitive builder action.

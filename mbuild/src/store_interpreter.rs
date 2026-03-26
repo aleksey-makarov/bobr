@@ -6,7 +6,7 @@ use crate::runtime::{
 };
 use mbuild_core::{
     Build, BuildLogLevel, BuildLogger, Builder, PublishedBuild, ResolvedInputValue, ResolvedInputs,
-    StoreLayout, load_build_record, publish_refs,
+    StoreLayout, load_published_build, publish_refs,
 };
 use nickel_lang_core::{
     cache::{CacheHub, ImportResolver, SourcePath},
@@ -379,10 +379,10 @@ fn interpret_store(
                 "publish",
                 builder.spec().tag,
                 &run.name,
-                published.record.build_key,
+                published.build.build_key,
                 format!(
                     "published '{}' -> {}",
-                    run.name, published.record.object_hash
+                    run.name, published.build.object_hash
                 ),
             );
             logger.as_ref().log_event(mbuild_core::BuildLogEvent {
@@ -390,13 +390,13 @@ fn interpret_store(
                 phase: "done".to_string(),
                 builder: builder.spec().tag.to_string(),
                 name: run.name.clone(),
-                build_key: published.record.build_key,
+                build_key: published.build.build_key,
                 message: "builder node completed".to_string(),
-                object_hash: Some(published.record.object_hash),
+                object_hash: Some(published.build.object_hash),
                 raw_log_path: None,
                 details: Map::new(),
             });
-            build_to_nickel_value(&published.record)
+            build_to_nickel_value(&published.build)
         }
         other => Err(RuntimeError::InvalidRequest(format!(
             "unknown STORE action tag '{other}'"
@@ -500,7 +500,7 @@ fn resolve_input_build(
         ))
     })?;
 
-    let canonical = load_build_record(layout, supplied.build_key)
+    let canonical = load_published_build(layout, supplied.build_key)
         .map_err(map_store_error)?
         .ok_or_else(|| {
             RuntimeError::Store(format!(
@@ -511,7 +511,7 @@ fn resolve_input_build(
             ))
         })?;
 
-    if canonical != supplied {
+    if canonical.build != supplied {
         return Err(RuntimeError::InvalidRequest(format!(
             "STORE action input build '{}' for builder '{}' slot '{}' does not match store record",
             supplied.build_key,
@@ -520,8 +520,7 @@ fn resolve_input_build(
         )));
     }
 
-    let published = build_to_published(layout, canonical)?;
-    Ok(to_resolved_object(published))
+    Ok(to_resolved_object(canonical))
 }
 
 fn build_to_nickel_value(build: &Build) -> Result<NickelValue, RuntimeError> {

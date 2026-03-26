@@ -1,4 +1,4 @@
-use crate::builder::{Build, ProducerInfo, PublishedBuild, StagedBuildResult};
+use crate::builder::{Build, ProducerInfo, PublishedBuild, ResultRecord, StagedBuildResult};
 use crate::fsutil;
 use fsobj_hash::{ObjectHash, hash_path};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -16,11 +16,15 @@ use time::UtcOffset;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 
-const BUILD_SCHEMA: &str = "mbuild-build-v2";
+const RESULT_SCHEMA: &str = "mbuild-result-v1";
+#[cfg(test)]
+const BUILD_SCHEMA: &str = RESULT_SCHEMA;
 const INVOCATION_SCHEMA: &str = "mbuild-build-invocation-v1";
+const RESULT_INVOCATION_SCHEMA: &str = "mbuild-build-result-invocation-v1";
 const ROOT_DIR: &str = ".mbuild";
 const OBJECTS_DIR: &str = "objects";
 const BUILDS_DIR: &str = "builds";
+const RESULTS_DIR: &str = "results";
 const OBJECT_REFS_DIR: &str = "object-refs";
 const META_REFS_DIR: &str = "meta-refs";
 
@@ -151,6 +155,7 @@ pub struct StoreLayout {
     pub root: PathBuf,
     pub objects: PathBuf,
     pub builds: PathBuf,
+    pub results: PathBuf,
     pub object_refs: PathBuf,
     pub meta_refs: PathBuf,
 }
@@ -161,6 +166,7 @@ impl StoreLayout {
             root: root.to_path_buf(),
             objects: root.join(OBJECTS_DIR),
             builds: root.join(BUILDS_DIR),
+            results: root.join(RESULTS_DIR),
             object_refs: root.join(OBJECT_REFS_DIR),
             meta_refs: root.join(META_REFS_DIR),
         };
@@ -178,6 +184,7 @@ impl StoreLayout {
         ensure_dir(&self.root, "mbuild root")?;
         ensure_dir(&self.objects, "objects")?;
         ensure_dir(&self.builds, "builds")?;
+        ensure_dir(&self.results, "results")?;
         ensure_dir(&self.object_refs, "object-refs")?;
         ensure_dir(&self.meta_refs, "meta-refs")?;
         Ok(())
@@ -188,11 +195,13 @@ impl StoreLayout {
 pub struct PublishOutputRequest {
     pub output_name: String,
     pub build_key: BuildKey,
+    pub result_key: BuildKey,
     pub created_at: String,
     pub staged_path: PathBuf,
     pub kind: String,
     pub producer_builder: String,
     pub input_build_keys: Vec<BuildKey>,
+    pub input_object_hashes: Vec<ObjectHash>,
     pub attrs: Map<String, Value>,
 }
 
@@ -200,30 +209,44 @@ pub struct PublishOutputRequest {
 pub struct PublishedOutput {
     pub object_hash: ObjectHash,
     pub build_key: BuildKey,
+    pub result_key: BuildKey,
 }
 
 pub fn publish_output(
     layout: &StoreLayout,
     request: PublishOutputRequest,
 ) -> Result<PublishedOutput, CasError> {
-    if let Some(record) = load_build_record(layout, request.build_key)? {
-        let object_path = object_path(layout, record.object_hash);
+    if let Some(published) = load_published_build(layout, request.build_key)? {
+        remove_path_force(&request.staged_path)?;
+        publish_refs(layout, &request.output_name, &published)?;
+        return Ok(PublishedOutput {
+            object_hash: published.build.object_hash,
+            build_key: published.build.build_key,
+            result_key: published.result.result_key,
+        });
+    }
+
+    if let Some(result) = load_result_record(layout, request.result_key)? {
+        let object_path = object_path(layout, result.object_hash);
         if !object_path.exists() {
             return Err(CasError::Io(format!(
-                "build '{}' points to missing object '{}'",
-                request.build_key,
+                "result '{}' points to missing object '{}'",
+                request.result_key,
                 object_path.display()
             )));
         }
         remove_path_force(&request.staged_path)?;
+        store_build_ref(layout, request.build_key, request.result_key)?;
         let published = PublishedBuild {
-            record,
+            build: build_from_result(request.build_key, &result),
+            result,
             object_path,
         };
         publish_refs(layout, &request.output_name, &published)?;
         return Ok(PublishedOutput {
-            object_hash: published.record.object_hash,
-            build_key: published.record.build_key,
+            object_hash: published.build.object_hash,
+            build_key: published.build.build_key,
+            result_key: published.result.result_key,
         });
     }
 
@@ -232,16 +255,24 @@ pub fn publish_output(
         producer: ProducerInfo {
             builder: request.producer_builder,
         },
-        input_build_keys: request.input_build_keys,
+        input_build_keys: vec![],
         attrs: request.attrs,
         staged_path: request.staged_path,
     };
-    let published = materialize_build(layout, request.build_key, &request.created_at, staged)?;
+    let published = materialize_build(
+        layout,
+        request.build_key,
+        request.result_key,
+        &request.created_at,
+        request.input_object_hashes,
+        staged,
+    )?;
     publish_refs(layout, &request.output_name, &published)?;
 
     Ok(PublishedOutput {
-        object_hash: published.record.object_hash,
-        build_key: published.record.build_key,
+        object_hash: published.build.object_hash,
+        build_key: published.build.build_key,
+        result_key: published.result.result_key,
     })
 }
 
@@ -271,51 +302,67 @@ pub fn compute_build_key(
     Ok(BuildKey(Sha256::digest(&canonical).into()))
 }
 
+pub fn compute_result_key(
+    builder_tag: &str,
+    normalized_payload: &Value,
+    input_object_hashes: &[ObjectHash],
+) -> Result<BuildKey, CasError> {
+    let input_hashes = input_object_hashes
+        .iter()
+        .map(|hash| Value::String(hash.to_string()))
+        .collect::<Vec<_>>();
+
+    let mut root = Map::new();
+    root.insert(
+        "schema".to_string(),
+        Value::String(RESULT_INVOCATION_SCHEMA.to_string()),
+    );
+    root.insert(
+        "builder_tag".to_string(),
+        Value::String(builder_tag.to_string()),
+    );
+    root.insert("payload".to_string(), normalized_payload.clone());
+    root.insert(
+        "input_object_hashes".to_string(),
+        Value::Array(input_hashes),
+    );
+
+    let canonical = canonical_json_bytes(&Value::Object(root))?;
+    Ok(BuildKey(Sha256::digest(&canonical).into()))
+}
+
 pub fn load_build_record(
     layout: &StoreLayout,
     build_key: BuildKey,
 ) -> Result<Option<Build>, CasError> {
-    let build_path = layout.builds.join(format!("{}.json", build_key.to_hex()));
-    if !build_path.exists() {
-        return Ok(None);
-    }
-
-    let bytes = fs::read(&build_path).map_err(|error| {
-        CasError::Io(format!(
-            "failed to read build record '{}': {error}",
-            build_path.display()
-        ))
-    })?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
-        CasError::Serialization(format!(
-            "failed to parse build record '{}': {error}",
-            build_path.display()
-        ))
-    })?;
-    Ok(Some(parse_build_record_value(build_key, &value)?))
+    Ok(load_published_build(layout, build_key)?.map(|published| published.build))
 }
 
 pub fn materialize_build(
     layout: &StoreLayout,
     build_key: BuildKey,
+    result_key: BuildKey,
     created_at: &str,
+    input_object_hashes: Vec<ObjectHash>,
     staged: StagedBuildResult,
 ) -> Result<PublishedBuild, CasError> {
     let object_hash = import_object(layout, &staged.staged_path)?;
-    let record = Build {
-        build_key,
+    let result = ResultRecord {
+        result_key,
         object_hash,
         created_at: Some(created_at.to_string()),
         kind: staged.kind,
         producer: staged.producer,
-        input_build_keys: staged.input_build_keys,
+        input_object_hashes,
         attrs: staged.attrs,
     };
-    write_build_record(layout, &record)?;
+    write_result_record(layout, &result)?;
+    store_build_ref(layout, build_key, result_key)?;
 
     Ok(PublishedBuild {
         object_path: layout.objects.join(object_hash.to_hex()),
-        record,
+        build: build_from_result(build_key, &result),
+        result,
     })
 }
 
@@ -330,7 +377,7 @@ pub fn publish_refs(
     let current_object_ref_path = layout.object_refs.join(output_name);
 
     if let Some(current) = load_current_publication(layout, output_name)? {
-        if current.build.build_key != published.record.build_key {
+        if current.result.result_key != published.result.result_key {
             let generation_name =
                 allocate_generation_name(layout, output_name, &generation_suffix(&current)?)?;
 
@@ -348,12 +395,12 @@ pub fn publish_refs(
 
     let object_ref_target = PathBuf::from("..")
         .join(OBJECTS_DIR)
-        .join(published.record.object_hash.to_hex());
+        .join(published.build.object_hash.to_hex());
     replace_symlink(&object_ref_target, &current_object_ref_path)?;
 
     let meta_ref_target = PathBuf::from("..")
         .join(BUILDS_DIR)
-        .join(format!("{}.json", published.record.build_key.to_hex()));
+        .join(published.build.build_key.to_hex());
     replace_symlink(&meta_ref_target, &current_meta_ref_path)?;
     Ok(())
 }
@@ -363,7 +410,112 @@ pub fn object_path(layout: &StoreLayout, object_hash: ObjectHash) -> PathBuf {
 }
 
 pub fn build_path(layout: &StoreLayout, build_key: BuildKey) -> PathBuf {
-    layout.builds.join(format!("{}.json", build_key.to_hex()))
+    layout.builds.join(build_key.to_hex())
+}
+
+pub fn result_path(layout: &StoreLayout, result_key: BuildKey) -> PathBuf {
+    layout.results.join(format!("{}.json", result_key.to_hex()))
+}
+
+pub fn store_build_ref(
+    layout: &StoreLayout,
+    build_key: BuildKey,
+    result_key: BuildKey,
+) -> Result<(), CasError> {
+    let target = PathBuf::from("..")
+        .join(RESULTS_DIR)
+        .join(format!("{}.json", result_key.to_hex()));
+    replace_symlink(&target, &build_path(layout, build_key))
+}
+
+pub fn load_published_build(
+    layout: &StoreLayout,
+    build_key: BuildKey,
+) -> Result<Option<PublishedBuild>, CasError> {
+    let build_ref_path = build_path(layout, build_key);
+    if !build_ref_path.exists() && !build_ref_path.is_symlink() {
+        return Ok(None);
+    }
+
+    let target = fs::read_link(&build_ref_path).map_err(|error| {
+        CasError::Io(format!(
+            "failed to read build ref '{}': {error}",
+            build_ref_path.display()
+        ))
+    })?;
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            CasError::Serialization(format!(
+                "build ref '{}' points to invalid target '{}'",
+                build_ref_path.display(),
+                target.display()
+            ))
+        })?;
+    let result_key_str = file_name.strip_suffix(".json").ok_or_else(|| {
+        CasError::Serialization(format!(
+            "build ref '{}' points to non-JSON result target '{}'",
+            build_ref_path.display(),
+            target.display()
+        ))
+    })?;
+    let result_key = parse_build_key_result(result_key_str)?;
+    let result = load_result_record(layout, result_key)?.ok_or_else(|| {
+        CasError::Serialization(format!(
+            "build ref '{}' points to missing result '{}'",
+            build_ref_path.display(),
+            result_key
+        ))
+    })?;
+    let object_path = object_path(layout, result.object_hash);
+    if !object_path.exists() {
+        return Err(CasError::Io(format!(
+            "result '{}' points to missing object '{}'",
+            result.result_key,
+            object_path.display()
+        )));
+    }
+    Ok(Some(PublishedBuild {
+        build: build_from_result(build_key, &result),
+        result,
+        object_path,
+    }))
+}
+
+pub fn load_result_record(
+    layout: &StoreLayout,
+    result_key: BuildKey,
+) -> Result<Option<ResultRecord>, CasError> {
+    let result_path = result_path(layout, result_key);
+    if !result_path.exists() {
+        return Ok(None);
+    }
+
+    let bytes = fs::read(&result_path).map_err(|error| {
+        CasError::Io(format!(
+            "failed to read result record '{}': {error}",
+            result_path.display()
+        ))
+    })?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        CasError::Serialization(format!(
+            "failed to parse result record '{}': {error}",
+            result_path.display()
+        ))
+    })?;
+    Ok(Some(parse_result_record_value(result_key, &value)?))
+}
+
+fn build_from_result(build_key: BuildKey, result: &ResultRecord) -> Build {
+    Build {
+        build_key,
+        object_hash: result.object_hash,
+        created_at: result.created_at.clone(),
+        kind: result.kind.clone(),
+        producer: result.producer.clone(),
+        attrs: result.attrs.clone(),
+    }
 }
 
 pub fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectHash, CasError> {
@@ -390,28 +542,28 @@ pub fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectH
     Ok(object_hash)
 }
 
-fn write_build_record(layout: &StoreLayout, record: &Build) -> Result<(), CasError> {
-    let build_value = build_record_json_value(record);
-    let canonical = canonical_json_bytes(&build_value)?;
-    let build_path = build_path(layout, record.build_key);
+fn write_result_record(layout: &StoreLayout, record: &ResultRecord) -> Result<(), CasError> {
+    let result_value = result_record_json_value(record);
+    let canonical = canonical_json_bytes(&result_value)?;
+    let result_path = result_path(layout, record.result_key);
     fsutil::write_atomic(
-        &build_path,
+        &result_path,
         std::str::from_utf8(&canonical).map_err(|error| {
             CasError::Serialization(format!(
-                "failed to encode canonical build JSON as UTF-8: {error}"
+                "failed to encode canonical result JSON as UTF-8: {error}"
             ))
         })?,
     )
     .map_err(map_fsutil_error)
 }
 
-fn build_json_value(
-    build_key: BuildKey,
+fn result_json_value(
+    result_key: BuildKey,
     created_at: Option<&str>,
     kind: &str,
     object_hash: ObjectHash,
     producer_builder: &str,
-    input_build_keys: &[BuildKey],
+    input_object_hashes: &[ObjectHash],
     attrs: Map<String, Value>,
 ) -> Value {
     let mut producer = Map::new();
@@ -420,19 +572,19 @@ fn build_json_value(
         Value::String(producer_builder.to_string()),
     );
 
-    let input_keys = input_build_keys
+    let input_hashes = input_object_hashes
         .iter()
-        .map(|key| Value::String(key.to_string()))
+        .map(|hash| Value::String(hash.to_string()))
         .collect::<Vec<_>>();
 
     let mut root = Map::new();
     root.insert(
         "schema".to_string(),
-        Value::String(BUILD_SCHEMA.to_string()),
+        Value::String(RESULT_SCHEMA.to_string()),
     );
     root.insert(
-        "build_key".to_string(),
-        Value::String(build_key.to_string()),
+        "result_key".to_string(),
+        Value::String(result_key.to_string()),
     );
     if let Some(created_at) = created_at {
         root.insert(
@@ -446,47 +598,71 @@ fn build_json_value(
         Value::String(object_hash.to_string()),
     );
     root.insert("producer".to_string(), Value::Object(producer));
-    root.insert("input_build_keys".to_string(), Value::Array(input_keys));
+    root.insert(
+        "input_object_hashes".to_string(),
+        Value::Array(input_hashes),
+    );
     root.insert("attrs".to_string(), Value::Object(attrs));
     Value::Object(root)
 }
 
-fn build_record_json_value(record: &Build) -> Value {
-    build_json_value(
-        record.build_key,
+fn result_record_json_value(record: &ResultRecord) -> Value {
+    result_json_value(
+        record.result_key,
         record.created_at.as_deref(),
         &record.kind,
         record.object_hash,
         &record.producer.builder,
-        &record.input_build_keys,
+        &record.input_object_hashes,
         record.attrs.clone(),
     )
 }
 
-fn parse_build_record_value(build_key: BuildKey, value: &Value) -> Result<Build, CasError> {
+#[cfg(test)]
+fn build_json_value(
+    result_key: BuildKey,
+    created_at: Option<&str>,
+    kind: &str,
+    object_hash: ObjectHash,
+    producer_builder: &str,
+    input_object_hashes: &[ObjectHash],
+    attrs: Map<String, Value>,
+) -> Value {
+    result_json_value(
+        result_key,
+        created_at,
+        kind,
+        object_hash,
+        producer_builder,
+        input_object_hashes,
+        attrs,
+    )
+}
+
+fn parse_result_record_value(result_key: BuildKey, value: &Value) -> Result<ResultRecord, CasError> {
     let object = value.as_object().ok_or_else(|| {
-        CasError::Serialization("build record root must be a JSON object".to_string())
+        CasError::Serialization("result record root must be a JSON object".to_string())
     })?;
 
     let schema = object
         .get("schema")
         .and_then(Value::as_str)
-        .ok_or_else(|| CasError::Serialization("build record is missing 'schema'".to_string()))?;
-    if schema != BUILD_SCHEMA && schema != "mbuild-build-v1" {
+        .ok_or_else(|| CasError::Serialization("result record is missing 'schema'".to_string()))?;
+    if schema != RESULT_SCHEMA {
         return Err(CasError::Serialization(format!(
-            "unsupported build record schema '{schema}'"
+            "unsupported result record schema '{schema}'"
         )));
     }
 
-    let encoded_build_key = object
-        .get("build_key")
+    let encoded_result_key = object
+        .get("result_key")
         .and_then(Value::as_str)
-        .ok_or_else(|| CasError::Serialization("build record is missing 'build_key'".to_string()))
+        .ok_or_else(|| CasError::Serialization("result record is missing 'result_key'".to_string()))
         .and_then(parse_build_key_result)?;
-    if encoded_build_key != build_key {
+    if encoded_result_key != result_key {
         return Err(CasError::Serialization(format!(
-            "build record key mismatch: path key '{}' does not match encoded key '{}'",
-            build_key, encoded_build_key
+            "result record key mismatch: path key '{}' does not match encoded key '{}'",
+            result_key, encoded_result_key
         )));
     }
 
@@ -494,7 +670,7 @@ fn parse_build_record_value(build_key: BuildKey, value: &Value) -> Result<Build,
         .get("created_at")
         .map(|value| {
             value.as_str().ok_or_else(|| {
-                CasError::Serialization("build record created_at must be a string".to_string())
+                CasError::Serialization("result record created_at must be a string".to_string())
             })
         })
         .transpose()?
@@ -503,32 +679,32 @@ fn parse_build_record_value(build_key: BuildKey, value: &Value) -> Result<Build,
     let kind = object
         .get("kind")
         .and_then(Value::as_str)
-        .ok_or_else(|| CasError::Serialization("build record is missing 'kind'".to_string()))?
+        .ok_or_else(|| CasError::Serialization("result record is missing 'kind'".to_string()))?
         .to_string();
 
     let object_hash = object
         .get("object_hash")
         .and_then(Value::as_str)
-        .ok_or_else(|| CasError::Serialization("build record is missing 'object_hash'".to_string()))
+        .ok_or_else(|| CasError::Serialization("result record is missing 'object_hash'".to_string()))
         .and_then(parse_object_hash_result)?;
 
     let producer_obj = object
         .get("producer")
         .and_then(Value::as_object)
-        .ok_or_else(|| CasError::Serialization("build record is missing 'producer'".to_string()))?;
+        .ok_or_else(|| CasError::Serialization("result record is missing 'producer'".to_string()))?;
     let builder = producer_obj
         .get("builder")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            CasError::Serialization("build record producer is missing 'builder'".to_string())
+            CasError::Serialization("result record producer is missing 'builder'".to_string())
         })?
         .to_string();
 
-    let input_build_keys = object
-        .get("input_build_keys")
+    let input_object_hashes = object
+        .get("input_object_hashes")
         .and_then(Value::as_array)
         .ok_or_else(|| {
-            CasError::Serialization("build record is missing 'input_build_keys'".to_string())
+            CasError::Serialization("result record is missing 'input_object_hashes'".to_string())
         })?
         .iter()
         .map(|value| {
@@ -536,26 +712,26 @@ fn parse_build_record_value(build_key: BuildKey, value: &Value) -> Result<Build,
                 .as_str()
                 .ok_or_else(|| {
                     CasError::Serialization(
-                        "build record input_build_keys must contain strings".to_string(),
+                        "result record input_object_hashes must contain strings".to_string(),
                     )
                 })
-                .and_then(parse_build_key_result)
+                .and_then(parse_object_hash_result)
         })
         .collect::<Result<Vec<_>, _>>()?;
 
     let attrs = object
         .get("attrs")
         .and_then(Value::as_object)
-        .ok_or_else(|| CasError::Serialization("build record is missing 'attrs'".to_string()))?
+        .ok_or_else(|| CasError::Serialization("result record is missing 'attrs'".to_string()))?
         .clone();
 
-    Ok(Build {
-        build_key,
+    Ok(ResultRecord {
+        result_key,
         object_hash,
         created_at,
         kind,
         producer: ProducerInfo { builder },
-        input_build_keys,
+        input_object_hashes,
         attrs,
     })
 }
@@ -654,8 +830,8 @@ fn validate_output_name(name: &str) -> Result<(), CasError> {
 
 #[derive(Debug)]
 struct CurrentPublication {
-    build: Build,
-    build_path: PathBuf,
+    result: ResultRecord,
+    result_path: PathBuf,
     meta_target: Option<PathBuf>,
     object_target: Option<PathBuf>,
 }
@@ -685,16 +861,9 @@ fn load_current_publication(
                 meta_target.display()
             ))
         })?;
-    let build_key_str = meta_file_name.strip_suffix(".json").ok_or_else(|| {
-        CasError::Serialization(format!(
-            "current meta ref '{}' points to non-JSON build target '{}'",
-            meta_ref_path.display(),
-            meta_target.display()
-        ))
-    })?;
+    let build_key_str = meta_file_name;
     let build_key = parse_build_key_result(build_key_str)?;
-    let build_path = build_path(layout, build_key);
-    let build = load_build_record(layout, build_key)?.ok_or_else(|| {
+    let published = load_published_build(layout, build_key)?.ok_or_else(|| {
         CasError::Serialization(format!(
             "current meta ref '{}' points to missing build '{}'",
             meta_ref_path.display(),
@@ -715,30 +884,30 @@ fn load_current_publication(
     };
 
     Ok(Some(CurrentPublication {
-        build,
-        build_path,
+        result_path: result_path(layout, published.result.result_key),
+        result: published.result,
         meta_target: Some(meta_target),
         object_target,
     }))
 }
 
 fn generation_suffix(current: &CurrentPublication) -> Result<String, CasError> {
-    if let Some(created_at) = &current.build.created_at {
+    if let Some(created_at) = &current.result.created_at {
         return human_timestamp_from_rfc3339(created_at);
     }
 
-    let modified = fs::metadata(&current.build_path)
+    let modified = fs::metadata(&current.result_path)
         .map_err(|error| {
             CasError::Io(format!(
-                "failed to stat build record '{}' for generation timestamp: {error}",
-                current.build_path.display()
+                "failed to stat result record '{}' for generation timestamp: {error}",
+                current.result_path.display()
             ))
         })?
         .modified()
         .map_err(|error| {
             CasError::Io(format!(
-                "failed to read mtime for build record '{}': {error}",
-                current.build_path.display()
+                "failed to read mtime for result record '{}': {error}",
+                current.result_path.display()
             ))
         })?;
     let parsed = OffsetDateTime::from(modified);
@@ -928,11 +1097,13 @@ mod tests {
             PublishOutputRequest {
                 output_name: "hello".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
             },
         )
@@ -945,11 +1116,13 @@ mod tests {
             PublishOutputRequest {
                 output_name: "hello-copy".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
             },
         )
@@ -961,14 +1134,14 @@ mod tests {
         assert!(
             layout
                 .builds
-                .join(format!("{}.json", second.build_key.to_hex()))
+                .join(second.build_key.to_hex())
                 .exists()
         );
         assert_eq!(
             fs::read_link(layout.meta_refs.join("hello-copy.json")).unwrap(),
             PathBuf::from("..")
                 .join(BUILDS_DIR)
-                .join(format!("{}.json", second.build_key.to_hex()))
+                .join(second.build_key.to_hex())
         );
     }
 
@@ -990,6 +1163,11 @@ mod tests {
                         "1111111111111111111111111111111111111111111111111111111111111111",
                     )],
                 ),
+                result_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "echo hi\n" }),
+                    &[],
+                ),
                 created_at: sample_created_at().to_string(),
                 staged_path: stage,
                 kind: "build-script".to_string(),
@@ -997,6 +1175,7 @@ mod tests {
                 input_build_keys: vec![parse_build_key(
                     "1111111111111111111111111111111111111111111111111111111111111111",
                 )],
+                input_object_hashes: vec![],
                 attrs: Map::from_iter([
                     ("source_bytes".to_string(), Value::from(8)),
                     ("generated".to_string(), Value::from(false)),
@@ -1005,19 +1184,19 @@ mod tests {
         )
         .unwrap();
 
-        let build_path = layout
-            .builds
-            .join(format!("{}.json", published.build_key.to_hex()));
-        assert!(build_path.exists());
+        let build_ref_path = layout.builds.join(published.build_key.to_hex());
+        let result_path = layout.results.join(format!("{}.json", published.result_key.to_hex()));
+        assert!(build_ref_path.exists());
+        assert!(result_path.exists());
 
-        let build_json: Value = serde_json::from_slice(&fs::read(&build_path).unwrap()).unwrap();
+        let build_json: Value = serde_json::from_slice(&fs::read(&result_path).unwrap()).unwrap();
         assert_eq!(
             build_json["schema"],
             Value::String(BUILD_SCHEMA.to_string())
         );
         assert_eq!(
-            build_json["build_key"],
-            Value::String(published.build_key.to_string())
+            build_json["result_key"],
+            Value::String(published.result_key.to_string())
         );
         assert_eq!(
             build_json["created_at"],
@@ -1036,10 +1215,8 @@ mod tests {
             Value::String("text".to_string())
         );
         assert_eq!(
-            build_json["input_build_keys"],
-            Value::Array(vec![Value::String(
-                "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
-            )])
+            build_json["input_object_hashes"],
+            Value::Array(vec![])
         );
         assert_eq!(build_json["attrs"]["source_bytes"], Value::from(8));
         assert_eq!(build_json["attrs"]["generated"], Value::from(false));
@@ -1048,7 +1225,7 @@ mod tests {
             fs::read_link(layout.meta_refs.join("script.json")).unwrap(),
             PathBuf::from("..")
                 .join(BUILDS_DIR)
-                .join(format!("{}.json", published.build_key.to_hex()))
+                .join(published.build_key.to_hex())
         );
         assert_eq!(
             fs::read_link(layout.object_refs.join("script")).unwrap(),
@@ -1074,11 +1251,17 @@ mod tests {
                     json!({ "kind": "build-script", "source": "hello" }),
                     &[],
                 ),
+                result_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "hello" }),
+                    &[],
+                ),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
             },
         )
@@ -1095,11 +1278,17 @@ mod tests {
                     json!({ "kind": "source-tree", "source": "hello" }),
                     &[],
                 ),
+                result_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "source-tree", "source": "hello" }),
+                    &[],
+                ),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 kind: "source-tree".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::from_iter([(String::from("source_bytes"), Value::from(6))]),
             },
         )
@@ -1121,11 +1310,13 @@ mod tests {
             PublishOutputRequest {
                 output_name: "kind-a".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1138,11 +1329,13 @@ mod tests {
             PublishOutputRequest {
                 output_name: "kind-b".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "source-tree" }), &[]),
+                result_key: build_key_for("Text", json!({ "kind": "source-tree" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 kind: "source-tree".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1164,11 +1357,13 @@ mod tests {
             PublishOutputRequest {
                 output_name: "producer-a".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1181,11 +1376,13 @@ mod tests {
             PublishOutputRequest {
                 output_name: "producer-b".to_string(),
                 build_key: build_key_for("Fetch", json!({ "kind": "build-script" }), &[]),
+                result_key: build_key_for("Fetch", json!({ "kind": "build-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "fetch".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1211,11 +1408,17 @@ mod tests {
                     json!({ "kind": "build-script", "source": "hello" }),
                     &[],
                 ),
+                result_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "hello" }),
+                    &[],
+                ),
                 created_at: "2026-03-24T12:34:56.123456789Z".to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1232,11 +1435,17 @@ mod tests {
                     json!({ "kind": "build-script", "source": "hello world" }),
                     &[],
                 ),
+                result_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "hello world" }),
+                    &[],
+                ),
                 created_at: "2026-03-24T12:35:30.123456789Z".to_string(),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1255,7 +1464,7 @@ mod tests {
             fs::read_link(layout.meta_refs.join("shared.json")).unwrap(),
             PathBuf::from("..")
                 .join(BUILDS_DIR)
-                .join(format!("{}.json", second.build_key.to_hex()))
+                .join(second.build_key.to_hex())
         );
         assert_eq!(
             fs::read_link(layout.object_refs.join(format!("shared.{suffix}"))).unwrap(),
@@ -1267,7 +1476,7 @@ mod tests {
             fs::read_link(layout.meta_refs.join(format!("shared.{suffix}.json"))).unwrap(),
             PathBuf::from("..")
                 .join(BUILDS_DIR)
-                .join(format!("{}.json", first.build_key.to_hex()))
+                .join(first.build_key.to_hex())
         );
     }
 
@@ -1288,11 +1497,13 @@ mod tests {
             PublishOutputRequest {
                 output_name: "shared".to_string(),
                 build_key,
+                result_key: build_key,
                 created_at: "2026-03-24T12:34:56.123456789Z".to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1305,11 +1516,13 @@ mod tests {
             PublishOutputRequest {
                 output_name: "shared".to_string(),
                 build_key,
+                result_key: build_key,
                 created_at: "2026-03-24T12:35:30.123456789Z".to_string(),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1343,11 +1556,17 @@ mod tests {
                     json!({ "kind": "build-script", "source": "one" }),
                     &[],
                 ),
+                result_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "one" }),
+                    &[],
+                ),
                 created_at: "2026-03-24T12:34:56.100000000Z".to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1364,11 +1583,17 @@ mod tests {
                     json!({ "kind": "build-script", "source": "two" }),
                     &[],
                 ),
+                result_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "two" }),
+                    &[],
+                ),
                 created_at: "2026-03-24T12:34:56.200000000Z".to_string(),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1385,11 +1610,17 @@ mod tests {
                     json!({ "kind": "build-script", "source": "three" }),
                     &[],
                 ),
+                result_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "three" }),
+                    &[],
+                ),
                 created_at: "2026-03-24T12:34:56.300000000Z".to_string(),
                 staged_path: third_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1433,11 +1664,13 @@ mod tests {
                 PublishOutputRequest {
                     output_name: invalid_name.to_string(),
                     build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                    result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                     created_at: sample_created_at().to_string(),
                     staged_path: stage,
                     kind: "build-script".to_string(),
                     producer_builder: "text".to_string(),
                     input_build_keys: vec![],
+                    input_object_hashes: vec![],
                     attrs: Map::new(),
                 },
             )
@@ -1461,11 +1694,13 @@ mod tests {
             PublishOutputRequest {
                 output_name: "tree".to_string(),
                 build_key: build_key_for("Fetch", json!({ "kind": "source-tree" }), &[]),
+                result_key: build_key_for("Fetch", json!({ "kind": "source-tree" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: stage_dir,
                 kind: "source-tree".to_string(),
                 producer_builder: "fetch".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1477,7 +1712,7 @@ mod tests {
         assert!(
             layout
                 .builds
-                .join(format!("{}.json", published.build_key.to_hex()))
+                .join(published.build_key.to_hex())
                 .exists()
         );
     }
@@ -1494,11 +1729,13 @@ mod tests {
             PublishOutputRequest {
                 output_name: "first".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1512,11 +1749,13 @@ mod tests {
             PublishOutputRequest {
                 output_name: "second".to_string(),
                 build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1545,11 +1784,13 @@ mod tests {
                     json!({ "kind": "binary-output" }),
                     &[key_a, key_b],
                 ),
+                result_key: build_key_for("Binary", json!({ "kind": "binary-output" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "binary-output".to_string(),
                 producer_builder: "binary".to_string(),
                 input_build_keys: vec![key_a, key_b],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1566,11 +1807,13 @@ mod tests {
                     json!({ "kind": "binary-output" }),
                     &[key_b, key_a],
                 ),
+                result_key: build_key_for("Binary", json!({ "kind": "binary-output" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 kind: "binary-output".to_string(),
                 producer_builder: "binary".to_string(),
                 input_build_keys: vec![key_b, key_a],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1629,11 +1872,17 @@ mod tests {
                     json!({ "kind": "build-script", "source": "hello", "variant": "plain" }),
                     &[],
                 ),
+                result_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "hello", "variant": "plain" }),
+                    &[],
+                ),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )
@@ -1652,11 +1901,17 @@ mod tests {
                     json!({ "kind": "build-script", "source": "hello", "variant": "exec" }),
                     &[],
                 ),
+                result_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "hello", "variant": "exec" }),
+                    &[],
+                ),
                 created_at: sample_created_at().to_string(),
                 staged_path: exec_stage,
                 kind: "build-script".to_string(),
                 producer_builder: "text".to_string(),
                 input_build_keys: vec![],
+                input_object_hashes: vec![],
                 attrs: Map::new(),
             },
         )

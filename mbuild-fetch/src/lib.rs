@@ -944,6 +944,9 @@ mod tests {
                 build_key: "2222222222222222222222222222222222222222222222222222222222222222"
                     .parse::<BuildKey>()
                     .unwrap(),
+                result_key: "2222222222222222222222222222222222222222222222222222222222222222"
+                    .parse::<BuildKey>()
+                    .unwrap(),
                 kind: "source-tree".to_string(),
                 attrs: Map::new(),
                 object_path: PathBuf::from("/tmp/input"),

@@ -929,6 +929,9 @@ mod tests {
             build_key: "2222222222222222222222222222222222222222222222222222222222222222"
                 .parse::<BuildKey>()
                 .unwrap(),
+            result_key: "2222222222222222222222222222222222222222222222222222222222222222"
+                .parse::<BuildKey>()
+                .unwrap(),
             kind: KIND_BINARY_OUTPUT.to_string(),
             attrs: Map::new(),
             object_path,
@@ -951,6 +954,9 @@ mod tests {
                 .parse::<ObjectHash>()
                 .unwrap(),
             build_key: "4444444444444444444444444444444444444444444444444444444444444444"
+                .parse::<BuildKey>()
+                .unwrap(),
+            result_key: "4444444444444444444444444444444444444444444444444444444444444444"
                 .parse::<BuildKey>()
                 .unwrap(),
             kind: KIND_CONTAINER_IMAGE.to_string(),

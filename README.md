@@ -33,10 +33,12 @@ model.
 By default, `mbuild` prints concise live build progress to `stderr`. The final
 result still goes to `stdout` only. Use `--quiet` to suppress live progress.
 
-A realized `Build` value is the canonical build record stored under
-`.mbuild/builds/<build_key>.json`. Build records carry a persistent
-`created_at` timestamp in RFC3339 UTC format. This timestamp does not affect
-`build_key`.
+A realized `Build` value is a public handle addressed by `build_key`.
+Canonical realized results are stored under `.mbuild/results/<result_key>.json`,
+while `.mbuild/builds/<build_key>` is a symlink index from public build handles
+to canonical result records. Result records carry a persistent `created_at`
+timestamp in RFC3339 UTC format. This timestamp does not affect either
+`build_key` or `result_key`.
 
 Realized results are stored in a local content-addressed store where object
 identity is determined only by payload content. Builder invocations are recorded

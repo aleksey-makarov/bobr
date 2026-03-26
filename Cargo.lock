@@ -1111,6 +1111,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "flate2",
+ "fsobj-hash",
  "mbuild-binary",
  "mbuild-core",
  "mbuild-fetch",

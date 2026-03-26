@@ -138,8 +138,8 @@ fn build(cli: BuildCli) -> MResult<()> {
     .map_err(map_runtime_error)?
     {
         StoreOutcome::Build(published) => {
-            println!("build_key: {}", published.record.build_key);
-            println!("object_hash: {}", published.record.object_hash);
+            println!("build_key: {}", published.build.build_key);
+            println!("object_hash: {}", published.build.object_hash);
             println!("object_path: {}", published.object_path.display());
         }
         StoreOutcome::Unit => println!("()"),

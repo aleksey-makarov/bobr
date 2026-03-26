@@ -6,8 +6,10 @@
 Nickel code builds STORE action trees. Rust evaluates the entry recipe to the
 first action and then interprets the action tree step by step.
 
-A realized `Build` value is the canonical build record stored in
-`.mbuild/builds/<build_key>.json`.
+A realized `Build` value is a public build handle addressed by `build_key`.
+Canonical realized results live in `.mbuild/results/<result_key>.json`, and
+`.mbuild/builds/<build_key>` is a symlink index from public build handles to
+canonical results.
 
 ## Layers
 
@@ -48,7 +50,8 @@ primitive builder action and its already-realized `Build` inputs.
 The store persists:
 
 - realized objects in `.mbuild/objects`
-- realized build records in `.mbuild/builds`
+- public build refs in `.mbuild/builds`
+- canonical result records in `.mbuild/results`
 - human-facing publication refs in `.mbuild/meta-refs` and `.mbuild/object-refs`
 
 ## STORE Programs
@@ -70,10 +73,7 @@ work explicitly with `bind`.
 
 ## `Build`
 
-`Build` is the canonical realized result of one builder invocation.
-
-Its contents are exactly the contents of the corresponding build record stored
-under `.mbuild/builds/<build_key>.json`.
+`Build` is the public handle for one realized builder invocation.
 
 A `Build` value contains at least:
 
@@ -82,16 +82,16 @@ A `Build` value contains at least:
 - `kind`
 - `attrs`
 
-It may also expose:
+It also exposes:
 
 - `producer`
-- `input_build_keys`
+- `created_at`
 
 `Build` does not contain runtime-only fields such as local object paths.
 
 ## Build Keys
 
-`build_key` is the identity of one builder node in the dependency graph.
+`build_key` is the public identity of one builder node in the dependency graph.
 
 It is computed from:
 
@@ -106,6 +106,15 @@ It does not depend on:
 - `object_hash`
 
 This makes `build_key` a graph identity rather than a payload identity.
+
+`result_key` is the internal canonical identity of one realized build result.
+It is computed from:
+
+- builder tag
+- normalized payload
+- ordered `input_object_hashes`
+
+`result_key` is not exposed through public `Build` values.
 
 ## Dependency Semantics
 
@@ -135,7 +144,7 @@ Publication is implicit in STORE semantics.
 Every primitive builder action carries a publication name. After the
 interpreter computes or reuses the corresponding `Build` value, it updates:
 
-- `meta-refs/<name>.json -> ../builds/<build_key>.json`
+- `meta-refs/<name>.json -> ../builds/<build_key>`
 - `object-refs/<name> -> ../objects/<object_hash>`
 
 There is no separate user-facing `Publish` operation in the language surface.
@@ -180,16 +189,19 @@ For one primitive builder action, the interpreter:
 1. decodes the publication name and builder payload
 2. decodes already-realized input `Build` values
 3. validates input kinds and required attrs
-4. computes ordered `input_build_keys`
+4. computes ordered `input_build_keys` and `input_object_hashes`
 5. computes `build_key`
-6. reuses an existing build record on cache hit
-7. executes the registered Rust builder on cache miss
-8. stores the produced payload in `objects/`
-9. writes one build record in `builds/`
-10. updates current publication refs for the supplied name
-11. rotates the previous current refs into timestamp-suffixed history refs if
-    the name already pointed at a different build
-12. returns the resulting `Build`
+6. reuses an existing public build ref on `build_key` hit
+7. on `build_key` miss, computes `result_key`
+8. reuses an existing canonical result on `result_key` hit
+9. executes the registered Rust builder only when both lookups miss
+10. stores the produced payload in `objects/`
+11. writes one canonical result record in `results/`
+12. updates `builds/<build_key>` to point at that result
+13. updates current publication refs for the supplied name
+14. rotates the previous current refs into timestamp-suffixed history refs if
+    the name already pointed at a different result
+15. returns the resulting `Build`
 
 ## Worked Example
 

@@ -45,6 +45,7 @@ pub enum InputArity {
 pub struct ResolvedObject {
     pub object_hash: ObjectHash,
     pub build_key: BuildKey,
+    pub result_key: BuildKey,
     pub kind: String,
     pub attrs: Map<String, Value>,
     pub object_path: PathBuf,
@@ -337,7 +338,17 @@ pub struct Build {
     pub created_at: Option<String>,
     pub kind: String,
     pub producer: ProducerInfo,
-    pub input_build_keys: Vec<BuildKey>,
+    pub attrs: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultRecord {
+    pub result_key: BuildKey,
+    pub object_hash: ObjectHash,
+    pub created_at: Option<String>,
+    pub kind: String,
+    pub producer: ProducerInfo,
+    pub input_object_hashes: Vec<ObjectHash>,
     pub attrs: Map<String, Value>,
 }
 
@@ -364,7 +375,8 @@ mod serde_object_hash {
 
 #[derive(Debug, Clone)]
 pub struct PublishedBuild {
-    pub record: Build,
+    pub build: Build,
+    pub result: ResultRecord,
     pub object_path: PathBuf,
 }
 
@@ -426,6 +438,10 @@ mod tests {
             .unwrap(),
             build_key: BuildKey::from_str(
                 "2222222222222222222222222222222222222222222222222222222222222222",
+            )
+            .unwrap(),
+            result_key: BuildKey::from_str(
+                "3333333333333333333333333333333333333333333333333333333333333333",
             )
             .unwrap(),
             kind: "build-script".to_string(),

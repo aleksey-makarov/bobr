@@ -632,6 +632,17 @@ mod tests {
             }
             .parse::<BuildKey>()
             .unwrap(),
+            result_key: match kind {
+                KIND_CONTAINER_IMAGE => {
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }
+                KIND_BUILD_SCRIPT => {
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                }
+                _ => "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            }
+            .parse::<BuildKey>()
+            .unwrap(),
             kind: kind.to_string(),
             attrs,
             object_path,

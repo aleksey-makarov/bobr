@@ -162,10 +162,10 @@ fn store_recipe_executes_all_real_builders() {
                 };
             handle.join().unwrap();
 
-            assert_eq!(published.record.kind, "container-image");
-            assert_eq!(published.record.producer.builder, "image");
+            assert_eq!(published.build.kind, "container-image");
+            assert_eq!(published.build.producer.builder, "image");
             assert_eq!(
-                published.record.attrs["mode"],
+                published.build.attrs["mode"],
                 Value::String("bootstrap".to_string())
             );
 
@@ -211,7 +211,7 @@ fn store_binding_is_visible_in_imported_modules() {
         StoreOutcome::Unit => panic!("expected final STORE result to be Build"),
     };
 
-    assert_eq!(published.record.kind, "plain-text");
+    assert_eq!(published.build.kind, "plain-text");
     assert!(
         workspace
             .path()

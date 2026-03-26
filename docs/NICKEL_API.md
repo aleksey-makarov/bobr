@@ -103,8 +103,9 @@ For `binary`, the `sources` array is ordered:
 
 A `Build` value is the realized result of one builder invocation.
 
-It is exactly the corresponding build record stored in
-`.mbuild/builds/<build_key>.json`.
+It is the public build handle stored under `.mbuild/builds/<build_key>`, which
+resolves to a canonical result record under
+`.mbuild/results/<result_key>.json`.
 
 At minimum, a `Build` value exposes:
 

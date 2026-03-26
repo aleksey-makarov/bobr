@@ -133,7 +133,13 @@ fn write_recipe(recipe_path: &Path, recipe_source: &str) {
 fn build_path(root: &Path, build_key: impl ToString) -> PathBuf {
     root.join(".mbuild")
         .join("builds")
-        .join(format!("{}.json", build_key.to_string()))
+        .join(build_key.to_string())
+}
+
+fn result_path(root: &Path, result_key: impl ToString) -> PathBuf {
+    root.join(".mbuild")
+        .join("results")
+        .join(format!("{}.json", result_key.to_string()))
 }
 
 fn latest_run_log(root: &Path) -> PathBuf {
@@ -255,12 +261,15 @@ fn store_text_recipe_creates_store_entries_and_refs() {
         assert_eq!(mode & 0o111, 0o111);
     }
 
-    let build_file = build_path(workspace.path(), published.record.build_key);
+    let build_file = build_path(workspace.path(), published.build.build_key);
     assert!(build_file.exists());
-    let build_json: Value = serde_json::from_slice(&fs::read(&build_file).unwrap()).unwrap();
+    let build_json: Value = serde_json::from_slice(
+        &fs::read(result_path(workspace.path(), published.result.result_key)).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
-        build_json["build_key"],
-        Value::String(published.record.build_key.to_string())
+        build_json["result_key"],
+        Value::String(published.result.result_key.to_string())
     );
     assert!(build_json["created_at"].is_string(), "{build_json}");
     assert_eq!(
@@ -273,9 +282,9 @@ fn store_text_recipe_creates_store_entries_and_refs() {
     );
     assert_eq!(
         build_json["object_hash"],
-        Value::String(published.record.object_hash.to_string())
+        Value::String(published.build.object_hash.to_string())
     );
-    assert_eq!(build_json["input_build_keys"], Value::Array(vec![]));
+    assert_eq!(build_json["input_object_hashes"], Value::Array(vec![]));
 
     assert_eq!(
         fs::read_link(
@@ -286,7 +295,7 @@ fn store_text_recipe_creates_store_entries_and_refs() {
                 .join("hello.json")
         )
         .unwrap(),
-        PathBuf::from(format!("../builds/{}.json", published.record.build_key))
+        PathBuf::from(format!("../builds/{}", published.build.build_key))
     );
     assert_eq!(
         fs::read_link(
@@ -297,7 +306,7 @@ fn store_text_recipe_creates_store_entries_and_refs() {
                 .join("hello")
         )
         .unwrap(),
-        PathBuf::from(format!("../objects/{}", published.record.object_hash))
+        PathBuf::from(format!("../objects/{}", published.build.object_hash))
     );
     let run_log = fs::read_to_string(latest_run_log(workspace.path())).unwrap();
     assert!(run_log.contains("\"phase\":\"start\""), "{run_log}");
@@ -320,8 +329,8 @@ fn repeated_store_text_recipe_reuses_same_build_record_and_object() {
     let second =
         expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
 
-    assert_eq!(first.record.build_key, second.record.build_key);
-    assert_eq!(first.record.object_hash, second.record.object_hash);
+    assert_eq!(first.build.build_key, second.build.build_key);
+    assert_eq!(first.build.object_hash, second.build.object_hash);
     assert_eq!(
         fs::read_dir(workspace.path().join(".mbuild").join("builds"))
             .unwrap()
@@ -358,11 +367,11 @@ fn store_recipe_executes_fetch_recipe_end_to_end() {
         expect_build(run_store_recipe_in_workspace(workspace.path(), &request_path).unwrap());
     handle.join().unwrap();
 
-    assert_eq!(published.record.kind, "fetched-file");
+    assert_eq!(published.build.kind, "fetched-file");
     assert_eq!(fs::read(&published.object_path).unwrap(), body);
-    assert_eq!(published.record.attrs["source_url"], Value::String(url));
-    assert_eq!(published.record.attrs["declared_hash"], Value::String(hash));
-    assert_eq!(published.record.attrs["unpack"], Value::Bool(false));
+    assert_eq!(published.build.attrs["source_url"], Value::String(url));
+    assert_eq!(published.build.attrs["declared_hash"], Value::String(hash));
+    assert_eq!(published.build.attrs["unpack"], Value::Bool(false));
 }
 
 #[test]
@@ -385,24 +394,24 @@ fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
                 run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
             );
 
-            assert_eq!(published.record.kind, "container-image");
-            assert_eq!(published.record.producer.builder, "container-image");
+            assert_eq!(published.build.kind, "container-image");
+            assert_eq!(published.build.producer.builder, "container-image");
             assert_eq!(
-                published.record.attrs["image"],
+                published.build.attrs["image"],
                 Value::String("docker.io/library/buildpack-deps:bookworm".to_string())
             );
             assert_eq!(
-                published.record.attrs["image_ref"],
+                published.build.attrs["image_ref"],
                 Value::String(
                     "docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
                 )
             );
             assert_eq!(
-                published.record.attrs["image_id"],
+                published.build.attrs["image_id"],
                 Value::String("sha256:imageid".to_string())
             );
             assert_eq!(
-                published.record.attrs["image_digest"],
+                published.build.attrs["image_digest"],
                 Value::String(
                     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_string(),
@@ -433,9 +442,13 @@ fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
                 )
             );
 
-            let build_file = build_path(workspace.path(), published.record.build_key);
+            let build_file = build_path(workspace.path(), published.build.build_key);
+            assert!(build_file.exists());
             let build_json: Value =
-                serde_json::from_slice(&fs::read(&build_file).unwrap()).unwrap();
+                serde_json::from_slice(
+                    &fs::read(result_path(workspace.path(), published.result.result_key)).unwrap(),
+                )
+                .unwrap();
             assert!(build_json["created_at"].is_string(), "{build_json}");
             assert_eq!(
                 build_json["kind"],
@@ -447,7 +460,7 @@ fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
             );
             assert_eq!(
                 build_json["object_hash"],
-                Value::String(published.record.object_hash.to_string())
+                Value::String(published.build.object_hash.to_string())
             );
             assert_eq!(
                 build_json["attrs"]["image"],
@@ -530,8 +543,8 @@ fn repeated_nested_binary_recipe_reuses_all_build_records_and_objects() {
                 run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
             );
 
-            assert_eq!(first.record.build_key, second.record.build_key);
-            assert_eq!(first.record.object_hash, second.record.object_hash);
+            assert_eq!(first.build.build_key, second.build.build_key);
+            assert_eq!(first.build.object_hash, second.build.object_hash);
             assert_eq!(
                 fs::read_dir(objects_dir).unwrap().count(),
                 first_object_count
@@ -541,19 +554,19 @@ fn repeated_nested_binary_recipe_reuses_all_build_records_and_objects() {
             assert_eq!(first_object_count, 4);
 
             let binary_build_json: Value = serde_json::from_slice(
-                &fs::read(build_path(workspace.path(), first.record.build_key)).unwrap(),
+                &fs::read(result_path(workspace.path(), first.result.result_key)).unwrap(),
             )
             .unwrap();
-            let input_build_keys = binary_build_json["input_build_keys"]
+            let input_object_hashes = binary_build_json["input_object_hashes"]
                 .as_array()
-                .expect("binary build record must encode input build keys");
+                .expect("binary result record must encode input object hashes");
             assert_eq!(
-                binary_build_json["build_key"],
-                Value::String(first.record.build_key.to_string())
+                binary_build_json["result_key"],
+                Value::String(first.result.result_key.to_string())
             );
-            assert_eq!(input_build_keys.len(), 3);
+            assert_eq!(input_object_hashes.len(), 3);
             assert!(
-                input_build_keys
+                input_object_hashes
                     .iter()
                     .all(|value| matches!(value, Value::String(_)))
             );
@@ -703,10 +716,10 @@ fn store_recipe_executes_all_real_builders_via_full_template() {
             );
             handle.join().unwrap();
 
-            assert_eq!(published.record.kind, "container-image");
-            assert_eq!(published.record.producer.builder, "image");
+            assert_eq!(published.build.kind, "container-image");
+            assert_eq!(published.build.producer.builder, "image");
             assert_eq!(
-                published.record.attrs["mode"],
+                published.build.attrs["mode"],
                 Value::String("bootstrap".to_string())
             );
 
