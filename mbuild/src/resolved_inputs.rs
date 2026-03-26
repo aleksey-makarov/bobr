@@ -1,11 +1,12 @@
 use mbuild_core::{
-    BuildKey, BuilderError, BuilderInputObject, BuilderInputValue, BuilderInputs, ObjectHash,
+    BuildKey, BuilderError, BuilderInputObject, BuilderInputValue, BuilderInputs, BuilderSpec,
+    InputArity, ObjectHash,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
-pub(crate) struct ResolvedObject {
+pub(crate) struct ResolvedDependency {
     pub(crate) object_hash: ObjectHash,
     pub(crate) build_key: BuildKey,
     pub(crate) kind: String,
@@ -14,7 +15,7 @@ pub(crate) struct ResolvedObject {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ResolvedInputs {
-    slots: BTreeMap<String, ResolvedInputValue>,
+    slots: BTreeMap<String, ResolvedDependencyValue>,
 }
 
 impl ResolvedInputs {
@@ -23,7 +24,7 @@ impl ResolvedInputs {
     }
 
     #[cfg(test)]
-    pub(crate) fn new(slots: BTreeMap<String, ResolvedInputValue>) -> Self {
+    pub(crate) fn new(slots: BTreeMap<String, ResolvedDependencyValue>) -> Self {
         Self { slots }
     }
 
@@ -32,13 +33,13 @@ impl ResolvedInputs {
         self.slots.is_empty()
     }
 
-    pub(crate) fn insert(&mut self, name: impl Into<String>, value: ResolvedInputValue) {
+    pub(crate) fn insert(&mut self, name: impl Into<String>, value: ResolvedDependencyValue) {
         self.slots.insert(name.into(), value);
     }
 
-    pub(crate) fn one(&self, name: &str) -> Result<&ResolvedObject, BuilderError> {
+    pub(crate) fn one(&self, name: &str) -> Result<&ResolvedDependency, BuilderError> {
         match self.slots.get(name) {
-            Some(ResolvedInputValue::One(object)) => Ok(object),
+            Some(ResolvedDependencyValue::One(object)) => Ok(object),
             Some(_) => Err(BuilderError::ExecutionFailed(format!(
                 "input slot '{name}' has unexpected arity"
             ))),
@@ -48,9 +49,12 @@ impl ResolvedInputs {
         }
     }
 
-    pub(crate) fn optional(&self, name: &str) -> Result<Option<&ResolvedObject>, BuilderError> {
+    pub(crate) fn optional(
+        &self,
+        name: &str,
+    ) -> Result<Option<&ResolvedDependency>, BuilderError> {
         match self.slots.get(name) {
-            Some(ResolvedInputValue::Optional(object)) => Ok(object.as_ref()),
+            Some(ResolvedDependencyValue::Optional(object)) => Ok(object.as_ref()),
             Some(_) => Err(BuilderError::ExecutionFailed(format!(
                 "input slot '{name}' has unexpected arity"
             ))),
@@ -60,9 +64,9 @@ impl ResolvedInputs {
         }
     }
 
-    pub(crate) fn many(&self, name: &str) -> Result<&[ResolvedObject], BuilderError> {
+    pub(crate) fn many(&self, name: &str) -> Result<&[ResolvedDependency], BuilderError> {
         match self.slots.get(name) {
-            Some(ResolvedInputValue::Many(objects)) => Ok(objects),
+            Some(ResolvedDependencyValue::Many(objects)) => Ok(objects),
             Some(_) => Err(BuilderError::ExecutionFailed(format!(
                 "input slot '{name}' has unexpected arity"
             ))),
@@ -72,21 +76,65 @@ impl ResolvedInputs {
         }
     }
 
+    pub(crate) fn ordered_build_keys(
+        &self,
+        spec: &BuilderSpec,
+    ) -> Result<Vec<BuildKey>, BuilderError> {
+        let mut ordered = Vec::new();
+        for slot in spec.inputs {
+            match slot.arity {
+                InputArity::One => ordered.push(self.one(slot.name)?.build_key),
+                InputArity::Optional => {
+                    if let Some(object) = self.optional(slot.name)? {
+                        ordered.push(object.build_key);
+                    }
+                }
+                InputArity::Many => {
+                    ordered.extend(self.many(slot.name)?.iter().map(|object| object.build_key));
+                }
+            }
+        }
+        Ok(ordered)
+    }
+
+    pub(crate) fn ordered_object_hashes(
+        &self,
+        spec: &BuilderSpec,
+    ) -> Result<Vec<ObjectHash>, BuilderError> {
+        let mut ordered = Vec::new();
+        for slot in spec.inputs {
+            match slot.arity {
+                InputArity::One => ordered.push(self.one(slot.name)?.object_hash),
+                InputArity::Optional => {
+                    if let Some(object) = self.optional(slot.name)? {
+                        ordered.push(object.object_hash);
+                    }
+                }
+                InputArity::Many => {
+                    ordered.extend(self.many(slot.name)?.iter().map(|object| object.object_hash));
+                }
+            }
+        }
+        Ok(ordered)
+    }
+
     pub(crate) fn into_builder_inputs(self) -> BuilderInputs {
         let slots = self
             .slots
             .into_iter()
             .map(|(name, value)| {
                 let value = match value {
-                    ResolvedInputValue::One(object) => BuilderInputValue::One(BuilderInputObject {
-                        object_path: object.object_path,
-                    }),
-                    ResolvedInputValue::Optional(object) => {
+                    ResolvedDependencyValue::One(object) => {
+                        BuilderInputValue::One(BuilderInputObject {
+                            object_path: object.object_path,
+                        })
+                    }
+                    ResolvedDependencyValue::Optional(object) => {
                         BuilderInputValue::Optional(object.map(|object| BuilderInputObject {
                             object_path: object.object_path,
                         }))
                     }
-                    ResolvedInputValue::Many(objects) => BuilderInputValue::Many(
+                    ResolvedDependencyValue::Many(objects) => BuilderInputValue::Many(
                         objects
                             .into_iter()
                             .map(|object| BuilderInputObject {
@@ -103,10 +151,10 @@ impl ResolvedInputs {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum ResolvedInputValue {
-    One(ResolvedObject),
-    Optional(Option<ResolvedObject>),
-    Many(Vec<ResolvedObject>),
+pub(crate) enum ResolvedDependencyValue {
+    One(ResolvedDependency),
+    Optional(Option<ResolvedDependency>),
+    Many(Vec<ResolvedDependency>),
 }
 
 #[cfg(test)]
@@ -114,8 +162,8 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
-    fn sample_object() -> ResolvedObject {
-        ResolvedObject {
+    fn sample_object() -> ResolvedDependency {
+        ResolvedDependency {
             object_hash: ObjectHash::from_str(
                 "1111111111111111111111111111111111111111111111111111111111111111",
             )
@@ -133,11 +181,11 @@ mod tests {
     fn resolved_inputs_helpers_work() {
         let object = sample_object();
         let mut inputs = ResolvedInputs::empty();
-        inputs.insert("script", ResolvedInputValue::One(object.clone()));
-        inputs.insert("base", ResolvedInputValue::Optional(None));
+        inputs.insert("script", ResolvedDependencyValue::One(object.clone()));
+        inputs.insert("base", ResolvedDependencyValue::Optional(None));
         inputs.insert(
             "sources",
-            ResolvedInputValue::Many(vec![object.clone(), object.clone()]),
+            ResolvedDependencyValue::Many(vec![object.clone(), object.clone()]),
         );
 
         assert_eq!(inputs.one("script").unwrap().kind, "build-script");
@@ -153,7 +201,7 @@ mod tests {
     fn resolved_inputs_missing_and_wrong_arity_are_errors() {
         let object = sample_object();
         let mut inputs = ResolvedInputs::empty();
-        inputs.insert("script", ResolvedInputValue::One(object));
+        inputs.insert("script", ResolvedDependencyValue::One(object));
 
         assert!(matches!(
             inputs.optional("script"),
@@ -185,7 +233,7 @@ mod tests {
 
         let inputs = ResolvedInputs::new(BTreeMap::from([(
             "sources".to_string(),
-            ResolvedInputValue::Many(vec![first.clone(), second.clone()]),
+            ResolvedDependencyValue::Many(vec![first.clone(), second.clone()]),
         )]));
 
         let many = inputs.many("sources").unwrap();
@@ -199,7 +247,7 @@ mod tests {
         let mut slots = BTreeMap::new();
         slots.insert(
             "script".to_string(),
-            ResolvedInputValue::One(sample_object()),
+            ResolvedDependencyValue::One(sample_object()),
         );
         assert!(!ResolvedInputs::new(slots).is_empty());
     }
@@ -209,7 +257,7 @@ mod tests {
         let object = sample_object();
         let inputs = ResolvedInputs::new(BTreeMap::from([(
             "base".to_string(),
-            ResolvedInputValue::Optional(Some(object.clone())),
+            ResolvedDependencyValue::Optional(Some(object.clone())),
         )]));
 
         let resolved = inputs.optional("base").unwrap().unwrap();
@@ -221,11 +269,150 @@ mod tests {
         let object = sample_object();
         let inputs = ResolvedInputs::new(BTreeMap::from([(
             "script".to_string(),
-            ResolvedInputValue::One(object.clone()),
+            ResolvedDependencyValue::One(object.clone()),
         )]));
 
         let builder_inputs = inputs.into_builder_inputs();
         let resolved = builder_inputs.one("script").unwrap();
         assert_eq!(resolved.object_path, object.object_path);
+    }
+
+    static ORDERED_SPEC: BuilderSpec = BuilderSpec {
+        tag: "Ordered",
+        inputs: &[
+            mbuild_core::InputSlot {
+                name: "first",
+                arity: InputArity::One,
+                allowed_kinds: &[],
+            },
+            mbuild_core::InputSlot {
+                name: "optional",
+                arity: InputArity::Optional,
+                allowed_kinds: &[],
+            },
+            mbuild_core::InputSlot {
+                name: "many",
+                arity: InputArity::Many,
+                allowed_kinds: &[],
+            },
+        ],
+    };
+
+    #[test]
+    fn ordered_build_keys_follow_builder_spec_order() {
+        let mut first = sample_object();
+        first.build_key = BuildKey::from_str(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let mut optional = sample_object();
+        optional.build_key = BuildKey::from_str(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+        let mut many_a = sample_object();
+        many_a.build_key = BuildKey::from_str(
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )
+        .unwrap();
+        let mut many_b = sample_object();
+        many_b.build_key = BuildKey::from_str(
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        )
+        .unwrap();
+
+        let inputs = ResolvedInputs::new(BTreeMap::from([
+            ("first".to_string(), ResolvedDependencyValue::One(first)),
+            (
+                "optional".to_string(),
+                ResolvedDependencyValue::Optional(Some(optional)),
+            ),
+            (
+                "many".to_string(),
+                ResolvedDependencyValue::Many(vec![many_a, many_b]),
+            ),
+        ]));
+
+        let ordered = inputs.ordered_build_keys(&ORDERED_SPEC).unwrap();
+        assert_eq!(
+            ordered,
+            vec![
+                BuildKey::from_str(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .unwrap(),
+                BuildKey::from_str(
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                )
+                .unwrap(),
+                BuildKey::from_str(
+                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                )
+                .unwrap(),
+                BuildKey::from_str(
+                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                )
+                .unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ordered_object_hashes_follow_builder_spec_order() {
+        let mut first = sample_object();
+        first.object_hash = ObjectHash::from_str(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let mut optional = sample_object();
+        optional.object_hash = ObjectHash::from_str(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+        let mut many_a = sample_object();
+        many_a.object_hash = ObjectHash::from_str(
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )
+        .unwrap();
+        let mut many_b = sample_object();
+        many_b.object_hash = ObjectHash::from_str(
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        )
+        .unwrap();
+
+        let inputs = ResolvedInputs::new(BTreeMap::from([
+            ("first".to_string(), ResolvedDependencyValue::One(first)),
+            (
+                "optional".to_string(),
+                ResolvedDependencyValue::Optional(Some(optional)),
+            ),
+            (
+                "many".to_string(),
+                ResolvedDependencyValue::Many(vec![many_a, many_b]),
+            ),
+        ]));
+
+        let ordered = inputs.ordered_object_hashes(&ORDERED_SPEC).unwrap();
+        assert_eq!(
+            ordered,
+            vec![
+                ObjectHash::from_str(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .unwrap(),
+                ObjectHash::from_str(
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                )
+                .unwrap(),
+                ObjectHash::from_str(
+                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                )
+                .unwrap(),
+                ObjectHash::from_str(
+                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                )
+                .unwrap(),
+            ]
+        );
     }
 }

@@ -1,9 +1,9 @@
 use crate::builders;
 use crate::logging::{BuildRunLogger, RunOptions};
-use crate::resolved_inputs::{ResolvedInputValue, ResolvedInputs, ResolvedObject};
+use crate::resolved_inputs::{ResolvedDependency, ResolvedDependencyValue, ResolvedInputs};
 use crate::runtime::{
     RuntimeError, build_to_published, execute_builder_node, log_runtime_event, map_store_error,
-    to_resolved_object, validate_allowed_kind,
+    to_resolved_dependency, validate_allowed_kind,
 };
 use mbuild_core::{
     Build, BuildLogLevel, BuildLogger, Builder, PublishedBuild, StoreLayout, load_build_handle,
@@ -444,15 +444,15 @@ fn resolve_action_inputs(
             mbuild_core::InputArity::One => {
                 let object = resolve_input_build(layout, builder, slot.name, value)?;
                 validate_allowed_kind(builder, slot.name, slot.allowed_kinds, &object.kind)?;
-                resolved.insert(slot.name, ResolvedInputValue::One(object));
+                resolved.insert(slot.name, ResolvedDependencyValue::One(object));
             }
             mbuild_core::InputArity::Optional => {
                 if value.is_null() {
-                    resolved.insert(slot.name, ResolvedInputValue::Optional(None));
+                    resolved.insert(slot.name, ResolvedDependencyValue::Optional(None));
                 } else {
                     let object = resolve_input_build(layout, builder, slot.name, value)?;
                     validate_allowed_kind(builder, slot.name, slot.allowed_kinds, &object.kind)?;
-                    resolved.insert(slot.name, ResolvedInputValue::Optional(Some(object)));
+                    resolved.insert(slot.name, ResolvedDependencyValue::Optional(Some(object)));
                 }
             }
             mbuild_core::InputArity::Many => {
@@ -469,7 +469,7 @@ fn resolve_action_inputs(
                     validate_allowed_kind(builder, slot.name, slot.allowed_kinds, &object.kind)?;
                     objects.push(object);
                 }
-                resolved.insert(slot.name, ResolvedInputValue::Many(objects));
+                resolved.insert(slot.name, ResolvedDependencyValue::Many(objects));
             }
         }
     }
@@ -492,7 +492,7 @@ fn resolve_input_build(
     builder: &'static dyn Builder,
     slot_name: &str,
     value: Value,
-) -> Result<ResolvedObject, RuntimeError> {
+) -> Result<ResolvedDependency, RuntimeError> {
     let supplied: Build = serde_json::from_value(value).map_err(|error| {
         RuntimeError::InvalidRequest(format!(
             "STORE action input slot '{}' for builder '{}' must contain a Build value: {error}",
@@ -521,7 +521,7 @@ fn resolve_input_build(
         )));
     }
 
-    Ok(to_resolved_object(canonical))
+    Ok(to_resolved_dependency(canonical))
 }
 
 fn build_to_nickel_value(build: &Build) -> Result<NickelValue, RuntimeError> {

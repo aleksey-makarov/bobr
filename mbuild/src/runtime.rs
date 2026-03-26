@@ -1,11 +1,10 @@
-use crate::resolved_inputs::{ResolvedInputs, ResolvedObject};
+use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use mbuild_core::{
     Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, Builder,
-    BuilderError, CasError, InputArity, PublishedBuild, StoreLayout, compute_build_key,
+    BuilderError, CasError, PublishedBuild, StoreLayout, compute_build_key,
     compute_result_key, load_build_handle, materialize_build, object_path,
 };
 use nickel_lang_core::{error::Error as NickelError, files::Files as NickelFiles};
-use fsobj_hash::ObjectHash;
 use serde_json::Value;
 use std::fmt;
 use std::path::Path;
@@ -66,8 +65,12 @@ pub(crate) fn execute_builder_node(
     config: Value,
     inputs: ResolvedInputs,
 ) -> Result<PublishedBuild, RuntimeError> {
-    let input_build_keys = collect_input_build_keys(builder, &inputs)?;
-    let input_object_hashes = collect_input_object_hashes(builder, &inputs)?;
+    let input_build_keys = inputs
+        .ordered_build_keys(builder.spec())
+        .map_err(map_builder_error)?;
+    let input_object_hashes = inputs
+        .ordered_object_hashes(builder.spec())
+        .map_err(map_builder_error)?;
     let build_key = compute_build_key(builder.spec().tag, &config, &input_build_keys)
         .map_err(map_store_error)?;
     log_runtime_event(
@@ -216,68 +219,6 @@ pub(crate) fn build_to_published(
         })
 }
 
-pub(crate) fn collect_input_build_keys(
-    builder: &dyn Builder,
-    inputs: &ResolvedInputs,
-) -> Result<Vec<BuildKey>, RuntimeError> {
-    let mut ordered = Vec::new();
-
-    for slot in builder.spec().inputs {
-        match slot.arity {
-            InputArity::One => {
-                ordered.push(inputs.one(slot.name).map_err(map_builder_error)?.build_key)
-            }
-            InputArity::Optional => {
-                if let Some(object) = inputs.optional(slot.name).map_err(map_builder_error)? {
-                    ordered.push(object.build_key);
-                }
-            }
-            InputArity::Many => {
-                ordered.extend(
-                    inputs
-                        .many(slot.name)
-                        .map_err(map_builder_error)?
-                        .iter()
-                        .map(|object| object.build_key),
-                );
-            }
-        }
-    }
-
-    Ok(ordered)
-}
-
-pub(crate) fn collect_input_object_hashes(
-    builder: &dyn Builder,
-    inputs: &ResolvedInputs,
-) -> Result<Vec<ObjectHash>, RuntimeError> {
-    let mut ordered = Vec::new();
-
-    for slot in builder.spec().inputs {
-        match slot.arity {
-            InputArity::One => {
-                ordered.push(inputs.one(slot.name).map_err(map_builder_error)?.object_hash)
-            }
-            InputArity::Optional => {
-                if let Some(object) = inputs.optional(slot.name).map_err(map_builder_error)? {
-                    ordered.push(object.object_hash);
-                }
-            }
-            InputArity::Many => {
-                ordered.extend(
-                    inputs
-                        .many(slot.name)
-                        .map_err(map_builder_error)?
-                        .iter()
-                        .map(|object| object.object_hash),
-                );
-            }
-        }
-    }
-
-    Ok(ordered)
-}
-
 pub(crate) fn validate_allowed_kind(
     builder: &dyn Builder,
     slot_name: &str,
@@ -296,8 +237,8 @@ pub(crate) fn validate_allowed_kind(
     )))
 }
 
-pub(crate) fn to_resolved_object(published: PublishedBuild) -> ResolvedObject {
-    ResolvedObject {
+pub(crate) fn to_resolved_dependency(published: PublishedBuild) -> ResolvedDependency {
+    ResolvedDependency {
         object_hash: published.build.object_hash,
         build_key: published.build.build_key,
         kind: published.build.kind,
