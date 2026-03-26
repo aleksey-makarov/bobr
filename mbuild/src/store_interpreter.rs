@@ -644,7 +644,8 @@ fn nickel_value_to_json_inner(
 mod tests {
     use super::*;
     use mbuild_core::{
-        BuildContext, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo, TypedBuilder,
+        BuildContext, BuilderError, BuilderInputs, BuilderSpec, InputArity, InputSlot,
+        ProducerInfo, TypedBuilder,
     };
     use nickel_lang_core::serialize::ExportFormat;
     use std::fs;
@@ -675,7 +676,7 @@ mod tests {
         fn build_typed(
             &self,
             config: Self::Config,
-            inputs: ResolvedInputs,
+            inputs: BuilderInputs,
             cx: &mut BuildContext,
         ) -> Result<mbuild_core::StagedBuildResult, BuilderError> {
             if !inputs.is_empty() {
@@ -695,7 +696,6 @@ mod tests {
                 producer: ProducerInfo {
                     builder: "dummy-leaf".to_string(),
                 },
-                input_build_keys: vec![],
                 attrs: Map::from_iter([("echo".to_string(), Value::String(config.text))]),
                 staged_path: staged,
             })
@@ -744,10 +744,10 @@ mod tests {
         fn build_typed(
             &self,
             config: Self::Config,
-            inputs: ResolvedInputs,
+            inputs: BuilderInputs,
             cx: &mut BuildContext,
         ) -> Result<mbuild_core::StagedBuildResult, BuilderError> {
-            let base = inputs.one("base")?;
+            let _base = inputs.one("base")?;
             let maybe = inputs.optional("maybe")?;
             let others = inputs.many("others")?;
             fs::create_dir_all(&cx.temp_root).map_err(|error| {
@@ -757,10 +757,8 @@ mod tests {
             fs::write(
                 &staged,
                 format!(
-                    "base={} maybe={} others={}",
-                    base.kind,
-                    maybe.is_some(),
-                    others.len()
+                    "base_present=true maybe={} others={}",
+                    maybe.is_some(), others.len()
                 ),
             )
             .map_err(|error| {
@@ -771,13 +769,9 @@ mod tests {
                 producer: ProducerInfo {
                     builder: "dummy-consumer".to_string(),
                 },
-                input_build_keys: vec![
-                    base.build_key,
-                    maybe.map(|value| value.build_key).unwrap_or(base.build_key),
-                ],
                 attrs: Map::from_iter([(
-                    "base_kind".to_string(),
-                    Value::String(base.kind.clone()),
+                    "has_maybe".to_string(),
+                    Value::Bool(maybe.is_some()),
                 )]),
                 staged_path: staged,
             })

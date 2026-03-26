@@ -165,7 +165,7 @@ pub(crate) fn execute_builder_node(
         "running builder implementation",
     );
     let staged = builder
-        .build_erased(config, inputs, &mut context)
+        .build_erased(config, inputs.into_builder_inputs(), &mut context)
         .map_err(|error| {
             log_runtime_event(
                 logger.as_ref(),

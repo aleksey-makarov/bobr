@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -115,6 +116,108 @@ pub enum ResolvedInputValue {
     One(ResolvedObject),
     Optional(Option<ResolvedObject>),
     Many(Vec<ResolvedObject>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuilderInputObject {
+    pub object_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BuilderInputs {
+    slots: BTreeMap<String, BuilderInputValue>,
+}
+
+impl BuilderInputs {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn new(slots: BTreeMap<String, BuilderInputValue>) -> Self {
+        Self { slots }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    pub fn insert(&mut self, name: impl Into<String>, value: BuilderInputValue) {
+        self.slots.insert(name.into(), value);
+    }
+
+    pub fn one(&self, name: &str) -> Result<&BuilderInputObject, BuilderError> {
+        match self.slots.get(name) {
+            Some(BuilderInputValue::One(object)) => Ok(object),
+            Some(_) => Err(BuilderError::ExecutionFailed(format!(
+                "input slot '{name}' has unexpected arity"
+            ))),
+            None => Err(BuilderError::ExecutionFailed(format!(
+                "required input slot '{name}' is missing"
+            ))),
+        }
+    }
+
+    pub fn optional(&self, name: &str) -> Result<Option<&BuilderInputObject>, BuilderError> {
+        match self.slots.get(name) {
+            Some(BuilderInputValue::Optional(object)) => Ok(object.as_ref()),
+            Some(_) => Err(BuilderError::ExecutionFailed(format!(
+                "input slot '{name}' has unexpected arity"
+            ))),
+            None => Err(BuilderError::ExecutionFailed(format!(
+                "optional input slot '{name}' is missing"
+            ))),
+        }
+    }
+
+    pub fn many(&self, name: &str) -> Result<&[BuilderInputObject], BuilderError> {
+        match self.slots.get(name) {
+            Some(BuilderInputValue::Many(objects)) => Ok(objects),
+            Some(_) => Err(BuilderError::ExecutionFailed(format!(
+                "input slot '{name}' has unexpected arity"
+            ))),
+            None => Err(BuilderError::ExecutionFailed(format!(
+                "repeated input slot '{name}' is missing"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum BuilderInputValue {
+    One(BuilderInputObject),
+    Optional(Option<BuilderInputObject>),
+    Many(Vec<BuilderInputObject>),
+}
+
+impl ResolvedInputs {
+    pub fn into_builder_inputs(self) -> BuilderInputs {
+        let slots = self
+            .slots
+            .into_iter()
+            .map(|(name, value)| {
+                let value = match value {
+                    ResolvedInputValue::One(object) => BuilderInputValue::One(BuilderInputObject {
+                        object_path: object.object_path,
+                    }),
+                    ResolvedInputValue::Optional(object) => {
+                        BuilderInputValue::Optional(object.map(|object| BuilderInputObject {
+                            object_path: object.object_path,
+                        }))
+                    }
+                    ResolvedInputValue::Many(objects) => BuilderInputValue::Many(
+                        objects
+                            .into_iter()
+                            .map(|object| BuilderInputObject {
+                                object_path: object.object_path,
+                            })
+                            .collect(),
+                    ),
+                };
+                (name, value)
+            })
+            .collect();
+        BuilderInputs::new(slots)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,9 +427,43 @@ pub struct ProducerInfo {
 pub struct StagedBuildResult {
     pub kind: String,
     pub producer: ProducerInfo,
-    pub input_build_keys: Vec<BuildKey>,
     pub attrs: Map<String, Value>,
     pub staged_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ContainerImageDescriptor {
+    pub image_ref: String,
+    pub image_digest: String,
+}
+
+pub fn load_container_image_descriptor(path: &Path) -> Result<ContainerImageDescriptor, String> {
+    let bytes = fs::read(path).map_err(|error| {
+        format!(
+            "failed to read container-image descriptor '{}': {error}",
+            path.display()
+        )
+    })?;
+    let descriptor: ContainerImageDescriptor =
+        serde_json::from_slice(&bytes).map_err(|error| {
+            format!(
+                "failed to parse container-image descriptor '{}': {error}",
+                path.display()
+            )
+        })?;
+    if descriptor.image_ref.trim().is_empty() {
+        return Err(format!(
+            "container-image descriptor '{}' has empty 'image_ref'",
+            path.display()
+        ));
+    }
+    if descriptor.image_digest.trim().is_empty() {
+        return Err(format!(
+            "container-image descriptor '{}' has empty 'image_digest'",
+            path.display()
+        ));
+    }
+    Ok(descriptor)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,7 +523,7 @@ pub trait Builder {
     fn build_erased(
         &self,
         config: Value,
-        inputs: ResolvedInputs,
+        inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError>;
 }
@@ -399,7 +536,7 @@ pub trait TypedBuilder {
     fn build_typed(
         &self,
         config: Self::Config,
-        inputs: ResolvedInputs,
+        inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError>;
 }
@@ -415,7 +552,7 @@ where
     fn build_erased(
         &self,
         config: Value,
-        inputs: ResolvedInputs,
+        inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         let config = serde_json::from_value(config).map_err(|error| {
@@ -446,6 +583,12 @@ mod tests {
             .unwrap(),
             kind: "build-script".to_string(),
             attrs: Map::new(),
+            object_path: PathBuf::from("/tmp/object"),
+        }
+    }
+
+    fn sample_builder_object() -> BuilderInputObject {
+        BuilderInputObject {
             object_path: PathBuf::from("/tmp/object"),
         }
     }
@@ -537,6 +680,39 @@ mod tests {
         assert_eq!(resolved.build_key, object.build_key);
     }
 
+    #[test]
+    fn builder_inputs_helpers_work() {
+        let object = sample_builder_object();
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert("script", BuilderInputValue::One(object.clone()));
+        inputs.insert("base", BuilderInputValue::Optional(None));
+        inputs.insert(
+            "sources",
+            BuilderInputValue::Many(vec![object.clone(), object.clone()]),
+        );
+
+        assert_eq!(inputs.one("script").unwrap().object_path, object.object_path);
+        assert!(inputs.optional("base").unwrap().is_none());
+        assert_eq!(inputs.many("sources").unwrap().len(), 2);
+        assert!(matches!(
+            inputs.one("sources"),
+            Err(BuilderError::ExecutionFailed(_))
+        ));
+    }
+
+    #[test]
+    fn resolved_inputs_convert_to_builder_inputs() {
+        let object = sample_object();
+        let inputs = ResolvedInputs::new(BTreeMap::from([(
+            "script".to_string(),
+            ResolvedInputValue::One(object.clone()),
+        )]));
+
+        let builder_inputs = inputs.into_builder_inputs();
+        let resolved = builder_inputs.one("script").unwrap();
+        assert_eq!(resolved.object_path, object.object_path);
+    }
+
     #[derive(Debug)]
     struct DummyBuilder;
 
@@ -561,7 +737,7 @@ mod tests {
         fn build_typed(
             &self,
             config: Self::Config,
-            inputs: ResolvedInputs,
+            inputs: BuilderInputs,
             cx: &mut BuildContext,
         ) -> Result<StagedBuildResult, BuilderError> {
             assert_eq!(
@@ -577,7 +753,6 @@ mod tests {
                 producer: ProducerInfo {
                     builder: "dummy".to_string(),
                 },
-                input_build_keys: vec![],
                 attrs: Map::new(),
                 staged_path: PathBuf::from("/tmp/out"),
             })
@@ -601,7 +776,7 @@ mod tests {
         let result = builder
             .build_erased(
                 serde_json::json!({ "kind": "demo" }),
-                ResolvedInputs::empty(),
+                BuilderInputs::empty(),
                 &mut cx,
             )
             .unwrap();

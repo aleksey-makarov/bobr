@@ -1,6 +1,7 @@
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo,
-    ResolvedInputs, ResolvedObject, StagedBuildResult, TypedBuilder, fsutil,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
+    InputArity, InputSlot, ProducerInfo, StagedBuildResult, TypedBuilder, fsutil,
+    load_container_image_descriptor,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -141,7 +142,7 @@ impl TypedBuilder for ContainerImageBuilder {
     fn build_typed(
         &self,
         config: Self::Config,
-        inputs: ResolvedInputs,
+        inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         validate_container_image_config(&config).map_err(map_container_image_error)?;
@@ -184,7 +185,6 @@ impl TypedBuilder for ContainerImageBuilder {
             producer: ProducerInfo {
                 builder: "container-image".to_string(),
             },
-            input_build_keys: vec![],
             attrs,
             staged_path,
         })
@@ -201,7 +201,7 @@ impl TypedBuilder for ImageBuilder {
     fn build_typed(
         &self,
         config: Self::Config,
-        inputs: ResolvedInputs,
+        inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         let base = inputs.optional("base")?;
@@ -250,18 +250,11 @@ impl TypedBuilder for ImageBuilder {
             );
         }
 
-        let mut input_build_keys = Vec::with_capacity(binaries.len() + usize::from(base.is_some()));
-        if let Some(base) = base {
-            input_build_keys.push(base.build_key);
-        }
-        input_build_keys.extend(binaries.iter().map(|input| input.build_key));
-
         Ok(StagedBuildResult {
             kind: KIND_CONTAINER_IMAGE.to_string(),
             producer: ProducerInfo {
                 builder: "image".to_string(),
             },
-            input_build_keys,
             attrs,
             staged_path,
         })
@@ -285,8 +278,8 @@ fn validate_container_image_config(config: &ContainerImageConfig) -> CIResult<()
 
 fn validate_image_config(
     config: &ImageConfig,
-    base: Option<&ResolvedObject>,
-    binaries: &[ResolvedObject],
+    base: Option<&BuilderInputObject>,
+    binaries: &[BuilderInputObject],
 ) -> IResult<()> {
     if binaries.is_empty() {
         return Err(ImageError::InvalidConfig(
@@ -327,7 +320,7 @@ fn validate_image_config(
 
 fn effective_image_mode(
     config: &ImageConfig,
-    base: Option<&ResolvedObject>,
+    base: Option<&BuilderInputObject>,
 ) -> IResult<&'static str> {
     match (config.mode.as_deref(), base.is_some()) {
         (Some("bootstrap"), false) => Ok("bootstrap"),
@@ -436,7 +429,7 @@ fn inspect_local_image(cx: &BuildContext, image: &str) -> Result<LocalImageInspe
     })
 }
 
-fn run_bootstrap_mode(cx: &BuildContext, binaries: &[ResolvedObject]) -> IResult<ImportedImage> {
+fn run_bootstrap_mode(cx: &BuildContext, binaries: &[BuilderInputObject]) -> IResult<ImportedImage> {
     let rootfs_dir = cx.temp_root.join("rootfs");
     let tar_path = cx.temp_root.join("rootfs.tar");
     fsutil::recreate_empty_dir_force(&rootfs_dir).map_err(map_fsutil_error_to_image)?;
@@ -453,8 +446,8 @@ fn run_bootstrap_mode(cx: &BuildContext, binaries: &[ResolvedObject]) -> IResult
 
 fn run_layered_mode(
     cx: &BuildContext,
-    base: &ResolvedObject,
-    binaries: &[ResolvedObject],
+    base: &BuilderInputObject,
+    binaries: &[BuilderInputObject],
 ) -> IResult<ImportedImage> {
     let base_ref = resolve_image_ref(base)?;
     let container_id = podman_create(cx, &base_ref)?;
@@ -472,18 +465,10 @@ fn run_layered_mode(
     result
 }
 
-fn resolve_image_ref(image: &ResolvedObject) -> IResult<String> {
-    image
-        .attrs
-        .get("image_ref")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            ImageError::InputResolutionFailed(
-                "container-image input does not define string attr 'image_ref'".to_string(),
-            )
-        })
+fn resolve_image_ref(image: &BuilderInputObject) -> IResult<String> {
+    load_container_image_descriptor(&image.object_path)
+        .map(|descriptor| descriptor.image_ref)
+        .map_err(ImageError::InputResolutionFailed)
 }
 
 fn generated_image_ref(mode: &str) -> Result<String, fsutil::FsUtilError> {
@@ -845,7 +830,7 @@ fn map_image_error(error: ImageError) -> BuilderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{BuildKey, Builder, ObjectHash, ResolvedInputValue};
+    use mbuild_core::{Builder, BuilderInputObject, BuilderInputValue, BuilderInputs};
     use std::env;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
@@ -918,51 +903,21 @@ mod tests {
         )
     }
 
-    fn resolved_binary_output(root: &Path, name: &str) -> ResolvedObject {
+    fn resolved_binary_output(root: &Path, name: &str) -> BuilderInputObject {
         let object_path = root.join(name);
         fs::create_dir_all(&object_path).unwrap();
         fs::write(object_path.join("README.txt"), b"hello image\n").unwrap();
-        ResolvedObject {
-            object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
-                .parse::<ObjectHash>()
-                .unwrap(),
-            build_key: "2222222222222222222222222222222222222222222222222222222222222222"
-                .parse::<BuildKey>()
-                .unwrap(),
-            result_key: "2222222222222222222222222222222222222222222222222222222222222222"
-                .parse::<BuildKey>()
-                .unwrap(),
-            kind: KIND_BINARY_OUTPUT.to_string(),
-            attrs: Map::new(),
-            object_path,
-        }
+        BuilderInputObject { object_path }
     }
 
-    fn resolved_base_image(root: &Path) -> ResolvedObject {
+    fn resolved_base_image(root: &Path) -> BuilderInputObject {
         let object_path = root.join("base-image.json");
-        fs::write(&object_path, b"{}\n").unwrap();
-        let mut attrs = Map::new();
-        attrs.insert(
-            "image_ref".to_string(),
-            Value::String(format!(
-                "docker.io/library/buildpack-deps@{}",
-                sample_digest()
-            )),
-        );
-        ResolvedObject {
-            object_hash: "3333333333333333333333333333333333333333333333333333333333333333"
-                .parse::<ObjectHash>()
-                .unwrap(),
-            build_key: "4444444444444444444444444444444444444444444444444444444444444444"
-                .parse::<BuildKey>()
-                .unwrap(),
-            result_key: "4444444444444444444444444444444444444444444444444444444444444444"
-                .parse::<BuildKey>()
-                .unwrap(),
-            kind: KIND_CONTAINER_IMAGE.to_string(),
-            attrs,
-            object_path,
-        }
+        let descriptor = serde_json::json!({
+            "image_ref": format!("docker.io/library/buildpack-deps@{}", sample_digest()),
+            "image_digest": sample_digest(),
+        });
+        fs::write(&object_path, serde_json::to_vec(&descriptor).unwrap()).unwrap();
+        BuilderInputObject { object_path }
     }
 
     #[test]
@@ -976,14 +931,13 @@ mod tests {
                         image: "docker.io/library/buildpack-deps:bookworm".to_string(),
                         digest: sample_digest().to_string(),
                     },
-                    ResolvedInputs::empty(),
+                    BuilderInputs::empty(),
                     &mut cx,
                 )
                 .unwrap();
 
             assert_eq!(result.kind, KIND_CONTAINER_IMAGE);
             assert_eq!(result.producer.builder, "container-image");
-            assert_eq!(result.input_build_keys.len(), 0);
             assert_eq!(
                 result.attrs["image"],
                 Value::String("docker.io/library/buildpack-deps:bookworm".to_string())
@@ -1014,11 +968,11 @@ mod tests {
         with_fake_podman(&base_inspect_json(), || {
             let temp = tempdir().unwrap();
             let mut cx = build_context(temp.path());
-            let mut inputs = ResolvedInputs::empty();
-            inputs.insert("base", mbuild_core::ResolvedInputValue::Optional(None));
+            let mut inputs = BuilderInputs::empty();
+            inputs.insert("base", BuilderInputValue::Optional(None));
             inputs.insert(
                 "inputs",
-                ResolvedInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
+                BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
             );
 
             let result = ImageBuilder
@@ -1050,14 +1004,14 @@ mod tests {
         with_fake_podman(&base_inspect_json(), || {
             let temp = tempdir().unwrap();
             let mut cx = build_context(temp.path());
-            let mut inputs = ResolvedInputs::empty();
+            let mut inputs = BuilderInputs::empty();
             inputs.insert(
                 "base",
-                ResolvedInputValue::Optional(Some(resolved_base_image(temp.path()))),
+                BuilderInputValue::Optional(Some(resolved_base_image(temp.path()))),
             );
             inputs.insert(
                 "inputs",
-                ResolvedInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
+                BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
             );
 
             let result = ImageBuilder
@@ -1085,8 +1039,8 @@ mod tests {
     fn container_image_builder_rejects_non_empty_inputs() {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
-        let mut inputs = ResolvedInputs::empty();
-        inputs.insert("base", mbuild_core::ResolvedInputValue::Many(vec![]));
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert("base", BuilderInputValue::Many(vec![]));
 
         let error = ContainerImageBuilder
             .build_typed(
@@ -1114,7 +1068,7 @@ mod tests {
                     "digest": sample_digest(),
                     "extra": true,
                 }),
-                ResolvedInputs::empty(),
+                BuilderInputs::empty(),
                 &mut cx,
             )
             .unwrap_err();
@@ -1126,11 +1080,11 @@ mod tests {
     fn image_build_erased_rejects_unknown_config_field() {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
-        let mut inputs = ResolvedInputs::empty();
-        inputs.insert("base", mbuild_core::ResolvedInputValue::Optional(None));
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert("base", BuilderInputValue::Optional(None));
         inputs.insert(
             "inputs",
-            ResolvedInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
+            BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
         );
 
         let error = ImageBuilder
@@ -1155,7 +1109,7 @@ mod tests {
                     image: "docker.io/library/buildpack-deps:bookworm".to_string(),
                     digest: "sha256:short".to_string(),
                 },
-                ResolvedInputs::empty(),
+                BuilderInputs::empty(),
                 &mut cx,
             )
             .unwrap_err();
@@ -1167,11 +1121,11 @@ mod tests {
     fn image_builder_rejects_invalid_mode() {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
-        let mut inputs = ResolvedInputs::empty();
-        inputs.insert("base", mbuild_core::ResolvedInputValue::Optional(None));
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert("base", BuilderInputValue::Optional(None));
         inputs.insert(
             "inputs",
-            ResolvedInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
+            BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
         );
 
         let error = ImageBuilder
@@ -1192,11 +1146,11 @@ mod tests {
         with_fake_podman(&base_inspect_json(), || {
             let temp = tempdir().unwrap();
             let mut cx = build_context(temp.path());
-            let mut inputs = ResolvedInputs::empty();
-            inputs.insert("base", mbuild_core::ResolvedInputValue::Optional(None));
+            let mut inputs = BuilderInputs::empty();
+            inputs.insert("base", BuilderInputValue::Optional(None));
             inputs.insert(
                 "inputs",
-                ResolvedInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
+                BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
             );
 
             unsafe { env::set_var("MBUILD_TEST_IMAGE_IMPORT_FAIL", "1") };

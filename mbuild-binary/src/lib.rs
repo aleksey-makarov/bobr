@@ -1,6 +1,7 @@
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderSpec, InputArity, InputSlot, ProducerInfo,
-    ResolvedInputs, ResolvedObject, StagedBuildResult, TypedBuilder, fsutil,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
+    InputArity, InputSlot, ProducerInfo, StagedBuildResult, TypedBuilder, fsutil,
+    load_container_image_descriptor,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -102,7 +103,7 @@ impl TypedBuilder for BinaryBuilder {
     fn build_typed(
         &self,
         config: Self::Config,
-        inputs: ResolvedInputs,
+        inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         validate_config(&config).map_err(map_error)?;
@@ -164,17 +165,11 @@ impl TypedBuilder for BinaryBuilder {
             }),
         );
 
-        let mut input_build_keys = Vec::with_capacity(2 + sources.len());
-        input_build_keys.push(image.build_key);
-        input_build_keys.push(script.build_key);
-        input_build_keys.extend(sources.iter().map(|source| source.build_key));
-
         Ok(StagedBuildResult {
             kind: config.kind,
             producer: ProducerInfo {
                 builder: "binary".to_string(),
             },
-            input_build_keys,
             attrs,
             staged_path: output_path,
         })
@@ -197,9 +192,9 @@ fn validate_config(config: &BinaryConfig) -> BResult<()> {
 }
 
 fn resolve_script_execution(
-    script: &ResolvedObject,
+    script: &BuilderInputObject,
     script_config_dir: &Path,
-    sources: &[ResolvedObject],
+    sources: &[BuilderInputObject],
 ) -> BResult<ScriptExecution> {
     if !script.object_path.is_file() {
         return Err(BinaryError::InputResolutionFailed(format!(
@@ -236,7 +231,7 @@ fn resolve_script_execution(
     })
 }
 
-fn resolve_container_execution(image: &ResolvedObject) -> BResult<ContainerExecution> {
+fn resolve_container_execution(image: &BuilderInputObject) -> BResult<ContainerExecution> {
     if !image.object_path.is_file() {
         return Err(BinaryError::InputResolutionFailed(format!(
             "container-image input must resolve to a file: {}",
@@ -244,31 +239,18 @@ fn resolve_container_execution(image: &ResolvedObject) -> BResult<ContainerExecu
         )));
     }
 
-    let image_ref = image
-        .attrs
-        .get("image_ref")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            BinaryError::InputResolutionFailed(
-                "container-image input does not define string attr 'image_ref'".to_string(),
-            )
-        })?;
-
-    if image_ref.trim().is_empty() {
-        return Err(BinaryError::InputResolutionFailed(
-            "container-image input has empty attr 'image_ref'".to_string(),
-        ));
-    }
+    let descriptor = load_container_image_descriptor(&image.object_path)
+        .map_err(BinaryError::InputResolutionFailed)?;
 
     Ok(ContainerExecution {
-        image_ref: image_ref.to_string(),
+        image_ref: descriptor.image_ref,
     })
 }
 
 fn run_container_build(
     container: &ContainerExecution,
     script: &ScriptExecution,
-    sources: &[ResolvedObject],
+    sources: &[BuilderInputObject],
     output_path: &Path,
     (uid, gid): (u32, u32),
     cx: &BuildContext,
@@ -524,7 +506,7 @@ fn write_script_config_node(path: &Path, value: &Value, debug_path: &str) -> BRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{BuildKey, Builder, ObjectHash, ResolvedInputValue};
+    use mbuild_core::{Builder, BuilderInputObject, BuilderInputValue, BuilderInputs};
     use std::env;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -595,11 +577,25 @@ mod tests {
         kind: &str,
         name: &str,
         attrs: Map<String, Value>,
-    ) -> ResolvedObject {
+    ) -> BuilderInputObject {
         let object_path = root.join(name);
         if kind == KIND_SOURCE_TREE || kind == KIND_BINARY_OUTPUT {
             fs::create_dir_all(&object_path).unwrap();
             fs::write(object_path.join("README.txt"), b"hello source\n").unwrap();
+        } else if kind == KIND_CONTAINER_IMAGE {
+            let image_ref = attrs
+                .get("image_ref")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let image_digest = attrs
+                .get("image_digest")
+                .and_then(Value::as_str)
+                .unwrap_or("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            let descriptor = serde_json::json!({
+                "image_ref": image_ref,
+                "image_digest": image_digest,
+            });
+            fs::write(&object_path, serde_json::to_vec(&descriptor).unwrap()).unwrap();
         } else {
             fs::write(&object_path, b"payload\n").unwrap();
             #[cfg(unix)]
@@ -609,56 +605,23 @@ mod tests {
                 fs::set_permissions(&object_path, permissions).unwrap();
             }
         }
-        ResolvedObject {
-            object_hash: match kind {
-                KIND_CONTAINER_IMAGE => {
-                    "1111111111111111111111111111111111111111111111111111111111111111"
-                }
-                KIND_BUILD_SCRIPT => {
-                    "2222222222222222222222222222222222222222222222222222222222222222"
-                }
-                _ => "3333333333333333333333333333333333333333333333333333333333333333",
-            }
-            .parse::<ObjectHash>()
-            .unwrap(),
-            build_key: match kind {
-                KIND_CONTAINER_IMAGE => {
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                }
-                KIND_BUILD_SCRIPT => {
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                }
-                _ => "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-            }
-            .parse::<BuildKey>()
-            .unwrap(),
-            result_key: match kind {
-                KIND_CONTAINER_IMAGE => {
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                }
-                KIND_BUILD_SCRIPT => {
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                }
-                _ => "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-            }
-            .parse::<BuildKey>()
-            .unwrap(),
-            kind: kind.to_string(),
-            attrs,
-            object_path,
-        }
+        BuilderInputObject { object_path }
     }
 
-    fn sample_inputs(root: &Path) -> ResolvedInputs {
-        let mut inputs = ResolvedInputs::empty();
+    fn sample_inputs(root: &Path) -> BuilderInputs {
+        let mut inputs = BuilderInputs::empty();
         let mut image_attrs = Map::new();
         image_attrs.insert(
             "image_ref".to_string(),
             Value::String("docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
         );
+        image_attrs.insert(
+            "image_digest".to_string(),
+            Value::String("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+        );
         inputs.insert(
             "image",
-            ResolvedInputValue::One(resolved_object(
+            BuilderInputValue::One(resolved_object(
                 root,
                 KIND_CONTAINER_IMAGE,
                 "image.json",
@@ -667,7 +630,7 @@ mod tests {
         );
         inputs.insert(
             "script",
-            ResolvedInputValue::One(resolved_object(
+            BuilderInputValue::One(resolved_object(
                 root,
                 KIND_BUILD_SCRIPT,
                 "script.sh",
@@ -676,7 +639,7 @@ mod tests {
         );
         inputs.insert(
             "sources",
-            ResolvedInputValue::Many(vec![resolved_object(
+            BuilderInputValue::Many(vec![resolved_object(
                 root,
                 KIND_SOURCE_TREE,
                 "src",
@@ -686,7 +649,7 @@ mod tests {
         inputs
     }
 
-    fn sample_inputs_with_aux_file(root: &Path) -> ResolvedInputs {
+    fn sample_inputs_with_aux_file(root: &Path) -> BuilderInputs {
         let mut inputs = sample_inputs(root);
         let mut sources = match inputs.many("sources").unwrap().to_vec() {
             values => values,
@@ -697,11 +660,11 @@ mod tests {
             "patch.diff",
             Map::new(),
         ));
-        inputs.insert("sources", ResolvedInputValue::Many(sources));
+        inputs.insert("sources", BuilderInputValue::Many(sources));
         inputs
     }
 
-    fn sample_inputs_with_binary_output_aux(root: &Path) -> ResolvedInputs {
+    fn sample_inputs_with_binary_output_aux(root: &Path) -> BuilderInputs {
         let mut inputs = sample_inputs(root);
         let mut sources = match inputs.many("sources").unwrap().to_vec() {
             values => values,
@@ -712,7 +675,7 @@ mod tests {
             "linux-headers",
             Map::new(),
         ));
-        inputs.insert("sources", ResolvedInputValue::Many(sources));
+        inputs.insert("sources", BuilderInputValue::Many(sources));
         inputs
     }
 
@@ -736,7 +699,6 @@ mod tests {
             assert_eq!(result.kind, "binary-output");
             assert_eq!(result.producer.builder, "binary");
             assert_eq!(result.attrs["optimize"], Value::String("size".to_string()));
-            assert_eq!(result.input_build_keys.len(), 3);
             assert!(result.staged_path.is_dir());
             assert_eq!(
                 fs::read_to_string(result.staged_path.join("copied").join("README.txt")).unwrap(),
@@ -841,7 +803,6 @@ mod tests {
                 .unwrap();
 
             assert_eq!(result.kind, "binary-output");
-            assert_eq!(result.input_build_keys.len(), 4);
             assert!(result.staged_path.is_dir());
         });
     }
@@ -864,13 +825,13 @@ mod tests {
             );
             let script = resolved_object(temp.path(), KIND_BUILD_SCRIPT, "script.sh", Map::new());
 
-            let inputs = ResolvedInputs::new(std::collections::BTreeMap::from([
-                ("image".to_string(), ResolvedInputValue::One(image.clone())),
+            let inputs = BuilderInputs::new(std::collections::BTreeMap::from([
+                ("image".to_string(), BuilderInputValue::One(image.clone())),
                 (
                     "script".to_string(),
-                    ResolvedInputValue::One(script.clone()),
+                    BuilderInputValue::One(script.clone()),
                 ),
-                ("sources".to_string(), ResolvedInputValue::Many(vec![])),
+                ("sources".to_string(), BuilderInputValue::Many(vec![])),
             ]));
 
             let result = builder
@@ -908,7 +869,6 @@ mod tests {
                 .unwrap();
 
             assert_eq!(result.kind, "binary-output");
-            assert_eq!(result.input_build_keys.len(), 4);
             assert!(result.staged_path.is_dir());
         });
     }
@@ -917,10 +877,10 @@ mod tests {
     fn binary_builder_rejects_missing_image_ref_attr() {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
-        let mut inputs = ResolvedInputs::empty();
+        let mut inputs = BuilderInputs::empty();
         inputs.insert(
             "image",
-            ResolvedInputValue::One(resolved_object(
+            BuilderInputValue::One(resolved_object(
                 temp.path(),
                 KIND_CONTAINER_IMAGE,
                 "image.json",
@@ -929,7 +889,7 @@ mod tests {
         );
         inputs.insert(
             "script",
-            ResolvedInputValue::One(resolved_object(
+            BuilderInputValue::One(resolved_object(
                 temp.path(),
                 KIND_BUILD_SCRIPT,
                 "script.sh",
@@ -938,7 +898,7 @@ mod tests {
         );
         inputs.insert(
             "sources",
-            ResolvedInputValue::Many(vec![resolved_object(
+            BuilderInputValue::Many(vec![resolved_object(
                 temp.path(),
                 KIND_SOURCE_TREE,
                 "src",

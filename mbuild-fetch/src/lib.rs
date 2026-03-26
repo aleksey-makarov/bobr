@@ -1,8 +1,8 @@
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderSpec, InputSlot, ProducerInfo,
-    ResolvedInputs, StagedBuildResult, TypedBuilder, fsutil,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, InputSlot,
+    ProducerInfo, StagedBuildResult, TypedBuilder, fsutil,
 };
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
@@ -116,7 +116,7 @@ impl TypedBuilder for FetchBuilder {
     fn build_typed(
         &self,
         config: Self::Config,
-        inputs: ResolvedInputs,
+        inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         validate_config(&config).map_err(map_error)?;
@@ -190,7 +190,6 @@ impl TypedBuilder for FetchBuilder {
             producer: ProducerInfo {
                 builder: "fetch".to_string(),
             },
-            input_build_keys: vec![],
             attrs,
             staged_path,
         })
@@ -850,7 +849,7 @@ fn map_error(error: FetchError) -> BuilderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{BuildKey, Builder, ObjectHash, ResolvedInputValue};
+    use mbuild_core::{Builder, BuilderInputObject, BuilderInputValue, BuilderInputs};
     use sha2::Digest;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -933,22 +932,11 @@ mod tests {
         }
     }
 
-    fn sample_input() -> ResolvedInputs {
-        let mut inputs = ResolvedInputs::empty();
+    fn sample_input() -> BuilderInputs {
+        let mut inputs = BuilderInputs::empty();
         inputs.insert(
             "unexpected",
-            ResolvedInputValue::One(mbuild_core::ResolvedObject {
-                object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
-                    .parse::<ObjectHash>()
-                    .unwrap(),
-                build_key: "2222222222222222222222222222222222222222222222222222222222222222"
-                    .parse::<BuildKey>()
-                    .unwrap(),
-                result_key: "2222222222222222222222222222222222222222222222222222222222222222"
-                    .parse::<BuildKey>()
-                    .unwrap(),
-                kind: "source-tree".to_string(),
-                attrs: Map::new(),
+            BuilderInputValue::One(BuilderInputObject {
                 object_path: PathBuf::from("/tmp/input"),
             }),
         );
@@ -998,7 +986,7 @@ mod tests {
                     archive_format: None,
                     kind: None,
                 },
-                ResolvedInputs::empty(),
+                BuilderInputs::empty(),
                 &mut cx,
             )
             .unwrap();
@@ -1040,7 +1028,7 @@ mod tests {
                     archive_format: None,
                     kind: None,
                 },
-                ResolvedInputs::empty(),
+                BuilderInputs::empty(),
                 &mut cx,
             )
             .unwrap();
@@ -1098,7 +1086,7 @@ mod tests {
                     archive_format: None,
                     kind: None,
                 },
-                ResolvedInputs::empty(),
+                BuilderInputs::empty(),
                 &mut first_cx,
             )
             .unwrap();
@@ -1114,7 +1102,7 @@ mod tests {
                     archive_format: None,
                     kind: None,
                 },
-                ResolvedInputs::empty(),
+                BuilderInputs::empty(),
                 &mut second_cx,
             )
             .unwrap();
@@ -1162,7 +1150,7 @@ mod tests {
                     "hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
                     "extra": true
                 }),
-                ResolvedInputs::empty(),
+                BuilderInputs::empty(),
                 &mut cx,
             )
             .unwrap_err();

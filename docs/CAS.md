@@ -319,7 +319,6 @@ Rust builders consume:
 
 - builder-specific configuration
 - resolved input payload paths
-- resolved input `Build` records for semantic validation
 
 For the `binary` builder specifically:
 
@@ -334,6 +333,11 @@ Rust builders produce:
 
 The interpreter writes the build record and updates both publication ref
 namespaces.
+
+Kind validation and other dependency-metadata checks happen in the interpreter
+before builder invocation. Builder implementations themselves receive only
+resolved payload paths and therefore cannot read dependency `kind`, `attrs`,
+`build_key`, or `result_key`.
 
 ## Logging And Progress
 

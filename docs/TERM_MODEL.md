@@ -137,6 +137,11 @@ on metadata such as `dep.kind` or `dep.attrs.*`, Nickel must copy that data
 explicitly into the downstream builder payload. A Rust builder whose behavior
 changes solely because dependency metadata differs is considered a model bug.
 
+The interpreter enforces this boundary structurally: builders receive only
+resolved payload paths for their inputs. Dependency `kind`, `attrs`,
+`build_key`, and `result_key` remain available to Nickel and to the store
+interpreter, but they are not exposed through the Rust builder API.
+
 ## Publication
 
 Publication is implicit in STORE semantics.

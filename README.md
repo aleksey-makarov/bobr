@@ -30,6 +30,10 @@ relevant data into a downstream builder payload. A Rust builder whose behavior
 changes based on dependency metadata alone is considered a bug in the store
 model.
 
+Rust builders do not receive dependency metadata directly. The interpreter
+performs kind validation itself and then passes builders only resolved payload
+paths for their inputs.
+
 By default, `mbuild` prints concise live build progress to `stderr`. The final
 result still goes to `stdout` only. Use `--quiet` to suppress live progress.
 

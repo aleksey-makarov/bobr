@@ -1,5 +1,5 @@
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderSpec, ProducerInfo, ResolvedInputs,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, ProducerInfo,
     StagedBuildResult, TypedBuilder, fsutil,
 };
 use serde::Deserialize;
@@ -56,7 +56,7 @@ impl TypedBuilder for TextBuilder {
     fn build_typed(
         &self,
         config: Self::Config,
-        inputs: ResolvedInputs,
+        inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         validate_config(&config).map_err(map_error)?;
@@ -121,7 +121,6 @@ impl TypedBuilder for TextBuilder {
             producer: ProducerInfo {
                 builder: BUILDER_NAME.to_string(),
             },
-            input_build_keys: vec![],
             attrs,
             staged_path: tmp_path,
         })
@@ -146,7 +145,7 @@ fn map_error(error: TextError) -> BuilderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::Builder;
+    use mbuild_core::{Builder, BuilderInputValue, BuilderInputs};
     use tempfile::tempdir;
 
     fn build_context(root: &std::path::Path) -> BuildContext {
@@ -174,14 +173,13 @@ mod tests {
                     kind: "plain-text".to_string(),
                     source: "hello".to_string(),
                 },
-                ResolvedInputs::empty(),
+                BuilderInputs::empty(),
                 &mut cx,
             )
             .unwrap();
 
         assert_eq!(result.kind, "plain-text");
         assert_eq!(result.producer.builder, "text");
-        assert!(result.input_build_keys.is_empty());
         assert_eq!(result.attrs["source_bytes"], Value::from(5));
         assert_eq!(fs::read_to_string(&result.staged_path).unwrap(), "hello");
     }
@@ -198,7 +196,7 @@ mod tests {
                     kind: "build-script".to_string(),
                     source: "#!/bin/sh\necho hi\n".to_string(),
                 },
-                ResolvedInputs::empty(),
+                BuilderInputs::empty(),
                 &mut cx,
             )
             .unwrap();
@@ -225,7 +223,7 @@ mod tests {
                     kind: "plain-text".to_string(),
                     source: "hello".to_string(),
                 },
-                ResolvedInputs::empty(),
+                BuilderInputs::empty(),
                 &mut cx,
             )
             .unwrap();
@@ -245,8 +243,8 @@ mod tests {
         let builder = TextBuilder;
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
-        let mut inputs = ResolvedInputs::empty();
-        inputs.insert("script", mbuild_core::ResolvedInputValue::Many(Vec::new()));
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert("script", BuilderInputValue::Many(Vec::new()));
 
         let error = builder
             .build_typed(
@@ -274,7 +272,7 @@ mod tests {
                     kind: "".to_string(),
                     source: "hello".to_string(),
                 },
-                ResolvedInputs::empty(),
+                BuilderInputs::empty(),
                 &mut cx,
             )
             .unwrap_err();
@@ -295,7 +293,7 @@ mod tests {
                     "source": "hello",
                     "extra": true
                 }),
-                ResolvedInputs::empty(),
+                BuilderInputs::empty(),
                 &mut cx,
             )
             .unwrap_err();
