@@ -830,7 +830,10 @@ fn map_image_error(error: ImageError) -> BuilderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{Builder, BuilderInputObject, BuilderInputValue, BuilderInputs};
+    use mbuild_core::{
+        BuildKey, Builder, BuilderInputObject, BuilderInputValue, BuilderInputs, ObjectHash,
+        ResolvedInputValue, ResolvedInputs, ResolvedObject,
+    };
     use std::env;
     use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
@@ -918,6 +921,55 @@ mod tests {
         });
         fs::write(&object_path, serde_json::to_vec(&descriptor).unwrap()).unwrap();
         BuilderInputObject { object_path }
+    }
+
+    fn metadata_rich_base_image(
+        root: &Path,
+        descriptor_image_ref: &str,
+        attrs_image_ref: &str,
+    ) -> ResolvedObject {
+        let object_path = root.join("base-image-metadata-rich.json");
+        let descriptor = serde_json::json!({
+            "image_ref": descriptor_image_ref,
+            "image_digest": sample_digest(),
+        });
+        fs::write(&object_path, serde_json::to_vec(&descriptor).unwrap()).unwrap();
+
+        ResolvedObject {
+            object_hash: "3333333333333333333333333333333333333333333333333333333333333333"
+                .parse::<ObjectHash>()
+                .unwrap(),
+            build_key: "4444444444444444444444444444444444444444444444444444444444444444"
+                .parse::<BuildKey>()
+                .unwrap(),
+            result_key: "4444444444444444444444444444444444444444444444444444444444444444"
+                .parse::<BuildKey>()
+                .unwrap(),
+            kind: KIND_CONTAINER_IMAGE.to_string(),
+            attrs: Map::from_iter([(
+                "image_ref".to_string(),
+                Value::String(attrs_image_ref.to_string()),
+            )]),
+            object_path,
+        }
+    }
+
+    fn resolved_binary_output_internal(root: &Path, name: &str) -> ResolvedObject {
+        let object = resolved_binary_output(root, name);
+        ResolvedObject {
+            object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                .parse::<ObjectHash>()
+                .unwrap(),
+            build_key: "2222222222222222222222222222222222222222222222222222222222222222"
+                .parse::<BuildKey>()
+                .unwrap(),
+            result_key: "2222222222222222222222222222222222222222222222222222222222222222"
+                .parse::<BuildKey>()
+                .unwrap(),
+            kind: KIND_BINARY_OUTPUT.to_string(),
+            attrs: Map::new(),
+            object_path: object.object_path,
+        }
     }
 
     #[test]
@@ -1025,6 +1077,50 @@ mod tests {
                 .unwrap();
 
             assert_eq!(result.attrs["mode"], Value::String("layered".to_string()));
+            assert_eq!(
+                result.attrs["base_image_ref"],
+                Value::String(format!(
+                    "docker.io/library/buildpack-deps@{}",
+                    sample_digest()
+                ))
+            );
+        });
+    }
+
+    #[test]
+    fn image_builder_uses_descriptor_when_runtime_metadata_disagrees() {
+        with_fake_podman(&base_inspect_json(), || {
+            let temp = tempdir().unwrap();
+            let mut cx = build_context(temp.path());
+            let inputs = ResolvedInputs::new(std::collections::BTreeMap::from([
+                (
+                    "base".to_string(),
+                    ResolvedInputValue::Optional(Some(metadata_rich_base_image(
+                        temp.path(),
+                        &format!("docker.io/library/buildpack-deps@{}", sample_digest()),
+                        "docker.io/library/wrong@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    ))),
+                ),
+                (
+                    "inputs".to_string(),
+                    ResolvedInputValue::Many(vec![resolved_binary_output_internal(
+                        temp.path(),
+                        "bin-out",
+                    )]),
+                ),
+            ]))
+            .into_builder_inputs();
+
+            let result = ImageBuilder
+                .build_typed(
+                    ImageConfig {
+                        mode: Some("layered".to_string()),
+                    },
+                    inputs,
+                    &mut cx,
+                )
+                .unwrap();
+
             assert_eq!(
                 result.attrs["base_image_ref"],
                 Value::String(format!(

@@ -506,7 +506,10 @@ fn write_script_config_node(path: &Path, value: &Value, debug_path: &str) -> BRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{Builder, BuilderInputObject, BuilderInputValue, BuilderInputs};
+    use mbuild_core::{
+        BuildKey, Builder, BuilderInputObject, BuilderInputValue, BuilderInputs, ObjectHash,
+        ResolvedInputValue, ResolvedInputs, ResolvedObject,
+    };
     use std::env;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -677,6 +680,38 @@ mod tests {
         ));
         inputs.insert("sources", BuilderInputValue::Many(sources));
         inputs
+    }
+
+    fn metadata_rich_container_image_input(
+        root: &Path,
+        name: &str,
+        descriptor_image_ref: &str,
+        attrs_image_ref: &str,
+    ) -> ResolvedObject {
+        let object_path = root.join(name);
+        let descriptor = serde_json::json!({
+            "image_ref": descriptor_image_ref,
+            "image_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        });
+        fs::write(&object_path, serde_json::to_vec(&descriptor).unwrap()).unwrap();
+
+        ResolvedObject {
+            object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                .parse::<ObjectHash>()
+                .unwrap(),
+            build_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .parse::<BuildKey>()
+                .unwrap(),
+            result_key: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .parse::<BuildKey>()
+                .unwrap(),
+            kind: KIND_CONTAINER_IMAGE.to_string(),
+            attrs: Map::from_iter([(
+                "image_ref".to_string(),
+                Value::String(attrs_image_ref.to_string()),
+            )]),
+            object_path,
+        }
     }
 
     #[test]
@@ -919,6 +954,73 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, BuilderError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn binary_builder_uses_descriptor_when_runtime_metadata_disagrees() {
+        with_fake_podman(|| {
+            let temp = tempdir().unwrap();
+            let mut cx = build_context(temp.path());
+
+            let image = metadata_rich_container_image_input(
+                temp.path(),
+                "image.json",
+                "docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "docker.io/library/wrong@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            );
+            let script = resolved_object(temp.path(), KIND_BUILD_SCRIPT, "script.sh", Map::new());
+            let source = resolved_object(temp.path(), KIND_SOURCE_TREE, "src", Map::new());
+
+            let inputs = ResolvedInputs::new(std::collections::BTreeMap::from([
+                ("image".to_string(), ResolvedInputValue::One(image)),
+                ("script".to_string(), ResolvedInputValue::One(ResolvedObject {
+                    object_hash: "2222222222222222222222222222222222222222222222222222222222222222"
+                        .parse::<ObjectHash>()
+                        .unwrap(),
+                    build_key: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .parse::<BuildKey>()
+                        .unwrap(),
+                    result_key: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .parse::<BuildKey>()
+                        .unwrap(),
+                    kind: KIND_BUILD_SCRIPT.to_string(),
+                    attrs: Map::new(),
+                    object_path: script.object_path,
+                })),
+                ("sources".to_string(), ResolvedInputValue::Many(vec![ResolvedObject {
+                    object_hash: "3333333333333333333333333333333333333333333333333333333333333333"
+                        .parse::<ObjectHash>()
+                        .unwrap(),
+                    build_key: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .parse::<BuildKey>()
+                        .unwrap(),
+                    result_key: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .parse::<BuildKey>()
+                        .unwrap(),
+                    kind: KIND_SOURCE_TREE.to_string(),
+                    attrs: Map::new(),
+                    object_path: source.object_path,
+                }])),
+            ]))
+            .into_builder_inputs();
+
+            let result = BinaryBuilder
+                .build_typed(
+                    BinaryConfig {
+                        kind: "binary-output".to_string(),
+                        optimize: "size".to_string(),
+                        script_config: None,
+                    },
+                    inputs,
+                    &mut cx,
+                )
+                .unwrap();
+
+            assert_eq!(
+                fs::read_to_string(result.staged_path.join("image-ref.txt")).unwrap(),
+                "docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            );
+        });
     }
 
     #[test]
