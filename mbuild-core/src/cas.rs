@@ -215,7 +215,7 @@ pub fn publish_output(
     layout: &StoreLayout,
     request: PublishOutputRequest,
 ) -> Result<PublishedOutput, CasError> {
-    if let Some(published) = load_published_build(layout, request.build_key)? {
+    if let Some(published) = load_build_handle(layout, request.build_key)? {
         remove_path_force(&request.staged_path)?;
         publish_refs(layout, &request.output_name, &published)?;
         return Ok(PublishedOutput {
@@ -235,7 +235,7 @@ pub fn publish_output(
             )));
         }
         remove_path_force(&request.staged_path)?;
-        store_build_ref(layout, request.build_key, request.result_key)?;
+        store_build_handle_ref(layout, request.build_key, request.result_key)?;
         let published = PublishedBuild {
             build: build_from_result(request.build_key, &result),
             result,
@@ -329,11 +329,11 @@ pub fn compute_result_key(
     Ok(BuildKey(Sha256::digest(&canonical).into()))
 }
 
-pub fn load_build_record(
+pub fn load_public_build(
     layout: &StoreLayout,
     build_key: BuildKey,
 ) -> Result<Option<Build>, CasError> {
-    Ok(load_published_build(layout, build_key)?.map(|published| published.build))
+    Ok(load_build_handle(layout, build_key)?.map(|published| published.build))
 }
 
 pub fn materialize_build(
@@ -355,7 +355,7 @@ pub fn materialize_build(
         attrs: staged.attrs,
     };
     write_result_record(layout, &result)?;
-    store_build_ref(layout, build_key, result_key)?;
+    store_build_handle_ref(layout, build_key, result_key)?;
 
     Ok(PublishedBuild {
         object_path: layout.objects.join(object_hash.to_hex()),
@@ -407,7 +407,7 @@ pub fn object_path(layout: &StoreLayout, object_hash: ObjectHash) -> PathBuf {
     layout.objects.join(object_hash.to_hex())
 }
 
-pub fn build_path(layout: &StoreLayout, build_key: BuildKey) -> PathBuf {
+pub fn build_ref_path(layout: &StoreLayout, build_key: BuildKey) -> PathBuf {
     layout.builds.join(build_key.to_hex())
 }
 
@@ -415,7 +415,7 @@ pub fn result_path(layout: &StoreLayout, result_key: BuildKey) -> PathBuf {
     layout.results.join(format!("{}.json", result_key.to_hex()))
 }
 
-pub fn store_build_ref(
+pub fn store_build_handle_ref(
     layout: &StoreLayout,
     build_key: BuildKey,
     result_key: BuildKey,
@@ -423,14 +423,14 @@ pub fn store_build_ref(
     let target = PathBuf::from("..")
         .join(RESULTS_DIR)
         .join(format!("{}.json", result_key.to_hex()));
-    replace_symlink(&target, &build_path(layout, build_key))
+    replace_symlink(&target, &build_ref_path(layout, build_key))
 }
 
-pub fn load_published_build(
+pub fn load_build_handle(
     layout: &StoreLayout,
     build_key: BuildKey,
 ) -> Result<Option<PublishedBuild>, CasError> {
-    let build_ref_path = build_path(layout, build_key);
+    let build_ref_path = build_ref_path(layout, build_key);
     if !build_ref_path.exists() && !build_ref_path.is_symlink() {
         return Ok(None);
     }
@@ -861,7 +861,7 @@ fn load_current_publication(
         })?;
     let build_key_str = meta_file_name;
     let build_key = parse_build_key_result(build_key_str)?;
-    let published = load_published_build(layout, build_key)?.ok_or_else(|| {
+    let published = load_build_handle(layout, build_key)?.ok_or_else(|| {
         CasError::Serialization(format!(
             "current meta ref '{}' points to missing build '{}'",
             meta_ref_path.display(),
@@ -1084,18 +1084,23 @@ mod tests {
     }
 
     #[test]
-    fn publish_output_reuses_existing_object_hash() {
+    fn publish_output_reuses_existing_result_via_new_build_handle_ref() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
+        let result_key = build_key_for("Text", json!({ "kind": "build-script" }), &[]);
         let first_stage = temp.path().join("first.txt");
         fs::write(&first_stage, b"hello").unwrap();
         let first = publish_output(
             &layout,
             PublishOutputRequest {
                 output_name: "hello".to_string(),
-                build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
-                result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                build_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "hello-1" }),
+                    &[],
+                ),
+                result_key,
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 kind: "build-script".to_string(),
@@ -1112,8 +1117,12 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "hello-copy".to_string(),
-                build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
-                result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                build_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "hello-2" }),
+                    &[],
+                ),
+                result_key,
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 kind: "build-script".to_string(),
@@ -1125,13 +1134,26 @@ mod tests {
         .unwrap();
 
         assert_eq!(first.object_hash, second.object_hash);
-        assert_eq!(first.build_key, second.build_key);
+        assert_ne!(first.build_key, second.build_key);
+        assert_eq!(first.result_key, second.result_key);
         assert!(layout.objects.join(first.object_hash.to_hex()).exists());
+        assert_eq!(
+            fs::read_link(layout.builds.join(first.build_key.to_hex())).unwrap(),
+            PathBuf::from("..")
+                .join(RESULTS_DIR)
+                .join(format!("{}.json", first.result_key.to_hex()))
+        );
         assert!(
             layout
                 .builds
                 .join(second.build_key.to_hex())
                 .exists()
+        );
+        assert_eq!(
+            fs::read_link(layout.builds.join(second.build_key.to_hex())).unwrap(),
+            PathBuf::from("..")
+                .join(RESULTS_DIR)
+                .join(format!("{}.json", second.result_key.to_hex()))
         );
         assert_eq!(
             fs::read_link(layout.meta_refs.join("hello-copy.json")).unwrap(),
@@ -1181,6 +1203,12 @@ mod tests {
         let result_path = layout.results.join(format!("{}.json", published.result_key.to_hex()));
         assert!(build_ref_path.exists());
         assert!(result_path.exists());
+        assert_eq!(
+            fs::read_link(&build_ref_path).unwrap(),
+            PathBuf::from("..")
+                .join(RESULTS_DIR)
+                .join(format!("{}.json", published.result_key.to_hex()))
+        );
 
         let build_json: Value = serde_json::from_slice(&fs::read(&result_path).unwrap()).unwrap();
         assert_eq!(

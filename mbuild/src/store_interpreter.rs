@@ -6,7 +6,7 @@ use crate::runtime::{
     to_resolved_object, validate_allowed_kind,
 };
 use mbuild_core::{
-    Build, BuildLogLevel, BuildLogger, Builder, PublishedBuild, StoreLayout, load_published_build,
+    Build, BuildLogLevel, BuildLogger, Builder, PublishedBuild, StoreLayout, load_build_handle,
     publish_refs,
 };
 use nickel_lang_core::{
@@ -501,7 +501,7 @@ fn resolve_input_build(
         ))
     })?;
 
-    let canonical = load_published_build(layout, supplied.build_key)
+    let canonical = load_build_handle(layout, supplied.build_key)
         .map_err(map_store_error)?
         .ok_or_else(|| {
             RuntimeError::Store(format!(

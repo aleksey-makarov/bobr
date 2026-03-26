@@ -9,7 +9,7 @@ symlink refs to those results.
 - `objects/` holds payloads addressed by `object_hash`.
 - `results/` holds canonical result records addressed by `result_key`.
 - `builds/` holds public build-handle refs addressed by `build_key`.
-- `meta-refs/` holds human-facing symlinks from published name to build record.
+- `meta-refs/` holds human-facing symlinks from published name to build-handle refs.
 - `object-refs/` holds human-facing symlinks from published name to payload
   object.
 
@@ -218,7 +218,7 @@ Stored at:
 
 Purpose:
 
-- human-facing lookup from published name to build record
+- human-facing lookup from published name to a build-handle ref
 - stable publication of one selected name or alias
 - convenient inspection of the currently published realized result
 
@@ -227,7 +227,7 @@ These refs are publication state:
 - they are not part of object identity
 - they are not part of build-record identity
 - builders do not read them directly
-- removing them does not invalidate objects or build records
+- removing them does not invalidate objects, canonical result records, or build-handle refs
 
 ### Object refs
 
@@ -331,7 +331,8 @@ Rust builders produce:
 - a payload that becomes one object
 - builder-generated semantic metadata that becomes part of `Build`
 
-The interpreter writes the build record and updates both publication ref
+The interpreter writes or reuses one canonical result record, updates the
+corresponding build-handle ref, and then updates both publication ref
 namespaces.
 
 Kind validation and other dependency-metadata checks happen in the interpreter

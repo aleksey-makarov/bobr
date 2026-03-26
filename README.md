@@ -49,9 +49,9 @@ identity is determined only by payload content. Builder invocations are recorded
 separately under stable build keys, and published names resolve through
 metadata refs and object refs. The plain published name is always the current
 alias. Republishing a different build under the same name rotates the previous
-current refs into timestamp-suffixed history refs. Hashing, build recording,
-dependency resolution, and publication are interpreter details rather than part
-of the user-facing Nickel API.
+current refs into timestamp-suffixed history refs. Hashing, result recording,
+build-handle recording, dependency resolution, and publication are interpreter
+details rather than part of the user-facing Nickel API.
 
 Each `mbuild` invocation also writes persistent logs:
 

@@ -130,7 +130,7 @@ fn write_recipe(recipe_path: &Path, recipe_source: &str) {
     fs::write(recipe_path, recipe_source).unwrap();
 }
 
-fn build_path(root: &Path, build_key: impl ToString) -> PathBuf {
+fn build_ref_path(root: &Path, build_key: impl ToString) -> PathBuf {
     root.join(".mbuild")
         .join("builds")
         .join(build_key.to_string())
@@ -261,8 +261,14 @@ fn store_text_recipe_creates_store_entries_and_refs() {
         assert_eq!(mode & 0o111, 0o111);
     }
 
-    let build_file = build_path(workspace.path(), published.build.build_key);
+    let build_file = build_ref_path(workspace.path(), published.build.build_key);
     assert!(build_file.exists());
+    assert_eq!(
+        fs::read_link(&build_file).unwrap(),
+        PathBuf::from("..")
+            .join("results")
+            .join(format!("{}.json", published.result.result_key))
+    );
     let build_json: Value = serde_json::from_slice(
         &fs::read(result_path(workspace.path(), published.result.result_key)).unwrap(),
     )
@@ -431,8 +437,14 @@ fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
                 )
             );
 
-            let build_file = build_path(workspace.path(), published.build.build_key);
+            let build_file = build_ref_path(workspace.path(), published.build.build_key);
             assert!(build_file.exists());
+            assert_eq!(
+                fs::read_link(&build_file).unwrap(),
+                PathBuf::from("..")
+                    .join("results")
+                    .join(format!("{}.json", published.result.result_key))
+            );
             let build_json: Value =
                 serde_json::from_slice(
                     &fs::read(result_path(workspace.path(), published.result.result_key)).unwrap(),

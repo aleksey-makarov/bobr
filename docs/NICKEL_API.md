@@ -149,7 +149,8 @@ The returned value is still the same `Build` record.
 The interpreter translates primitive builder evaluation into:
 
 - realized objects in `.mbuild/objects`
-- realized build records in `.mbuild/builds`
+- public build-handle refs in `.mbuild/builds`
+- canonical result records in `.mbuild/results`
 - human-facing metadata refs in `.mbuild/meta-refs`
 - human-facing object refs in `.mbuild/object-refs`
 

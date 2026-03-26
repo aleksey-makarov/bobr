@@ -2,7 +2,7 @@ use crate::resolved_inputs::{ResolvedInputs, ResolvedObject};
 use mbuild_core::{
     Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, Builder,
     BuilderError, CasError, InputArity, PublishedBuild, StoreLayout, compute_build_key,
-    compute_result_key, load_published_build, materialize_build, object_path,
+    compute_result_key, load_build_handle, materialize_build, object_path,
 };
 use nickel_lang_core::{error::Error as NickelError, files::Files as NickelFiles};
 use fsobj_hash::ObjectHash;
@@ -80,7 +80,7 @@ pub(crate) fn execute_builder_node(
         "starting builder node",
     );
 
-    if let Some(published) = load_published_build(layout, build_key).map_err(map_store_error)? {
+    if let Some(published) = load_build_handle(layout, build_key).map_err(map_store_error)? {
         log_runtime_event(
             logger.as_ref(),
             BuildLogLevel::Info,
@@ -114,7 +114,8 @@ pub(crate) fn execute_builder_node(
                 object_path.display()
             )));
         }
-        mbuild_core::store_build_ref(layout, build_key, result_key).map_err(map_store_error)?;
+        mbuild_core::store_build_handle_ref(layout, build_key, result_key)
+            .map_err(map_store_error)?;
         log_runtime_event(
             logger.as_ref(),
             BuildLogLevel::Info,
@@ -205,7 +206,7 @@ pub(crate) fn build_to_published(
     layout: &StoreLayout,
     build: Build,
 ) -> Result<PublishedBuild, RuntimeError> {
-    load_published_build(layout, build.build_key)
+    load_build_handle(layout, build.build_key)
         .map_err(map_store_error)?
         .ok_or_else(|| {
             RuntimeError::Store(format!(
