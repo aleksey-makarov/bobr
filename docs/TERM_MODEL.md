@@ -123,8 +123,8 @@ Downstream builder actions consume `Build` values as inputs.
 Nickel may inspect builder-generated metadata such as:
 
 - `dep.kind`
-- `dep.attrs.image_ref`
-- `dep.attrs.image_digest`
+- `dep.attrs.image`
+- `dep.attrs.image_id`
 
 However, Rust-builder semantics are defined only by:
 

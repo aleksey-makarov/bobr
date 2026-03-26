@@ -49,11 +49,11 @@ store.bind (store.container_image "bootstrap-image" {
   image = "docker.io/library/buildpack-deps:bookworm",
   digest = "sha256:...",
 }) (fun bootstrapImage =>
-  let imageRef = bootstrapImage.attrs.image_ref in
-  let imageDigest = bootstrapImage.attrs.image_digest in
+  let image = bootstrapImage.attrs.image in
+  let imageId = bootstrapImage.attrs.image_id in
   store.text "bootstrap-info" {
     kind = "text-file",
-    source = "ref=" ++ imageRef ++ "\ndigest=" ++ imageDigest ++ "\n",
+    source = "image=" ++ image ++ "\nimage-id=" ++ imageId ++ "\n",
   })
 ```
 
@@ -120,8 +120,8 @@ Conceptually, a realized value has the same shape as one build record:
   object_hash = "fedcba9876543210...",
   kind = "container-image",
   attrs = {
-    image_ref = "docker.io/...@sha256:...",
-    image_digest = "sha256:...",
+    image = "docker.io/library/buildpack-deps:bookworm",
+    image_id = "sha256:...",
   },
 }
 ```

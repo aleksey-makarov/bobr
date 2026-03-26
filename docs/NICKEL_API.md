@@ -124,8 +124,8 @@ payload content of realized input objects.
 Examples:
 
 - `bootstrapImage.kind`
-- `bootstrapImage.attrs.image_ref`
-- `bootstrapImage.attrs.image_digest`
+- `bootstrapImage.attrs.image`
+- `bootstrapImage.attrs.image_id`
 
 ## Implicit Publication
 

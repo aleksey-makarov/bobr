@@ -401,22 +401,11 @@ fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
                 Value::String("docker.io/library/buildpack-deps:bookworm".to_string())
             );
             assert_eq!(
-                published.build.attrs["image_ref"],
-                Value::String(
-                    "docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-                )
-            );
-            assert_eq!(
                 published.build.attrs["image_id"],
                 Value::String("sha256:imageid".to_string())
             );
-            assert_eq!(
-                published.build.attrs["image_digest"],
-                Value::String(
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        .to_string(),
-                )
-            );
+            assert!(published.build.attrs.get("image_ref").is_none(), "{:?}", published.build.attrs);
+            assert!(published.build.attrs.get("image_digest").is_none(), "{:?}", published.build.attrs);
 
             let descriptor: Value =
                 serde_json::from_slice(&fs::read(&published.object_path).unwrap()).unwrap();
@@ -467,22 +456,11 @@ fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
                 Value::String("docker.io/library/buildpack-deps:bookworm".to_string())
             );
             assert_eq!(
-                build_json["attrs"]["image_ref"],
-                Value::String(
-                    "docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-                )
-            );
-            assert_eq!(
                 build_json["attrs"]["image_id"],
                 Value::String("sha256:imageid".to_string())
             );
-            assert_eq!(
-                build_json["attrs"]["image_digest"],
-                Value::String(
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        .to_string(),
-                )
-            );
+            assert!(build_json["attrs"].get("image_ref").is_none(), "{build_json}");
+            assert!(build_json["attrs"].get("image_digest").is_none(), "{build_json}");
             let run_log = fs::read_to_string(latest_run_log(workspace.path())).unwrap();
             assert!(
                 run_log.contains("\"phase\":\"podman-image-inspect\""),

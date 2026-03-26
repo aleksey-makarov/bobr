@@ -170,15 +170,7 @@ impl TypedBuilder for ContainerImageBuilder {
 
         let mut attrs = Map::new();
         attrs.insert("image".to_string(), Value::String(config.image));
-        attrs.insert(
-            "image_ref".to_string(),
-            Value::String(inspected.image_ref.clone()),
-        );
         attrs.insert("image_id".to_string(), Value::String(inspected.image_id));
-        attrs.insert(
-            "image_digest".to_string(),
-            Value::String(config.digest.clone()),
-        );
 
         Ok(StagedBuildResult {
             kind: KIND_CONTAINER_IMAGE.to_string(),
@@ -234,15 +226,7 @@ impl TypedBuilder for ImageBuilder {
 
         let mut attrs = Map::new();
         attrs.insert("mode".to_string(), Value::String(mode.to_string()));
-        attrs.insert(
-            "image_ref".to_string(),
-            Value::String(imported.image_ref.clone()),
-        );
         attrs.insert("image_id".to_string(), Value::String(imported.image_id));
-        attrs.insert(
-            "image_digest".to_string(),
-            Value::String(imported.image_digest.clone()),
-        );
         if let Some(base) = base {
             attrs.insert(
                 "base_image_ref".to_string(),
@@ -995,9 +979,11 @@ mod tests {
                 Value::String("docker.io/library/buildpack-deps:bookworm".to_string())
             );
             assert_eq!(
-                result.attrs["image_digest"],
-                Value::String(sample_digest().to_string())
+                result.attrs["image_id"],
+                Value::String("sha256:imageid".to_string())
             );
+            assert!(!result.attrs.contains_key("image_ref"), "{:?}", result.attrs);
+            assert!(!result.attrs.contains_key("image_digest"), "{:?}", result.attrs);
             let descriptor: Value =
                 serde_json::from_slice(&fs::read(&result.staged_path).unwrap()).unwrap();
             assert_eq!(
@@ -1035,9 +1021,11 @@ mod tests {
             assert_eq!(result.producer.builder, "image");
             assert_eq!(result.attrs["mode"], Value::String("bootstrap".to_string()));
             assert_eq!(
-                result.attrs["image_digest"],
-                Value::String(GENERATED_DIGEST.to_string())
+                result.attrs["image_id"],
+                Value::String("sha256:generated-image".to_string())
             );
+            assert!(!result.attrs.contains_key("image_ref"), "{:?}", result.attrs);
+            assert!(!result.attrs.contains_key("image_digest"), "{:?}", result.attrs);
             let descriptor: Value =
                 serde_json::from_slice(&fs::read(&result.staged_path).unwrap()).unwrap();
             assert_eq!(
