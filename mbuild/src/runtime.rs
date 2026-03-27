@@ -205,20 +205,6 @@ pub(crate) fn execute_builder_node(
     Ok(published)
 }
 
-pub(crate) fn build_to_published(
-    layout: &StoreLayout,
-    build: Build,
-) -> Result<PublishedBuild, RuntimeError> {
-    load_build_handle(layout, build.build_key)
-        .map_err(map_store_error)?
-        .ok_or_else(|| {
-            RuntimeError::Store(format!(
-                "build '{}' is missing from store",
-                build.build_key
-            ))
-        })
-}
-
 pub(crate) fn validate_allowed_kind(
     builder: &dyn Builder,
     slot_name: &str,

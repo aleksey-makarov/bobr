@@ -2,12 +2,11 @@ use crate::builders;
 use crate::logging::{BuildRunLogger, RunOptions};
 use crate::resolved_inputs::{ResolvedDependency, ResolvedDependencyValue, ResolvedInputs};
 use crate::runtime::{
-    RuntimeError, build_to_published, execute_builder_node, log_runtime_event, map_store_error,
+    RuntimeError, execute_builder_node, log_runtime_event, map_store_error,
     to_resolved_dependency, validate_allowed_kind,
 };
 use mbuild_core::{
-    Build, BuildLogLevel, BuildLogger, Builder, PublishedBuild, StoreLayout, load_build_handle,
-    publish_refs,
+    Build, BuildLogLevel, BuildLogger, Builder, StoreLayout, load_build_handle, publish_refs,
 };
 use nickel_lang_core::{
     cache::{CacheHub, ImportResolver, SourcePath},
@@ -49,12 +48,6 @@ impl BuilderRegistry for DefaultBuilderRegistry {
 static DEFAULT_REGISTRY: DefaultBuilderRegistry = DefaultBuilderRegistry;
 const STORE_LIB: &str = include_str!("../ncl/store.ncl");
 const STORE_BINDING: &str = "store";
-
-#[derive(Debug)]
-pub enum StoreOutcome {
-    Build(PublishedBuild),
-    Unit,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StoreRunOptions {
@@ -217,6 +210,11 @@ impl NickelRuntime {
             )
         })
     }
+
+    fn render_value_as_nickel(&mut self, value: NickelValue) -> Result<String, RuntimeError> {
+        let value = self.eval_full_for_export(value)?;
+        Ok(format!("{value}\n"))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,7 +228,7 @@ struct RunBuilderAction {
 pub fn run_store_recipe_in_workspace(
     workspace_root: &Path,
     recipe_path: &Path,
-) -> Result<StoreOutcome, RuntimeError> {
+) -> Result<NickelValue, RuntimeError> {
     run_store_recipe_in_workspace_with_options(
         workspace_root,
         recipe_path,
@@ -242,7 +240,7 @@ pub fn run_store_recipe_in_workspace_with_options(
     workspace_root: &Path,
     recipe_path: &Path,
     options: StoreRunOptions,
-) -> Result<StoreOutcome, RuntimeError> {
+) -> Result<NickelValue, RuntimeError> {
     run_store_recipe_in_workspace_with_registry(
         workspace_root,
         recipe_path,
@@ -259,12 +257,27 @@ pub fn export_recipe_with_store(
     runtime.export_value_to_string(value, format)
 }
 
+pub fn render_store_recipe_in_workspace_with_options(
+    workspace_root: &Path,
+    recipe_path: &Path,
+    options: StoreRunOptions,
+    format: ExportFormat,
+) -> Result<String, RuntimeError> {
+    render_store_recipe_in_workspace_with_registry(
+        workspace_root,
+        recipe_path,
+        &DEFAULT_REGISTRY,
+        options,
+        format,
+    )
+}
+
 fn run_store_recipe_in_workspace_with_registry(
     workspace_root: &Path,
     recipe_path: &Path,
     registry: &dyn BuilderRegistry,
     options: StoreRunOptions,
-) -> Result<StoreOutcome, RuntimeError> {
+) -> Result<NickelValue, RuntimeError> {
     if !recipe_path.exists() {
         return Err(RuntimeError::RecipeLoad(format!(
             "recipe file '{}' does not exist",
@@ -292,26 +305,47 @@ fn run_store_recipe_in_workspace_with_registry(
         registry,
         action,
     )?;
-    final_store_result_to_outcome(&mut runtime, &layout, result)
+    runtime.eval_value(result)
 }
 
-fn final_store_result_to_outcome(
-    runtime: &mut NickelRuntime,
-    layout: &StoreLayout,
-    value: NickelValue,
-) -> Result<StoreOutcome, RuntimeError> {
-    let value = runtime.eval_value(value)?;
-
-    if value.is_null() {
-        return Ok(StoreOutcome::Unit);
+fn render_store_recipe_in_workspace_with_registry(
+    workspace_root: &Path,
+    recipe_path: &Path,
+    registry: &dyn BuilderRegistry,
+    options: StoreRunOptions,
+    format: ExportFormat,
+) -> Result<String, RuntimeError> {
+    if !recipe_path.exists() {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "recipe file '{}' does not exist",
+            recipe_path.display()
+        )));
     }
 
-    let build = Build::deserialize(value).map_err(|error| {
-        RuntimeError::InvalidRequest(format!(
-            "final STORE result must decode as Build or null: {error}"
-        ))
-    })?;
-    Ok(StoreOutcome::Build(build_to_published(layout, build)?))
+    let layout = StoreLayout::discover(&workspace_root.join(".mbuild")).map_err(map_store_error)?;
+    let logger: Arc<BuildRunLogger> = Arc::new(
+        BuildRunLogger::new(
+            &layout.root,
+            RunOptions {
+                emit_progress: options.emit_progress,
+            },
+        )
+        .map_err(RuntimeError::Store)?,
+    );
+    let (mut runtime, action) = NickelRuntime::from_recipe_file(recipe_path)?;
+    let action = runtime.eval_value(action)?;
+    let result = interpret_store(
+        &mut runtime,
+        workspace_root,
+        &layout,
+        logger,
+        registry,
+        action,
+    )?;
+    match format {
+        ExportFormat::Text => runtime.render_value_as_nickel(result),
+        other => runtime.export_value_to_string(result, other),
+    }
 }
 
 fn interpret_store(

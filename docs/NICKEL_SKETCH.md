@@ -10,7 +10,8 @@ store.text "hello-script" {
 ```
 
 This entry file evaluates to one primitive STORE action. `mbuild` evaluates the
-file to that action and interprets it directly.
+file to that action, interprets it directly, and then pretty-prints the final
+Nickel value.
 
 ## Monadic Dependency Sequencing
 

@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use mbuild::store_interpreter::{self, StoreOutcome, StoreRunOptions};
+use mbuild::store_interpreter::{self, StoreRunOptions};
 
 type MResult<T> = Result<T, MbuildError>;
 
@@ -128,22 +128,16 @@ fn build(cli: BuildCli) -> MResult<()> {
     let recipe_path = cli
         .recipe_file
         .unwrap_or_else(|| PathBuf::from(".mbuild/recipe.ncl"));
-    match store_interpreter::run_store_recipe_in_workspace_with_options(
+    let rendered = store_interpreter::render_store_recipe_in_workspace_with_options(
         &workspace_root,
         &recipe_path,
         StoreRunOptions {
             emit_progress: !cli.quiet,
         },
+        ExportFormat::Text,
     )
-    .map_err(map_runtime_error)?
-    {
-        StoreOutcome::Build(published) => {
-            println!("build_key: {}", published.build.build_key);
-            println!("object_hash: {}", published.build.object_hash);
-            println!("object_path: {}", published.object_path.display());
-        }
-        StoreOutcome::Unit => println!("()"),
-    }
+    .map_err(map_runtime_error)?;
+    print!("{rendered}");
     Ok(())
 }
 

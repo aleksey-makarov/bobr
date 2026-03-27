@@ -1,4 +1,7 @@
-use mbuild::store_interpreter::{StoreOutcome, run_store_recipe_in_workspace};
+use mbuild::store_interpreter::run_store_recipe_in_workspace;
+use mbuild_core::{Build, StoreLayout, load_build_handle};
+use nickel_lang_core::eval::value::NickelValue;
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::env;
@@ -125,6 +128,14 @@ fn write_store_recipe(workspace: &Path, recipe_source: &str) -> PathBuf {
     recipe_path
 }
 
+fn expect_build(workspace_root: &Path, value: NickelValue) -> mbuild_core::PublishedBuild {
+    let build = Build::deserialize(value).expect("expected final STORE result to decode as Build");
+    let layout = StoreLayout::discover(&workspace_root.join(".mbuild")).unwrap();
+    load_build_handle(&layout, build.build_key)
+        .unwrap()
+        .expect("expected final Build to exist in store")
+}
+
 #[test]
 fn store_recipe_executes_all_real_builders() {
     with_fake_podman(
@@ -155,11 +166,10 @@ fn store_recipe_executes_all_real_builders() {
                 .replace("__SOURCE_HASH__", &source_hash);
             let recipe_path = write_store_recipe(workspace.path(), &recipe_source);
 
-            let published =
-                match run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap() {
-                    StoreOutcome::Build(published) => published,
-                    StoreOutcome::Unit => panic!("expected final STORE result to be Build"),
-                };
+            let published = expect_build(
+                workspace.path(),
+                run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
+            );
             handle.join().unwrap();
 
             assert_eq!(published.build.kind, "container-image");
@@ -206,10 +216,10 @@ fn store_binding_is_visible_in_imported_modules() {
     )
     .unwrap();
 
-    let published = match run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap() {
-        StoreOutcome::Build(published) => published,
-        StoreOutcome::Unit => panic!("expected final STORE result to be Build"),
-    };
+    let published = expect_build(
+        workspace.path(),
+        run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
+    );
 
     assert_eq!(published.build.kind, "plain-text");
     assert!(

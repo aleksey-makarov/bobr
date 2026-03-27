@@ -17,8 +17,11 @@ The Nickel layer does not expose:
 
 `mbuild` executes one Nickel entry file.
 
-The top-level result of that file must be a STORE action. The normal case is a
-`STORE Build` action.
+The top-level result of that file must be a STORE action.
+
+After Rust interprets that STORE program, `mbuild build` pretty-prints the
+final Nickel value. The final result may therefore be any `STORE a`, not only
+`STORE Build`.
 
 `mbuild` does not select a package field or interpret package-set structure on
 its own. If a recipe uses a recursive `pkgs` record, the recipe itself must

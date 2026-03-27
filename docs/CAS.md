@@ -258,6 +258,9 @@ the Nickel STORE program interpreted by Rust.
 and interprets the resulting action tree. STORE recursion is expressed in
 Nickel through `bind`, not through recursive store lookups by name.
 
+After interpretation, `mbuild build` pretty-prints the final Nickel value
+produced by that STORE program.
+
 For one primitive builder action, the interpreter:
 
 1. receives a builder action whose dependency fields are already realized

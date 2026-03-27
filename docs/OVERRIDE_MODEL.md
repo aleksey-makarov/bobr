@@ -68,6 +68,8 @@ Operationally:
 5. Rust reuses or executes builders.
 6. Rust implicitly updates publication refs from the explicit name carried by
    each primitive builder action.
+7. `mbuild build` pretty-prints the final Nickel value produced by that STORE
+   program.
 
 ## Effect on Identity
 

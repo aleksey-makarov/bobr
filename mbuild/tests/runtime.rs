@@ -1,4 +1,7 @@
-use mbuild::store_interpreter::{StoreOutcome, run_store_recipe_in_workspace};
+use mbuild::store_interpreter::run_store_recipe_in_workspace;
+use mbuild_core::{Build, StoreLayout, load_build_handle};
+use nickel_lang_core::eval::value::NickelValue;
+use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::env;
@@ -168,11 +171,12 @@ fn collect_log_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn expect_build(outcome: StoreOutcome) -> mbuild_core::PublishedBuild {
-    match outcome {
-        StoreOutcome::Build(published) => published,
-        StoreOutcome::Unit => panic!("expected STORE result to be Build"),
-    }
+fn expect_build(workspace_root: &Path, value: NickelValue) -> mbuild_core::PublishedBuild {
+    let build = Build::deserialize(value).expect("expected STORE result to decode as Build");
+    let layout = StoreLayout::discover(&workspace_root.join(".mbuild")).unwrap();
+    load_build_handle(&layout, build.build_key)
+        .unwrap()
+        .expect("expected final Build to exist in store")
 }
 
 fn text_recipe(name: &str, kind: &str, source: &str) -> String {
@@ -244,8 +248,10 @@ fn store_text_recipe_creates_store_entries_and_refs() {
         &text_recipe("hello", "build-script", "#!/bin/sh\necho hi\n"),
     );
 
-    let published =
-        expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
+    let published = expect_build(
+        workspace.path(),
+        run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
+    );
 
     assert!(published.object_path.exists());
     assert_eq!(
@@ -330,10 +336,14 @@ fn repeated_store_text_recipe_reuses_same_build_record_and_object() {
         &text_recipe("cached", "plain-text", "hello cache"),
     );
 
-    let first =
-        expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
-    let second =
-        expect_build(run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap());
+    let first = expect_build(
+        workspace.path(),
+        run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
+    );
+    let second = expect_build(
+        workspace.path(),
+        run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
+    );
 
     assert_eq!(first.build.build_key, second.build.build_key);
     assert_eq!(first.build.object_hash, second.build.object_hash);
@@ -369,8 +379,10 @@ fn store_recipe_executes_fetch_recipe_end_to_end() {
         &fetch_recipe("fetched-file", &url, &hash, false),
     );
 
-    let published =
-        expect_build(run_store_recipe_in_workspace(workspace.path(), &request_path).unwrap());
+    let published = expect_build(
+        workspace.path(),
+        run_store_recipe_in_workspace(workspace.path(), &request_path).unwrap(),
+    );
     handle.join().unwrap();
 
     assert_eq!(published.build.kind, "fetched-file");
@@ -397,6 +409,7 @@ fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
             );
 
             let published = expect_build(
+                workspace.path(),
                 run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
             );
 
@@ -520,6 +533,7 @@ fn repeated_nested_binary_recipe_reuses_all_build_records_and_objects() {
             );
 
             let first = expect_build(
+                workspace.path(),
                 run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
             );
             handle.join().unwrap();
@@ -530,6 +544,7 @@ fn repeated_nested_binary_recipe_reuses_all_build_records_and_objects() {
             let first_build_count = fs::read_dir(&builds_dir).unwrap().count();
 
             let second = expect_build(
+                workspace.path(),
                 run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
             );
 
@@ -605,6 +620,7 @@ fn binary_recipe_materializes_script_config_dir_end_to_end() {
             );
 
             let published = expect_build(
+                workspace.path(),
                 run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
             );
             handle.join().unwrap();
@@ -702,6 +718,7 @@ fn store_recipe_executes_all_real_builders_via_full_template() {
             write_recipe(&recipe_path, &recipe_source);
 
             let published = expect_build(
+                workspace.path(),
                 run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
             );
             handle.join().unwrap();

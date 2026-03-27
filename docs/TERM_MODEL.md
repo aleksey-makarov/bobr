@@ -26,6 +26,10 @@ The top-level entry file must evaluate to one STORE action. `mbuild` does not
 select a package field on its own. Any package-set selection is a frontend
 concern inside the Nickel program.
 
+After the interpreter executes that STORE program, `mbuild build` pretty-prints
+the final Nickel value. The final result is not restricted to `Build`; it may
+be any `STORE a`.
+
 Nickel may inspect builder-generated metadata through previously computed
 `Build` values.
 

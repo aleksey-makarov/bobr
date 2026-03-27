@@ -3,8 +3,9 @@
 `mbuild` executes one Nickel recipe entry file.
 
 The entry file evaluates to a top-level STORE action. Rust embeds Nickel,
-evaluates the entry file to weak head normal form, and then interprets the
-resulting STORE action tree step by step.
+evaluates the entry file to weak head normal form, interprets the resulting
+STORE action tree step by step, and then pretty-prints the final Nickel value
+produced by that STORE program.
 
 STORE programs are built from:
 
@@ -35,7 +36,8 @@ performs kind validation itself and then passes builders only resolved payload
 paths for their inputs.
 
 By default, `mbuild` prints concise live build progress to `stderr`. The final
-result still goes to `stdout` only. Use `--quiet` to suppress live progress.
+Nickel value still goes to `stdout` only. Use `--quiet` to suppress live
+progress.
 
 A realized `Build` value is a public handle addressed by `build_key`.
 Canonical realized results are stored under `.mbuild/results/<result_key>.json`,
