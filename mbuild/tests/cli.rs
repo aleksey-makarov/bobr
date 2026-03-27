@@ -229,6 +229,44 @@ fn cli_prints_unit_for_return_null() {
 }
 
 #[test]
+fn cli_sequence_ignores_results() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("sequence-discard.ncl");
+    write_recipe(
+        &recipe_path,
+        "store.sequence_ [store.return 1, store.return 2]\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "()\n");
+}
+
+#[test]
+fn cli_for_each_ignores_results() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("for-each.ncl");
+    write_recipe(
+        &recipe_path,
+        "store.for_each [1, 2] (fun x => store.return x)\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{:?}", output);
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "()\n");
+}
+
+#[test]
 fn cli_reports_recipe_parse_errors_with_nickel_diagnostics() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("bad-syntax.ncl");

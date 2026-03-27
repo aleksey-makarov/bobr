@@ -76,17 +76,39 @@ Conceptually, a Nickel STORE helper module looks like:
 
   sequence = fun actions =>
     std.array.fold_right
-      (fun action acc =>
+      (fun act next =>
         'Bind {
-          action = action,
+          action = act,
           cont = fun x =>
             'Bind {
-              action = acc,
-              cont = fun xs => 'Return ([x] ++ xs),
+              action = next,
+              cont = fun xs => 'Return ([x] @ xs),
             },
         })
       ('Return [])
       actions,
+
+  sequence_ = fun actions =>
+    std.array.fold_right
+      (fun act next =>
+        'Bind {
+          action = act,
+          cont = fun _ =>
+            next,
+        })
+      ('Return null)
+      actions,
+
+  for_each = fun items f =>
+    std.array.fold_right
+      (fun item next =>
+        'Bind {
+          action = f item,
+          cont = fun _ =>
+            next,
+        })
+      ('Return null)
+      items,
 
   text = fun name payload =>
     'Text { name = name, payload = payload },

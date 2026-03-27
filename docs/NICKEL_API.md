@@ -32,6 +32,8 @@ Conceptual API:
 - `bind : STORE a -> (a -> STORE b) -> STORE b`
 - `map : (a -> b) -> STORE a -> STORE b`
 - `sequence : Array (STORE a) -> STORE (Array a)`
+- `sequence_ : Array (STORE a) -> STORE null`
+- `for_each : Array a -> (a -> STORE b) -> STORE null`
 
 `bind` is the mechanism that sequences build dependencies. Primitive builder
 helpers consume already-realized `Build` values, not unresolved STORE actions.

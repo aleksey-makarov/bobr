@@ -836,6 +836,43 @@ mod tests {
     }
 
     #[test]
+    fn sequence_collects_results_in_order() {
+        let workspace = tempdir().unwrap();
+        let layout =
+            StoreLayout::discover(&workspace.path().join(".mbuild")).map_err(map_store_error).unwrap();
+        let logger = Arc::new(
+            BuildRunLogger::new(
+                &layout.root,
+                RunOptions {
+                    emit_progress: false,
+                },
+            )
+            .map_err(RuntimeError::Store)
+            .unwrap(),
+        );
+        let (mut runtime, action) = NickelRuntime::from_source(
+            "<sequence-test>",
+            "store.sequence [store.return 1, store.return 2]\n",
+        )
+        .unwrap();
+        let action = runtime.eval_value(action).unwrap();
+        let result = interpret_store(
+            &mut runtime,
+            workspace.path(),
+            &layout,
+            logger,
+            &DummyRegistry,
+            action,
+        )
+        .unwrap();
+        let exported = runtime
+            .export_value_to_string(result, ExportFormat::Json)
+            .unwrap();
+
+        assert_eq!(exported, "[\n  1,\n  2\n]");
+    }
+
+    #[test]
     fn export_supports_plain_serializable_data_with_store_in_scope() {
         let (mut runtime, value) = NickelRuntime::from_source(
             "<export-test>",

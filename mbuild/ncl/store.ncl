@@ -54,11 +54,35 @@
 
   sequence = fun actions =>
     std.array.fold_right
-      (fun action acc =>
+      (fun act next =>
         'Bind {
-          action = action,
-          cont = fun _ => acc,
+          action = act,
+          cont = fun x =>
+            'Bind {
+              action = next,
+              cont = fun xs => 'Return ([x] @ xs),
+            },
+        })
+      ('Return [])
+      actions,
+
+  sequence_ = fun actions =>
+    std.array.fold_right
+      (fun act next =>
+        'Bind {
+          action = act,
+          cont = fun _ => next,
         })
       ('Return null)
       actions,
+
+  for_each = fun items f =>
+    std.array.fold_right
+      (fun item next =>
+        'Bind {
+          action = f item,
+          cont = fun _ => next,
+        })
+      ('Return null)
+      items,
 }
