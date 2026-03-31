@@ -2,19 +2,18 @@
 
 ## Summary
 
-`mbuild` stores payloads as content-addressed objects, stores canonical
-realized builder results as result records, and stores public build handles as
-symlink refs to those results.
+`mbuild` stores payloads as content-addressed objects, canonical realized
+results as result records, and public build handles as symlink refs to those
+results.
 
-- `objects/` holds payloads addressed by `object_hash`.
-- `results/` holds canonical result records addressed by `result_key`.
-- `builds/` holds public build-handle refs addressed by `build_key`.
-- `meta-refs/` holds human-facing symlinks from published name to build-handle refs.
-- `object-refs/` holds human-facing symlinks from published name to payload
-  object.
+- `objects/` holds payloads addressed by `object_hash`
+- `results/` holds canonical result records addressed by `result_key`
+- `builds/` holds public build-handle refs addressed by `build_key`
+- `meta-refs/` holds human-facing refs from publication name to build handle
+- `object-refs/` holds human-facing refs from publication name to payload
 
-Object identity depends only on payload content. Publication names do not
-participate in object identity or build-record identity.
+Publication names do not participate in object identity, `build_key`, or
+`result_key`.
 
 ## Layout
 
@@ -33,388 +32,56 @@ participate in object identity or build-record identity.
   logs/
     runs/
       <YYMMDDHHMMSS>-<pid>.jsonl
-  .. builder-specific files and dirs ..
+  builder-state/
+    <builder>/
+      logs/
 ```
 
 `objects/<object_hash>` is the payload itself, either a file or a directory.
 
 `results/<result_key>.json` stores one canonical realized result record.
+
 `builds/<build_key>` stores the corresponding public build handle as a symlink
-to the canonical result record. The language-level `Build` value exposes the
-public `build_key`, not the internal `result_key`.
+to the canonical result record. The language-level `Build` value exposes
+`build_key`, not `result_key`.
 
-Internal CAS identifiers use bare lowercase hex:
+## Result Reuse
 
-- `object_hash` is a 64-character lowercase hex string
-- `build_key` is a 64-character lowercase hex string
-- `result_key` is a 64-character lowercase hex string
-- algorithm-qualified strings such as `sha256:...` remain only for external
-  digests and declared fetch hashes
+For one planned node, the runtime tries reuse in this order:
 
-`meta-refs/<name>.json` is a human-facing symlink to the selected current
-public build handle. Historical generations are kept as timestamp-suffixed refs such as
-`meta-refs/<name>.<YYMMDDHHMMSS>.json`.
+1. build-handle hit on `build_key`
+2. canonical result hit on `result_key`
+3. actual builder execution
 
-`object-refs/<name>` is a human-facing symlink to the selected current payload
-object. Historical generations mirror metadata refs under names such as
-`object-refs/<name>.<YYMMDDHHMMSS>`.
+If a canonical result exists but the public build handle is missing, `mbuild`
+recreates the missing build-handle ref and reuses the result.
 
-Each builder owns a same-named subdirectory under `.mbuild/` for builder-
-specific runtime state, temporary files, logs, and caches.
+## Publication
 
-`logs/runs/<YYMMDDHHMMSS>-<pid>.jsonl` is the event log for one `mbuild`
-invocation.
+Every recipe node carries a publication name.
 
-Builder raw logs live under:
+After the runtime reuses or builds a node, it updates:
 
-```text
-.mbuild/builder-state/<builder>/logs/<name>/<YYMMDDHHMMSS>-<short-build-key>-<label>.log
-```
+- `meta-refs/<name>.json -> ../builds/<build_key>`
+- `object-refs/<name> -> ../objects/<object_hash>`
 
-These raw logs contain captured stdout/stderr for external builder commands.
-For example, `binary` writes raw logs for `podman run`, and `image` writes raw
-logs for `podman import`, `podman create`, `podman cp`, `podman commit`, and
-`podman inspect`.
+If the current publication name already points at a different result, the old
+current refs are rotated into timestamp-suffixed history refs.
 
-## Image Layering Semantics
+## Logging
 
-`Image` consumes one optional base `container-image` and one or more
-`binary-output` directories.
+Each `mbuild` invocation writes:
 
-Two modes exist:
-
-- `bootstrap`: build a new image from scratch from the supplied
-  `binary-output` directories
-- `layered`: start from a base `container-image` and apply the supplied
-  `binary-output` directories on top
-
-Layering is conflict-aware.
-
-Rules:
-
-- directory over directory merge is allowed
-- any attempt to replace an existing non-directory path is a conflict
-- any file-vs-file replacement is a conflict
-- any file-vs-directory or directory-vs-file replacement is a conflict
-- any symlink-vs-existing-path replacement is a conflict
-
-As a consequence, `Image` never silently overwrites files coming from the base
-image or from earlier `binary-output` inputs. Path conflicts fail the build.
-
-This prevents accidental construction of hybrid images where runtime components
-from different systems are mixed by implicit overwrite.
-
-## Object Identity
-
-`object_hash` is the hash of payload content only.
-
-Hashing rules:
-
-- algorithm: `sha256`
-- root object kind: `file` or `directory`
-- for regular files, the hash includes:
-  - file bytes
-  - executable bit only
-- for directories, the hash includes:
-  - relative paths
-  - entry kinds: file, directory, symlink
-  - executable bit for regular files
-  - file content digests for files
-  - symlink target bytes for symlinks
-- directory traversal order is strict lexicographic order by relative path
-
-The hash excludes:
-
-- uid, gid
-- mtime, ctime, atime
-- xattrs and ACLs
-- inode or device data
-- symlink mode
-- publication names
-- authored recipe metadata
-- builder provenance metadata
-- builder attrs
-
-Consequences:
-
-- identical payloads built in different temp directories have the same
-  `object_hash`
-- identical payloads produced by different builders are the same object
-- one object may be published under many names
-
-## Build Records
-
-Build records are stored at:
-
-```text
-.mbuild/results/<result_key>.json
-```
-
-A result record is the canonical realized result of one builder invocation.
-Language-level `Build` values are public handles layered on top of result
-records and therefore do not have the exact same on-disk shape.
-
-Example shape:
-
-```json
-{
-  "schema": "mbuild-result-v1",
-  "result_key": "0123456789abcdef...",
-  "created_at": "2026-03-24T12:34:56.123456789Z",
-  "object_hash": "fedcba9876543210...",
-  "kind": "build-script|source-tree|fetched-file|binary-output|container-image|...",
-  "producer": {
-    "builder": "text|fetch|binary|image|container-image"
-  },
-  "input_object_hashes": [
-    "89abcdef01234567..."
-  ],
-  "attrs": {}
-}
-```
-
-Rules:
-
-- each result record is keyed by `result_key`
-- `result_key` is computed before builder execution from:
-  - builder tag
-  - normalized payload
--  - ordered `input_object_hashes`
-- `result_key` does not depend on `object_hash`
-- `result_key` does not depend on `created_at`
-- a result record points at exactly one `object_hash`
-- multiple `build_key` refs may point at the same result record
-- `created_at` records the first materialization time of that result record in
-  RFC3339 UTC format
-- builder-generated semantic metadata lives in the result record
-- downstream builder calls consume `Build` values, not raw store paths
-
-Public `Build` includes machine-facing semantic data such as:
-
-- `build_key`
-- `object_hash`
-- `kind`
-- `attrs`
-- `producer`
-
-Canonical result records additionally include:
-
-- `result_key`
-- `input_object_hashes`
-
-`object_path` is a runtime detail. It is not part of the language-level `Build`
-value.
-
-## Publication Refs
-
-### Metadata refs
-
-Stored at:
-
-```text
-.mbuild/meta-refs/<name>.json -> ../builds/<build_key>
-.mbuild/meta-refs/<name>.<YYMMDDHHMMSS>.json -> ../builds/<old_build_key>
-```
-
-Purpose:
-
-- human-facing lookup from published name to a build-handle ref
-- stable publication of one selected name or alias
-- convenient inspection of the currently published realized result
-
-These refs are publication state:
-
-- they are not part of object identity
-- they are not part of build-record identity
-- builders do not read them directly
-- removing them does not invalidate objects, canonical result records, or build-handle refs
-
-### Object refs
-
-Stored at:
-
-```text
-.mbuild/object-refs/<name> -> ../objects/<object_hash>
-.mbuild/object-refs/<name>.<YYMMDDHHMMSS> -> ../objects/<old_object_hash>
-```
-
-Purpose:
-
-- human-friendly direct access to payloads
-- convenient inspection of the object currently published under a name
-
-These refs are human-facing only:
-
-- they are not part of object identity
-- builders do not read them directly
-- removing them must not affect store semantics
-
-## Runtime Responsibilities
-
-The store does not define dependency semantics. Dependency structure comes from
-the Nickel STORE program interpreted by Rust.
-
-`mbuild` loads one recipe entry file, evaluates it to a top-level STORE action,
-and interprets the resulting action tree. STORE recursion is expressed in
-Nickel through `bind`, not through recursive store lookups by name.
-
-After interpretation, `mbuild build` pretty-prints the final Nickel value
-produced by that STORE program.
-
-For one primitive builder action, the interpreter:
-
-1. receives a builder action whose dependency fields are already realized
-   `Build` values
-2. validates builder-specific input kinds and required attrs
-3. collects ordered `input_build_keys` and `input_object_hashes`
-4. computes `build_key`
-5. reuses an existing public build ref on matching `build_key`
-6. on `build_key` miss, computes `result_key`
-7. reuses an existing canonical result on matching `result_key`
-8. executes the appropriate Rust builder only when both lookups miss
-9. stores the produced payload in `objects/`
-10. writes or reuses one canonical result record in `results/`, including `created_at`
-11. updates or creates `builds/<build_key>` as a symlink to that result
-12. updates `meta-refs/<name>.json` and `object-refs/<name>`
-13. if the published name already pointed at a different result, rotates the old
-    current refs into timestamp-suffixed generation refs
-14. returns the realized `Build` value
-
-Rust builders do not receive publication names as part of build semantics.
-Names are consumed only by the interpreter for implicit publication.
-
-Rust-builder semantics are defined only by builder config and by the payload
-content of already-realized input objects. Dependency metadata carried by
-`Build` values is visible to Nickel for inspection, but it is not a semantic
-input to Rust builders unless Nickel explicitly copies it into a downstream
-builder payload. A builder that changes behavior because dependency metadata
-differs, while payload objects and builder config stay the same, violates the
-store model.
-
-## Monadic Execution Example
-
-Conceptually, a recipe may evaluate to a STORE program like:
-
-```nickel
-store.bind (store.fetch "bash-src-5.3" { ... }) (fun bashSrc =>
-store.bind (store.text "buildscript-bash-stage2" { ... }) (fun bashScript =>
-store.bind (store.container_image "bootstrap-image" { ... }) (fun bootstrapImage =>
-store.binary "bash-stage2" { optimize = "size" } bootstrapImage bashScript [bashSrc])))
-```
-
-Execution alternates between Nickel and Rust:
-
-1. Nickel evaluates the entry file to the first STORE action.
-2. Rust interprets that action.
-3. If the action is `Bind`, Rust interprets the left side, obtains a Nickel
-   value, applies the continuation inside Nickel, and gets the next STORE
-   action.
-4. When Rust encounters a primitive builder action, it performs the build/store
-   steps listed above and returns a realized `Build` record back to Nickel.
-5. Nickel code may inspect `Build` metadata before constructing the next action.
-
-This is how dependency recursion is expressed without giving Rust builders
-access to authored recipe metadata or to human-facing refs.
-
-## Builder Data Model
-
-Rust builders consume:
-
-- builder-specific configuration
-- resolved input payload paths
-
-For the `binary` builder specifically:
-
-- the first `sources` entry is the primary source tree
-- additional `sources` entries may be either source trees or fetched files
-- auxiliary fetched files are exposed to the build script under `/in/sourcesN`
-
-Rust builders produce:
-
-- a payload that becomes one object
-- builder-generated semantic metadata that becomes part of `Build`
-
-The interpreter writes or reuses one canonical result record, updates the
-corresponding build-handle ref, and then updates both publication ref
-namespaces.
-
-Kind validation and other dependency-metadata checks happen in the interpreter
-before builder invocation. Builder implementations themselves receive only
-resolved payload paths and therefore cannot read dependency `kind`, `attrs`,
-`build_key`, or `result_key`.
-
-## Logging And Progress
-
-`mbuild` emits two kinds of logs:
-
-- an **event log**, which is the structured JSONL record of one `mbuild` run
-- **raw logs**, which are the captured stdout/stderr logs of external commands
+- one structured event log under `.mbuild/logs/runs/<YYMMDDHHMMSS>-<pid>.jsonl`
+- raw builder logs under `.mbuild/builder-state/<builder>/logs/<name>/`
 
 The event log records lifecycle events such as:
 
 - `start`
 - `cache-hit`
+- `result-hit`
 - `cache-miss`
 - `run`
 - `publish`
 - `done`
 - `fail`
-
-Each event entry stores the builder tag, published name, shortened
-`build_key`, a short message, and optional data such as shortened
-`object_hash`, `raw_log_path`, and structured details. Full identifiers remain
-available in `details`.
-
-By default, `mbuild` also prints concise live progress lines to `stderr` while
-the run is in progress. The final `Build` summary remains on `stdout`.
-
-`mbuild --quiet` disables live progress output but still writes both the event
-log and all raw logs.
-
-## Container Image Objects
-
-A `container-image` object is a file object whose contents are a JSON
-descriptor, for example:
-
-```json
-{
-  "schema": "mbuild-container-image-object-v1",
-  "storage": "external-podman",
-  "image_ref": "docker.io/...@sha256:...",
-  "image_digest": "sha256:..."
-}
-```
-
-The descriptor file is hashed like any other file object. The corresponding
-`Build` record carries the semantic type and builder-generated metadata for that
-object.
-
-## Builder-Specific Conventions
-
-### `text`
-
-- output is usually a file object
-- executable mode for `build-script` participates in object hashing
-- build attrs may include fields such as `source_bytes`
-
-### `fetch`
-
-- downloaded blob cache lives in `.mbuild/fetch/cache`
-- unpacked or raw result becomes an object
-- build attrs carry source URL, declared hash, unpack flag, archive format, and
-  normalized-root information
-
-### `binary`
-
-- runtime state lives in `.mbuild/binary/`
-- output staging lives in `.mbuild/binary/tmp`
-- run logs live in `.mbuild/binary/logs`
-- one builder call produces one `Build` result
-- build attrs carry stable install-related data needed by downstream image
-  assembly
-
-### `image` and `container-image`
-
-- output payload is a file object containing the image descriptor
-- build metadata carries semantic type and provenance
-- publication names do not affect `build_key`

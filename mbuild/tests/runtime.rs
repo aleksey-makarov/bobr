@@ -1,8 +1,12 @@
-use mbuild::store_interpreter::run_store_recipe_in_workspace;
-use mbuild_core::{Build, StoreLayout, load_build_handle};
-use nickel_lang_core::eval::value::NickelValue;
-use serde::Deserialize;
-use serde_json::Value;
+mod support;
+
+use support::{
+    base_image_recipe, binary_recipe, build_ref_path, image_recipe, recipe_node, script_recipe,
+    source_recipe, write_recipe,
+};
+use mbuild::recipe_runtime::{BuildRunOptions, run_recipe_json_in_workspace, run_recipe_json_in_workspace_with_options};
+use mbuild_core::{StoreLayout, load_build_handle};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
@@ -10,21 +14,16 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 use tempfile::tempdir;
-
-const STORE_RECIPE_TEMPLATE: &str = include_str!("assets/store_recipe_full.ncl");
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn nickel_string(value: &str) -> String {
-    serde_json::to_string(value).unwrap()
 }
 
 fn install_fake_podman(dir: &Path, inspect_json: &str) {
@@ -111,6 +110,68 @@ fn spawn_http_server(
     Ok((url, handle))
 }
 
+fn spawn_barrier_http_server(
+    body: Vec<u8>,
+    content_type: &'static str,
+    expected_requests: usize,
+    timeout: Duration,
+) -> Result<(String, thread::JoinHandle<()>), std::io::Error> {
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr().unwrap();
+    let url = format!("http://{}/payload", addr);
+    let handle = thread::spawn(move || {
+        let deadline = Instant::now() + timeout;
+        let mut streams = Vec::new();
+        while streams.len() < expected_requests && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    drain_request(&mut stream);
+                    streams.push(stream);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("failed to accept barrier HTTP request: {error}"),
+            }
+        }
+
+        let (status_line, payload) = if streams.len() == expected_requests {
+            (
+                "HTTP/1.1 200 OK",
+                Some((body, content_type)),
+            )
+        } else {
+            (
+                "HTTP/1.1 503 Service Unavailable",
+                None,
+            )
+        };
+
+        for mut stream in streams {
+            match &payload {
+                Some((body, content_type)) => {
+                    let response = format!(
+                        "{status_line}\r\nContent-Length: {}\r\nContent-Type: {}\r\nConnection: close\r\n\r\n",
+                        body.len(),
+                        content_type
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                    stream.write_all(body).unwrap();
+                }
+                None => {
+                    let response = format!(
+                        "{status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            }
+            stream.flush().unwrap();
+        }
+    });
+    Ok((url, handle))
+}
+
 fn drain_request(stream: &mut TcpStream) {
     let mut buf = [0u8; 1024];
     let mut request = Vec::new();
@@ -126,387 +187,40 @@ fn drain_request(stream: &mut TcpStream) {
     }
 }
 
-fn write_recipe(recipe_path: &Path, recipe_source: &str) {
-    if let Some(parent) = recipe_path.parent() {
-        fs::create_dir_all(parent).unwrap();
-    }
-    fs::write(recipe_path, recipe_source).unwrap();
+fn make_full_recipe(url: &str, source_hash: &str) -> Value {
+    image_recipe("final-image", vec![binary_recipe("binary", url, source_hash)])
 }
 
-fn build_ref_path(root: &Path, build_key: impl ToString) -> PathBuf {
-    root.join(".mbuild")
-        .join("builds")
-        .join(build_key.to_string())
-}
-
-fn result_path(root: &Path, result_key: impl ToString) -> PathBuf {
-    root.join(".mbuild")
-        .join("results")
-        .join(format!("{}.json", result_key.to_string()))
-}
-
-fn latest_run_log(root: &Path) -> PathBuf {
-    let runs_dir = root.join(".mbuild").join("logs").join("runs");
-    fs::read_dir(&runs_dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .max_by_key(|path| fs::metadata(path).unwrap().modified().unwrap())
-        .expect("expected at least one run log")
-}
-
-fn collect_log_files(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if !root.exists() {
-        return out;
-    }
-    for entry in fs::read_dir(root).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        if path.is_dir() {
-            out.extend(collect_log_files(&path));
-        } else {
-            out.push(path);
-        }
-    }
-    out
-}
-
-fn expect_build(workspace_root: &Path, value: NickelValue) -> mbuild_core::PublishedBuild {
-    let build = Build::deserialize(value).expect("expected STORE result to decode as Build");
-    let layout = StoreLayout::discover(&workspace_root.join(".mbuild")).unwrap();
-    load_build_handle(&layout, build.build_key)
-        .unwrap()
-        .expect("expected final Build to exist in store")
-}
-
-fn text_recipe(name: &str, kind: &str, source: &str) -> String {
-    format!(
-        "store.text {} {{\n  kind = {},\n  source = {},\n}}\n",
-        nickel_string(name),
-        nickel_string(kind),
-        nickel_string(source),
-    )
-}
-
-fn fetch_recipe(name: &str, url: &str, hash: &str, unpack: bool) -> String {
-    format!(
-        "store.fetch {} {{\n  url = {},\n  hash = {},\n  unpack = {},\n}}\n",
-        nickel_string(name),
-        nickel_string(url),
-        nickel_string(hash),
-        if unpack { "true" } else { "false" },
-    )
-}
-
-fn container_image_recipe(name: &str, image: &str, digest: &str) -> String {
-    format!(
-        "store.container_image {} {{\n  image = {},\n  digest = {},\n}}\n",
-        nickel_string(name),
-        nickel_string(image),
-        nickel_string(digest),
-    )
-}
-
-fn binary_recipe(
-    name: &str,
-    image: &str,
-    digest: &str,
-    source_url: &str,
-    source_hash: &str,
-) -> String {
-    binary_recipe_with_script_config(name, image, digest, source_url, source_hash, None)
-}
-
-fn binary_recipe_with_script_config(
-    name: &str,
-    image: &str,
-    digest: &str,
-    source_url: &str,
-    source_hash: &str,
-    script_config: Option<&str>,
-) -> String {
-    let script_config_field = script_config
-        .map(|value| format!("  script_config = {value},\n"))
-        .unwrap_or_default();
-    format!(
-        "store.bind (store.fetch \"source\" {{\n  url = {},\n  hash = {},\n  unpack = true,\n}}) (fun source =>\nstore.bind (store.text \"script\" {{\n  kind = \"build-script\",\n  source = \"#!/bin/sh\\nexit 0\\n\",\n}}) (fun script =>\nstore.bind (store.container_image \"base-image\" {{\n  image = {},\n  digest = {},\n}}) (fun image =>\nstore.binary {} {{\n  kind = \"binary-output\",\n  optimize = \"size\",\n{}}} image script [source])))\n",
-        nickel_string(source_url),
-        nickel_string(source_hash),
-        nickel_string(image),
-        nickel_string(digest),
-        nickel_string(name),
-        script_config_field,
+fn binary_with_two_sources_recipe(url_a: &str, url_b: &str, source_hash: &str) -> Value {
+    recipe_node(
+        "binary",
+        "Binary",
+        json!({
+            "kind": "binary-output",
+            "optimize": "size"
+        }),
+        json!({
+            "image": base_image_recipe(),
+            "script": script_recipe(),
+            "sources": [
+                source_recipe(url_a, source_hash),
+                source_recipe(url_b, source_hash)
+            ]
+        }),
     )
 }
 
 #[test]
-fn store_text_recipe_creates_store_entries_and_refs() {
-    let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("recipe.ncl");
-    write_recipe(
-        &recipe_path,
-        &text_recipe("hello", "build-script", "#!/bin/sh\necho hi\n"),
-    );
-
-    let published = expect_build(
-        workspace.path(),
-        run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
-    );
-
-    assert!(published.object_path.exists());
-    assert_eq!(
-        fs::read_to_string(&published.object_path).unwrap(),
-        "#!/bin/sh\necho hi\n"
-    );
-    #[cfg(unix)]
-    {
-        let mode = fs::metadata(&published.object_path)
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o111, 0o111);
-    }
-
-    let build_file = build_ref_path(workspace.path(), published.build.build_key);
-    assert!(build_file.exists());
-    assert_eq!(
-        fs::read_link(&build_file).unwrap(),
-        PathBuf::from("..")
-            .join("results")
-            .join(format!("{}.json", published.result.result_key))
-    );
-    let build_json: Value = serde_json::from_slice(
-        &fs::read(result_path(workspace.path(), published.result.result_key)).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        build_json["result_key"],
-        Value::String(published.result.result_key.to_string())
-    );
-    assert!(build_json["created_at"].is_string(), "{build_json}");
-    assert_eq!(
-        build_json["kind"],
-        Value::String("build-script".to_string())
-    );
-    assert_eq!(
-        build_json["producer"]["builder"],
-        Value::String("text".to_string())
-    );
-    assert_eq!(
-        build_json["object_hash"],
-        Value::String(published.build.object_hash.to_string())
-    );
-    assert_eq!(build_json["input_object_hashes"], Value::Array(vec![]));
-
-    assert_eq!(
-        fs::read_link(
-            workspace
-                .path()
-                .join(".mbuild")
-                .join("meta-refs")
-                .join("hello.json")
-        )
-        .unwrap(),
-        PathBuf::from(format!("../builds/{}", published.build.build_key))
-    );
-    assert_eq!(
-        fs::read_link(
-            workspace
-                .path()
-                .join(".mbuild")
-                .join("object-refs")
-                .join("hello")
-        )
-        .unwrap(),
-        PathBuf::from(format!("../objects/{}", published.build.object_hash))
-    );
-    let run_log = fs::read_to_string(latest_run_log(workspace.path())).unwrap();
-    assert!(run_log.contains("\"phase\":\"start\""), "{run_log}");
-    assert!(run_log.contains("\"phase\":\"cache-miss\""), "{run_log}");
-    assert!(run_log.contains("\"phase\":\"publish\""), "{run_log}");
-    assert!(run_log.contains("\"phase\":\"done\""), "{run_log}");
-}
-
-#[test]
-fn repeated_store_text_recipe_reuses_same_build_record_and_object() {
-    let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("recipe.ncl");
-    write_recipe(
-        &recipe_path,
-        &text_recipe("cached", "plain-text", "hello cache"),
-    );
-
-    let first = expect_build(
-        workspace.path(),
-        run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
-    );
-    let second = expect_build(
-        workspace.path(),
-        run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
-    );
-
-    assert_eq!(first.build.build_key, second.build.build_key);
-    assert_eq!(first.build.object_hash, second.build.object_hash);
-    assert_eq!(
-        fs::read_dir(workspace.path().join(".mbuild").join("builds"))
-            .unwrap()
-            .count(),
-        1
-    );
-    assert_eq!(
-        fs::read_dir(workspace.path().join(".mbuild").join("objects"))
-            .unwrap()
-            .count(),
-        1
-    );
-    let run_log = fs::read_to_string(latest_run_log(workspace.path())).unwrap();
-    assert!(run_log.contains("\"phase\":\"cache-hit\""), "{run_log}");
-}
-
-#[test]
-fn store_recipe_executes_fetch_recipe_end_to_end() {
-    let workspace = tempdir().unwrap();
-    let request_path = workspace.path().join("fetch-recipe.ncl");
-    let body = b"fetched payload\n".to_vec();
-    let hash = format!("sha256:{:x}", Sha256::digest(&body));
-    let (url, handle) = match spawn_http_server(body.clone(), "application/octet-stream") {
-        Ok(server) => server,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-        Err(error) => panic!("failed to start test HTTP server: {error}"),
-    };
-    write_recipe(
-        &request_path,
-        &fetch_recipe("fetched-file", &url, &hash, false),
-    );
-
-    let published = expect_build(
-        workspace.path(),
-        run_store_recipe_in_workspace(workspace.path(), &request_path).unwrap(),
-    );
-    handle.join().unwrap();
-
-    assert_eq!(published.build.kind, "fetched-file");
-    assert_eq!(fs::read(&published.object_path).unwrap(), body);
-    assert_eq!(published.build.attrs["source_url"], Value::String(url));
-    assert_eq!(published.build.attrs["declared_hash"], Value::String(hash));
-    assert_eq!(published.build.attrs["unpack"], Value::Bool(false));
-}
-
-#[test]
-fn store_recipe_executes_container_image_recipe_and_persists_full_record() {
+fn json_recipe_executes_all_real_builders() {
     with_fake_podman(
         r#"[{"Id":"sha256:imageid","RepoDigests":["docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]"#,
         || {
             let workspace = tempdir().unwrap();
-            let recipe_path = workspace.path().join("container-image.ncl");
-            write_recipe(
-                &recipe_path,
-                &container_image_recipe(
-                    "bootstrap-image",
-                    "docker.io/library/buildpack-deps:bookworm",
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                ),
-            );
-
-            let published = expect_build(
-                workspace.path(),
-                run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
-            );
-
-            assert_eq!(published.build.kind, "container-image");
-            assert_eq!(published.build.producer.builder, "container-image");
-            assert_eq!(
-                published.build.attrs["image"],
-                Value::String("docker.io/library/buildpack-deps:bookworm".to_string())
-            );
-            assert_eq!(
-                published.build.attrs["image_id"],
-                Value::String("sha256:imageid".to_string())
-            );
-            assert!(published.build.attrs.get("image_ref").is_none(), "{:?}", published.build.attrs);
-            assert!(published.build.attrs.get("image_digest").is_none(), "{:?}", published.build.attrs);
-
-            let descriptor: Value =
-                serde_json::from_slice(&fs::read(&published.object_path).unwrap()).unwrap();
-            assert_eq!(
-                descriptor["schema"],
-                Value::String("mbuild-container-image-object-v1".to_string())
-            );
-            assert_eq!(
-                descriptor["storage"],
-                Value::String("external-podman".to_string())
-            );
-            assert_eq!(
-                descriptor["image_ref"],
-                Value::String(
-                    "docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
-                )
-            );
-            assert_eq!(
-                descriptor["image_digest"],
-                Value::String(
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        .to_string(),
-                )
-            );
-
-            let build_file = build_ref_path(workspace.path(), published.build.build_key);
-            assert!(build_file.exists());
-            assert_eq!(
-                fs::read_link(&build_file).unwrap(),
-                PathBuf::from("..")
-                    .join("results")
-                    .join(format!("{}.json", published.result.result_key))
-            );
-            let build_json: Value =
-                serde_json::from_slice(
-                    &fs::read(result_path(workspace.path(), published.result.result_key)).unwrap(),
-                )
-                .unwrap();
-            assert!(build_json["created_at"].is_string(), "{build_json}");
-            assert_eq!(
-                build_json["kind"],
-                Value::String("container-image".to_string())
-            );
-            assert_eq!(
-                build_json["producer"]["builder"],
-                Value::String("container-image".to_string())
-            );
-            assert_eq!(
-                build_json["object_hash"],
-                Value::String(published.build.object_hash.to_string())
-            );
-            assert_eq!(
-                build_json["attrs"]["image"],
-                Value::String("docker.io/library/buildpack-deps:bookworm".to_string())
-            );
-            assert_eq!(
-                build_json["attrs"]["image_id"],
-                Value::String("sha256:imageid".to_string())
-            );
-            assert!(build_json["attrs"].get("image_ref").is_none(), "{build_json}");
-            assert!(build_json["attrs"].get("image_digest").is_none(), "{build_json}");
-            let run_log = fs::read_to_string(latest_run_log(workspace.path())).unwrap();
-            assert!(
-                run_log.contains("\"phase\":\"podman-image-inspect\""),
-                "{run_log}"
-            );
-        },
-    );
-}
-
-#[test]
-fn repeated_nested_binary_recipe_reuses_all_build_records_and_objects() {
-    with_fake_podman(
-        r#"[{"Id":"sha256:imageid","RepoDigests":["docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]"#,
-        || {
-            let workspace = tempdir().unwrap();
-            let recipe_path = workspace.path().join("binary-recipe.ncl");
             let source_tar = {
                 let encoder =
                     flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
                 let mut tar = tar::Builder::new(encoder);
-                let body = b"hello cached binary\n";
+                let body = b"hello from json runtime\n";
                 let mut header = tar::Header::new_gnu();
                 header.set_path("pkg/README.txt").unwrap();
                 header.set_size(body.len() as u64);
@@ -521,207 +235,17 @@ fn repeated_nested_binary_recipe_reuses_all_build_records_and_objects() {
                 Err(error) => panic!("failed to start test HTTP server: {error}"),
             };
             let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
-            write_recipe(
-                &recipe_path,
-                &binary_recipe(
-                    "cached-binary",
-                    "docker.io/library/buildpack-deps:bookworm",
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    &url,
-                    &source_hash,
-                ),
-            );
+            let recipe = make_full_recipe(&url, &source_hash);
+            let recipe_path = workspace.path().join("recipe.json");
+            write_recipe(&recipe_path, &recipe);
 
-            let first = expect_build(
-                workspace.path(),
-                run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
-            );
+            let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
             handle.join().unwrap();
 
-            let objects_dir = workspace.path().join(".mbuild").join("objects");
-            let builds_dir = workspace.path().join(".mbuild").join("builds");
-            let first_object_count = fs::read_dir(&objects_dir).unwrap().count();
-            let first_build_count = fs::read_dir(&builds_dir).unwrap().count();
-
-            let second = expect_build(
-                workspace.path(),
-                run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
-            );
-
-            assert_eq!(first.build.build_key, second.build.build_key);
-            assert_eq!(first.build.object_hash, second.build.object_hash);
-            assert_eq!(
-                fs::read_dir(objects_dir).unwrap().count(),
-                first_object_count
-            );
-            assert_eq!(fs::read_dir(builds_dir).unwrap().count(), first_build_count);
-            assert_eq!(first_build_count, 4);
-            assert_eq!(first_object_count, 4);
-
-            let binary_build_json: Value = serde_json::from_slice(
-                &fs::read(result_path(workspace.path(), first.result.result_key)).unwrap(),
-            )
-            .unwrap();
-            let input_object_hashes = binary_build_json["input_object_hashes"]
-                .as_array()
-                .expect("binary result record must encode input object hashes");
-            assert_eq!(
-                binary_build_json["result_key"],
-                Value::String(first.result.result_key.to_string())
-            );
-            assert_eq!(input_object_hashes.len(), 3);
-            assert!(
-                input_object_hashes
-                    .iter()
-                    .all(|value| matches!(value, Value::String(_)))
-            );
-        },
-    );
-}
-
-#[test]
-fn binary_recipe_materializes_script_config_dir_end_to_end() {
-    with_fake_podman(
-        r#"[{"Id":"sha256:imageid","RepoDigests":["docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]"#,
-        || {
-            let workspace = tempdir().unwrap();
-            let recipe_path = workspace.path().join("binary-script-config.ncl");
-            let source_tar = {
-                let encoder =
-                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-                let mut tar = tar::Builder::new(encoder);
-                let body = b"hello script config\n";
-                let mut header = tar::Header::new_gnu();
-                header.set_path("pkg/README.txt").unwrap();
-                header.set_size(body.len() as u64);
-                header.set_mode(0o644);
-                header.set_cksum();
-                tar.append(&header, &body[..]).unwrap();
-                tar.into_inner().unwrap().finish().unwrap()
-            };
-            let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
-                Ok(server) => server,
-                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-                Err(error) => panic!("failed to start test HTTP server: {error}"),
-            };
-            let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
-            write_recipe(
-                &recipe_path,
-                &binary_recipe_with_script_config(
-                    "binary-with-script-config",
-                    "docker.io/library/buildpack-deps:bookworm",
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    &url,
-                    &source_hash,
-                    Some(
-                        "{ configure_args = [\"--disable-nls\", \"--without-selinux\"], env = { CC = \"gcc\" }, pre_configure = \"echo pre\", post_install = \"echo post\" }",
-                    ),
-                ),
-            );
-
-            let published = expect_build(
-                workspace.path(),
-                run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
-            );
-            handle.join().unwrap();
-
-            assert_eq!(
-                fs::read_to_string(published.object_path.join("script-config-dir.txt")).unwrap(),
-                "/__mbuild_script_config\n"
-            );
-            assert_eq!(
-                fs::read_to_string(
-                    published
-                        .object_path
-                        .join("script-config")
-                        .join("configure_args")
-                        .join("00000000")
-                )
-                .unwrap(),
-                "--disable-nls"
-            );
-            assert_eq!(
-                fs::read_to_string(
-                    published
-                        .object_path
-                        .join("script-config")
-                        .join("configure_args")
-                        .join("00000001")
-                )
-                .unwrap(),
-                "--without-selinux"
-            );
-            assert_eq!(
-                fs::read_to_string(
-                    published
-                        .object_path
-                        .join("script-config")
-                        .join("env")
-                        .join("CC")
-                )
-                .unwrap(),
-                "gcc"
-            );
-            assert_eq!(
-                fs::read_to_string(
-                    published
-                        .object_path
-                        .join("script-config")
-                        .join("pre_configure")
-                )
-                .unwrap(),
-                "echo pre"
-            );
-            assert_eq!(
-                fs::read_to_string(
-                    published
-                        .object_path
-                        .join("script-config")
-                        .join("post_install")
-                )
-                .unwrap(),
-                "echo post"
-            );
-        },
-    );
-}
-
-#[test]
-fn store_recipe_executes_all_real_builders_via_full_template() {
-    with_fake_podman(
-        r#"[{"Id":"sha256:imageid","RepoDigests":["docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]"#,
-        || {
-            let workspace = tempdir().unwrap();
-            let source_tar = {
-                let encoder =
-                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-                let mut tar = tar::Builder::new(encoder);
-                let body = b"hello from store loop\n";
-                let mut header = tar::Header::new_gnu();
-                header.set_path("pkg/README.txt").unwrap();
-                header.set_size(body.len() as u64);
-                header.set_mode(0o644);
-                header.set_cksum();
-                tar.append(&header, &body[..]).unwrap();
-                tar.into_inner().unwrap().finish().unwrap()
-            };
-            let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
-                Ok(server) => server,
-                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-                Err(error) => panic!("failed to start test HTTP server: {error}"),
-            };
-            let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
-            let recipe_source = STORE_RECIPE_TEMPLATE
-                .replace("__URL__", &url)
-                .replace("__SOURCE_HASH__", &source_hash);
-            let recipe_path = workspace.path().join("full.ncl");
-            write_recipe(&recipe_path, &recipe_source);
-
-            let published = expect_build(
-                workspace.path(),
-                run_store_recipe_in_workspace(workspace.path(), &recipe_path).unwrap(),
-            );
-            handle.join().unwrap();
+            let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+            let published = load_build_handle(&layout, build.build_key)
+                .unwrap()
+                .expect("expected final Build to exist in store");
 
             assert_eq!(published.build.kind, "container-image");
             assert_eq!(published.build.producer.builder, "image");
@@ -731,56 +255,147 @@ fn store_recipe_executes_all_real_builders_via_full_template() {
             );
 
             for name in ["source", "script", "base-image", "binary", "final-image"] {
-                assert!(
-                    workspace
-                        .path()
-                        .join(".mbuild")
-                        .join("meta-refs")
-                        .join(format!("{name}.json"))
-                        .exists()
-                );
-                assert!(
-                    workspace
-                        .path()
-                        .join(".mbuild")
-                        .join("object-refs")
-                        .join(name)
-                        .exists()
-                );
+                assert!(workspace
+                    .path()
+                    .join(".mbuild")
+                    .join("meta-refs")
+                    .join(format!("{name}.json"))
+                    .exists());
+                assert!(workspace
+                    .path()
+                    .join(".mbuild")
+                    .join("object-refs")
+                    .join(name)
+                    .exists());
             }
-            let binary_logs = collect_log_files(
-                &workspace
-                    .path()
-                    .join(".mbuild")
-                    .join("builder-state")
-                    .join("binary")
-                    .join("logs"),
-            );
-            assert!(
-                binary_logs.iter().any(|path| path
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .contains("podman-run")),
-                "{binary_logs:?}"
-            );
-            let image_logs = collect_log_files(
-                &workspace
-                    .path()
-                    .join(".mbuild")
-                    .join("builder-state")
-                    .join("image")
-                    .join("logs"),
-            );
-            assert!(
-                image_logs.iter().any(|path| {
-                    path.file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .contains("podman-import")
+
+            let builds_dir = workspace.path().join(".mbuild").join("builds");
+            let objects_dir = workspace.path().join(".mbuild").join("objects");
+            assert_eq!(fs::read_dir(&builds_dir).unwrap().count(), 5);
+            assert_eq!(fs::read_dir(&objects_dir).unwrap().count(), 5);
+        },
+    );
+}
+
+#[test]
+fn repeated_build_keys_are_built_once_but_published_under_all_names() {
+    with_fake_podman(
+        r#"[{"Id":"sha256:imageid","RepoDigests":["docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]"#,
+        || {
+            let workspace = tempdir().unwrap();
+            let source_tar = {
+                let encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                let mut tar = tar::Builder::new(encoder);
+                let body = b"hello from duplicate test\n";
+                let mut header = tar::Header::new_gnu();
+                header.set_path("pkg/README.txt").unwrap();
+                header.set_size(body.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                tar.append(&header, &body[..]).unwrap();
+                tar.into_inner().unwrap().finish().unwrap()
+            };
+            let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
+                Ok(server) => server,
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+                Err(error) => panic!("failed to start test HTTP server: {error}"),
+            };
+            let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
+            let recipe = recipe_node(
+                "final-image",
+                "Image",
+                json!({ "mode": "bootstrap" }),
+                json!({
+                    "base": null,
+                    "inputs": [
+                        binary_recipe("binary-a", &url, &source_hash),
+                        binary_recipe("binary-b", &url, &source_hash)
+                    ]
                 }),
-                "{image_logs:?}"
             );
+            let recipe_path = workspace.path().join("dedup.json");
+            write_recipe(&recipe_path, &recipe);
+
+            let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+            handle.join().unwrap();
+
+            let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+            assert!(load_build_handle(&layout, build.build_key).unwrap().is_some());
+            assert_eq!(
+                fs::read_dir(workspace.path().join(".mbuild").join("builds"))
+                    .unwrap()
+                    .count(),
+                5
+            );
+            assert!(workspace
+                .path()
+                .join(".mbuild")
+                .join("meta-refs")
+                .join("binary-a.json")
+                .exists());
+            assert!(workspace
+                .path()
+                .join(".mbuild")
+                .join("meta-refs")
+                .join("binary-b.json")
+                .exists());
+            assert!(build_ref_path(workspace.path(), build.build_key).exists());
+        },
+    );
+}
+
+#[test]
+fn independent_fetch_sources_run_in_parallel() {
+    with_fake_podman(
+        r#"[{"Id":"sha256:imageid","RepoDigests":["docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]"#,
+        || {
+            let workspace = tempdir().unwrap();
+            let source_tar = {
+                let encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                let mut tar = tar::Builder::new(encoder);
+                let body = b"hello from parallel test\n";
+                let mut header = tar::Header::new_gnu();
+                header.set_path("pkg/README.txt").unwrap();
+                header.set_size(body.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                tar.append(&header, &body[..]).unwrap();
+                tar.into_inner().unwrap().finish().unwrap()
+            };
+            let (base_url, handle) = spawn_barrier_http_server(
+                source_tar.clone(),
+                "application/gzip",
+                2,
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
+            let recipe = binary_with_two_sources_recipe(
+                &format!("{base_url}?a=1"),
+                &format!("{base_url}?a=2"),
+                &source_hash,
+            );
+            let recipe_path = workspace.path().join("parallel.json");
+            write_recipe(&recipe_path, &recipe);
+
+            let build = run_recipe_json_in_workspace_with_options(
+                workspace.path(),
+                &recipe_path,
+                BuildRunOptions {
+                    emit_progress: false,
+                    jobs: 4,
+                },
+            )
+            .unwrap();
+            handle.join().unwrap();
+
+            let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+            let published = load_build_handle(&layout, build.build_key)
+                .unwrap()
+                .expect("expected binary Build to exist in store");
+            assert_eq!(published.build.kind, "binary-output");
         },
     );
 }

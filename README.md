@@ -1,77 +1,76 @@
 # mbuild
 
-`mbuild` executes one Nickel recipe entry file.
+`mbuild` executes one JSON recipe graph.
 
-The entry file evaluates to a top-level STORE action. Rust embeds Nickel,
-evaluates the entry file to weak head normal form, interprets the resulting
-STORE action tree step by step, and then pretty-prints the final Nickel value
-produced by that STORE program.
+The entry file is a JSON document whose root object describes one build target.
+Dependencies are embedded inline as child recipe objects. `mbuild` parses that
+nested tree, validates each node against the registered `BuilderSpec`, computes
+build keys in Rust, performs top-down store lookups, and builds only the
+missing nodes. Missing leaves and other ready nodes may execute in parallel.
 
-STORE programs are built from:
+Every recipe node uses one generic shape:
 
-- `return`
-- `bind`
-- named primitive builder actions such as `text`, `fetch`, `binary`, and
-  `image`
+```json
+{
+  "name": "tar-1.35",
+  "tag": "Binary",
+  "config": {
+    "kind": "binary-output",
+    "optimize": "size"
+  },
+  "inputs": {
+    "image": { "...": "recipe object" },
+    "script": { "...": "recipe object" },
+    "sources": [{ "...": "recipe object" }]
+  }
+}
+```
 
-Primitive builder actions do not recursively execute dependency actions on their
-own. Dependency sequencing is expressed in Nickel through monadic combinators.
-A primitive builder action consumes already-realized `Build` values and returns
-one `STORE Build` action.
+Node fields:
 
-Build semantics are defined only by:
+- `name`: publication name
+- `tag`: builder tag from the Rust builder registry
+- `config`: opaque builder payload
+- `inputs`: object keyed by input slot names from the selected `BuilderSpec`
 
-- the primitive builder tag
-- the builder payload/config
-- the payload content of already-realized input objects
+Input encoding is generic and follows the slot arity declared by the builder:
 
-Dependency metadata carried by `Build` values is observable in Nickel, but it
-is not part of Rust-builder semantics unless Nickel explicitly copies the
-relevant data into a downstream builder payload. A Rust builder whose behavior
-changes based on dependency metadata alone is considered a bug in the store
-model.
+- `One`: one inline recipe object
+- `Optional`: always present, either `null` or one inline recipe object
+- `Many`: an array of inline recipe objects
 
-Rust builders do not receive dependency metadata directly. The interpreter
-performs kind validation itself and then passes builders only resolved payload
-paths for their inputs.
+The runtime rejects:
 
-By default, `mbuild` prints concise live build progress to `stderr`. The final
-Nickel value still goes to `stdout` only. Use `--quiet` to suppress live
-progress.
+- unknown builder tags
+- extra input slots
+- missing declared slots
+- wrong input arity for a slot
 
-A realized `Build` value is a public handle addressed by `build_key`.
-Canonical realized results are stored under `.mbuild/results/<result_key>.json`,
-while `.mbuild/builds/<build_key>` is a symlink index from public build handles
-to canonical result records. Result records carry a persistent `created_at`
-timestamp in RFC3339 UTC format. This timestamp does not affect either
-`build_key` or `result_key`.
+`mbuild build` defaults to `./.mbuild/recipe.json`. On success it prints the
+realized root `Build` as JSON to `stdout`. Live progress goes to `stderr`. Use
+`--quiet` to suppress progress output. Use `--jobs/-j` to limit parallel
+builder execution; the default is the available CPU parallelism.
 
-Realized results are stored in a local content-addressed store where object
-identity is determined only by payload content. Builder invocations are recorded
-separately under stable build keys, and published names resolve through
-metadata refs and object refs. The plain published name is always the current
-alias. Republishing a different build under the same name rotates the previous
-current refs into timestamp-suffixed history refs. Hashing, result recording,
-build-handle recording, dependency resolution, and publication are interpreter
-details rather than part of the user-facing Nickel API.
+The store layout is content-addressed:
 
-Each `mbuild` invocation also writes persistent logs:
+- `.mbuild/objects/` stores payload objects by `object_hash`
+- `.mbuild/results/` stores canonical realized results by `result_key`
+- `.mbuild/builds/` stores public build handles by `build_key`
+- `.mbuild/meta-refs/` and `.mbuild/object-refs/` store published current refs
 
-- one structured event log under `.mbuild/logs/runs/<YYMMDDHHMMSS>-<pid>.jsonl`
-- raw external-command logs under
-  `.mbuild/builder-state/<builder>/logs/<name>/`
+`build_key` is computed from:
 
-The event log records build lifecycle events such as `start`, `cache-hit`,
-`cache-miss`, `run`, `publish`, `done`, and `fail`. For readability, the
-top-level `build_key` and `object_hash` fields in the event log are shortened;
-the full identifiers remain available in the event `details`. Raw logs contain
-the captured stdout/stderr of external commands such as `podman run`,
-`podman import`, or `podman inspect`.
+- builder tag
+- normalized config payload
+- ordered direct dependency `build_key`s
 
-The `binary` builder also supports an optional structured `script_config`
-payload. When present, `mbuild` materializes it as a read-only directory inside
-the build container and exports `MBUILD_SCRIPT_CONFIG_DIR=/__mbuild_script_config`.
-This lets reusable recipe-level build scripts consume structured configuration
-without requiring a per-package generated shell script.
+`result_key` is computed from:
+
+- builder tag
+- normalized config payload
+- ordered direct dependency `object_hash`es
+
+The dependency order comes from `BuilderSpec.inputs`, not from JSON field order.
+This lets `mbuild` keep the general runtime independent from concrete builders.
 
 For the architecture documents, start with [`docs/INDEX.md`](./docs/INDEX.md).

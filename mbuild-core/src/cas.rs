@@ -529,13 +529,17 @@ pub fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectH
         return Ok(object_hash);
     }
 
-    fs::rename(staged_path, &destination).map_err(|error| {
-        CasError::Io(format!(
+    if let Err(error) = fs::rename(staged_path, &destination) {
+        if destination.exists() {
+            remove_path_force(staged_path)?;
+            return Ok(object_hash);
+        }
+        return Err(CasError::Io(format!(
             "failed to import object '{}' -> '{}': {error}",
             staged_path.display(),
             destination.display()
-        ))
-    })?;
+        )));
+    }
 
     Ok(object_hash)
 }

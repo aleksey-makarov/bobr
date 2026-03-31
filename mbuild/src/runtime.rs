@@ -4,7 +4,6 @@ use mbuild_core::{
     BuilderError, CasError, PublishedBuild, StoreLayout, compute_build_key,
     compute_result_key, load_build_handle, materialize_build, object_path,
 };
-use nickel_lang_core::{error::Error as NickelError, files::Files as NickelFiles};
 use serde_json::Value;
 use std::fmt;
 use std::path::Path;
@@ -15,10 +14,6 @@ pub enum RuntimeError {
     InvalidRequest(String),
     UnknownBuilder(String),
     RecipeLoad(String),
-    RecipeDiagnostic {
-        files: NickelFiles,
-        error: NickelError,
-    },
     Build(String),
     Store(String),
 }
@@ -29,7 +24,6 @@ impl RuntimeError {
             Self::InvalidRequest(_) => "invalid-request",
             Self::UnknownBuilder(_) => "unknown-builder",
             Self::RecipeLoad(_) => "recipe-load",
-            Self::RecipeDiagnostic { .. } => "recipe-diagnostic",
             Self::Build(_) => "build",
             Self::Store(_) => "store",
         }
@@ -42,7 +36,6 @@ impl RuntimeError {
             | Self::RecipeLoad(message)
             | Self::Build(message)
             | Self::Store(message) => message,
-            Self::RecipeDiagnostic { .. } => "Nickel recipe error",
         }
     }
 }
@@ -203,6 +196,63 @@ pub(crate) fn execute_builder_node(
         map_store_error(error)
     })?;
     Ok(published)
+}
+
+pub(crate) fn build_to_published(
+    layout: &StoreLayout,
+    build: Build,
+) -> Result<PublishedBuild, RuntimeError> {
+    load_build_handle(layout, build.build_key)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            RuntimeError::Store(format!(
+                "build '{}' is missing from store",
+                build.build_key
+            ))
+        })
+}
+
+pub(crate) fn lookup_build_handle(
+    layout: &StoreLayout,
+    build_key: BuildKey,
+) -> Result<Option<PublishedBuild>, RuntimeError> {
+    load_build_handle(layout, build_key).map_err(map_store_error)
+}
+
+pub(crate) fn lookup_canonical_result(
+    layout: &StoreLayout,
+    builder_tag: &str,
+    config: &Value,
+    input_object_hashes: &[mbuild_core::ObjectHash],
+    build_key: BuildKey,
+) -> Result<Option<PublishedBuild>, RuntimeError> {
+    let result_key =
+        compute_result_key(builder_tag, config, input_object_hashes).map_err(map_store_error)?;
+    let Some(result) = mbuild_core::load_result_record(layout, result_key).map_err(map_store_error)?
+    else {
+        return Ok(None);
+    };
+    let object_path = object_path(layout, result.object_hash);
+    if !object_path.exists() {
+        return Err(RuntimeError::Store(format!(
+            "result '{}' points to missing object '{}'",
+            result_key,
+            object_path.display()
+        )));
+    }
+    mbuild_core::store_build_handle_ref(layout, build_key, result_key).map_err(map_store_error)?;
+    Ok(Some(PublishedBuild {
+        build: Build {
+            build_key,
+            object_hash: result.object_hash,
+            created_at: result.created_at.clone(),
+            kind: result.kind.clone(),
+            producer: result.producer.clone(),
+            attrs: result.attrs.clone(),
+        },
+        result,
+        object_path,
+    }))
 }
 
 pub(crate) fn validate_allowed_kind(
