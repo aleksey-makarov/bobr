@@ -1,5 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = image ] && [ "${2:-}" = exists ]; then
+  # Simulate image is already loaded; tests needing a load can set this to 1.
+  if [ "${MBUILD_TEST_IMAGE_NOT_LOADED:-}" = "1" ]; then
+    exit 1
+  fi
+  exit 0
+fi
+if [ "${1:-}" = load ]; then
+  if [ "${MBUILD_TEST_PODMAN_LOAD_FAIL:-}" = "1" ]; then
+    echo simulated podman load failure >&2
+    exit 42
+  fi
+  exit 0
+fi
 if [ "${1:-}" = run ]; then
   if [ "${MBUILD_TEST_BINARY_PODMAN_FAIL:-}" = "1" ]; then
     echo simulated podman run failure >&2

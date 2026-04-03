@@ -1,34 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then
-  target="${3:-}"
-  if [[ "$target" == localhost/mbuild-image:* ]]; then
-    cat <<JSON
-[{"Id":"sha256:generated-image","RepoDigests":["${target}@__GENERATED_DIGEST__"]}]
-JSON
-  else
-    cat <<'JSON'
-__INSPECT_JSON__
-JSON
-  fi
+if [ "${1:-}" = image ] && [ "${2:-}" = exists ]; then
   exit 0
 fi
-if [ "${1:-}" = import ]; then
-  echo sha256:imported-image
-  exit 0
-fi
-if [ "${1:-}" = create ]; then
-  echo ctr-test
-  exit 0
-fi
-if [ "${1:-}" = cp ]; then
-  exit 0
-fi
-if [ "${1:-}" = commit ]; then
-  echo sha256:committed-image
-  exit 0
-fi
-if [ "${1:-}" = rm ]; then
+if [ "${1:-}" = load ]; then
   exit 0
 fi
 if [ "${1:-}" = run ]; then

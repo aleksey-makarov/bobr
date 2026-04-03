@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -324,40 +324,6 @@ pub struct StagedBuildResult {
     pub staged_path: PathBuf,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct ContainerImageDescriptor {
-    pub image_ref: String,
-    pub image_digest: String,
-}
-
-pub fn load_container_image_descriptor(path: &Path) -> Result<ContainerImageDescriptor, String> {
-    let bytes = fs::read(path).map_err(|error| {
-        format!(
-            "failed to read container-image descriptor '{}': {error}",
-            path.display()
-        )
-    })?;
-    let descriptor: ContainerImageDescriptor =
-        serde_json::from_slice(&bytes).map_err(|error| {
-            format!(
-                "failed to parse container-image descriptor '{}': {error}",
-                path.display()
-            )
-        })?;
-    if descriptor.image_ref.trim().is_empty() {
-        return Err(format!(
-            "container-image descriptor '{}' has empty 'image_ref'",
-            path.display()
-        ));
-    }
-    if descriptor.image_digest.trim().is_empty() {
-        return Err(format!(
-            "container-image descriptor '{}' has empty 'image_digest'",
-            path.display()
-        ));
-    }
-    Ok(descriptor)
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Build {

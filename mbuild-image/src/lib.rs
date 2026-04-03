@@ -1,23 +1,20 @@
+mod layer;
+mod oci;
+mod registry;
+
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     InputArity, InputSlot, ProducerInfo, StagedBuildResult, TypedBuilder, fsutil,
-    load_container_image_descriptor,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::fmt;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
+use std::path::Path;
 
 const KIND_BINARY_OUTPUT: &str = "binary-output";
 const KIND_CONTAINER_IMAGE: &str = "container-image";
-const DESCRIPTOR_SCHEMA: &str = "mbuild-container-image-object-v1";
-const DESCRIPTOR_STORAGE: &str = "external-podman";
-const GENERATED_IMAGE_PREFIX: &str = "localhost/mbuild-image";
-#[cfg(test)]
-const GENERATED_DIGEST: &str =
-    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const OCI_LAYOUT_SUBDIR: &str = "image";
 
 #[derive(Debug)]
 enum ContainerImageError {
@@ -29,9 +26,7 @@ enum ContainerImageError {
 impl ContainerImageError {
     fn message(&self) -> &str {
         match self {
-            Self::InvalidConfig(message) | Self::BuildFailed(message) | Self::FsFailed(message) => {
-                message
-            }
+            Self::InvalidConfig(m) | Self::BuildFailed(m) | Self::FsFailed(m) => m,
         }
     }
 }
@@ -42,7 +37,6 @@ impl fmt::Display for ContainerImageError {
     }
 }
 
-type CIResult<T> = Result<T, ContainerImageError>;
 
 #[derive(Debug)]
 enum ImageError {
@@ -55,10 +49,10 @@ enum ImageError {
 impl ImageError {
     fn message(&self) -> &str {
         match self {
-            Self::InvalidConfig(message)
-            | Self::InputResolutionFailed(message)
-            | Self::BuildFailed(message)
-            | Self::FsFailed(message) => message,
+            Self::InvalidConfig(m)
+            | Self::InputResolutionFailed(m)
+            | Self::BuildFailed(m)
+            | Self::FsFailed(m) => m,
         }
     }
 }
@@ -83,27 +77,6 @@ pub struct ContainerImageConfig {
 pub struct ImageConfig {
     #[serde(default)]
     mode: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PodmanImageInspectRecord {
-    #[serde(rename = "Id")]
-    id: String,
-    #[serde(rename = "RepoDigests", default)]
-    repo_digests: Vec<String>,
-}
-
-#[derive(Debug)]
-struct LocalImageInspect {
-    image_ref: String,
-    image_id: String,
-}
-
-#[derive(Debug)]
-struct ImportedImage {
-    image_ref: String,
-    image_id: String,
-    image_digest: String,
 }
 
 pub struct ContainerImageBuilder;
@@ -145,32 +118,56 @@ impl TypedBuilder for ContainerImageBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
-        validate_container_image_config(&config).map_err(map_container_image_error)?;
         if !inputs.is_empty() {
             return Err(BuilderError::ExecutionFailed(
                 "ContainerImage builder does not accept input objects".to_string(),
             ));
         }
 
+        if config.image.trim().is_empty() {
+            return Err(map_container_image_error(ContainerImageError::InvalidConfig(
+                "image must not be empty".to_string(),
+            )));
+        }
+        if !is_valid_sha256_digest(&config.digest) {
+            return Err(map_container_image_error(ContainerImageError::InvalidConfig(
+                format!(
+                    "invalid digest '{}'; expected format: sha256:<64 hex chars>",
+                    config.digest
+                ),
+            )));
+        }
+
         fsutil::recreate_empty_dir_force(&cx.temp_root)
-            .map_err(map_fsutil_error_to_container)
+            .map_err(|e| ContainerImageError::FsFailed(e.to_string()))
             .map_err(map_container_image_error)?;
+
+        let staged_path = cx.temp_root.join(OCI_LAYOUT_SUBDIR);
+        fs::create_dir(&staged_path)
+            .map_err(|e| ContainerImageError::FsFailed(format!("failed to create staging dir: {e}")))
+            .map_err(map_container_image_error)?;
+
         cx.log_event(
             BuildLogLevel::Info,
-            "inspect",
-            format!("inspecting local image '{}'", config.image),
+            "fetch",
+            format!("fetching image '{}' from registry", config.image),
         );
-
-        let inspected =
-            inspect_local_container_image_with_expected_digest(cx, &config.image, &config.digest)
-                .map_err(map_container_image_error)?;
-        let staged_path = write_descriptor(&cx.temp_root, &inspected.image_ref, &config.digest)
-            .map_err(ContainerImageError::FsFailed)
+        registry::fetch_image_authenticated(&config.image, &config.digest, &staged_path)
+            .map_err(|e| {
+                // On digest mismatch, resolve the current digest by tag and show a helpful hint.
+                let hint = registry::resolve_current_digest(&config.image)
+                    .map(|d| format!("\n    digest = \"{d}\","))
+                    .unwrap_or_default();
+                ContainerImageError::BuildFailed(format!("{e}{hint}"))
+            })
             .map_err(map_container_image_error)?;
 
         let mut attrs = Map::new();
         attrs.insert("image".to_string(), Value::String(config.image));
-        attrs.insert("image_id".to_string(), Value::String(inspected.image_id));
+        attrs.insert(
+            "manifest_digest".to_string(),
+            Value::String(config.digest),
+        );
 
         Ok(StagedBuildResult {
             kind: KIND_CONTAINER_IMAGE.to_string(),
@@ -201,7 +198,7 @@ impl TypedBuilder for ImageBuilder {
         validate_image_config(&config, base, binaries).map_err(map_image_error)?;
 
         fsutil::recreate_empty_dir_force(&cx.temp_root)
-            .map_err(map_fsutil_error_to_image)
+            .map_err(|e| ImageError::FsFailed(e.to_string()))
             .map_err(map_image_error)?;
 
         let mode = effective_image_mode(&config, base).map_err(map_image_error)?;
@@ -210,29 +207,24 @@ impl TypedBuilder for ImageBuilder {
             "prepare",
             format!("building image in '{}' mode", mode),
         );
-        let imported = match mode {
-            "bootstrap" => run_bootstrap_mode(cx, binaries).map_err(map_image_error)?,
+
+        let staged_path = cx.temp_root.join(OCI_LAYOUT_SUBDIR);
+        fs::create_dir(&staged_path)
+            .map_err(|e| ImageError::FsFailed(format!("failed to create staging dir: {e}")))
+            .map_err(map_image_error)?;
+
+        let manifest_digest = match mode {
+            "bootstrap" => run_bootstrap_mode(&staged_path, binaries).map_err(map_image_error)?,
             "layered" => {
                 let base = base.unwrap();
-                run_layered_mode(cx, base, binaries).map_err(map_image_error)?
+                run_layered_mode(&staged_path, base, binaries).map_err(map_image_error)?
             }
             _ => unreachable!(),
         };
 
-        let staged_path =
-            write_descriptor(&cx.temp_root, &imported.image_ref, &imported.image_digest)
-                .map_err(ImageError::FsFailed)
-                .map_err(map_image_error)?;
-
         let mut attrs = Map::new();
         attrs.insert("mode".to_string(), Value::String(mode.to_string()));
-        attrs.insert("image_id".to_string(), Value::String(imported.image_id));
-        if let Some(base) = base {
-            attrs.insert(
-                "base_image_ref".to_string(),
-                Value::String(resolve_image_ref(base).map_err(map_image_error)?),
-            );
-        }
+        attrs.insert("manifest_digest".to_string(), Value::String(manifest_digest));
 
         Ok(StagedBuildResult {
             kind: KIND_CONTAINER_IMAGE.to_string(),
@@ -245,20 +237,6 @@ impl TypedBuilder for ImageBuilder {
     }
 }
 
-fn validate_container_image_config(config: &ContainerImageConfig) -> CIResult<()> {
-    if config.image.trim().is_empty() {
-        return Err(ContainerImageError::InvalidConfig(
-            "image must not be empty".to_string(),
-        ));
-    }
-    if !is_valid_sha256_digest(&config.digest) {
-        return Err(ContainerImageError::InvalidConfig(format!(
-            "invalid digest '{}'; expected format: sha256:<64 hex chars>",
-            config.digest
-        )));
-    }
-    Ok(())
-}
 
 fn validate_image_config(
     config: &ImageConfig,
@@ -279,9 +257,15 @@ fn validate_image_config(
         }
     }
     if let Some(base) = base {
-        if !base.object_path.is_file() {
+        if !base.object_path.is_dir() {
             return Err(ImageError::InputResolutionFailed(format!(
-                "base container-image input must resolve to a file: {}",
+                "base container-image input must resolve to a directory: {}",
+                base.object_path.display()
+            )));
+        }
+        if !base.object_path.join("oci-layout").exists() {
+            return Err(ImageError::InputResolutionFailed(format!(
+                "base container-image input is not a valid OCI layout directory: {}",
                 base.object_path.display()
             )));
         }
@@ -330,467 +314,122 @@ fn is_valid_sha256_digest(value: &str) -> bool {
     hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn inspect_local_container_image_with_expected_digest(
-    cx: &BuildContext,
-    image: &str,
-    digest: &str,
-) -> CIResult<LocalImageInspect> {
-    let inspected = inspect_local_image(cx, image)
-        .map_err(|message| ContainerImageError::BuildFailed(message))?;
-    if !inspected.image_ref.ends_with(&format!("@{digest}")) {
-        return Err(ContainerImageError::BuildFailed(format!(
-            "local image '{}' does not match required digest '{}'",
-            image, digest
-        )));
-    }
-    Ok(LocalImageInspect {
-        image_ref: inspected.image_ref,
-        image_id: inspected.image_id,
-    })
+/// Build a bootstrap OCI image from scratch (no base).
+/// Returns the manifest digest.
+fn run_bootstrap_mode(
+    staging_dir: &Path,
+    binaries: &[BuilderInputObject],
+) -> IResult<String> {
+    oci::init_layout(staging_dir)
+        .map_err(|e| ImageError::FsFailed(e.to_string()))?;
+
+    let binary_paths: Vec<&Path> = binaries.iter().map(|b| b.object_path.as_path()).collect();
+    let layer = layer::create_layer(&binary_paths)
+        .map_err(|e| ImageError::BuildFailed(e.to_string()))?;
+
+    let layer_desc = oci::write_blob(staging_dir, &layer.compressed, oci::MEDIA_TYPE_OCI_LAYER)
+        .map_err(|e| ImageError::FsFailed(e.to_string()))?;
+
+    let config = json!({
+        "architecture": "amd64",
+        "os": "linux",
+        "rootfs": {
+            "type": "layers",
+            "diff_ids": [layer.diff_id]
+        },
+        "config": {}
+    });
+    let config_bytes = serde_json::to_vec(&config)
+        .map_err(|e| ImageError::FsFailed(format!("failed to serialize config: {e}")))?;
+    let config_desc =
+        oci::write_blob(staging_dir, &config_bytes, oci::MEDIA_TYPE_OCI_CONFIG)
+            .map_err(|e| ImageError::FsFailed(e.to_string()))?;
+
+    let manifest = oci::OciManifest {
+        schema_version: 2,
+        config: config_desc,
+        layers: vec![layer_desc],
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest)
+        .map_err(|e| ImageError::FsFailed(format!("failed to serialize manifest: {e}")))?;
+    let manifest_desc =
+        oci::write_blob(staging_dir, &manifest_bytes, oci::MEDIA_TYPE_OCI_MANIFEST)
+            .map_err(|e| ImageError::FsFailed(e.to_string()))?;
+
+    let manifest_digest = manifest_desc.digest.clone();
+    oci::write_index(staging_dir, manifest_desc, None)
+        .map_err(|e| ImageError::FsFailed(e.to_string()))?;
+
+    Ok(manifest_digest)
 }
 
-fn inspect_generated_image(cx: &BuildContext, image_ref: &str) -> IResult<ImportedImage> {
-    let inspected = inspect_local_image(cx, image_ref).map_err(ImageError::BuildFailed)?;
-    let digest = inspected
-        .image_ref
-        .rsplit_once('@')
-        .map(|(_, digest)| digest.to_string())
-        .ok_or_else(|| {
-            ImageError::BuildFailed(format!(
-                "podman inspect did not return digest-qualified ref for image '{}'",
-                image_ref
-            ))
-        })?;
-
-    Ok(ImportedImage {
-        image_ref: inspected.image_ref,
-        image_id: inspected.image_id,
-        image_digest: digest,
-    })
-}
-
-fn inspect_local_image(cx: &BuildContext, image: &str) -> Result<LocalImageInspect, String> {
-    let output = run_podman_command(cx, "podman-image-inspect", "podman image inspect", {
-        let mut command = ProcessCommand::new("podman");
-        command
-            .arg("image")
-            .arg("inspect")
-            .arg(image)
-            .arg("--format")
-            .arg("json");
-        command
-    })?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "podman image '{}' is not available locally: {}",
-            image,
-            command_details(&output)
-        ));
-    }
-
-    let records: Vec<PodmanImageInspectRecord> =
-        serde_json::from_slice(&output.stdout).map_err(|error| {
-            format!(
-                "failed to parse podman inspect output for image '{}': {error}",
-                image
-            )
-        })?;
-
-    let record = records
-        .first()
-        .ok_or_else(|| format!("podman inspect returned no records for image '{}'", image))?;
-    let image_ref = record.repo_digests.first().cloned().ok_or_else(|| {
-        format!(
-            "podman inspect returned no repo digests for image '{}'",
-            image
-        )
-    })?;
-
-    Ok(LocalImageInspect {
-        image_ref,
-        image_id: record.id.clone(),
-    })
-}
-
-fn run_bootstrap_mode(cx: &BuildContext, binaries: &[BuilderInputObject]) -> IResult<ImportedImage> {
-    let rootfs_dir = cx.temp_root.join("rootfs");
-    let tar_path = cx.temp_root.join("rootfs.tar");
-    fsutil::recreate_empty_dir_force(&rootfs_dir).map_err(map_fsutil_error_to_image)?;
-
-    for binary in binaries {
-        merge_directory(binary.object_path.as_path(), &rootfs_dir)?;
-    }
-
-    create_rootfs_tar(&rootfs_dir, &tar_path)?;
-    let image_ref = generated_image_ref("bootstrap").map_err(map_fsutil_error_to_image)?;
-    podman_import(cx, &tar_path, &image_ref)?;
-    inspect_generated_image(cx, &image_ref)
-}
-
+/// Build a layered OCI image on top of a base.
+/// Returns the manifest digest.
 fn run_layered_mode(
-    cx: &BuildContext,
+    staging_dir: &Path,
     base: &BuilderInputObject,
     binaries: &[BuilderInputObject],
-) -> IResult<ImportedImage> {
-    let base_ref = resolve_image_ref(base)?;
-    let container_id = podman_create(cx, &base_ref)?;
-    let result = (|| {
-        for binary in binaries {
-            podman_cp(cx, binary.object_path.as_path(), &container_id)?;
-        }
-        let image_ref = generated_image_ref("layered").map_err(map_fsutil_error_to_image)?;
-        podman_commit(cx, &container_id, &image_ref)?;
-        inspect_generated_image(cx, &image_ref)
-    })();
-    let _ = podman_rm(cx, &container_id);
-    let _ = fsutil::recreate_empty_dir_force(&cx.temp_root.join("layered-work"))
-        .map_err(map_fsutil_error_to_image);
-    result
-}
+) -> IResult<String> {
+    let base_dir = &base.object_path;
 
-fn resolve_image_ref(image: &BuilderInputObject) -> IResult<String> {
-    load_container_image_descriptor(&image.object_path)
-        .map(|descriptor| descriptor.image_ref)
-        .map_err(ImageError::InputResolutionFailed)
-}
+    // Read base manifest and config.
+    let base_manifest = oci::read_oci_manifest(base_dir)
+        .map_err(|e| ImageError::InputResolutionFailed(e.to_string()))?;
+    let base_config = oci::read_config(base_dir, &base_manifest)
+        .map_err(|e| ImageError::InputResolutionFailed(e.to_string()))?;
 
-fn generated_image_ref(mode: &str) -> Result<String, fsutil::FsUtilError> {
-    let now = fsutil::current_epoch_nanos()?;
-    Ok(format!("{GENERATED_IMAGE_PREFIX}:{mode}-{now}"))
-}
+    // Initialize new layout and hardlink all base blobs.
+    oci::init_layout(staging_dir)
+        .map_err(|e| ImageError::FsFailed(e.to_string()))?;
+    oci::hardlink_layer_blobs(base_dir, staging_dir)
+        .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
-fn podman_import(cx: &BuildContext, tar_path: &Path, image_ref: &str) -> IResult<()> {
-    let output = run_podman_command(cx, "podman-import", "podman import", {
-        let mut command = ProcessCommand::new("podman");
-        command.arg("import").arg(tar_path).arg(image_ref);
-        command
-    })
-    .map_err(ImageError::BuildFailed)?;
-    if !output.status.success() {
-        return Err(ImageError::BuildFailed(format!(
-            "podman import failed: {}",
-            command_details(&output)
-        )));
-    }
-    Ok(())
-}
+    // Build new layer from binary outputs.
+    let binary_paths: Vec<&Path> = binaries.iter().map(|b| b.object_path.as_path()).collect();
+    let layer = layer::create_layer(&binary_paths)
+        .map_err(|e| ImageError::BuildFailed(e.to_string()))?;
+    let layer_desc = oci::write_blob(staging_dir, &layer.compressed, oci::MEDIA_TYPE_OCI_LAYER)
+        .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
-fn podman_create(cx: &BuildContext, base_ref: &str) -> IResult<String> {
-    let output = run_podman_command(cx, "podman-create", "podman create", {
-        let mut command = ProcessCommand::new("podman");
-        command.arg("create").arg(base_ref);
-        command
-    })
-    .map_err(ImageError::BuildFailed)?;
-    if !output.status.success() {
-        return Err(ImageError::BuildFailed(format!(
-            "podman create failed: {}",
-            command_details(&output)
-        )));
-    }
-    let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if container_id.is_empty() {
-        return Err(ImageError::BuildFailed(
-            "podman create did not return a container id".to_string(),
-        ));
-    }
-    Ok(container_id)
-}
-
-fn podman_cp(cx: &BuildContext, binary_dir: &Path, container_id: &str) -> IResult<()> {
-    let source = format!("{}/.", binary_dir.display());
-    let destination = format!("{}:/", container_id);
-    let output = run_podman_command(cx, "podman-cp", "podman cp", {
-        let mut command = ProcessCommand::new("podman");
-        command.arg("cp").arg(source).arg(destination);
-        command
-    })
-    .map_err(ImageError::BuildFailed)?;
-    if !output.status.success() {
-        return Err(ImageError::BuildFailed(format!(
-            "podman cp failed: {}",
-            command_details(&output)
-        )));
-    }
-    Ok(())
-}
-
-fn podman_commit(cx: &BuildContext, container_id: &str, image_ref: &str) -> IResult<()> {
-    let output = run_podman_command(cx, "podman-commit", "podman commit", {
-        let mut command = ProcessCommand::new("podman");
-        command.arg("commit").arg(container_id).arg(image_ref);
-        command
-    })
-    .map_err(ImageError::BuildFailed)?;
-    if !output.status.success() {
-        return Err(ImageError::BuildFailed(format!(
-            "podman commit failed: {}",
-            command_details(&output)
-        )));
-    }
-    Ok(())
-}
-
-fn podman_rm(cx: &BuildContext, container_id: &str) -> IResult<()> {
-    let output = run_podman_command(cx, "podman-rm", "podman rm", {
-        let mut command = ProcessCommand::new("podman");
-        command.arg("rm").arg(container_id);
-        command
-    })
-    .map_err(ImageError::BuildFailed)?;
-    if !output.status.success() {
-        return Err(ImageError::BuildFailed(format!(
-            "podman rm failed: {}",
-            command_details(&output)
-        )));
-    }
-    Ok(())
-}
-
-fn merge_directory(source: &Path, destination: &Path) -> IResult<()> {
-    for entry in fs::read_dir(source).map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to read binary-output directory '{}': {error}",
-            source.display()
-        ))
-    })? {
-        let entry = entry.map_err(|error| {
-            ImageError::FsFailed(format!(
-                "failed to read directory entry in '{}': {error}",
-                source.display()
-            ))
-        })?;
-        let src_path = entry.path();
-        let dst_path = destination.join(entry.file_name());
-        copy_path_recursive(&src_path, &dst_path)?;
-    }
-    Ok(())
-}
-
-fn copy_path_recursive(source: &Path, destination: &Path) -> IResult<()> {
-    let metadata = fs::symlink_metadata(source).map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to inspect path '{}': {error}",
-            source.display()
-        ))
-    })?;
-
-    if metadata.file_type().is_symlink() {
-        let target = fs::read_link(source).map_err(|error| {
-            ImageError::FsFailed(format!(
-                "failed to read symlink '{}': {error}",
-                source.display()
-            ))
-        })?;
-        replace_path(destination)?;
-        create_symlink(&target, destination)?;
-        return Ok(());
-    }
-
-    if metadata.is_dir() {
-        fs::create_dir_all(destination).map_err(|error| {
-            ImageError::FsFailed(format!(
-                "failed to create directory '{}': {error}",
-                destination.display()
-            ))
-        })?;
-        for entry in fs::read_dir(source).map_err(|error| {
-            ImageError::FsFailed(format!(
-                "failed to read directory '{}': {error}",
-                source.display()
-            ))
-        })? {
-            let entry = entry.map_err(|error| {
-                ImageError::FsFailed(format!(
-                    "failed to read directory entry in '{}': {error}",
-                    source.display()
-                ))
-            })?;
-            copy_path_recursive(&entry.path(), &destination.join(entry.file_name()))?;
-        }
-        return Ok(());
-    }
-
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            ImageError::FsFailed(format!(
-                "failed to create directory '{}': {error}",
-                parent.display()
-            ))
-        })?;
-    }
-    replace_path(destination)?;
-    fs::copy(source, destination).map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to copy '{}' -> '{}': {error}",
-            source.display(),
-            destination.display()
-        ))
-    })?;
-    Ok(())
-}
-
-fn replace_path(path: &Path) -> IResult<()> {
-    if !(path.exists() || path.is_symlink()) {
-        return Ok(());
-    }
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to inspect existing path '{}': {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
-        fs::remove_dir_all(path).map_err(|error| {
-            ImageError::FsFailed(format!(
-                "failed to remove directory '{}': {error}",
-                path.display()
-            ))
-        })?;
+    // Synthesize new config: extend base diff_ids with the new layer's diffID.
+    let mut new_config = base_config;
+    if let Some(diff_ids) = new_config
+        .get_mut("rootfs")
+        .and_then(|r| r.get_mut("diff_ids"))
+        .and_then(Value::as_array_mut)
+    {
+        diff_ids.push(Value::String(layer.diff_id.clone()));
     } else {
-        fs::remove_file(path).map_err(|error| {
-            ImageError::FsFailed(format!(
-                "failed to remove file '{}': {error}",
-                path.display()
-            ))
-        })?;
+        new_config["rootfs"] = json!({
+            "type": "layers",
+            "diff_ids": [layer.diff_id]
+        });
     }
-    Ok(())
-}
+    let config_bytes = serde_json::to_vec(&new_config)
+        .map_err(|e| ImageError::FsFailed(format!("failed to serialize config: {e}")))?;
+    let config_desc =
+        oci::write_blob(staging_dir, &config_bytes, oci::MEDIA_TYPE_OCI_CONFIG)
+            .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
-#[cfg(unix)]
-fn create_symlink(target: &Path, link_path: &Path) -> IResult<()> {
-    std::os::unix::fs::symlink(target, link_path).map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to create symlink '{}' -> '{}': {error}",
-            link_path.display(),
-            target.display()
-        ))
-    })
-}
+    // Synthesize new manifest: extend base layers with the new layer.
+    let mut new_layers = base_manifest.layers.clone();
+    new_layers.push(layer_desc);
+    let new_manifest = oci::OciManifest {
+        schema_version: 2,
+        config: config_desc,
+        layers: new_layers,
+    };
+    let manifest_bytes = serde_json::to_vec(&new_manifest)
+        .map_err(|e| ImageError::FsFailed(format!("failed to serialize manifest: {e}")))?;
+    let manifest_desc =
+        oci::write_blob(staging_dir, &manifest_bytes, oci::MEDIA_TYPE_OCI_MANIFEST)
+            .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
-#[cfg(not(unix))]
-fn create_symlink(_target: &Path, _link_path: &Path) -> IResult<()> {
-    Err(ImageError::FsFailed(
-        "symlink overlay for image builder is supported only on unix hosts".to_string(),
-    ))
-}
+    let manifest_digest = manifest_desc.digest.clone();
+    oci::write_index(staging_dir, manifest_desc, None)
+        .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
-fn create_rootfs_tar(rootfs_dir: &Path, tar_path: &Path) -> IResult<()> {
-    let tar_file = fs::File::create(tar_path).map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to create rootfs tar '{}': {error}",
-            tar_path.display()
-        ))
-    })?;
-    let mut builder = tar::Builder::new(tar_file);
-    builder.follow_symlinks(false);
-    builder.append_dir_all(".", rootfs_dir).map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to write rootfs tar '{}': {error}",
-            tar_path.display()
-        ))
-    })?;
-    builder.finish().map_err(|error| {
-        ImageError::FsFailed(format!(
-            "failed to finalize rootfs tar '{}': {error}",
-            tar_path.display()
-        ))
-    })?;
-    Ok(())
-}
-
-fn write_descriptor(temp_root: &Path, image_ref: &str, digest: &str) -> Result<PathBuf, String> {
-    let staged_path = temp_root.join("container-image.json");
-    let payload = json!({
-        "schema": DESCRIPTOR_SCHEMA,
-        "storage": DESCRIPTOR_STORAGE,
-        "image_ref": image_ref,
-        "image_digest": digest,
-    });
-    let text = serde_json::to_string_pretty(&payload)
-        .map_err(|error| format!("failed to serialize container-image descriptor: {error}"))?;
-    fsutil::write_atomic(&staged_path, &text).map_err(|error| error.to_string())?;
-    Ok(staged_path)
-}
-
-fn command_details(output: &std::process::Output) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    match (stdout.is_empty(), stderr.is_empty()) {
-        (true, true) => "no output".to_string(),
-        (false, true) => format!("stdout: {stdout}"),
-        (true, false) => format!("stderr: {stderr}"),
-        (false, false) => format!("stdout: {stdout}; stderr: {stderr}"),
-    }
-}
-
-fn run_podman_command(
-    cx: &BuildContext,
-    label: &str,
-    display_name: &str,
-    mut command: ProcessCommand,
-) -> Result<std::process::Output, String> {
-    cx.log_event(
-        BuildLogLevel::Info,
-        label,
-        format!("running {display_name}"),
-    );
-    let output = command
-        .output()
-        .map_err(|error| format!("failed to execute {display_name}: {error}"))?;
-    let raw_log_path = write_podman_raw_log(cx, label, display_name, &output);
-
-    if output.status.success() {
-        cx.log_event_with_details(
-            BuildLogLevel::Info,
-            label,
-            format!("{display_name} completed"),
-            None,
-            raw_log_path,
-            Map::new(),
-        );
-    } else {
-        cx.log_event_with_details(
-            BuildLogLevel::Error,
-            "command-fail",
-            format!("{display_name} failed: {}", command_details(&output)),
-            None,
-            raw_log_path,
-            Map::new(),
-        );
-    }
-
-    Ok(output)
-}
-
-fn write_podman_raw_log(
-    cx: &BuildContext,
-    label: &str,
-    display_name: &str,
-    output: &std::process::Output,
-) -> Option<PathBuf> {
-    let log_content = format!(
-        "command: {display_name}\nexit_code: {}\nstatus_success: {}\n\n=== stdout ===\n{}\n\n=== stderr ===\n{}\n",
-        output
-            .status
-            .code()
-            .map(|code| code.to_string())
-            .unwrap_or_else(|| "signal".to_string()),
-        output.status.success(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    cx.write_raw_log(label, &log_content)
-}
-
-fn map_fsutil_error_to_container(error: fsutil::FsUtilError) -> ContainerImageError {
-    ContainerImageError::FsFailed(error.to_string())
-}
-
-fn map_fsutil_error_to_image(error: fsutil::FsUtilError) -> ImageError {
-    ImageError::FsFailed(error.to_string())
+    Ok(manifest_digest)
 }
 
 fn map_container_image_error(error: ContainerImageError) -> BuilderError {
@@ -814,17 +453,11 @@ fn map_image_error(error: ImageError) -> BuilderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{
-        Builder, BuilderInputObject, BuilderInputValue, BuilderInputs,
-    };
-    use std::env;
-    use std::sync::{Mutex, OnceLock};
+    use mbuild_core::{Builder, BuilderInputObject, BuilderInputValue, BuilderInputs};
+    use sha2::{Digest, Sha256};
+    use std::fs;
+    use std::path::PathBuf;
     use tempfile::tempdir;
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn build_context(root: &Path) -> BuildContext {
         BuildContext::with_noop_logger(
@@ -839,54 +472,72 @@ mod tests {
         )
     }
 
-    fn install_fake_podman(dir: &Path, base_inspect_json: &str) {
-        let script_path = dir.join("podman");
-        let script = include_str!("../tests/assets/fake_podman_full.sh")
-            .replace("__BASE_INSPECT_JSON__", base_inspect_json)
-            .replace("__GENERATED_PREFIX__", GENERATED_IMAGE_PREFIX)
-            .replace("__GENERATED_DIGEST__", GENERATED_DIGEST);
-        fs::write(&script_path, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(&script_path).unwrap().permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&script_path, permissions).unwrap();
-        }
-    }
-
-    fn with_fake_podman<T>(base_inspect_json: &str, f: impl FnOnce() -> T) -> T {
-        let _guard = env_lock().lock().unwrap();
-        let temp = tempdir().unwrap();
-        install_fake_podman(temp.path(), base_inspect_json);
-        let previous_path = env::var_os("PATH");
-        let new_path = match &previous_path {
-            Some(existing) => {
-                let mut joined = temp.path().as_os_str().to_os_string();
-                joined.push(":");
-                joined.push(existing);
-                joined
-            }
-            None => temp.path().as_os_str().to_os_string(),
-        };
-        unsafe { env::set_var("PATH", &new_path) };
-        let result = f();
-        match previous_path {
-            Some(path) => unsafe { env::set_var("PATH", path) },
-            None => unsafe { env::remove_var("PATH") },
-        }
-        result
-    }
-
-    fn sample_digest() -> &'static str {
-        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    }
-
-    fn base_inspect_json() -> String {
-        format!(
-            "[{{\"Id\":\"sha256:imageid\",\"RepoDigests\":[\"docker.io/library/buildpack-deps@{}\"]}}]",
-            sample_digest()
+    /// Create a minimal valid OCI layout directory and return the path to it.
+    fn create_test_oci_layout(dir: &Path, name: &str) -> PathBuf {
+        let oci_dir = dir.join(name);
+        fs::create_dir_all(oci_dir.join("blobs").join("sha256")).unwrap();
+        fs::write(
+            oci_dir.join("oci-layout"),
+            r#"{"imageLayoutVersion":"1.0.0"}"#,
         )
+        .unwrap();
+
+        let config_bytes = br#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":["sha256:0000000000000000000000000000000000000000000000000000000000000000"]},"config":{}}"#;
+        let config_hex = format!("{:x}", Sha256::digest(config_bytes));
+        let config_digest = format!("sha256:{config_hex}");
+        fs::write(
+            oci_dir.join("blobs").join("sha256").join(&config_hex),
+            config_bytes,
+        )
+        .unwrap();
+
+        // Minimal gzip of an empty tar (the magic bytes for gzip(empty tar)).
+        let layer_bytes: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        let layer_hex = format!("{:x}", Sha256::digest(layer_bytes));
+        let layer_digest = format!("sha256:{layer_hex}");
+        fs::write(
+            oci_dir.join("blobs").join("sha256").join(&layer_hex),
+            layer_bytes,
+        )
+        .unwrap();
+
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "config": {
+                "mediaType": oci::MEDIA_TYPE_OCI_CONFIG,
+                "digest": config_digest,
+                "size": config_bytes.len()
+            },
+            "layers": [{
+                "mediaType": oci::MEDIA_TYPE_OCI_LAYER,
+                "digest": layer_digest,
+                "size": layer_bytes.len()
+            }]
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let manifest_hex = format!("{:x}", Sha256::digest(&manifest_bytes));
+        let manifest_digest = format!("sha256:{manifest_hex}");
+        fs::write(
+            oci_dir.join("blobs").join("sha256").join(&manifest_hex),
+            &manifest_bytes,
+        )
+        .unwrap();
+
+        let index = serde_json::json!({
+            "schemaVersion": 2,
+            "manifests": [{
+                "mediaType": oci::MEDIA_TYPE_OCI_MANIFEST,
+                "digest": manifest_digest,
+                "size": manifest_bytes.len()
+            }]
+        });
+        fs::write(
+            oci_dir.join("index.json"),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+
+        oci_dir
     }
 
     fn resolved_binary_output(root: &Path, name: &str) -> BuilderInputObject {
@@ -897,181 +548,87 @@ mod tests {
     }
 
     fn resolved_base_image(root: &Path) -> BuilderInputObject {
-        let object_path = root.join("base-image.json");
-        let descriptor = serde_json::json!({
-            "image_ref": format!("docker.io/library/buildpack-deps@{}", sample_digest()),
-            "image_digest": sample_digest(),
-        });
-        fs::write(&object_path, serde_json::to_vec(&descriptor).unwrap()).unwrap();
-        BuilderInputObject { object_path }
+        let oci_dir = create_test_oci_layout(root, "base-image");
+        BuilderInputObject { object_path: oci_dir }
     }
 
-    fn resolved_base_image_with_ref(root: &Path, descriptor_image_ref: &str) -> BuilderInputObject {
-        let object_path = root.join("base-image-metadata-rich.json");
-        let descriptor = serde_json::json!({
-            "image_ref": descriptor_image_ref,
-            "image_digest": sample_digest(),
-        });
-        fs::write(&object_path, serde_json::to_vec(&descriptor).unwrap()).unwrap();
-        BuilderInputObject { object_path }
+    fn sample_digest() -> &'static str {
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
+
+    // -----------------------------------------------------------------------
+    // ContainerImage builder tests
+    // -----------------------------------------------------------------------
 
     #[test]
-    fn container_image_builder_writes_descriptor_and_attrs() {
-        with_fake_podman(&base_inspect_json(), || {
-            let temp = tempdir().unwrap();
-            let mut cx = build_context(temp.path());
-            let result = ContainerImageBuilder
-                .build_typed(
-                    ContainerImageConfig {
-                        image: "docker.io/library/buildpack-deps:bookworm".to_string(),
-                        digest: sample_digest().to_string(),
-                    },
-                    BuilderInputs::empty(),
-                    &mut cx,
-                )
-                .unwrap();
+    fn container_image_builder_fetches_and_writes_oci_layout() {
+        use mockito::Server;
 
-            assert_eq!(result.kind, KIND_CONTAINER_IMAGE);
-            assert_eq!(result.producer.builder, "container-image");
-            assert_eq!(
-                result.attrs["image"],
-                Value::String("docker.io/library/buildpack-deps:bookworm".to_string())
-            );
-            assert_eq!(
-                result.attrs["image_id"],
-                Value::String("sha256:imageid".to_string())
-            );
-            assert!(!result.attrs.contains_key("image_ref"), "{:?}", result.attrs);
-            assert!(!result.attrs.contains_key("image_digest"), "{:?}", result.attrs);
-            let descriptor: Value =
-                serde_json::from_slice(&fs::read(&result.staged_path).unwrap()).unwrap();
-            assert_eq!(
-                descriptor["schema"],
-                Value::String(DESCRIPTOR_SCHEMA.to_string())
-            );
-            assert_eq!(
-                descriptor["storage"],
-                Value::String(DESCRIPTOR_STORAGE.to_string())
-            );
-            assert_eq!(
-                descriptor["image_digest"],
-                Value::String(sample_digest().to_string())
-            );
+        let mut server = Server::new();
+
+        let config_bytes = br#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":["sha256:0000000000000000000000000000000000000000000000000000000000000000"]},"config":{}}"#;
+        let config_hex = format!("{:x}", Sha256::digest(config_bytes));
+        let config_digest = format!("sha256:{config_hex}");
+
+        let layer_bytes: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x00";
+        let layer_hex = format!("{:x}", Sha256::digest(layer_bytes));
+        let layer_digest = format!("sha256:{layer_hex}");
+
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "config": {"mediaType": oci::MEDIA_TYPE_OCI_CONFIG, "digest": config_digest, "size": config_bytes.len()},
+            "layers": [{"mediaType": oci::MEDIA_TYPE_OCI_LAYER, "digest": layer_digest, "size": layer_bytes.len()}]
         });
-    }
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let manifest_hex = format!("{:x}", Sha256::digest(&manifest_bytes));
+        let pinned_digest = format!("sha256:{manifest_hex}");
 
-    #[test]
-    fn image_builder_bootstrap_mode_writes_descriptor_and_attrs() {
-        with_fake_podman(&base_inspect_json(), || {
-            let temp = tempdir().unwrap();
-            let mut cx = build_context(temp.path());
-            let mut inputs = BuilderInputs::empty();
-            inputs.insert("base", BuilderInputValue::Optional(None));
-            inputs.insert(
-                "inputs",
-                BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
-            );
+        let repo = "testuser/testimage";
+        let path_manifests = format!("/v2/{repo}/manifests/{pinned_digest}");
+        let path_config = format!("/v2/{repo}/blobs/{config_digest}");
+        let path_layer = format!("/v2/{repo}/blobs/{layer_digest}");
+        let _m1 = server.mock("GET", "/v2/").with_status(200).create();
+        let _m2 = server
+            .mock("GET", path_manifests.as_str())
+            .with_status(200)
+            .with_header("Content-Type", oci::MEDIA_TYPE_OCI_MANIFEST)
+            .with_body(manifest_bytes)
+            .create();
+        let _m3 = server
+            .mock("GET", path_config.as_str())
+            .with_status(200)
+            .with_body(config_bytes.as_ref())
+            .create();
+        let _m4 = server
+            .mock("GET", path_layer.as_str())
+            .with_status(200)
+            .with_body(layer_bytes)
+            .create();
 
-            let result = ImageBuilder
-                .build_typed(ImageConfig { mode: None }, inputs, &mut cx)
-                .unwrap();
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        let image = format!("{}/{repo}@{pinned_digest}", server.host_with_port());
 
-            assert_eq!(result.kind, KIND_CONTAINER_IMAGE);
-            assert_eq!(result.producer.builder, "image");
-            assert_eq!(result.attrs["mode"], Value::String("bootstrap".to_string()));
-            assert_eq!(
-                result.attrs["image_id"],
-                Value::String("sha256:generated-image".to_string())
-            );
-            assert!(!result.attrs.contains_key("image_ref"), "{:?}", result.attrs);
-            assert!(!result.attrs.contains_key("image_digest"), "{:?}", result.attrs);
-            let descriptor: Value =
-                serde_json::from_slice(&fs::read(&result.staged_path).unwrap()).unwrap();
-            assert_eq!(
-                descriptor["schema"],
-                Value::String(DESCRIPTOR_SCHEMA.to_string())
-            );
-            assert_eq!(
-                descriptor["image_digest"],
-                Value::String(GENERATED_DIGEST.to_string())
-            );
-        });
-    }
+        let result = ContainerImageBuilder
+            .build_typed(
+                ContainerImageConfig {
+                    image: image.clone(),
+                    digest: pinned_digest.clone(),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
 
-    #[test]
-    fn image_builder_layered_mode_uses_base_image() {
-        with_fake_podman(&base_inspect_json(), || {
-            let temp = tempdir().unwrap();
-            let mut cx = build_context(temp.path());
-            let mut inputs = BuilderInputs::empty();
-            inputs.insert(
-                "base",
-                BuilderInputValue::Optional(Some(resolved_base_image(temp.path()))),
-            );
-            inputs.insert(
-                "inputs",
-                BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
-            );
-
-            let result = ImageBuilder
-                .build_typed(
-                    ImageConfig {
-                        mode: Some("layered".to_string()),
-                    },
-                    inputs,
-                    &mut cx,
-                )
-                .unwrap();
-
-            assert_eq!(result.attrs["mode"], Value::String("layered".to_string()));
-            assert_eq!(
-                result.attrs["base_image_ref"],
-                Value::String(format!(
-                    "docker.io/library/buildpack-deps@{}",
-                    sample_digest()
-                ))
-            );
-        });
-    }
-
-    #[test]
-    fn image_builder_uses_base_image_descriptor() {
-        with_fake_podman(&base_inspect_json(), || {
-            let temp = tempdir().unwrap();
-            let mut cx = build_context(temp.path());
-            let inputs = BuilderInputs::new(std::collections::BTreeMap::from([
-                (
-                    "base".to_string(),
-                    BuilderInputValue::Optional(Some(resolved_base_image_with_ref(
-                        temp.path(),
-                        "docker.io/library/custom@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    ))),
-                ),
-                (
-                    "inputs".to_string(),
-                    BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
-                ),
-            ]));
-
-            let result = ImageBuilder
-                .build_typed(
-                    ImageConfig {
-                        mode: Some("layered".to_string()),
-                    },
-                    inputs,
-                    &mut cx,
-                )
-                .unwrap();
-
-            assert_eq!(
-                result.attrs["base_image_ref"],
-                Value::String(
-                    "docker.io/library/custom@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        .to_string(),
-                )
-            );
-        });
+        assert_eq!(result.kind, KIND_CONTAINER_IMAGE);
+        assert_eq!(result.producer.builder, "container-image");
+        assert_eq!(result.attrs["image"], Value::String(image));
+        assert_eq!(result.attrs["manifest_digest"], Value::String(pinned_digest));
+        assert!(result.staged_path.join("oci-layout").exists());
+        assert!(result.staged_path.join("index.json").exists());
+        assert!(result.staged_path.join("blobs").join("sha256").join(&manifest_hex).exists());
+        assert!(result.staged_path.join("blobs").join("sha256").join(&config_hex).exists());
+        assert!(result.staged_path.join("blobs").join("sha256").join(&layer_hex).exists());
     }
 
     #[test]
@@ -1084,7 +641,7 @@ mod tests {
         let error = ContainerImageBuilder
             .build_typed(
                 ContainerImageConfig {
-                    image: "docker.io/library/buildpack-deps:bookworm".to_string(),
+                    image: "docker.io/library/ubuntu:20.04".to_string(),
                     digest: sample_digest().to_string(),
                 },
                 inputs,
@@ -1096,14 +653,33 @@ mod tests {
     }
 
     #[test]
+    fn container_image_builder_rejects_invalid_digest() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let error = ContainerImageBuilder
+            .build_typed(
+                ContainerImageConfig {
+                    image: "docker.io/library/ubuntu:20.04".to_string(),
+                    digest: "sha256:short".to_string(),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, BuilderError::InvalidRecipe(_)));
+    }
+
+    #[test]
     fn build_erased_rejects_unknown_config_field() {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
 
         let error = ContainerImageBuilder
             .build_erased(
-                json!({
-                    "image": "docker.io/library/buildpack-deps:bookworm",
+                serde_json::json!({
+                    "image": "docker.io/library/ubuntu:20.04",
                     "digest": sample_digest(),
                     "extra": true,
                 }),
@@ -1115,8 +691,12 @@ mod tests {
         assert!(matches!(error, BuilderError::InvalidRecipe(_)));
     }
 
+    // -----------------------------------------------------------------------
+    // Image builder tests
+    // -----------------------------------------------------------------------
+
     #[test]
-    fn image_build_erased_rejects_unknown_config_field() {
+    fn image_builder_bootstrap_mode_produces_oci_layout() {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
         let mut inputs = BuilderInputs::empty();
@@ -1126,34 +706,114 @@ mod tests {
             BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
         );
 
+        let result = ImageBuilder
+            .build_typed(ImageConfig { mode: None }, inputs, &mut cx)
+            .unwrap();
+
+        assert_eq!(result.kind, KIND_CONTAINER_IMAGE);
+        assert_eq!(result.producer.builder, "image");
+        assert_eq!(result.attrs["mode"], Value::String("bootstrap".to_string()));
+        assert!(result.attrs.contains_key("manifest_digest"), "{:?}", result.attrs);
+        let digest = result.attrs["manifest_digest"].as_str().unwrap();
+        assert!(digest.starts_with("sha256:"), "manifest_digest should start with sha256:");
+        assert!(result.staged_path.join("oci-layout").exists());
+        assert!(result.staged_path.join("index.json").exists());
+    }
+
+    #[test]
+    fn image_builder_layered_mode_produces_oci_layout() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        let base = resolved_base_image(temp.path());
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert("base", BuilderInputValue::Optional(Some(base)));
+        inputs.insert(
+            "inputs",
+            BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
+        );
+
+        let result = ImageBuilder
+            .build_typed(
+                ImageConfig {
+                    mode: Some("layered".to_string()),
+                },
+                inputs,
+                &mut cx,
+            )
+            .unwrap();
+
+        assert_eq!(result.attrs["mode"], Value::String("layered".to_string()));
+        let digest = result.attrs["manifest_digest"].as_str().unwrap();
+        assert!(digest.starts_with("sha256:"));
+        assert!(result.staged_path.join("oci-layout").exists());
+        assert!(result.staged_path.join("index.json").exists());
+    }
+
+    #[test]
+    fn image_builder_layered_mode_has_more_blobs_than_base() {
+        // Verify that the derived image has the base blobs plus new ones.
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        let base_oci = create_test_oci_layout(temp.path(), "base-oci");
+        let base_blob_count = fs::read_dir(base_oci.join("blobs").join("sha256"))
+            .unwrap()
+            .count();
+
+        let base = BuilderInputObject {
+            object_path: base_oci,
+        };
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert("base", BuilderInputValue::Optional(Some(base)));
+        inputs.insert(
+            "inputs",
+            BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
+        );
+
+        let result = ImageBuilder
+            .build_typed(
+                ImageConfig {
+                    mode: Some("layered".to_string()),
+                },
+                inputs,
+                &mut cx,
+            )
+            .unwrap();
+
+        let new_blob_count = fs::read_dir(result.staged_path.join("blobs").join("sha256"))
+            .unwrap()
+            .count();
+        // We should have base blobs + new manifest + new config + new layer = +3
+        assert!(new_blob_count > base_blob_count, "layered image should have more blobs");
+    }
+
+    #[test]
+    fn image_builder_rejects_base_without_oci_layout_marker() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        // Create a directory without oci-layout file.
+        let bad_base = temp.path().join("bad-base");
+        fs::create_dir(&bad_base).unwrap();
+        let base = BuilderInputObject {
+            object_path: bad_base,
+        };
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert("base", BuilderInputValue::Optional(Some(base)));
+        inputs.insert(
+            "inputs",
+            BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
+        );
+
         let error = ImageBuilder
-            .build_erased(
-                json!({ "mode": "bootstrap", "extra": true }),
+            .build_typed(
+                ImageConfig {
+                    mode: Some("layered".to_string()),
+                },
                 inputs,
                 &mut cx,
             )
             .unwrap_err();
 
-        assert!(matches!(error, BuilderError::InvalidRecipe(_)));
-    }
-
-    #[test]
-    fn container_image_builder_rejects_invalid_digest() {
-        let temp = tempdir().unwrap();
-        let mut cx = build_context(temp.path());
-
-        let error = ContainerImageBuilder
-            .build_typed(
-                ContainerImageConfig {
-                    image: "docker.io/library/buildpack-deps:bookworm".to_string(),
-                    digest: "sha256:short".to_string(),
-                },
-                BuilderInputs::empty(),
-                &mut cx,
-            )
-            .unwrap_err();
-
-        assert!(matches!(error, BuilderError::InvalidRecipe(_)));
+        assert!(matches!(error, BuilderError::ExecutionFailed(_)));
     }
 
     #[test]
@@ -1181,26 +841,24 @@ mod tests {
     }
 
     #[test]
-    fn image_builder_reports_podman_import_failure() {
-        with_fake_podman(&base_inspect_json(), || {
-            let temp = tempdir().unwrap();
-            let mut cx = build_context(temp.path());
-            let mut inputs = BuilderInputs::empty();
-            inputs.insert("base", BuilderInputValue::Optional(None));
-            inputs.insert(
-                "inputs",
-                BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
-            );
+    fn image_build_erased_rejects_unknown_config_field() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert("base", BuilderInputValue::Optional(None));
+        inputs.insert(
+            "inputs",
+            BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
+        );
 
-            unsafe { env::set_var("MBUILD_TEST_IMAGE_IMPORT_FAIL", "1") };
-            let error = ImageBuilder
-                .build_typed(ImageConfig { mode: None }, inputs, &mut cx)
-                .unwrap_err();
-            unsafe { env::remove_var("MBUILD_TEST_IMAGE_IMPORT_FAIL") };
+        let error = ImageBuilder
+            .build_erased(
+                serde_json::json!({ "mode": "bootstrap", "extra": true }),
+                inputs,
+                &mut cx,
+            )
+            .unwrap_err();
 
-            assert!(matches!(error, BuilderError::ExecutionFailed(_)));
-            let message = error.to_string();
-            assert!(message.contains("podman import"), "{message}");
-        });
+        assert!(matches!(error, BuilderError::InvalidRecipe(_)));
     }
 }

@@ -1,7 +1,6 @@
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     InputArity, InputSlot, ProducerInfo, StagedBuildResult, TypedBuilder, fsutil,
-    load_container_image_descriptor,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -126,7 +125,8 @@ impl TypedBuilder for BinaryBuilder {
 
         let script_execution =
             resolve_script_execution(script, &config_path, sources).map_err(map_error)?;
-        let container_execution = resolve_container_execution(image).map_err(map_error)?;
+        let container_execution =
+            resolve_container_execution(image, cx).map_err(map_error)?;
         cx.log_event(
             BuildLogLevel::Info,
             "prepare",
@@ -231,20 +231,116 @@ fn resolve_script_execution(
     })
 }
 
-fn resolve_container_execution(image: &BuilderInputObject) -> BResult<ContainerExecution> {
-    if !image.object_path.is_file() {
+fn resolve_container_execution(
+    image: &BuilderInputObject,
+    cx: &BuildContext,
+) -> BResult<ContainerExecution> {
+    if !image.object_path.is_dir() {
         return Err(BinaryError::InputResolutionFailed(format!(
-            "container-image input must resolve to a file: {}",
+            "container-image input must resolve to a directory: {}",
+            image.object_path.display()
+        )));
+    }
+    if !image.object_path.join("oci-layout").exists() {
+        return Err(BinaryError::InputResolutionFailed(format!(
+            "container-image input is not a valid OCI layout directory: {}",
             image.object_path.display()
         )));
     }
 
-    let descriptor = load_container_image_descriptor(&image.object_path)
+    let config_digest = read_config_digest_from_oci_layout(&image.object_path)
         .map_err(BinaryError::InputResolutionFailed)?;
 
+    // Check if the image is already loaded in podman (by config digest = OCI image ID).
+    let exists = is_image_loaded_in_podman(&config_digest, cx)?;
+    if !exists {
+        load_oci_to_podman(&image.object_path, cx)?;
+    }
+
     Ok(ContainerExecution {
-        image_ref: descriptor.image_ref,
+        image_ref: config_digest,
     })
+}
+
+/// Read the config blob digest from an OCI layout directory.
+fn read_config_digest_from_oci_layout(oci_dir: &std::path::Path) -> Result<String, String> {
+    let index_bytes = std::fs::read(oci_dir.join("index.json"))
+        .map_err(|e| format!("failed to read index.json in '{}': {e}", oci_dir.display()))?;
+    let index: serde_json::Value = serde_json::from_slice(&index_bytes)
+        .map_err(|e| format!("failed to parse index.json: {e}"))?;
+    let manifest_digest = index["manifests"][0]["digest"]
+        .as_str()
+        .ok_or_else(|| "index.json: missing manifests[0].digest".to_string())?
+        .to_string();
+
+    let (alg, hex) = manifest_digest
+        .split_once(':')
+        .ok_or_else(|| format!("invalid manifest digest '{manifest_digest}'"))?;
+    let blob_path = oci_dir.join("blobs").join(alg).join(hex);
+    let manifest_bytes = std::fs::read(&blob_path)
+        .map_err(|e| format!("failed to read manifest blob '{}': {e}", blob_path.display()))?;
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| format!("failed to parse manifest: {e}"))?;
+    let config_digest = manifest["config"]["digest"]
+        .as_str()
+        .ok_or_else(|| "manifest: missing config.digest".to_string())?
+        .to_string();
+    Ok(config_digest)
+}
+
+/// Check whether the image with the given config digest (OCI image ID) is
+/// already loaded in podman.
+fn is_image_loaded_in_podman(config_digest: &str, cx: &BuildContext) -> BResult<bool> {
+    let mut cmd = ProcessCommand::new("podman");
+    cmd.arg("image").arg("exists").arg(config_digest);
+    cx.log_event(
+        BuildLogLevel::Info,
+        "podman-image-exists",
+        format!("checking podman for image {config_digest}"),
+    );
+    let output = cmd.output().map_err(|e| {
+        BinaryError::PodmanFailed(format!("failed to run podman image exists: {e}"))
+    })?;
+    Ok(output.status.success())
+}
+
+/// Create a tar archive of an OCI layout directory and load it into podman.
+fn load_oci_to_podman(oci_dir: &std::path::Path, cx: &BuildContext) -> BResult<()> {
+    let tar_path = cx.temp_root.join("oci-load.tar");
+    {
+        let file = std::fs::File::create(&tar_path).map_err(|e| {
+            BinaryError::FsFailed(format!(
+                "failed to create OCI tar '{}': {e}",
+                tar_path.display()
+            ))
+        })?;
+        let mut builder = tar::Builder::new(file);
+        builder.follow_symlinks(false);
+        builder.append_dir_all(".", oci_dir).map_err(|e| {
+            BinaryError::FsFailed(format!("failed to write OCI tar: {e}"))
+        })?;
+        builder.finish().map_err(|e| {
+            BinaryError::FsFailed(format!("failed to finalize OCI tar: {e}"))
+        })?;
+    }
+
+    cx.log_event(
+        BuildLogLevel::Info,
+        "podman-load",
+        format!("loading OCI image from '{}'", oci_dir.display()),
+    );
+    let mut cmd = ProcessCommand::new("podman");
+    cmd.arg("load").arg("--input").arg(&tar_path);
+    let output = cmd.output().map_err(|e| {
+        BinaryError::PodmanFailed(format!("failed to run podman load: {e}"))
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(BinaryError::PodmanFailed(format!(
+            "podman load failed: {stderr}"
+        )));
+    }
+    Ok(())
 }
 
 fn run_container_build(
@@ -578,26 +674,14 @@ mod tests {
         root: &Path,
         kind: &str,
         name: &str,
-        attrs: Map<String, Value>,
+        _attrs: Map<String, Value>,
     ) -> BuilderInputObject {
         let object_path = root.join(name);
         if kind == KIND_SOURCE_TREE || kind == KIND_BINARY_OUTPUT {
             fs::create_dir_all(&object_path).unwrap();
             fs::write(object_path.join("README.txt"), b"hello source\n").unwrap();
         } else if kind == KIND_CONTAINER_IMAGE {
-            let image_ref = attrs
-                .get("image_ref")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let image_digest = attrs
-                .get("image_digest")
-                .and_then(Value::as_str)
-                .unwrap_or("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-            let descriptor = serde_json::json!({
-                "image_ref": image_ref,
-                "image_digest": image_digest,
-            });
-            fs::write(&object_path, serde_json::to_vec(&descriptor).unwrap()).unwrap();
+            create_test_oci_layout_at(&object_path);
         } else {
             fs::write(&object_path, b"payload\n").unwrap();
             #[cfg(unix)]
@@ -610,24 +694,80 @@ mod tests {
         BuilderInputObject { object_path }
     }
 
+    /// Create a minimal valid OCI layout directory at the given path.
+    fn create_test_oci_layout_at(oci_dir: &Path) {
+        fs::create_dir_all(oci_dir.join("blobs").join("sha256")).unwrap();
+        fs::write(
+            oci_dir.join("oci-layout"),
+            r#"{"imageLayoutVersion":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let config_bytes = b"{}";
+        let config_digest_hex = sha256_hex_test(config_bytes);
+        let config_digest = format!("sha256:{config_digest_hex}");
+        fs::write(
+            oci_dir.join("blobs").join("sha256").join(&config_digest_hex),
+            config_bytes,
+        )
+        .unwrap();
+
+        let layer_bytes: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        let layer_digest_hex = sha256_hex_test(layer_bytes);
+        let layer_digest = format!("sha256:{layer_digest_hex}");
+        fs::write(
+            oci_dir.join("blobs").join("sha256").join(&layer_digest_hex),
+            layer_bytes,
+        )
+        .unwrap();
+
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config_digest, "size": config_bytes.len()},
+            "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": layer_digest, "size": layer_bytes.len()}]
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let manifest_digest_hex = sha256_hex_test(&manifest_bytes);
+        let manifest_digest = format!("sha256:{manifest_digest_hex}");
+        fs::write(
+            oci_dir.join("blobs").join("sha256").join(&manifest_digest_hex),
+            &manifest_bytes,
+        )
+        .unwrap();
+
+        let index = serde_json::json!({
+            "schemaVersion": 2,
+            "manifests": [{"mediaType": "application/vnd.oci.image.manifest.v1+json", "digest": manifest_digest, "size": manifest_bytes.len()}]
+        });
+        fs::write(
+            oci_dir.join("index.json"),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn sha256_hex_test(data: &[u8]) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        // We don't have sha2 as a dep here; use a deterministic pseudo-digest
+        // by hashing the data and padding to 64 hex chars. Good enough for
+        // test fixtures that just need unique, stable identifiers.
+        let mut hasher = DefaultHasher::new();
+        data.hash(&mut hasher);
+        let h = hasher.finish();
+        let padded = data.len();
+        format!("{h:016x}{h:016x}{h:016x}{padded:016x}")
+    }
+
     fn sample_inputs(root: &Path) -> BuilderInputs {
         let mut inputs = BuilderInputs::empty();
-        let mut image_attrs = Map::new();
-        image_attrs.insert(
-            "image_ref".to_string(),
-            Value::String("docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
-        );
-        image_attrs.insert(
-            "image_digest".to_string(),
-            Value::String("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
-        );
         inputs.insert(
             "image",
             BuilderInputValue::One(resolved_object(
                 root,
                 KIND_CONTAINER_IMAGE,
-                "image.json",
-                image_attrs,
+                "image-oci",
+                Map::new(),
             )),
         );
         inputs.insert(
@@ -706,9 +846,11 @@ mod tests {
                 fs::read_to_string(result.staged_path.join("copied").join("README.txt")).unwrap(),
                 "hello source\n"
             );
-            assert_eq!(
-                fs::read_to_string(result.staged_path.join("image-ref.txt")).unwrap(),
-                "docker.io/library/buildpack-deps@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            let image_ref = fs::read_to_string(result.staged_path.join("image-ref.txt")).unwrap();
+            let image_ref = image_ref.trim();
+            assert!(
+                image_ref.starts_with("sha256:") && image_ref.len() == 71,
+                "expected sha256:<64hex> image ref, got: {image_ref}"
             );
         });
     }
@@ -819,11 +961,8 @@ mod tests {
             let image = resolved_object(
                 temp.path(),
                 KIND_CONTAINER_IMAGE,
-                "image.json",
-                Map::from_iter([(
-                    "image_ref".to_string(),
-                    Value::String("docker.io/library/alpine@sha256:deadbeef".to_string()),
-                )]),
+                "image-oci-zero",
+                Map::new(),
             );
             let script = resolved_object(temp.path(), KIND_BUILD_SCRIPT, "script.sh", Map::new());
 
@@ -876,18 +1015,18 @@ mod tests {
     }
 
     #[test]
-    fn binary_builder_rejects_container_image_descriptor_without_image_ref() {
+    fn binary_builder_rejects_non_oci_layout_image_input() {
+        // A plain directory without oci-layout marker should be rejected.
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
+        let bad_image_dir = temp.path().join("not-an-oci-dir");
+        fs::create_dir(&bad_image_dir).unwrap();
         let mut inputs = BuilderInputs::empty();
         inputs.insert(
             "image",
-            BuilderInputValue::One(resolved_object(
-                temp.path(),
-                KIND_CONTAINER_IMAGE,
-                "image.json",
-                Map::new(),
-            )),
+            BuilderInputValue::One(BuilderInputObject {
+                object_path: bad_image_dir,
+            }),
         );
         inputs.insert(
             "script",
@@ -924,41 +1063,12 @@ mod tests {
     }
 
     #[test]
-    fn binary_builder_uses_container_image_descriptor_image_ref() {
+    fn binary_builder_uses_config_digest_as_image_ref() {
+        // The image ref passed to podman run should be the config blob digest
+        // (sha256:<config_hex>) extracted from the OCI layout.
         with_fake_podman(|| {
             let temp = tempdir().unwrap();
             let mut cx = build_context(temp.path());
-
-            let image = resolved_object(
-                temp.path(),
-                KIND_CONTAINER_IMAGE,
-                "image.json",
-                Map::from_iter([
-                    (
-                        "image_ref".to_string(),
-                        Value::String(
-                            "docker.io/library/custom@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                                .to_string(),
-                        ),
-                    ),
-                    (
-                        "image_digest".to_string(),
-                        Value::String(
-                            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                                .to_string(),
-                        ),
-                    ),
-                ]),
-            );
-            let script = resolved_object(temp.path(), KIND_BUILD_SCRIPT, "script.sh", Map::new());
-            let source = resolved_object(temp.path(), KIND_SOURCE_TREE, "src", Map::new());
-
-            let inputs = BuilderInputs::new(std::collections::BTreeMap::from([
-                ("image".to_string(), BuilderInputValue::One(image)),
-                ("script".to_string(), BuilderInputValue::One(script)),
-                ("sources".to_string(), BuilderInputValue::Many(vec![source])),
-            ]));
-
             let result = BinaryBuilder
                 .build_typed(
                     BinaryConfig {
@@ -966,14 +1076,16 @@ mod tests {
                         optimize: "size".to_string(),
                         script_config: None,
                     },
-                    inputs,
+                    sample_inputs(temp.path()),
                     &mut cx,
                 )
                 .unwrap();
 
-            assert_eq!(
-                fs::read_to_string(result.staged_path.join("image-ref.txt")).unwrap(),
-                "docker.io/library/custom@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+            let image_ref = fs::read_to_string(result.staged_path.join("image-ref.txt")).unwrap();
+            let image_ref = image_ref.trim();
+            assert!(
+                image_ref.starts_with("sha256:") && image_ref.len() == 71,
+                "expected sha256:<64hex> from OCI config digest, got: {image_ref}"
             );
         });
     }
