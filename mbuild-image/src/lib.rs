@@ -77,6 +77,8 @@ pub struct ContainerImageConfig {
 pub struct ImageConfig {
     #[serde(default)]
     mode: Option<String>,
+    #[serde(default)]
+    ref_name: Option<String>,
 }
 
 pub struct ContainerImageBuilder;
@@ -213,11 +215,12 @@ impl TypedBuilder for ImageBuilder {
             .map_err(|e| ImageError::FsFailed(format!("failed to create staging dir: {e}")))
             .map_err(map_image_error)?;
 
+        let ref_name = config.ref_name.as_deref();
         let manifest_digest = match mode {
-            "bootstrap" => run_bootstrap_mode(&staged_path, binaries).map_err(map_image_error)?,
+            "bootstrap" => run_bootstrap_mode(&staged_path, binaries, ref_name).map_err(map_image_error)?,
             "layered" => {
                 let base = base.unwrap();
-                run_layered_mode(&staged_path, base, binaries).map_err(map_image_error)?
+                run_layered_mode(&staged_path, base, binaries, ref_name).map_err(map_image_error)?
             }
             _ => unreachable!(),
         };
@@ -319,6 +322,7 @@ fn is_valid_sha256_digest(value: &str) -> bool {
 fn run_bootstrap_mode(
     staging_dir: &Path,
     binaries: &[BuilderInputObject],
+    ref_name: Option<&str>,
 ) -> IResult<String> {
     oci::init_layout(staging_dir)
         .map_err(|e| ImageError::FsFailed(e.to_string()))?;
@@ -357,7 +361,7 @@ fn run_bootstrap_mode(
             .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
     let manifest_digest = manifest_desc.digest.clone();
-    oci::write_index(staging_dir, manifest_desc, None)
+    oci::write_index(staging_dir, manifest_desc, ref_name)
         .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
     Ok(manifest_digest)
@@ -369,6 +373,7 @@ fn run_layered_mode(
     staging_dir: &Path,
     base: &BuilderInputObject,
     binaries: &[BuilderInputObject],
+    ref_name: Option<&str>,
 ) -> IResult<String> {
     let base_dir = &base.object_path;
 
@@ -426,7 +431,7 @@ fn run_layered_mode(
             .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
     let manifest_digest = manifest_desc.digest.clone();
-    oci::write_index(staging_dir, manifest_desc, None)
+    oci::write_index(staging_dir, manifest_desc, ref_name)
         .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
     Ok(manifest_digest)
@@ -707,7 +712,7 @@ mod tests {
         );
 
         let result = ImageBuilder
-            .build_typed(ImageConfig { mode: None }, inputs, &mut cx)
+            .build_typed(ImageConfig { ref_name: None, mode: None }, inputs, &mut cx)
             .unwrap();
 
         assert_eq!(result.kind, KIND_CONTAINER_IMAGE);
@@ -734,8 +739,7 @@ mod tests {
 
         let result = ImageBuilder
             .build_typed(
-                ImageConfig {
-                    mode: Some("layered".to_string()),
+                ImageConfig { ref_name: None, mode: Some("layered".to_string()),
                 },
                 inputs,
                 &mut cx,
@@ -771,8 +775,7 @@ mod tests {
 
         let result = ImageBuilder
             .build_typed(
-                ImageConfig {
-                    mode: Some("layered".to_string()),
+                ImageConfig { ref_name: None, mode: Some("layered".to_string()),
                 },
                 inputs,
                 &mut cx,
@@ -805,8 +808,7 @@ mod tests {
 
         let error = ImageBuilder
             .build_typed(
-                ImageConfig {
-                    mode: Some("layered".to_string()),
+                ImageConfig { ref_name: None, mode: Some("layered".to_string()),
                 },
                 inputs,
                 &mut cx,
@@ -829,8 +831,7 @@ mod tests {
 
         let error = ImageBuilder
             .build_typed(
-                ImageConfig {
-                    mode: Some("invalid".to_string()),
+                ImageConfig { ref_name: None, mode: Some("invalid".to_string()),
                 },
                 inputs,
                 &mut cx,
