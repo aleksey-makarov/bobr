@@ -331,6 +331,9 @@ fn load_oci_to_podman(oci_dir: &std::path::Path, cx: &BuildContext) -> BResult<(
     );
     let mut cmd = ProcessCommand::new("podman");
     cmd.arg("load").arg("--input").arg(&tar_path);
+    // Clear TMPDIR: podman uses it for temp files when processing oci-archive,
+    // and a stale value (e.g. from an expired nix-shell) causes load to fail.
+    cmd.env_remove("TMPDIR");
     let output = cmd.output().map_err(|e| {
         BinaryError::PodmanFailed(format!("failed to run podman load: {e}"))
     })?;
