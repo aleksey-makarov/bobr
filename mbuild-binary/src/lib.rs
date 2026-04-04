@@ -330,6 +330,10 @@ fn load_oci_to_podman(oci_dir: &std::path::Path, cx: &BuildContext) -> BResult<(
         format!("loading OCI image from '{}'", oci_dir.display()),
     );
     let mut cmd = ProcessCommand::new("podman");
+    // ignore_chown_errors: rootless podman without /etc/subuid cannot map all
+    // uid/gid values (e.g. gid=42 for the shadow group in Debian images).
+    // Files retain the current user's ownership instead — acceptable for builds.
+    cmd.arg("--storage-opt").arg("ignore_chown_errors=true");
     cmd.arg("load").arg("--input").arg(&tar_path);
     // Clear TMPDIR: podman uses it for temp files when processing oci-archive,
     // and a stale value (e.g. from an expired nix-shell) causes load to fail.
