@@ -3,10 +3,11 @@ use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use mbuild_core::{
     Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, Builder,
     BuilderError, CasError, PublishedBuild, ResultInputIdentity, StoreLayout, compute_build_key,
-    compute_result_key, load_build_handle, materialize_build, object_path,
+    compute_result_key, fsutil, load_build_handle, materialize_build, object_path,
 };
 use serde_json::Value;
 use std::fmt;
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -50,7 +51,6 @@ impl fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {}
 
 pub(crate) fn execute_builder_node(
-    workspace_root: &Path,
     layout: &StoreLayout,
     builder: &'static dyn Builder,
     build_name: &str,
@@ -136,13 +136,7 @@ pub(crate) fn execute_builder_node(
         "cache-miss",
         "executing builder",
     );
-    let mut context = build_context(
-        workspace_root,
-        layout,
-        builder.spec().tag,
-        build_key,
-        logger.clone(),
-    );
+    let mut context = build_context(layout, builder.spec().tag, build_key, logger.clone())?;
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
@@ -158,7 +152,9 @@ pub(crate) fn execute_builder_node(
                 "fail",
                 error.to_string(),
             );
-            map_builder_error(error)
+            let runtime_error = map_builder_error(error);
+            cleanup_temp_dir(&context.temp_dir, logger.as_ref());
+            runtime_error
         })?;
     let published = materialize_build(
         layout,
@@ -176,7 +172,9 @@ pub(crate) fn execute_builder_node(
             error.to_string(),
         );
         map_store_error(error)
-    })?;
+    });
+    cleanup_temp_dir(&context.temp_dir, logger.as_ref());
+    let published = published?;
     Ok(published)
 }
 
@@ -264,22 +262,25 @@ pub(crate) fn to_resolved_dependency(published: PublishedBuild) -> ResolvedDepen
 }
 
 pub(crate) fn build_context(
-    workspace_root: &Path,
     layout: &StoreLayout,
     builder_tag: &str,
     build_key: BuildKey,
     logger: Arc<dyn BuildLogger>,
-) -> BuildContext {
-    let builder_root = layout
+) -> Result<BuildContext, RuntimeError> {
+    let state_dir = layout
         .root
         .join("builder-state")
         .join(builder_tag.to_ascii_lowercase());
-    BuildContext::with_noop_logger(
-        workspace_root.to_path_buf(),
-        builder_root.clone(),
-        builder_root.join("tmp").join(build_key.to_hex()),
-    )
-    .with_logger(logger)
+    let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
+    fs::create_dir_all(&state_dir).map_err(|error| {
+        RuntimeError::Store(format!(
+            "failed to create builder state directory '{}': {error}",
+            state_dir.display()
+        ))
+    })?;
+    fsutil::recreate_empty_dir_force(&temp_dir)
+        .map_err(|error| RuntimeError::Store(error.to_string()))?;
+    Ok(BuildContext::with_noop_logger(state_dir, temp_dir).with_logger(logger))
 }
 
 pub(crate) fn map_builder_error(error: BuilderError) -> RuntimeError {
@@ -306,14 +307,143 @@ pub(crate) fn log_runtime_event(
     });
 }
 
+fn cleanup_temp_dir(temp_dir: &Path, logger: &dyn BuildLogger) {
+    if let Err(error) = fsutil::remove_dir_force(temp_dir) {
+        log_runtime_event(
+            logger,
+            BuildLogLevel::Warn,
+            "cleanup-warning",
+            format!(
+                "failed to remove temp dir '{}': {error}",
+                temp_dir.display()
+            ),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{PublishOutputRequest, ResultInputIdentity, publish_output};
-    use serde_json::{Map, json};
+    use crate::logging::{BuildRunLogger, RunOptions};
+    use mbuild_core::{
+        BuildContext, BuilderInputs, BuilderSpec, ProducerInfo, PublishOutputRequest,
+        ResultInputIdentity, StagedBuildResult, TypedBuilder, publish_output,
+    };
+    use serde::Deserialize;
+    use serde_json::{Map, Value, json};
     use std::fs;
     use std::str::FromStr;
+    use std::sync::Arc;
     use tempfile::tempdir;
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RuntimeTestConfig {
+        kind: String,
+    }
+
+    static RUNTIME_TEST_SPEC: BuilderSpec = BuilderSpec {
+        tag: "RuntimeTest",
+        inputs: &[],
+    };
+
+    #[derive(Debug)]
+    struct RuntimeTestBuilder;
+    static RUNTIME_TEST_BUILDER: RuntimeTestBuilder = RuntimeTestBuilder;
+
+    impl TypedBuilder for RuntimeTestBuilder {
+        type Config = RuntimeTestConfig;
+
+        fn spec(&self) -> &'static BuilderSpec {
+            &RUNTIME_TEST_SPEC
+        }
+
+        fn build_typed(
+            &self,
+            config: Self::Config,
+            inputs: BuilderInputs,
+            cx: &mut BuildContext,
+        ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+            assert!(inputs.is_empty());
+            assert!(cx.state_dir.is_dir());
+            assert!(cx.temp_dir.is_dir());
+            assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
+
+            fs::create_dir_all(cx.temp_dir.join("out")).unwrap();
+            fs::write(cx.temp_dir.join("out").join("payload"), b"ok\n").unwrap();
+
+            Ok(StagedBuildResult {
+                kind: config.kind,
+                producer: ProducerInfo {
+                    builder: "runtime-test".to_string(),
+                },
+                meta: Map::new(),
+                staged_path: cx.temp_dir.join("out"),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct RuntimeFailBuilder;
+    static RUNTIME_FAIL_BUILDER: RuntimeFailBuilder = RuntimeFailBuilder;
+
+    impl TypedBuilder for RuntimeFailBuilder {
+        type Config = RuntimeTestConfig;
+
+        fn spec(&self) -> &'static BuilderSpec {
+            &RUNTIME_TEST_SPEC
+        }
+
+        fn build_typed(
+            &self,
+            _config: Self::Config,
+            inputs: BuilderInputs,
+            cx: &mut BuildContext,
+        ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+            assert!(inputs.is_empty());
+            assert!(cx.state_dir.is_dir());
+            assert!(cx.temp_dir.is_dir());
+            assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
+            fs::write(cx.temp_dir.join("scratch"), b"temp\n").unwrap();
+            Err(mbuild_core::BuilderError::ExecutionFailed(
+                "intentional failure".to_string(),
+            ))
+        }
+    }
+
+    #[derive(Debug)]
+    struct RuntimeBrokenStageBuilder;
+    static RUNTIME_BROKEN_STAGE_BUILDER: RuntimeBrokenStageBuilder = RuntimeBrokenStageBuilder;
+
+    impl TypedBuilder for RuntimeBrokenStageBuilder {
+        type Config = RuntimeTestConfig;
+
+        fn spec(&self) -> &'static BuilderSpec {
+            &RUNTIME_TEST_SPEC
+        }
+
+        fn build_typed(
+            &self,
+            config: Self::Config,
+            inputs: BuilderInputs,
+            cx: &mut BuildContext,
+        ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+            assert!(inputs.is_empty());
+            assert!(cx.state_dir.is_dir());
+            assert!(cx.temp_dir.is_dir());
+            assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
+            fs::write(cx.temp_dir.join("scratch"), b"temp\n").unwrap();
+
+            Ok(StagedBuildResult {
+                kind: config.kind,
+                producer: ProducerInfo {
+                    builder: "runtime-test".to_string(),
+                },
+                meta: Map::new(),
+                staged_path: cx.temp_dir.join("missing-output"),
+            })
+        }
+    }
 
     #[test]
     fn lookup_canonical_result_depends_on_input_meta_hash() {
@@ -385,5 +515,101 @@ mod tests {
             .unwrap()
             .is_none()
         );
+    }
+
+    #[test]
+    fn execute_builder_node_prepares_dirs_and_cleans_temp_on_success() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let config = json!({ "kind": "binary-output" });
+        let inputs = ResolvedInputs::empty();
+        let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
+        let state_dir = layout.root.join("builder-state").join("runtimetest");
+        let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join("stale"), b"old\n").unwrap();
+
+        let published = execute_builder_node(
+            &layout,
+            &RUNTIME_TEST_BUILDER,
+            "runtime-test",
+            "2026-04-05T12:00:00.000000000Z",
+            logger,
+            config,
+            inputs,
+        )
+        .unwrap();
+
+        assert!(state_dir.is_dir());
+        assert!(!temp_dir.exists());
+        assert_eq!(published.build.kind, "binary-output");
+        assert!(published.object_path.is_dir());
+        assert!(published.object_path.join("payload").is_file());
+    }
+
+    #[test]
+    fn execute_builder_node_cleans_temp_on_failure() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let config = Value::Object(Map::from_iter([(
+            "kind".to_string(),
+            Value::String("binary-output".to_string()),
+        )]));
+        let inputs = ResolvedInputs::empty();
+        let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
+        let temp_dir = layout
+            .root
+            .join("builder-state")
+            .join("runtimetest")
+            .join("tmp")
+            .join(build_key.to_hex());
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join("stale"), b"old\n").unwrap();
+
+        let error = execute_builder_node(
+            &layout,
+            &RUNTIME_FAIL_BUILDER,
+            "runtime-fail",
+            "2026-04-05T12:00:00.000000000Z",
+            logger,
+            config,
+            inputs,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.class(), "build");
+        assert!(!temp_dir.exists());
+    }
+
+    #[test]
+    fn execute_builder_node_cleans_temp_on_materialize_failure() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let config = json!({ "kind": "binary-output" });
+        let inputs = ResolvedInputs::empty();
+        let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
+        let temp_dir = layout
+            .root
+            .join("builder-state")
+            .join("runtimetest")
+            .join("tmp")
+            .join(build_key.to_hex());
+
+        let error = execute_builder_node(
+            &layout,
+            &RUNTIME_BROKEN_STAGE_BUILDER,
+            "runtime-broken-stage",
+            "2026-04-05T12:00:00.000000000Z",
+            logger,
+            config,
+            inputs,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.class(), "store");
+        assert!(!temp_dir.exists());
     }
 }

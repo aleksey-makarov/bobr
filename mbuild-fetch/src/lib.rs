@@ -126,10 +126,8 @@ impl TypedBuilder for FetchBuilder {
             ));
         }
 
-        let cache_dir = cx.builder_root.join(CACHE_DIR);
-        ensure_dir(&cx.builder_root, "fetch builder root").map_err(map_error)?;
+        let cache_dir = cx.state_dir.join(CACHE_DIR);
         ensure_dir(&cache_dir, "fetch cache").map_err(map_error)?;
-        ensure_dir(&cx.temp_root, "fetch temp").map_err(map_error)?;
 
         let urls = config.url.as_list();
         cx.log_event(
@@ -139,7 +137,7 @@ impl TypedBuilder for FetchBuilder {
         );
         let expected_hash = parse_hash(&config.hash).map_err(map_error)?;
         let (cached_blob, source_url) =
-            ensure_cached_blob(&cache_dir, &cx.builder_root, cx, &urls, &expected_hash)
+            ensure_cached_blob(&cache_dir, &cx.state_dir, cx, &urls, &expected_hash)
                 .map_err(map_error)?;
 
         let kind = config.kind.clone().unwrap_or_else(|| {
@@ -159,7 +157,7 @@ impl TypedBuilder for FetchBuilder {
             let format =
                 select_archive_format(&config, &cached_blob, &source_url).map_err(map_error)?;
             let (path, normalized_root) =
-                stage_archive_output(&cx.temp_root, &cached_blob, format.clone())
+                stage_archive_output(&cx.temp_dir, &cached_blob, format.clone())
                     .map_err(map_error)?;
             let mut meta = Map::new();
             meta.insert(
@@ -170,7 +168,7 @@ impl TypedBuilder for FetchBuilder {
             meta.insert("unpack".to_string(), Value::Bool(true));
             (path, meta)
         } else {
-            let path = stage_file_output(&cx.temp_root, &cached_blob).map_err(map_error)?;
+            let path = stage_file_output(&cx.temp_dir, &cached_blob).map_err(map_error)?;
             let mut meta = Map::new();
             meta.insert("unpack".to_string(), Value::Bool(false));
             (path, meta)
@@ -860,14 +858,11 @@ mod tests {
     use tempfile::tempdir;
 
     fn build_context(root: &Path) -> BuildContext {
-        BuildContext::with_noop_logger(
-            root.to_path_buf(),
-            root.join(".mbuild").join("builder-state").join("fetch"),
-            root.join(".mbuild")
-                .join("builder-state")
-                .join("fetch")
-                .join("tmp"),
-        )
+        let state_dir = root.join(".mbuild").join("builder-state").join("fetch");
+        let temp_dir = state_dir.join("tmp");
+        fs::create_dir_all(&state_dir).unwrap();
+        mbuild_core::fsutil::recreate_empty_dir_force(&temp_dir).unwrap();
+        BuildContext::with_noop_logger(state_dir, temp_dir)
     }
 
     fn spawn_http_server(
@@ -1104,7 +1099,7 @@ mod tests {
 
         assert_eq!(fs::read(&first.staged_path).unwrap(), payload);
         assert_eq!(fs::read(&second.staged_path).unwrap(), payload);
-        let cache_blob = first_cx.builder_root.join("cache").join("sha256");
+        let cache_blob = first_cx.state_dir.join("cache").join("sha256");
         assert_eq!(fs::read_dir(cache_blob).unwrap().count(), 1);
     }
 

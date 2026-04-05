@@ -105,7 +105,6 @@ pub fn run_recipe_json_in_workspace_with_options(
     }
 
     execute_misses(
-        workspace_root,
         &layout,
         logger,
         &nodes,
@@ -260,7 +259,6 @@ fn lookup_canonical_for_planned_node(
 }
 
 fn execute_misses(
-    workspace_root: &Path,
     layout: &StoreLayout,
     logger: Arc<BuildRunLogger>,
     nodes: &HashMap<BuildKey, PlannedNode>,
@@ -320,14 +318,12 @@ fn execute_misses(
             let config = node.recipe.config().clone();
             let build_name = node.recipe.build_name().to_string();
             let builder_tag = node.recipe.builder_tag().to_string();
-            let workspace_root = workspace_root.to_path_buf();
             let layout = layout.clone();
             let logger = logger.clone();
             let tx = tx.clone();
             let handle = thread::spawn(move || {
                 let result = match builders::get_builder(&builder_tag) {
                     Some(builder) => execute_builder_node(
-                        &workspace_root,
                         &layout,
                         builder,
                         &build_name,

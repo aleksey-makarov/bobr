@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -158,33 +158,34 @@ impl BuildLogger for NoopBuildLogger {
 }
 
 #[derive(Clone)]
+/// Builder execution context prepared by the runtime before a builder is invoked.
+///
+/// Contract:
+/// - `state_dir` is a persistent builder-local state directory. It exists on entry and is not
+///   cleaned by the runtime between builds.
+/// - `temp_dir` is a per-build temporary directory. It exists and is empty on entry.
+/// - Builders may create files and subdirectories inside both directories.
+/// - The runtime owns cleanup of `temp_dir` after the builder finishes.
 pub struct BuildContext {
-    pub workspace_root: PathBuf,
-    pub builder_root: PathBuf,
-    pub temp_root: PathBuf,
+    pub state_dir: PathBuf,
+    pub temp_dir: PathBuf,
     logger: Arc<dyn BuildLogger>,
 }
 
 impl fmt::Debug for BuildContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BuildContext")
-            .field("workspace_root", &self.workspace_root)
-            .field("builder_root", &self.builder_root)
-            .field("temp_root", &self.temp_root)
+            .field("state_dir", &self.state_dir)
+            .field("temp_dir", &self.temp_dir)
             .finish_non_exhaustive()
     }
 }
 
 impl BuildContext {
-    pub fn with_noop_logger(
-        workspace_root: PathBuf,
-        builder_root: PathBuf,
-        temp_root: PathBuf,
-    ) -> Self {
+    pub fn with_noop_logger(state_dir: PathBuf, temp_dir: PathBuf) -> Self {
         Self {
-            workspace_root,
-            builder_root,
-            temp_root,
+            state_dir,
+            temp_dir,
             logger: Arc::new(NoopBuildLogger),
         }
     }
@@ -258,14 +259,6 @@ impl BuildContext {
         }
 
         Some(path)
-    }
-
-    pub fn logger(&self) -> &dyn BuildLogger {
-        self.logger.as_ref()
-    }
-
-    pub fn builder_root(&self) -> &Path {
-        &self.builder_root
     }
 }
 
@@ -453,7 +446,8 @@ mod tests {
                 }
             );
             assert!(inputs.is_empty());
-            assert_eq!(cx.workspace_root, PathBuf::from("/tmp/ws"));
+            assert_eq!(cx.state_dir, PathBuf::from("/tmp/builder"));
+            assert_eq!(cx.temp_dir, PathBuf::from("/tmp/tmp"));
             Ok(StagedBuildResult {
                 kind: config.kind,
                 producer: ProducerInfo {
@@ -469,7 +463,6 @@ mod tests {
     fn typed_builder_adapter_decodes_config() {
         let builder = DummyBuilder;
         let mut cx = BuildContext::with_noop_logger(
-            PathBuf::from("/tmp/ws"),
             PathBuf::from("/tmp/builder"),
             PathBuf::from("/tmp/tmp"),
         );

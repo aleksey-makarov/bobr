@@ -4,7 +4,7 @@ mod registry;
 
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
-    InputArity, InputSlot, ProducerInfo, StagedBuildResult, TypedBuilder, fsutil,
+    InputArity, InputSlot, ProducerInfo, StagedBuildResult, TypedBuilder,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -139,11 +139,7 @@ impl TypedBuilder for ContainerImageBuilder {
             ));
         }
 
-        fsutil::recreate_empty_dir_force(&cx.temp_root)
-            .map_err(|e| ContainerImageError::FsFailed(e.to_string()))
-            .map_err(map_container_image_error)?;
-
-        let staged_path = cx.temp_root.join(OCI_LAYOUT_SUBDIR);
+        let staged_path = cx.temp_dir.join(OCI_LAYOUT_SUBDIR);
         fs::create_dir(&staged_path)
             .map_err(|e| {
                 ContainerImageError::FsFailed(format!("failed to create staging dir: {e}"))
@@ -197,10 +193,6 @@ impl TypedBuilder for ImageBuilder {
         let binaries = inputs.many("inputs")?;
         validate_image_config(&config, base, binaries).map_err(map_image_error)?;
 
-        fsutil::recreate_empty_dir_force(&cx.temp_root)
-            .map_err(|e| ImageError::FsFailed(e.to_string()))
-            .map_err(map_image_error)?;
-
         let mode = effective_image_mode(&config, base).map_err(map_image_error)?;
         cx.log_event(
             BuildLogLevel::Info,
@@ -208,7 +200,7 @@ impl TypedBuilder for ImageBuilder {
             format!("building image in '{}' mode", mode),
         );
 
-        let staged_path = cx.temp_root.join(OCI_LAYOUT_SUBDIR);
+        let staged_path = cx.temp_dir.join(OCI_LAYOUT_SUBDIR);
         fs::create_dir(&staged_path)
             .map_err(|e| ImageError::FsFailed(format!("failed to create staging dir: {e}")))
             .map_err(map_image_error)?;
@@ -461,7 +453,11 @@ mod tests {
     use tempfile::tempdir;
 
     fn build_context(root: &Path) -> BuildContext {
-        BuildContext::with_noop_logger(root.to_path_buf(), root.join("builder"), root.join("tmp"))
+        let state_dir = root.join("builder");
+        let temp_dir = root.join("tmp");
+        fs::create_dir_all(&state_dir).unwrap();
+        mbuild_core::fsutil::recreate_empty_dir_force(&temp_dir).unwrap();
+        BuildContext::with_noop_logger(state_dir, temp_dir)
     }
 
     /// Create a minimal valid OCI layout directory and return the path to it.

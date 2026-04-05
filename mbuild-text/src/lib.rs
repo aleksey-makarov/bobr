@@ -72,16 +72,9 @@ impl TypedBuilder for TextBuilder {
             format!("writing text output of kind '{}'", config.kind),
         );
 
-        fs::create_dir_all(&cx.temp_root).map_err(|error| {
-            BuilderError::ExecutionFailed(format!(
-                "failed to create text temp directory '{}': {error}",
-                cx.temp_root.display()
-            ))
-        })?;
-
         let now_nanos = fsutil::current_epoch_nanos()
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-        let tmp_path = cx.temp_root.join(format!("text-{now_nanos}.obj"));
+        let tmp_path = cx.temp_dir.join(format!("text-{now_nanos}.obj"));
 
         if tmp_path.exists() {
             fs::remove_file(&tmp_path).map_err(|error| {
@@ -149,11 +142,11 @@ mod tests {
     use tempfile::tempdir;
 
     fn build_context(root: &std::path::Path) -> BuildContext {
-        BuildContext::with_noop_logger(
-            root.to_path_buf(),
-            root.join("text"),
-            root.join("text").join("tmp"),
-        )
+        let state_dir = root.join("text");
+        let temp_dir = state_dir.join("tmp");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        mbuild_core::fsutil::recreate_empty_dir_force(&temp_dir).unwrap();
+        BuildContext::with_noop_logger(state_dir, temp_dir)
     }
 
     #[test]

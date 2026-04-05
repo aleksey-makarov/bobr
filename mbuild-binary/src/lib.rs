@@ -110,14 +110,11 @@ impl TypedBuilder for BinaryBuilder {
         let script = inputs.one("script")?;
         let sources = inputs.many("sources")?;
 
-        fsutil::recreate_empty_dir_force(&cx.temp_root)
-            .map_err(map_fsutil_error)
-            .map_err(map_error)?;
-        let output_path = cx.temp_root.join(OUTPUT_DIR_NAME);
+        let output_path = cx.temp_dir.join(OUTPUT_DIR_NAME);
         fsutil::recreate_empty_dir(&output_path)
             .map_err(map_fsutil_error)
             .map_err(map_error)?;
-        let config_path = cx.temp_root.join(SCRIPT_CONFIG_DIR_NAME);
+        let config_path = cx.temp_dir.join(SCRIPT_CONFIG_DIR_NAME);
         fsutil::recreate_empty_dir(&config_path)
             .map_err(map_fsutil_error)
             .map_err(map_error)?;
@@ -145,7 +142,6 @@ impl TypedBuilder for BinaryBuilder {
         );
 
         if let Err(error) = build_result {
-            let _ = fsutil::remove_dir_force(&cx.temp_root);
             return Err(map_error(error));
         }
 
@@ -309,7 +305,7 @@ fn is_image_loaded_in_podman(config_digest: &str, cx: &BuildContext) -> BResult<
 
 /// Create a tar archive of an OCI layout directory and load it into podman.
 fn load_oci_to_podman(oci_dir: &std::path::Path, cx: &BuildContext) -> BResult<()> {
-    let tar_path = cx.temp_root.join("oci-load.tar");
+    let tar_path = cx.temp_dir.join("oci-load.tar");
     {
         let file = std::fs::File::create(&tar_path).map_err(|e| {
             BinaryError::FsFailed(format!(
@@ -625,14 +621,11 @@ mod tests {
     }
 
     fn build_context(root: &Path) -> BuildContext {
-        BuildContext::with_noop_logger(
-            root.to_path_buf(),
-            root.join(".mbuild").join("builder-state").join("binary"),
-            root.join(".mbuild")
-                .join("builder-state")
-                .join("binary")
-                .join("tmp"),
-        )
+        let state_dir = root.join(".mbuild").join("builder-state").join("binary");
+        let temp_dir = state_dir.join("tmp");
+        fs::create_dir_all(&state_dir).unwrap();
+        mbuild_core::fsutil::recreate_empty_dir_force(&temp_dir).unwrap();
+        BuildContext::with_noop_logger(state_dir, temp_dir)
     }
 
     fn install_fake_podman(dir: &Path) {
