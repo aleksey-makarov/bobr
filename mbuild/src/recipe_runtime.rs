@@ -7,7 +7,7 @@ use crate::recipe::{
 use crate::resolved_inputs::{ResolvedDependencyValue, ResolvedInputs};
 use crate::runtime::{
     RuntimeError, build_to_published, execute_builder_node, log_runtime_event, lookup_build_handle,
-    lookup_canonical_result, map_store_error, to_resolved_dependency, validate_allowed_kind,
+    lookup_canonical_result, map_store_error, to_resolved_dependency,
 };
 use mbuild_core::{
     Build, BuildKey, BuildLogEvent, BuildLogLevel, PublishedBuild, ResultInputIdentity,
@@ -428,14 +428,12 @@ fn build_resolved_inputs(
         match (slot.arity, planned) {
             (mbuild_core::InputArity::One, PlannedInputValue::One(key)) => {
                 let dep = resolved_dependency_from_completed(layout, completed, *key)?;
-                validate_allowed_kind(builder, slot.name, slot.allowed_kinds, &dep.kind)?;
                 inputs.insert(slot.name, ResolvedDependencyValue::One(dep));
             }
             (mbuild_core::InputArity::Optional, PlannedInputValue::Optional(maybe_key)) => {
                 let dep = match maybe_key {
                     Some(key) => {
                         let dep = resolved_dependency_from_completed(layout, completed, *key)?;
-                        validate_allowed_kind(builder, slot.name, slot.allowed_kinds, &dep.kind)?;
                         Some(dep)
                     }
                     None => None,
@@ -446,7 +444,6 @@ fn build_resolved_inputs(
                 let mut deps = Vec::with_capacity(keys.len());
                 for key in keys {
                     let dep = resolved_dependency_from_completed(layout, completed, *key)?;
-                    validate_allowed_kind(builder, slot.name, slot.allowed_kinds, &dep.kind)?;
                     deps.push(dep);
                 }
                 inputs.insert(slot.name, ResolvedDependencyValue::Many(deps));
@@ -482,7 +479,7 @@ fn resolved_dependency_from_completed(
 mod tests {
     use super::*;
     use crate::recipe::{ReuseOrigin, collect_graph};
-    use mbuild_core::{MetaHash, ProducerInfo, PublishOutputRequest, publish_output};
+    use mbuild_core::{MetaHash, PublishOutputRequest, publish_output};
     use serde_json::{Map, json};
     use std::collections::HashMap;
     use std::fs;
@@ -495,11 +492,10 @@ mod tests {
             object_hash: object_hash.parse().unwrap(),
             meta_hash: MetaHash::from_str(meta_hash).unwrap(),
             created_at: None,
-            kind: kind.to_string(),
-            producer: ProducerInfo {
-                builder: "test".to_string(),
-            },
-            meta: Map::new(),
+            meta: Map::from_iter([(
+                "kind".to_string(),
+                serde_json::Value::String(kind.to_string()),
+            )]),
         }
     }
 
@@ -605,13 +601,17 @@ mod tests {
                 result_key,
                 created_at: "2026-04-05T12:00:00.000000000Z".to_string(),
                 staged_path: stage,
-                kind: "binary-output".to_string(),
-                producer_builder: "binary".to_string(),
                 inputs: root_inputs,
-                meta: Map::from_iter([(
-                    "optimize".to_string(),
-                    serde_json::Value::String("size".to_string()),
-                )]),
+                meta: Map::from_iter([
+                    (
+                        "kind".to_string(),
+                        serde_json::Value::String("binary-output".to_string()),
+                    ),
+                    (
+                        "optimize".to_string(),
+                        serde_json::Value::String("size".to_string()),
+                    ),
+                ]),
             },
         )
         .unwrap();

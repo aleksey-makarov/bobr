@@ -1,6 +1,6 @@
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
-    InputArity, InputSlot, ProducerInfo, StagedBuildResult, TypedBuilder, fsutil,
+    InputArity, InputSlot, StagedBuildResult, TypedBuilder, fsutil,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -73,17 +73,14 @@ static BINARY_INPUTS: &[InputSlot] = &[
     InputSlot {
         name: "image",
         arity: InputArity::One,
-        allowed_kinds: &[KIND_CONTAINER_IMAGE],
     },
     InputSlot {
         name: "script",
         arity: InputArity::One,
-        allowed_kinds: &[KIND_BUILD_SCRIPT],
     },
     InputSlot {
         name: "sources",
         arity: InputArity::Many,
-        allowed_kinds: &[KIND_SOURCE_TREE, KIND_FETCHED_FILE, KIND_BINARY_OUTPUT],
     },
 ];
 
@@ -146,6 +143,7 @@ impl TypedBuilder for BinaryBuilder {
         }
 
         let mut meta = Map::new();
+        meta.insert("kind".to_string(), Value::String(config.kind));
         meta.insert("optimize".to_string(), Value::String(config.optimize));
         meta.insert(
             "install".to_string(),
@@ -161,10 +159,6 @@ impl TypedBuilder for BinaryBuilder {
         );
 
         Ok(StagedBuildResult {
-            kind: config.kind,
-            producer: ProducerInfo {
-                builder: "binary".to_string(),
-            },
             meta,
             staged_path: output_path,
         })
@@ -191,6 +185,7 @@ fn resolve_script_execution(
     script_config_dir: &Path,
     sources: &[BuilderInputObject],
 ) -> BResult<ScriptExecution> {
+    require_input_kind(script, "script", &[KIND_BUILD_SCRIPT])?;
     if !script.object_path.is_file() {
         return Err(BinaryError::InputResolutionFailed(format!(
             "build-script input must resolve to a file: {}",
@@ -198,20 +193,29 @@ fn resolve_script_execution(
         )));
     }
     if let Some((first, rest)) = sources.split_first() {
+        require_input_kind(
+            first,
+            "sources[0]",
+            &[KIND_SOURCE_TREE, KIND_FETCHED_FILE, KIND_BINARY_OUTPUT],
+        )?;
         if !first.object_path.is_dir() {
             return Err(BinaryError::InputResolutionFailed(format!(
                 "first source input must resolve to a directory: {}",
                 first.object_path.display()
             )));
         }
-        if let Some(source) = rest
-            .iter()
-            .find(|source| !source.object_path.is_dir() && !source.object_path.is_file())
-        {
-            return Err(BinaryError::InputResolutionFailed(format!(
-                "additional source inputs must resolve to directories or files: {}",
-                source.object_path.display()
-            )));
+        for (index, source) in rest.iter().enumerate() {
+            require_input_kind(
+                source,
+                &format!("sources[{}]", index + 1),
+                &[KIND_SOURCE_TREE, KIND_FETCHED_FILE, KIND_BINARY_OUTPUT],
+            )?;
+            if !source.object_path.is_dir() && !source.object_path.is_file() {
+                return Err(BinaryError::InputResolutionFailed(format!(
+                    "additional source inputs must resolve to directories or files: {}",
+                    source.object_path.display()
+                )));
+            }
         }
     }
 
@@ -230,6 +234,7 @@ fn resolve_container_execution(
     image: &BuilderInputObject,
     cx: &BuildContext,
 ) -> BResult<ContainerExecution> {
+    require_input_kind(image, "image", &[KIND_CONTAINER_IMAGE])?;
     if !image.object_path.is_dir() {
         return Err(BinaryError::InputResolutionFailed(format!(
             "container-image input must resolve to a directory: {}",
@@ -255,6 +260,33 @@ fn resolve_container_execution(
     Ok(ContainerExecution {
         image_ref: config_digest,
     })
+}
+
+fn input_kind<'a>(object: &'a BuilderInputObject, slot_name: &str) -> BResult<&'a str> {
+    object
+        .meta
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            BinaryError::InputResolutionFailed(format!(
+                "input '{slot_name}' is missing string meta.kind"
+            ))
+        })
+}
+
+fn require_input_kind(
+    object: &BuilderInputObject,
+    slot_name: &str,
+    allowed_kinds: &[&str],
+) -> BResult<()> {
+    let actual_kind = input_kind(object, slot_name)?;
+    if allowed_kinds.iter().any(|kind| *kind == actual_kind) {
+        return Ok(());
+    }
+    Err(BinaryError::InputResolutionFailed(format!(
+        "input '{slot_name}' has kind '{actual_kind}', expected one of: {}",
+        allowed_kinds.join(", ")
+    )))
 }
 
 /// Read the config blob digest from an OCI layout directory.
@@ -670,7 +702,7 @@ mod tests {
         root: &Path,
         kind: &str,
         name: &str,
-        _meta: Map<String, Value>,
+        extra_meta: Map<String, Value>,
     ) -> BuilderInputObject {
         let object_path = root.join(name);
         if kind == KIND_SOURCE_TREE || kind == KIND_BINARY_OUTPUT {
@@ -687,7 +719,9 @@ mod tests {
                 fs::set_permissions(&object_path, permissions).unwrap();
             }
         }
-        BuilderInputObject { object_path }
+        let mut meta = extra_meta;
+        meta.insert("kind".to_string(), Value::String(kind.to_string()));
+        BuilderInputObject { object_path, meta }
     }
 
     /// Create a minimal valid OCI layout directory at the given path.
@@ -841,8 +875,10 @@ mod tests {
                 )
                 .unwrap();
 
-            assert_eq!(result.kind, "binary-output");
-            assert_eq!(result.producer.builder, "binary");
+            assert_eq!(
+                result.meta["kind"],
+                Value::String("binary-output".to_string())
+            );
             assert_eq!(result.meta["optimize"], Value::String("size".to_string()));
             assert!(result.staged_path.is_dir());
             assert_eq!(
@@ -949,7 +985,10 @@ mod tests {
                 )
                 .unwrap();
 
-            assert_eq!(result.kind, "binary-output");
+            assert_eq!(
+                result.meta["kind"],
+                Value::String("binary-output".to_string())
+            );
             assert!(result.staged_path.is_dir());
         });
     }
@@ -987,7 +1026,10 @@ mod tests {
                 )
                 .unwrap();
 
-            assert_eq!(result.kind, "binary-output");
+            assert_eq!(
+                result.meta["kind"],
+                Value::String("binary-output".to_string())
+            );
             assert!(result.staged_path.is_dir());
         });
     }
@@ -1009,7 +1051,10 @@ mod tests {
                 )
                 .unwrap();
 
-            assert_eq!(result.kind, "binary-output");
+            assert_eq!(
+                result.meta["kind"],
+                Value::String("binary-output".to_string())
+            );
             assert!(result.staged_path.is_dir());
         });
     }
@@ -1026,6 +1071,10 @@ mod tests {
             "image",
             BuilderInputValue::One(BuilderInputObject {
                 object_path: bad_image_dir,
+                meta: Map::from_iter([(
+                    "kind".to_string(),
+                    Value::String(KIND_CONTAINER_IMAGE.to_string()),
+                )]),
             }),
         );
         inputs.insert(

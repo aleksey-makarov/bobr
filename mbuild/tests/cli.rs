@@ -24,7 +24,7 @@ fn cli_uses_default_dot_mbuild_recipe_json() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
     let build: Build = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(build.kind, "plain-text");
+    assert_eq!(build.meta["kind"], json!("plain-text"));
     assert!(stderr.contains("[start] Text default-recipe"), "{stderr}");
     assert!(stderr.contains("[done] Text default-recipe"), "{stderr}");
 }
@@ -48,7 +48,7 @@ fn cli_accepts_explicit_recipe_path() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
     let build: Build = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(build.kind, "plain-text");
+    assert_eq!(build.meta["kind"], json!("plain-text"));
     assert!(stderr.contains("[start] Text custom-recipe"), "{stderr}");
 }
 
@@ -72,7 +72,7 @@ fn cli_quiet_suppresses_live_progress() {
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
     let stdout = String::from_utf8(output.stdout).unwrap();
     let build: Build = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(build.kind, "plain-text");
+    assert_eq!(build.meta["kind"], json!("plain-text"));
 }
 
 #[test]

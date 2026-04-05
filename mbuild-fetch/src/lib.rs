@@ -1,7 +1,7 @@
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, InputSlot, ProducerInfo,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, InputSlot,
     StagedBuildResult, TypedBuilder, fsutil,
 };
 use reqwest::blocking::Client;
@@ -182,15 +182,9 @@ impl TypedBuilder for FetchBuilder {
             "declared_hash".to_string(),
             Value::String(config.hash.clone()),
         );
+        meta.insert("kind".to_string(), Value::String(kind));
 
-        Ok(StagedBuildResult {
-            kind,
-            producer: ProducerInfo {
-                builder: "fetch".to_string(),
-            },
-            meta,
-            staged_path,
-        })
+        Ok(StagedBuildResult { meta, staged_path })
     }
 }
 
@@ -928,6 +922,7 @@ mod tests {
             "unexpected",
             BuilderInputValue::One(BuilderInputObject {
                 object_path: PathBuf::from("/tmp/input"),
+                meta: Map::new(),
             }),
         );
         inputs
@@ -983,8 +978,10 @@ mod tests {
 
         handle.join().unwrap();
 
-        assert_eq!(result.kind, "fetched-file");
-        assert_eq!(result.producer.builder, "fetch");
+        assert_eq!(
+            result.meta["kind"],
+            Value::String("fetched-file".to_string())
+        );
         assert_eq!(fs::read(&result.staged_path).unwrap(), payload);
         assert_eq!(result.meta["source_url"], Value::String(url));
         assert_eq!(result.meta["declared_hash"], Value::String(hash));
@@ -1025,7 +1022,10 @@ mod tests {
 
         handle.join().unwrap();
 
-        assert_eq!(result.kind, "source-tree");
+        assert_eq!(
+            result.meta["kind"],
+            Value::String("source-tree".to_string())
+        );
         assert!(result.staged_path.is_dir());
         assert_eq!(
             fs::read_to_string(result.staged_path.join("README.txt")).unwrap(),

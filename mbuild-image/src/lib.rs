@@ -4,7 +4,7 @@ mod registry;
 
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
-    InputArity, InputSlot, ProducerInfo, StagedBuildResult, TypedBuilder,
+    InputArity, InputSlot, StagedBuildResult, TypedBuilder,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -92,12 +92,10 @@ static IMAGE_INPUTS: &[InputSlot] = &[
     InputSlot {
         name: "base",
         arity: InputArity::Optional,
-        allowed_kinds: &[KIND_CONTAINER_IMAGE],
     },
     InputSlot {
         name: "inputs",
         arity: InputArity::Many,
-        allowed_kinds: &[KIND_BINARY_OUTPUT],
     },
 ];
 
@@ -162,17 +160,14 @@ impl TypedBuilder for ContainerImageBuilder {
             .map_err(map_container_image_error)?;
 
         let mut meta = Map::new();
+        meta.insert(
+            "kind".to_string(),
+            Value::String(KIND_CONTAINER_IMAGE.to_string()),
+        );
         meta.insert("image".to_string(), Value::String(config.image));
         meta.insert("manifest_digest".to_string(), Value::String(config.digest));
 
-        Ok(StagedBuildResult {
-            kind: KIND_CONTAINER_IMAGE.to_string(),
-            producer: ProducerInfo {
-                builder: "container-image".to_string(),
-            },
-            meta,
-            staged_path,
-        })
+        Ok(StagedBuildResult { meta, staged_path })
     }
 }
 
@@ -218,20 +213,17 @@ impl TypedBuilder for ImageBuilder {
         };
 
         let mut meta = Map::new();
+        meta.insert(
+            "kind".to_string(),
+            Value::String(KIND_CONTAINER_IMAGE.to_string()),
+        );
         meta.insert("mode".to_string(), Value::String(mode.to_string()));
         meta.insert(
             "manifest_digest".to_string(),
             Value::String(manifest_digest),
         );
 
-        Ok(StagedBuildResult {
-            kind: KIND_CONTAINER_IMAGE.to_string(),
-            producer: ProducerInfo {
-                builder: "image".to_string(),
-            },
-            meta,
-            staged_path,
-        })
+        Ok(StagedBuildResult { meta, staged_path })
     }
 }
 
@@ -254,6 +246,7 @@ fn validate_image_config(
         }
     }
     if let Some(base) = base {
+        require_input_kind(base, "base", &[KIND_CONTAINER_IMAGE])?;
         if !base.object_path.is_dir() {
             return Err(ImageError::InputResolutionFailed(format!(
                 "base container-image input must resolve to a directory: {}",
@@ -267,7 +260,8 @@ fn validate_image_config(
             )));
         }
     }
-    for binary in binaries {
+    for (index, binary) in binaries.iter().enumerate() {
+        require_input_kind(binary, &format!("inputs[{index}]"), &[KIND_BINARY_OUTPUT])?;
         if !binary.object_path.is_dir() {
             return Err(ImageError::InputResolutionFailed(format!(
                 "binary-output input must resolve to a directory: {}",
@@ -281,6 +275,33 @@ fn validate_image_config(
         ));
     }
     Ok(())
+}
+
+fn input_kind<'a>(object: &'a BuilderInputObject, slot_name: &str) -> IResult<&'a str> {
+    object
+        .meta
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ImageError::InputResolutionFailed(format!(
+                "input '{slot_name}' is missing string meta.kind"
+            ))
+        })
+}
+
+fn require_input_kind(
+    object: &BuilderInputObject,
+    slot_name: &str,
+    allowed_kinds: &[&str],
+) -> IResult<()> {
+    let actual_kind = input_kind(object, slot_name)?;
+    if allowed_kinds.iter().any(|kind| *kind == actual_kind) {
+        return Ok(());
+    }
+    Err(ImageError::InputResolutionFailed(format!(
+        "input '{slot_name}' has kind '{actual_kind}', expected one of: {}",
+        allowed_kinds.join(", ")
+    )))
 }
 
 fn effective_image_mode(
@@ -533,13 +554,23 @@ mod tests {
         let object_path = root.join(name);
         fs::create_dir_all(&object_path).unwrap();
         fs::write(object_path.join("README.txt"), b"hello image\n").unwrap();
-        BuilderInputObject { object_path }
+        BuilderInputObject {
+            object_path,
+            meta: Map::from_iter([(
+                "kind".to_string(),
+                Value::String(KIND_BINARY_OUTPUT.to_string()),
+            )]),
+        }
     }
 
     fn resolved_base_image(root: &Path) -> BuilderInputObject {
         let oci_dir = create_test_oci_layout(root, "base-image");
         BuilderInputObject {
             object_path: oci_dir,
+            meta: Map::from_iter([(
+                "kind".to_string(),
+                Value::String(KIND_CONTAINER_IMAGE.to_string()),
+            )]),
         }
     }
 
@@ -611,8 +642,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(result.kind, KIND_CONTAINER_IMAGE);
-        assert_eq!(result.producer.builder, "container-image");
+        assert_eq!(
+            result.meta["kind"],
+            Value::String(KIND_CONTAINER_IMAGE.to_string())
+        );
         assert_eq!(result.meta["image"], Value::String(image));
         assert_eq!(result.meta["manifest_digest"], Value::String(pinned_digest));
         assert!(result.staged_path.join("oci-layout").exists());
@@ -729,8 +762,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(result.kind, KIND_CONTAINER_IMAGE);
-        assert_eq!(result.producer.builder, "image");
+        assert_eq!(
+            result.meta["kind"],
+            Value::String(KIND_CONTAINER_IMAGE.to_string())
+        );
         assert_eq!(result.meta["mode"], Value::String("bootstrap".to_string()));
         assert!(
             result.meta.contains_key("manifest_digest"),
@@ -788,6 +823,10 @@ mod tests {
 
         let base = BuilderInputObject {
             object_path: base_oci,
+            meta: Map::from_iter([(
+                "kind".to_string(),
+                Value::String(KIND_CONTAINER_IMAGE.to_string()),
+            )]),
         };
         let mut inputs = BuilderInputs::empty();
         inputs.insert("base", BuilderInputValue::Optional(Some(base)));
@@ -826,6 +865,10 @@ mod tests {
         fs::create_dir(&bad_base).unwrap();
         let base = BuilderInputObject {
             object_path: bad_base,
+            meta: Map::from_iter([(
+                "kind".to_string(),
+                Value::String(KIND_CONTAINER_IMAGE.to_string()),
+            )]),
         };
         let mut inputs = BuilderInputs::empty();
         inputs.insert("base", BuilderInputValue::Optional(Some(base)));

@@ -1,6 +1,6 @@
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, ProducerInfo,
-    StagedBuildResult, TypedBuilder, fsutil,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, StagedBuildResult,
+    TypedBuilder, fsutil,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -8,8 +8,6 @@ use std::fmt;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-
-const BUILDER_NAME: &str = "text";
 
 #[derive(Debug)]
 enum TextError {
@@ -104,16 +102,13 @@ impl TypedBuilder for TextBuilder {
         }
 
         let mut meta = Map::new();
+        meta.insert("kind".to_string(), Value::String(config.kind));
         meta.insert(
             "source_bytes".to_string(),
             Value::from(config.source.len() as u64),
         );
 
         Ok(StagedBuildResult {
-            kind: config.kind,
-            producer: ProducerInfo {
-                builder: BUILDER_NAME.to_string(),
-            },
             meta,
             staged_path: tmp_path,
         })
@@ -166,8 +161,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(result.kind, "plain-text");
-        assert_eq!(result.producer.builder, "text");
+        assert_eq!(result.meta["kind"], Value::String("plain-text".to_string()));
         assert_eq!(result.meta["source_bytes"], Value::from(5));
         assert_eq!(fs::read_to_string(&result.staged_path).unwrap(), "hello");
     }

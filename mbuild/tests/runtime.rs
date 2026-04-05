@@ -244,8 +244,10 @@ fn json_recipe_executes_all_real_builders() {
             .unwrap()
             .expect("expected final Build to exist in store");
 
-        assert_eq!(published.build.kind, "container-image");
-        assert_eq!(published.build.producer.builder, "image");
+        assert_eq!(
+            published.build.meta["kind"],
+            Value::String("container-image".to_string())
+        );
         assert_eq!(
             published.build.meta["mode"],
             Value::String("bootstrap".to_string())
@@ -402,7 +404,10 @@ fn independent_fetch_sources_run_in_parallel() {
         let published = load_build_handle(&layout, build.build_key)
             .unwrap()
             .expect("expected binary Build to exist in store");
-        assert_eq!(published.build.kind, "binary-output");
+        assert_eq!(
+            published.build.meta["kind"],
+            Value::String("binary-output".to_string())
+        );
         drop(oci_server);
     });
 }

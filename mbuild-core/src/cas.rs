@@ -1,6 +1,4 @@
-use crate::builder::{
-    Build, ProducerInfo, PublishedBuild, ResultInputIdentity, ResultRecord, StagedBuildResult,
-};
+use crate::builder::{Build, PublishedBuild, ResultInputIdentity, ResultRecord, StagedBuildResult};
 use crate::fsutil;
 use fsobj_hash::{ObjectHash, hash_path};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -18,7 +16,7 @@ use time::UtcOffset;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 
-const RESULT_SCHEMA: &str = "mbuild-result-v2";
+const RESULT_SCHEMA: &str = "mbuild-result-v3";
 #[cfg(test)]
 const BUILD_SCHEMA: &str = RESULT_SCHEMA;
 const INVOCATION_SCHEMA: &str = "mbuild-build-invocation-v1";
@@ -293,8 +291,6 @@ pub struct PublishOutputRequest {
     pub result_key: BuildKey,
     pub created_at: String,
     pub staged_path: PathBuf,
-    pub kind: String,
-    pub producer_builder: String,
     pub inputs: Vec<ResultInputIdentity>,
     pub meta: Map<String, Value>,
 }
@@ -345,10 +341,6 @@ pub fn publish_output(
     }
 
     let staged = StagedBuildResult {
-        kind: request.kind,
-        producer: ProducerInfo {
-            builder: request.producer_builder,
-        },
         meta: request.meta,
         staged_path: request.staged_path,
     };
@@ -437,6 +429,12 @@ pub fn compute_meta_hash(meta: &Map<String, Value>) -> Result<MetaHash, CasError
     Ok(MetaHash(Sha256::digest(&canonical).into()))
 }
 
+pub fn require_meta_kind(meta: &Map<String, Value>) -> Result<&str, CasError> {
+    meta.get("kind").and_then(Value::as_str).ok_or_else(|| {
+        CasError::Serialization("result metadata is missing string 'kind'".to_string())
+    })
+}
+
 pub fn load_public_build(
     layout: &StoreLayout,
     build_key: BuildKey,
@@ -454,13 +452,12 @@ pub fn materialize_build(
 ) -> Result<PublishedBuild, CasError> {
     let object_hash = import_object(layout, &staged.staged_path)?;
     let meta_hash = compute_meta_hash(&staged.meta)?;
+    require_meta_kind(&staged.meta)?;
     let result = ResultRecord {
         result_key,
         object_hash,
         meta_hash,
         created_at: Some(created_at.to_string()),
-        kind: staged.kind,
-        producer: staged.producer,
         inputs,
         meta: staged.meta,
     };
@@ -621,8 +618,6 @@ fn build_from_result(build_key: BuildKey, result: &ResultRecord) -> Build {
         object_hash: result.object_hash,
         meta_hash: result.meta_hash,
         created_at: result.created_at.clone(),
-        kind: result.kind.clone(),
-        producer: result.producer.clone(),
         meta: result.meta.clone(),
     }
 }
@@ -673,19 +668,11 @@ fn write_result_record(layout: &StoreLayout, record: &ResultRecord) -> Result<()
 fn result_json_value(
     result_key: BuildKey,
     created_at: Option<&str>,
-    kind: &str,
     object_hash: ObjectHash,
     meta_hash: MetaHash,
-    producer_builder: &str,
     inputs: &[ResultInputIdentity],
     meta: Map<String, Value>,
 ) -> Value {
-    let mut producer = Map::new();
-    producer.insert(
-        "builder".to_string(),
-        Value::String(producer_builder.to_string()),
-    );
-
     let input_values = inputs
         .iter()
         .map(|input| {
@@ -717,7 +704,6 @@ fn result_json_value(
             Value::String(created_at.to_string()),
         );
     }
-    root.insert("kind".to_string(), Value::String(kind.to_string()));
     root.insert(
         "object_hash".to_string(),
         Value::String(object_hash.to_string()),
@@ -726,7 +712,6 @@ fn result_json_value(
         "meta_hash".to_string(),
         Value::String(meta_hash.to_string()),
     );
-    root.insert("producer".to_string(), Value::Object(producer));
     root.insert("inputs".to_string(), Value::Array(input_values));
     root.insert("meta".to_string(), Value::Object(meta));
     Value::Object(root)
@@ -736,10 +721,8 @@ fn result_record_json_value(record: &ResultRecord) -> Value {
     result_json_value(
         record.result_key,
         record.created_at.as_deref(),
-        &record.kind,
         record.object_hash,
         record.meta_hash,
-        &record.producer.builder,
         &record.inputs,
         record.meta.clone(),
     )
@@ -749,23 +732,12 @@ fn result_record_json_value(record: &ResultRecord) -> Value {
 fn build_json_value(
     result_key: BuildKey,
     created_at: Option<&str>,
-    kind: &str,
     object_hash: ObjectHash,
     meta_hash: MetaHash,
-    producer_builder: &str,
     inputs: &[ResultInputIdentity],
     meta: Map<String, Value>,
 ) -> Value {
-    result_json_value(
-        result_key,
-        created_at,
-        kind,
-        object_hash,
-        meta_hash,
-        producer_builder,
-        inputs,
-        meta,
-    )
+    result_json_value(result_key, created_at, object_hash, meta_hash, inputs, meta)
 }
 
 fn parse_result_record_value(
@@ -808,12 +780,6 @@ fn parse_result_record_value(
         .transpose()?
         .map(str::to_string);
 
-    let kind = object
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or_else(|| CasError::Serialization("result record is missing 'kind'".to_string()))?
-        .to_string();
-
     let object_hash = object
         .get("object_hash")
         .and_then(Value::as_str)
@@ -827,20 +793,6 @@ fn parse_result_record_value(
         .and_then(Value::as_str)
         .ok_or_else(|| CasError::Serialization("result record is missing 'meta_hash'".to_string()))
         .and_then(parse_meta_hash_result)?;
-
-    let producer_obj = object
-        .get("producer")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            CasError::Serialization("result record is missing 'producer'".to_string())
-        })?;
-    let builder = producer_obj
-        .get("builder")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            CasError::Serialization("result record producer is missing 'builder'".to_string())
-        })?
-        .to_string();
 
     let inputs = object
         .get("inputs")
@@ -881,14 +833,13 @@ fn parse_result_record_value(
         .and_then(Value::as_object)
         .ok_or_else(|| CasError::Serialization("result record is missing 'meta'".to_string()))?
         .clone();
+    require_meta_kind(&meta)?;
 
     Ok(ResultRecord {
         result_key,
         object_hash,
         meta_hash,
         created_at,
-        kind,
-        producer: ProducerInfo { builder },
         inputs,
         meta,
     })
@@ -1215,6 +1166,11 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
+    fn with_kind(kind: &str, mut meta: Map<String, Value>) -> Map<String, Value> {
+        meta.insert("kind".to_string(), Value::String(kind.to_string()));
+        meta
+    }
+
     #[test]
     fn canonical_json_hash_is_stable_across_key_order() {
         let build_key =
@@ -1225,10 +1181,8 @@ mod tests {
         let left = build_json_value(
             build_key,
             Some(sample_created_at()),
-            "text",
             parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111"),
             compute_meta_hash(&meta_a).unwrap(),
-            "text",
             &[],
             meta_a,
         );
@@ -1239,10 +1193,8 @@ mod tests {
         let right = build_json_value(
             build_key,
             Some(sample_created_at()),
-            "text",
             parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111"),
             compute_meta_hash(&meta_b).unwrap(),
-            "text",
             &[],
             meta_b,
         );
@@ -1380,10 +1332,11 @@ mod tests {
                 result_key,
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
+                meta: with_kind(
+                    "build-script",
+                    Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
+                ),
             },
         )
         .unwrap();
@@ -1402,10 +1355,11 @@ mod tests {
                 result_key,
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
+                meta: with_kind(
+                    "build-script",
+                    Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
+                ),
             },
         )
         .unwrap();
@@ -1460,13 +1414,14 @@ mod tests {
                 ),
                 created_at: sample_created_at().to_string(),
                 staged_path: stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::from_iter([
-                    ("source_bytes".to_string(), Value::from(8)),
-                    ("generated".to_string(), Value::from(false)),
-                ]),
+                meta: with_kind(
+                    "build-script",
+                    Map::from_iter([
+                        ("source_bytes".to_string(), Value::from(8)),
+                        ("generated".to_string(), Value::from(false)),
+                    ]),
+                ),
             },
         )
         .unwrap();
@@ -1505,6 +1460,10 @@ mod tests {
             build_json["meta_hash"],
             Value::String(
                 compute_meta_hash(&Map::from_iter([
+                    (
+                        "kind".to_string(),
+                        Value::String("build-script".to_string())
+                    ),
                     ("source_bytes".to_string(), Value::from(8)),
                     ("generated".to_string(), Value::from(false)),
                 ]))
@@ -1512,15 +1471,8 @@ mod tests {
                 .to_string()
             )
         );
-        assert_eq!(
-            build_json["kind"],
-            Value::String("build-script".to_string())
-        );
-        assert_eq!(
-            build_json["producer"]["builder"],
-            Value::String("text".to_string())
-        );
         assert_eq!(build_json["inputs"], Value::Array(vec![]));
+        assert_eq!(build_json["meta"]["kind"], Value::from("build-script"));
         assert_eq!(build_json["meta"]["source_bytes"], Value::from(8));
         assert_eq!(build_json["meta"]["generated"], Value::from(false));
 
@@ -1543,10 +1495,13 @@ mod tests {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
-        let meta = Map::from_iter([
-            ("source_bytes".to_string(), Value::from(8)),
-            ("generated".to_string(), Value::from(false)),
-        ]);
+        let meta = with_kind(
+            "build-script",
+            Map::from_iter([
+                ("source_bytes".to_string(), Value::from(8)),
+                ("generated".to_string(), Value::from(false)),
+            ]),
+        );
         let inputs = vec![
             ResultInputIdentity {
                 object_hash: parse_object_hash(
@@ -1587,8 +1542,6 @@ mod tests {
                 result_key,
                 created_at: sample_created_at().to_string(),
                 staged_path: stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: inputs.clone(),
                 meta: meta.clone(),
             },
@@ -1627,10 +1580,11 @@ mod tests {
                 ),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
+                meta: with_kind(
+                    "build-script",
+                    Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
+                ),
             },
         )
         .unwrap();
@@ -1653,10 +1607,11 @@ mod tests {
                 ),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
-                kind: "source-tree".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::from_iter([(String::from("source_bytes"), Value::from(6))]),
+                meta: with_kind(
+                    "source-tree",
+                    Map::from_iter([(String::from("source_bytes"), Value::from(6))]),
+                ),
             },
         )
         .unwrap();
@@ -1680,10 +1635,8 @@ mod tests {
                 result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();
@@ -1698,10 +1651,8 @@ mod tests {
                 result_key: build_key_for("Text", json!({ "kind": "source-tree" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
-                kind: "source-tree".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("source-tree", Map::new()),
             },
         )
         .unwrap();
@@ -1725,10 +1676,8 @@ mod tests {
                 result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();
@@ -1743,10 +1692,8 @@ mod tests {
                 result_key: build_key_for("Fetch", json!({ "kind": "build-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "fetch".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();
@@ -1778,10 +1725,8 @@ mod tests {
                 ),
                 created_at: "2026-03-24T12:34:56.123456789Z".to_string(),
                 staged_path: first_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();
@@ -1804,10 +1749,8 @@ mod tests {
                 ),
                 created_at: "2026-03-24T12:35:30.123456789Z".to_string(),
                 staged_path: second_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();
@@ -1861,10 +1804,8 @@ mod tests {
                 result_key: build_key,
                 created_at: "2026-03-24T12:34:56.123456789Z".to_string(),
                 staged_path: first_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();
@@ -1879,10 +1820,8 @@ mod tests {
                 result_key: build_key,
                 created_at: "2026-03-24T12:35:30.123456789Z".to_string(),
                 staged_path: second_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();
@@ -1922,10 +1861,8 @@ mod tests {
                 ),
                 created_at: "2026-03-24T12:34:56.100000000Z".to_string(),
                 staged_path: first_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();
@@ -1948,10 +1885,8 @@ mod tests {
                 ),
                 created_at: "2026-03-24T12:34:56.200000000Z".to_string(),
                 staged_path: second_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();
@@ -1974,10 +1909,8 @@ mod tests {
                 ),
                 created_at: "2026-03-24T12:34:56.300000000Z".to_string(),
                 staged_path: third_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();
@@ -2023,10 +1956,8 @@ mod tests {
                     result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                     created_at: sample_created_at().to_string(),
                     staged_path: stage,
-                    kind: "build-script".to_string(),
-                    producer_builder: "text".to_string(),
                     inputs: vec![],
-                    meta: Map::new(),
+                    meta: with_kind("build-script", Map::new()),
                 },
             )
             .unwrap_err();
@@ -2052,10 +1983,8 @@ mod tests {
                 result_key: build_key_for("Fetch", json!({ "kind": "source-tree" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: stage_dir,
-                kind: "source-tree".to_string(),
-                producer_builder: "fetch".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("source-tree", Map::new()),
             },
         )
         .unwrap();
@@ -2081,10 +2010,8 @@ mod tests {
                 result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();
@@ -2100,10 +2027,8 @@ mod tests {
                 result_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();
@@ -2134,10 +2059,8 @@ mod tests {
                 result_key: build_key_for("Binary", json!({ "kind": "binary-output" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
-                kind: "binary-output".to_string(),
-                producer_builder: "binary".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("binary-output", Map::new()),
             },
         )
         .unwrap();
@@ -2156,10 +2079,8 @@ mod tests {
                 result_key: build_key_for("Binary", json!({ "kind": "binary-output" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
-                kind: "binary-output".to_string(),
-                producer_builder: "binary".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("binary-output", Map::new()),
             },
         )
         .unwrap();
@@ -2224,10 +2145,8 @@ mod tests {
                 ),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();
@@ -2252,10 +2171,8 @@ mod tests {
                 ),
                 created_at: sample_created_at().to_string(),
                 staged_path: exec_stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: vec![],
-                meta: Map::new(),
+                meta: with_kind("build-script", Map::new()),
             },
         )
         .unwrap();

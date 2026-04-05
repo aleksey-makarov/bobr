@@ -121,8 +121,6 @@ pub(crate) fn execute_builder_node(
                 object_hash: result.object_hash,
                 meta_hash: result.meta_hash,
                 created_at: result.created_at.clone(),
-                kind: result.kind.clone(),
-                producer: result.producer.clone(),
                 meta: result.meta.clone(),
             },
             result,
@@ -224,8 +222,6 @@ pub(crate) fn lookup_canonical_result(
             object_hash: result.object_hash,
             meta_hash: result.meta_hash,
             created_at: result.created_at.clone(),
-            kind: result.kind.clone(),
-            producer: result.producer.clone(),
             meta: result.meta.clone(),
         },
         result,
@@ -233,31 +229,13 @@ pub(crate) fn lookup_canonical_result(
     }))
 }
 
-pub(crate) fn validate_allowed_kind(
-    builder: &dyn Builder,
-    slot_name: &str,
-    allowed_kinds: &[&str],
-    actual_kind: &str,
-) -> Result<(), RuntimeError> {
-    if allowed_kinds.is_empty() || allowed_kinds.iter().any(|kind| *kind == actual_kind) {
-        return Ok(());
-    }
-    Err(RuntimeError::InvalidRequest(format!(
-        "builder '{}' input slot '{}' rejects kind '{}'; allowed kinds: {}",
-        builder.spec().tag,
-        slot_name,
-        actual_kind,
-        allowed_kinds.join(", ")
-    )))
-}
-
 pub(crate) fn to_resolved_dependency(published: PublishedBuild) -> ResolvedDependency {
     ResolvedDependency {
         object_hash: published.build.object_hash,
         meta_hash: published.build.meta_hash,
         build_key: published.build.build_key,
-        kind: published.build.kind,
         object_path: published.object_path,
+        meta: published.build.meta,
     }
 }
 
@@ -326,8 +304,8 @@ mod tests {
     use super::*;
     use crate::logging::{BuildRunLogger, RunOptions};
     use mbuild_core::{
-        BuildContext, BuilderInputs, BuilderSpec, ProducerInfo, PublishOutputRequest,
-        ResultInputIdentity, StagedBuildResult, TypedBuilder, publish_output,
+        BuildContext, BuilderInputs, BuilderSpec, PublishOutputRequest, ResultInputIdentity,
+        StagedBuildResult, TypedBuilder, publish_output,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
@@ -371,13 +349,11 @@ mod tests {
 
             fs::create_dir_all(cx.temp_dir.join("out")).unwrap();
             fs::write(cx.temp_dir.join("out").join("payload"), b"ok\n").unwrap();
+            let mut meta = Map::new();
+            meta.insert("kind".to_string(), Value::String(config.kind));
 
             Ok(StagedBuildResult {
-                kind: config.kind,
-                producer: ProducerInfo {
-                    builder: "runtime-test".to_string(),
-                },
-                meta: Map::new(),
+                meta,
                 staged_path: cx.temp_dir.join("out"),
             })
         }
@@ -433,13 +409,11 @@ mod tests {
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
             fs::write(cx.temp_dir.join("scratch"), b"temp\n").unwrap();
+            let mut meta = Map::new();
+            meta.insert("kind".to_string(), Value::String(config.kind));
 
             Ok(StagedBuildResult {
-                kind: config.kind,
-                producer: ProducerInfo {
-                    builder: "runtime-test".to_string(),
-                },
-                meta: Map::new(),
+                meta,
                 staged_path: cx.temp_dir.join("missing-output"),
             })
         }
@@ -466,7 +440,13 @@ mod tests {
         let lookup_build_key =
             BuildKey::from_str("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
                 .unwrap();
-        let meta = Map::from_iter([("source_bytes".to_string(), serde_json::Value::from(8))]);
+        let meta = Map::from_iter([
+            (
+                "kind".to_string(),
+                serde_json::Value::String("build-script".to_string()),
+            ),
+            ("source_bytes".to_string(), serde_json::Value::from(8)),
+        ]);
         let expected_meta_hash = mbuild_core::compute_meta_hash(&meta).unwrap();
 
         let stage = temp.path().join("script.sh");
@@ -479,8 +459,6 @@ mod tests {
                 result_key,
                 created_at: "2026-04-05T12:00:00.000000000Z".to_string(),
                 staged_path: stage,
-                kind: "build-script".to_string(),
-                producer_builder: "text".to_string(),
                 inputs: matching_inputs.clone(),
                 meta,
             },
@@ -543,7 +521,10 @@ mod tests {
 
         assert!(state_dir.is_dir());
         assert!(!temp_dir.exists());
-        assert_eq!(published.build.kind, "binary-output");
+        assert_eq!(
+            published.build.meta["kind"],
+            Value::String("binary-output".to_string())
+        );
         assert!(published.object_path.is_dir());
         assert!(published.object_path.join("payload").is_file());
     }

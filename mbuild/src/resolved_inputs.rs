@@ -2,6 +2,7 @@ use mbuild_core::{
     BuildKey, BuilderError, BuilderInputObject, BuilderInputValue, BuilderInputs, BuilderSpec,
     InputArity, MetaHash, ObjectHash, ResultInputIdentity,
 };
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -10,8 +11,8 @@ pub(crate) struct ResolvedDependency {
     pub(crate) object_hash: ObjectHash,
     pub(crate) meta_hash: MetaHash,
     pub(crate) build_key: BuildKey,
-    pub(crate) kind: String,
     pub(crate) object_path: PathBuf,
+    pub(crate) meta: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -139,11 +140,13 @@ impl ResolvedInputs {
                     ResolvedDependencyValue::One(object) => {
                         BuilderInputValue::One(BuilderInputObject {
                             object_path: object.object_path,
+                            meta: object.meta,
                         })
                     }
                     ResolvedDependencyValue::Optional(object) => {
                         BuilderInputValue::Optional(object.map(|object| BuilderInputObject {
                             object_path: object.object_path,
+                            meta: object.meta,
                         }))
                     }
                     ResolvedDependencyValue::Many(objects) => BuilderInputValue::Many(
@@ -151,6 +154,7 @@ impl ResolvedInputs {
                             .into_iter()
                             .map(|object| BuilderInputObject {
                                 object_path: object.object_path,
+                                meta: object.meta,
                             })
                             .collect(),
                     ),
@@ -188,8 +192,11 @@ mod tests {
                 "2222222222222222222222222222222222222222222222222222222222222222",
             )
             .unwrap(),
-            kind: "build-script".to_string(),
             object_path: PathBuf::from("/tmp/object"),
+            meta: Map::from_iter([(
+                "kind".to_string(),
+                Value::String("build-script".to_string()),
+            )]),
         }
     }
 
@@ -204,7 +211,10 @@ mod tests {
             ResolvedDependencyValue::Many(vec![object.clone(), object.clone()]),
         );
 
-        assert_eq!(inputs.one("script").unwrap().kind, "build-script");
+        assert_eq!(
+            inputs.one("script").unwrap().meta["kind"],
+            Value::String("build-script".to_string())
+        );
         assert!(inputs.optional("base").unwrap().is_none());
         assert_eq!(inputs.many("sources").unwrap().len(), 2);
         assert!(matches!(
@@ -245,7 +255,9 @@ mod tests {
     fn resolved_inputs_many_preserves_order() {
         let first = sample_object();
         let mut second = sample_object();
-        second.kind = "source-tree".to_string();
+        second
+            .meta
+            .insert("kind".to_string(), Value::String("source-tree".to_string()));
 
         let inputs = ResolvedInputs::new(BTreeMap::from([(
             "sources".to_string(),
@@ -253,8 +265,8 @@ mod tests {
         )]));
 
         let many = inputs.many("sources").unwrap();
-        assert_eq!(many[0].kind, first.kind);
-        assert_eq!(many[1].kind, second.kind);
+        assert_eq!(many[0].meta, first.meta);
+        assert_eq!(many[1].meta, second.meta);
     }
 
     #[test]
@@ -291,6 +303,7 @@ mod tests {
         let builder_inputs = inputs.into_builder_inputs();
         let resolved = builder_inputs.one("script").unwrap();
         assert_eq!(resolved.object_path, object.object_path);
+        assert_eq!(resolved.meta, object.meta);
     }
 
     static ORDERED_SPEC: BuilderSpec = BuilderSpec {
@@ -299,17 +312,14 @@ mod tests {
             mbuild_core::InputSlot {
                 name: "first",
                 arity: InputArity::One,
-                allowed_kinds: &[],
             },
             mbuild_core::InputSlot {
                 name: "optional",
                 arity: InputArity::Optional,
-                allowed_kinds: &[],
             },
             mbuild_core::InputSlot {
                 name: "many",
                 arity: InputArity::Many,
-                allowed_kinds: &[],
             },
         ],
     };

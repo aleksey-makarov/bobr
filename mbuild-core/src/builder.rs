@@ -32,7 +32,6 @@ pub struct BuilderSpec {
 pub struct InputSlot {
     pub name: &'static str,
     pub arity: InputArity,
-    pub allowed_kinds: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +44,7 @@ pub enum InputArity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderInputObject {
     pub object_path: PathBuf,
+    pub meta: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -262,15 +262,8 @@ impl BuildContext {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProducerInfo {
-    pub builder: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct StagedBuildResult {
-    pub kind: String,
-    pub producer: ProducerInfo,
     pub meta: Map<String, Value>,
     pub staged_path: PathBuf,
 }
@@ -289,8 +282,6 @@ pub struct Build {
     pub meta_hash: MetaHash,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
-    pub kind: String,
-    pub producer: ProducerInfo,
     pub meta: Map<String, Value>,
 }
 
@@ -300,8 +291,6 @@ pub struct ResultRecord {
     pub object_hash: ObjectHash,
     pub meta_hash: MetaHash,
     pub created_at: Option<String>,
-    pub kind: String,
-    pub producer: ProducerInfo,
     pub inputs: Vec<ResultInputIdentity>,
     pub meta: Map<String, Value>,
 }
@@ -386,6 +375,7 @@ mod tests {
     fn sample_builder_object() -> BuilderInputObject {
         BuilderInputObject {
             object_path: PathBuf::from("/tmp/object"),
+            meta: Map::new(),
         }
     }
 
@@ -449,11 +439,7 @@ mod tests {
             assert_eq!(cx.state_dir, PathBuf::from("/tmp/builder"));
             assert_eq!(cx.temp_dir, PathBuf::from("/tmp/tmp"));
             Ok(StagedBuildResult {
-                kind: config.kind,
-                producer: ProducerInfo {
-                    builder: "dummy".to_string(),
-                },
-                meta: Map::new(),
+                meta: Map::from_iter([("kind".to_string(), Value::String(config.kind))]),
                 staged_path: PathBuf::from("/tmp/out"),
             })
         }
@@ -475,8 +461,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(result.kind, "demo");
-        assert_eq!(result.producer.builder, "dummy");
+        assert_eq!(result.meta["kind"], Value::String("demo".to_string()));
     }
 
     #[test]
