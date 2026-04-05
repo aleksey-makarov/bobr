@@ -10,8 +10,8 @@ use crate::runtime::{
     lookup_canonical_result, map_store_error, to_resolved_dependency, validate_allowed_kind,
 };
 use mbuild_core::{
-    Build, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, PublishedBuild,
-    ResultInputIdentity, StoreLayout, publish_refs,
+    Build, BuildKey, BuildLogEvent, BuildLogLevel, PublishedBuild, ResultInputIdentity,
+    StoreLayout, publish_refs,
 };
 use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
@@ -91,7 +91,7 @@ pub fn run_recipe_json_in_workspace_with_options(
     let mut nodes = HashMap::new();
     let root_key = collect_graph(&recipe, &mut nodes)?;
     plan_top_down(&recipe, &layout, &mut nodes)?;
-    publish_reused_nodes(&layout, logger.as_ref(), &nodes)?;
+    publish_reused_nodes(&layout, &logger, &nodes)?;
 
     let mut completed = HashMap::new();
     for (key, node) in &nodes {
@@ -170,7 +170,7 @@ fn plan_top_down(
 
 fn publish_reused_nodes(
     layout: &StoreLayout,
-    logger: &dyn BuildLogger,
+    logger: &Arc<BuildRunLogger>,
     nodes: &HashMap<BuildKey, PlannedNode>,
 ) -> Result<(), RuntimeError> {
     for node in nodes.values() {
@@ -182,25 +182,20 @@ fn publish_reused_nodes(
         }
         let published = build_to_published(layout, build.clone())?;
         for name in &node.active_names {
+            let node_logger = logger.bind_node(node.recipe.builder_tag(), name, build.build_key);
             log_runtime_event(
-                logger,
+                node_logger.as_ref(),
                 BuildLogLevel::Info,
                 "start",
-                node.recipe.builder_tag(),
-                name,
-                build.build_key,
                 "starting builder node",
             );
             log_runtime_event(
-                logger,
+                node_logger.as_ref(),
                 BuildLogLevel::Info,
                 match origin {
                     ReuseOrigin::BuildHandle => "cache-hit",
                     ReuseOrigin::CanonicalResult => "result-hit",
                 },
-                node.recipe.builder_tag(),
-                name,
-                build.build_key,
                 match origin {
                     ReuseOrigin::BuildHandle => "reusing existing build ref",
                     ReuseOrigin::CanonicalResult => "reusing existing canonical result",
@@ -208,20 +203,14 @@ fn publish_reused_nodes(
             );
             publish_refs(layout, name, &published).map_err(map_store_error)?;
             log_runtime_event(
-                logger,
+                node_logger.as_ref(),
                 BuildLogLevel::Info,
                 "publish",
-                node.recipe.builder_tag(),
-                name,
-                build.build_key,
                 format!("published '{}' -> {}", name, build.object_hash),
             );
-            logger.log_event(BuildLogEvent {
+            node_logger.log_event(BuildLogEvent {
                 level: BuildLogLevel::Info,
                 phase: "done".to_string(),
-                builder: node.recipe.builder_tag().to_string(),
-                name: name.clone(),
-                build_key: build.build_key,
                 message: "builder node completed".to_string(),
                 object_hash: Some(build.object_hash),
                 raw_log_path: None,
@@ -382,22 +371,17 @@ fn execute_misses(
             RuntimeError::Store(format!("missing planned node for build '{}'", key))
         })?;
         for name in &node.active_names {
+            let node_logger = logger.bind_node(node.recipe.builder_tag(), name, key);
             publish_refs(layout, name, &published).map_err(map_store_error)?;
             log_runtime_event(
-                logger.as_ref(),
+                node_logger.as_ref(),
                 BuildLogLevel::Info,
                 "publish",
-                node.recipe.builder_tag(),
-                name,
-                key,
                 format!("published '{}' -> {}", name, published.build.object_hash),
             );
-            logger.as_ref().log_event(BuildLogEvent {
+            node_logger.log_event(BuildLogEvent {
                 level: BuildLogLevel::Info,
                 phase: "done".to_string(),
-                builder: node.recipe.builder_tag().to_string(),
-                name: name.clone(),
-                build_key: key,
                 message: "builder node completed".to_string(),
                 object_hash: Some(published.build.object_hash),
                 raw_log_path: None,

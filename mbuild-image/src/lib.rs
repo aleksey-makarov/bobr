@@ -461,16 +461,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn build_context(root: &Path) -> BuildContext {
-        BuildContext::with_noop_logger(
-            root.to_path_buf(),
-            root.join("builder"),
-            root.join("tmp"),
-            "1111111111111111111111111111111111111111111111111111111111111111"
-                .parse()
-                .unwrap(),
-            "Image",
-            "image-test",
-        )
+        BuildContext::with_noop_logger(root.to_path_buf(), root.join("builder"), root.join("tmp"))
     }
 
     /// Create a minimal valid OCI layout directory and return the path to it.

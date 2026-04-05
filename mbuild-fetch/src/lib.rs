@@ -867,11 +867,6 @@ mod tests {
                 .join("builder-state")
                 .join("fetch")
                 .join("tmp"),
-            "1111111111111111111111111111111111111111111111111111111111111111"
-                .parse()
-                .unwrap(),
-            "Fetch",
-            "fetch-test",
         )
     }
 

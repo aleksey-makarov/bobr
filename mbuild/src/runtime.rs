@@ -1,3 +1,4 @@
+use crate::logging::BuildRunLogger;
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use mbuild_core::{
     Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, Builder,
@@ -54,7 +55,7 @@ pub(crate) fn execute_builder_node(
     builder: &'static dyn Builder,
     build_name: &str,
     created_at: &str,
-    logger: Arc<dyn BuildLogger>,
+    run_logger: Arc<BuildRunLogger>,
     config: Value,
     inputs: ResolvedInputs,
 ) -> Result<PublishedBuild, RuntimeError> {
@@ -66,13 +67,11 @@ pub(crate) fn execute_builder_node(
         .map_err(map_builder_error)?;
     let build_key = compute_build_key(builder.spec().tag, &config, &input_build_keys)
         .map_err(map_store_error)?;
+    let logger = run_logger.bind_node(builder.spec().tag, build_name, build_key);
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
         "start",
-        builder.spec().tag,
-        build_name,
-        build_key,
         "starting builder node",
     );
 
@@ -81,9 +80,6 @@ pub(crate) fn execute_builder_node(
             logger.as_ref(),
             BuildLogLevel::Info,
             "cache-hit",
-            builder.spec().tag,
-            build_name,
-            build_key,
             "reusing existing build ref",
         );
         return Ok(published);
@@ -100,9 +96,6 @@ pub(crate) fn execute_builder_node(
                 logger.as_ref(),
                 BuildLogLevel::Error,
                 "fail",
-                builder.spec().tag,
-                build_name,
-                build_key,
                 format!(
                     "result points to missing object '{}'",
                     object_path.display()
@@ -120,9 +113,6 @@ pub(crate) fn execute_builder_node(
             logger.as_ref(),
             BuildLogLevel::Info,
             "result-hit",
-            builder.spec().tag,
-            build_name,
-            build_key,
             "reusing existing canonical result",
         );
         return Ok(PublishedBuild {
@@ -144,16 +134,12 @@ pub(crate) fn execute_builder_node(
         logger.as_ref(),
         BuildLogLevel::Info,
         "cache-miss",
-        builder.spec().tag,
-        build_name,
-        build_key,
         "executing builder",
     );
     let mut context = build_context(
         workspace_root,
         layout,
         builder.spec().tag,
-        build_name,
         build_key,
         logger.clone(),
     );
@@ -161,9 +147,6 @@ pub(crate) fn execute_builder_node(
         logger.as_ref(),
         BuildLogLevel::Info,
         "run",
-        builder.spec().tag,
-        build_name,
-        build_key,
         "running builder implementation",
     );
     let staged = builder
@@ -173,9 +156,6 @@ pub(crate) fn execute_builder_node(
                 logger.as_ref(),
                 BuildLogLevel::Error,
                 "fail",
-                builder.spec().tag,
-                build_name,
-                build_key,
                 error.to_string(),
             );
             map_builder_error(error)
@@ -193,9 +173,6 @@ pub(crate) fn execute_builder_node(
             logger.as_ref(),
             BuildLogLevel::Error,
             "fail",
-            builder.spec().tag,
-            build_name,
-            build_key,
             error.to_string(),
         );
         map_store_error(error)
@@ -290,7 +267,6 @@ pub(crate) fn build_context(
     workspace_root: &Path,
     layout: &StoreLayout,
     builder_tag: &str,
-    build_name: &str,
     build_key: BuildKey,
     logger: Arc<dyn BuildLogger>,
 ) -> BuildContext {
@@ -302,9 +278,6 @@ pub(crate) fn build_context(
         workspace_root.to_path_buf(),
         builder_root.clone(),
         builder_root.join("tmp").join(build_key.to_hex()),
-        build_key,
-        builder_tag,
-        build_name,
     )
     .with_logger(logger)
 }
@@ -321,17 +294,11 @@ pub(crate) fn log_runtime_event(
     logger: &dyn BuildLogger,
     level: BuildLogLevel,
     phase: &str,
-    builder_tag: &str,
-    build_name: &str,
-    build_key: BuildKey,
     message: impl Into<String>,
 ) {
     logger.log_event(BuildLogEvent {
         level,
         phase: phase.to_string(),
-        builder: builder_tag.to_string(),
-        name: build_name.to_string(),
-        build_key,
         message: message.into(),
         object_hash: None,
         raw_log_path: None,

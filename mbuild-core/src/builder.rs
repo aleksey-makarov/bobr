@@ -134,9 +134,6 @@ impl fmt::Display for BuildLogLevel {
 pub struct BuildLogEvent {
     pub level: BuildLogLevel,
     pub phase: String,
-    pub builder: String,
-    pub name: String,
-    pub build_key: BuildKey,
     pub message: String,
     pub object_hash: Option<ObjectHash>,
     pub raw_log_path: Option<PathBuf>,
@@ -146,13 +143,7 @@ pub struct BuildLogEvent {
 pub trait BuildLogger: fmt::Debug + Send + Sync {
     fn log_event(&self, event: BuildLogEvent);
 
-    fn allocate_raw_log_path(
-        &self,
-        builder: &str,
-        name: &str,
-        build_key: BuildKey,
-        label: &str,
-    ) -> Result<PathBuf, String>;
+    fn allocate_raw_log_path(&self, label: &str) -> Result<PathBuf, String>;
 }
 
 #[derive(Debug, Default)]
@@ -161,13 +152,7 @@ pub struct NoopBuildLogger;
 impl BuildLogger for NoopBuildLogger {
     fn log_event(&self, _event: BuildLogEvent) {}
 
-    fn allocate_raw_log_path(
-        &self,
-        _builder: &str,
-        _name: &str,
-        _build_key: BuildKey,
-        _label: &str,
-    ) -> Result<PathBuf, String> {
+    fn allocate_raw_log_path(&self, _label: &str) -> Result<PathBuf, String> {
         Err("no build logger configured".to_string())
     }
 }
@@ -177,9 +162,6 @@ pub struct BuildContext {
     pub workspace_root: PathBuf,
     pub builder_root: PathBuf,
     pub temp_root: PathBuf,
-    pub build_key: BuildKey,
-    pub builder_tag: String,
-    pub build_name: String,
     logger: Arc<dyn BuildLogger>,
 }
 
@@ -189,9 +171,6 @@ impl fmt::Debug for BuildContext {
             .field("workspace_root", &self.workspace_root)
             .field("builder_root", &self.builder_root)
             .field("temp_root", &self.temp_root)
-            .field("build_key", &self.build_key)
-            .field("builder_tag", &self.builder_tag)
-            .field("build_name", &self.build_name)
             .finish_non_exhaustive()
     }
 }
@@ -201,17 +180,11 @@ impl BuildContext {
         workspace_root: PathBuf,
         builder_root: PathBuf,
         temp_root: PathBuf,
-        build_key: BuildKey,
-        builder_tag: impl Into<String>,
-        build_name: impl Into<String>,
     ) -> Self {
         Self {
             workspace_root,
             builder_root,
             temp_root,
-            build_key,
-            builder_tag: builder_tag.into(),
-            build_name: build_name.into(),
             logger: Arc::new(NoopBuildLogger),
         }
     }
@@ -242,9 +215,6 @@ impl BuildContext {
         self.logger.log_event(BuildLogEvent {
             level,
             phase: phase.into(),
-            builder: self.builder_tag.clone(),
-            name: self.build_name.clone(),
-            build_key: self.build_key,
             message: message.into(),
             object_hash,
             raw_log_path,
@@ -254,7 +224,7 @@ impl BuildContext {
 
     pub fn allocate_raw_log_path(&self, label: &str) -> Result<PathBuf, BuilderError> {
         self.logger
-            .allocate_raw_log_path(&self.builder_tag, &self.build_name, self.build_key, label)
+            .allocate_raw_log_path(label)
             .map_err(BuilderError::ExecutionFailed)
     }
 
@@ -292,18 +262,6 @@ impl BuildContext {
 
     pub fn logger(&self) -> &dyn BuildLogger {
         self.logger.as_ref()
-    }
-
-    pub fn builder_tag(&self) -> &str {
-        &self.builder_tag
-    }
-
-    pub fn build_name(&self) -> &str {
-        &self.build_name
-    }
-
-    pub fn build_key(&self) -> BuildKey {
-        self.build_key
     }
 
     pub fn builder_root(&self) -> &Path {
@@ -514,11 +472,6 @@ mod tests {
             PathBuf::from("/tmp/ws"),
             PathBuf::from("/tmp/builder"),
             PathBuf::from("/tmp/tmp"),
-            "1111111111111111111111111111111111111111111111111111111111111111"
-                .parse()
-                .unwrap(),
-            "Dummy",
-            "dummy",
         );
 
         let result = builder

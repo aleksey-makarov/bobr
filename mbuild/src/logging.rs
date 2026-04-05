@@ -6,7 +6,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use time::OffsetDateTime;
 use time::UtcOffset;
 use time::macros::format_description;
@@ -105,10 +105,31 @@ impl BuildRunLogger {
         self.run_timestamp.rfc3339_utc()
     }
 
-    fn write_event(&self, event: &BuildLogEvent) -> Result<(), String> {
+    pub fn bind_node(
+        self: &Arc<Self>,
+        builder: impl Into<String>,
+        name: impl Into<String>,
+        build_key: BuildKey,
+    ) -> Arc<dyn BuildLogger> {
+        Arc::new(BoundBuildLogger {
+            inner: self.clone(),
+            builder: builder.into(),
+            name: name.into(),
+            build_key,
+        })
+    }
+
+    fn write_event(
+        &self,
+        builder: &str,
+        name: &str,
+        build_key: BuildKey,
+        event: &BuildLogEvent,
+    ) -> Result<(), String> {
         let mut writer = self.writer.lock().map_err(|error| error.to_string())?;
-        let line = serde_json::to_string(&EventLogRecord::from_event(event))
-            .map_err(|error| format!("failed to serialize build event: {error}"))?;
+        let line =
+            serde_json::to_string(&EventLogRecord::from_event(builder, name, build_key, event))
+                .map_err(|error| format!("failed to serialize build event: {error}"))?;
         writer
             .write_all(line.as_bytes())
             .and_then(|_| writer.write_all(b"\n"))
@@ -120,20 +141,24 @@ impl BuildRunLogger {
                 )
             })
     }
-}
 
-impl BuildLogger for BuildRunLogger {
-    fn log_event(&self, event: BuildLogEvent) {
+    fn log_bound_event(
+        &self,
+        builder: &str,
+        name: &str,
+        build_key: BuildKey,
+        event: &BuildLogEvent,
+    ) {
         if self.emit_progress {
-            eprintln!("{}", format_progress_line(&event));
+            eprintln!("{}", format_progress_line(builder, name, build_key, event));
         }
 
-        if let Err(error) = self.write_event(&event) {
+        if let Err(error) = self.write_event(builder, name, build_key, event) {
             eprintln!("warning: {error}");
         }
     }
 
-    fn allocate_raw_log_path(
+    fn allocate_node_raw_log_path(
         &self,
         builder: &str,
         name: &str,
@@ -164,6 +189,26 @@ impl BuildLogger for BuildRunLogger {
     }
 }
 
+#[derive(Debug)]
+struct BoundBuildLogger {
+    inner: Arc<BuildRunLogger>,
+    builder: String,
+    name: String,
+    build_key: BuildKey,
+}
+
+impl BuildLogger for BoundBuildLogger {
+    fn log_event(&self, event: BuildLogEvent) {
+        self.inner
+            .log_bound_event(&self.builder, &self.name, self.build_key, &event);
+    }
+
+    fn allocate_raw_log_path(&self, label: &str) -> Result<PathBuf, String> {
+        self.inner
+            .allocate_node_raw_log_path(&self.builder, &self.name, self.build_key, label)
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct EventLogRecord {
     ts: String,
@@ -182,11 +227,11 @@ struct EventLogRecord {
 }
 
 impl EventLogRecord {
-    fn from_event(event: &BuildLogEvent) -> Self {
+    fn from_event(builder: &str, name: &str, build_key: BuildKey, event: &BuildLogEvent) -> Self {
         let mut details = event.details.clone();
         details.insert(
             "full_build_key".to_string(),
-            Value::String(event.build_key.to_string()),
+            Value::String(build_key.to_string()),
         );
         if let Some(object_hash) = event.object_hash {
             details.insert(
@@ -199,9 +244,9 @@ impl EventLogRecord {
             ts: current_human_timestamp(),
             level: event.level.to_string(),
             phase: event.phase.clone(),
-            builder: event.builder.clone(),
-            name: event.name.clone(),
-            build_key: short_build_key(event.build_key),
+            builder: builder.to_string(),
+            name: name.to_string(),
+            build_key: short_build_key(build_key),
             message: event.message.clone(),
             object_hash: event.object_hash.map(short_object_hash),
             raw_log_path: event
@@ -213,13 +258,18 @@ impl EventLogRecord {
     }
 }
 
-fn format_progress_line(event: &BuildLogEvent) -> String {
+fn format_progress_line(
+    builder: &str,
+    name: &str,
+    build_key: BuildKey,
+    event: &BuildLogEvent,
+) -> String {
     let mut line = format!(
         "[{}] {} {} {}",
         event.phase,
-        event.builder,
-        event.name,
-        short_build_key(event.build_key)
+        builder,
+        name,
+        short_build_key(build_key)
     );
 
     if let Some(object_hash) = event.object_hash {
@@ -332,5 +382,76 @@ fn create_run_log_file(dir: &Path, base: &str) -> Result<(PathBuf, File), String
 impl fmt::Display for RunOptions {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "RunOptions {{ emit_progress: {} }}", self.emit_progress)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use std::fs;
+    use std::str::FromStr;
+    use tempfile::tempdir;
+
+    #[test]
+    fn bound_logger_writes_builder_identity_to_event_log() {
+        let temp = tempdir().unwrap();
+        let logger = Arc::new(BuildRunLogger::new(temp.path(), RunOptions::default()).unwrap());
+        let build_key =
+            BuildKey::from_str("1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
+        let node_logger = logger.bind_node("Binary", "bash", build_key);
+
+        node_logger.log_event(BuildLogEvent {
+            level: mbuild_core::BuildLogLevel::Info,
+            phase: "start".to_string(),
+            message: "starting builder node".to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details: Map::new(),
+        });
+
+        let contents = fs::read_to_string(&logger.event_log_path).unwrap();
+        let line = contents.lines().last().unwrap();
+        let event: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(event["builder"], Value::String("Binary".to_string()));
+        assert_eq!(event["name"], Value::String("bash".to_string()));
+        assert_eq!(
+            event["build_key"],
+            Value::String(short_build_key(build_key))
+        );
+        assert_eq!(
+            event["details"]["full_build_key"],
+            Value::String(build_key.to_string())
+        );
+    }
+
+    #[test]
+    fn bound_logger_allocates_raw_logs_under_sanitized_build_name() {
+        let temp = tempdir().unwrap();
+        let logger = Arc::new(BuildRunLogger::new(temp.path(), RunOptions::default()).unwrap());
+        let build_key =
+            BuildKey::from_str("2222222222222222222222222222222222222222222222222222222222222222")
+                .unwrap();
+        let node_logger = logger.bind_node("Binary", "bash debug/test", build_key);
+
+        let path = node_logger.allocate_raw_log_path("podman/run").unwrap();
+        let expected_dir = temp
+            .path()
+            .join("builder-state")
+            .join("binary")
+            .join("logs")
+            .join("bash_debug_test");
+        assert!(path.starts_with(&expected_dir));
+        assert_eq!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("log")
+        );
+        assert!(
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .unwrap()
+                .contains("podman_run")
+        );
     }
 }

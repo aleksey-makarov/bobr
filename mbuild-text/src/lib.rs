@@ -153,11 +153,6 @@ mod tests {
             root.to_path_buf(),
             root.join("text"),
             root.join("text").join("tmp"),
-            "1111111111111111111111111111111111111111111111111111111111111111"
-                .parse()
-                .unwrap(),
-            "Text",
-            "text-test",
         )
     }
 

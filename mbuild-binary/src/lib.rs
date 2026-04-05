@@ -632,11 +632,6 @@ mod tests {
                 .join("builder-state")
                 .join("binary")
                 .join("tmp"),
-            "1111111111111111111111111111111111111111111111111111111111111111"
-                .parse()
-                .unwrap(),
-            "Binary",
-            "binary-test",
         )
     }
 
