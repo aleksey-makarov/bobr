@@ -6,13 +6,12 @@ use crate::recipe::{
 };
 use crate::resolved_inputs::{ResolvedDependencyValue, ResolvedInputs};
 use crate::runtime::{
-    RuntimeError, build_to_published, execute_builder_node, log_runtime_event,
-    lookup_build_handle, lookup_canonical_result, map_store_error, to_resolved_dependency,
-    validate_allowed_kind,
+    RuntimeError, build_to_published, execute_builder_node, log_runtime_event, lookup_build_handle,
+    lookup_canonical_result, map_store_error, to_resolved_dependency, validate_allowed_kind,
 };
 use mbuild_core::{
-    Build, BuildLogEvent, BuildLogLevel, BuildLogger, BuildKey, PublishedBuild, StoreLayout,
-    publish_refs,
+    Build, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, PublishedBuild,
+    ResultInputIdentity, StoreLayout, publish_refs,
 };
 use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
@@ -130,9 +129,9 @@ fn plan_top_down(
     nodes: &mut HashMap<BuildKey, PlannedNode>,
 ) -> Result<(), RuntimeError> {
     let key = collect_graph(recipe, nodes)?;
-    let node = nodes.get_mut(&key).ok_or_else(|| {
-        RuntimeError::Store(format!("missing planned node for build '{}'", key))
-    })?;
+    let node = nodes
+        .get_mut(&key)
+        .ok_or_else(|| RuntimeError::Store(format!("missing planned node for build '{}'", key)))?;
     node.active_names.insert(recipe.name().to_string());
     match node.state {
         PlanningState::Reused { .. } | PlanningState::NeedsBuild => return Ok(()),
@@ -241,14 +240,20 @@ fn lookup_canonical_for_planned_node(
     let node = nodes
         .get(&key)
         .ok_or_else(|| RuntimeError::Store(format!("missing planned node for build '{}'", key)))?;
-    let mut input_object_hashes = Vec::new();
+    let mut inputs = Vec::<ResultInputIdentity>::new();
     let mut all_reused = true;
     node.recipe.try_for_each_direct_dep(|dep| {
         let dep_node = nodes.get(&dep).ok_or_else(|| {
-            RuntimeError::Store(format!("missing dependency node '{}' for build '{}'", dep, key))
+            RuntimeError::Store(format!(
+                "missing dependency node '{}' for build '{}'",
+                dep, key
+            ))
         })?;
         match &dep_node.state {
-            PlanningState::Reused { build, .. } => input_object_hashes.push(build.object_hash),
+            PlanningState::Reused { build, .. } => inputs.push(ResultInputIdentity {
+                object_hash: build.object_hash,
+                meta_hash: build.meta_hash,
+            }),
             PlanningState::Unknown | PlanningState::NeedsBuild => all_reused = false,
         }
         Ok(())
@@ -260,7 +265,7 @@ fn lookup_canonical_for_planned_node(
         layout,
         node.recipe.builder_tag(),
         node.recipe.config(),
-        &input_object_hashes,
+        &inputs,
         key,
     )
 }
@@ -283,15 +288,18 @@ fn execute_misses(
             continue;
         }
         let mut wait_for = 0usize;
-        node.recipe.try_for_each_direct_dep(|dep| -> Result<(), RuntimeError> {
-            if let Some(dep_node) = nodes.get(&dep) {
-                if matches!(dep_node.state, PlanningState::NeedsBuild) && !dep_node.active_names.is_empty() {
-                    wait_for += 1;
-                    reverse.entry(dep).or_default().push(*key);
+        node.recipe
+            .try_for_each_direct_dep(|dep| -> Result<(), RuntimeError> {
+                if let Some(dep_node) = nodes.get(&dep) {
+                    if matches!(dep_node.state, PlanningState::NeedsBuild)
+                        && !dep_node.active_names.is_empty()
+                    {
+                        wait_for += 1;
+                        reverse.entry(dep).or_default().push(*key);
+                    }
                 }
-            }
-            Ok(())
-        })?;
+                Ok(())
+            })?;
         remaining.insert(*key, wait_for);
         if wait_for == 0 {
             ready.push_back(*key);
@@ -414,7 +422,10 @@ fn execute_misses(
     }
 
     completed.get(&root_key).cloned().ok_or_else(|| {
-        RuntimeError::Store(format!("root build '{}' is missing after executor completion", root_key))
+        RuntimeError::Store(format!(
+            "root build '{}' is missing after executor completion",
+            root_key
+        ))
     })
 }
 

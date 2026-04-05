@@ -125,8 +125,7 @@ impl TypedBuilder for BinaryBuilder {
 
         let script_execution =
             resolve_script_execution(script, &config_path, sources).map_err(map_error)?;
-        let container_execution =
-            resolve_container_execution(image, cx).map_err(map_error)?;
+        let container_execution = resolve_container_execution(image, cx).map_err(map_error)?;
         cx.log_event(
             BuildLogLevel::Info,
             "prepare",
@@ -150,9 +149,9 @@ impl TypedBuilder for BinaryBuilder {
             return Err(map_error(error));
         }
 
-        let mut attrs = Map::new();
-        attrs.insert("optimize".to_string(), Value::String(config.optimize));
-        attrs.insert(
+        let mut meta = Map::new();
+        meta.insert("optimize".to_string(), Value::String(config.optimize));
+        meta.insert(
             "install".to_string(),
             serde_json::json!({
                 "owners": [
@@ -170,7 +169,7 @@ impl TypedBuilder for BinaryBuilder {
             producer: ProducerInfo {
                 builder: "binary".to_string(),
             },
-            attrs,
+            meta,
             staged_path: output_path,
         })
     }
@@ -277,8 +276,12 @@ fn read_config_digest_from_oci_layout(oci_dir: &std::path::Path) -> Result<Strin
         .split_once(':')
         .ok_or_else(|| format!("invalid manifest digest '{manifest_digest}'"))?;
     let blob_path = oci_dir.join("blobs").join(alg).join(hex);
-    let manifest_bytes = std::fs::read(&blob_path)
-        .map_err(|e| format!("failed to read manifest blob '{}': {e}", blob_path.display()))?;
+    let manifest_bytes = std::fs::read(&blob_path).map_err(|e| {
+        format!(
+            "failed to read manifest blob '{}': {e}",
+            blob_path.display()
+        )
+    })?;
     let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| format!("failed to parse manifest: {e}"))?;
     let config_digest = manifest["config"]["digest"]
@@ -316,12 +319,12 @@ fn load_oci_to_podman(oci_dir: &std::path::Path, cx: &BuildContext) -> BResult<(
         })?;
         let mut builder = tar::Builder::new(file);
         builder.follow_symlinks(false);
-        builder.append_dir_all(".", oci_dir).map_err(|e| {
-            BinaryError::FsFailed(format!("failed to write OCI tar: {e}"))
-        })?;
-        builder.finish().map_err(|e| {
-            BinaryError::FsFailed(format!("failed to finalize OCI tar: {e}"))
-        })?;
+        builder
+            .append_dir_all(".", oci_dir)
+            .map_err(|e| BinaryError::FsFailed(format!("failed to write OCI tar: {e}")))?;
+        builder
+            .finish()
+            .map_err(|e| BinaryError::FsFailed(format!("failed to finalize OCI tar: {e}")))?;
     }
 
     cx.log_event(
@@ -338,9 +341,9 @@ fn load_oci_to_podman(oci_dir: &std::path::Path, cx: &BuildContext) -> BResult<(
     // Clear TMPDIR: podman uses it for temp files when processing oci-archive,
     // and a stale value (e.g. from an expired nix-shell) causes load to fail.
     cmd.env_remove("TMPDIR");
-    let output = cmd.output().map_err(|e| {
-        BinaryError::PodmanFailed(format!("failed to run podman load: {e}"))
-    })?;
+    let output = cmd
+        .output()
+        .map_err(|e| BinaryError::PodmanFailed(format!("failed to run podman load: {e}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(BinaryError::PodmanFailed(format!(
@@ -609,9 +612,7 @@ fn write_script_config_node(path: &Path, value: &Value, debug_path: &str) -> BRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{
-        Builder, BuilderInputObject, BuilderInputValue, BuilderInputs,
-    };
+    use mbuild_core::{Builder, BuilderInputObject, BuilderInputValue, BuilderInputs};
     use std::env;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -681,7 +682,7 @@ mod tests {
         root: &Path,
         kind: &str,
         name: &str,
-        _attrs: Map<String, Value>,
+        _meta: Map<String, Value>,
     ) -> BuilderInputObject {
         let object_path = root.join(name);
         if kind == KIND_SOURCE_TREE || kind == KIND_BINARY_OUTPUT {
@@ -714,12 +715,16 @@ mod tests {
         let config_digest_hex = sha256_hex_test(config_bytes);
         let config_digest = format!("sha256:{config_digest_hex}");
         fs::write(
-            oci_dir.join("blobs").join("sha256").join(&config_digest_hex),
+            oci_dir
+                .join("blobs")
+                .join("sha256")
+                .join(&config_digest_hex),
             config_bytes,
         )
         .unwrap();
 
-        let layer_bytes: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        let layer_bytes: &[u8] =
+            b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00";
         let layer_digest_hex = sha256_hex_test(layer_bytes);
         let layer_digest = format!("sha256:{layer_digest_hex}");
         fs::write(
@@ -737,7 +742,10 @@ mod tests {
         let manifest_digest_hex = sha256_hex_test(&manifest_bytes);
         let manifest_digest = format!("sha256:{manifest_digest_hex}");
         fs::write(
-            oci_dir.join("blobs").join("sha256").join(&manifest_digest_hex),
+            oci_dir
+                .join("blobs")
+                .join("sha256")
+                .join(&manifest_digest_hex),
             &manifest_bytes,
         )
         .unwrap();
@@ -847,7 +855,7 @@ mod tests {
 
             assert_eq!(result.kind, "binary-output");
             assert_eq!(result.producer.builder, "binary");
-            assert_eq!(result.attrs["optimize"], Value::String("size".to_string()));
+            assert_eq!(result.meta["optimize"], Value::String("size".to_string()));
             assert!(result.staged_path.is_dir());
             assert_eq!(
                 fs::read_to_string(result.staged_path.join("copied").join("README.txt")).unwrap(),
@@ -975,10 +983,7 @@ mod tests {
 
             let inputs = BuilderInputs::new(std::collections::BTreeMap::from([
                 ("image".to_string(), BuilderInputValue::One(image.clone())),
-                (
-                    "script".to_string(),
-                    BuilderInputValue::One(script.clone()),
-                ),
+                ("script".to_string(), BuilderInputValue::One(script.clone())),
                 ("sources".to_string(), BuilderInputValue::Many(vec![])),
             ]));
 

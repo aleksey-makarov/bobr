@@ -44,6 +44,15 @@ layout directories.
 
 `results/<result_key>.json` stores one canonical realized result record.
 
+Each result record contains:
+
+- payload identity: `object_hash`
+- metadata identity: `meta_hash`
+- result metadata under `meta`
+- direct input identities under `inputs`, where each entry contains:
+  - `object_hash`
+  - `meta_hash`
+
 `builds/<build_key>` stores the corresponding public build handle as a symlink
 to the canonical result record. The language-level `Build` value exposes
 `build_key`, not `result_key`.

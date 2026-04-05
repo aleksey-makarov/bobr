@@ -110,8 +110,8 @@ impl TypedBuilder for TextBuilder {
             })?;
         }
 
-        let mut attrs = Map::new();
-        attrs.insert(
+        let mut meta = Map::new();
+        meta.insert(
             "source_bytes".to_string(),
             Value::from(config.source.len() as u64),
         );
@@ -121,7 +121,7 @@ impl TypedBuilder for TextBuilder {
             producer: ProducerInfo {
                 builder: BUILDER_NAME.to_string(),
             },
-            attrs,
+            meta,
             staged_path: tmp_path,
         })
     }
@@ -162,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn build_typed_creates_staged_file_and_attrs() {
+    fn build_typed_creates_staged_file_and_meta() {
         let builder = TextBuilder;
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
@@ -180,7 +180,7 @@ mod tests {
 
         assert_eq!(result.kind, "plain-text");
         assert_eq!(result.producer.builder, "text");
-        assert_eq!(result.attrs["source_bytes"], Value::from(5));
+        assert_eq!(result.meta["source_bytes"], Value::from(5));
         assert_eq!(fs::read_to_string(&result.staged_path).unwrap(), "hello");
     }
 

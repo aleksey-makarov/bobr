@@ -62,7 +62,12 @@ JSON.
 
 - builder tag
 - normalized config payload
-- ordered direct dependency `object_hash`es
+- ordered direct dependency input identities
+
+Each direct input identity contains:
+
+- `object_hash`
+- `meta_hash`
 
 `build_key` is the public identity of a node in the dependency graph.
 `result_key` is the canonical identity of one realized result payload.
@@ -112,7 +117,9 @@ only on:
 - builder config
 - realized payload content of direct inputs
 
-Dependency metadata does not change builder semantics on its own.
+Dependency metadata does not change builder execution semantics on its own, but
+it does participate in canonical result identity through direct input
+`meta_hash` values.
 
 ## CLI Contract
 

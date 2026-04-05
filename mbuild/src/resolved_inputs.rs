@@ -1,6 +1,6 @@
 use mbuild_core::{
     BuildKey, BuilderError, BuilderInputObject, BuilderInputValue, BuilderInputs, BuilderSpec,
-    InputArity, ObjectHash,
+    InputArity, MetaHash, ObjectHash, ResultInputIdentity,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -8,6 +8,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedDependency {
     pub(crate) object_hash: ObjectHash,
+    pub(crate) meta_hash: MetaHash,
     pub(crate) build_key: BuildKey,
     pub(crate) kind: String,
     pub(crate) object_path: PathBuf,
@@ -49,10 +50,7 @@ impl ResolvedInputs {
         }
     }
 
-    pub(crate) fn optional(
-        &self,
-        name: &str,
-    ) -> Result<Option<&ResolvedDependency>, BuilderError> {
+    pub(crate) fn optional(&self, name: &str) -> Result<Option<&ResolvedDependency>, BuilderError> {
         match self.slots.get(name) {
             Some(ResolvedDependencyValue::Optional(object)) => Ok(object.as_ref()),
             Some(_) => Err(BuilderError::ExecutionFailed(format!(
@@ -97,21 +95,35 @@ impl ResolvedInputs {
         Ok(ordered)
     }
 
-    pub(crate) fn ordered_object_hashes(
+    pub(crate) fn ordered_input_identities(
         &self,
         spec: &BuilderSpec,
-    ) -> Result<Vec<ObjectHash>, BuilderError> {
+    ) -> Result<Vec<ResultInputIdentity>, BuilderError> {
         let mut ordered = Vec::new();
         for slot in spec.inputs {
             match slot.arity {
-                InputArity::One => ordered.push(self.one(slot.name)?.object_hash),
+                InputArity::One => {
+                    let object = self.one(slot.name)?;
+                    ordered.push(ResultInputIdentity {
+                        object_hash: object.object_hash,
+                        meta_hash: object.meta_hash,
+                    });
+                }
                 InputArity::Optional => {
                     if let Some(object) = self.optional(slot.name)? {
-                        ordered.push(object.object_hash);
+                        ordered.push(ResultInputIdentity {
+                            object_hash: object.object_hash,
+                            meta_hash: object.meta_hash,
+                        });
                     }
                 }
                 InputArity::Many => {
-                    ordered.extend(self.many(slot.name)?.iter().map(|object| object.object_hash));
+                    ordered.extend(self.many(slot.name)?.iter().map(|object| {
+                        ResultInputIdentity {
+                            object_hash: object.object_hash,
+                            meta_hash: object.meta_hash,
+                        }
+                    }));
                 }
             }
         }
@@ -166,6 +178,10 @@ mod tests {
         ResolvedDependency {
             object_hash: ObjectHash::from_str(
                 "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+            meta_hash: MetaHash::from_str(
+                "3333333333333333333333333333333333333333333333333333333333333333",
             )
             .unwrap(),
             build_key: BuildKey::from_str(
@@ -301,25 +317,21 @@ mod tests {
     #[test]
     fn ordered_build_keys_follow_builder_spec_order() {
         let mut first = sample_object();
-        first.build_key = BuildKey::from_str(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        )
-        .unwrap();
+        first.build_key =
+            BuildKey::from_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap();
         let mut optional = sample_object();
-        optional.build_key = BuildKey::from_str(
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        )
-        .unwrap();
+        optional.build_key =
+            BuildKey::from_str("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .unwrap();
         let mut many_a = sample_object();
-        many_a.build_key = BuildKey::from_str(
-            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        )
-        .unwrap();
+        many_a.build_key =
+            BuildKey::from_str("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+                .unwrap();
         let mut many_b = sample_object();
-        many_b.build_key = BuildKey::from_str(
-            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-        )
-        .unwrap();
+        many_b.build_key =
+            BuildKey::from_str("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+                .unwrap();
 
         let inputs = ResolvedInputs::new(BTreeMap::from([
             ("first".to_string(), ResolvedDependencyValue::One(first)),
@@ -358,27 +370,39 @@ mod tests {
     }
 
     #[test]
-    fn ordered_object_hashes_follow_builder_spec_order() {
+    fn ordered_input_identities_follow_builder_spec_order() {
         let mut first = sample_object();
         first.object_hash = ObjectHash::from_str(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .unwrap();
+        first.meta_hash =
+            MetaHash::from_str("1111111111111111111111111111111111111111111111111111111111111111")
+                .unwrap();
         let mut optional = sample_object();
         optional.object_hash = ObjectHash::from_str(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         )
         .unwrap();
+        optional.meta_hash =
+            MetaHash::from_str("2222222222222222222222222222222222222222222222222222222222222222")
+                .unwrap();
         let mut many_a = sample_object();
         many_a.object_hash = ObjectHash::from_str(
             "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         )
         .unwrap();
+        many_a.meta_hash =
+            MetaHash::from_str("3333333333333333333333333333333333333333333333333333333333333333")
+                .unwrap();
         let mut many_b = sample_object();
         many_b.object_hash = ObjectHash::from_str(
             "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         )
         .unwrap();
+        many_b.meta_hash =
+            MetaHash::from_str("4444444444444444444444444444444444444444444444444444444444444444")
+                .unwrap();
 
         let inputs = ResolvedInputs::new(BTreeMap::from([
             ("first".to_string(), ResolvedDependencyValue::One(first)),
@@ -392,26 +416,50 @@ mod tests {
             ),
         ]));
 
-        let ordered = inputs.ordered_object_hashes(&ORDERED_SPEC).unwrap();
+        let ordered = inputs.ordered_input_identities(&ORDERED_SPEC).unwrap();
         assert_eq!(
             ordered,
             vec![
-                ObjectHash::from_str(
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                )
-                .unwrap(),
-                ObjectHash::from_str(
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                )
-                .unwrap(),
-                ObjectHash::from_str(
-                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                )
-                .unwrap(),
-                ObjectHash::from_str(
-                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                )
-                .unwrap(),
+                ResultInputIdentity {
+                    object_hash: ObjectHash::from_str(
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    )
+                    .unwrap(),
+                    meta_hash: MetaHash::from_str(
+                        "1111111111111111111111111111111111111111111111111111111111111111",
+                    )
+                    .unwrap(),
+                },
+                ResultInputIdentity {
+                    object_hash: ObjectHash::from_str(
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    )
+                    .unwrap(),
+                    meta_hash: MetaHash::from_str(
+                        "2222222222222222222222222222222222222222222222222222222222222222",
+                    )
+                    .unwrap(),
+                },
+                ResultInputIdentity {
+                    object_hash: ObjectHash::from_str(
+                        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    )
+                    .unwrap(),
+                    meta_hash: MetaHash::from_str(
+                        "3333333333333333333333333333333333333333333333333333333333333333",
+                    )
+                    .unwrap(),
+                },
+                ResultInputIdentity {
+                    object_hash: ObjectHash::from_str(
+                        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    )
+                    .unwrap(),
+                    meta_hash: MetaHash::from_str(
+                        "4444444444444444444444444444444444444444444444444444444444444444",
+                    )
+                    .unwrap(),
+                },
             ]
         );
     }

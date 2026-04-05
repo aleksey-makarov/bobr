@@ -1,5 +1,5 @@
 use crate::BuilderError;
-use crate::cas::BuildKey;
+use crate::cas::{BuildKey, MetaHash};
 use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -320,32 +320,39 @@ pub struct ProducerInfo {
 pub struct StagedBuildResult {
     pub kind: String,
     pub producer: ProducerInfo,
-    pub attrs: Map<String, Value>,
+    pub meta: Map<String, Value>,
     pub staged_path: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultInputIdentity {
+    pub object_hash: ObjectHash,
+    pub meta_hash: MetaHash,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Build {
     pub build_key: BuildKey,
     #[serde(with = "serde_object_hash")]
     pub object_hash: ObjectHash,
+    pub meta_hash: MetaHash,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     pub kind: String,
     pub producer: ProducerInfo,
-    pub attrs: Map<String, Value>,
+    pub meta: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultRecord {
     pub result_key: BuildKey,
     pub object_hash: ObjectHash,
+    pub meta_hash: MetaHash,
     pub created_at: Option<String>,
     pub kind: String,
     pub producer: ProducerInfo,
-    pub input_object_hashes: Vec<ObjectHash>,
-    pub attrs: Map<String, Value>,
+    pub inputs: Vec<ResultInputIdentity>,
+    pub meta: Map<String, Value>,
 }
 
 mod serde_object_hash {
@@ -442,7 +449,10 @@ mod tests {
             BuilderInputValue::Many(vec![object.clone(), object.clone()]),
         );
 
-        assert_eq!(inputs.one("script").unwrap().object_path, object.object_path);
+        assert_eq!(
+            inputs.one("script").unwrap().object_path,
+            object.object_path
+        );
         assert!(inputs.optional("base").unwrap().is_none());
         assert_eq!(inputs.many("sources").unwrap().len(), 2);
         assert!(matches!(
@@ -491,7 +501,7 @@ mod tests {
                 producer: ProducerInfo {
                     builder: "dummy".to_string(),
                 },
-                attrs: Map::new(),
+                meta: Map::new(),
                 staged_path: PathBuf::from("/tmp/out"),
             })
         }

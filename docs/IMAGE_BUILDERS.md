@@ -53,7 +53,7 @@ The realized object is a directory with the standard OCI layout shape:
   blobs/sha256/...
 ```
 
-The current realized attrs contain:
+The current realized result metadata contains:
 
 - `image`: the requested image reference from the recipe config
 - `manifest_digest`: the pinned digest from the recipe config
@@ -104,7 +104,7 @@ Layered mode builds a new OCI image layout on top of a base image:
 
 The realized result kind is still `container-image`.
 
-The current realized attrs contain:
+The current realized result metadata contains:
 
 - `mode`: `bootstrap` or `layered`
 - `manifest_digest`: the digest of the newly written OCI manifest blob

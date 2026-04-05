@@ -1,7 +1,7 @@
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use mbuild_core::{
     Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, Builder,
-    BuilderError, CasError, PublishedBuild, StoreLayout, compute_build_key,
+    BuilderError, CasError, PublishedBuild, ResultInputIdentity, StoreLayout, compute_build_key,
     compute_result_key, load_build_handle, materialize_build, object_path,
 };
 use serde_json::Value;
@@ -61,8 +61,8 @@ pub(crate) fn execute_builder_node(
     let input_build_keys = inputs
         .ordered_build_keys(builder.spec())
         .map_err(map_builder_error)?;
-    let input_object_hashes = inputs
-        .ordered_object_hashes(builder.spec())
+    let inputs_identity = inputs
+        .ordered_input_identities(builder.spec())
         .map_err(map_builder_error)?;
     let build_key = compute_build_key(builder.spec().tag, &config, &input_build_keys)
         .map_err(map_store_error)?;
@@ -89,9 +89,10 @@ pub(crate) fn execute_builder_node(
         return Ok(published);
     }
 
-    let result_key = compute_result_key(builder.spec().tag, &config, &input_object_hashes)
+    let result_key = compute_result_key(builder.spec().tag, &config, &inputs_identity)
         .map_err(map_store_error)?;
-    if let Some(result) = mbuild_core::load_result_record(layout, result_key).map_err(map_store_error)?
+    if let Some(result) =
+        mbuild_core::load_result_record(layout, result_key).map_err(map_store_error)?
     {
         let object_path = object_path(layout, result.object_hash);
         if !object_path.exists() {
@@ -102,7 +103,10 @@ pub(crate) fn execute_builder_node(
                 builder.spec().tag,
                 build_name,
                 build_key,
-                format!("result points to missing object '{}'", object_path.display()),
+                format!(
+                    "result points to missing object '{}'",
+                    object_path.display()
+                ),
             );
             return Err(RuntimeError::Store(format!(
                 "result '{}' points to missing object '{}'",
@@ -125,10 +129,11 @@ pub(crate) fn execute_builder_node(
             build: Build {
                 build_key,
                 object_hash: result.object_hash,
+                meta_hash: result.meta_hash,
                 created_at: result.created_at.clone(),
                 kind: result.kind.clone(),
                 producer: result.producer.clone(),
-                attrs: result.attrs.clone(),
+                meta: result.meta.clone(),
             },
             result,
             object_path,
@@ -180,7 +185,7 @@ pub(crate) fn execute_builder_node(
         build_key,
         result_key,
         created_at,
-        input_object_hashes,
+        inputs_identity,
         staged,
     )
     .map_err(|error| {
@@ -205,10 +210,7 @@ pub(crate) fn build_to_published(
     load_build_handle(layout, build.build_key)
         .map_err(map_store_error)?
         .ok_or_else(|| {
-            RuntimeError::Store(format!(
-                "build '{}' is missing from store",
-                build.build_key
-            ))
+            RuntimeError::Store(format!("build '{}' is missing from store", build.build_key))
         })
 }
 
@@ -223,12 +225,12 @@ pub(crate) fn lookup_canonical_result(
     layout: &StoreLayout,
     builder_tag: &str,
     config: &Value,
-    input_object_hashes: &[mbuild_core::ObjectHash],
+    inputs: &[ResultInputIdentity],
     build_key: BuildKey,
 ) -> Result<Option<PublishedBuild>, RuntimeError> {
-    let result_key =
-        compute_result_key(builder_tag, config, input_object_hashes).map_err(map_store_error)?;
-    let Some(result) = mbuild_core::load_result_record(layout, result_key).map_err(map_store_error)?
+    let result_key = compute_result_key(builder_tag, config, inputs).map_err(map_store_error)?;
+    let Some(result) =
+        mbuild_core::load_result_record(layout, result_key).map_err(map_store_error)?
     else {
         return Ok(None);
     };
@@ -245,10 +247,11 @@ pub(crate) fn lookup_canonical_result(
         build: Build {
             build_key,
             object_hash: result.object_hash,
+            meta_hash: result.meta_hash,
             created_at: result.created_at.clone(),
             kind: result.kind.clone(),
             producer: result.producer.clone(),
-            attrs: result.attrs.clone(),
+            meta: result.meta.clone(),
         },
         result,
         object_path,
@@ -276,6 +279,7 @@ pub(crate) fn validate_allowed_kind(
 pub(crate) fn to_resolved_dependency(published: PublishedBuild) -> ResolvedDependency {
     ResolvedDependency {
         object_hash: published.build.object_hash,
+        meta_hash: published.build.meta_hash,
         build_key: published.build.build_key,
         kind: published.build.kind,
         object_path: published.object_path,

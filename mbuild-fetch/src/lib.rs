@@ -1,8 +1,8 @@
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, InputSlot,
-    ProducerInfo, StagedBuildResult, TypedBuilder, fsutil,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, InputSlot, ProducerInfo,
+    StagedBuildResult, TypedBuilder, fsutil,
 };
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
@@ -150,7 +150,7 @@ impl TypedBuilder for FetchBuilder {
             }
         });
 
-        let (staged_path, mut attrs) = if config.unpack {
+        let (staged_path, mut meta) = if config.unpack {
             cx.log_event(
                 BuildLogLevel::Info,
                 "unpack",
@@ -161,26 +161,26 @@ impl TypedBuilder for FetchBuilder {
             let (path, normalized_root) =
                 stage_archive_output(&cx.temp_root, &cached_blob, format.clone())
                     .map_err(map_error)?;
-            let mut attrs = Map::new();
-            attrs.insert(
+            let mut meta = Map::new();
+            meta.insert(
                 "archive_format".to_string(),
                 Value::String(archive_format_name(&format).to_string()),
             );
-            attrs.insert("normalized_root".to_string(), Value::Bool(normalized_root));
-            attrs.insert("unpack".to_string(), Value::Bool(true));
-            (path, attrs)
+            meta.insert("normalized_root".to_string(), Value::Bool(normalized_root));
+            meta.insert("unpack".to_string(), Value::Bool(true));
+            (path, meta)
         } else {
             let path = stage_file_output(&cx.temp_root, &cached_blob).map_err(map_error)?;
-            let mut attrs = Map::new();
-            attrs.insert("unpack".to_string(), Value::Bool(false));
-            (path, attrs)
+            let mut meta = Map::new();
+            meta.insert("unpack".to_string(), Value::Bool(false));
+            (path, meta)
         };
 
-        attrs.insert(
+        meta.insert(
             "source_url".to_string(),
             Value::String(source_url.to_string()),
         );
-        attrs.insert(
+        meta.insert(
             "declared_hash".to_string(),
             Value::String(config.hash.clone()),
         );
@@ -190,7 +190,7 @@ impl TypedBuilder for FetchBuilder {
             producer: ProducerInfo {
                 builder: "fetch".to_string(),
             },
-            attrs,
+            meta,
             staged_path,
         })
     }
@@ -960,7 +960,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_builder_downloads_file_and_reports_attrs() {
+    fn fetch_builder_downloads_file_and_reports_meta() {
         let temp = tempdir().unwrap();
         let payload = b"hello fetch\n".to_vec();
         let hash = format!("sha256:{}", bytes_to_hex(&Sha256::digest(&payload)));
@@ -996,13 +996,13 @@ mod tests {
         assert_eq!(result.kind, "fetched-file");
         assert_eq!(result.producer.builder, "fetch");
         assert_eq!(fs::read(&result.staged_path).unwrap(), payload);
-        assert_eq!(result.attrs["source_url"], Value::String(url));
-        assert_eq!(result.attrs["declared_hash"], Value::String(hash));
-        assert_eq!(result.attrs["unpack"], Value::Bool(false));
+        assert_eq!(result.meta["source_url"], Value::String(url));
+        assert_eq!(result.meta["declared_hash"], Value::String(hash));
+        assert_eq!(result.meta["unpack"], Value::Bool(false));
     }
 
     #[test]
-    fn fetch_builder_unpacks_tar_gz_and_sets_archive_attrs() {
+    fn fetch_builder_unpacks_tar_gz_and_sets_archive_meta() {
         let temp = tempdir().unwrap();
         let payload = tar_gz_with_wrapped_root();
         let hash = format!("sha256:{}", bytes_to_hex(&Sha256::digest(&payload)));
@@ -1041,14 +1041,14 @@ mod tests {
             fs::read_to_string(result.staged_path.join("README.txt")).unwrap(),
             "hello archive\n"
         );
-        assert_eq!(result.attrs["source_url"], Value::String(url));
-        assert_eq!(result.attrs["declared_hash"], Value::String(hash));
-        assert_eq!(result.attrs["unpack"], Value::Bool(true));
+        assert_eq!(result.meta["source_url"], Value::String(url));
+        assert_eq!(result.meta["declared_hash"], Value::String(hash));
+        assert_eq!(result.meta["unpack"], Value::Bool(true));
         assert_eq!(
-            result.attrs["archive_format"],
+            result.meta["archive_format"],
             Value::String("tar-gz".to_string())
         );
-        assert_eq!(result.attrs["normalized_root"], Value::Bool(true));
+        assert_eq!(result.meta["normalized_root"], Value::Bool(true));
         #[cfg(unix)]
         {
             let mode = fs::metadata(result.staged_path.join("README.txt"))

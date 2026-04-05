@@ -68,7 +68,12 @@ The store layout is content-addressed:
 
 - builder tag
 - normalized config payload
-- ordered direct dependency `object_hash`es
+- ordered direct dependency input identities
+
+Each direct input identity contains:
+
+- `object_hash`
+- `meta_hash`
 
 The dependency order comes from `BuilderSpec.inputs`, not from JSON field order.
 This lets `mbuild` keep the general runtime independent from concrete builders.

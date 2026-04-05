@@ -1,10 +1,8 @@
 mod support;
 
-use support::{
-    base_image_recipe, binary_recipe, build_ref_path, image_recipe, recipe_node, script_recipe,
-    source_recipe, spawn_test_oci_registry, write_recipe,
+use mbuild::recipe_runtime::{
+    BuildRunOptions, run_recipe_json_in_workspace, run_recipe_json_in_workspace_with_options,
 };
-use mbuild::recipe_runtime::{BuildRunOptions, run_recipe_json_in_workspace, run_recipe_json_in_workspace_with_options};
 use mbuild_core::{StoreLayout, load_build_handle};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -19,6 +17,10 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
+use support::{
+    base_image_recipe, binary_recipe, build_ref_path, image_recipe, recipe_node, script_recipe,
+    source_recipe, spawn_test_oci_registry, write_recipe,
+};
 use tempfile::tempdir;
 
 fn env_lock() -> &'static Mutex<()> {
@@ -132,15 +134,9 @@ fn spawn_barrier_http_server(
         }
 
         let (status_line, payload) = if streams.len() == expected_requests {
-            (
-                "HTTP/1.1 200 OK",
-                Some((body, content_type)),
-            )
+            ("HTTP/1.1 200 OK", Some((body, content_type)))
         } else {
-            (
-                "HTTP/1.1 503 Service Unavailable",
-                None,
-            )
+            ("HTTP/1.1 503 Service Unavailable", None)
         };
 
         for mut stream in streams {
@@ -155,9 +151,8 @@ fn spawn_barrier_http_server(
                     stream.write_all(body).unwrap();
                 }
                 None => {
-                    let response = format!(
-                        "{status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                    );
+                    let response =
+                        format!("{status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                     stream.write_all(response.as_bytes()).unwrap();
                 }
             }
@@ -220,8 +215,7 @@ fn json_recipe_executes_all_real_builders() {
         let workspace = tempdir().unwrap();
         let (oci_server, image_ref, pinned_digest) = spawn_test_oci_registry();
         let source_tar = {
-            let encoder =
-                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             let mut tar = tar::Builder::new(encoder);
             let body = b"hello from json runtime\n";
             let mut header = tar::Header::new_gnu();
@@ -253,23 +247,27 @@ fn json_recipe_executes_all_real_builders() {
         assert_eq!(published.build.kind, "container-image");
         assert_eq!(published.build.producer.builder, "image");
         assert_eq!(
-            published.build.attrs["mode"],
+            published.build.meta["mode"],
             Value::String("bootstrap".to_string())
         );
 
         for name in ["source", "script", "base-image", "binary", "final-image"] {
-            assert!(workspace
-                .path()
-                .join(".mbuild")
-                .join("meta-refs")
-                .join(format!("{name}.json"))
-                .exists());
-            assert!(workspace
-                .path()
-                .join(".mbuild")
-                .join("object-refs")
-                .join(name)
-                .exists());
+            assert!(
+                workspace
+                    .path()
+                    .join(".mbuild")
+                    .join("meta-refs")
+                    .join(format!("{name}.json"))
+                    .exists()
+            );
+            assert!(
+                workspace
+                    .path()
+                    .join(".mbuild")
+                    .join("object-refs")
+                    .join(name)
+                    .exists()
+            );
         }
 
         let builds_dir = workspace.path().join(".mbuild").join("builds");
@@ -286,8 +284,7 @@ fn repeated_build_keys_are_built_once_but_published_under_all_names() {
         let workspace = tempdir().unwrap();
         let (oci_server, image_ref, pinned_digest) = spawn_test_oci_registry();
         let source_tar = {
-            let encoder =
-                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             let mut tar = tar::Builder::new(encoder);
             let body = b"hello from duplicate test\n";
             let mut header = tar::Header::new_gnu();
@@ -323,25 +320,33 @@ fn repeated_build_keys_are_built_once_but_published_under_all_names() {
         handle.join().unwrap();
 
         let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
-        assert!(load_build_handle(&layout, build.build_key).unwrap().is_some());
+        assert!(
+            load_build_handle(&layout, build.build_key)
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(
             fs::read_dir(workspace.path().join(".mbuild").join("builds"))
                 .unwrap()
                 .count(),
             5
         );
-        assert!(workspace
-            .path()
-            .join(".mbuild")
-            .join("meta-refs")
-            .join("binary-a.json")
-            .exists());
-        assert!(workspace
-            .path()
-            .join(".mbuild")
-            .join("meta-refs")
-            .join("binary-b.json")
-            .exists());
+        assert!(
+            workspace
+                .path()
+                .join(".mbuild")
+                .join("meta-refs")
+                .join("binary-a.json")
+                .exists()
+        );
+        assert!(
+            workspace
+                .path()
+                .join(".mbuild")
+                .join("meta-refs")
+                .join("binary-b.json")
+                .exists()
+        );
         assert!(build_ref_path(workspace.path(), build.build_key).exists());
         drop(oci_server);
     });
@@ -353,8 +358,7 @@ fn independent_fetch_sources_run_in_parallel() {
         let workspace = tempdir().unwrap();
         let (oci_server, image_ref, pinned_digest) = spawn_test_oci_registry();
         let source_tar = {
-            let encoder =
-                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             let mut tar = tar::Builder::new(encoder);
             let body = b"hello from parallel test\n";
             let mut header = tar::Header::new_gnu();

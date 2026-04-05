@@ -37,7 +37,6 @@ impl fmt::Display for ContainerImageError {
     }
 }
 
-
 #[derive(Debug)]
 enum ImageError {
     InvalidConfig(String),
@@ -127,17 +126,17 @@ impl TypedBuilder for ContainerImageBuilder {
         }
 
         if config.image.trim().is_empty() {
-            return Err(map_container_image_error(ContainerImageError::InvalidConfig(
-                "image must not be empty".to_string(),
-            )));
+            return Err(map_container_image_error(
+                ContainerImageError::InvalidConfig("image must not be empty".to_string()),
+            ));
         }
         if !is_valid_sha256_digest(&config.digest) {
-            return Err(map_container_image_error(ContainerImageError::InvalidConfig(
-                format!(
+            return Err(map_container_image_error(
+                ContainerImageError::InvalidConfig(format!(
                     "invalid digest '{}'; expected format: sha256:<64 hex chars>",
                     config.digest
-                ),
-            )));
+                )),
+            ));
         }
 
         fsutil::recreate_empty_dir_force(&cx.temp_root)
@@ -146,7 +145,9 @@ impl TypedBuilder for ContainerImageBuilder {
 
         let staged_path = cx.temp_root.join(OCI_LAYOUT_SUBDIR);
         fs::create_dir(&staged_path)
-            .map_err(|e| ContainerImageError::FsFailed(format!("failed to create staging dir: {e}")))
+            .map_err(|e| {
+                ContainerImageError::FsFailed(format!("failed to create staging dir: {e}"))
+            })
             .map_err(map_container_image_error)?;
 
         cx.log_event(
@@ -164,19 +165,16 @@ impl TypedBuilder for ContainerImageBuilder {
             })
             .map_err(map_container_image_error)?;
 
-        let mut attrs = Map::new();
-        attrs.insert("image".to_string(), Value::String(config.image));
-        attrs.insert(
-            "manifest_digest".to_string(),
-            Value::String(config.digest),
-        );
+        let mut meta = Map::new();
+        meta.insert("image".to_string(), Value::String(config.image));
+        meta.insert("manifest_digest".to_string(), Value::String(config.digest));
 
         Ok(StagedBuildResult {
             kind: KIND_CONTAINER_IMAGE.to_string(),
             producer: ProducerInfo {
                 builder: "container-image".to_string(),
             },
-            attrs,
+            meta,
             staged_path,
         })
     }
@@ -217,7 +215,9 @@ impl TypedBuilder for ImageBuilder {
 
         let ref_name = config.ref_name.as_deref();
         let manifest_digest = match mode {
-            "bootstrap" => run_bootstrap_mode(&staged_path, binaries, ref_name).map_err(map_image_error)?,
+            "bootstrap" => {
+                run_bootstrap_mode(&staged_path, binaries, ref_name).map_err(map_image_error)?
+            }
             "layered" => {
                 let base = base.unwrap();
                 run_layered_mode(&staged_path, base, binaries, ref_name).map_err(map_image_error)?
@@ -225,21 +225,23 @@ impl TypedBuilder for ImageBuilder {
             _ => unreachable!(),
         };
 
-        let mut attrs = Map::new();
-        attrs.insert("mode".to_string(), Value::String(mode.to_string()));
-        attrs.insert("manifest_digest".to_string(), Value::String(manifest_digest));
+        let mut meta = Map::new();
+        meta.insert("mode".to_string(), Value::String(mode.to_string()));
+        meta.insert(
+            "manifest_digest".to_string(),
+            Value::String(manifest_digest),
+        );
 
         Ok(StagedBuildResult {
             kind: KIND_CONTAINER_IMAGE.to_string(),
             producer: ProducerInfo {
                 builder: "image".to_string(),
             },
-            attrs,
+            meta,
             staged_path,
         })
     }
 }
-
 
 fn validate_image_config(
     config: &ImageConfig,
@@ -324,12 +326,11 @@ fn run_bootstrap_mode(
     binaries: &[BuilderInputObject],
     ref_name: Option<&str>,
 ) -> IResult<String> {
-    oci::init_layout(staging_dir)
-        .map_err(|e| ImageError::FsFailed(e.to_string()))?;
+    oci::init_layout(staging_dir).map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
     let binary_paths: Vec<&Path> = binaries.iter().map(|b| b.object_path.as_path()).collect();
-    let layer = layer::create_layer(&binary_paths)
-        .map_err(|e| ImageError::BuildFailed(e.to_string()))?;
+    let layer =
+        layer::create_layer(&binary_paths).map_err(|e| ImageError::BuildFailed(e.to_string()))?;
 
     let layer_desc = oci::write_blob(staging_dir, &layer.compressed, oci::MEDIA_TYPE_OCI_LAYER)
         .map_err(|e| ImageError::FsFailed(e.to_string()))?;
@@ -345,9 +346,8 @@ fn run_bootstrap_mode(
     });
     let config_bytes = serde_json::to_vec(&config)
         .map_err(|e| ImageError::FsFailed(format!("failed to serialize config: {e}")))?;
-    let config_desc =
-        oci::write_blob(staging_dir, &config_bytes, oci::MEDIA_TYPE_OCI_CONFIG)
-            .map_err(|e| ImageError::FsFailed(e.to_string()))?;
+    let config_desc = oci::write_blob(staging_dir, &config_bytes, oci::MEDIA_TYPE_OCI_CONFIG)
+        .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
     let manifest = oci::OciManifest {
         schema_version: 2,
@@ -356,9 +356,8 @@ fn run_bootstrap_mode(
     };
     let manifest_bytes = serde_json::to_vec(&manifest)
         .map_err(|e| ImageError::FsFailed(format!("failed to serialize manifest: {e}")))?;
-    let manifest_desc =
-        oci::write_blob(staging_dir, &manifest_bytes, oci::MEDIA_TYPE_OCI_MANIFEST)
-            .map_err(|e| ImageError::FsFailed(e.to_string()))?;
+    let manifest_desc = oci::write_blob(staging_dir, &manifest_bytes, oci::MEDIA_TYPE_OCI_MANIFEST)
+        .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
     let manifest_digest = manifest_desc.digest.clone();
     oci::write_index(staging_dir, manifest_desc, ref_name)
@@ -384,15 +383,14 @@ fn run_layered_mode(
         .map_err(|e| ImageError::InputResolutionFailed(e.to_string()))?;
 
     // Initialize new layout and hardlink all base blobs.
-    oci::init_layout(staging_dir)
-        .map_err(|e| ImageError::FsFailed(e.to_string()))?;
+    oci::init_layout(staging_dir).map_err(|e| ImageError::FsFailed(e.to_string()))?;
     oci::hardlink_layer_blobs(base_dir, staging_dir)
         .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
     // Build new layer from binary outputs.
     let binary_paths: Vec<&Path> = binaries.iter().map(|b| b.object_path.as_path()).collect();
-    let layer = layer::create_layer(&binary_paths)
-        .map_err(|e| ImageError::BuildFailed(e.to_string()))?;
+    let layer =
+        layer::create_layer(&binary_paths).map_err(|e| ImageError::BuildFailed(e.to_string()))?;
     let layer_desc = oci::write_blob(staging_dir, &layer.compressed, oci::MEDIA_TYPE_OCI_LAYER)
         .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
@@ -412,9 +410,8 @@ fn run_layered_mode(
     }
     let config_bytes = serde_json::to_vec(&new_config)
         .map_err(|e| ImageError::FsFailed(format!("failed to serialize config: {e}")))?;
-    let config_desc =
-        oci::write_blob(staging_dir, &config_bytes, oci::MEDIA_TYPE_OCI_CONFIG)
-            .map_err(|e| ImageError::FsFailed(e.to_string()))?;
+    let config_desc = oci::write_blob(staging_dir, &config_bytes, oci::MEDIA_TYPE_OCI_CONFIG)
+        .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
     // Synthesize new manifest: extend base layers with the new layer.
     let mut new_layers = base_manifest.layers.clone();
@@ -426,9 +423,8 @@ fn run_layered_mode(
     };
     let manifest_bytes = serde_json::to_vec(&new_manifest)
         .map_err(|e| ImageError::FsFailed(format!("failed to serialize manifest: {e}")))?;
-    let manifest_desc =
-        oci::write_blob(staging_dir, &manifest_bytes, oci::MEDIA_TYPE_OCI_MANIFEST)
-            .map_err(|e| ImageError::FsFailed(e.to_string()))?;
+    let manifest_desc = oci::write_blob(staging_dir, &manifest_bytes, oci::MEDIA_TYPE_OCI_MANIFEST)
+        .map_err(|e| ImageError::FsFailed(e.to_string()))?;
 
     let manifest_digest = manifest_desc.digest.clone();
     oci::write_index(staging_dir, manifest_desc, ref_name)
@@ -497,7 +493,8 @@ mod tests {
         .unwrap();
 
         // Minimal gzip of an empty tar (the magic bytes for gzip(empty tar)).
-        let layer_bytes: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+        let layer_bytes: &[u8] =
+            b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00";
         let layer_hex = format!("{:x}", Sha256::digest(layer_bytes));
         let layer_digest = format!("sha256:{layer_hex}");
         fs::write(
@@ -554,7 +551,9 @@ mod tests {
 
     fn resolved_base_image(root: &Path) -> BuilderInputObject {
         let oci_dir = create_test_oci_layout(root, "base-image");
-        BuilderInputObject { object_path: oci_dir }
+        BuilderInputObject {
+            object_path: oci_dir,
+        }
     }
 
     fn sample_digest() -> &'static str {
@@ -627,13 +626,34 @@ mod tests {
 
         assert_eq!(result.kind, KIND_CONTAINER_IMAGE);
         assert_eq!(result.producer.builder, "container-image");
-        assert_eq!(result.attrs["image"], Value::String(image));
-        assert_eq!(result.attrs["manifest_digest"], Value::String(pinned_digest));
+        assert_eq!(result.meta["image"], Value::String(image));
+        assert_eq!(result.meta["manifest_digest"], Value::String(pinned_digest));
         assert!(result.staged_path.join("oci-layout").exists());
         assert!(result.staged_path.join("index.json").exists());
-        assert!(result.staged_path.join("blobs").join("sha256").join(&manifest_hex).exists());
-        assert!(result.staged_path.join("blobs").join("sha256").join(&config_hex).exists());
-        assert!(result.staged_path.join("blobs").join("sha256").join(&layer_hex).exists());
+        assert!(
+            result
+                .staged_path
+                .join("blobs")
+                .join("sha256")
+                .join(&manifest_hex)
+                .exists()
+        );
+        assert!(
+            result
+                .staged_path
+                .join("blobs")
+                .join("sha256")
+                .join(&config_hex)
+                .exists()
+        );
+        assert!(
+            result
+                .staged_path
+                .join("blobs")
+                .join("sha256")
+                .join(&layer_hex)
+                .exists()
+        );
     }
 
     #[test]
@@ -712,15 +732,29 @@ mod tests {
         );
 
         let result = ImageBuilder
-            .build_typed(ImageConfig { ref_name: None, mode: None }, inputs, &mut cx)
+            .build_typed(
+                ImageConfig {
+                    ref_name: None,
+                    mode: None,
+                },
+                inputs,
+                &mut cx,
+            )
             .unwrap();
 
         assert_eq!(result.kind, KIND_CONTAINER_IMAGE);
         assert_eq!(result.producer.builder, "image");
-        assert_eq!(result.attrs["mode"], Value::String("bootstrap".to_string()));
-        assert!(result.attrs.contains_key("manifest_digest"), "{:?}", result.attrs);
-        let digest = result.attrs["manifest_digest"].as_str().unwrap();
-        assert!(digest.starts_with("sha256:"), "manifest_digest should start with sha256:");
+        assert_eq!(result.meta["mode"], Value::String("bootstrap".to_string()));
+        assert!(
+            result.meta.contains_key("manifest_digest"),
+            "{:?}",
+            result.meta
+        );
+        let digest = result.meta["manifest_digest"].as_str().unwrap();
+        assert!(
+            digest.starts_with("sha256:"),
+            "manifest_digest should start with sha256:"
+        );
         assert!(result.staged_path.join("oci-layout").exists());
         assert!(result.staged_path.join("index.json").exists());
     }
@@ -739,15 +773,17 @@ mod tests {
 
         let result = ImageBuilder
             .build_typed(
-                ImageConfig { ref_name: None, mode: Some("layered".to_string()),
+                ImageConfig {
+                    ref_name: None,
+                    mode: Some("layered".to_string()),
                 },
                 inputs,
                 &mut cx,
             )
             .unwrap();
 
-        assert_eq!(result.attrs["mode"], Value::String("layered".to_string()));
-        let digest = result.attrs["manifest_digest"].as_str().unwrap();
+        assert_eq!(result.meta["mode"], Value::String("layered".to_string()));
+        let digest = result.meta["manifest_digest"].as_str().unwrap();
         assert!(digest.starts_with("sha256:"));
         assert!(result.staged_path.join("oci-layout").exists());
         assert!(result.staged_path.join("index.json").exists());
@@ -775,7 +811,9 @@ mod tests {
 
         let result = ImageBuilder
             .build_typed(
-                ImageConfig { ref_name: None, mode: Some("layered".to_string()),
+                ImageConfig {
+                    ref_name: None,
+                    mode: Some("layered".to_string()),
                 },
                 inputs,
                 &mut cx,
@@ -786,7 +824,10 @@ mod tests {
             .unwrap()
             .count();
         // We should have base blobs + new manifest + new config + new layer = +3
-        assert!(new_blob_count > base_blob_count, "layered image should have more blobs");
+        assert!(
+            new_blob_count > base_blob_count,
+            "layered image should have more blobs"
+        );
     }
 
     #[test]
@@ -808,7 +849,9 @@ mod tests {
 
         let error = ImageBuilder
             .build_typed(
-                ImageConfig { ref_name: None, mode: Some("layered".to_string()),
+                ImageConfig {
+                    ref_name: None,
+                    mode: Some("layered".to_string()),
                 },
                 inputs,
                 &mut cx,
@@ -831,7 +874,9 @@ mod tests {
 
         let error = ImageBuilder
             .build_typed(
-                ImageConfig { ref_name: None, mode: Some("invalid".to_string()),
+                ImageConfig {
+                    ref_name: None,
+                    mode: Some("invalid".to_string()),
                 },
                 inputs,
                 &mut cx,
