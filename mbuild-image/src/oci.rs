@@ -89,8 +89,12 @@ pub fn blob_path(oci_dir: &Path, digest: &str) -> PathBuf {
 /// Read index.json and return the first manifest descriptor.
 pub fn read_index(oci_dir: &Path) -> Result<OciDescriptor, OciError> {
     let path = oci_dir.join("index.json");
-    let bytes = fs::read(&path)
-        .map_err(|e| OciError::Io(format!("failed to read index.json '{}': {e}", path.display())))?;
+    let bytes = fs::read(&path).map_err(|e| {
+        OciError::Io(format!(
+            "failed to read index.json '{}': {e}",
+            path.display()
+        ))
+    })?;
     let index: OciIndex = serde_json::from_slice(&bytes)
         .map_err(|e| OciError::Parse(format!("failed to parse index.json: {e}")))?;
     index
@@ -140,12 +144,8 @@ pub fn write_blob(
 ) -> Result<OciDescriptor, OciError> {
     let digest = sha256_digest(data);
     let path = blob_path(oci_dir, &digest);
-    fs::write(&path, data).map_err(|e| {
-        OciError::Io(format!(
-            "failed to write blob '{}': {e}",
-            path.display()
-        ))
-    })?;
+    fs::write(&path, data)
+        .map_err(|e| OciError::Io(format!("failed to write blob '{}': {e}", path.display())))?;
     Ok(OciDescriptor {
         media_type: media_type.into(),
         digest,
@@ -172,10 +172,17 @@ pub fn init_layout(oci_dir: &Path) -> Result<(), OciError> {
 /// Write index.json referencing a single manifest descriptor.
 /// If `image_ref` is provided, sets the `org.opencontainers.image.ref.name` annotation
 /// so that `podman load` assigns a recognizable name to the image.
-pub fn write_index(oci_dir: &Path, mut manifest_desc: OciDescriptor, image_ref: Option<&str>) -> Result<(), OciError> {
+pub fn write_index(
+    oci_dir: &Path,
+    mut manifest_desc: OciDescriptor,
+    image_ref: Option<&str>,
+) -> Result<(), OciError> {
     if let Some(name) = image_ref {
         let mut annotations = std::collections::BTreeMap::new();
-        annotations.insert("org.opencontainers.image.ref.name".to_string(), name.to_string());
+        annotations.insert(
+            "org.opencontainers.image.ref.name".to_string(),
+            name.to_string(),
+        );
         manifest_desc.annotations = Some(annotations);
     }
     let index = OciIndex {
@@ -197,7 +204,10 @@ pub fn hardlink_layer_blobs(src_oci_dir: &Path, dst_oci_dir: &Path) -> Result<()
     let dst_blobs = dst_oci_dir.join("blobs").join("sha256");
     for layer in &manifest.layers {
         let src = blob_path(src_oci_dir, &layer.digest);
-        let (_, hex) = layer.digest.split_once(':').unwrap_or(("sha256", &layer.digest));
+        let (_, hex) = layer
+            .digest
+            .split_once(':')
+            .unwrap_or(("sha256", &layer.digest));
         let dst = dst_blobs.join(hex);
         fs::hard_link(&src, &dst).map_err(|e| {
             OciError::Io(format!(

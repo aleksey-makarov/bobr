@@ -1,8 +1,8 @@
 mod support;
 
-use support::{build_ref_path, text_recipe, write_recipe};
 use mbuild::recipe_runtime::run_recipe_json_in_workspace;
 use std::fs;
+use support::{build_ref_path, text_recipe, write_recipe};
 use tempfile::tempdir;
 
 #[test]

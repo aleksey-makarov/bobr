@@ -1,10 +1,10 @@
 mod support;
 
-use support::{recipe_node, text_recipe, write_recipe};
 use mbuild_core::Build;
 use serde_json::json;
 use std::fs;
 use std::process::Command;
+use support::{recipe_node, text_recipe, write_recipe};
 use tempfile::tempdir;
 
 #[test]

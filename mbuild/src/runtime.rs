@@ -338,3 +338,85 @@ pub(crate) fn log_runtime_event(
         details: serde_json::Map::new(),
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mbuild_core::{PublishOutputRequest, ResultInputIdentity, publish_output};
+    use serde_json::{Map, json};
+    use std::fs;
+    use std::str::FromStr;
+    use tempfile::tempdir;
+
+    #[test]
+    fn lookup_canonical_result_depends_on_input_meta_hash() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let matching_inputs = vec![ResultInputIdentity {
+            object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                .parse()
+                .unwrap(),
+            meta_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .parse()
+                .unwrap(),
+        }];
+        let payload = json!({ "kind": "build-script", "source": "echo hi\n" });
+        let result_key = compute_result_key("Text", &payload, &matching_inputs).unwrap();
+        let build_key_for_result =
+            BuildKey::from_str("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .unwrap();
+        let lookup_build_key =
+            BuildKey::from_str("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+                .unwrap();
+        let meta = Map::from_iter([("source_bytes".to_string(), serde_json::Value::from(8))]);
+        let expected_meta_hash = mbuild_core::compute_meta_hash(&meta).unwrap();
+
+        let stage = temp.path().join("script.sh");
+        fs::write(&stage, b"echo hi\n").unwrap();
+        publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "script".to_string(),
+                build_key: build_key_for_result,
+                result_key,
+                created_at: "2026-04-05T12:00:00.000000000Z".to_string(),
+                staged_path: stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                inputs: matching_inputs.clone(),
+                meta,
+            },
+        )
+        .unwrap();
+
+        let hit = lookup_canonical_result(
+            &layout,
+            "Text",
+            &payload,
+            &matching_inputs,
+            lookup_build_key,
+        )
+        .unwrap()
+        .expect("expected canonical result hit");
+        assert_eq!(hit.build.meta_hash, expected_meta_hash);
+
+        let mismatching_inputs = vec![ResultInputIdentity {
+            object_hash: matching_inputs[0].object_hash,
+            meta_hash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                .parse()
+                .unwrap(),
+        }];
+        assert!(
+            lookup_canonical_result(
+                &layout,
+                "Text",
+                &payload,
+                &mismatching_inputs,
+                lookup_build_key,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+}

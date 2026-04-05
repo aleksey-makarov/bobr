@@ -1294,6 +1294,51 @@ mod tests {
     }
 
     #[test]
+    fn result_key_is_stable_for_identical_inputs() {
+        let payload = json!({ "kind": "build-script" });
+        let inputs = vec![
+            ResultInputIdentity {
+                object_hash: parse_object_hash(
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                ),
+                meta_hash: parse_meta_hash(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ),
+            },
+            ResultInputIdentity {
+                object_hash: parse_object_hash(
+                    "2222222222222222222222222222222222222222222222222222222222222222",
+                ),
+                meta_hash: parse_meta_hash(
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                ),
+            },
+        ];
+
+        assert_eq!(
+            compute_result_key("Text", &payload, &inputs).unwrap(),
+            compute_result_key("Text", &payload, &inputs).unwrap()
+        );
+    }
+
+    #[test]
+    fn meta_hash_changes_when_meta_changes() {
+        let left = Map::from_iter([
+            ("source_bytes".to_string(), Value::from(5)),
+            ("generated".to_string(), Value::from(false)),
+        ]);
+        let right = Map::from_iter([
+            ("source_bytes".to_string(), Value::from(6)),
+            ("generated".to_string(), Value::from(false)),
+        ]);
+
+        assert_ne!(
+            compute_meta_hash(&left).unwrap(),
+            compute_meta_hash(&right).unwrap()
+        );
+    }
+
+    #[test]
     fn parse_result_record_rejects_old_schema() {
         let result_key =
             parse_build_key("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
@@ -1491,6 +1536,72 @@ mod tests {
                 .join(OBJECTS_DIR)
                 .join(published.object_hash.to_hex())
         );
+    }
+
+    #[test]
+    fn result_record_round_trips_inputs_meta_hash_and_meta() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let meta = Map::from_iter([
+            ("source_bytes".to_string(), Value::from(8)),
+            ("generated".to_string(), Value::from(false)),
+        ]);
+        let inputs = vec![
+            ResultInputIdentity {
+                object_hash: parse_object_hash(
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                ),
+                meta_hash: parse_meta_hash(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                ),
+            },
+            ResultInputIdentity {
+                object_hash: parse_object_hash(
+                    "2222222222222222222222222222222222222222222222222222222222222222",
+                ),
+                meta_hash: parse_meta_hash(
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                ),
+            },
+        ];
+        let expected_meta_hash = compute_meta_hash(&meta).unwrap();
+        let result_key = compute_result_key(
+            "Text",
+            &json!({ "kind": "build-script", "source": "echo hi\n" }),
+            &inputs,
+        )
+        .unwrap();
+
+        let stage = temp.path().join("script.sh");
+        fs::write(&stage, b"echo hi\n").unwrap();
+        let published = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "script".to_string(),
+                build_key: build_key_for(
+                    "Text",
+                    json!({ "kind": "build-script", "source": "echo hi\n" }),
+                    &[],
+                ),
+                result_key,
+                created_at: sample_created_at().to_string(),
+                staged_path: stage,
+                kind: "build-script".to_string(),
+                producer_builder: "text".to_string(),
+                inputs: inputs.clone(),
+                meta: meta.clone(),
+            },
+        )
+        .unwrap();
+
+        let loaded = load_result_record(&layout, published.result_key)
+            .unwrap()
+            .expect("expected result record to exist");
+
+        assert_eq!(loaded.inputs, inputs);
+        assert_eq!(loaded.meta_hash, expected_meta_hash);
+        assert_eq!(loaded.meta, meta);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::oci::{self, OciDescriptor, OciManifest, MEDIA_TYPE_OCI_MANIFEST};
+use crate::oci::{self, MEDIA_TYPE_OCI_MANIFEST, OciDescriptor, OciManifest};
 use std::fmt;
 use std::io::Read;
 use std::path::Path;
@@ -89,12 +89,11 @@ pub fn parse_image_ref(image: &str) -> Result<(String, String, String), Registry
         host
     };
 
-    let repository =
-        if registry_host == "registry-1.docker.io" && !repository.contains('/') {
-            format!("library/{repository}")
-        } else {
-            repository
-        };
+    let repository = if registry_host == "registry-1.docker.io" && !repository.contains('/') {
+        format!("library/{repository}")
+    } else {
+        repository
+    };
 
     Ok((registry_host, repository, reference))
 }
@@ -135,8 +134,7 @@ pub fn fetch_image_authenticated(
     // image string is only used to locate the registry and repository.
     let pinned_url =
         format!("{scheme}://{registry_host}/v2/{repository}/manifests/{pinned_digest}");
-    let (pinned_bytes, pinned_media_type) =
-        get_with_bearer_auth(&pinned_url, ACCEPT_MANIFESTS)?;
+    let (pinned_bytes, pinned_media_type) = get_with_bearer_auth(&pinned_url, ACCEPT_MANIFESTS)?;
 
     // Verify that what the registry returned actually has the expected digest.
     let actual_digest = format!("sha256:{}", oci::sha256_hex(&pinned_bytes));
@@ -167,18 +165,13 @@ pub fn fetch_image_authenticated(
 
     oci::write_blob(target_dir, &manifest_bytes, MEDIA_TYPE_OCI_MANIFEST)?;
 
-    let config_bytes = get_blob_with_auth(
-        scheme,
-        &registry_host,
-        &repository,
-        &manifest.config.digest,
-    )?;
+    let config_bytes =
+        get_blob_with_auth(scheme, &registry_host, &repository, &manifest.config.digest)?;
     verify_digest(&config_bytes, &manifest.config.digest)?;
     oci::write_blob(target_dir, &config_bytes, &manifest.config.media_type)?;
 
     for layer in &manifest.layers {
-        let layer_bytes =
-            get_blob_with_auth(scheme, &registry_host, &repository, &layer.digest)?;
+        let layer_bytes = get_blob_with_auth(scheme, &registry_host, &repository, &layer.digest)?;
         verify_digest(&layer_bytes, &layer.digest)?;
         oci::write_blob(target_dir, &layer_bytes, &layer.media_type)?;
     }
@@ -291,12 +284,9 @@ fn select_platform_manifest(
         let m_os = m["platform"]["os"].as_str().unwrap_or("");
         let m_arch = m["platform"]["architecture"].as_str().unwrap_or("");
         if m_os == os && m_arch == arch {
-            return m["digest"]
-                .as_str()
-                .map(|s| s.to_string())
-                .ok_or_else(|| {
-                    RegistryError::Parse("platform manifest has no digest".to_string())
-                });
+            return m["digest"].as_str().map(|s| s.to_string()).ok_or_else(|| {
+                RegistryError::Parse("platform manifest has no digest".to_string())
+            });
         }
     }
 
@@ -358,8 +348,7 @@ mod tests {
 
     #[test]
     fn parse_image_ref_localhost_with_digest() {
-        let digest =
-            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let image = format!("localhost:5000/myrepo/myimage@{digest}");
         let (host, repo, reference) = parse_image_ref(&image).unwrap();
         assert_eq!(host, "localhost:5000");
@@ -430,20 +419,26 @@ mod tests {
 
         assert!(target.join("oci-layout").exists());
         assert!(target.join("index.json").exists());
-        assert!(target
-            .join("blobs")
-            .join("sha256")
-            .join(&manifest_hex)
-            .exists());
-        assert!(target
-            .join("blobs")
-            .join("sha256")
-            .join(&config_hex)
-            .exists());
-        assert!(target
-            .join("blobs")
-            .join("sha256")
-            .join(&layer_hex)
-            .exists());
+        assert!(
+            target
+                .join("blobs")
+                .join("sha256")
+                .join(&manifest_hex)
+                .exists()
+        );
+        assert!(
+            target
+                .join("blobs")
+                .join("sha256")
+                .join(&config_hex)
+                .exists()
+        );
+        assert!(
+            target
+                .join("blobs")
+                .join("sha256")
+                .join(&layer_hex)
+                .exists()
+        );
     }
 }

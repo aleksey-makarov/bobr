@@ -227,9 +227,10 @@ pub(crate) fn collect_graph(
 }
 
 fn parse_recipe_value(value: Value, path: &str) -> Result<Recipe, RuntimeError> {
-    let mut object = value.as_object().cloned().ok_or_else(|| {
-        RuntimeError::RecipeLoad(format!("{path}: expected recipe object"))
-    })?;
+    let mut object = value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: expected recipe object")))?;
 
     let name = take_string(&mut object, path, "name")?;
     let tag = take_string(&mut object, path, "tag")?;
@@ -246,9 +247,10 @@ fn parse_recipe_value(value: Value, path: &str) -> Result<Recipe, RuntimeError> 
         )));
     }
 
-    let inputs_object = inputs_value.as_object().cloned().ok_or_else(|| {
-        RuntimeError::RecipeLoad(format!("{path}.inputs: expected object"))
-    })?;
+    let inputs_object = inputs_value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}.inputs: expected object")))?;
     let mut inputs = BTreeMap::new();
     for (slot_name, slot_value) in inputs_object {
         let input_path = format!("{path}.inputs.{slot_name}");
@@ -290,9 +292,10 @@ fn take_string(
     let value = object.remove(field).ok_or_else(|| {
         RuntimeError::RecipeLoad(format!("{path}: missing required field '{field}'"))
     })?;
-    value.as_str().map(ToOwned::to_owned).ok_or_else(|| {
-        RuntimeError::RecipeLoad(format!("{path}.{field}: expected string"))
-    })
+    value
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}.{field}: expected string")))
 }
 
 #[cfg(test)]
@@ -301,7 +304,9 @@ mod tests {
     use mbuild_core::compute_build_key;
     use serde_json::json;
 
-    fn collect_one(recipe: &Value) -> Result<(BuildKey, HashMap<BuildKey, PlannedNode>), RuntimeError> {
+    fn collect_one(
+        recipe: &Value,
+    ) -> Result<(BuildKey, HashMap<BuildKey, PlannedNode>), RuntimeError> {
         let recipe = parse_recipe_value(recipe.clone(), "$")?;
         let mut nodes = HashMap::new();
         let key = collect_graph(&recipe, &mut nodes)?;
@@ -311,7 +316,10 @@ mod tests {
     #[test]
     fn recipe_requires_generic_shape() {
         let error = Recipe::parse_json(br#"{"kind":"Text"}"#).unwrap_err();
-        assert!(error.to_string().contains("missing required field 'name'"), "{error}");
+        assert!(
+            error.to_string().contains("missing required field 'name'"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -323,7 +331,12 @@ mod tests {
             "inputs": {}
         });
         let error = collect_one(&recipe).unwrap_err();
-        assert!(error.to_string().contains("unknown builder tag 'NoSuchBuilder'"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("unknown builder tag 'NoSuchBuilder'"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -335,7 +348,12 @@ mod tests {
             "inputs": { "unexpected": null }
         });
         let error = collect_one(&recipe).unwrap_err();
-        assert!(error.to_string().contains("does not define input slot 'unexpected'"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("does not define input slot 'unexpected'"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -347,7 +365,12 @@ mod tests {
             "inputs": {}
         });
         let error = collect_one(&recipe).unwrap_err();
-        assert!(error.to_string().contains("missing required input slot 'base'"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("missing required input slot 'base'"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -363,7 +386,12 @@ mod tests {
             }
         });
         let error = collect_one(&recipe).unwrap_err();
-        assert!(error.to_string().contains("input slot 'image' must be a single recipe object"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("input slot 'image' must be a single recipe object"),
+            "{error}"
+        );
     }
 
     #[test]

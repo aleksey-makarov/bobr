@@ -497,3 +497,163 @@ fn resolved_dependency_from_completed(
     let published = build_to_published(layout, build)?;
     Ok(to_resolved_dependency(published))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::recipe::{ReuseOrigin, collect_graph};
+    use mbuild_core::{MetaHash, ProducerInfo, PublishOutputRequest, publish_output};
+    use serde_json::{Map, json};
+    use std::collections::HashMap;
+    use std::fs;
+    use std::str::FromStr;
+    use tempfile::tempdir;
+
+    fn sample_build(build_key: BuildKey, object_hash: &str, meta_hash: &str, kind: &str) -> Build {
+        Build {
+            build_key,
+            object_hash: object_hash.parse().unwrap(),
+            meta_hash: MetaHash::from_str(meta_hash).unwrap(),
+            created_at: None,
+            kind: kind.to_string(),
+            producer: ProducerInfo {
+                builder: "test".to_string(),
+            },
+            meta: Map::new(),
+        }
+    }
+
+    #[test]
+    fn lookup_canonical_for_planned_node_uses_dependency_meta_hashes() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let recipe = Recipe::parse_json(
+            br##"{
+                "name": "bin",
+                "tag": "Binary",
+                "config": { "kind": "binary-output", "optimize": "size" },
+                "inputs": {
+                    "image": {
+                        "name": "image",
+                        "tag": "ContainerImage",
+                        "config": {
+                            "image": "docker.io/library/buildpack-deps:bookworm",
+                            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        },
+                        "inputs": {}
+                    },
+                    "script": {
+                        "name": "script",
+                        "tag": "Text",
+                        "config": {
+                            "kind": "build-script",
+                            "source": "#!/bin/sh\nexit 0\n"
+                        },
+                        "inputs": {}
+                    },
+                    "sources": []
+                }
+            }"##,
+        )
+        .unwrap();
+
+        let mut nodes = HashMap::new();
+        let root_key = collect_graph(&recipe, &mut nodes).unwrap();
+        let dep_keys = {
+            let mut keys = Vec::new();
+            nodes
+                .get(&root_key)
+                .unwrap()
+                .recipe
+                .try_for_each_direct_dep(|dep| {
+                    keys.push(dep);
+                    Ok::<_, RuntimeError>(())
+                })
+                .unwrap();
+            keys
+        };
+        assert_eq!(dep_keys.len(), 2);
+
+        let image_build = sample_build(
+            dep_keys[0],
+            "1111111111111111111111111111111111111111111111111111111111111111",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "container-image",
+        );
+        let script_build = sample_build(
+            dep_keys[1],
+            "2222222222222222222222222222222222222222222222222222222222222222",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "build-script",
+        );
+        nodes.get_mut(&dep_keys[0]).unwrap().state = PlanningState::Reused {
+            build: image_build.clone(),
+            origin: ReuseOrigin::CanonicalResult,
+        };
+        nodes.get_mut(&dep_keys[1]).unwrap().state = PlanningState::Reused {
+            build: script_build.clone(),
+            origin: ReuseOrigin::CanonicalResult,
+        };
+
+        let root_inputs = vec![
+            ResultInputIdentity {
+                object_hash: image_build.object_hash,
+                meta_hash: image_build.meta_hash,
+            },
+            ResultInputIdentity {
+                object_hash: script_build.object_hash,
+                meta_hash: script_build.meta_hash,
+            },
+        ];
+        let result_key = mbuild_core::compute_result_key(
+            "Binary",
+            &json!({ "kind": "binary-output", "optimize": "size" }),
+            &root_inputs,
+        )
+        .unwrap();
+        let stage = temp.path().join("binary-out");
+        fs::create_dir_all(&stage).unwrap();
+        fs::write(stage.join("tool"), b"payload\n").unwrap();
+        publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "bin".to_string(),
+                build_key: BuildKey::from_str(
+                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                )
+                .unwrap(),
+                result_key,
+                created_at: "2026-04-05T12:00:00.000000000Z".to_string(),
+                staged_path: stage,
+                kind: "binary-output".to_string(),
+                producer_builder: "binary".to_string(),
+                inputs: root_inputs,
+                meta: Map::from_iter([(
+                    "optimize".to_string(),
+                    serde_json::Value::String("size".to_string()),
+                )]),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            lookup_canonical_for_planned_node(&layout, &nodes, root_key)
+                .unwrap()
+                .is_some()
+        );
+
+        let script_node = nodes.get_mut(&dep_keys[1]).unwrap();
+        if let PlanningState::Reused { build, .. } = &mut script_node.state {
+            build.meta_hash = MetaHash::from_str(
+                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            )
+            .unwrap();
+        }
+
+        assert!(
+            lookup_canonical_for_planned_node(&layout, &nodes, root_key)
+                .unwrap()
+                .is_none()
+        );
+    }
+}

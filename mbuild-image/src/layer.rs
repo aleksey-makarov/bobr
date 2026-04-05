@@ -61,7 +61,8 @@ pub fn create_layer(binary_outputs: &[&Path]) -> Result<LayerBlobs, LayerError> 
 
     // Build a map of symlink_rel → resolved_target_prefix for symlinks that have
     // a conflicting directory entry.
-    let mut symlink_rewrite: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut symlink_rewrite: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     {
         // First pass: collect all symlinks and their targets.
         let all_symlinks: std::collections::HashMap<String, String> = entries
@@ -170,22 +171,21 @@ fn collect_entries(
     current: &Path,
     out: &mut Vec<(String, std::path::PathBuf)>,
 ) -> Result<(), LayerError> {
-    let metadata = fs::symlink_metadata(current).map_err(|e| {
-        LayerError::Io(format!(
-            "failed to stat '{}': {e}",
-            current.display()
-        ))
-    })?;
+    let metadata = fs::symlink_metadata(current)
+        .map_err(|e| LayerError::Io(format!("failed to stat '{}': {e}", current.display())))?;
 
     // Build relative path from root to current (without leading /).
     let rel = if current == root {
         // root itself; we add its children, not root
         // Iterate children
-        for entry in fs::read_dir(current)
-            .map_err(|e| LayerError::Io(format!("failed to read dir '{}': {e}", current.display())))?
-        {
+        for entry in fs::read_dir(current).map_err(|e| {
+            LayerError::Io(format!("failed to read dir '{}': {e}", current.display()))
+        })? {
             let entry = entry.map_err(|e| {
-                LayerError::Io(format!("failed to read entry in '{}': {e}", current.display()))
+                LayerError::Io(format!(
+                    "failed to read entry in '{}': {e}",
+                    current.display()
+                ))
             })?;
             collect_entries(root, &entry.path(), out)?;
         }
@@ -193,7 +193,13 @@ fn collect_entries(
     } else {
         current
             .strip_prefix(root)
-            .map_err(|_| LayerError::Io(format!("path '{}' is not under root '{}'", current.display(), root.display())))?
+            .map_err(|_| {
+                LayerError::Io(format!(
+                    "path '{}' is not under root '{}'",
+                    current.display(),
+                    root.display()
+                ))
+            })?
             .to_string_lossy()
             .replace('\\', "/")
     };
@@ -205,11 +211,14 @@ fn collect_entries(
 
     if metadata.is_dir() {
         out.push((format!("{rel}/"), current.to_path_buf()));
-        for entry in fs::read_dir(current)
-            .map_err(|e| LayerError::Io(format!("failed to read dir '{}': {e}", current.display())))?
-        {
+        for entry in fs::read_dir(current).map_err(|e| {
+            LayerError::Io(format!("failed to read dir '{}': {e}", current.display()))
+        })? {
             let entry = entry.map_err(|e| {
-                LayerError::Io(format!("failed to read entry in '{}': {e}", current.display()))
+                LayerError::Io(format!(
+                    "failed to read entry in '{}': {e}",
+                    current.display()
+                ))
             })?;
             collect_entries(root, &entry.path(), out)?;
         }
@@ -226,12 +235,8 @@ fn append_entry(
     rel_path: &str,
     abs_path: &Path,
 ) -> Result<(), LayerError> {
-    let metadata = fs::symlink_metadata(abs_path).map_err(|e| {
-        LayerError::Io(format!(
-            "failed to stat '{}': {e}",
-            abs_path.display()
-        ))
-    })?;
+    let metadata = fs::symlink_metadata(abs_path)
+        .map_err(|e| LayerError::Io(format!("failed to stat '{}': {e}", abs_path.display())))?;
 
     let mut header = tar::Header::new_gnu();
     header.set_mtime(0);
@@ -242,7 +247,10 @@ fn append_entry(
 
     if metadata.is_symlink() {
         let target = fs::read_link(abs_path).map_err(|e| {
-            LayerError::Io(format!("failed to read symlink '{}': {e}", abs_path.display()))
+            LayerError::Io(format!(
+                "failed to read symlink '{}': {e}",
+                abs_path.display()
+            ))
         })?;
         header.set_entry_type(tar::EntryType::Symlink);
         header.set_size(0);
@@ -268,10 +276,7 @@ fn append_entry(
 
     // Regular file.
     let file_bytes = fs::read(abs_path).map_err(|e| {
-        LayerError::Io(format!(
-            "failed to read file '{}': {e}",
-            abs_path.display()
-        ))
+        LayerError::Io(format!("failed to read file '{}': {e}", abs_path.display()))
     })?;
     #[cfg(unix)]
     let mode = {
@@ -317,7 +322,9 @@ fn resolve_symlink_target(sym_rel: &str, raw_target: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for component in candidate.split('/') {
         match component {
-            ".." => { parts.pop(); }
+            ".." => {
+                parts.pop();
+            }
             "." | "" => {}
             c => parts.push(c),
         }
