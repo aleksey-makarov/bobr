@@ -101,8 +101,7 @@ fn cli_reports_invalid_generic_input_shape() {
         "bin",
         "Binary",
         json!({
-            "kind": "binary-output",
-            "optimize": "size"
+            "kind": "binary-output"
         }),
         json!({
             "image": [],

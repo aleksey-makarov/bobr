@@ -138,7 +138,6 @@ pub fn binary_recipe(name: &str, url: &str, source_hash: &str, image: &str, dige
         "Binary",
         json!({
             "kind": "binary-output",
-            "optimize": "size",
         }),
         json!({
             "image": base_image_recipe(image, digest),

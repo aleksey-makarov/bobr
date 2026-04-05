@@ -195,8 +195,7 @@ fn binary_with_two_sources_recipe(
         "binary",
         "Binary",
         json!({
-            "kind": "binary-output",
-            "optimize": "size"
+            "kind": "binary-output"
         }),
         json!({
             "image": base_image_recipe(image, digest),

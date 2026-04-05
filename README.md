@@ -15,8 +15,7 @@ Every recipe node uses one generic shape:
   "name": "tar-1.35",
   "tag": "Binary",
   "config": {
-    "kind": "binary-output",
-    "optimize": "size"
+    "kind": "binary-output"
   },
   "inputs": {
     "image": { "...": "recipe object" },

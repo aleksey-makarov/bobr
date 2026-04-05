@@ -427,7 +427,7 @@ mod tests {
         let recipe = json!({
             "name": "bin",
             "tag": "Binary",
-            "config": { "kind": "binary-output", "optimize": "size" },
+            "config": { "kind": "binary-output" },
             "inputs": {
                 "sources": [source.clone()],
                 "script": script.clone(),

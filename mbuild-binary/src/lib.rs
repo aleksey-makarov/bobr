@@ -52,7 +52,6 @@ type BResult<T> = Result<T, BinaryError>;
 #[serde(deny_unknown_fields)]
 pub struct BinaryConfig {
     kind: String,
-    optimize: String,
     #[serde(default)]
     script_config: Option<Value>,
 }
@@ -144,7 +143,6 @@ impl TypedBuilder for BinaryBuilder {
 
         let mut meta = Map::new();
         meta.insert("kind".to_string(), Value::String(config.kind));
-        meta.insert("optimize".to_string(), Value::String(config.optimize));
         meta.insert(
             "install".to_string(),
             serde_json::json!({
@@ -169,11 +167,6 @@ fn validate_config(config: &BinaryConfig) -> BResult<()> {
     if config.kind.trim().is_empty() {
         return Err(BinaryError::InvalidConfig(
             "kind must not be empty".to_string(),
-        ));
-    }
-    if config.optimize.trim().is_empty() {
-        return Err(BinaryError::InvalidConfig(
-            "optimize must not be empty".to_string(),
         ));
     }
     validate_script_config(config.script_config.as_ref())?;
@@ -867,7 +860,6 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         kind: "binary-output".to_string(),
-                        optimize: "size".to_string(),
                         script_config: None,
                     },
                     sample_inputs(temp.path()),
@@ -879,7 +871,6 @@ mod tests {
                 result.meta["kind"],
                 Value::String("binary-output".to_string())
             );
-            assert_eq!(result.meta["optimize"], Value::String("size".to_string()));
             assert!(result.staged_path.is_dir());
             assert_eq!(
                 fs::read_to_string(result.staged_path.join("copied").join("README.txt")).unwrap(),
@@ -903,7 +894,6 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         kind: "binary-output".to_string(),
-                        optimize: "size".to_string(),
                         script_config: Some(serde_json::json!({
                             "configure_args": ["--disable-nls", "--without-selinux"],
                             "env": {
@@ -977,7 +967,6 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         kind: "binary-output".to_string(),
-                        optimize: "size".to_string(),
                         script_config: None,
                     },
                     sample_inputs_with_aux_file(temp.path()),
@@ -1018,7 +1007,6 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         kind: "binary-output".to_string(),
-                        optimize: "size".to_string(),
                         script_config: None,
                     },
                     inputs,
@@ -1043,7 +1031,6 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         kind: "binary-output".to_string(),
-                        optimize: "size".to_string(),
                         script_config: None,
                     },
                     sample_inputs_with_binary_output_aux(temp.path()),
@@ -1100,7 +1087,6 @@ mod tests {
             .build_typed(
                 BinaryConfig {
                     kind: "binary-output".to_string(),
-                    optimize: "size".to_string(),
                     script_config: None,
                 },
                 inputs,
@@ -1122,7 +1108,6 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         kind: "binary-output".to_string(),
-                        optimize: "size".to_string(),
                         script_config: None,
                     },
                     sample_inputs(temp.path()),
@@ -1147,7 +1132,6 @@ mod tests {
             .build_typed(
                 BinaryConfig {
                     kind: "binary-output".to_string(),
-                    optimize: "size".to_string(),
                     script_config: Some(serde_json::json!({
                         "configure_args": ["--disable-nls"],
                         "jobs": 4,
@@ -1171,7 +1155,6 @@ mod tests {
             .build_typed(
                 BinaryConfig {
                     kind: "binary-output".to_string(),
-                    optimize: "size".to_string(),
                     script_config: Some(serde_json::json!({
                         "bad key": "value",
                     })),
@@ -1195,7 +1178,6 @@ mod tests {
             .build_erased(
                 serde_json::json!({
                     "kind": "binary-output",
-                    "optimize": "size",
                     "extra": true,
                 }),
                 sample_inputs(temp.path()),
@@ -1216,7 +1198,6 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         kind: "binary-output".to_string(),
-                        optimize: "size".to_string(),
                         script_config: None,
                     },
                     sample_inputs(temp.path()),

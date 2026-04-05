@@ -507,7 +507,7 @@ mod tests {
             br##"{
                 "name": "bin",
                 "tag": "Binary",
-                "config": { "kind": "binary-output", "optimize": "size" },
+                "config": { "kind": "binary-output" },
                 "inputs": {
                     "image": {
                         "name": "image",
@@ -583,7 +583,7 @@ mod tests {
         ];
         let result_key = mbuild_core::compute_result_key(
             "Binary",
-            &json!({ "kind": "binary-output", "optimize": "size" }),
+            &json!({ "kind": "binary-output" }),
             &root_inputs,
         )
         .unwrap();
@@ -602,16 +602,10 @@ mod tests {
                 created_at: "2026-04-05T12:00:00.000000000Z".to_string(),
                 staged_path: stage,
                 inputs: root_inputs,
-                meta: Map::from_iter([
-                    (
-                        "kind".to_string(),
-                        serde_json::Value::String("binary-output".to_string()),
-                    ),
-                    (
-                        "optimize".to_string(),
-                        serde_json::Value::String("size".to_string()),
-                    ),
-                ]),
+                meta: Map::from_iter([(
+                    "kind".to_string(),
+                    serde_json::Value::String("binary-output".to_string()),
+                )]),
             },
         )
         .unwrap();
