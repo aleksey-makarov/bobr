@@ -102,6 +102,9 @@ Rust builders still receive:
 
 They do not receive unresolved recipe nodes.
 
+Concrete object formats are builder-specific. The current image-related builder
+contracts are described in [`IMAGE_BUILDERS.md`](./IMAGE_BUILDERS.md).
+
 Input kind validation happens before the builder runs. Builder semantics depend
 only on:
 

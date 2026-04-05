@@ -38,6 +38,9 @@ Publication names do not participate in object identity, `build_key`, or
 ```
 
 `objects/<object_hash>` is the payload itself, either a file or a directory.
+Concrete directory payload formats are builder-specific. For example, the
+current image builders may realize `container-image` objects as OCI image
+layout directories.
 
 `results/<result_key>.json` stores one canonical realized result record.
 

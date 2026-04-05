@@ -73,4 +73,7 @@ The store layout is content-addressed:
 The dependency order comes from `BuilderSpec.inputs`, not from JSON field order.
 This lets `mbuild` keep the general runtime independent from concrete builders.
 
+Concrete builder behavior is documented separately. For the current image
+builder path, see [`docs/IMAGE_BUILDERS.md`](./docs/IMAGE_BUILDERS.md).
+
 For the architecture documents, start with [`docs/INDEX.md`](./docs/INDEX.md).
