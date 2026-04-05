@@ -247,10 +247,7 @@ fn json_recipe_executes_all_real_builders() {
             published.build.meta["kind"],
             Value::String("container-image".to_string())
         );
-        assert_eq!(
-            published.build.meta["mode"],
-            Value::String("bootstrap".to_string())
-        );
+        assert!(published.build.meta.get("mode").is_none());
 
         for name in ["source", "script", "base-image", "binary", "final-image"] {
             assert!(

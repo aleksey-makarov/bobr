@@ -55,8 +55,8 @@ The realized object is a directory with the standard OCI layout shape:
 
 The current realized result metadata contains:
 
-- `image`: the requested image reference from the recipe config
-- `manifest_digest`: the pinned digest from the recipe config
+- `manifest_digest`: the digest of the manifest blob stored in the realized
+  OCI layout
 
 `ContainerImage` currently targets `linux/amd64` only.
 
@@ -106,7 +106,6 @@ The realized result kind is still `container-image`.
 
 The current realized result metadata contains:
 
-- `mode`: `bootstrap` or `layered`
 - `manifest_digest`: the digest of the newly written OCI manifest blob
 
 ## `Binary` With `container-image`

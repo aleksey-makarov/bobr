@@ -121,7 +121,7 @@ pub fn fetch_image_authenticated(
     image: &str,
     pinned_digest: &str,
     target_dir: &Path,
-) -> Result<(), RegistryError> {
+) -> Result<String, RegistryError> {
     let (registry_host, repository, reference) = parse_image_ref(image)?;
 
     let scheme = if registry_host.starts_with("localhost") || registry_host.starts_with("127.") {
@@ -150,6 +150,7 @@ pub fn fetch_image_authenticated(
         let platform_url =
             format!("{scheme}://{registry_host}/v2/{repository}/manifests/{platform_digest}");
         let (platform_bytes, _) = get_with_bearer_auth(&platform_url, ACCEPT_MANIFESTS)?;
+        verify_digest(&platform_bytes, &platform_digest)?;
         platform_bytes
     } else {
         pinned_bytes
@@ -179,14 +180,14 @@ pub fn fetch_image_authenticated(
     let stored_manifest_digest = format!("sha256:{}", oci::sha256_hex(&manifest_bytes));
     let manifest_descriptor = OciDescriptor {
         media_type: MEDIA_TYPE_OCI_MANIFEST.to_string(),
-        digest: stored_manifest_digest,
+        digest: stored_manifest_digest.clone(),
         size: manifest_bytes.len() as u64,
         platform: None,
         annotations: None,
     };
     oci::write_index(target_dir, manifest_descriptor, Some(image))?;
 
-    Ok(())
+    Ok(stored_manifest_digest)
 }
 
 /// GET a URL, attempting unauthenticated first; if challenged with 401,
@@ -415,10 +416,12 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
 
         let image = format!("{}/{repo}@{pinned_digest}", server.host_with_port());
-        fetch_image_authenticated(&image, &pinned_digest, &target).unwrap();
+        let stored_manifest_digest =
+            fetch_image_authenticated(&image, &pinned_digest, &target).unwrap();
 
         assert!(target.join("oci-layout").exists());
         assert!(target.join("index.json").exists());
+        assert_eq!(stored_manifest_digest, format!("sha256:{manifest_hex}"));
         assert!(
             target
                 .join("blobs")

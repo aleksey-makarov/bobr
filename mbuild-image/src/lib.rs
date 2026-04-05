@@ -149,23 +149,26 @@ impl TypedBuilder for ContainerImageBuilder {
             "fetch",
             format!("fetching image '{}' from registry", config.image),
         );
-        registry::fetch_image_authenticated(&config.image, &config.digest, &staged_path)
-            .map_err(|e| {
-                // On digest mismatch, resolve the current digest by tag and show a helpful hint.
-                let hint = registry::resolve_current_digest(&config.image)
-                    .map(|d| format!("\n    digest = \"{d}\","))
-                    .unwrap_or_default();
-                ContainerImageError::BuildFailed(format!("{e}{hint}"))
-            })
-            .map_err(map_container_image_error)?;
+        let manifest_digest =
+            registry::fetch_image_authenticated(&config.image, &config.digest, &staged_path)
+                .map_err(|e| {
+                    // On digest mismatch, resolve the current digest by tag and show a helpful hint.
+                    let hint = registry::resolve_current_digest(&config.image)
+                        .map(|d| format!("\n    digest = \"{d}\","))
+                        .unwrap_or_default();
+                    ContainerImageError::BuildFailed(format!("{e}{hint}"))
+                })
+                .map_err(map_container_image_error)?;
 
         let mut meta = Map::new();
         meta.insert(
             "kind".to_string(),
             Value::String(KIND_CONTAINER_IMAGE.to_string()),
         );
-        meta.insert("image".to_string(), Value::String(config.image));
-        meta.insert("manifest_digest".to_string(), Value::String(config.digest));
+        meta.insert(
+            "manifest_digest".to_string(),
+            Value::String(manifest_digest),
+        );
 
         Ok(StagedBuildResult { meta, staged_path })
     }
@@ -217,7 +220,6 @@ impl TypedBuilder for ImageBuilder {
             "kind".to_string(),
             Value::String(KIND_CONTAINER_IMAGE.to_string()),
         );
-        meta.insert("mode".to_string(), Value::String(mode.to_string()));
         meta.insert(
             "manifest_digest".to_string(),
             Value::String(manifest_digest),
@@ -646,8 +648,11 @@ mod tests {
             result.meta["kind"],
             Value::String(KIND_CONTAINER_IMAGE.to_string())
         );
-        assert_eq!(result.meta["image"], Value::String(image));
-        assert_eq!(result.meta["manifest_digest"], Value::String(pinned_digest));
+        assert_eq!(
+            result.meta["manifest_digest"],
+            Value::String(format!("sha256:{manifest_hex}"))
+        );
+        assert_eq!(result.meta.len(), 2);
         assert!(result.staged_path.join("oci-layout").exists());
         assert!(result.staged_path.join("index.json").exists());
         assert!(
@@ -766,7 +771,6 @@ mod tests {
             result.meta["kind"],
             Value::String(KIND_CONTAINER_IMAGE.to_string())
         );
-        assert_eq!(result.meta["mode"], Value::String("bootstrap".to_string()));
         assert!(
             result.meta.contains_key("manifest_digest"),
             "{:?}",
@@ -804,7 +808,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(result.meta["mode"], Value::String("layered".to_string()));
+        assert_eq!(
+            result.meta["kind"],
+            Value::String(KIND_CONTAINER_IMAGE.to_string())
+        );
         let digest = result.meta["manifest_digest"].as_str().unwrap();
         assert!(digest.starts_with("sha256:"));
         assert!(result.staged_path.join("oci-layout").exists());

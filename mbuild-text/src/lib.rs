@@ -103,10 +103,6 @@ impl TypedBuilder for TextBuilder {
 
         let mut meta = Map::new();
         meta.insert("kind".to_string(), Value::String(config.kind));
-        meta.insert(
-            "source_bytes".to_string(),
-            Value::from(config.source.len() as u64),
-        );
 
         Ok(StagedBuildResult {
             meta,
@@ -162,7 +158,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.meta["kind"], Value::String("plain-text".to_string()));
-        assert_eq!(result.meta["source_bytes"], Value::from(5));
         assert_eq!(fs::read_to_string(&result.staged_path).unwrap(), "hello");
     }
 

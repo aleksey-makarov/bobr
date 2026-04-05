@@ -148,7 +148,7 @@ impl TypedBuilder for FetchBuilder {
             }
         });
 
-        let (staged_path, mut meta) = if config.unpack {
+        let staged_path = if config.unpack {
             cx.log_event(
                 BuildLogLevel::Info,
                 "unpack",
@@ -156,32 +156,14 @@ impl TypedBuilder for FetchBuilder {
             );
             let format =
                 select_archive_format(&config, &cached_blob, &source_url).map_err(map_error)?;
-            let (path, normalized_root) =
-                stage_archive_output(&cx.temp_dir, &cached_blob, format.clone())
-                    .map_err(map_error)?;
-            let mut meta = Map::new();
-            meta.insert(
-                "archive_format".to_string(),
-                Value::String(archive_format_name(&format).to_string()),
-            );
-            meta.insert("normalized_root".to_string(), Value::Bool(normalized_root));
-            meta.insert("unpack".to_string(), Value::Bool(true));
-            (path, meta)
+            let (path, _) =
+                stage_archive_output(&cx.temp_dir, &cached_blob, format).map_err(map_error)?;
+            path
         } else {
-            let path = stage_file_output(&cx.temp_dir, &cached_blob).map_err(map_error)?;
-            let mut meta = Map::new();
-            meta.insert("unpack".to_string(), Value::Bool(false));
-            (path, meta)
+            stage_file_output(&cx.temp_dir, &cached_blob).map_err(map_error)?
         };
 
-        meta.insert(
-            "source_url".to_string(),
-            Value::String(source_url.to_string()),
-        );
-        meta.insert(
-            "declared_hash".to_string(),
-            Value::String(config.hash.clone()),
-        );
+        let mut meta = Map::new();
         meta.insert("kind".to_string(), Value::String(kind));
 
         Ok(StagedBuildResult { meta, staged_path })
@@ -807,15 +789,6 @@ fn detect_archive_format_from_url(url: &str) -> Option<ArchiveFormat> {
     None
 }
 
-fn archive_format_name(format: &ArchiveFormat) -> &'static str {
-    match format {
-        ArchiveFormat::TarGz => "tar-gz",
-        ArchiveFormat::TarXz => "tar-xz",
-        ArchiveFormat::TarBz2 => "tar-bz2",
-        ArchiveFormat::Zip => "zip",
-    }
-}
-
 fn ensure_dir(path: &Path, label: &str) -> FResult<()> {
     fs::create_dir_all(path).map_err(|error| {
         FetchError::FsFailed(format!(
@@ -983,9 +956,7 @@ mod tests {
             Value::String("fetched-file".to_string())
         );
         assert_eq!(fs::read(&result.staged_path).unwrap(), payload);
-        assert_eq!(result.meta["source_url"], Value::String(url));
-        assert_eq!(result.meta["declared_hash"], Value::String(hash));
-        assert_eq!(result.meta["unpack"], Value::Bool(false));
+        assert_eq!(result.meta.len(), 1);
     }
 
     #[test]
@@ -1031,14 +1002,7 @@ mod tests {
             fs::read_to_string(result.staged_path.join("README.txt")).unwrap(),
             "hello archive\n"
         );
-        assert_eq!(result.meta["source_url"], Value::String(url));
-        assert_eq!(result.meta["declared_hash"], Value::String(hash));
-        assert_eq!(result.meta["unpack"], Value::Bool(true));
-        assert_eq!(
-            result.meta["archive_format"],
-            Value::String("tar-gz".to_string())
-        );
-        assert_eq!(result.meta["normalized_root"], Value::Bool(true));
+        assert_eq!(result.meta.len(), 1);
         #[cfg(unix)]
         {
             let mode = fs::metadata(result.staged_path.join("README.txt"))

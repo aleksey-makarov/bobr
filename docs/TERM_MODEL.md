@@ -103,23 +103,27 @@ identical graph fragments reuse the same internal state.
 Rust builders still receive:
 
 - builder config payload
-- resolved input object paths
+- resolved input payload paths
+- resolved input metadata records
 
 They do not receive unresolved recipe nodes.
 
 Concrete object formats are builder-specific. The current image-related builder
 contracts are described in [`IMAGE_BUILDERS.md`](./IMAGE_BUILDERS.md).
 
-Input kind validation happens before the builder runs. Builder semantics depend
-only on:
+Builders may use both the realized payload content and the resolved input
+metadata they receive. In the current model, kind checks are builder-specific
+and typically read `meta.kind` from direct inputs.
+
+Builder semantics depend only on:
 
 - builder tag
 - builder config
 - realized payload content of direct inputs
+- resolved metadata of direct inputs
 
-Dependency metadata does not change builder execution semantics on its own, but
-it does participate in canonical result identity through direct input
-`meta_hash` values.
+Direct input metadata also participates in canonical result identity through
+direct input `meta_hash` values.
 
 ## CLI Contract
 
