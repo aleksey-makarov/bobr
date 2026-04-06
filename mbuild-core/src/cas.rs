@@ -429,12 +429,6 @@ pub fn compute_meta_hash(meta: &Map<String, Value>) -> Result<MetaHash, CasError
     Ok(MetaHash(Sha256::digest(&canonical).into()))
 }
 
-pub fn require_meta_kind(meta: &Map<String, Value>) -> Result<&str, CasError> {
-    meta.get("kind").and_then(Value::as_str).ok_or_else(|| {
-        CasError::Serialization("result metadata is missing string 'kind'".to_string())
-    })
-}
-
 pub fn load_public_build(
     layout: &StoreLayout,
     build_key: BuildKey,
@@ -452,7 +446,6 @@ pub fn materialize_build(
 ) -> Result<PublishedBuild, CasError> {
     let object_hash = import_object(layout, &staged.staged_path)?;
     let meta_hash = compute_meta_hash(&staged.meta)?;
-    require_meta_kind(&staged.meta)?;
     let result = ResultRecord {
         result_key,
         object_hash,
@@ -833,7 +826,6 @@ fn parse_result_record_value(
         .and_then(Value::as_object)
         .ok_or_else(|| CasError::Serialization("result record is missing 'meta'".to_string()))?
         .clone();
-    require_meta_kind(&meta)?;
 
     Ok(ResultRecord {
         result_key,
@@ -1166,8 +1158,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
-    fn with_kind(kind: &str, mut meta: Map<String, Value>) -> Map<String, Value> {
-        meta.insert("kind".to_string(), Value::String(kind.to_string()));
+    fn with_kind(_kind: &str, meta: Map<String, Value>) -> Map<String, Value> {
         meta
     }
 
@@ -1460,10 +1451,6 @@ mod tests {
             build_json["meta_hash"],
             Value::String(
                 compute_meta_hash(&Map::from_iter([
-                    (
-                        "kind".to_string(),
-                        Value::String("build-script".to_string())
-                    ),
                     ("source_bytes".to_string(), Value::from(8)),
                     ("generated".to_string(), Value::from(false)),
                 ]))
@@ -1472,7 +1459,6 @@ mod tests {
             )
         );
         assert_eq!(build_json["inputs"], Value::Array(vec![]));
-        assert_eq!(build_json["meta"]["kind"], Value::from("build-script"));
         assert_eq!(build_json["meta"]["source_bytes"], Value::from(8));
         assert_eq!(build_json["meta"]["generated"], Value::from(false));
 

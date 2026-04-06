@@ -112,8 +112,8 @@ Concrete object formats are builder-specific. The current image-related builder
 contracts are described in [`IMAGE_BUILDERS.md`](./IMAGE_BUILDERS.md).
 
 Builders may use both the realized payload content and the resolved input
-metadata they receive. In the current model, kind checks are builder-specific
-and typically read `meta.kind` from direct inputs.
+metadata they receive. Input validation is builder-specific and is based on
+slot semantics plus payload inspection.
 
 Builder semantics depend only on:
 

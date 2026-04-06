@@ -194,9 +194,7 @@ fn binary_with_two_sources_recipe(
     recipe_node(
         "binary",
         "Binary",
-        json!({
-            "kind": "binary-output"
-        }),
+        json!({}),
         json!({
             "image": base_image_recipe(image, digest),
             "script": script_recipe(),
@@ -244,8 +242,10 @@ fn json_recipe_executes_all_real_builders() {
             .expect("expected final Build to exist in store");
 
         assert_eq!(
-            published.build.meta["kind"],
-            Value::String("container-image".to_string())
+            published.build.meta["manifest_digest"]
+                .as_str()
+                .map(|value| value.starts_with("sha256:")),
+            Some(true)
         );
         assert!(published.build.meta.get("mode").is_none());
 
@@ -400,10 +400,7 @@ fn independent_fetch_sources_run_in_parallel() {
         let published = load_build_handle(&layout, build.build_key)
             .unwrap()
             .expect("expected binary Build to exist in store");
-        assert_eq!(
-            published.build.meta["kind"],
-            Value::String("binary-output".to_string())
-        );
+        assert!(published.build.meta.get("install").is_some());
         drop(oci_server);
     });
 }

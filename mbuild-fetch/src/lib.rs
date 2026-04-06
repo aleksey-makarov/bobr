@@ -7,7 +7,7 @@ use mbuild_core::{
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde_json::Map;
 use sha2::{Digest, Sha256};
 use std::fmt;
 use std::fs;
@@ -85,8 +85,6 @@ pub struct FetchConfig {
     unpack: bool,
     #[serde(default)]
     archive_format: Option<ArchiveFormat>,
-    #[serde(default)]
-    kind: Option<String>,
 }
 
 fn default_unpack() -> bool {
@@ -140,14 +138,6 @@ impl TypedBuilder for FetchBuilder {
             ensure_cached_blob(&cache_dir, &cx.state_dir, cx, &urls, &expected_hash)
                 .map_err(map_error)?;
 
-        let kind = config.kind.clone().unwrap_or_else(|| {
-            if config.unpack {
-                "source-tree".to_string()
-            } else {
-                "fetched-file".to_string()
-            }
-        });
-
         let staged_path = if config.unpack {
             cx.log_event(
                 BuildLogLevel::Info,
@@ -163,10 +153,10 @@ impl TypedBuilder for FetchBuilder {
             stage_file_output(&cx.temp_dir, &cached_blob).map_err(map_error)?
         };
 
-        let mut meta = Map::new();
-        meta.insert("kind".to_string(), Value::String(kind));
-
-        Ok(StagedBuildResult { meta, staged_path })
+        Ok(StagedBuildResult {
+            meta: Map::new(),
+            staged_path,
+        })
     }
 }
 
@@ -942,7 +932,6 @@ mod tests {
                     hash: hash.clone(),
                     unpack: false,
                     archive_format: None,
-                    kind: None,
                 },
                 BuilderInputs::empty(),
                 &mut cx,
@@ -951,12 +940,9 @@ mod tests {
 
         handle.join().unwrap();
 
-        assert_eq!(
-            result.meta["kind"],
-            Value::String("fetched-file".to_string())
-        );
+        assert!(result.meta.is_empty());
         assert_eq!(fs::read(&result.staged_path).unwrap(), payload);
-        assert_eq!(result.meta.len(), 1);
+        assert_eq!(result.meta.len(), 0);
     }
 
     #[test]
@@ -984,7 +970,6 @@ mod tests {
                     hash: hash.clone(),
                     unpack: true,
                     archive_format: None,
-                    kind: None,
                 },
                 BuilderInputs::empty(),
                 &mut cx,
@@ -993,16 +978,13 @@ mod tests {
 
         handle.join().unwrap();
 
-        assert_eq!(
-            result.meta["kind"],
-            Value::String("source-tree".to_string())
-        );
+        assert!(result.meta.is_empty());
         assert!(result.staged_path.is_dir());
         assert_eq!(
             fs::read_to_string(result.staged_path.join("README.txt")).unwrap(),
             "hello archive\n"
         );
-        assert_eq!(result.meta.len(), 1);
+        assert_eq!(result.meta.len(), 0);
         #[cfg(unix)]
         {
             let mode = fs::metadata(result.staged_path.join("README.txt"))
@@ -1038,7 +1020,6 @@ mod tests {
                     hash: hash.clone(),
                     unpack: false,
                     archive_format: None,
-                    kind: None,
                 },
                 BuilderInputs::empty(),
                 &mut first_cx,
@@ -1054,7 +1035,6 @@ mod tests {
                     hash,
                     unpack: false,
                     archive_format: None,
-                    kind: None,
                 },
                 BuilderInputs::empty(),
                 &mut second_cx,
@@ -1080,7 +1060,6 @@ mod tests {
                         .to_string(),
                     unpack: false,
                     archive_format: None,
-                    kind: None,
                 },
                 sample_input(),
                 &mut cx,

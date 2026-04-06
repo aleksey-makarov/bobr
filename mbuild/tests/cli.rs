@@ -12,7 +12,7 @@ fn cli_uses_default_dot_mbuild_recipe_json() {
     let workspace = tempdir().unwrap();
     write_recipe(
         &workspace.path().join(".mbuild").join("recipe.json"),
-        &text_recipe("default-recipe", "plain-text", "hello default"),
+        &text_recipe("default-recipe", "hello default", false),
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
@@ -24,7 +24,7 @@ fn cli_uses_default_dot_mbuild_recipe_json() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
     let build: Build = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(build.meta["kind"], json!("plain-text"));
+    assert!(build.meta.is_empty());
     assert!(stderr.contains("[start] Text default-recipe"), "{stderr}");
     assert!(stderr.contains("[done] Text default-recipe"), "{stderr}");
 }
@@ -35,7 +35,7 @@ fn cli_accepts_explicit_recipe_path() {
     let recipe_path = workspace.path().join("custom.json");
     write_recipe(
         &recipe_path,
-        &text_recipe("custom-recipe", "plain-text", "hello custom"),
+        &text_recipe("custom-recipe", "hello custom", false),
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
@@ -48,7 +48,7 @@ fn cli_accepts_explicit_recipe_path() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
     let build: Build = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(build.meta["kind"], json!("plain-text"));
+    assert!(build.meta.is_empty());
     assert!(stderr.contains("[start] Text custom-recipe"), "{stderr}");
 }
 
@@ -58,7 +58,7 @@ fn cli_quiet_suppresses_live_progress() {
     let recipe_path = workspace.path().join("quiet.json");
     write_recipe(
         &recipe_path,
-        &text_recipe("quiet-recipe", "plain-text", "hello quiet"),
+        &text_recipe("quiet-recipe", "hello quiet", false),
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
@@ -72,7 +72,7 @@ fn cli_quiet_suppresses_live_progress() {
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
     let stdout = String::from_utf8(output.stdout).unwrap();
     let build: Build = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(build.meta["kind"], json!("plain-text"));
+    assert!(build.meta.is_empty());
 }
 
 #[test]
@@ -100,12 +100,10 @@ fn cli_reports_invalid_generic_input_shape() {
     let recipe = recipe_node(
         "bin",
         "Binary",
-        json!({
-            "kind": "binary-output"
-        }),
+        json!({}),
         json!({
             "image": [],
-            "script": text_recipe("script", "build-script", "#!/bin/sh\nexit 0\n"),
+            "script": text_recipe("script", "#!/bin/sh\nexit 0\n", true),
             "sources": []
         }),
     );
@@ -134,8 +132,8 @@ fn cli_reports_unknown_input_slot() {
         "text",
         "Text",
         json!({
-            "kind": "plain-text",
-            "source": "hello"
+            "source": "hello",
+            "executable": false
         }),
         json!({
             "unexpected": null

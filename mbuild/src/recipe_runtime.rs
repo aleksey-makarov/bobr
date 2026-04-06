@@ -486,16 +486,18 @@ mod tests {
     use std::str::FromStr;
     use tempfile::tempdir;
 
-    fn sample_build(build_key: BuildKey, object_hash: &str, meta_hash: &str, kind: &str) -> Build {
+    fn sample_build(
+        build_key: BuildKey,
+        object_hash: &str,
+        meta_hash: &str,
+        meta: Map<String, serde_json::Value>,
+    ) -> Build {
         Build {
             build_key,
             object_hash: object_hash.parse().unwrap(),
             meta_hash: MetaHash::from_str(meta_hash).unwrap(),
             created_at: None,
-            meta: Map::from_iter([(
-                "kind".to_string(),
-                serde_json::Value::String(kind.to_string()),
-            )]),
+            meta,
         }
     }
 
@@ -507,7 +509,7 @@ mod tests {
             br##"{
                 "name": "bin",
                 "tag": "Binary",
-                "config": { "kind": "binary-output" },
+                "config": {},
                 "inputs": {
                     "image": {
                         "name": "image",
@@ -522,8 +524,8 @@ mod tests {
                         "name": "script",
                         "tag": "Text",
                         "config": {
-                            "kind": "build-script",
-                            "source": "#!/bin/sh\nexit 0\n"
+                            "source": "#!/bin/sh\nexit 0\n",
+                            "executable": true
                         },
                         "inputs": {}
                     },
@@ -554,13 +556,19 @@ mod tests {
             dep_keys[0],
             "1111111111111111111111111111111111111111111111111111111111111111",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "container-image",
+            Map::from_iter([(
+                "manifest_digest".to_string(),
+                serde_json::Value::String(
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_string(),
+                ),
+            )]),
         );
         let script_build = sample_build(
             dep_keys[1],
             "2222222222222222222222222222222222222222222222222222222222222222",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            "build-script",
+            Map::new(),
         );
         nodes.get_mut(&dep_keys[0]).unwrap().state = PlanningState::Reused {
             build: image_build.clone(),
@@ -581,12 +589,8 @@ mod tests {
                 meta_hash: script_build.meta_hash,
             },
         ];
-        let result_key = mbuild_core::compute_result_key(
-            "Binary",
-            &json!({ "kind": "binary-output" }),
-            &root_inputs,
-        )
-        .unwrap();
+        let result_key =
+            mbuild_core::compute_result_key("Binary", &json!({}), &root_inputs).unwrap();
         let stage = temp.path().join("binary-out");
         fs::create_dir_all(&stage).unwrap();
         fs::write(stage.join("tool"), b"payload\n").unwrap();
@@ -603,8 +607,8 @@ mod tests {
                 staged_path: stage,
                 inputs: root_inputs,
                 meta: Map::from_iter([(
-                    "kind".to_string(),
-                    serde_json::Value::String("binary-output".to_string()),
+                    "install".to_string(),
+                    serde_json::json!({"owners":[{"path":"**","uid":0,"gid":0}]}),
                 )]),
             },
         )

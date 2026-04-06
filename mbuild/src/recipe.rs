@@ -344,7 +344,7 @@ mod tests {
         let recipe = json!({
             "name": "text",
             "tag": "Text",
-            "config": { "kind": "plain-text", "source": "hello" },
+            "config": { "source": "hello", "executable": false },
             "inputs": { "unexpected": null }
         });
         let error = collect_one(&recipe).unwrap_err();
@@ -378,7 +378,7 @@ mod tests {
         let recipe = json!({
             "name": "bin",
             "tag": "Binary",
-            "config": { "kind": "binary-output" },
+            "config": {},
             "inputs": {
                 "image": [],
                 "script": null,
@@ -409,8 +409,8 @@ mod tests {
             "name": "script",
             "tag": "Text",
             "config": {
-                "kind": "build-script",
-                "source": "#!/bin/sh\nexit 0\n"
+                "source": "#!/bin/sh\nexit 0\n",
+                "executable": true
             },
             "inputs": {}
         });
@@ -427,7 +427,7 @@ mod tests {
         let recipe = json!({
             "name": "bin",
             "tag": "Binary",
-            "config": { "kind": "binary-output" },
+            "config": {},
             "inputs": {
                 "sources": [source.clone()],
                 "script": script.clone(),

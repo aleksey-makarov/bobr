@@ -9,11 +9,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
-const KIND_SOURCE_TREE: &str = "source-tree";
-const KIND_FETCHED_FILE: &str = "fetched-file";
-const KIND_BINARY_OUTPUT: &str = "binary-output";
-const KIND_BUILD_SCRIPT: &str = "build-script";
-const KIND_CONTAINER_IMAGE: &str = "container-image";
 const OUTPUT_DIR_NAME: &str = "out";
 const SCRIPT_CONFIG_DIR_NAME: &str = "script-config";
 const SCRIPT_CONFIG_MOUNT_PATH: &str = "/__mbuild_script_config";
@@ -51,7 +46,6 @@ type BResult<T> = Result<T, BinaryError>;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BinaryConfig {
-    kind: String,
     #[serde(default)]
     script_config: Option<Value>,
 }
@@ -142,7 +136,6 @@ impl TypedBuilder for BinaryBuilder {
         }
 
         let mut meta = Map::new();
-        meta.insert("kind".to_string(), Value::String(config.kind));
         meta.insert(
             "install".to_string(),
             serde_json::json!({
@@ -164,11 +157,6 @@ impl TypedBuilder for BinaryBuilder {
 }
 
 fn validate_config(config: &BinaryConfig) -> BResult<()> {
-    if config.kind.trim().is_empty() {
-        return Err(BinaryError::InvalidConfig(
-            "kind must not be empty".to_string(),
-        ));
-    }
     validate_script_config(config.script_config.as_ref())?;
     Ok(())
 }
@@ -178,31 +166,20 @@ fn resolve_script_execution(
     script_config_dir: &Path,
     sources: &[BuilderInputObject],
 ) -> BResult<ScriptExecution> {
-    require_input_kind(script, "script", &[KIND_BUILD_SCRIPT])?;
     if !script.object_path.is_file() {
         return Err(BinaryError::InputResolutionFailed(format!(
-            "build-script input must resolve to a file: {}",
+            "script input must resolve to a file: {}",
             script.object_path.display()
         )));
     }
     if let Some((first, rest)) = sources.split_first() {
-        require_input_kind(
-            first,
-            "sources[0]",
-            &[KIND_SOURCE_TREE, KIND_FETCHED_FILE, KIND_BINARY_OUTPUT],
-        )?;
         if !first.object_path.is_dir() {
             return Err(BinaryError::InputResolutionFailed(format!(
                 "first source input must resolve to a directory: {}",
                 first.object_path.display()
             )));
         }
-        for (index, source) in rest.iter().enumerate() {
-            require_input_kind(
-                source,
-                &format!("sources[{}]", index + 1),
-                &[KIND_SOURCE_TREE, KIND_FETCHED_FILE, KIND_BINARY_OUTPUT],
-            )?;
+        for source in rest {
             if !source.object_path.is_dir() && !source.object_path.is_file() {
                 return Err(BinaryError::InputResolutionFailed(format!(
                     "additional source inputs must resolve to directories or files: {}",
@@ -227,16 +204,15 @@ fn resolve_container_execution(
     image: &BuilderInputObject,
     cx: &BuildContext,
 ) -> BResult<ContainerExecution> {
-    require_input_kind(image, "image", &[KIND_CONTAINER_IMAGE])?;
     if !image.object_path.is_dir() {
         return Err(BinaryError::InputResolutionFailed(format!(
-            "container-image input must resolve to a directory: {}",
+            "image input must resolve to a directory: {}",
             image.object_path.display()
         )));
     }
     if !image.object_path.join("oci-layout").exists() {
         return Err(BinaryError::InputResolutionFailed(format!(
-            "container-image input is not a valid OCI layout directory: {}",
+            "image input is not a valid OCI layout directory: {}",
             image.object_path.display()
         )));
     }
@@ -254,34 +230,6 @@ fn resolve_container_execution(
         image_ref: config_digest,
     })
 }
-
-fn input_kind<'a>(object: &'a BuilderInputObject, slot_name: &str) -> BResult<&'a str> {
-    object
-        .meta
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            BinaryError::InputResolutionFailed(format!(
-                "input '{slot_name}' is missing string meta.kind"
-            ))
-        })
-}
-
-fn require_input_kind(
-    object: &BuilderInputObject,
-    slot_name: &str,
-    allowed_kinds: &[&str],
-) -> BResult<()> {
-    let actual_kind = input_kind(object, slot_name)?;
-    if allowed_kinds.iter().any(|kind| *kind == actual_kind) {
-        return Ok(());
-    }
-    Err(BinaryError::InputResolutionFailed(format!(
-        "input '{slot_name}' has kind '{actual_kind}', expected one of: {}",
-        allowed_kinds.join(", ")
-    )))
-}
-
 /// Read the config blob digest from an OCI layout directory.
 fn read_config_digest_from_oci_layout(oci_dir: &std::path::Path) -> Result<String, String> {
     let index_bytes = std::fs::read(oci_dir.join("index.json"))
@@ -691,29 +639,44 @@ mod tests {
         result
     }
 
-    fn resolved_object(
+    fn resolved_directory(
         root: &Path,
-        kind: &str,
         name: &str,
         extra_meta: Map<String, Value>,
     ) -> BuilderInputObject {
         let object_path = root.join(name);
-        if kind == KIND_SOURCE_TREE || kind == KIND_BINARY_OUTPUT {
-            fs::create_dir_all(&object_path).unwrap();
-            fs::write(object_path.join("README.txt"), b"hello source\n").unwrap();
-        } else if kind == KIND_CONTAINER_IMAGE {
-            create_test_oci_layout_at(&object_path);
-        } else {
-            fs::write(&object_path, b"payload\n").unwrap();
-            #[cfg(unix)]
-            if kind == KIND_BUILD_SCRIPT {
-                let mut permissions = fs::metadata(&object_path).unwrap().permissions();
-                permissions.set_mode(0o755);
-                fs::set_permissions(&object_path, permissions).unwrap();
-            }
+        fs::create_dir_all(&object_path).unwrap();
+        fs::write(object_path.join("README.txt"), b"hello source\n").unwrap();
+        let meta = extra_meta;
+        BuilderInputObject { object_path, meta }
+    }
+
+    fn resolved_file(
+        root: &Path,
+        name: &str,
+        executable: bool,
+        extra_meta: Map<String, Value>,
+    ) -> BuilderInputObject {
+        let object_path = root.join(name);
+        fs::write(&object_path, b"payload\n").unwrap();
+        #[cfg(unix)]
+        if executable {
+            let mut permissions = fs::metadata(&object_path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&object_path, permissions).unwrap();
         }
-        let mut meta = extra_meta;
-        meta.insert("kind".to_string(), Value::String(kind.to_string()));
+        let meta = extra_meta;
+        BuilderInputObject { object_path, meta }
+    }
+
+    fn resolved_oci_layout(
+        root: &Path,
+        name: &str,
+        extra_meta: Map<String, Value>,
+    ) -> BuilderInputObject {
+        let object_path = root.join(name);
+        create_test_oci_layout_at(&object_path);
+        let meta = extra_meta;
         BuilderInputObject { object_path, meta }
     }
 
@@ -793,30 +756,15 @@ mod tests {
         let mut inputs = BuilderInputs::empty();
         inputs.insert(
             "image",
-            BuilderInputValue::One(resolved_object(
-                root,
-                KIND_CONTAINER_IMAGE,
-                "image-oci",
-                Map::new(),
-            )),
+            BuilderInputValue::One(resolved_oci_layout(root, "image-oci", Map::new())),
         );
         inputs.insert(
             "script",
-            BuilderInputValue::One(resolved_object(
-                root,
-                KIND_BUILD_SCRIPT,
-                "script.sh",
-                Map::new(),
-            )),
+            BuilderInputValue::One(resolved_file(root, "script.sh", true, Map::new())),
         );
         inputs.insert(
             "sources",
-            BuilderInputValue::Many(vec![resolved_object(
-                root,
-                KIND_SOURCE_TREE,
-                "src",
-                Map::new(),
-            )]),
+            BuilderInputValue::Many(vec![resolved_directory(root, "src", Map::new())]),
         );
         inputs
     }
@@ -826,12 +774,7 @@ mod tests {
         let mut sources = match inputs.many("sources").unwrap().to_vec() {
             values => values,
         };
-        sources.push(resolved_object(
-            root,
-            KIND_FETCHED_FILE,
-            "patch.diff",
-            Map::new(),
-        ));
+        sources.push(resolved_file(root, "patch.diff", false, Map::new()));
         inputs.insert("sources", BuilderInputValue::Many(sources));
         inputs
     }
@@ -841,12 +784,7 @@ mod tests {
         let mut sources = match inputs.many("sources").unwrap().to_vec() {
             values => values,
         };
-        sources.push(resolved_object(
-            root,
-            KIND_BINARY_OUTPUT,
-            "linux-headers",
-            Map::new(),
-        ));
+        sources.push(resolved_directory(root, "linux-headers", Map::new()));
         inputs.insert("sources", BuilderInputValue::Many(sources));
         inputs
     }
@@ -859,18 +797,13 @@ mod tests {
             let result = BinaryBuilder
                 .build_typed(
                     BinaryConfig {
-                        kind: "binary-output".to_string(),
                         script_config: None,
                     },
                     sample_inputs(temp.path()),
                     &mut cx,
                 )
                 .unwrap();
-
-            assert_eq!(
-                result.meta["kind"],
-                Value::String("binary-output".to_string())
-            );
+            assert!(result.meta.get("install").is_some());
             assert!(result.staged_path.is_dir());
             assert_eq!(
                 fs::read_to_string(result.staged_path.join("copied").join("README.txt")).unwrap(),
@@ -893,7 +826,6 @@ mod tests {
             let result = BinaryBuilder
                 .build_typed(
                     BinaryConfig {
-                        kind: "binary-output".to_string(),
                         script_config: Some(serde_json::json!({
                             "configure_args": ["--disable-nls", "--without-selinux"],
                             "env": {
@@ -966,18 +898,13 @@ mod tests {
             let result = BinaryBuilder
                 .build_typed(
                     BinaryConfig {
-                        kind: "binary-output".to_string(),
                         script_config: None,
                     },
                     sample_inputs_with_aux_file(temp.path()),
                     &mut cx,
                 )
                 .unwrap();
-
-            assert_eq!(
-                result.meta["kind"],
-                Value::String("binary-output".to_string())
-            );
+            assert!(result.meta.get("install").is_some());
             assert!(result.staged_path.is_dir());
         });
     }
@@ -989,13 +916,8 @@ mod tests {
             let mut cx = build_context(temp.path());
             let builder = BinaryBuilder;
 
-            let image = resolved_object(
-                temp.path(),
-                KIND_CONTAINER_IMAGE,
-                "image-oci-zero",
-                Map::new(),
-            );
-            let script = resolved_object(temp.path(), KIND_BUILD_SCRIPT, "script.sh", Map::new());
+            let image = resolved_oci_layout(temp.path(), "image-oci-zero", Map::new());
+            let script = resolved_file(temp.path(), "script.sh", true, Map::new());
 
             let inputs = BuilderInputs::new(std::collections::BTreeMap::from([
                 ("image".to_string(), BuilderInputValue::One(image.clone())),
@@ -1006,18 +928,13 @@ mod tests {
             let result = builder
                 .build_typed(
                     BinaryConfig {
-                        kind: "binary-output".to_string(),
                         script_config: None,
                     },
                     inputs,
                     &mut cx,
                 )
                 .unwrap();
-
-            assert_eq!(
-                result.meta["kind"],
-                Value::String("binary-output".to_string())
-            );
+            assert!(result.meta.get("install").is_some());
             assert!(result.staged_path.is_dir());
         });
     }
@@ -1030,18 +947,13 @@ mod tests {
             let result = BinaryBuilder
                 .build_typed(
                     BinaryConfig {
-                        kind: "binary-output".to_string(),
                         script_config: None,
                     },
                     sample_inputs_with_binary_output_aux(temp.path()),
                     &mut cx,
                 )
                 .unwrap();
-
-            assert_eq!(
-                result.meta["kind"],
-                Value::String("binary-output".to_string())
-            );
+            assert!(result.meta.get("install").is_some());
             assert!(result.staged_path.is_dir());
         });
     }
@@ -1058,35 +970,21 @@ mod tests {
             "image",
             BuilderInputValue::One(BuilderInputObject {
                 object_path: bad_image_dir,
-                meta: Map::from_iter([(
-                    "kind".to_string(),
-                    Value::String(KIND_CONTAINER_IMAGE.to_string()),
-                )]),
+                meta: Map::new(),
             }),
         );
         inputs.insert(
             "script",
-            BuilderInputValue::One(resolved_object(
-                temp.path(),
-                KIND_BUILD_SCRIPT,
-                "script.sh",
-                Map::new(),
-            )),
+            BuilderInputValue::One(resolved_file(temp.path(), "script.sh", true, Map::new())),
         );
         inputs.insert(
             "sources",
-            BuilderInputValue::Many(vec![resolved_object(
-                temp.path(),
-                KIND_SOURCE_TREE,
-                "src",
-                Map::new(),
-            )]),
+            BuilderInputValue::Many(vec![resolved_directory(temp.path(), "src", Map::new())]),
         );
 
         let error = BinaryBuilder
             .build_typed(
                 BinaryConfig {
-                    kind: "binary-output".to_string(),
                     script_config: None,
                 },
                 inputs,
@@ -1107,7 +1005,6 @@ mod tests {
             let result = BinaryBuilder
                 .build_typed(
                     BinaryConfig {
-                        kind: "binary-output".to_string(),
                         script_config: None,
                     },
                     sample_inputs(temp.path()),
@@ -1131,7 +1028,6 @@ mod tests {
         let error = BinaryBuilder
             .build_typed(
                 BinaryConfig {
-                    kind: "binary-output".to_string(),
                     script_config: Some(serde_json::json!({
                         "configure_args": ["--disable-nls"],
                         "jobs": 4,
@@ -1154,7 +1050,6 @@ mod tests {
         let error = BinaryBuilder
             .build_typed(
                 BinaryConfig {
-                    kind: "binary-output".to_string(),
                     script_config: Some(serde_json::json!({
                         "bad key": "value",
                     })),
@@ -1177,7 +1072,6 @@ mod tests {
         let error = BinaryBuilder
             .build_erased(
                 serde_json::json!({
-                    "kind": "binary-output",
                     "extra": true,
                 }),
                 sample_inputs(temp.path()),
@@ -1197,7 +1091,6 @@ mod tests {
             let error = BinaryBuilder
                 .build_typed(
                     BinaryConfig {
-                        kind: "binary-output".to_string(),
                         script_config: None,
                     },
                     sample_inputs(temp.path()),

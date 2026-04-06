@@ -12,8 +12,6 @@ use std::fmt;
 use std::fs;
 use std::path::Path;
 
-const KIND_BINARY_OUTPUT: &str = "binary-output";
-const KIND_CONTAINER_IMAGE: &str = "container-image";
 const OCI_LAYOUT_SUBDIR: &str = "image";
 
 #[derive(Debug)]
@@ -162,10 +160,6 @@ impl TypedBuilder for ContainerImageBuilder {
 
         let mut meta = Map::new();
         meta.insert(
-            "kind".to_string(),
-            Value::String(KIND_CONTAINER_IMAGE.to_string()),
-        );
-        meta.insert(
             "manifest_digest".to_string(),
             Value::String(manifest_digest),
         );
@@ -217,10 +211,6 @@ impl TypedBuilder for ImageBuilder {
 
         let mut meta = Map::new();
         meta.insert(
-            "kind".to_string(),
-            Value::String(KIND_CONTAINER_IMAGE.to_string()),
-        );
-        meta.insert(
             "manifest_digest".to_string(),
             Value::String(manifest_digest),
         );
@@ -236,7 +226,7 @@ fn validate_image_config(
 ) -> IResult<()> {
     if binaries.is_empty() {
         return Err(ImageError::InvalidConfig(
-            "Image builder requires at least one binary-output input".to_string(),
+            "Image builder requires at least one directory input".to_string(),
         ));
     }
     if let Some(mode) = &config.mode {
@@ -248,62 +238,33 @@ fn validate_image_config(
         }
     }
     if let Some(base) = base {
-        require_input_kind(base, "base", &[KIND_CONTAINER_IMAGE])?;
         if !base.object_path.is_dir() {
             return Err(ImageError::InputResolutionFailed(format!(
-                "base container-image input must resolve to a directory: {}",
+                "base input must resolve to a directory: {}",
                 base.object_path.display()
             )));
         }
         if !base.object_path.join("oci-layout").exists() {
             return Err(ImageError::InputResolutionFailed(format!(
-                "base container-image input is not a valid OCI layout directory: {}",
+                "base input is not a valid OCI layout directory: {}",
                 base.object_path.display()
             )));
         }
     }
     for (index, binary) in binaries.iter().enumerate() {
-        require_input_kind(binary, &format!("inputs[{index}]"), &[KIND_BINARY_OUTPUT])?;
         if !binary.object_path.is_dir() {
             return Err(ImageError::InputResolutionFailed(format!(
-                "binary-output input must resolve to a directory: {}",
+                "inputs[{index}] must resolve to a directory: {}",
                 binary.object_path.display()
             )));
         }
     }
     if matches!(config.mode.as_deref(), Some("layered")) && base.is_none() {
         return Err(ImageError::InvalidConfig(
-            "image mode 'layered' requires a base container-image input".to_string(),
+            "image mode 'layered' requires a base OCI image input".to_string(),
         ));
     }
     Ok(())
-}
-
-fn input_kind<'a>(object: &'a BuilderInputObject, slot_name: &str) -> IResult<&'a str> {
-    object
-        .meta
-        .get("kind")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            ImageError::InputResolutionFailed(format!(
-                "input '{slot_name}' is missing string meta.kind"
-            ))
-        })
-}
-
-fn require_input_kind(
-    object: &BuilderInputObject,
-    slot_name: &str,
-    allowed_kinds: &[&str],
-) -> IResult<()> {
-    let actual_kind = input_kind(object, slot_name)?;
-    if allowed_kinds.iter().any(|kind| *kind == actual_kind) {
-        return Ok(());
-    }
-    Err(ImageError::InputResolutionFailed(format!(
-        "input '{slot_name}' has kind '{actual_kind}', expected one of: {}",
-        allowed_kinds.join(", ")
-    )))
 }
 
 fn effective_image_mode(
@@ -314,10 +275,10 @@ fn effective_image_mode(
         (Some("bootstrap"), false) => Ok("bootstrap"),
         (Some("layered"), true) => Ok("layered"),
         (Some("bootstrap"), true) => Err(ImageError::InvalidConfig(
-            "image mode 'bootstrap' is incompatible with a base container-image input".to_string(),
+            "image mode 'bootstrap' is incompatible with a base OCI image input".to_string(),
         )),
         (Some("layered"), false) => Err(ImageError::InvalidConfig(
-            "image mode 'layered' requires a base container-image input".to_string(),
+            "image mode 'layered' requires a base OCI image input".to_string(),
         )),
         (None, true) => Ok("layered"),
         (None, false) => Ok("bootstrap"),
@@ -558,10 +519,7 @@ mod tests {
         fs::write(object_path.join("README.txt"), b"hello image\n").unwrap();
         BuilderInputObject {
             object_path,
-            meta: Map::from_iter([(
-                "kind".to_string(),
-                Value::String(KIND_BINARY_OUTPUT.to_string()),
-            )]),
+            meta: Map::new(),
         }
     }
 
@@ -569,10 +527,7 @@ mod tests {
         let oci_dir = create_test_oci_layout(root, "base-image");
         BuilderInputObject {
             object_path: oci_dir,
-            meta: Map::from_iter([(
-                "kind".to_string(),
-                Value::String(KIND_CONTAINER_IMAGE.to_string()),
-            )]),
+            meta: Map::new(),
         }
     }
 
@@ -645,14 +600,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            result.meta["kind"],
-            Value::String(KIND_CONTAINER_IMAGE.to_string())
-        );
-        assert_eq!(
             result.meta["manifest_digest"],
             Value::String(format!("sha256:{manifest_hex}"))
         );
-        assert_eq!(result.meta.len(), 2);
+        assert_eq!(result.meta.len(), 1);
         assert!(result.staged_path.join("oci-layout").exists());
         assert!(result.staged_path.join("index.json").exists());
         assert!(
@@ -767,10 +718,6 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            result.meta["kind"],
-            Value::String(KIND_CONTAINER_IMAGE.to_string())
-        );
         assert!(
             result.meta.contains_key("manifest_digest"),
             "{:?}",
@@ -808,10 +755,6 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            result.meta["kind"],
-            Value::String(KIND_CONTAINER_IMAGE.to_string())
-        );
         let digest = result.meta["manifest_digest"].as_str().unwrap();
         assert!(digest.starts_with("sha256:"));
         assert!(result.staged_path.join("oci-layout").exists());
@@ -830,10 +773,7 @@ mod tests {
 
         let base = BuilderInputObject {
             object_path: base_oci,
-            meta: Map::from_iter([(
-                "kind".to_string(),
-                Value::String(KIND_CONTAINER_IMAGE.to_string()),
-            )]),
+            meta: Map::new(),
         };
         let mut inputs = BuilderInputs::empty();
         inputs.insert("base", BuilderInputValue::Optional(Some(base)));
@@ -872,10 +812,7 @@ mod tests {
         fs::create_dir(&bad_base).unwrap();
         let base = BuilderInputObject {
             object_path: bad_base,
-            meta: Map::from_iter([(
-                "kind".to_string(),
-                Value::String(KIND_CONTAINER_IMAGE.to_string()),
-            )]),
+            meta: Map::new(),
         };
         let mut inputs = BuilderInputs::empty();
         inputs.insert("base", BuilderInputValue::Optional(Some(base)));

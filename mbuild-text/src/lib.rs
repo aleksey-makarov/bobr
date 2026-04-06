@@ -3,38 +3,17 @@ use mbuild_core::{
     TypedBuilder, fsutil,
 };
 use serde::Deserialize;
-use serde_json::{Map, Value};
-use std::fmt;
+use serde_json::Map;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-#[derive(Debug)]
-enum TextError {
-    InvalidConfig(String),
-}
-
-impl TextError {
-    fn message(&self) -> &str {
-        match self {
-            Self::InvalidConfig(m) => m,
-        }
-    }
-}
-
-impl fmt::Display for TextError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message())
-    }
-}
-
-type TResult<T> = Result<T, TextError>;
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextConfig {
-    kind: String,
     source: String,
+    #[serde(default)]
+    executable: bool,
 }
 
 pub struct TextBuilder;
@@ -57,7 +36,6 @@ impl TypedBuilder for TextBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
-        validate_config(&config).map_err(map_error)?;
         if !inputs.is_empty() {
             return Err(BuilderError::ExecutionFailed(
                 "Text builder does not accept input objects".to_string(),
@@ -67,7 +45,7 @@ impl TypedBuilder for TextBuilder {
         cx.log_event(
             BuildLogLevel::Info,
             "stage",
-            format!("writing text output of kind '{}'", config.kind),
+            "writing text output".to_string(),
         );
 
         let now_nanos = fsutil::current_epoch_nanos()
@@ -91,38 +69,20 @@ impl TypedBuilder for TextBuilder {
         })?;
 
         #[cfg(unix)]
-        if config.kind == "build-script" {
+        if config.executable {
             let perms = fs::Permissions::from_mode(0o755);
             fs::set_permissions(&tmp_path, perms).map_err(|error| {
                 BuilderError::ExecutionFailed(format!(
-                    "failed to set executable mode on staged build-script '{}': {error}",
+                    "failed to set executable mode on staged text output '{}': {error}",
                     tmp_path.display()
                 ))
             })?;
         }
 
-        let mut meta = Map::new();
-        meta.insert("kind".to_string(), Value::String(config.kind));
-
         Ok(StagedBuildResult {
-            meta,
+            meta: Map::new(),
             staged_path: tmp_path,
         })
-    }
-}
-
-fn validate_config(config: &TextConfig) -> TResult<()> {
-    if config.kind.is_empty() {
-        return Err(TextError::InvalidConfig(
-            "kind must not be empty".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn map_error(error: TextError) -> BuilderError {
-    match error {
-        TextError::InvalidConfig(message) => BuilderError::InvalidRecipe(message),
     }
 }
 
@@ -149,15 +109,15 @@ mod tests {
         let result = builder
             .build_typed(
                 TextConfig {
-                    kind: "plain-text".to_string(),
                     source: "hello".to_string(),
+                    executable: false,
                 },
                 BuilderInputs::empty(),
                 &mut cx,
             )
             .unwrap();
 
-        assert_eq!(result.meta["kind"], Value::String("plain-text".to_string()));
+        assert!(result.meta.is_empty());
         assert_eq!(fs::read_to_string(&result.staged_path).unwrap(), "hello");
     }
 
@@ -170,8 +130,8 @@ mod tests {
         let result = builder
             .build_typed(
                 TextConfig {
-                    kind: "build-script".to_string(),
                     source: "#!/bin/sh\necho hi\n".to_string(),
+                    executable: true,
                 },
                 BuilderInputs::empty(),
                 &mut cx,
@@ -197,8 +157,8 @@ mod tests {
         let result = builder
             .build_typed(
                 TextConfig {
-                    kind: "plain-text".to_string(),
                     source: "hello".to_string(),
+                    executable: false,
                 },
                 BuilderInputs::empty(),
                 &mut cx,
@@ -226,8 +186,8 @@ mod tests {
         let error = builder
             .build_typed(
                 TextConfig {
-                    kind: "plain-text".to_string(),
                     source: "hello".to_string(),
+                    executable: false,
                 },
                 inputs,
                 &mut cx,
@@ -235,26 +195,6 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, BuilderError::ExecutionFailed(_)));
-    }
-
-    #[test]
-    fn text_builder_rejects_empty_kind() {
-        let builder = TextBuilder;
-        let temp = tempdir().unwrap();
-        let mut cx = build_context(temp.path());
-
-        let error = builder
-            .build_typed(
-                TextConfig {
-                    kind: "".to_string(),
-                    source: "hello".to_string(),
-                },
-                BuilderInputs::empty(),
-                &mut cx,
-            )
-            .unwrap_err();
-
-        assert!(matches!(error, BuilderError::InvalidRecipe(_)));
     }
 
     #[test]
@@ -266,8 +206,8 @@ mod tests {
         let error = builder
             .build_erased(
                 serde_json::json!({
-                    "kind": "plain-text",
                     "source": "hello",
+                    "executable": false,
                     "extra": true
                 }),
                 BuilderInputs::empty(),

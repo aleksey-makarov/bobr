@@ -316,9 +316,7 @@ mod tests {
 
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
-    struct RuntimeTestConfig {
-        kind: String,
-    }
+    struct RuntimeTestConfig {}
 
     static RUNTIME_TEST_SPEC: BuilderSpec = BuilderSpec {
         tag: "RuntimeTest",
@@ -338,7 +336,7 @@ mod tests {
 
         fn build_typed(
             &self,
-            config: Self::Config,
+            _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
         ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
@@ -349,11 +347,9 @@ mod tests {
 
             fs::create_dir_all(cx.temp_dir.join("out")).unwrap();
             fs::write(cx.temp_dir.join("out").join("payload"), b"ok\n").unwrap();
-            let mut meta = Map::new();
-            meta.insert("kind".to_string(), Value::String(config.kind));
 
             Ok(StagedBuildResult {
-                meta,
+                meta: Map::new(),
                 staged_path: cx.temp_dir.join("out"),
             })
         }
@@ -400,7 +396,7 @@ mod tests {
 
         fn build_typed(
             &self,
-            config: Self::Config,
+            _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
         ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
@@ -409,11 +405,9 @@ mod tests {
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
             fs::write(cx.temp_dir.join("scratch"), b"temp\n").unwrap();
-            let mut meta = Map::new();
-            meta.insert("kind".to_string(), Value::String(config.kind));
 
             Ok(StagedBuildResult {
-                meta,
+                meta: Map::new(),
                 staged_path: cx.temp_dir.join("missing-output"),
             })
         }
@@ -432,7 +426,7 @@ mod tests {
                 .parse()
                 .unwrap(),
         }];
-        let payload = json!({ "kind": "build-script", "source": "echo hi\n" });
+        let payload = json!({ "source": "echo hi\n", "executable": true });
         let result_key = compute_result_key("Text", &payload, &matching_inputs).unwrap();
         let build_key_for_result =
             BuildKey::from_str("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
@@ -440,13 +434,7 @@ mod tests {
         let lookup_build_key =
             BuildKey::from_str("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
                 .unwrap();
-        let meta = Map::from_iter([
-            (
-                "kind".to_string(),
-                serde_json::Value::String("build-script".to_string()),
-            ),
-            ("source_bytes".to_string(), serde_json::Value::from(8)),
-        ]);
+        let meta = Map::new();
         let expected_meta_hash = mbuild_core::compute_meta_hash(&meta).unwrap();
 
         let stage = temp.path().join("script.sh");
@@ -500,7 +488,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
         let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
-        let config = json!({ "kind": "binary-output" });
+        let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
         let state_dir = layout.root.join("builder-state").join("runtimetest");
@@ -521,10 +509,7 @@ mod tests {
 
         assert!(state_dir.is_dir());
         assert!(!temp_dir.exists());
-        assert_eq!(
-            published.build.meta["kind"],
-            Value::String("binary-output".to_string())
-        );
+        assert!(published.build.meta.is_empty());
         assert!(published.object_path.is_dir());
         assert!(published.object_path.join("payload").is_file());
     }
@@ -534,10 +519,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
         let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
-        let config = Value::Object(Map::from_iter([(
-            "kind".to_string(),
-            Value::String("binary-output".to_string()),
-        )]));
+        let config = Value::Object(Map::new());
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
         let temp_dir = layout
@@ -569,7 +551,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
         let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
-        let config = json!({ "kind": "binary-output" });
+        let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
         let temp_dir = layout

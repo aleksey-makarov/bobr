@@ -9,7 +9,7 @@ use tempfile::tempdir;
 fn second_run_reuses_existing_root_build_handle() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("recipe.json");
-    let recipe = text_recipe("hello", "plain-text", "hi\n");
+    let recipe = text_recipe("hello", "hi\n", false);
     write_recipe(&recipe_path, &recipe);
 
     let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
@@ -32,7 +32,7 @@ fn second_run_reuses_existing_root_build_handle() {
 fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("recipe.json");
-    let recipe = text_recipe("hello", "plain-text", "hi\n");
+    let recipe = text_recipe("hello", "hi\n", false);
     write_recipe(&recipe_path, &recipe);
 
     let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();

@@ -3,15 +3,15 @@
 ## Summary
 
 `mbuild` currently implements store-owned OCI images for both imported images
-and images built from `binary-output` inputs.
+and images built from filesystem tree inputs.
 
 The current image path has three builders:
 
 - `ContainerImage`: import one pinned external image from a registry into the
   store as an OCI image layout directory
-- `Image`: build one derived OCI image layout directory from `binary-output`
+- `Image`: build one derived OCI image layout directory from filesystem tree
   inputs, optionally on top of a base image
-- `Binary`: execute a build script inside a `container-image` input by loading
+- `Binary`: execute a build script inside an OCI image layout input by loading
   the OCI layout into `podman` and then running `podman run`
 
 This means:
@@ -64,8 +64,8 @@ The current realized result metadata contains:
 
 `Image` accepts:
 
-- optional `base`: one `container-image`
-- repeated `inputs`: one or more `binary-output` objects
+- optional `base`: one OCI image layout directory
+- repeated `inputs`: one or more filesystem tree directories
 
 Config fields:
 
@@ -83,7 +83,7 @@ Mode selection:
 Bootstrap mode creates a new OCI image layout from scratch:
 
 - collects all files, directories, and symlinks from the incoming
-  `binary-output` directories
+  input directories
 - builds one deterministic tar layer from those paths
 - compresses it with gzip
 - computes one `diff_id` from the uncompressed tar
@@ -97,20 +97,18 @@ Layered mode builds a new OCI image layout on top of a base image:
 - reads the base manifest and base config from the base OCI layout directory
 - creates a new OCI layout directory
 - hardlinks the base layer blobs into the new layout
-- creates one new deterministic layer from the incoming `binary-output` inputs
+- creates one new deterministic layer from the incoming input directories
 - writes one new OCI config blob by extending `rootfs.diff_ids`
 - writes one new OCI manifest by appending the new layer to the base layers
 - writes a new `index.json`
-
-The realized result kind is still `container-image`.
 
 The current realized result metadata contains:
 
 - `manifest_digest`: the digest of the newly written OCI manifest blob
 
-## `Binary` With `container-image`
+## `Binary` With An OCI Image Layout
 
-`Binary` currently executes against a `container-image` input in two steps:
+`Binary` currently executes against an OCI image layout input in two steps:
 
 1. read the OCI layout directory from the store
 2. make that image available to `podman`, then run `podman run`
@@ -145,7 +143,7 @@ In particular:
 - `Binary` still depends on `podman load` and `podman run`
 - `Image` does not compute or persist canonical flattened `contents`
 - `Image` does not implement additive-only file-composition checks
-- `Image` does not reject path conflicts between incoming `binary-output`
+- `Image` does not reject path conflicts between incoming filesystem tree
   inputs beyond the limited normalization already performed while building a
   tar layer
 

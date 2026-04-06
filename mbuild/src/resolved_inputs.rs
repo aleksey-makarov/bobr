@@ -193,10 +193,7 @@ mod tests {
             )
             .unwrap(),
             object_path: PathBuf::from("/tmp/object"),
-            meta: Map::from_iter([(
-                "kind".to_string(),
-                Value::String("build-script".to_string()),
-            )]),
+            meta: Map::new(),
         }
     }
 
@@ -211,10 +208,7 @@ mod tests {
             ResolvedDependencyValue::Many(vec![object.clone(), object.clone()]),
         );
 
-        assert_eq!(
-            inputs.one("script").unwrap().meta["kind"],
-            Value::String("build-script".to_string())
-        );
+        assert!(inputs.one("script").unwrap().meta.is_empty());
         assert!(inputs.optional("base").unwrap().is_none());
         assert_eq!(inputs.many("sources").unwrap().len(), 2);
         assert!(matches!(
@@ -255,9 +249,10 @@ mod tests {
     fn resolved_inputs_many_preserves_order() {
         let first = sample_object();
         let mut second = sample_object();
-        second
-            .meta
-            .insert("kind".to_string(), Value::String("source-tree".to_string()));
+        second.meta.insert(
+            "install".to_string(),
+            serde_json::json!({"owners":[{"path":"**","uid":0,"gid":0}]}),
+        );
 
         let inputs = ResolvedInputs::new(BTreeMap::from([(
             "sources".to_string(),

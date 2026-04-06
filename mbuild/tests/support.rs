@@ -27,13 +27,13 @@ pub fn recipe_node(name: &str, tag: &str, config: Value, inputs: Value) -> Value
     })
 }
 
-pub fn text_recipe(name: &str, kind: &str, source: &str) -> Value {
+pub fn text_recipe(name: &str, source: &str, executable: bool) -> Value {
     recipe_node(
         name,
         "Text",
         json!({
-            "kind": kind,
             "source": source,
+            "executable": executable,
         }),
         json!({}),
     )
@@ -116,7 +116,7 @@ pub fn base_image_recipe(image: &str, digest: &str) -> Value {
 }
 
 pub fn script_recipe() -> Value {
-    text_recipe("script", "build-script", "#!/bin/sh\nexit 0\n")
+    text_recipe("script", "#!/bin/sh\nexit 0\n", true)
 }
 
 pub fn source_recipe(url: &str, source_hash: &str) -> Value {
@@ -136,9 +136,7 @@ pub fn binary_recipe(name: &str, url: &str, source_hash: &str, image: &str, dige
     recipe_node(
         name,
         "Binary",
-        json!({
-            "kind": "binary-output",
-        }),
+        json!({}),
         json!({
             "image": base_image_recipe(image, digest),
             "script": script_recipe(),

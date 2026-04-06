@@ -408,7 +408,7 @@ mod tests {
     #[derive(Debug, Deserialize, PartialEq, Eq)]
     #[serde(deny_unknown_fields)]
     struct DummyConfig {
-        kind: String,
+        demo: String,
     }
 
     static DUMMY_SPEC: BuilderSpec = BuilderSpec {
@@ -432,14 +432,14 @@ mod tests {
             assert_eq!(
                 config,
                 DummyConfig {
-                    kind: "demo".into()
+                    demo: "demo".into()
                 }
             );
             assert!(inputs.is_empty());
             assert_eq!(cx.state_dir, PathBuf::from("/tmp/builder"));
             assert_eq!(cx.temp_dir, PathBuf::from("/tmp/tmp"));
             Ok(StagedBuildResult {
-                meta: Map::from_iter([("kind".to_string(), Value::String(config.kind))]),
+                meta: Map::new(),
                 staged_path: PathBuf::from("/tmp/out"),
             })
         }
@@ -455,13 +455,13 @@ mod tests {
 
         let result = builder
             .build_erased(
-                serde_json::json!({ "kind": "demo" }),
+                serde_json::json!({ "demo": "demo" }),
                 BuilderInputs::empty(),
                 &mut cx,
             )
             .unwrap();
 
-        assert_eq!(result.meta["kind"], Value::String("demo".to_string()));
+        assert!(result.meta.is_empty());
     }
 
     #[test]
