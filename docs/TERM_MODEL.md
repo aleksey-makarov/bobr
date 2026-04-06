@@ -109,7 +109,9 @@ Rust builders still receive:
 They do not receive unresolved recipe nodes.
 
 Concrete object formats are builder-specific. The current image-related builder
-contracts are described in [`IMAGE_BUILDERS.md`](./IMAGE_BUILDERS.md).
+contracts are described in [`IMAGE_BUILDERS.md`](./IMAGE_BUILDERS.md). The
+current filesystem composition builder contract is described in
+[`ROOTFS_BUILDERS.md`](./ROOTFS_BUILDERS.md).
 
 Builders may use both the realized payload content and the resolved input
 metadata they receive. Input validation is builder-specific and is based on

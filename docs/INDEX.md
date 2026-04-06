@@ -10,9 +10,13 @@
    Current behavior of `ContainerImage`, `Image`, and `Binary` on the image
    path.
 
-3. [CAS.md](./CAS.md)
+3. [ROOTFS_BUILDERS.md](./ROOTFS_BUILDERS.md)
+   Current behavior of `Ext4Rootfs` and the direct filesystem composition
+   path.
+
+4. [CAS.md](./CAS.md)
    Content-addressed store, build handles, canonical result records, and
    publication refs.
 
-4. [FSOBJ_HASH.md](./FSOBJ_HASH.md)
+5. [FSOBJ_HASH.md](./FSOBJ_HASH.md)
    Structural hashing rules shared by filesystem paths and tar archives.

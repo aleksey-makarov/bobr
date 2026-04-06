@@ -7,6 +7,7 @@ edition = "2024"
 clap = { version = "4.5", features = ["derive"] }
 fsobj-hash = { path = "../fsobj-hash" }
 mbuild-core = { path = "../mbuild-core" }
+mbuild-compose = { path = "../mbuild-compose" }
 mbuild-binary = { path = "../mbuild-binary" }
 mbuild-fetch = { path = "../mbuild-fetch" }
 mbuild-image = { path = "../mbuild-image" }

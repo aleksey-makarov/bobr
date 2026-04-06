@@ -75,7 +75,9 @@ Each direct input identity contains:
 The dependency order comes from `BuilderSpec.inputs`, not from JSON field order.
 This lets `mbuild` keep the general runtime independent from concrete builders.
 
-Concrete builder behavior is documented separately. For the current image
-builder path, see [`docs/IMAGE_BUILDERS.md`](./docs/IMAGE_BUILDERS.md).
+Concrete builder behavior is documented separately:
+
+- image-related builders: [`docs/IMAGE_BUILDERS.md`](./docs/IMAGE_BUILDERS.md)
+- filesystem composition builder: [`docs/ROOTFS_BUILDERS.md`](./docs/ROOTFS_BUILDERS.md)
 
 For the architecture documents, start with [`docs/INDEX.md`](./docs/INDEX.md).
