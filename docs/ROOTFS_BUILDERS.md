@@ -2,11 +2,20 @@
 
 ## Summary
 
-`mbuild` currently implements one filesystem composition builder:
+`mbuild` currently implements two filesystem-related builders:
 
+- `Tree`: realize text files and explicit empty directories as one file object or
+  one installable directory object
 - `Ext4Rootfs`: compose installable directory objects into one ext4 rootfs image
 
-This is a direct composition path:
+`Tree` is a direct authoring path:
+
+- the builder accepts generated tree data embedded in `config.tree`
+- it stages UTF-8 text files and explicit empty directories
+- it publishes either one file object or one directory object, depending on the
+  tree shape
+
+`Ext4Rootfs` is a direct composition path:
 
 - the builder reads installable directory objects from the store
 - it applies install ownership rules from each input's `meta.install`
@@ -14,6 +23,52 @@ This is a direct composition path:
 - it writes one ext4 image file directly as the realized result
 
 There is no intermediate composed directory object published to the store.
+
+## `Tree`
+
+`Tree` accepts this config:
+
+```json
+{
+  "tree": {
+    "entries": [
+      {
+        "type": "dir",
+        "path": "etc"
+      },
+      {
+        "type": "file",
+        "path": "etc/hostname",
+        "text": "mbuild\n",
+        "executable": false
+      }
+    ]
+  },
+  "install": {
+    "owners": [
+      { "path": "**", "uid": 0, "gid": 0 }
+    ]
+  }
+}
+```
+
+Inputs:
+
+- none
+
+Current behavior:
+
+- accepts only explicit `file` and `dir` entries
+- file entries carry UTF-8 text and one `executable` flag
+- parent directories for file entries are created automatically
+- if the tree contains exactly one top-level file entry, the result is a file object
+- otherwise the result is a directory object
+- `install` is rejected for file output and required for directory output
+
+Current limitations:
+
+- tree entries currently support only UTF-8 text files and explicit empty directories
+- symlinks, binary files, and richer file mode control are not yet supported
 
 ## `Ext4Rootfs`
 

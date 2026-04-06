@@ -890,6 +890,7 @@ dependencies = [
  "mbuild-fetch",
  "mbuild-image",
  "mbuild-text",
+ "mbuild-tree",
  "mockito",
  "serde",
  "serde_json",
@@ -971,6 +972,16 @@ dependencies = [
 
 [[package]]
 name = "mbuild-text"
+version = "0.1.0"
+dependencies = [
+ "mbuild-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "mbuild-tree"
 version = "0.1.0"
 dependencies = [
  "mbuild-core",

@@ -12,6 +12,7 @@ mbuild-binary = { path = "../mbuild-binary" }
 mbuild-fetch = { path = "../mbuild-fetch" }
 mbuild-image = { path = "../mbuild-image" }
 mbuild-text = { path = "../mbuild-text" }
+mbuild-tree = { path = "../mbuild-tree" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
