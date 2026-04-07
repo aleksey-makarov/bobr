@@ -879,7 +879,12 @@ mod tests {
         let first_bytes = fs::read(&first.staged_path).unwrap();
         let second_bytes = fs::read(&second.staged_path).unwrap();
         assert_eq!(first.meta, Map::new());
-        assert_eq!(first_bytes, second_bytes);
+        assert_images_equal_with_diagnostics(
+            &first.staged_path,
+            &first_bytes,
+            &second.staged_path,
+            &second_bytes,
+        );
 
         let listing = debugfs_output(&first.staged_path, "ls -l /bin");
         assert!(listing.contains("tool"));
@@ -911,6 +916,99 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "debugfs failed: {:?}", output);
         String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn assert_images_equal_with_diagnostics(
+        first_path: &Path,
+        first_bytes: &[u8],
+        second_path: &Path,
+        second_bytes: &[u8],
+    ) {
+        if first_bytes == second_bytes {
+            return;
+        }
+
+        let first_diff = first_difference_offset(first_bytes, second_bytes);
+        let first_window = hex_window(first_bytes, first_diff);
+        let second_window = hex_window(second_bytes, first_diff);
+        let first_summary = tune2fs_summary(first_path);
+        let second_summary = tune2fs_summary(second_path);
+
+        panic!(
+            "ext4 images differ\nfirst: {}\nsecond: {}\nfirst size: {}\nsecond size: {}\nfirst differing offset: {}\nfirst bytes: {}\nsecond bytes: {}\nfirst tune2fs:\n{}\nsecond tune2fs:\n{}",
+            first_path.display(),
+            second_path.display(),
+            first_bytes.len(),
+            second_bytes.len(),
+            first_diff,
+            first_window,
+            second_window,
+            first_summary,
+            second_summary,
+        );
+    }
+
+    fn first_difference_offset(first: &[u8], second: &[u8]) -> usize {
+        let shared = first.len().min(second.len());
+        for index in 0..shared {
+            if first[index] != second[index] {
+                return index;
+            }
+        }
+        shared
+    }
+
+    fn hex_window(bytes: &[u8], offset: usize) -> String {
+        let start = offset.saturating_sub(16);
+        let end = bytes.len().min(offset.saturating_add(16));
+        let mut rendered = String::new();
+        for (index, byte) in bytes[start..end].iter().enumerate() {
+            if index > 0 {
+                rendered.push(' ');
+            }
+            rendered.push_str(&format!("{:02x}", byte));
+        }
+        format!("offset {}..{} [{}]", start, end, rendered)
+    }
+
+    fn tune2fs_summary(image: &Path) -> String {
+        let output = match Command::new("tune2fs").arg("-l").arg(image).output() {
+            Ok(output) => output,
+            Err(error) => {
+                return format!("tune2fs unavailable for '{}': {}", image.display(), error);
+            }
+        };
+
+        if !output.status.success() {
+            return format!(
+                "tune2fs failed for '{}': {}",
+                image.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let wanted = [
+            "Filesystem UUID:",
+            "Filesystem volume name:",
+            "Filesystem features:",
+            "Directory Hash Seed:",
+            "Filesystem created:",
+            "Last mount time:",
+            "Last write time:",
+            "Last checked:",
+        ];
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut selected = stdout
+            .lines()
+            .filter(|line| wanted.iter().any(|prefix| line.starts_with(prefix)))
+            .collect::<Vec<_>>();
+
+        if selected.is_empty() {
+            selected.push("<no selected tune2fs lines>");
+        }
+
+        selected.join("\n")
     }
 
     #[cfg(unix)]
