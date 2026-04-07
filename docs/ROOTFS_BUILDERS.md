@@ -10,7 +10,9 @@
 
 `Tree` is a direct authoring path:
 
-- the builder accepts generated tree data embedded in `config.tree`
+- the builder accepts generated tree data in `config.tree`
+- generated `*-tree.ncl` modules import UTF-8 text from the adjacent `*-tree-src`
+  tree instead of embedding file contents inline
 - it stages UTF-8 text files, symlinks, and explicit directories
 - it publishes either one file object or one directory object, depending on the
   tree shape
@@ -70,6 +72,9 @@ Current behavior:
 - if the tree contains exactly one top-level file entry, the result is a file object
 - otherwise the result is a directory object
 - `install` is rejected for file output and required for directory output
+- when authoring `*-tree-src`, empty directories must contain `.gitkeep`; the generator ignores `.gitkeep` and still emits an empty `dir` entry
+- codegen staleness checks cover tree structure, symlink targets, and executable bits;
+  text file contents are read at Nickel import time
 
 Current limitations:
 
