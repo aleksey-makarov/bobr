@@ -19,7 +19,7 @@ use std::time::Duration;
 use std::time::Instant;
 use support::{
     base_image_recipe, binary_recipe, build_ref_path, image_recipe, recipe_node, script_recipe,
-    source_recipe, spawn_test_oci_registry, write_recipe,
+    source_recipe, spawn_test_oci_registry, tree_directory_recipe, tree_file_recipe, write_recipe,
 };
 use tempfile::tempdir;
 
@@ -403,4 +403,50 @@ fn independent_fetch_sources_run_in_parallel() {
         assert!(published.build.meta.get("install").is_some());
         drop(oci_server);
     });
+}
+
+#[test]
+fn tree_file_recipe_builds_successfully_via_runtime() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("tree-file.json");
+    write_recipe(
+        &recipe_path,
+        &tree_file_recipe("hello-tree", "hello.txt", "hello tree\n", false),
+    );
+
+    let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+
+    let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+    let published = load_build_handle(&layout, build.build_key)
+        .unwrap()
+        .expect("expected Tree Build to exist in store");
+
+    assert!(published.build.meta.is_empty());
+    assert!(published.object_path.is_file());
+    assert_eq!(
+        fs::read_to_string(&published.object_path).unwrap(),
+        "hello tree\n"
+    );
+}
+
+#[test]
+fn tree_directory_recipe_builds_successfully_via_runtime() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("tree-dir.json");
+    write_recipe(&recipe_path, &tree_directory_recipe("runtime-tree"));
+
+    let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+
+    let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+    let published = load_build_handle(&layout, build.build_key)
+        .unwrap()
+        .expect("expected Tree Build to exist in store");
+
+    assert!(published.object_path.is_dir());
+    assert!(published.object_path.join("dev").is_dir());
+    assert_eq!(
+        fs::read_to_string(published.object_path.join("etc/hostname")).unwrap(),
+        "mbuild\n"
+    );
+    assert!(published.build.meta.get("install").is_some());
 }

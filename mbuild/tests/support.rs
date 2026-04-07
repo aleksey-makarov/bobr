@@ -39,6 +39,54 @@ pub fn text_recipe(name: &str, source: &str, executable: bool) -> Value {
     )
 }
 
+pub fn tree_file_recipe(name: &str, path: &str, text: &str, executable: bool) -> Value {
+    recipe_node(
+        name,
+        "Tree",
+        json!({
+            "tree": {
+                "entries": [{
+                    "type": "file",
+                    "path": path,
+                    "text": text,
+                    "executable": executable,
+                }]
+            }
+        }),
+        json!({}),
+    )
+}
+
+pub fn tree_directory_recipe(name: &str) -> Value {
+    recipe_node(
+        name,
+        "Tree",
+        json!({
+            "tree": {
+                "entries": [
+                    { "type": "dir", "path": "dev" },
+                    {
+                        "type": "file",
+                        "path": "etc/hostname",
+                        "text": "mbuild\n",
+                        "executable": false,
+                    },
+                    {
+                        "type": "file",
+                        "path": "init",
+                        "text": "#!/bin/sh\nexit 0\n",
+                        "executable": true,
+                    }
+                ]
+            },
+            "install": {
+                "owners": [{ "path": "**", "uid": 0, "gid": 0 }]
+            }
+        }),
+        json!({}),
+    )
+}
+
 /// Spawn a minimal OCI registry server and return
 /// `(server, image_ref, pinned_digest)`.
 ///

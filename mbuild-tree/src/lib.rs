@@ -239,16 +239,20 @@ fn validate_rel_path(path: &str) -> Result<String, BuilderError> {
             "invalid builder config: tree entry path must not be empty".to_string(),
         ));
     }
-    if path.contains('\\') {
-        return Err(BuilderError::InvalidRecipe(format!(
-            "invalid builder config: tree entry path '{path}' must use '/' separators"
-        )));
-    }
-
     let path_obj = Path::new(path);
     if path_obj.is_absolute() {
         return Err(BuilderError::InvalidRecipe(format!(
             "invalid builder config: tree entry path '{path}' must be relative"
+        )));
+    }
+    if path.split('/').any(str::is_empty) {
+        return Err(BuilderError::InvalidRecipe(format!(
+            "invalid builder config: tree entry path '{path}' must not contain empty segments"
+        )));
+    }
+    if path.contains('\\') {
+        return Err(BuilderError::InvalidRecipe(format!(
+            "invalid builder config: tree entry path '{path}' must use '/' separators"
         )));
     }
 
@@ -481,6 +485,114 @@ mod tests {
     }
 
     #[test]
+    fn single_nested_file_requires_directory_output() {
+        let builder = TreeBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let error = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "etc/hostname".to_string(),
+                            text: "mbuild\n".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: None,
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("directory output requires install")
+        );
+    }
+
+    #[test]
+    fn single_dir_entry_produces_directory_output() {
+        let builder = TreeBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let result = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::Dir {
+                            path: "dev".to_string(),
+                        }],
+                    },
+                    install: Some(sample_install()),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+
+        assert!(result.staged_path.is_dir());
+        assert!(result.staged_path.join("dev").is_dir());
+        assert!(result.meta.get("install").is_some());
+    }
+
+    #[test]
+    fn materializes_explicit_empty_directories() {
+        let builder = TreeBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let result = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![
+                            TreeEntry::Dir {
+                                path: "dev".to_string(),
+                            },
+                            TreeEntry::Dir {
+                                path: "proc".to_string(),
+                            },
+                            TreeEntry::Dir {
+                                path: "sys".to_string(),
+                            },
+                        ],
+                    },
+                    install: Some(sample_install()),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+
+        assert!(result.staged_path.join("dev").is_dir());
+        assert!(result.staged_path.join("proc").is_dir());
+        assert!(result.staged_path.join("sys").is_dir());
+        assert_eq!(
+            fs::read_dir(result.staged_path.join("dev"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(result.staged_path.join("proc"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(
+            fs::read_dir(result.staged_path.join("sys"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
     fn directory_tree_builds_directory_and_preserves_install_meta() {
         let builder = TreeBuilder;
         let temp = tempdir().unwrap();
@@ -597,6 +709,34 @@ mod tests {
     }
 
     #[test]
+    fn directory_output_rejects_empty_install_owners() {
+        let builder = TreeBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let error = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::Dir {
+                            path: "dev".to_string(),
+                        }],
+                    },
+                    install: Some(InstallMeta { owners: vec![] }),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("install.owners must contain at least one rule")
+        );
+    }
+
+    #[test]
     fn tree_builder_rejects_non_empty_inputs() {
         let builder = TreeBuilder;
         let temp = tempdir().unwrap();
@@ -678,6 +818,114 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("must not contain '..'"));
+
+        let error = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![
+                            TreeEntry::Dir {
+                                path: "etc".to_string(),
+                            },
+                            TreeEntry::File {
+                                path: "etc".to_string(),
+                                text: "bad".to_string(),
+                                executable: false,
+                            },
+                        ],
+                    },
+                    install: Some(sample_install()),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate tree entry path 'etc'")
+        );
+
+        let error = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "/etc/hostname".to_string(),
+                            text: "bad".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: None,
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("must be relative"));
+
+        let error = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "./etc/hostname".to_string(),
+                            text: "bad".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: None,
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("must not contain '.'"));
+
+        let error = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "etc\\hostname".to_string(),
+                            text: "bad".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: None,
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("must use '/' separators"));
+
+        let error = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "etc//hostname".to_string(),
+                            text: "bad".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: None,
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("must not contain empty segments")
+        );
     }
 
     #[test]
