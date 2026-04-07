@@ -4,14 +4,14 @@
 
 `mbuild` currently implements two filesystem-related builders:
 
-- `Tree`: realize text files and explicit empty directories as one file object or
+- `Tree`: realize text files, symlinks, and explicit directories as one file object or
   one installable directory object
 - `Ext4Rootfs`: compose installable directory objects into one ext4 rootfs image
 
 `Tree` is a direct authoring path:
 
 - the builder accepts generated tree data embedded in `config.tree`
-- it stages UTF-8 text files and explicit empty directories
+- it stages UTF-8 text files, symlinks, and explicit directories
 - it publishes either one file object or one directory object, depending on the
   tree shape
 
@@ -37,6 +37,11 @@ There is no intermediate composed directory object published to the store.
         "path": "etc"
       },
       {
+        "type": "symlink",
+        "path": "bin",
+        "target": "usr/bin"
+      },
+      {
         "type": "file",
         "path": "etc/hostname",
         "text": "mbuild\n",
@@ -58,8 +63,9 @@ Inputs:
 
 Current behavior:
 
-- accepts only explicit `file` and `dir` entries
+- accepts explicit `file`, `dir`, and `symlink` entries
 - file entries carry UTF-8 text and one `executable` flag
+- symlink entries carry one literal target string
 - parent directories for file entries are created automatically
 - if the tree contains exactly one top-level file entry, the result is a file object
 - otherwise the result is a directory object
@@ -67,8 +73,8 @@ Current behavior:
 
 Current limitations:
 
-- tree entries currently support only UTF-8 text files and explicit empty directories
-- symlinks, binary files, and richer file mode control are not yet supported
+- tree entries currently support only UTF-8 text files, symlinks, and explicit directories
+- binary files and richer file mode control are not yet supported
 
 ## `Ext4Rootfs`
 

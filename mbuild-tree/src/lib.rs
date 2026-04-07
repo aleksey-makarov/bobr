@@ -35,6 +35,10 @@ enum TreeEntry {
     Dir {
         path: String,
     },
+    Symlink {
+        path: String,
+        target: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -61,17 +65,27 @@ enum NormalizedEntry {
     Dir {
         rel_path: String,
     },
+    Symlink {
+        rel_path: String,
+        target: String,
+    },
 }
 
 impl NormalizedEntry {
     fn rel_path(&self) -> &str {
         match self {
-            Self::File { rel_path, .. } | Self::Dir { rel_path } => rel_path,
+            Self::File { rel_path, .. }
+            | Self::Dir { rel_path }
+            | Self::Symlink { rel_path, .. } => rel_path,
         }
     }
 
-    fn is_file(&self) -> bool {
-        matches!(self, Self::File { .. })
+    fn kind_name(&self) -> &'static str {
+        match self {
+            Self::File { .. } => "file",
+            Self::Dir { .. } => "directory",
+            Self::Symlink { .. } => "symlink",
+        }
     }
 }
 
@@ -164,6 +178,17 @@ fn normalize_entries(entries: Vec<TreeEntry>) -> Result<Vec<NormalizedEntry>, Bu
             TreeEntry::Dir { path } => Ok(NormalizedEntry::Dir {
                 rel_path: validate_rel_path(&path)?,
             }),
+            TreeEntry::Symlink { path, target } => {
+                if target.is_empty() {
+                    return Err(BuilderError::InvalidRecipe(
+                        "invalid builder config: symlink target must not be empty".to_string(),
+                    ));
+                }
+                Ok(NormalizedEntry::Symlink {
+                    rel_path: validate_rel_path(&path)?,
+                    target,
+                })
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -173,7 +198,7 @@ fn normalize_entries(entries: Vec<TreeEntry>) -> Result<Vec<NormalizedEntry>, Bu
     for entry in &normalized {
         let rel_path = entry.rel_path().to_string();
         if kinds_by_path
-            .insert(rel_path.clone(), entry.is_file())
+            .insert(rel_path.clone(), entry.kind_name())
             .is_some()
         {
             return Err(BuilderError::InvalidRecipe(format!(
@@ -189,10 +214,12 @@ fn normalize_entries(entries: Vec<TreeEntry>) -> Result<Vec<NormalizedEntry>, Bu
         for segment in components.iter().take(components.len().saturating_sub(1)) {
             current.push(segment);
             let ancestor = current.to_string_lossy();
-            if kinds_by_path.get(ancestor.as_ref()) == Some(&true) {
+            if let Some(kind) = kinds_by_path.get(ancestor.as_ref())
+                && matches!(*kind, "file" | "symlink")
+            {
                 return Err(BuilderError::InvalidRecipe(format!(
-                    "invalid builder config: file entry '{}' conflicts with descendant path '{}'",
-                    ancestor, rel_path
+                    "invalid builder config: {} entry '{}' conflicts with descendant path '{}'",
+                    kind, ancestor, rel_path
                 )));
             }
         }
@@ -377,6 +404,20 @@ fn materialize_directory_output(
                 })?;
                 set_file_mode(&path, *executable)?;
             }
+            NormalizedEntry::Symlink { rel_path, target } => {
+                let path = root.join(rel_path);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(|error| {
+                        BuilderError::ExecutionFailed(format!(
+                            "failed to create parent directory '{}': {error}",
+                            parent.display()
+                        ))
+                    })?;
+                    #[cfg(unix)]
+                    ensure_parent_dirs_0755(root, parent)?;
+                }
+                create_symlink(target, &path)?;
+            }
         }
     }
 
@@ -421,6 +462,24 @@ fn set_file_mode(path: &Path, executable: bool) -> Result<(), BuilderError> {
         })?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &str, path: &Path) -> Result<(), BuilderError> {
+    std::os::unix::fs::symlink(target, path).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to create staged symlink '{}' -> '{}': {error}",
+            path.display(),
+            target
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn create_symlink(_target: &str, _path: &Path) -> Result<(), BuilderError> {
+    Err(BuilderError::ExecutionFailed(
+        "Tree symlink entries are only supported on unix platforms".to_string(),
+    ))
 }
 
 fn install_meta_map(install: &InstallMeta) -> Result<Map<String, Value>, BuilderError> {
@@ -593,6 +652,63 @@ mod tests {
     }
 
     #[test]
+    fn materializes_symlink_entries_with_literal_targets() {
+        let builder = TreeBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let result = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![
+                            TreeEntry::Dir {
+                                path: "usr/bin".to_string(),
+                            },
+                            TreeEntry::Symlink {
+                                path: "bin".to_string(),
+                                target: "usr/bin".to_string(),
+                            },
+                        ],
+                    },
+                    install: Some(sample_install()),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+
+        let target = fs::read_link(result.staged_path.join("bin")).unwrap();
+        assert_eq!(target, PathBuf::from("usr/bin"));
+    }
+
+    #[test]
+    fn materializes_broken_symlink_entries() {
+        let builder = TreeBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let result = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::Symlink {
+                            path: "etc/mtab".to_string(),
+                            target: "/proc/self/mounts".to_string(),
+                        }],
+                    },
+                    install: Some(sample_install()),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+
+        let target = fs::read_link(result.staged_path.join("etc/mtab")).unwrap();
+        assert_eq!(target, PathBuf::from("/proc/self/mounts"));
+    }
+
+    #[test]
     fn directory_tree_builds_directory_and_preserves_install_meta() {
         let builder = TreeBuilder;
         let temp = tempdir().unwrap();
@@ -616,6 +732,10 @@ mod tests {
                                 text: "#!/bin/sh\n".to_string(),
                                 executable: true,
                             },
+                            TreeEntry::Symlink {
+                                path: "bin".to_string(),
+                                target: "usr/bin".to_string(),
+                            },
                         ],
                     },
                     install: Some(sample_install()),
@@ -630,6 +750,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(result.staged_path.join("etc/hostname")).unwrap(),
             "mbuild\n"
+        );
+        assert_eq!(
+            fs::read_link(result.staged_path.join("bin")).unwrap(),
+            PathBuf::from("usr/bin")
         );
         assert!(result.meta.get("install").is_some());
 
@@ -925,6 +1049,64 @@ mod tests {
             error
                 .to_string()
                 .contains("must not contain empty segments")
+        );
+
+        let error = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![
+                            TreeEntry::Symlink {
+                                path: "bin".to_string(),
+                                target: "usr/bin".to_string(),
+                            },
+                            TreeEntry::File {
+                                path: "bin/tool".to_string(),
+                                text: "bad".to_string(),
+                                executable: false,
+                            },
+                        ],
+                    },
+                    install: Some(sample_install()),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("symlink entry 'bin' conflicts with descendant path 'bin/tool'")
+        );
+
+        let error = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![
+                            TreeEntry::Symlink {
+                                path: "bin".to_string(),
+                                target: "".to_string(),
+                            },
+                            TreeEntry::File {
+                                path: "etc/hostname".to_string(),
+                                text: "mbuild\n".to_string(),
+                                executable: false,
+                            },
+                        ],
+                    },
+                    install: Some(sample_install()),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("symlink target must not be empty")
         );
     }
 

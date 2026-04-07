@@ -76,7 +76,32 @@ pub fn tree_directory_recipe(name: &str) -> Value {
                         "path": "init",
                         "text": "#!/bin/sh\nexit 0\n",
                         "executable": true,
+                    },
+                    {
+                        "type": "symlink",
+                        "path": "bin",
+                        "target": "usr/bin",
                     }
+                ]
+            },
+            "install": {
+                "owners": [{ "path": "**", "uid": 0, "gid": 0 }]
+            }
+        }),
+        json!({}),
+    )
+}
+
+pub fn tree_symlink_recipe(name: &str) -> Value {
+    recipe_node(
+        name,
+        "Tree",
+        json!({
+            "tree": {
+                "entries": [
+                    { "type": "dir", "path": "usr/bin" },
+                    { "type": "symlink", "path": "bin", "target": "usr/bin" },
+                    { "type": "symlink", "path": "etc/mtab", "target": "/proc/self/mounts" }
                 ]
             },
             "install": {
