@@ -2,11 +2,13 @@
 
 ## Summary
 
-`mbuild` consumes one JSON recipe graph and executes it entirely in Rust.
+`mbuild` consumes one JSON DAG request and executes it entirely in Rust.
 
-The input file is a nested JSON tree. Each object describes one builder node in
-a generic format driven by the Rust builder registry. Dependencies are inline
-child recipe objects rather than store handles or symbolic names.
+The input file is a top-level object of recipe nodes keyed by technical ids.
+The reserved id `root` identifies the build target for the current invocation.
+Each node describes one builder node in a generic format driven by the Rust
+builder registry. Dependencies are encoded as id references rather than inline
+child recipe objects.
 
 Rust is responsible for:
 
@@ -45,7 +47,7 @@ The runtime rejects:
 - missing declared slots
 - input values that do not match the declared arity
 
-Children are always inline recipe objects.
+Children are always referenced by node id.
 
 ## Build Identity
 
@@ -74,7 +76,7 @@ Each direct input identity contains:
 
 ## Planning and Execution
 
-Planning starts at the root node.
+Planning starts at node `root`.
 
 For each node, Rust:
 
@@ -94,9 +96,9 @@ Execution then proceeds bottom-up:
 - independent ready nodes may run in parallel
 - a node is never built twice for the same `build_key`
 
-Repeated subtrees in the input tree do not require a separate DAG-normalization
-phase. The runtime keeps planner and executor state keyed by `build_key`, so
-identical graph fragments reuse the same internal state.
+The request is already a DAG-level representation rather than a fully nested
+tree. The runtime still keeps planner and executor state keyed by `build_key`,
+so identical graph fragments reuse the same internal state.
 
 ## Builder Interface
 

@@ -3,7 +3,7 @@
 ## Recommended Reading Order
 
 1. [TERM_MODEL.md](./TERM_MODEL.md)
-   High-level execution model: one JSON recipe graph, Rust-side planning, and
+   High-level execution model: one JSON DAG request, Rust-side planning, and
    bottom-up execution of missing nodes.
 
 2. [IMAGE_BUILDERS.md](./IMAGE_BUILDERS.md)

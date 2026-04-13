@@ -119,7 +119,7 @@ fn cli_reports_invalid_generic_input_shape() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
     assert!(
-        stderr.contains("input slot 'image' must be a single recipe object"),
+        stderr.contains("input slot 'image' must be a single node id string"),
         "{stderr}"
     );
 }

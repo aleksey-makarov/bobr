@@ -1,8 +1,8 @@
 use crate::builders;
 use crate::logging::{BuildRunLogger, RunOptions};
 use crate::recipe::{
-    PlannedInputValue, PlannedNode, PlannedRecipe, PlanningState, Recipe, ReuseOrigin,
-    collect_graph,
+    CollectedGraph, PlannedInputValue, PlannedNode, PlannedRecipe, PlanningState, RecipeRequest,
+    ReuseOrigin, collect_graph,
 };
 use crate::resolved_inputs::{ResolvedDependencyValue, ResolvedInputs};
 use crate::runtime::{
@@ -70,7 +70,7 @@ pub fn run_recipe_json_in_workspace_with_options(
             recipe_path.display()
         ))
     })?;
-    let recipe = Recipe::parse_json(&recipe_bytes).map_err(|error| {
+    let request = RecipeRequest::parse_json(&recipe_bytes).map_err(|error| {
         RuntimeError::RecipeLoad(format!(
             "failed to parse recipe JSON '{}': {error}",
             recipe_path.display()
@@ -89,8 +89,9 @@ pub fn run_recipe_json_in_workspace_with_options(
     );
 
     let mut nodes = HashMap::new();
-    let root_key = collect_graph(&recipe, &mut nodes)?;
-    plan_top_down(&recipe, &layout, &mut nodes)?;
+    let graph = collect_graph(&request, "root", &mut nodes)?;
+    let root_key = graph.root_key;
+    plan_top_down(&layout, &mut nodes, &graph)?;
     publish_reused_nodes(&layout, &logger, &nodes)?;
 
     let mut completed = HashMap::new();
@@ -123,45 +124,46 @@ pub fn render_build_as_json(build: &Build) -> Result<String, RuntimeError> {
 }
 
 fn plan_top_down(
-    recipe: &Recipe,
     layout: &StoreLayout,
     nodes: &mut HashMap<BuildKey, PlannedNode>,
+    graph: &CollectedGraph,
 ) -> Result<(), RuntimeError> {
-    let key = collect_graph(recipe, nodes)?;
-    let node = nodes
-        .get_mut(&key)
-        .ok_or_else(|| RuntimeError::Store(format!("missing planned node for build '{}'", key)))?;
-    node.active_names.insert(recipe.name().to_string());
-    match node.state {
-        PlanningState::Reused { .. } | PlanningState::NeedsBuild => return Ok(()),
-        PlanningState::Unknown => {}
-    }
-
-    if let Some(published) = lookup_build_handle(layout, key)? {
-        node.state = PlanningState::Reused {
-            build: published.build.clone(),
-            origin: ReuseOrigin::BuildHandle,
-        };
-        return Ok(());
-    }
-
-    for child in recipe.direct_children() {
-        plan_top_down(child, layout, nodes)?;
-    }
-
-    if let Some(published) = lookup_canonical_for_planned_node(layout, nodes, key)? {
+    for node_id in &graph.topo_order {
+        let key = *graph.node_keys.get(node_id).ok_or_else(|| {
+            RuntimeError::Store(format!(
+                "missing build key for request node id '{}'",
+                node_id
+            ))
+        })?;
         let node = nodes.get_mut(&key).ok_or_else(|| {
             RuntimeError::Store(format!("missing planned node for build '{}'", key))
         })?;
-        node.state = PlanningState::Reused {
-            build: published.build.clone(),
-            origin: ReuseOrigin::CanonicalResult,
-        };
-    } else {
-        let node = nodes.get_mut(&key).ok_or_else(|| {
-            RuntimeError::Store(format!("missing planned node for build '{}'", key))
-        })?;
-        node.state = PlanningState::NeedsBuild;
+        if !matches!(node.state, PlanningState::Unknown) {
+            continue;
+        }
+
+        if let Some(published) = lookup_build_handle(layout, key)? {
+            node.state = PlanningState::Reused {
+                build: published.build.clone(),
+                origin: ReuseOrigin::BuildHandle,
+            };
+            continue;
+        }
+
+        if let Some(published) = lookup_canonical_for_planned_node(layout, nodes, key)? {
+            let node = nodes.get_mut(&key).ok_or_else(|| {
+                RuntimeError::Store(format!("missing planned node for build '{}'", key))
+            })?;
+            node.state = PlanningState::Reused {
+                build: published.build.clone(),
+                origin: ReuseOrigin::CanonicalResult,
+            };
+        } else {
+            let node = nodes.get_mut(&key).ok_or_else(|| {
+                RuntimeError::Store(format!("missing planned node for build '{}'", key))
+            })?;
+            node.state = PlanningState::NeedsBuild;
+        }
     }
 
     Ok(())
@@ -505,38 +507,43 @@ mod tests {
     fn lookup_canonical_for_planned_node_uses_dependency_meta_hashes() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
-        let recipe = Recipe::parse_json(
+        let request = RecipeRequest::parse_json(
             br##"{
-                "name": "bin",
-                "tag": "Binary",
-                "config": {},
-                "inputs": {
-                    "image": {
-                        "name": "image",
-                        "tag": "ContainerImage",
-                        "config": {
-                            "image": "docker.io/library/buildpack-deps:bookworm",
-                            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        },
-                        "inputs": {}
+                "root": {
+                    "name": "bin",
+                    "tag": "Binary",
+                    "config": {},
+                    "inputs": {
+                        "image": "image",
+                        "script": "script",
+                        "sources": []
+                    }
+                },
+                "image": {
+                    "name": "image",
+                    "tag": "ContainerImage",
+                    "config": {
+                        "image": "docker.io/library/buildpack-deps:bookworm",
+                        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     },
-                    "script": {
-                        "name": "script",
-                        "tag": "Text",
-                        "config": {
-                            "source": "#!/bin/sh\nexit 0\n",
-                            "executable": true
-                        },
-                        "inputs": {}
+                    "inputs": {}
+                },
+                "script": {
+                    "name": "script",
+                    "tag": "Text",
+                    "config": {
+                        "source": "#!/bin/sh\nexit 0\n",
+                        "executable": true
                     },
-                    "sources": []
+                    "inputs": {}
                 }
             }"##,
         )
         .unwrap();
 
         let mut nodes = HashMap::new();
-        let root_key = collect_graph(&recipe, &mut nodes).unwrap();
+        let graph = collect_graph(&request, "root", &mut nodes).unwrap();
+        let root_key = graph.root_key;
         let dep_keys = {
             let mut keys = Vec::new();
             nodes

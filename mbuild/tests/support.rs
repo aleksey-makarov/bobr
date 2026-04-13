@@ -9,7 +9,78 @@ pub fn write_recipe(recipe_path: &Path, recipe: &Value) {
     if let Some(parent) = recipe_path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
-    fs::write(recipe_path, serde_json::to_vec_pretty(recipe).unwrap()).unwrap();
+    let request = normalize_request(recipe);
+    fs::write(recipe_path, serde_json::to_vec_pretty(&request).unwrap()).unwrap();
+}
+
+fn normalize_request(recipe: &Value) -> Value {
+    fn visit(node: &Value, nodes: &mut serde_json::Map<String, Value>, next_id: &mut usize, is_root: bool) -> String {
+        let id = if is_root {
+            "root".to_string()
+        } else {
+            let id = format!("n{}", *next_id);
+            *next_id += 1;
+            id
+        };
+
+        let object = node.as_object().expect("recipe node must be an object");
+        let name = object
+            .get("name")
+            .cloned()
+            .expect("recipe node must have name");
+        let tag = object
+            .get("tag")
+            .cloned()
+            .expect("recipe node must have tag");
+        let config = object
+            .get("config")
+            .cloned()
+            .expect("recipe node must have config");
+        let inputs = object
+            .get("inputs")
+            .and_then(Value::as_object)
+            .expect("recipe node inputs must be an object");
+
+        let mut normalized_inputs = serde_json::Map::new();
+        for (slot, value) in inputs {
+            normalized_inputs.insert(slot.clone(), normalize_input(value, nodes, next_id));
+        }
+
+        nodes.insert(
+            id.clone(),
+            json!({
+                "name": name,
+                "tag": tag,
+                "config": config,
+                "inputs": normalized_inputs,
+            }),
+        );
+
+        id
+    }
+
+    fn normalize_input(
+        value: &Value,
+        nodes: &mut serde_json::Map<String, Value>,
+        next_id: &mut usize,
+    ) -> Value {
+        match value {
+            Value::Null => Value::Null,
+            Value::Array(items) => Value::Array(
+                items.iter()
+                    .map(|item| Value::String(visit(item, nodes, next_id, false)))
+                    .collect(),
+            ),
+            Value::Object(_) => Value::String(visit(value, nodes, next_id, false)),
+            _ => panic!("recipe input must be null, object, or array"),
+        }
+    }
+
+    let mut nodes = serde_json::Map::new();
+    let mut next_id = 0usize;
+    let root_id = visit(recipe, &mut nodes, &mut next_id, true);
+    assert_eq!(root_id, "root");
+    Value::Object(nodes)
 }
 
 pub fn build_ref_path(root: &Path, build_key: impl ToString) -> PathBuf {

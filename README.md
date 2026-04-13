@@ -1,29 +1,33 @@
 # mbuild
 
-`mbuild` executes one JSON recipe graph.
+`mbuild` executes one JSON DAG request.
 
-The entry file is a JSON document whose root object describes one build target.
-Dependencies are embedded inline as child recipe objects. `mbuild` parses that
-nested tree, validates each node against the registered `BuilderSpec`, computes
-build keys in Rust, performs top-down store lookups, and builds only the
-missing nodes. Missing leaves and other ready nodes may execute in parallel.
+The entry file is a JSON document whose top-level object is a table of recipe
+nodes keyed by technical ids. The root build target is the entry with the
+reserved id `root`. Dependencies are encoded as id references in input slots.
+`mbuild` parses that DAG request, validates each node against the registered
+`BuilderSpec`, computes build keys in Rust, performs top-down store lookups,
+and builds only the missing nodes. Missing leaves and other ready nodes may
+execute in parallel.
 
-Every recipe node uses one generic shape:
+Every recipe node still uses one generic shape:
 
 ```json
 {
-  "name": "tar-1.35",
-  "tag": "Binary",
-  "config": {},
-  "inputs": {
-    "image": { "...": "recipe object" },
-    "script": { "...": "recipe object" },
-    "sources": [{ "...": "recipe object" }]
+  "root": {
+    "name": "tar-1.35",
+    "tag": "Binary",
+    "config": {},
+    "inputs": {
+      "image": "image_1",
+      "script": "script_1",
+      "sources": ["src_0"]
+    }
   }
 }
 ```
 
-Node fields:
+Node payload fields:
 
 - `name`: publication name
 - `tag`: builder tag from the Rust builder registry
@@ -32,9 +36,9 @@ Node fields:
 
 Input encoding is generic and follows the slot arity declared by the builder:
 
-- `One`: one inline recipe object
-- `Optional`: always present, either `null` or one inline recipe object
-- `Many`: an array of inline recipe objects
+- `One`: one node id string
+- `Optional`: always present, either `null` or one node id string
+- `Many`: an array of node id strings
 
 The runtime rejects:
 
@@ -72,8 +76,9 @@ Each direct input identity contains:
 - `object_hash`
 - `meta_hash`
 
-The dependency order comes from `BuilderSpec.inputs`, not from JSON field order.
-This lets `mbuild` keep the general runtime independent from concrete builders.
+The dependency order comes from `BuilderSpec.inputs`, not from JSON field order
+or node id order. This lets `mbuild` keep the general runtime independent from
+concrete builders.
 
 Concrete builder behavior is documented separately:
 
