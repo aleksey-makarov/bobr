@@ -26,6 +26,8 @@ if [ "${1:-}" = run ]; then
   config_host=""
   config_dir=""
   image_ref=""
+  userns_mode=""
+  run_user=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --volume)
@@ -55,10 +57,15 @@ if [ "${1:-}" = run ]; then
         esac
         shift 2
         ;;
-      --rm|--network=none|--userns=keep-id)
+      --rm|--network=none)
+        shift 1
+        ;;
+      --userns=*)
+        userns_mode="${1#*=}"
         shift 1
         ;;
       --user)
+        run_user="$2"
         shift 2
         ;;
       *)
@@ -85,6 +92,8 @@ if [ "${1:-}" = run ]; then
     printf '%s\n' "${config_dir:-}" > "$out_host/script-config-dir.txt"
   fi
   printf '%s\n' "$image_ref" > "$out_host/image-ref.txt"
+  printf '%s\n' "$userns_mode" > "$out_host/userns-mode.txt"
+  printf '%s\n' "$run_user" > "$out_host/run-user.txt"
   exit 0
 fi
 

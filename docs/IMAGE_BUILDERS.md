@@ -133,6 +133,17 @@ reference passed to `podman`.
 - the build script
 - the serialized `script_config` directory
 
+`Binary` currently runs the build process as root inside a rootless user
+namespace:
+
+- `podman run --userns=host --user 0:0`
+- the container process is not host-root, but it is root with respect to the
+  container filesystem view
+- the live container filesystem is writable during a single `Binary` run,
+  including `/usr` and `/tmp`
+- only `/out/out` is published as the realized result; live filesystem changes
+  outside `/out/out` are not published automatically
+
 ## Current Limitations
 
 The current image path intentionally does not yet implement the final image

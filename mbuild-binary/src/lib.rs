@@ -127,7 +127,6 @@ impl TypedBuilder for BinaryBuilder {
             &script_execution,
             sources,
             &output_path,
-            current_uid_gid(),
             cx,
         );
 
@@ -327,7 +326,6 @@ fn run_container_build(
     script: &ScriptExecution,
     sources: &[BuilderInputObject],
     output_path: &Path,
-    (uid, gid): (u32, u32),
     cx: &BuildContext,
 ) -> BResult<()> {
     cx.log_event(
@@ -340,9 +338,9 @@ fn run_container_build(
         .arg("run")
         .arg("--rm")
         .arg("--network=none")
-        .arg("--userns=keep-id")
+        .arg("--userns=host")
         .arg("--user")
-        .arg(format!("{}:{}", uid, gid));
+        .arg("0:0");
 
     for (index, source) in sources.iter().enumerate() {
         let mount_spec = if source.object_path.is_dir() {
@@ -478,20 +476,6 @@ fn map_error(error: BinaryError) -> BuilderError {
         | BinaryError::PodmanFailed(message)
         | BinaryError::BuildFailed(message)
         | BinaryError::FsFailed(message) => BuilderError::ExecutionFailed(message),
-    }
-}
-
-fn current_uid_gid() -> (u32, u32) {
-    #[cfg(unix)]
-    {
-        let uid = unsafe { libc::geteuid() };
-        let gid = unsafe { libc::getegid() };
-        (uid, gid)
-    }
-
-    #[cfg(not(unix))]
-    {
-        (0, 0)
     }
 }
 
@@ -1017,6 +1001,32 @@ mod tests {
             assert!(
                 image_ref.starts_with("sha256:") && image_ref.len() == 71,
                 "expected sha256:<64hex> from OCI config digest, got: {image_ref}"
+            );
+        });
+    }
+
+    #[test]
+    fn binary_builder_runs_as_root_in_rootless_user_namespace() {
+        with_fake_podman(|| {
+            let temp = tempdir().unwrap();
+            let mut cx = build_context(temp.path());
+            let result = BinaryBuilder
+                .build_typed(
+                    BinaryConfig {
+                        script_config: None,
+                    },
+                    sample_inputs(temp.path()),
+                    &mut cx,
+                )
+                .unwrap();
+
+            assert_eq!(
+                fs::read_to_string(result.staged_path.join("userns-mode.txt")).unwrap(),
+                "host\n"
+            );
+            assert_eq!(
+                fs::read_to_string(result.staged_path.join("run-user.txt")).unwrap(),
+                "0:0\n"
             );
         });
     }
