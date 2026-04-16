@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+state_root="$(dirname "$0")/.fake-podman-state"
+mkdir -p "$state_root"
+
 if [ "${1:-}" = image ] && [ "${2:-}" = exists ]; then
-  # Simulate image is already loaded; tests needing a load can set this to 1.
   if [ "${MBUILD_TEST_IMAGE_NOT_LOADED:-}" = "1" ]; then
     exit 1
   fi
   exit 0
 fi
+
+if [ "${1:-}" = --storage-opt ]; then
+  shift 2
+fi
+
 if [ "${1:-}" = load ]; then
   if [ "${MBUILD_TEST_PODMAN_LOAD_FAIL:-}" = "1" ]; then
     echo simulated podman load failure >&2
@@ -14,20 +22,18 @@ if [ "${1:-}" = load ]; then
   fi
   exit 0
 fi
-if [ "${1:-}" = run ]; then
-  if [ "${MBUILD_TEST_BINARY_PODMAN_FAIL:-}" = "1" ]; then
-    echo simulated podman run failure >&2
-    exit 42
-  fi
+
+if [ "${1:-}" = create ]; then
   shift 1
   source_input=""
-  declare -A in_mounts
-  out_host=""
-  config_host=""
+  source_dir=""
+  build_dir=""
+  install_dir=""
   config_dir=""
+  config_host=""
   image_ref=""
   userns_mode=""
-  run_user=""
+  create_user=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --volume)
@@ -41,9 +47,8 @@ if [ "${1:-}" = run ]; then
         fi
         if [[ "$mount" == /in/* ]]; then
           name="${mount#/in/}"
-          in_mounts["$name"]="$host"
-        elif [ "$mount" = "/out/out" ]; then
-          out_host="$host"
+          mkdir -p "$state_root/create-mounts"
+          printf '%s\n' "$host" > "$state_root/create-mounts/$name"
         elif [ "$mount" = "/__mbuild_script_config" ]; then
           config_host="$host"
         fi
@@ -52,12 +57,14 @@ if [ "${1:-}" = run ]; then
       --env)
         kv="$2"
         case "$kv" in
-          MBUILD_SOURCE_INPUT=*) source_input="${kv#*=}" ;;
+          MBUILD_SOURCE_DIR=*) source_dir="${kv#*=}" ;;
+          MBUILD_BUILD_DIR=*) build_dir="${kv#*=}" ;;
+          MBUILD_INSTALL_DIR=*) install_dir="${kv#*=}" ;;
           MBUILD_SCRIPT_CONFIG_DIR=*) config_dir="${kv#*=}" ;;
         esac
         shift 2
         ;;
-      --rm|--network=none)
+      --network=none)
         shift 1
         ;;
       --userns=*)
@@ -65,7 +72,7 @@ if [ "${1:-}" = run ]; then
         shift 1
         ;;
       --user)
-        run_user="$2"
+        create_user="$2"
         shift 2
         ;;
       *)
@@ -76,24 +83,155 @@ if [ "${1:-}" = run ]; then
         ;;
     esac
   done
-  if [ -z "$source_input" ]; then
-    for key in "${!in_mounts[@]}"; do
-      source_input="$key"
-      break
-    done
+
+  counter_file="$state_root/counter"
+  if [ -f "$counter_file" ]; then
+    counter="$(cat "$counter_file")"
+  else
+    counter=0
   fi
-  mkdir -p "$out_host/copied"
-  if [ -n "$source_input" ] && [ -n "${in_mounts[$source_input]+x}" ]; then
-    cp -R "${in_mounts[$source_input]}/." "$out_host/copied/"
+  counter=$((counter + 1))
+  printf '%s\n' "$counter" > "$counter_file"
+  container_id="fake-container-$counter"
+  container_dir="$state_root/$container_id"
+  mkdir -p "$container_dir/in-mounts"
+  mkdir -p "$container_dir/fs$build_dir"
+  mkdir -p "$container_dir/fs$install_dir"
+  if [ -d "$state_root/create-mounts" ]; then
+    cp -R "$state_root/create-mounts/." "$container_dir/in-mounts/"
+    rm -rf "$state_root/create-mounts"
   fi
-  if [ -n "$config_host" ]; then
-    mkdir -p "$out_host/script-config"
-    cp -R "${config_host}/." "$out_host/script-config/" 2>/dev/null || true
-    printf '%s\n' "${config_dir:-}" > "$out_host/script-config-dir.txt"
+  printf '%s\n' "$source_input" > "$container_dir/source_input"
+  printf '%s\n' "$source_dir" > "$container_dir/source_dir"
+  printf '%s\n' "$build_dir" > "$container_dir/build_dir"
+  printf '%s\n' "$install_dir" > "$container_dir/install_dir"
+  printf '%s\n' "$config_dir" > "$container_dir/config_dir"
+  printf '%s\n' "$config_host" > "$container_dir/config_host"
+  printf '%s\n' "$image_ref" > "$container_dir/image_ref"
+  printf '%s\n' "$userns_mode" > "$container_dir/userns_mode"
+  printf '%s\n' "$create_user" > "$container_dir/create_user"
+  printf '%s\n' "$container_id"
+  exit 0
+fi
+
+if [ "${1:-}" = start ]; then
+  container_id="$2"
+  touch "$state_root/$container_id/started"
+  printf '%s\n' "$container_id"
+  exit 0
+fi
+
+if [ "${1:-}" = exec ]; then
+  shift 1
+  run_user=""
+  phase=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --user)
+        run_user="$2"
+        shift 2
+        ;;
+      --env)
+        kv="$2"
+        case "$kv" in
+          MBUILD_PHASE=*) phase="${kv#*=}" ;;
+        esac
+        shift 2
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+  container_id="$1"
+  shift 1
+  container_dir="$state_root/$container_id"
+  if [ ! -d "$container_dir" ]; then
+    echo missing container state for "$container_id" >&2
+    exit 1
   fi
-  printf '%s\n' "$image_ref" > "$out_host/image-ref.txt"
-  printf '%s\n' "$userns_mode" > "$out_host/userns-mode.txt"
-  printf '%s\n' "$run_user" > "$out_host/run-user.txt"
+
+  config_host="$(cat "$container_dir/config_host")"
+  config_dir="$(cat "$container_dir/config_dir")"
+  install_dir="$(cat "$container_dir/install_dir")"
+  image_ref="$(cat "$container_dir/image_ref")"
+  userns_mode="$(cat "$container_dir/userns_mode")"
+  create_user="$(cat "$container_dir/create_user")"
+  out_root="$container_dir/fs$install_dir"
+  effective_user="$run_user"
+  if [ -z "$effective_user" ]; then
+    effective_user="$create_user"
+  fi
+  if [ -z "$phase" ]; then
+    exit 0
+  fi
+  if [ "${MBUILD_TEST_BINARY_PODMAN_FAIL:-}" = "1" ]; then
+    echo simulated podman exec failure >&2
+    exit 42
+  fi
+  if [ -n "$phase" ]; then
+    printf '%s\n' "$phase" >> "$out_root/phases.txt"
+  fi
+
+  case "$phase" in
+    configure)
+      printf '%s\n' "$effective_user" > "$out_root/configure-user.txt"
+      touch "$container_dir/configured"
+      ;;
+    build)
+      test -f "$container_dir/configured"
+      printf '%s\n' "$effective_user" > "$out_root/build-user.txt"
+      touch "$container_dir/built"
+      ;;
+    install)
+      test -f "$container_dir/built"
+      printf '%s\n' "$effective_user" > "$out_root/install-user.txt"
+      mkdir -p "$out_root/copied"
+      source_input="sources0"
+      if [ -n "$source_input" ] && [ -f "$container_dir/in-mounts/$source_input" ]; then
+        cp -R "$(cat "$container_dir/in-mounts/$source_input")/." "$out_root/copied/"
+      fi
+      printf '%s\n' "$image_ref" > "$out_root/image-ref.txt"
+      printf '%s\n' "$userns_mode" > "$out_root/userns-mode.txt"
+      ;;
+    post_install)
+      printf '%s\n' "$effective_user" > "$out_root/post-install-user.txt"
+      printf '%s\n' "$create_user" > "$out_root/create-user.txt"
+      printf '%s\n' "$container_id" > "$out_root/container-id.txt"
+      if [ -n "$config_host" ]; then
+        mkdir -p "$out_root/script-config"
+        cp -R "$config_host/." "$out_root/script-config/" 2>/dev/null || true
+        printf '%s\n' "$config_dir" > "$out_root/script-config-dir.txt"
+      fi
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "${1:-}" = cp ]; then
+  shift 1
+  src="$1"
+  dest="$2"
+  if [[ ! "$src" =~ ^([^:]+):(.+)$ ]]; then
+    echo invalid podman cp source: "$src" >&2
+    exit 1
+  fi
+  container_id="${BASH_REMATCH[1]}"
+  container_path="${BASH_REMATCH[2]}"
+  container_dir="$state_root/$container_id"
+  src_path="$container_dir/fs${container_path%/.}"
+  mkdir -p "$dest"
+  cp -R "$src_path/." "$dest/"
+  exit 0
+fi
+
+if [ "${1:-}" = rm ]; then
+  shift 1
+  if [ "${1:-}" = --force ]; then
+    shift 1
+  fi
+  container_id="$1"
+  rm -rf "$state_root/$container_id"
   exit 0
 fi
 

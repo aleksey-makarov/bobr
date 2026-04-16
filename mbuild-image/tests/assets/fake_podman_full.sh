@@ -37,7 +37,6 @@ if [ "${1:-}" = rm ]; then
 fi
 if [ "${1:-}" = run ]; then
   shift 1
-  source_input=""
   declare -A in_mounts
   out_host=""
   image_ref=""
@@ -60,13 +59,6 @@ if [ "${1:-}" = run ]; then
         fi
         shift 2
         ;;
-      --env)
-        kv="$2"
-        case "$kv" in
-          MBUILD_SOURCE_INPUT=*) source_input="${kv#*=}" ;;
-        esac
-        shift 2
-        ;;
       --rm|--network=none|--userns=keep-id)
         shift 1
         ;;
@@ -81,7 +73,8 @@ if [ "${1:-}" = run ]; then
         ;;
     esac
   done
-  if [ -z "$source_input" ]; then
+  source_input="sources0"
+  if [ -z "${in_mounts[$source_input]+x}" ]; then
     for key in "${!in_mounts[@]}"; do
       source_input="$key"
       break

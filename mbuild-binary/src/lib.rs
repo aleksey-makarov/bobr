@@ -9,10 +9,24 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
+#[cfg(unix)]
+unsafe extern "C" {
+    fn geteuid() -> u32;
+    fn getegid() -> u32;
+}
+
+const BUILD_DIR_NAME: &str = "build";
 const OUTPUT_DIR_NAME: &str = "out";
 const SCRIPT_CONFIG_DIR_NAME: &str = "script-config";
+const SCRIPT_MOUNT_PATH: &str = "/__mbuild_binary_script";
 const SCRIPT_CONFIG_MOUNT_PATH: &str = "/__mbuild_script_config";
 const SCRIPT_CONFIG_ENV_VAR: &str = "MBUILD_SCRIPT_CONFIG_DIR";
+const SOURCE_DIR_ENV_VAR: &str = "MBUILD_SOURCE_DIR";
+const BUILD_DIR_ENV_VAR: &str = "MBUILD_BUILD_DIR";
+const INSTALL_DIR_ENV_VAR: &str = "MBUILD_INSTALL_DIR";
+const PHASE_ENV_VAR: &str = "MBUILD_PHASE";
+const BUILD_DIR_MOUNT_PATH: &str = "/work/build";
+const INSTALL_DIR_MOUNT_PATH: &str = "/out/out";
 
 #[derive(Debug)]
 enum BinaryError {
@@ -92,6 +106,32 @@ struct ContainerExecution {
     image_ref: String,
 }
 
+struct ContainerInstance {
+    id: String,
+}
+
+#[derive(Clone, Copy)]
+enum PhaseUser {
+    ContainerDefault,
+    Root,
+}
+
+struct BuildPhase {
+    name: &'static str,
+    log_tag: &'static str,
+    user: PhaseUser,
+}
+
+impl ScriptExecution {
+    fn primary_source_mount_path(&self) -> String {
+        if self.source_input_name.is_empty() {
+            String::new()
+        } else {
+            format!("/in/{}", self.source_input_name)
+        }
+    }
+}
+
 pub struct BinaryBuilder;
 
 static BINARY_INPUTS: &[InputSlot] = &[
@@ -133,11 +173,15 @@ impl TypedBuilder for BinaryBuilder {
         let sources = inputs.many("sources")?;
 
         let output_path = cx.temp_dir.join(OUTPUT_DIR_NAME);
-        fsutil::recreate_empty_dir(&output_path)
+        fsutil::recreate_empty_dir_force(&output_path)
+            .map_err(map_fsutil_error)
+            .map_err(map_error)?;
+        let build_path = cx.temp_dir.join(BUILD_DIR_NAME);
+        fsutil::recreate_empty_dir_force(&build_path)
             .map_err(map_fsutil_error)
             .map_err(map_error)?;
         let config_path = cx.temp_dir.join(SCRIPT_CONFIG_DIR_NAME);
-        fsutil::recreate_empty_dir(&config_path)
+        fsutil::recreate_empty_dir_force(&config_path)
             .map_err(map_fsutil_error)
             .map_err(map_error)?;
         write_script_config(&config_path, config.script_config.as_ref()).map_err(map_error)?;
@@ -158,6 +202,7 @@ impl TypedBuilder for BinaryBuilder {
             &container_execution,
             &script_execution,
             sources,
+            &build_path,
             &output_path,
             cx,
         );
@@ -382,22 +427,106 @@ fn run_container_build(
     container: &ContainerExecution,
     script: &ScriptExecution,
     sources: &[BuilderInputObject],
+    build_path: &Path,
     output_path: &Path,
     cx: &BuildContext,
 ) -> BResult<()> {
+    let (uid, gid) = current_uid_gid();
+    let instance = create_container(
+        container,
+        script,
+        sources,
+        build_path,
+        output_path,
+        uid,
+        gid,
+        cx,
+    )?;
+    let build_result = (|| {
+        start_container(&instance, cx)?;
+        prepare_container_workspace(&instance, uid, gid, cx)?;
+        for phase in build_phases() {
+            exec_phase(&instance, phase, cx)?;
+        }
+        export_container_output(&instance, output_path, cx)?;
+        if !output_path.is_dir() {
+            return Err(BinaryError::BuildFailed(format!(
+                "binary builder did not produce output directory '{}'",
+                output_path.display()
+            )));
+        }
+        Ok(())
+    })();
+    let cleanup_result = remove_container(&instance, cx);
+    match (build_result, cleanup_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+fn build_phases() -> &'static [BuildPhase] {
+    static PHASES: [BuildPhase; 4] = [
+        BuildPhase {
+            name: "configure",
+            log_tag: "phase-configure",
+            user: PhaseUser::ContainerDefault,
+        },
+        BuildPhase {
+            name: "build",
+            log_tag: "phase-build",
+            user: PhaseUser::ContainerDefault,
+        },
+        BuildPhase {
+            name: "install",
+            log_tag: "phase-install",
+            user: PhaseUser::Root,
+        },
+        BuildPhase {
+            name: "post_install",
+            log_tag: "phase-post-install",
+            user: PhaseUser::Root,
+        },
+    ];
+    &PHASES
+}
+
+fn current_uid_gid() -> (u32, u32) {
+    #[cfg(unix)]
+    unsafe {
+        (geteuid(), getegid())
+    }
+    #[cfg(not(unix))]
+    {
+        (0, 0)
+    }
+}
+
+fn create_container(
+    container: &ContainerExecution,
+    script: &ScriptExecution,
+    sources: &[BuilderInputObject],
+    _build_path: &Path,
+    _output_path: &Path,
+    uid: u32,
+    gid: u32,
+    cx: &BuildContext,
+) -> BResult<ContainerInstance> {
     cx.log_event(
         BuildLogLevel::Info,
-        "podman-run",
-        format!("running podman with image '{}'", container.image_ref),
+        "podman-create",
+        format!(
+            "creating build container from image '{}'",
+            container.image_ref
+        ),
     );
     let mut process = ProcessCommand::new("podman");
     process
-        .arg("run")
-        .arg("--rm")
+        .arg("create")
         .arg("--network=none")
-        .arg("--userns=host")
+        .arg("--userns=keep-id")
         .arg("--user")
-        .arg("0:0");
+        .arg(format!("{uid}:{gid}"));
 
     for (index, source) in sources.iter().enumerate() {
         let mount_spec = if source.object_path.is_dir() {
@@ -409,14 +538,9 @@ fn run_container_build(
     }
 
     process.arg("--volume").arg(format!(
-        "{}:/out/{}:rw",
-        output_path.display(),
-        OUTPUT_DIR_NAME
-    ));
-
-    process.arg("--volume").arg(format!(
-        "{}:/__mbuild_binary_script:ro",
-        script.script_host_path.display()
+        "{}:{}:ro",
+        script.script_host_path.display(),
+        SCRIPT_MOUNT_PATH
     ));
     process.arg("--volume").arg(format!(
         "{}:{}:ro",
@@ -426,21 +550,28 @@ fn run_container_build(
 
     process
         .arg("--env")
-        .arg(format!("MBUILD_SOURCE_INPUT={}", script.source_input_name))
-        .arg("--env")
-        .arg(format!("MBUILD_PRIMARY_OUTPUT={OUTPUT_DIR_NAME}"))
-        .arg("--env")
         .arg(format!(
             "{SCRIPT_CONFIG_ENV_VAR}={SCRIPT_CONFIG_MOUNT_PATH}"
         ))
+        .arg("--env")
+        .arg(format!(
+            "{SOURCE_DIR_ENV_VAR}={}",
+            script.primary_source_mount_path()
+        ))
+        .arg("--env")
+        .arg(format!("{BUILD_DIR_ENV_VAR}={BUILD_DIR_MOUNT_PATH}"))
+        .arg("--env")
+        .arg(format!("{INSTALL_DIR_ENV_VAR}={INSTALL_DIR_MOUNT_PATH}"))
         .arg(&container.image_ref)
-        .arg("/__mbuild_binary_script");
+        .arg("sleep")
+        .arg("infinity");
 
     let output = process.output().map_err(|error| {
-        BinaryError::PodmanFailed(format!("failed to execute podman run: {error}"))
+        BinaryError::PodmanFailed(format!("failed to execute podman create: {error}"))
     })?;
-    let log_path = write_run_log(
+    let log_path = write_command_log(
         cx,
+        "podman-create",
         &container.image_ref,
         &script.script_host_path,
         &script.source_input_name,
@@ -448,37 +579,66 @@ fn run_container_build(
     );
 
     if !output.status.success() {
-        cx.log_event_with_details(
-            BuildLogLevel::Error,
-            "command-fail",
-            format!("podman run failed: {}", command_details(&output)),
-            None,
-            log_path.clone(),
-            Map::new(),
-        );
-        let log_hint = match &log_path {
-            Some(path) => format!(" (log: {})", path.display()),
-            None => String::new(),
-        };
-        return Err(BinaryError::BuildFailed(format!(
-            "podman run failed with exit status {}: {}{}",
-            output.status.code().unwrap_or(1),
-            command_details(&output),
-            log_hint,
-        )));
+        return Err(command_failure(
+            "podman-create",
+            "podman create",
+            &output,
+            log_path,
+        ));
     }
 
-    if !output_path.is_dir() {
-        return Err(BinaryError::BuildFailed(format!(
-            "binary builder did not produce output directory '{}'",
-            output_path.display()
-        )));
+    let id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if id.is_empty() {
+        return Err(BinaryError::PodmanFailed(
+            "podman create returned an empty container id".to_string(),
+        ));
     }
 
     cx.log_event_with_details(
         BuildLogLevel::Info,
-        "podman-run",
-        "podman run completed",
+        "podman-create",
+        format!("created container {id}"),
+        None,
+        log_path,
+        Map::new(),
+    );
+
+    Ok(ContainerInstance { id })
+}
+
+fn export_container_output(
+    instance: &ContainerInstance,
+    output_path: &Path,
+    cx: &BuildContext,
+) -> BResult<()> {
+    fsutil::recreate_empty_dir_force(output_path).map_err(map_fsutil_error)?;
+    cx.log_event(
+        BuildLogLevel::Info,
+        "podman-cp",
+        format!(
+            "exporting build result from container {} to '{}'",
+            instance.id,
+            output_path.display()
+        ),
+    );
+    let mut process = ProcessCommand::new("podman");
+    process
+        .arg("cp")
+        .arg(format!("{}:{}/.", instance.id, INSTALL_DIR_MOUNT_PATH))
+        .arg(output_path);
+    let output = process.output().map_err(|error| {
+        BinaryError::PodmanFailed(format!("failed to execute podman cp: {error}"))
+    })?;
+    let log_path = write_command_log(cx, "podman-cp", "", Path::new(""), "", &output);
+
+    if !output.status.success() {
+        return Err(command_failure("podman-cp", "podman cp", &output, log_path));
+    }
+
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        "podman-cp",
+        format!("exported build result from container {}", instance.id),
         None,
         log_path,
         Map::new(),
@@ -487,8 +647,197 @@ fn run_container_build(
     Ok(())
 }
 
-fn write_run_log(
+fn prepare_container_workspace(
+    instance: &ContainerInstance,
+    uid: u32,
+    gid: u32,
     cx: &BuildContext,
+) -> BResult<()> {
+    cx.log_event(
+        BuildLogLevel::Info,
+        "podman-prepare",
+        format!("preparing workspace in container {}", instance.id),
+    );
+    let mut process = ProcessCommand::new("podman");
+    process
+        .arg("exec")
+        .arg("--user")
+        .arg("0:0")
+        .arg(&instance.id)
+        .arg("sh")
+        .arg("-lc")
+        .arg(format!(
+            "mkdir -p '{}' '{}' && chown {}:{} '{}'",
+            BUILD_DIR_MOUNT_PATH, INSTALL_DIR_MOUNT_PATH, uid, gid, BUILD_DIR_MOUNT_PATH
+        ));
+    let output = process.output().map_err(|error| {
+        BinaryError::PodmanFailed(format!(
+            "failed to execute podman exec for workspace prepare: {error}"
+        ))
+    })?;
+    let log_path = write_command_log(cx, "podman-prepare", "", Path::new(""), "", &output);
+
+    if !output.status.success() {
+        return Err(command_failure(
+            "podman-prepare",
+            "podman exec prepare-workspace",
+            &output,
+            log_path,
+        ));
+    }
+
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        "podman-prepare",
+        format!("prepared workspace in container {}", instance.id),
+        None,
+        log_path,
+        Map::new(),
+    );
+
+    Ok(())
+}
+
+fn start_container(instance: &ContainerInstance, cx: &BuildContext) -> BResult<()> {
+    cx.log_event(
+        BuildLogLevel::Info,
+        "podman-start",
+        format!("starting build container {}", instance.id),
+    );
+    let mut process = ProcessCommand::new("podman");
+    process.arg("start").arg(&instance.id);
+    let output = process.output().map_err(|error| {
+        BinaryError::PodmanFailed(format!("failed to execute podman start: {error}"))
+    })?;
+    let log_path = write_command_log(cx, "podman-start", "", Path::new(""), "", &output);
+
+    if !output.status.success() {
+        return Err(command_failure(
+            "podman-start",
+            "podman start",
+            &output,
+            log_path,
+        ));
+    }
+
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        "podman-start",
+        format!("started container {}", instance.id),
+        None,
+        log_path,
+        Map::new(),
+    );
+
+    Ok(())
+}
+
+fn exec_phase(instance: &ContainerInstance, phase: &BuildPhase, cx: &BuildContext) -> BResult<()> {
+    cx.log_event(
+        BuildLogLevel::Info,
+        phase.log_tag,
+        format!("running '{}' in container {}", phase.name, instance.id),
+    );
+    let mut process = ProcessCommand::new("podman");
+    process.arg("exec");
+    if matches!(phase.user, PhaseUser::Root) {
+        process.arg("--user").arg("0:0");
+    }
+    process
+        .arg("--env")
+        .arg(format!("{PHASE_ENV_VAR}={}", phase.name))
+        .arg(&instance.id)
+        .arg(SCRIPT_MOUNT_PATH);
+    let output = process.output().map_err(|error| {
+        BinaryError::PodmanFailed(format!(
+            "failed to execute podman exec for phase '{}': {error}",
+            phase.name
+        ))
+    })?;
+    let log_path = write_command_log(cx, phase.log_tag, "", Path::new(""), phase.name, &output);
+
+    if !output.status.success() {
+        return Err(command_failure(
+            phase.log_tag,
+            &format!("phase '{}'", phase.name),
+            &output,
+            log_path,
+        ));
+    }
+
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        phase.log_tag,
+        format!("phase '{}' completed", phase.name),
+        None,
+        log_path,
+        Map::new(),
+    );
+
+    Ok(())
+}
+
+fn remove_container(instance: &ContainerInstance, cx: &BuildContext) -> BResult<()> {
+    cx.log_event(
+        BuildLogLevel::Info,
+        "podman-cleanup",
+        format!("removing build container {}", instance.id),
+    );
+    let mut process = ProcessCommand::new("podman");
+    process.arg("rm").arg("--force").arg(&instance.id);
+    let output = process.output().map_err(|error| {
+        BinaryError::PodmanFailed(format!("failed to execute podman rm: {error}"))
+    })?;
+    let log_path = write_command_log(cx, "podman-cleanup", "", Path::new(""), "", &output);
+
+    if !output.status.success() {
+        return Err(command_failure(
+            "podman-cleanup",
+            "podman rm",
+            &output,
+            log_path,
+        ));
+    }
+
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        "podman-cleanup",
+        format!("removed container {}", instance.id),
+        None,
+        log_path,
+        Map::new(),
+    );
+
+    Ok(())
+}
+
+fn command_failure(
+    log_tag: &str,
+    command_name: &str,
+    output: &std::process::Output,
+    log_path: Option<PathBuf>,
+) -> BinaryError {
+    let log_hint = match &log_path {
+        Some(path) => format!(" (log: {})", path.display()),
+        None => String::new(),
+    };
+    let details = command_details(output);
+    let exit_code = output.status.code().unwrap_or(1);
+    match log_tag {
+        "phase-configure" | "phase-build" | "phase-install" | "phase-post-install" => {
+            BinaryError::BuildFailed(format!(
+                "{command_name} failed with exit status {exit_code}: {details}{log_hint}"
+            ))
+        }
+        _ => BinaryError::PodmanFailed(format!(
+            "{command_name} failed with exit status {exit_code}: {details}{log_hint}"
+        )),
+    }
+}
+
+fn write_command_log(
+    cx: &BuildContext,
+    log_tag: &str,
     image_ref: &str,
     script_path: &Path,
     source_input_name: &str,
@@ -508,7 +857,7 @@ fn write_run_log(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    cx.write_raw_log("podman-run", &log_content)
+    cx.write_raw_log(log_tag, &log_content)
 }
 
 fn command_details(output: &std::process::Output) -> String {
@@ -1044,7 +1393,7 @@ mod tests {
 
     #[test]
     fn binary_builder_uses_config_digest_as_image_ref() {
-        // The image ref passed to podman run should be the config blob digest
+        // The image ref passed to podman create should be the config blob digest
         // (sha256:<config_hex>) extracted from the OCI layout.
         with_fake_podman(|| {
             let temp = tempdir().unwrap();
@@ -1070,7 +1419,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_builder_runs_as_root_in_rootless_user_namespace() {
+    fn binary_builder_runs_phases_with_split_user_contexts() {
         with_fake_podman(|| {
             let temp = tempdir().unwrap();
             let mut cx = build_context(temp.path());
@@ -1087,10 +1436,26 @@ mod tests {
 
             assert_eq!(
                 fs::read_to_string(result.staged_path.join("userns-mode.txt")).unwrap(),
-                "host\n"
+                "keep-id\n"
             );
             assert_eq!(
-                fs::read_to_string(result.staged_path.join("run-user.txt")).unwrap(),
+                fs::read_to_string(result.staged_path.join("install-user.txt")).unwrap(),
+                "0:0\n"
+            );
+            assert_eq!(
+                fs::read_to_string(result.staged_path.join("post-install-user.txt")).unwrap(),
+                "0:0\n"
+            );
+            assert_eq!(
+                fs::read_to_string(result.staged_path.join("phases.txt")).unwrap(),
+                "configure\nbuild\ninstall\npost_install\n"
+            );
+            assert_ne!(
+                fs::read_to_string(result.staged_path.join("configure-user.txt")).unwrap(),
+                "0:0\n"
+            );
+            assert_ne!(
+                fs::read_to_string(result.staged_path.join("build-user.txt")).unwrap(),
                 "0:0\n"
             );
         });
@@ -1208,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_builder_reports_podman_run_failure() {
+    fn binary_builder_reports_phase_failure() {
         with_fake_podman(|| {
             let temp = tempdir().unwrap();
             let mut cx = build_context(temp.path());
@@ -1227,7 +1592,7 @@ mod tests {
 
             assert!(matches!(error, BuilderError::ExecutionFailed(_)));
             let message = error.to_string();
-            assert!(message.contains("podman run"), "{message}");
+            assert!(message.contains("phase 'configure'"), "{message}");
         });
     }
 }
