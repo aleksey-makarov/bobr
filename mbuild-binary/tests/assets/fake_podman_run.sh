@@ -124,17 +124,20 @@ fi
 if [ "${1:-}" = exec ]; then
   shift 1
   run_user=""
-  phase=""
+  step_name=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --user)
         run_user="$2"
         shift 2
         ;;
+      --workdir)
+        shift 2
+        ;;
       --env)
         kv="$2"
         case "$kv" in
-          MBUILD_PHASE=*) phase="${kv#*=}" ;;
+          MBUILD_STEP_NAME=*) step_name="${kv#*=}" ;;
         esac
         shift 2
         ;;
@@ -162,18 +165,18 @@ if [ "${1:-}" = exec ]; then
   if [ -z "$effective_user" ]; then
     effective_user="$create_user"
   fi
-  if [ -z "$phase" ]; then
+  if [ -z "$step_name" ]; then
     exit 0
   fi
   if [ "${MBUILD_TEST_BINARY_PODMAN_FAIL:-}" = "1" ]; then
     echo simulated podman exec failure >&2
     exit 42
   fi
-  if [ -n "$phase" ]; then
-    printf '%s\n' "$phase" >> "$out_root/phases.txt"
+  if [ -n "$step_name" ]; then
+    printf '%s\n' "$step_name" >> "$out_root/phases.txt"
   fi
 
-  case "$phase" in
+  case "$step_name" in
     configure)
       printf '%s\n' "$effective_user" > "$out_root/configure-user.txt"
       touch "$container_dir/configured"

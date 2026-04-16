@@ -24,7 +24,7 @@ const SCRIPT_CONFIG_ENV_VAR: &str = "MBUILD_SCRIPT_CONFIG_DIR";
 const SOURCE_DIR_ENV_VAR: &str = "MBUILD_SOURCE_DIR";
 const BUILD_DIR_ENV_VAR: &str = "MBUILD_BUILD_DIR";
 const INSTALL_DIR_ENV_VAR: &str = "MBUILD_INSTALL_DIR";
-const PHASE_ENV_VAR: &str = "MBUILD_PHASE";
+const STEP_NAME_ENV_VAR: &str = "MBUILD_STEP_NAME";
 const BUILD_DIR_MOUNT_PATH: &str = "/work/build";
 const INSTALL_DIR_MOUNT_PATH: &str = "/out/out";
 
@@ -62,8 +62,27 @@ type BResult<T> = Result<T, BinaryError>;
 pub struct BinaryConfig {
     #[serde(default)]
     script_config: Option<Value>,
+    steps: Vec<BuildStep>,
     #[serde(default)]
     install: Option<InstallMeta>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum StepUser {
+    BuildUser,
+    Root,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildStep {
+    name: String,
+    run_as: StepUser,
+    cwd: String,
+    argv: Vec<String>,
+    #[serde(default)]
+    env: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -108,18 +127,6 @@ struct ContainerExecution {
 
 struct ContainerInstance {
     id: String,
-}
-
-#[derive(Clone, Copy)]
-enum PhaseUser {
-    ContainerDefault,
-    Root,
-}
-
-struct BuildPhase {
-    name: &'static str,
-    log_tag: &'static str,
-    user: PhaseUser,
 }
 
 impl ScriptExecution {
@@ -201,6 +208,7 @@ impl TypedBuilder for BinaryBuilder {
         let build_result = run_container_build(
             &container_execution,
             &script_execution,
+            &config.steps,
             sources,
             &build_path,
             &output_path,
@@ -231,7 +239,56 @@ impl TypedBuilder for BinaryBuilder {
 
 fn validate_config(config: &BinaryConfig) -> BResult<()> {
     validate_script_config(config.script_config.as_ref())?;
+    validate_steps(&config.steps)?;
     validate_install(config.install.as_ref())?;
+    Ok(())
+}
+
+fn validate_steps(steps: &[BuildStep]) -> BResult<()> {
+    if steps.is_empty() {
+        return Err(BinaryError::InvalidConfig(
+            "steps must contain at least one step".to_string(),
+        ));
+    }
+
+    for (index, step) in steps.iter().enumerate() {
+        if step.name.trim().is_empty() {
+            return Err(BinaryError::InvalidConfig(format!(
+                "steps[{index}].name must not be empty"
+            )));
+        }
+        if step.cwd.trim().is_empty() {
+            return Err(BinaryError::InvalidConfig(format!(
+                "steps[{index}].cwd must not be empty"
+            )));
+        }
+        if step.argv.is_empty() {
+            return Err(BinaryError::InvalidConfig(format!(
+                "steps[{index}].argv must not be empty"
+            )));
+        }
+        for (arg_index, arg) in step.argv.iter().enumerate() {
+            if arg.is_empty() {
+                return Err(BinaryError::InvalidConfig(format!(
+                    "steps[{index}].argv[{arg_index}] must not be empty"
+                )));
+            }
+        }
+        validate_step_env(&step.env, &format!("steps[{index}].env"))?;
+    }
+
+    Ok(())
+}
+
+fn validate_step_env(env: &Map<String, Value>, path: &str) -> BResult<()> {
+    for (key, value) in env {
+        validate_script_config_key(key, path)?;
+        if !matches!(value, Value::String(_)) {
+            return Err(BinaryError::InvalidConfig(format!(
+                "{path}.{key} must be a string"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -426,6 +483,7 @@ fn load_oci_to_podman(oci_dir: &std::path::Path, cx: &BuildContext) -> BResult<(
 fn run_container_build(
     container: &ContainerExecution,
     script: &ScriptExecution,
+    steps: &[BuildStep],
     sources: &[BuilderInputObject],
     build_path: &Path,
     output_path: &Path,
@@ -445,8 +503,8 @@ fn run_container_build(
     let build_result = (|| {
         start_container(&instance, cx)?;
         prepare_container_workspace(&instance, uid, gid, cx)?;
-        for phase in build_phases() {
-            exec_phase(&instance, phase, cx)?;
+        for step in steps {
+            exec_step(&instance, step, script, sources, cx)?;
         }
         export_container_output(&instance, output_path, cx)?;
         if !output_path.is_dir() {
@@ -465,32 +523,6 @@ fn run_container_build(
     }
 }
 
-fn build_phases() -> &'static [BuildPhase] {
-    static PHASES: [BuildPhase; 4] = [
-        BuildPhase {
-            name: "configure",
-            log_tag: "phase-configure",
-            user: PhaseUser::ContainerDefault,
-        },
-        BuildPhase {
-            name: "build",
-            log_tag: "phase-build",
-            user: PhaseUser::ContainerDefault,
-        },
-        BuildPhase {
-            name: "install",
-            log_tag: "phase-install",
-            user: PhaseUser::Root,
-        },
-        BuildPhase {
-            name: "post_install",
-            log_tag: "phase-post-install",
-            user: PhaseUser::Root,
-        },
-    ];
-    &PHASES
-}
-
 fn current_uid_gid() -> (u32, u32) {
     #[cfg(unix)]
     unsafe {
@@ -500,6 +532,121 @@ fn current_uid_gid() -> (u32, u32) {
     {
         (0, 0)
     }
+}
+
+fn interpolate_step_string(
+    value: &str,
+    script: &ScriptExecution,
+    sources: &[BuilderInputObject],
+) -> BResult<String> {
+    let mut rendered = String::new();
+    let mut rest = value;
+
+    while let Some(start) = rest.find("${") {
+        rendered.push_str(&rest[..start]);
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find('}') else {
+            return Err(BinaryError::InvalidConfig(format!(
+                "unterminated interpolation in '{value}'"
+            )));
+        };
+        let key = &after_start[..end];
+        let replacement = interpolation_value(key, script, sources)?;
+        rendered.push_str(&replacement);
+        rest = &after_start[end + 1..];
+    }
+
+    rendered.push_str(rest);
+    Ok(rendered)
+}
+
+fn interpolation_value(
+    key: &str,
+    _script: &ScriptExecution,
+    sources: &[BuilderInputObject],
+) -> BResult<String> {
+    match key {
+        "script" => Ok(SCRIPT_MOUNT_PATH.to_string()),
+        "source" => {
+            if sources.is_empty() {
+                Err(BinaryError::InvalidConfig(
+                    "interpolation variable '${source}' requires at least one source input"
+                        .to_string(),
+                ))
+            } else {
+                Ok("/in/sources0".to_string())
+            }
+        }
+        "build_dir" => Ok(BUILD_DIR_MOUNT_PATH.to_string()),
+        "install_dir" => Ok(INSTALL_DIR_MOUNT_PATH.to_string()),
+        "script_config" => Ok(SCRIPT_CONFIG_MOUNT_PATH.to_string()),
+        _ => {
+            if let Some(index_str) = key.strip_prefix("source") {
+                let index = index_str.parse::<usize>().map_err(|_| {
+                    BinaryError::InvalidConfig(format!(
+                        "unknown interpolation variable '${{{key}}}'"
+                    ))
+                })?;
+                if index >= sources.len() {
+                    return Err(BinaryError::InvalidConfig(format!(
+                        "interpolation variable '${{{key}}}' references missing source input"
+                    )));
+                }
+                Ok(format!("/in/sources{index}"))
+            } else {
+                Err(BinaryError::InvalidConfig(format!(
+                    "unknown interpolation variable '${{{key}}}'"
+                )))
+            }
+        }
+    }
+}
+
+fn resolve_step_cwd(
+    step: &BuildStep,
+    script: &ScriptExecution,
+    sources: &[BuilderInputObject],
+) -> BResult<String> {
+    let cwd = interpolate_step_string(&step.cwd, script, sources)?;
+    if cwd.is_empty() || !cwd.starts_with('/') {
+        return Err(BinaryError::InvalidConfig(format!(
+            "step '{}' resolved cwd must be an absolute path, got '{}'",
+            step.name, cwd
+        )));
+    }
+    Ok(cwd)
+}
+
+fn resolve_step_argv(
+    step: &BuildStep,
+    script: &ScriptExecution,
+    sources: &[BuilderInputObject],
+) -> BResult<Vec<String>> {
+    step.argv
+        .iter()
+        .map(|arg| interpolate_step_string(arg, script, sources))
+        .collect()
+}
+
+fn resolve_step_env(
+    step: &BuildStep,
+    script: &ScriptExecution,
+    sources: &[BuilderInputObject],
+) -> BResult<Vec<(String, String)>> {
+    let mut rendered = Vec::new();
+    for (key, value) in &step.env {
+        let string_value = value.as_str().ok_or_else(|| {
+            BinaryError::InvalidConfig(format!(
+                "step '{}' env key '{}' must be a string",
+                step.name, key
+            ))
+        })?;
+        rendered.push((
+            key.clone(),
+            interpolate_step_string(string_value, script, sources)?,
+        ));
+    }
+    Ok(rendered)
 }
 
 fn create_container(
@@ -732,34 +879,51 @@ fn start_container(instance: &ContainerInstance, cx: &BuildContext) -> BResult<(
     Ok(())
 }
 
-fn exec_phase(instance: &ContainerInstance, phase: &BuildPhase, cx: &BuildContext) -> BResult<()> {
+fn exec_step(
+    instance: &ContainerInstance,
+    step: &BuildStep,
+    script: &ScriptExecution,
+    sources: &[BuilderInputObject],
+    cx: &BuildContext,
+) -> BResult<()> {
+    let log_tag = format!("step-{}", step.name);
+    let cwd = resolve_step_cwd(step, script, sources)?;
+    let argv = resolve_step_argv(step, script, sources)?;
+    let env = resolve_step_env(step, script, sources)?;
     cx.log_event(
         BuildLogLevel::Info,
-        phase.log_tag,
-        format!("running '{}' in container {}", phase.name, instance.id),
+        &log_tag,
+        format!("running '{}' in container {}", step.name, instance.id),
     );
     let mut process = ProcessCommand::new("podman");
     process.arg("exec");
-    if matches!(phase.user, PhaseUser::Root) {
+    if matches!(step.run_as, StepUser::Root) {
         process.arg("--user").arg("0:0");
     }
     process
+        .arg("--workdir")
+        .arg(&cwd)
         .arg("--env")
-        .arg(format!("{PHASE_ENV_VAR}={}", phase.name))
-        .arg(&instance.id)
-        .arg(SCRIPT_MOUNT_PATH);
+        .arg(format!("{STEP_NAME_ENV_VAR}={}", step.name));
+    for (key, value) in env {
+        process.arg("--env").arg(format!("{key}={value}"));
+    }
+    process.arg(&instance.id);
+    for arg in &argv {
+        process.arg(arg);
+    }
     let output = process.output().map_err(|error| {
         BinaryError::PodmanFailed(format!(
-            "failed to execute podman exec for phase '{}': {error}",
-            phase.name
+            "failed to execute podman exec for step '{}': {error}",
+            step.name
         ))
     })?;
-    let log_path = write_command_log(cx, phase.log_tag, "", Path::new(""), phase.name, &output);
+    let log_path = write_command_log(cx, &log_tag, "", Path::new(""), &step.name, &output);
 
     if !output.status.success() {
         return Err(command_failure(
-            phase.log_tag,
-            &format!("phase '{}'", phase.name),
+            &log_tag,
+            &format!("step '{}'", step.name),
             &output,
             log_path,
         ));
@@ -767,8 +931,8 @@ fn exec_phase(instance: &ContainerInstance, phase: &BuildPhase, cx: &BuildContex
 
     cx.log_event_with_details(
         BuildLogLevel::Info,
-        phase.log_tag,
-        format!("phase '{}' completed", phase.name),
+        &log_tag,
+        format!("step '{}' completed", step.name),
         None,
         log_path,
         Map::new(),
@@ -824,11 +988,9 @@ fn command_failure(
     let details = command_details(output);
     let exit_code = output.status.code().unwrap_or(1);
     match log_tag {
-        "phase-configure" | "phase-build" | "phase-install" | "phase-post-install" => {
-            BinaryError::BuildFailed(format!(
-                "{command_name} failed with exit status {exit_code}: {details}{log_hint}"
-            ))
-        }
+        tag if tag.starts_with("step-") => BinaryError::BuildFailed(format!(
+            "{command_name} failed with exit status {exit_code}: {details}{log_hint}"
+        )),
         _ => BinaryError::PodmanFailed(format!(
             "{command_name} failed with exit status {exit_code}: {details}{log_hint}"
         )),
@@ -1179,20 +1341,91 @@ mod tests {
         inputs
     }
 
+    fn default_steps() -> Vec<BuildStep> {
+        vec![
+            BuildStep {
+                name: "configure".to_string(),
+                run_as: StepUser::BuildUser,
+                cwd: "${source}".to_string(),
+                argv: vec!["${script}".to_string(), "configure".to_string()],
+                env: Map::new(),
+            },
+            BuildStep {
+                name: "build".to_string(),
+                run_as: StepUser::BuildUser,
+                cwd: "${build_dir}".to_string(),
+                argv: vec!["${script}".to_string(), "build".to_string()],
+                env: Map::new(),
+            },
+            BuildStep {
+                name: "install".to_string(),
+                run_as: StepUser::Root,
+                cwd: "${build_dir}".to_string(),
+                argv: vec!["${script}".to_string(), "install".to_string()],
+                env: Map::new(),
+            },
+            BuildStep {
+                name: "post_install".to_string(),
+                run_as: StepUser::Root,
+                cwd: "${build_dir}".to_string(),
+                argv: vec!["${script}".to_string(), "post_install".to_string()],
+                env: Map::new(),
+            },
+        ]
+    }
+
+    fn default_config() -> BinaryConfig {
+        BinaryConfig {
+            script_config: None,
+            steps: default_steps(),
+            install: None,
+        }
+    }
+
+    fn source_free_config() -> BinaryConfig {
+        BinaryConfig {
+            script_config: None,
+            steps: vec![
+                BuildStep {
+                    name: "configure".to_string(),
+                    run_as: StepUser::BuildUser,
+                    cwd: "${build_dir}".to_string(),
+                    argv: vec!["${script}".to_string(), "configure".to_string()],
+                    env: Map::new(),
+                },
+                BuildStep {
+                    name: "build".to_string(),
+                    run_as: StepUser::BuildUser,
+                    cwd: "${build_dir}".to_string(),
+                    argv: vec!["${script}".to_string(), "build".to_string()],
+                    env: Map::new(),
+                },
+                BuildStep {
+                    name: "install".to_string(),
+                    run_as: StepUser::Root,
+                    cwd: "${build_dir}".to_string(),
+                    argv: vec!["${script}".to_string(), "install".to_string()],
+                    env: Map::new(),
+                },
+                BuildStep {
+                    name: "post_install".to_string(),
+                    run_as: StepUser::Root,
+                    cwd: "${build_dir}".to_string(),
+                    argv: vec!["${script}".to_string(), "post_install".to_string()],
+                    env: Map::new(),
+                },
+            ],
+            install: None,
+        }
+    }
+
     #[test]
     fn binary_builder_runs_fake_podman_and_materializes_output_dir() {
         with_fake_podman(|| {
             let temp = tempdir().unwrap();
             let mut cx = build_context(temp.path());
             let result = BinaryBuilder
-                .build_typed(
-                    BinaryConfig {
-                        script_config: None,
-                        install: None,
-                    },
-                    sample_inputs(temp.path()),
-                    &mut cx,
-                )
+                .build_typed(default_config(), sample_inputs(temp.path()), &mut cx)
                 .unwrap();
             assert!(result.meta.get("install").is_some());
             assert!(result.staged_path.is_dir());
@@ -1225,6 +1458,7 @@ mod tests {
                             },
                             "pre_configure": "echo pre",
                         })),
+                        steps: default_steps(),
                         install: None,
                     },
                     sample_inputs(temp.path()),
@@ -1289,10 +1523,7 @@ mod tests {
             let mut cx = build_context(temp.path());
             let result = BinaryBuilder
                 .build_typed(
-                    BinaryConfig {
-                        script_config: None,
-                        install: None,
-                    },
+                    default_config(),
                     sample_inputs_with_aux_file(temp.path()),
                     &mut cx,
                 )
@@ -1319,14 +1550,7 @@ mod tests {
             ]));
 
             let result = builder
-                .build_typed(
-                    BinaryConfig {
-                        script_config: None,
-                        install: None,
-                    },
-                    inputs,
-                    &mut cx,
-                )
+                .build_typed(source_free_config(), inputs, &mut cx)
                 .unwrap();
             assert!(result.meta.get("install").is_some());
             assert!(result.staged_path.is_dir());
@@ -1340,10 +1564,7 @@ mod tests {
             let mut cx = build_context(temp.path());
             let result = BinaryBuilder
                 .build_typed(
-                    BinaryConfig {
-                        script_config: None,
-                        install: None,
-                    },
+                    default_config(),
                     sample_inputs_with_binary_output_aux(temp.path()),
                     &mut cx,
                 )
@@ -1378,14 +1599,7 @@ mod tests {
         );
 
         let error = BinaryBuilder
-            .build_typed(
-                BinaryConfig {
-                    script_config: None,
-                    install: None,
-                },
-                inputs,
-                &mut cx,
-            )
+            .build_typed(default_config(), inputs, &mut cx)
             .unwrap_err();
 
         assert!(matches!(error, BuilderError::ExecutionFailed(_)));
@@ -1399,14 +1613,7 @@ mod tests {
             let temp = tempdir().unwrap();
             let mut cx = build_context(temp.path());
             let result = BinaryBuilder
-                .build_typed(
-                    BinaryConfig {
-                        script_config: None,
-                        install: None,
-                    },
-                    sample_inputs(temp.path()),
-                    &mut cx,
-                )
+                .build_typed(default_config(), sample_inputs(temp.path()), &mut cx)
                 .unwrap();
 
             let image_ref = fs::read_to_string(result.staged_path.join("image-ref.txt")).unwrap();
@@ -1424,14 +1631,7 @@ mod tests {
             let temp = tempdir().unwrap();
             let mut cx = build_context(temp.path());
             let result = BinaryBuilder
-                .build_typed(
-                    BinaryConfig {
-                        script_config: None,
-                        install: None,
-                    },
-                    sample_inputs(temp.path()),
-                    &mut cx,
-                )
+                .build_typed(default_config(), sample_inputs(temp.path()), &mut cx)
                 .unwrap();
 
             assert_eq!(
@@ -1470,6 +1670,7 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         script_config: None,
+                        steps: default_steps(),
                         install: Some(InstallMeta {
                             rules: vec![InstallRule {
                                 path: "etc/shadow".to_string(),
@@ -1520,6 +1721,7 @@ mod tests {
                         "configure_args": ["--disable-nls"],
                         "jobs": 4,
                     })),
+                    steps: default_steps(),
                     install: None,
                 },
                 sample_inputs(temp.path()),
@@ -1542,6 +1744,7 @@ mod tests {
                     script_config: Some(serde_json::json!({
                         "bad key": "value",
                     })),
+                    steps: default_steps(),
                     install: None,
                 },
                 sample_inputs(temp.path()),
@@ -1579,20 +1782,13 @@ mod tests {
             let mut cx = build_context(temp.path());
             unsafe { env::set_var("MBUILD_TEST_BINARY_PODMAN_FAIL", "1") };
             let error = BinaryBuilder
-                .build_typed(
-                    BinaryConfig {
-                        script_config: None,
-                        install: None,
-                    },
-                    sample_inputs(temp.path()),
-                    &mut cx,
-                )
+                .build_typed(default_config(), sample_inputs(temp.path()), &mut cx)
                 .unwrap_err();
             unsafe { env::remove_var("MBUILD_TEST_BINARY_PODMAN_FAIL") };
 
             assert!(matches!(error, BuilderError::ExecutionFailed(_)));
             let message = error.to_string();
-            assert!(message.contains("phase 'configure'"), "{message}");
+            assert!(message.contains("step 'configure'"), "{message}");
         });
     }
 }

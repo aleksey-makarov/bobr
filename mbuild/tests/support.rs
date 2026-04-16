@@ -302,11 +302,42 @@ pub fn source_recipe(url: &str, source_hash: &str) -> Value {
     )
 }
 
+pub fn default_binary_steps() -> Value {
+    json!([
+        {
+            "name": "configure",
+            "run_as": "build-user",
+            "cwd": "${source}",
+            "argv": ["${script}", "configure"]
+        },
+        {
+            "name": "build",
+            "run_as": "build-user",
+            "cwd": "${build_dir}",
+            "argv": ["${script}", "build"]
+        },
+        {
+            "name": "install",
+            "run_as": "root",
+            "cwd": "${build_dir}",
+            "argv": ["${script}", "install"]
+        },
+        {
+            "name": "post_install",
+            "run_as": "root",
+            "cwd": "${build_dir}",
+            "argv": ["${script}", "post_install"]
+        }
+    ])
+}
+
 pub fn binary_recipe(name: &str, url: &str, source_hash: &str, image: &str, digest: &str) -> Value {
     recipe_node(
         name,
         "Binary",
-        json!({}),
+        json!({
+            "steps": default_binary_steps(),
+        }),
         json!({
             "image": base_image_recipe(image, digest),
             "script": script_recipe(),

@@ -11,9 +11,9 @@ The current image path has three builders:
   store as an OCI image layout directory
 - `Image`: build one derived OCI image layout directory from filesystem tree
   inputs, optionally on top of a base image
-- `Binary`: execute a build script inside an OCI image layout input by loading
-  the OCI layout into `podman` and then running phased commands inside one
-  long-lived container
+- `Binary`: execute an explicit step plan inside an OCI image layout input by
+  loading the OCI layout into `podman` and then running ordered commands
+  inside one long-lived container
 
 This means:
 
@@ -113,7 +113,7 @@ The current realized result metadata contains:
 
 1. read the OCI layout directory from the store
 2. make that image available to `podman`, then create and start one container
-   instance and execute build phases inside it with `podman exec`
+   instance and execute the configured step list inside it with `podman exec`
 
 Current behavior:
 
@@ -125,7 +125,7 @@ Current behavior:
   `podman load --input <tar>`
 - runs `podman create`
 - runs `podman start`
-- runs the build phases with `podman exec`
+- runs the configured steps with `podman exec`
 - removes the container with `podman rm --force`
 
 The current execution path uses the OCI config digest as the runtime image
@@ -148,23 +148,89 @@ The canonical source directory is:
 
 - `MBUILD_BUILD_DIR=/work/build`
 - `MBUILD_INSTALL_DIR=/out/out`
-- `MBUILD_PHASE=<configure|build|install|post_install>`
+- `MBUILD_SCRIPT_CONFIG_DIR=/__mbuild_script_config`
+- `MBUILD_STEP_NAME=<step name>`
 
-The current phased execution contract is:
+`Binary.config` accepts an explicit linear execution plan:
 
-- `configure`: executed as the container default user inside
+```json
+{
+  "steps": [
+    {
+      "name": "configure",
+      "run_as": "build-user",
+      "cwd": "${source}",
+      "argv": ["${script}", "configure"]
+    },
+    {
+      "name": "build",
+      "run_as": "build-user",
+      "cwd": "${build_dir}",
+      "argv": ["${script}", "build"]
+    },
+    {
+      "name": "install",
+      "run_as": "root",
+      "cwd": "${build_dir}",
+      "argv": ["${script}", "install"]
+    }
+  ],
+  "script_config": { "...": "..." }
+}
+```
+
+Each step contains:
+
+- `name`
+- `run_as`
+- `cwd`
+- `argv`
+- optional `env`
+
+`Binary` interprets only execution mechanics:
+
+- `run_as=build-user` executes as the container default user inside
   `--userns=keep-id`
-- `build`: executed as the container default user inside `--userns=keep-id`
-- `install`: executed as `--user 0:0`
-- `post_install`: executed as `--user 0:0`
+- `run_as=root` executes as `--user 0:0`
+- steps run strictly in order
+- the build stops at the first failed step
+
+`Binary` performs controlled interpolation in `cwd`, `argv`, and step-local
+environment values. Supported variables are:
+
+- `${script}`
+- `${source}`
+- `${source0}`, `${source1}`, ...
+- `${build_dir}`
+- `${install_dir}`
+- `${script_config}`
+
+Interpolation is a simple path substitution:
+
+- no shell parsing
+- no word splitting
+- no globbing
+- no command substitution
+- unknown variables are rejected as invalid builder config
 
 This means:
 
-- source-tree mutations inside `/in/sources0` survive across all phases of one
-  `Binary` build because all phases run in the same container lifecycle
-- the realized result is exported from `/out/out` via `podman cp` after a
-  successful `post_install`
+- source-tree mutations inside `/in/sources0` survive across all steps of one
+  `Binary` build because all steps run in the same container lifecycle
+- the realized result is exported from `/out/out` via `podman cp` after the
+  final successful step
 - live filesystem changes outside `/out/out` are not published automatically
+
+The runtime does not assign package semantics to step names. Build-system
+knowledge lives in script libraries and recipe helpers. Common recipe helpers
+may still synthesize default step sequences such as:
+
+- `configure`
+- `build`
+- `install`
+- `post_install`
+
+but these are authoring conventions, not special runtime phases.
 
 Whether a build uses an out-of-tree build directory is a property of the
 selected build script:

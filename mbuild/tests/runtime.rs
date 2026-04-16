@@ -18,9 +18,9 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use support::{
-    base_image_recipe, binary_recipe, build_ref_path, image_recipe, recipe_node, script_recipe,
-    source_recipe, spawn_test_oci_registry, tree_directory_recipe, tree_file_recipe,
-    tree_symlink_recipe, write_recipe,
+    base_image_recipe, binary_recipe, build_ref_path, default_binary_steps, image_recipe,
+    recipe_node, script_recipe, source_recipe, spawn_test_oci_registry, tree_directory_recipe,
+    tree_file_recipe, tree_symlink_recipe, write_recipe,
 };
 use tempfile::tempdir;
 
@@ -195,7 +195,9 @@ fn binary_with_two_sources_recipe(
     recipe_node(
         "binary",
         "Binary",
-        json!({}),
+        json!({
+            "steps": default_binary_steps(),
+        }),
         json!({
             "image": base_image_recipe(image, digest),
             "script": script_recipe(),

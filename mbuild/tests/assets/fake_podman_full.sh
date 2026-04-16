@@ -107,16 +107,19 @@ fi
 
 if [ "${1:-}" = exec ]; then
   shift 1
-  phase=""
+  step_name=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --user)
         shift 2
         ;;
+      --workdir)
+        shift 2
+        ;;
       --env)
         kv="$2"
         case "$kv" in
-          MBUILD_PHASE=*) phase="${kv#*=}" ;;
+          MBUILD_STEP_NAME=*) step_name="${kv#*=}" ;;
         esac
         shift 2
         ;;
@@ -139,11 +142,11 @@ if [ "${1:-}" = exec ]; then
   config_host="$(cat "$container_dir/config_host")"
   config_dir="$(cat "$container_dir/config_dir")"
   out_root="$container_dir/fs$install_dir"
-  if [ -z "$phase" ]; then
+  if [ -z "$step_name" ]; then
     exit 0
   fi
 
-  case "$phase" in
+  case "$step_name" in
     configure)
       touch "$container_dir/configured"
       ;;
