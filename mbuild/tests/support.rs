@@ -14,7 +14,12 @@ pub fn write_recipe(recipe_path: &Path, recipe: &Value) {
 }
 
 fn normalize_request(recipe: &Value) -> Value {
-    fn visit(node: &Value, nodes: &mut serde_json::Map<String, Value>, next_id: &mut usize, is_root: bool) -> String {
+    fn visit(
+        node: &Value,
+        nodes: &mut serde_json::Map<String, Value>,
+        next_id: &mut usize,
+        is_root: bool,
+    ) -> String {
         let id = if is_root {
             "root".to_string()
         } else {
@@ -67,7 +72,8 @@ fn normalize_request(recipe: &Value) -> Value {
         match value {
             Value::Null => Value::Null,
             Value::Array(items) => Value::Array(
-                items.iter()
+                items
+                    .iter()
                     .map(|item| Value::String(visit(item, nodes, next_id, false)))
                     .collect(),
             ),
@@ -156,7 +162,17 @@ pub fn tree_directory_recipe(name: &str) -> Value {
                 ]
             },
             "install": {
-                "owners": [{ "path": "**", "uid": 0, "gid": 0 }]
+                "rules": [{
+                    "path": "**",
+                    "attrs": {
+                        "uid": 0,
+                        "gid": 0,
+                        "directory_mode": 493,
+                        "regular_file_mode": 420,
+                        "executable_file_mode": 493,
+                        "symlink_mode": 511
+                    }
+                }]
             }
         }),
         json!({}),
@@ -176,7 +192,17 @@ pub fn tree_symlink_recipe(name: &str) -> Value {
                 ]
             },
             "install": {
-                "owners": [{ "path": "**", "uid": 0, "gid": 0 }]
+                "rules": [{
+                    "path": "**",
+                    "attrs": {
+                        "uid": 0,
+                        "gid": 0,
+                        "directory_mode": 493,
+                        "regular_file_mode": 420,
+                        "executable_file_mode": 493,
+                        "symlink_mode": 511
+                    }
+                }]
             }
         }),
         json!({}),

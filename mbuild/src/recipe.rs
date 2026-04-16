@@ -33,9 +33,9 @@ impl RecipeRequest {
     }
 
     pub(crate) fn node(&self, id: &str) -> Result<&Recipe, RuntimeError> {
-        self.nodes
-            .get(id)
-            .ok_or_else(|| RuntimeError::InvalidRequest(format!("request references unknown node id '{id}'")))
+        self.nodes.get(id).ok_or_else(|| {
+            RuntimeError::InvalidRequest(format!("request references unknown node id '{id}'"))
+        })
     }
 }
 
@@ -212,20 +212,24 @@ fn collect_graph_inner(
         })?;
         let planned = match (slot.arity, input) {
             (InputArity::One, RecipeInputValue::One(child_id)) => {
-                let key = collect_graph_inner(request, child_id, nodes, stack, node_keys, topo_order)?;
+                let key =
+                    collect_graph_inner(request, child_id, nodes, stack, node_keys, topo_order)?;
                 ordered_direct_deps.push(key);
                 PlannedInputValue::One(key)
             }
             (InputArity::Optional, RecipeInputValue::Null) => PlannedInputValue::Optional(None),
             (InputArity::Optional, RecipeInputValue::One(child_id)) => {
-                let key = collect_graph_inner(request, child_id, nodes, stack, node_keys, topo_order)?;
+                let key =
+                    collect_graph_inner(request, child_id, nodes, stack, node_keys, topo_order)?;
                 ordered_direct_deps.push(key);
                 PlannedInputValue::Optional(Some(key))
             }
             (InputArity::Many, RecipeInputValue::Many(child_ids)) => {
                 let mut keys = Vec::with_capacity(child_ids.len());
                 for child_id in child_ids {
-                    let key = collect_graph_inner(request, child_id, nodes, stack, node_keys, topo_order)?;
+                    let key = collect_graph_inner(
+                        request, child_id, nodes, stack, node_keys, topo_order,
+                    )?;
                     ordered_direct_deps.push(key);
                     keys.push(key);
                 }
@@ -274,10 +278,11 @@ fn collect_graph_inner(
 }
 
 fn parse_request_value(value: Value, path: &str) -> Result<RecipeRequest, RuntimeError> {
-    let object = value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: expected top-level object of node definitions")))?;
+    let object = value.as_object().cloned().ok_or_else(|| {
+        RuntimeError::RecipeLoad(format!(
+            "{path}: expected top-level object of node definitions"
+        ))
+    })?;
 
     if !object.contains_key("root") {
         return Err(RuntimeError::RecipeLoad(
@@ -340,9 +345,7 @@ fn parse_input_value(value: Value, path: &str) -> Result<RecipeInputValue, Runti
             let mut children = Vec::with_capacity(items.len());
             for (index, item) in items.into_iter().enumerate() {
                 let child_id = item.as_str().ok_or_else(|| {
-                    RuntimeError::RecipeLoad(format!(
-                        "{path}[{index}]: expected node id string"
-                    ))
+                    RuntimeError::RecipeLoad(format!("{path}[{index}]: expected node id string"))
                 })?;
                 children.push(child_id.to_string());
             }
@@ -388,7 +391,9 @@ mod tests {
     fn recipe_requires_top_level_root_node() {
         let error = RecipeRequest::parse_json(br#"{"kind":"Text"}"#).unwrap_err();
         assert!(
-            error.to_string().contains("missing required top-level node 'root'"),
+            error
+                .to_string()
+                .contains("missing required top-level node 'root'"),
             "{error}"
         );
     }
@@ -591,10 +596,7 @@ mod tests {
         });
 
         let error = collect_one(&request).unwrap_err();
-        assert!(
-            error.to_string().contains("contains a cycle"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("contains a cycle"), "{error}");
     }
 
     #[test]
@@ -620,7 +622,9 @@ mod tests {
 
         let error = collect_one(&request).unwrap_err();
         assert!(
-            error.to_string().contains("unknown node id 'missing-image'"),
+            error
+                .to_string()
+                .contains("unknown node id 'missing-image'"),
             "{error}"
         );
     }
@@ -637,7 +641,9 @@ mod tests {
         let error = RecipeRequest::parse_json(serde_json::to_vec(&old_shape).unwrap().as_slice())
             .unwrap_err();
         assert!(
-            error.to_string().contains("missing required top-level node 'root'"),
+            error
+                .to_string()
+                .contains("missing required top-level node 'root'"),
             "{error}"
         );
     }

@@ -251,7 +251,7 @@ mod tests {
         let mut second = sample_object();
         second.meta.insert(
             "install".to_string(),
-            serde_json::json!({"owners":[{"path":"**","uid":0,"gid":0}]}),
+            serde_json::json!({"rules":[{"path":"**","attrs":{"uid":0,"gid":0,"directory_mode":493,"regular_file_mode":420,"executable_file_mode":493,"symlink_mode":511}}]}),
         );
 
         let inputs = ResolvedInputs::new(BTreeMap::from([(

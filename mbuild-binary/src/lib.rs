@@ -2,7 +2,7 @@ use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     InputArity, InputSlot, StagedBuildResult, TypedBuilder, fsutil,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fmt;
 use std::fs;
@@ -48,6 +48,38 @@ type BResult<T> = Result<T, BinaryError>;
 pub struct BinaryConfig {
     #[serde(default)]
     script_config: Option<Value>,
+    #[serde(default)]
+    install: Option<InstallMeta>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InstallMeta {
+    rules: Vec<InstallRule>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InstallRule {
+    path: String,
+    attrs: InstallAttrs,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InstallAttrs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    directory_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    regular_file_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    executable_file_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    symlink_mode: Option<u32>,
 }
 
 struct ScriptExecution {
@@ -135,17 +167,14 @@ impl TypedBuilder for BinaryBuilder {
         }
 
         let mut meta = Map::new();
+        let install = config.install.unwrap_or_else(default_install_meta);
         meta.insert(
             "install".to_string(),
-            serde_json::json!({
-                "owners": [
-                    {
-                        "path": "**",
-                        "uid": 0,
-                        "gid": 0,
-                    }
-                ]
-            }),
+            serde_json::to_value(&install).map_err(|error| {
+                map_error(BinaryError::BuildFailed(format!(
+                    "failed to serialize install metadata: {error}"
+                )))
+            })?,
         );
 
         Ok(StagedBuildResult {
@@ -157,7 +186,35 @@ impl TypedBuilder for BinaryBuilder {
 
 fn validate_config(config: &BinaryConfig) -> BResult<()> {
     validate_script_config(config.script_config.as_ref())?;
+    validate_install(config.install.as_ref())?;
     Ok(())
+}
+
+fn validate_install(install: Option<&InstallMeta>) -> BResult<()> {
+    if let Some(install) = install
+        && install.rules.is_empty()
+    {
+        return Err(BinaryError::InvalidConfig(
+            "install.rules must contain at least one rule".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn default_install_meta() -> InstallMeta {
+    InstallMeta {
+        rules: vec![InstallRule {
+            path: "**".to_string(),
+            attrs: InstallAttrs {
+                uid: Some(0),
+                gid: Some(0),
+                directory_mode: Some(0o755),
+                regular_file_mode: Some(0o644),
+                executable_file_mode: Some(0o755),
+                symlink_mode: Some(0o777),
+            },
+        }],
+    }
 }
 
 fn resolve_script_execution(
@@ -782,6 +839,7 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         script_config: None,
+                        install: None,
                     },
                     sample_inputs(temp.path()),
                     &mut cx,
@@ -818,6 +876,7 @@ mod tests {
                             },
                             "pre_configure": "echo pre",
                         })),
+                        install: None,
                     },
                     sample_inputs(temp.path()),
                     &mut cx,
@@ -883,6 +942,7 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         script_config: None,
+                        install: None,
                     },
                     sample_inputs_with_aux_file(temp.path()),
                     &mut cx,
@@ -913,6 +973,7 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         script_config: None,
+                        install: None,
                     },
                     inputs,
                     &mut cx,
@@ -932,6 +993,7 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         script_config: None,
+                        install: None,
                     },
                     sample_inputs_with_binary_output_aux(temp.path()),
                     &mut cx,
@@ -970,6 +1032,7 @@ mod tests {
             .build_typed(
                 BinaryConfig {
                     script_config: None,
+                    install: None,
                 },
                 inputs,
                 &mut cx,
@@ -990,6 +1053,7 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         script_config: None,
+                        install: None,
                     },
                     sample_inputs(temp.path()),
                     &mut cx,
@@ -1014,6 +1078,7 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         script_config: None,
+                        install: None,
                     },
                     sample_inputs(temp.path()),
                     &mut cx,
@@ -1032,6 +1097,54 @@ mod tests {
     }
 
     #[test]
+    fn binary_builder_preserves_explicit_install_rules() {
+        with_fake_podman(|| {
+            let temp = tempdir().unwrap();
+            let mut cx = build_context(temp.path());
+            let result = BinaryBuilder
+                .build_typed(
+                    BinaryConfig {
+                        script_config: None,
+                        install: Some(InstallMeta {
+                            rules: vec![InstallRule {
+                                path: "etc/shadow".to_string(),
+                                attrs: InstallAttrs {
+                                    uid: Some(0),
+                                    gid: Some(42),
+                                    directory_mode: None,
+                                    regular_file_mode: Some(0o640),
+                                    executable_file_mode: None,
+                                    symlink_mode: None,
+                                },
+                            }],
+                        }),
+                    },
+                    sample_inputs(temp.path()),
+                    &mut cx,
+                )
+                .unwrap();
+
+            assert_eq!(
+                result.meta.get("install").unwrap(),
+                &serde_json::to_value(InstallMeta {
+                    rules: vec![InstallRule {
+                        path: "etc/shadow".to_string(),
+                        attrs: InstallAttrs {
+                            uid: Some(0),
+                            gid: Some(42),
+                            directory_mode: None,
+                            regular_file_mode: Some(0o640),
+                            executable_file_mode: None,
+                            symlink_mode: None,
+                        },
+                    }],
+                })
+                .unwrap()
+            );
+        });
+    }
+
+    #[test]
     fn binary_builder_rejects_non_string_script_config_leaves() {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
@@ -1042,6 +1155,7 @@ mod tests {
                         "configure_args": ["--disable-nls"],
                         "jobs": 4,
                     })),
+                    install: None,
                 },
                 sample_inputs(temp.path()),
                 &mut cx,
@@ -1063,6 +1177,7 @@ mod tests {
                     script_config: Some(serde_json::json!({
                         "bad key": "value",
                     })),
+                    install: None,
                 },
                 sample_inputs(temp.path()),
                 &mut cx,
@@ -1102,6 +1217,7 @@ mod tests {
                 .build_typed(
                     BinaryConfig {
                         script_config: None,
+                        install: None,
                     },
                     sample_inputs(temp.path()),
                     &mut cx,

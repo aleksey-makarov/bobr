@@ -6,7 +6,7 @@ use mbuild_core::{
 };
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -85,6 +85,8 @@ pub struct FetchConfig {
     unpack: bool,
     #[serde(default)]
     archive_format: Option<ArchiveFormat>,
+    #[serde(default)]
+    install: Option<InstallMeta>,
 }
 
 fn default_unpack() -> bool {
@@ -95,6 +97,36 @@ fn default_unpack() -> bool {
 struct ParsedHash {
     algorithm: String,
     value: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InstallMeta {
+    rules: Vec<InstallRule>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InstallRule {
+    path: String,
+    attrs: InstallAttrs,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InstallAttrs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    directory_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    regular_file_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    executable_file_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    symlink_mode: Option<u32>,
 }
 
 pub struct FetchBuilder;
@@ -153,10 +185,19 @@ impl TypedBuilder for FetchBuilder {
             stage_file_output(&cx.temp_dir, &cached_blob).map_err(map_error)?
         };
 
-        Ok(StagedBuildResult {
-            meta: Map::new(),
-            staged_path,
-        })
+        let mut meta = Map::new();
+        if let Some(install) = config.install.as_ref() {
+            meta.insert(
+                "install".to_string(),
+                serde_json::to_value(install).map_err(|error| {
+                    map_error(FetchError::ExtractFailed(format!(
+                        "failed to serialize install metadata: {error}"
+                    )))
+                })?,
+            );
+        }
+
+        Ok(StagedBuildResult { meta, staged_path })
     }
 }
 
@@ -181,6 +222,20 @@ fn validate_config(config: &FetchConfig) -> FResult<()> {
     if !config.unpack && config.archive_format.is_some() {
         return Err(FetchError::InvalidConfig(
             "archive_format must not be set when unpack = false".to_string(),
+        ));
+    }
+
+    if !config.unpack && config.install.is_some() {
+        return Err(FetchError::InvalidConfig(
+            "install must not be set when unpack = false".to_string(),
+        ));
+    }
+
+    if let Some(install) = config.install.as_ref()
+        && install.rules.is_empty()
+    {
+        return Err(FetchError::InvalidConfig(
+            "install.rules must contain at least one rule".to_string(),
         ));
     }
 
@@ -932,6 +987,7 @@ mod tests {
                     hash: hash.clone(),
                     unpack: false,
                     archive_format: None,
+                    install: None,
                 },
                 BuilderInputs::empty(),
                 &mut cx,
@@ -970,6 +1026,7 @@ mod tests {
                     hash: hash.clone(),
                     unpack: true,
                     archive_format: None,
+                    install: None,
                 },
                 BuilderInputs::empty(),
                 &mut cx,
@@ -993,6 +1050,70 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o644);
         }
+    }
+
+    #[test]
+    fn fetch_builder_preserves_optional_install_rules_for_unpacked_output() {
+        let temp = tempdir().unwrap();
+        let payload = tar_gz_with_wrapped_root();
+        let hash = format!("sha256:{}", bytes_to_hex(&Sha256::digest(&payload)));
+        let (url, handle) = match spawn_http_server(payload, "application/gzip") {
+            Ok(server) => server,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping fetch archive unit test because TCP bind is not permitted in this environment: {error}"
+                );
+                return;
+            }
+            Err(error) => panic!("failed to start test HTTP server: {error}"),
+        };
+
+        let mut cx = build_context(temp.path());
+        let builder = FetchBuilder;
+        let result = builder
+            .build_typed(
+                FetchConfig {
+                    url: UrlField::One(url.clone()),
+                    hash: hash.clone(),
+                    unpack: true,
+                    archive_format: None,
+                    install: Some(InstallMeta {
+                        rules: vec![InstallRule {
+                            path: "**".to_string(),
+                            attrs: InstallAttrs {
+                                uid: Some(0),
+                                gid: Some(0),
+                                directory_mode: Some(0o755),
+                                regular_file_mode: Some(0o644),
+                                executable_file_mode: Some(0o755),
+                                symlink_mode: Some(0o777),
+                            },
+                        }],
+                    }),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+
+        handle.join().unwrap();
+
+        assert_eq!(
+            result.meta.get("install").unwrap(),
+            &serde_json::json!({
+                "rules": [{
+                    "path": "**",
+                    "attrs": {
+                        "uid": 0,
+                        "gid": 0,
+                        "directory_mode": 493,
+                        "regular_file_mode": 420,
+                        "executable_file_mode": 493,
+                        "symlink_mode": 511
+                    }
+                }]
+            })
+        );
     }
 
     #[test]
@@ -1020,6 +1141,7 @@ mod tests {
                     hash: hash.clone(),
                     unpack: false,
                     archive_format: None,
+                    install: None,
                 },
                 BuilderInputs::empty(),
                 &mut first_cx,
@@ -1035,6 +1157,7 @@ mod tests {
                     hash,
                     unpack: false,
                     archive_format: None,
+                    install: None,
                 },
                 BuilderInputs::empty(),
                 &mut second_cx,
@@ -1060,6 +1183,7 @@ mod tests {
                         .to_string(),
                     unpack: false,
                     archive_format: None,
+                    install: None,
                 },
                 sample_input(),
                 &mut cx,

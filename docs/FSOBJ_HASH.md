@@ -47,6 +47,13 @@ A regular file hash depends on:
 
 All other mode bits are ignored.
 
+This is intentionally narrower than install semantics:
+
+- install metadata controls the final installed `uid`, `gid`, and unix mode
+- the payload executable bit is preserved as part of file identity
+- rootfs composition uses that bit only to choose between
+  `regular_file_mode` and `executable_file_mode`
+
 ### Symlink
 
 A symlink hash depends on:

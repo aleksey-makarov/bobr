@@ -20,7 +20,7 @@
 `Ext4Rootfs` is a direct composition path:
 
 - the builder reads installable directory objects from the store
-- it applies install ownership rules from each input's `meta.install`
+- it applies install rules from each input's `meta.install`
 - it merges those filesystem contributions in memory
 - it writes one ext4 image file directly as the realized result
 
@@ -52,8 +52,18 @@ There is no intermediate composed directory object published to the store.
     ]
   },
   "install": {
-    "owners": [
-      { "path": "**", "uid": 0, "gid": 0 }
+    "rules": [
+      {
+        "path": "**",
+        "attrs": {
+          "uid": 0,
+          "gid": 0,
+          "directory_mode": 493,
+          "regular_file_mode": 420,
+          "executable_file_mode": 493,
+          "symlink_mode": 511
+        }
+      }
     ]
   }
 }
@@ -72,6 +82,9 @@ Current behavior:
 - if the tree contains exactly one top-level file entry, the result is a file object
 - otherwise the result is a directory object
 - `install` is rejected for file output and required for directory output
+- `install.rules` uses path selectors with partial field overrides
+- authoring usually starts with one broad `**` rule carrying full defaults, then
+  adds narrower overrides
 - when authoring `*-tree-src`, empty directories must contain `.gitkeep`; the generator ignores `.gitkeep` and still emits an empty `dir` entry
 - codegen staleness checks cover tree structure, symlink targets, and executable bits;
   text file contents are read at Nickel import time
@@ -99,9 +112,9 @@ Inputs:
 Current behavior:
 
 - requires every input to resolve to a directory object
-- requires every input to carry valid `meta.install.owners`
+- requires every input to carry valid `meta.install.rules`
 - scans files, directories, and symlinks from all inputs
-- applies ownership rules per path using full coverage and last-match-wins semantics
+- resolves install attributes per path using full coverage and field-wise last-match-wins semantics
 - merges all filesystem contributions with strict conflict checking
 - writes one ext4 image file directly from the merged filesystem state
 
@@ -110,11 +123,21 @@ Conflict policy:
 - matching `directory/directory` overlap is allowed only when final `mode`, `uid`, and `gid` are identical
 - any other duplicate path is rejected
 
-Ownership policy:
+Install policy:
 
-- every path contributed by an input must match at least one `install.owners` rule
-- the last matching rule sets `uid` and `gid`
-- missing coverage is rejected as a composition error
+- every path contributed by an input must match at least one `install.rules` rule
+- the last matching rule for each individual field sets the final resolved value
+- final required fields must be fully resolved for the installed entry kind:
+  - directories: `uid`, `gid`, `directory_mode`
+  - regular files: `uid`, `gid`, plus `regular_file_mode` or
+    `executable_file_mode` depending on the payload executable bit
+  - symlinks: `uid`, `gid`, `symlink_mode`
+- missing resolved fields are rejected as a composition error
+- the builder does not trust source tree mode bits for final install mode
+- for regular files, the payload executable bit selects between
+  `regular_file_mode` and `executable_file_mode`
+- all mode fields are full final unix modes and may include special bits such as
+  `setuid`, `setgid`, and `sticky`
 
 The realized result payload is one regular file containing an ext4 filesystem image.
 

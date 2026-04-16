@@ -44,15 +44,31 @@ enum TreeEntry {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct InstallMeta {
-    owners: Vec<OwnerRule>,
+    rules: Vec<InstallRule>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct OwnerRule {
+struct InstallRule {
     path: String,
-    uid: u32,
-    gid: u32,
+    attrs: InstallAttrs,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct InstallAttrs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    gid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    directory_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    regular_file_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    executable_file_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    symlink_mode: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,9 +265,9 @@ fn validate_install(kind: OutputKind, install: Option<&InstallMeta>) -> Result<(
             "invalid builder config: directory output requires install".to_string(),
         )),
         (OutputKind::Directory, Some(install)) => {
-            if install.owners.is_empty() {
+            if install.rules.is_empty() {
                 return Err(BuilderError::InvalidRecipe(
-                    "invalid builder config: install.owners must contain at least one rule"
+                    "invalid builder config: install.rules must contain at least one rule"
                         .to_string(),
                 ));
             }
@@ -507,10 +523,16 @@ mod tests {
 
     fn sample_install() -> InstallMeta {
         InstallMeta {
-            owners: vec![OwnerRule {
+            rules: vec![InstallRule {
                 path: "**".to_string(),
-                uid: 0,
-                gid: 0,
+                attrs: InstallAttrs {
+                    uid: Some(0),
+                    gid: Some(0),
+                    directory_mode: Some(0o755),
+                    regular_file_mode: Some(0o644),
+                    executable_file_mode: Some(0o755),
+                    symlink_mode: Some(0o777),
+                },
             }],
         }
     }
@@ -833,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_output_rejects_empty_install_owners() {
+    fn directory_output_rejects_empty_install_rules() {
         let builder = TreeBuilder;
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
@@ -846,7 +868,7 @@ mod tests {
                             path: "dev".to_string(),
                         }],
                     },
-                    install: Some(InstallMeta { owners: vec![] }),
+                    install: Some(InstallMeta { rules: vec![] }),
                 },
                 BuilderInputs::empty(),
                 &mut cx,
@@ -856,7 +878,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("install.owners must contain at least one rule")
+                .contains("install.rules must contain at least one rule")
         );
     }
 

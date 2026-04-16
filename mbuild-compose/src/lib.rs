@@ -59,30 +59,50 @@ pub struct Ext4RootfsConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InstallMeta {
-    owners: Vec<OwnerRule>,
+    rules: Vec<InstallRule>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OwnerRule {
+struct InstallRule {
     path: String,
-    uid: u32,
-    gid: u32,
+    attrs: InstallAttrs,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstallAttrs {
+    #[serde(default)]
+    uid: Option<u32>,
+    #[serde(default)]
+    gid: Option<u32>,
+    #[serde(default)]
+    directory_mode: Option<u32>,
+    #[serde(default)]
+    regular_file_mode: Option<u32>,
+    #[serde(default)]
+    executable_file_mode: Option<u32>,
+    #[serde(default)]
+    symlink_mode: Option<u32>,
 }
 
 #[derive(Debug)]
-struct CompiledOwnerRule {
+struct CompiledInstallRule {
     pattern: String,
     matcher: GlobMatcher,
-    uid: u32,
-    gid: u32,
+    attrs: InstallAttrs,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EntryKind {
-    File { source_path: PathBuf },
+    File {
+        source_path: PathBuf,
+        executable: bool,
+    },
     Directory,
-    Symlink { target: PathBuf },
+    Symlink {
+        target: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,7 +171,7 @@ impl TypedBuilder for Ext4RootfsBuilder {
         for (index, input) in trees.iter().enumerate() {
             validate_input_tree(index, input).map_err(map_error)?;
             let install = parse_install_meta(input).map_err(map_error)?;
-            let compiled = compile_owner_rules(&install.owners).map_err(map_error)?;
+            let compiled = compile_install_rules(&install.rules).map_err(map_error)?;
             let contribution =
                 scan_install_tree(&input.object_path, &compiled).map_err(map_error)?;
             all_contributions.extend(contribution);
@@ -214,10 +234,10 @@ fn parse_install_meta(input: &BuilderInputObject) -> CResult<InstallMeta> {
     })
 }
 
-fn compile_owner_rules(rules: &[OwnerRule]) -> CResult<Vec<CompiledOwnerRule>> {
+fn compile_install_rules(rules: &[InstallRule]) -> CResult<Vec<CompiledInstallRule>> {
     if rules.is_empty() {
         return Err(ComposeError::InputResolutionFailed(
-            "meta.install.owners must contain at least one rule".to_string(),
+            "meta.install.rules must contain at least one rule".to_string(),
         ));
     }
 
@@ -226,21 +246,23 @@ fn compile_owner_rules(rules: &[OwnerRule]) -> CResult<Vec<CompiledOwnerRule>> {
         .map(|rule| {
             let glob = Glob::new(&rule.path).map_err(|error| {
                 ComposeError::InputResolutionFailed(format!(
-                    "invalid owner rule pattern '{}': {error}",
+                    "invalid install rule pattern '{}': {error}",
                     rule.path
                 ))
             })?;
-            Ok(CompiledOwnerRule {
+            Ok(CompiledInstallRule {
                 pattern: rule.path.clone(),
                 matcher: glob.compile_matcher(),
-                uid: rule.uid,
-                gid: rule.gid,
+                attrs: rule.attrs.clone(),
             })
         })
         .collect()
 }
 
-fn scan_install_tree(root: &Path, rules: &[CompiledOwnerRule]) -> CResult<Vec<ContributionEntry>> {
+fn scan_install_tree(
+    root: &Path,
+    rules: &[CompiledInstallRule],
+) -> CResult<Vec<ContributionEntry>> {
     let mut entries = Vec::new();
     scan_dir_recursive(root, root, rules, &mut entries)?;
     entries.sort_by(|left, right| left.rel_path.cmp(&right.rel_path));
@@ -250,7 +272,7 @@ fn scan_install_tree(root: &Path, rules: &[CompiledOwnerRule]) -> CResult<Vec<Co
 fn scan_dir_recursive(
     root: &Path,
     current: &Path,
-    rules: &[CompiledOwnerRule],
+    rules: &[CompiledInstallRule],
     entries: &mut Vec<ContributionEntry>,
 ) -> CResult<()> {
     let mut children = fs::read_dir(current)
@@ -282,26 +304,60 @@ fn scan_dir_recursive(
             ))
         })?;
         let file_type = metadata.file_type();
-        let (uid, gid) = resolve_owners(&rel_string, rules)?;
-
         if file_type.is_dir() {
+            let attrs = resolve_install_attrs(&rel_string, rules)?;
             entries.push(ContributionEntry {
                 rel_path: rel_string.clone(),
                 kind: EntryKind::Directory,
-                mode: unix_mode(&metadata) & 0o7777,
-                uid,
-                gid,
+                mode: attrs.directory_mode.ok_or_else(|| {
+                    ComposeError::CompositionFailed(format!(
+                        "path '{rel_string}' is missing resolved directory_mode"
+                    ))
+                })?,
+                uid: attrs.uid.ok_or_else(|| {
+                    ComposeError::CompositionFailed(format!(
+                        "path '{rel_string}' is missing resolved uid"
+                    ))
+                })?,
+                gid: attrs.gid.ok_or_else(|| {
+                    ComposeError::CompositionFailed(format!(
+                        "path '{rel_string}' is missing resolved gid"
+                    ))
+                })?,
             });
             scan_dir_recursive(root, &child_path, rules, entries)?;
         } else if file_type.is_file() {
+            let executable = (unix_mode(&metadata) & 0o111) != 0;
+            let attrs = resolve_install_attrs(&rel_string, rules)?;
             entries.push(ContributionEntry {
-                rel_path: rel_string,
+                rel_path: rel_string.clone(),
                 kind: EntryKind::File {
                     source_path: child_path,
+                    executable,
                 },
-                mode: unix_mode(&metadata) & 0o7777,
-                uid,
-                gid,
+                mode: if executable {
+                    attrs.executable_file_mode.ok_or_else(|| {
+                        ComposeError::CompositionFailed(format!(
+                            "path '{rel_string}' is missing resolved executable_file_mode"
+                        ))
+                    })?
+                } else {
+                    attrs.regular_file_mode.ok_or_else(|| {
+                        ComposeError::CompositionFailed(format!(
+                            "path '{rel_string}' is missing resolved regular_file_mode"
+                        ))
+                    })?
+                },
+                uid: attrs.uid.ok_or_else(|| {
+                    ComposeError::CompositionFailed(format!(
+                        "path '{rel_string}' is missing resolved uid"
+                    ))
+                })?,
+                gid: attrs.gid.ok_or_else(|| {
+                    ComposeError::CompositionFailed(format!(
+                        "path '{rel_string}' is missing resolved gid"
+                    ))
+                })?,
             });
         } else if file_type.is_symlink() {
             let target = fs::read_link(&child_path).map_err(|error| {
@@ -310,12 +366,25 @@ fn scan_dir_recursive(
                     child_path.display()
                 ))
             })?;
+            let attrs = resolve_install_attrs(&rel_string, rules)?;
             entries.push(ContributionEntry {
-                rel_path: rel_string,
+                rel_path: rel_string.clone(),
                 kind: EntryKind::Symlink { target },
-                mode: 0o777,
-                uid,
-                gid,
+                mode: attrs.symlink_mode.ok_or_else(|| {
+                    ComposeError::CompositionFailed(format!(
+                        "path '{rel_string}' is missing resolved symlink_mode"
+                    ))
+                })?,
+                uid: attrs.uid.ok_or_else(|| {
+                    ComposeError::CompositionFailed(format!(
+                        "path '{rel_string}' is missing resolved uid"
+                    ))
+                })?,
+                gid: attrs.gid.ok_or_else(|| {
+                    ComposeError::CompositionFailed(format!(
+                        "path '{rel_string}' is missing resolved gid"
+                    ))
+                })?,
             });
         } else {
             return Err(ComposeError::CompositionFailed(format!(
@@ -328,26 +397,47 @@ fn scan_dir_recursive(
     Ok(())
 }
 
-fn resolve_owners(rel_path: &str, rules: &[CompiledOwnerRule]) -> CResult<(u32, u32)> {
-    let mut matched = None;
+fn resolve_install_attrs(rel_path: &str, rules: &[CompiledInstallRule]) -> CResult<InstallAttrs> {
+    let mut resolved = InstallAttrs::default();
+    let mut matched_any = false;
     for rule in rules {
-        if owner_rule_matches(rule, rel_path) {
-            matched = Some((rule.uid, rule.gid));
+        if install_rule_matches(rule, rel_path) {
+            matched_any = true;
+            if let Some(uid) = rule.attrs.uid {
+                resolved.uid = Some(uid);
+            }
+            if let Some(gid) = rule.attrs.gid {
+                resolved.gid = Some(gid);
+            }
+            if let Some(mode) = rule.attrs.directory_mode {
+                resolved.directory_mode = Some(mode);
+            }
+            if let Some(mode) = rule.attrs.regular_file_mode {
+                resolved.regular_file_mode = Some(mode);
+            }
+            if let Some(mode) = rule.attrs.executable_file_mode {
+                resolved.executable_file_mode = Some(mode);
+            }
+            if let Some(mode) = rule.attrs.symlink_mode {
+                resolved.symlink_mode = Some(mode);
+            }
         }
     }
-    matched.ok_or_else(|| {
+    if matched_any {
+        Ok(resolved)
+    } else {
         let known = rules
             .iter()
             .map(|rule| rule.pattern.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        ComposeError::CompositionFailed(format!(
-            "path '{rel_path}' is not covered by any install owner rule (known patterns: {known})"
-        ))
-    })
+        Err(ComposeError::CompositionFailed(format!(
+            "path '{rel_path}' is not covered by any install rule (known patterns: {known})"
+        )))
+    }
 }
 
-fn owner_rule_matches(rule: &CompiledOwnerRule, rel_path: &str) -> bool {
+fn install_rule_matches(rule: &CompiledInstallRule, rel_path: &str) -> bool {
     if rule.matcher.is_match(rel_path) {
         return true;
     }
@@ -559,7 +649,7 @@ fn write_tar_stream(writer: impl Write, entries: &[RootEntry]) -> CResult<()> {
         }
         match &entry.kind {
             EntryKind::Directory => append_directory(&mut tar, entry)?,
-            EntryKind::File { source_path } => append_file(&mut tar, entry, source_path)?,
+            EntryKind::File { source_path, .. } => append_file(&mut tar, entry, source_path)?,
             EntryKind::Symlink { target } => append_symlink(&mut tar, entry, target)?,
         }
     }
@@ -695,7 +785,10 @@ mod tests {
     fn install_meta_with_overrides() -> Map<String, Value> {
         Map::from_iter([(
             "install".to_string(),
-            json!({"owners":[{"path":"**","uid":0,"gid":0},{"path":"var/log/**","uid":100,"gid":200}]}),
+            json!({"rules":[
+                {"path":"**","attrs":{"uid":0,"gid":0,"directory_mode":493,"regular_file_mode":420,"executable_file_mode":493,"symlink_mode":511}},
+                {"path":"var/log/**","attrs":{"uid":100,"gid":200}}
+            ]}),
         )])
     }
 
@@ -707,20 +800,20 @@ mod tests {
     }
 
     #[test]
-    fn owner_rules_require_full_coverage_and_last_match_wins() {
+    fn install_rules_require_full_coverage_and_last_match_wins() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("tree");
         fs::create_dir_all(root.join("var/log")).unwrap();
         fs::write(root.join("var/log/app.log"), b"log\n").unwrap();
 
         let install: InstallMeta = serde_json::from_value(json!({
-            "owners": [
-                {"path": "**", "uid": 0, "gid": 0},
-                {"path": "var/log/**", "uid": 100, "gid": 200}
+            "rules": [
+                {"path": "**", "attrs": {"uid": 0, "gid": 0, "directory_mode": 493, "regular_file_mode": 420, "executable_file_mode": 493, "symlink_mode": 511}},
+                {"path": "var/log/**", "attrs": {"uid": 100, "gid": 200}}
             ]
         }))
         .unwrap();
-        let rules = compile_owner_rules(&install.owners).unwrap();
+        let rules = compile_install_rules(&install.rules).unwrap();
         let entries = scan_install_tree(&root, &rules).unwrap();
         let log_entry = entries
             .iter()
@@ -729,18 +822,63 @@ mod tests {
         assert_eq!((log_entry.uid, log_entry.gid), (100, 200));
 
         let uncovered: InstallMeta = serde_json::from_value(json!({
-            "owners": [
-                {"path": "var/log/*.txt", "uid": 0, "gid": 0}
+            "rules": [
+                {"path": "var/log/*.txt", "attrs": {"uid": 0, "gid": 0}}
             ]
         }))
         .unwrap();
-        let rules = compile_owner_rules(&uncovered.owners).unwrap();
+        let rules = compile_install_rules(&uncovered.rules).unwrap();
         let error = scan_install_tree(&root, &rules).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("is not covered by any install owner rule")
+                .contains("is not covered by any install rule")
         );
+    }
+
+    #[test]
+    fn scan_uses_executable_class_and_full_final_modes() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("tree");
+        fs::create_dir_all(root.join("tmp")).unwrap();
+        fs::write(root.join("tmp").join("script.sh"), b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(root.join("tmp").join("script.sh"))
+                .unwrap()
+                .permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(root.join("tmp").join("script.sh"), perms).unwrap();
+        }
+
+        let install: InstallMeta = serde_json::from_value(json!({
+            "rules": [{
+                "path": "**",
+                "attrs": {
+                    "uid": 0,
+                    "gid": 0,
+                    "directory_mode": 0o1777,
+                    "regular_file_mode": 0o644,
+                    "executable_file_mode": 0o4755,
+                    "symlink_mode": 0o777
+                }
+            }]
+        }))
+        .unwrap();
+        let rules = compile_install_rules(&install.rules).unwrap();
+        let entries = scan_install_tree(&root, &rules).unwrap();
+
+        let dir_entry = entries
+            .iter()
+            .find(|entry| entry.rel_path == "tmp")
+            .unwrap();
+        assert_eq!(dir_entry.mode, 0o1777);
+
+        let file_entry = entries
+            .iter()
+            .find(|entry| entry.rel_path == "tmp/script.sh")
+            .unwrap();
+        assert_eq!(file_entry.mode, 0o4755);
     }
 
     #[test]
@@ -750,6 +888,7 @@ mod tests {
                 rel_path: "bin/tool".to_string(),
                 kind: EntryKind::File {
                     source_path: PathBuf::from("/tmp/a"),
+                    executable: true,
                 },
                 mode: 0o755,
                 uid: 0,
@@ -759,6 +898,7 @@ mod tests {
                 rel_path: "bin/tool".to_string(),
                 kind: EntryKind::File {
                     source_path: PathBuf::from("/tmp/b"),
+                    executable: true,
                 },
                 mode: 0o755,
                 uid: 0,
@@ -1022,12 +1162,22 @@ mod tests {
         let rc = unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o644) };
         assert_eq!(rc, 0);
 
-        let rules = compile_owner_rules(
+        let rules = compile_install_rules(
             &serde_json::from_value::<InstallMeta>(json!({
-                "owners": [{"path": "**", "uid": 0, "gid": 0}]
+                "rules": [{
+                    "path": "**",
+                    "attrs": {
+                        "uid": 0,
+                        "gid": 0,
+                        "directory_mode": 493,
+                        "regular_file_mode": 420,
+                        "executable_file_mode": 493,
+                        "symlink_mode": 511
+                    }
+                }]
             }))
             .unwrap()
-            .owners,
+            .rules,
         )
         .unwrap();
         let error = scan_install_tree(&root, &rules).unwrap_err();
