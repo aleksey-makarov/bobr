@@ -115,7 +115,9 @@ pub struct TreeBuilder;
 
 static TREE_SPEC: BuilderSpec = BuilderSpec {
     tag: "Tree",
-    inputs: &[],
+    required_inputs: &[],
+    optional_inputs: &[],
+    allow_extra_inputs: false,
 };
 
 impl TypedBuilder for TreeBuilder {
@@ -510,7 +512,7 @@ fn install_meta_map(install: &InstallMeta) -> Result<Map<String, Value>, Builder
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{Builder, BuilderInputValue, BuilderInputs};
+    use mbuild_core::{Builder, BuilderInputObject, BuilderInputs};
     use tempfile::tempdir;
 
     fn build_context(root: &std::path::Path) -> BuildContext {
@@ -888,7 +890,13 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("unexpected", BuilderInputValue::Many(Vec::new()));
+        inputs.insert(
+            "unexpected",
+            BuilderInputObject {
+                object_path: std::path::PathBuf::from("/tmp/unexpected"),
+                meta: Map::new(),
+            },
+        );
 
         let error = builder
             .build_typed(

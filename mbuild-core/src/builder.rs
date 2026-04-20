@@ -25,20 +25,53 @@ pub struct BuildMeta {
 #[derive(Debug)]
 pub struct BuilderSpec {
     pub tag: &'static str,
-    pub inputs: &'static [InputSlot],
+    pub required_inputs: &'static [&'static str],
+    pub optional_inputs: &'static [&'static str],
+    pub allow_extra_inputs: bool,
 }
 
-#[derive(Debug)]
-pub struct InputSlot {
-    pub name: &'static str,
-    pub arity: InputArity,
-}
+impl BuilderSpec {
+    pub fn reserved_input_names(&self) -> impl Iterator<Item = &'static str> {
+        self.required_inputs
+            .iter()
+            .copied()
+            .chain(self.optional_inputs.iter().copied())
+    }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputArity {
-    One,
-    Optional,
-    Many,
+    pub fn is_required_input(&self, name: &str) -> bool {
+        self.required_inputs.contains(&name)
+    }
+
+    pub fn is_optional_input(&self, name: &str) -> bool {
+        self.optional_inputs.contains(&name)
+    }
+
+    pub fn is_reserved_input(&self, name: &str) -> bool {
+        self.is_required_input(name) || self.is_optional_input(name)
+    }
+
+    pub fn ordered_present_input_names<'a, T>(
+        &self,
+        inputs: &'a BTreeMap<String, T>,
+    ) -> Vec<&'a str> {
+        let mut ordered = Vec::new();
+        for name in self.required_inputs {
+            if inputs.contains_key(*name) {
+                ordered.push(*name);
+            }
+        }
+        for name in self.optional_inputs {
+            if inputs.contains_key(*name) {
+                ordered.push(*name);
+            }
+        }
+        for name in inputs.keys() {
+            if !self.is_reserved_input(name) {
+                ordered.push(name.as_str());
+            }
+        }
+        ordered
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +82,7 @@ pub struct BuilderInputObject {
 
 #[derive(Debug, Clone, Default)]
 pub struct BuilderInputs {
-    slots: BTreeMap<String, BuilderInputValue>,
+    slots: BTreeMap<String, BuilderInputObject>,
 }
 
 impl BuilderInputs {
@@ -57,7 +90,7 @@ impl BuilderInputs {
         Self::default()
     }
 
-    pub fn new(slots: BTreeMap<String, BuilderInputValue>) -> Self {
+    pub fn new(slots: BTreeMap<String, BuilderInputObject>) -> Self {
         Self { slots }
     }
 
@@ -65,52 +98,51 @@ impl BuilderInputs {
         self.slots.is_empty()
     }
 
-    pub fn insert(&mut self, name: impl Into<String>, value: BuilderInputValue) {
+    pub fn insert(&mut self, name: impl Into<String>, value: BuilderInputObject) {
         self.slots.insert(name.into(), value);
     }
 
-    pub fn one(&self, name: &str) -> Result<&BuilderInputObject, BuilderError> {
+    pub fn required(&self, name: &str) -> Result<&BuilderInputObject, BuilderError> {
         match self.slots.get(name) {
-            Some(BuilderInputValue::One(object)) => Ok(object),
-            Some(_) => Err(BuilderError::ExecutionFailed(format!(
-                "input slot '{name}' has unexpected arity"
-            ))),
+            Some(object) => Ok(object),
             None => Err(BuilderError::ExecutionFailed(format!(
                 "required input slot '{name}' is missing"
             ))),
         }
     }
 
-    pub fn optional(&self, name: &str) -> Result<Option<&BuilderInputObject>, BuilderError> {
-        match self.slots.get(name) {
-            Some(BuilderInputValue::Optional(object)) => Ok(object.as_ref()),
-            Some(_) => Err(BuilderError::ExecutionFailed(format!(
-                "input slot '{name}' has unexpected arity"
-            ))),
-            None => Err(BuilderError::ExecutionFailed(format!(
-                "optional input slot '{name}' is missing"
-            ))),
+    pub fn optional(&self, name: &str) -> Option<&BuilderInputObject> {
+        self.slots.get(name)
+    }
+
+    pub fn get(&self, name: &str) -> Option<&BuilderInputObject> {
+        self.slots.get(name)
+    }
+
+    pub fn extra<'a>(
+        &'a self,
+        spec: &BuilderSpec,
+        name: &str,
+    ) -> Option<&'a BuilderInputObject> {
+        if spec.is_reserved_input(name) {
+            None
+        } else {
+            self.slots.get(name)
         }
     }
 
-    pub fn many(&self, name: &str) -> Result<&[BuilderInputObject], BuilderError> {
-        match self.slots.get(name) {
-            Some(BuilderInputValue::Many(objects)) => Ok(objects),
-            Some(_) => Err(BuilderError::ExecutionFailed(format!(
-                "input slot '{name}' has unexpected arity"
-            ))),
-            None => Err(BuilderError::ExecutionFailed(format!(
-                "repeated input slot '{name}' is missing"
-            ))),
-        }
+    pub fn extras<'a>(
+        &'a self,
+        spec: &'a BuilderSpec,
+    ) -> impl Iterator<Item = (&'a str, &'a BuilderInputObject)> + 'a {
+        self.slots.iter().filter_map(move |(name, object)| {
+            if spec.is_reserved_input(name) {
+                None
+            } else {
+                Some((name.as_str(), object))
+            }
+        })
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum BuilderInputValue {
-    One(BuilderInputObject),
-    Optional(Option<BuilderInputObject>),
-    Many(Vec<BuilderInputObject>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,23 +415,24 @@ mod tests {
     fn builder_inputs_helpers_work() {
         let object = sample_builder_object();
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("script", BuilderInputValue::One(object.clone()));
-        inputs.insert("base", BuilderInputValue::Optional(None));
-        inputs.insert(
-            "sources",
-            BuilderInputValue::Many(vec![object.clone(), object.clone()]),
-        );
+        inputs.insert("script", object.clone());
+        inputs.insert("source", object.clone());
+        inputs.insert("patch", object.clone());
+
+        let spec = BuilderSpec {
+            tag: "Binary",
+            required_inputs: &["image"],
+            optional_inputs: &["base"],
+            allow_extra_inputs: true,
+        };
 
         assert_eq!(
-            inputs.one("script").unwrap().object_path,
+            inputs.required("script").unwrap().object_path,
             object.object_path
         );
-        assert!(inputs.optional("base").unwrap().is_none());
-        assert_eq!(inputs.many("sources").unwrap().len(), 2);
-        assert!(matches!(
-            inputs.one("sources"),
-            Err(BuilderError::ExecutionFailed(_))
-        ));
+        assert!(inputs.optional("base").is_none());
+        assert!(inputs.extra(&spec, "source").is_some());
+        assert_eq!(inputs.extras(&spec).count(), 3);
     }
 
     #[derive(Debug)]
@@ -413,7 +446,9 @@ mod tests {
 
     static DUMMY_SPEC: BuilderSpec = BuilderSpec {
         tag: "Dummy",
-        inputs: &[],
+        required_inputs: &[],
+        optional_inputs: &[],
+        allow_extra_inputs: false,
     };
 
     impl TypedBuilder for DummyBuilder {
@@ -470,6 +505,8 @@ mod tests {
         let erased: &dyn Builder = &builder;
 
         assert_eq!(erased.spec().tag, "Dummy");
-        assert!(erased.spec().inputs.is_empty());
+        assert!(erased.spec().required_inputs.is_empty());
+        assert!(erased.spec().optional_inputs.is_empty());
+        assert!(!erased.spec().allow_extra_inputs);
     }
 }

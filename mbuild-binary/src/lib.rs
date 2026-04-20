@@ -1,6 +1,6 @@
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
-    InputArity, InputSlot, StagedBuildResult, TypedBuilder, fsutil,
+    StagedBuildResult, TypedBuilder, fsutil,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -18,10 +18,8 @@ unsafe extern "C" {
 const BUILD_DIR_NAME: &str = "build";
 const OUTPUT_DIR_NAME: &str = "out";
 const CONFIG_DIR_NAME: &str = "config";
-const INPUT_MOUNT_PREFIX: &str = "/__mbuild/in";
+const INPUT_MOUNT_ROOT: &str = "/__mbuild/inputs";
 const CONFIG_MOUNT_PATH: &str = "/__mbuild/config";
-const INPUT_ENV_VAR: &str = "MBUILD_IN";
-const INPUT_PREFIX_ENV_VAR: &str = "MBUILD_IN";
 const CONFIG_ENV_VAR: &str = "MBUILD_CONFIG_DIR";
 const BUILD_DIR_ENV_VAR: &str = "MBUILD_BUILD_DIR";
 const OUT_DIR_ENV_VAR: &str = "MBUILD_OUT_DIR";
@@ -130,20 +128,11 @@ struct ContainerInstance {
 
 pub struct BinaryBuilder;
 
-static BINARY_INPUTS: &[InputSlot] = &[
-    InputSlot {
-        name: "image",
-        arity: InputArity::One,
-    },
-    InputSlot {
-        name: "in",
-        arity: InputArity::Many,
-    },
-];
-
 static BINARY_SPEC: BuilderSpec = BuilderSpec {
     tag: "Binary",
-    inputs: BINARY_INPUTS,
+    required_inputs: &["image"],
+    optional_inputs: &[],
+    allow_extra_inputs: true,
 };
 
 impl TypedBuilder for BinaryBuilder {
@@ -160,8 +149,8 @@ impl TypedBuilder for BinaryBuilder {
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         validate_config(&config).map_err(map_error)?;
-        let image = inputs.one("image")?;
-        let in_inputs = inputs.many("in")?;
+        let image = inputs.required("image")?;
+        let named_inputs = collect_named_inputs(&inputs).map_err(map_error)?;
 
         let output_path = cx.temp_dir.join(OUTPUT_DIR_NAME);
         fsutil::recreate_empty_dir_force(&output_path)
@@ -177,14 +166,15 @@ impl TypedBuilder for BinaryBuilder {
             .map_err(map_error)?;
         write_script_config(&config_path, config.script_config.as_ref()).map_err(map_error)?;
 
-        let input_execution = resolve_input_execution(&config_path, in_inputs).map_err(map_error)?;
+        let input_execution =
+            resolve_input_execution(&config_path, &named_inputs).map_err(map_error)?;
         let container_execution = resolve_container_execution(image, cx).map_err(map_error)?;
         cx.log_event(
             BuildLogLevel::Info,
             "prepare",
             format!(
                 "resolved container image, {} input(s), and config dir",
-                in_inputs.len()
+                named_inputs.len()
             ),
         );
 
@@ -192,7 +182,7 @@ impl TypedBuilder for BinaryBuilder {
             &container_execution,
             &input_execution,
             &config.steps,
-            in_inputs,
+            &named_inputs,
             &build_path,
             &output_path,
             cx,
@@ -302,11 +292,49 @@ fn default_install_meta() -> InstallMeta {
     }
 }
 
+fn validate_input_name(name: &str) -> BResult<()> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err(BinaryError::InvalidConfig(
+            "input name must not be empty".to_string(),
+        ));
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(BinaryError::InvalidConfig(format!(
+            "input name '{name}' must start with an ASCII letter or underscore"
+        )));
+    }
+    if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return Err(BinaryError::InvalidConfig(format!(
+            "input name '{name}' must contain only ASCII letters, digits, and underscores"
+        )));
+    }
+    Ok(())
+}
+
+fn input_mount_path(name: &str) -> String {
+    format!("{INPUT_MOUNT_ROOT}/{name}")
+}
+
+fn collect_named_inputs(inputs: &BuilderInputs) -> BResult<Vec<(String, BuilderInputObject)>> {
+    let mut named = Vec::new();
+    for (name, object) in inputs.extras(&BINARY_SPEC) {
+        validate_input_name(name)?;
+        if matches!(name, "build" | "out" | "config") {
+            return Err(BinaryError::InvalidConfig(format!(
+                "input name '{name}' conflicts with a reserved Binary interpolation variable"
+            )));
+        }
+        named.push((name.to_string(), object.clone()));
+    }
+    Ok(named)
+}
+
 fn resolve_input_execution(
     script_config_dir: &Path,
-    inputs: &[BuilderInputObject],
+    inputs: &[(String, BuilderInputObject)],
 ) -> BResult<InputExecution> {
-    for input in inputs {
+    for (_, input) in inputs {
         if !input.object_path.is_dir() && !input.object_path.is_file() {
             return Err(BinaryError::InputResolutionFailed(format!(
                 "binary input must resolve to a file or directory: {}",
@@ -446,7 +474,7 @@ fn run_container_build(
     container: &ContainerExecution,
     input_execution: &InputExecution,
     steps: &[BuildStep],
-    inputs: &[BuilderInputObject],
+    inputs: &[(String, BuilderInputObject)],
     build_path: &Path,
     output_path: &Path,
     cx: &BuildContext,
@@ -498,7 +526,7 @@ fn current_uid_gid() -> (u32, u32) {
 
 fn interpolate_step_string(
     value: &str,
-    inputs: &[BuilderInputObject],
+    inputs: &[(String, BuilderInputObject)],
 ) -> BResult<String> {
     let mut rendered = String::new();
     let mut rest = value;
@@ -521,45 +549,31 @@ fn interpolate_step_string(
     Ok(rendered)
 }
 
-fn interpolation_value(key: &str, inputs: &[BuilderInputObject]) -> BResult<String> {
+fn interpolation_value(key: &str, inputs: &[(String, BuilderInputObject)]) -> BResult<String> {
     match key {
-        "in" => {
-            if inputs.is_empty() {
-                Err(BinaryError::InvalidConfig(
-                    "interpolation variable '${in}' requires at least one input".to_string(),
-                ))
-            } else {
-                Ok(format!("{INPUT_MOUNT_PREFIX}0"))
-            }
-        }
         "build" => Ok(BUILD_DIR_MOUNT_PATH.to_string()),
         "out" => Ok(OUT_DIR_MOUNT_PATH.to_string()),
         "config" => Ok(CONFIG_MOUNT_PATH.to_string()),
-        _ => {
-            if let Some(index_str) = key.strip_prefix("in") {
-                let index = index_str.parse::<usize>().map_err(|_| {
-                    BinaryError::InvalidConfig(format!(
-                        "unknown interpolation variable '${{{key}}}'"
-                    ))
-                })?;
-                if index >= inputs.len() {
-                    return Err(BinaryError::InvalidConfig(format!(
-                        "interpolation variable '${{{key}}}' references missing input"
-                    )));
+        _ => inputs
+            .iter()
+            .find_map(|(name, _)| {
+                if name == key {
+                    Some(input_mount_path(name))
+                } else {
+                    None
                 }
-                Ok(format!("{INPUT_MOUNT_PREFIX}{index}"))
-            } else {
-                Err(BinaryError::InvalidConfig(format!(
+            })
+            .ok_or_else(|| {
+                BinaryError::InvalidConfig(format!(
                     "unknown interpolation variable '${{{key}}}'"
-                )))
-            }
-        }
+                ))
+            }),
     }
 }
 
 fn resolve_step_cwd(
     step: &BuildStep,
-    inputs: &[BuilderInputObject],
+    inputs: &[(String, BuilderInputObject)],
 ) -> BResult<String> {
     let cwd = interpolate_step_string(&step.cwd, inputs)?;
     if cwd.is_empty() || !cwd.starts_with('/') {
@@ -573,7 +587,7 @@ fn resolve_step_cwd(
 
 fn resolve_step_argv(
     step: &BuildStep,
-    inputs: &[BuilderInputObject],
+    inputs: &[(String, BuilderInputObject)],
 ) -> BResult<Vec<String>> {
     step.argv
         .iter()
@@ -583,7 +597,7 @@ fn resolve_step_argv(
 
 fn resolve_step_env(
     step: &BuildStep,
-    inputs: &[BuilderInputObject],
+    inputs: &[(String, BuilderInputObject)],
 ) -> BResult<Vec<(String, String)>> {
     let mut rendered = Vec::new();
     for (key, value) in &step.env {
@@ -604,7 +618,7 @@ fn resolve_step_env(
 fn create_container(
     container: &ContainerExecution,
     input_execution: &InputExecution,
-    inputs: &[BuilderInputObject],
+    inputs: &[(String, BuilderInputObject)],
     _build_path: &Path,
     _output_path: &Path,
     uid: u32,
@@ -627,15 +641,16 @@ fn create_container(
         .arg("--user")
         .arg(format!("{uid}:{gid}"));
 
-    for (index, input) in inputs.iter().enumerate() {
+    for (name, input) in inputs {
+        let mount_path = input_mount_path(name);
         let mount_spec = if input.object_path.is_dir() {
             format!(
-                "{}:{INPUT_MOUNT_PREFIX}{index}:O",
+                "{}:{mount_path}:O",
                 input.object_path.display()
             )
         } else {
             format!(
-                "{}:{INPUT_MOUNT_PREFIX}{index}:ro",
+                "{}:{mount_path}:ro",
                 input.object_path.display()
             )
         };
@@ -655,16 +670,6 @@ fn create_container(
         .arg(format!("{BUILD_DIR_ENV_VAR}={BUILD_DIR_MOUNT_PATH}"))
         .arg("--env")
         .arg(format!("{OUT_DIR_ENV_VAR}={OUT_DIR_MOUNT_PATH}"));
-    if !inputs.is_empty() {
-        process
-            .arg("--env")
-            .arg(format!("{INPUT_ENV_VAR}={INPUT_MOUNT_PREFIX}0"));
-    }
-    for (index, _) in inputs.iter().enumerate() {
-        process
-            .arg("--env")
-            .arg(format!("{INPUT_PREFIX_ENV_VAR}{index}={INPUT_MOUNT_PREFIX}{index}"));
-    }
     process.arg(&container.image_ref).arg("sleep").arg("infinity");
 
     let output = process.output().map_err(|error| {
@@ -835,7 +840,7 @@ fn start_container(instance: &ContainerInstance, cx: &BuildContext) -> BResult<(
 fn exec_step(
     instance: &ContainerInstance,
     step: &BuildStep,
-    inputs: &[BuilderInputObject],
+    inputs: &[(String, BuilderInputObject)],
     cx: &BuildContext,
 ) -> BResult<()> {
     let log_tag = format!("step-{}", step.name);
@@ -953,15 +958,15 @@ fn write_command_log(
     cx: &BuildContext,
     log_tag: &str,
     image_ref: &str,
-    inputs: &[BuilderInputObject],
+    inputs: &[(String, BuilderInputObject)],
     output: &std::process::Output,
 ) -> Option<PathBuf> {
     let input_paths = if inputs.is_empty() {
         String::new()
     } else {
         let mut rendered = String::new();
-        for (index, input) in inputs.iter().enumerate() {
-            rendered.push_str(&format!("in{index}: {}\n", input.object_path.display()));
+        for (name, input) in inputs {
+            rendered.push_str(&format!("{name}: {}\n", input.object_path.display()));
         }
         rendered
     };
@@ -1092,7 +1097,7 @@ fn write_script_config_node(path: &Path, value: &Value, debug_path: &str) -> BRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{Builder, BuilderInputObject, BuilderInputValue, BuilderInputs};
+    use mbuild_core::{Builder, BuilderInputObject, BuilderInputs};
     use std::env;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -1265,37 +1270,24 @@ mod tests {
 
     fn sample_inputs(root: &Path) -> BuilderInputs {
         let mut inputs = BuilderInputs::empty();
-        inputs.insert(
-            "image",
-            BuilderInputValue::One(resolved_oci_layout(root, "image-oci", Map::new())),
-        );
-        inputs.insert(
-            "in",
-            BuilderInputValue::Many(vec![
-                resolved_file(root, "script.sh", true, Map::new()),
-                resolved_directory(root, "src", Map::new()),
-            ]),
-        );
+        inputs.insert("image", resolved_oci_layout(root, "image-oci", Map::new()));
+        inputs.insert("script", resolved_file(root, "script.sh", true, Map::new()));
+        inputs.insert("source", resolved_directory(root, "src", Map::new()));
         inputs
     }
 
     fn sample_inputs_with_aux_file(root: &Path) -> BuilderInputs {
         let mut inputs = sample_inputs(root);
-        let mut values = match inputs.many("in").unwrap().to_vec() {
-            values => values,
-        };
-        values.push(resolved_file(root, "patch.diff", false, Map::new()));
-        inputs.insert("in", BuilderInputValue::Many(values));
+        inputs.insert("patch", resolved_file(root, "patch.diff", false, Map::new()));
         inputs
     }
 
     fn sample_inputs_with_binary_output_aux(root: &Path) -> BuilderInputs {
         let mut inputs = sample_inputs(root);
-        let mut values = match inputs.many("in").unwrap().to_vec() {
-            values => values,
-        };
-        values.push(resolved_directory(root, "linux-headers", Map::new()));
-        inputs.insert("in", BuilderInputValue::Many(values));
+        inputs.insert(
+            "linux_headers",
+            resolved_directory(root, "linux-headers", Map::new()),
+        );
         inputs
     }
 
@@ -1305,28 +1297,28 @@ mod tests {
                 name: "configure".to_string(),
                 run_as: StepUser::BuildUser,
                 cwd: "${build}".to_string(),
-                argv: vec!["${in0}".to_string(), "configure".to_string()],
+                argv: vec!["${script}".to_string(), "configure".to_string()],
                 env: Map::new(),
             },
             BuildStep {
                 name: "build".to_string(),
                 run_as: StepUser::BuildUser,
                 cwd: "${build}".to_string(),
-                argv: vec!["${in0}".to_string(), "build".to_string()],
+                argv: vec!["${script}".to_string(), "build".to_string()],
                 env: Map::new(),
             },
             BuildStep {
                 name: "install".to_string(),
                 run_as: StepUser::Root,
                 cwd: "${build}".to_string(),
-                argv: vec!["${in0}".to_string(), "install".to_string()],
+                argv: vec!["${script}".to_string(), "install".to_string()],
                 env: Map::new(),
             },
             BuildStep {
                 name: "post_install".to_string(),
                 run_as: StepUser::Root,
                 cwd: "${build}".to_string(),
-                argv: vec!["${in0}".to_string(), "post_install".to_string()],
+                argv: vec!["${script}".to_string(), "post_install".to_string()],
                 env: Map::new(),
             },
         ]
@@ -1348,28 +1340,28 @@ mod tests {
                     name: "configure".to_string(),
                     run_as: StepUser::BuildUser,
                     cwd: "${build}".to_string(),
-                    argv: vec!["${in}".to_string(), "configure".to_string()],
+                    argv: vec!["${script}".to_string(), "configure".to_string()],
                     env: Map::new(),
                 },
                 BuildStep {
                     name: "build".to_string(),
                     run_as: StepUser::BuildUser,
                     cwd: "${build}".to_string(),
-                    argv: vec!["${in}".to_string(), "build".to_string()],
+                    argv: vec!["${script}".to_string(), "build".to_string()],
                     env: Map::new(),
                 },
                 BuildStep {
                     name: "install".to_string(),
                     run_as: StepUser::Root,
                     cwd: "${build}".to_string(),
-                    argv: vec!["${in}".to_string(), "install".to_string()],
+                    argv: vec!["${script}".to_string(), "install".to_string()],
                     env: Map::new(),
                 },
                 BuildStep {
                     name: "post_install".to_string(),
                     run_as: StepUser::Root,
                     cwd: "${build}".to_string(),
-                    argv: vec!["${in}".to_string(), "post_install".to_string()],
+                    argv: vec!["${script}".to_string(), "post_install".to_string()],
                     env: Map::new(),
                 },
             ],
@@ -1392,16 +1384,12 @@ mod tests {
                 "hello source\n"
             );
             assert_eq!(
-                fs::read_to_string(result.staged_path.join("in-env.txt")).unwrap(),
-                format!("{INPUT_MOUNT_PREFIX}0\n")
+                fs::read_to_string(result.staged_path.join("script-mount.txt")).unwrap(),
+                format!("{}/script\n", INPUT_MOUNT_ROOT)
             );
             assert_eq!(
-                fs::read_to_string(result.staged_path.join("in0-env.txt")).unwrap(),
-                format!("{INPUT_MOUNT_PREFIX}0\n")
-            );
-            assert_eq!(
-                fs::read_to_string(result.staged_path.join("in1-env.txt")).unwrap(),
-                format!("{INPUT_MOUNT_PREFIX}1\n")
+                fs::read_to_string(result.staged_path.join("source-mount.txt")).unwrap(),
+                format!("{}/source\n", INPUT_MOUNT_ROOT)
             );
             assert_eq!(
                 fs::read_to_string(result.staged_path.join("build-dir.txt")).unwrap(),
@@ -1522,8 +1510,8 @@ mod tests {
             let script = resolved_file(temp.path(), "script.sh", true, Map::new());
 
             let inputs = BuilderInputs::new(std::collections::BTreeMap::from([
-                ("image".to_string(), BuilderInputValue::One(image.clone())),
-                ("in".to_string(), BuilderInputValue::Many(vec![script.clone()])),
+                ("image".to_string(), image.clone()),
+                ("script".to_string(), script.clone()),
             ]));
 
             let result = builder
@@ -1561,18 +1549,13 @@ mod tests {
         let mut inputs = BuilderInputs::empty();
         inputs.insert(
             "image",
-            BuilderInputValue::One(BuilderInputObject {
+            BuilderInputObject {
                 object_path: bad_image_dir,
                 meta: Map::new(),
-            }),
+            },
         );
-        inputs.insert(
-            "in",
-            BuilderInputValue::Many(vec![
-                resolved_file(temp.path(), "script.sh", true, Map::new()),
-                resolved_directory(temp.path(), "src", Map::new()),
-            ]),
-        );
+        inputs.insert("script", resolved_file(temp.path(), "script.sh", true, Map::new()));
+        inputs.insert("source", resolved_directory(temp.path(), "src", Map::new()));
 
         let error = BinaryBuilder
             .build_typed(default_config(), inputs, &mut cx)
@@ -1752,7 +1735,7 @@ mod tests {
     }
 
     #[test]
-    fn binary_builder_reports_phase_failure() {
+    fn binary_builder_reports_step_failure() {
         with_fake_podman(|| {
             let temp = tempdir().unwrap();
             let mut cx = build_context(temp.path());
@@ -1779,8 +1762,8 @@ mod tests {
                     steps: vec![BuildStep {
                         name: "configure".to_string(),
                         run_as: StepUser::BuildUser,
-                        cwd: "${source}".to_string(),
-                        argv: vec!["${script}".to_string(), "configure".to_string()],
+                        cwd: "${in0}".to_string(),
+                        argv: vec!["${in}".to_string(), "configure".to_string()],
                         env: Map::new(),
                     }],
                     install: None,
@@ -1801,16 +1784,19 @@ mod tests {
             name: "install".to_string(),
             run_as: StepUser::Root,
             cwd: "${build}".to_string(),
-            argv: vec!["${in1}".to_string(), "install".to_string()],
+            argv: vec!["${missing_patch}".to_string(), "install".to_string()],
             env: Map::new(),
         };
         let error = resolve_step_argv(
             &step,
-            &[resolved_file(temp.path(), "script.sh", true, Map::new())],
+            &[(
+                "script".to_string(),
+                resolved_file(temp.path(), "script.sh", true, Map::new()),
+            )],
         )
         .unwrap_err();
 
         let message = error.to_string();
-        assert!(message.contains("missing input"), "{message}");
+        assert!(message.contains("unknown interpolation variable"), "{message}");
     }
 }

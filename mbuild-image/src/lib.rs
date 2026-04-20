@@ -4,7 +4,7 @@ mod registry;
 
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
-    InputArity, InputSlot, StagedBuildResult, TypedBuilder,
+    StagedBuildResult, TypedBuilder,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -83,23 +83,16 @@ pub struct ImageBuilder;
 
 static CONTAINER_IMAGE_SPEC: BuilderSpec = BuilderSpec {
     tag: "ContainerImage",
-    inputs: &[] as &[InputSlot],
+    required_inputs: &[],
+    optional_inputs: &[],
+    allow_extra_inputs: false,
 };
-
-static IMAGE_INPUTS: &[InputSlot] = &[
-    InputSlot {
-        name: "base",
-        arity: InputArity::Optional,
-    },
-    InputSlot {
-        name: "inputs",
-        arity: InputArity::Many,
-    },
-];
 
 static IMAGE_SPEC: BuilderSpec = BuilderSpec {
     tag: "Image",
-    inputs: IMAGE_INPUTS,
+    required_inputs: &[],
+    optional_inputs: &["base"],
+    allow_extra_inputs: true,
 };
 
 impl TypedBuilder for ContainerImageBuilder {
@@ -181,9 +174,12 @@ impl TypedBuilder for ImageBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
-        let base = inputs.optional("base")?;
-        let binaries = inputs.many("inputs")?;
-        validate_image_config(&config, base, binaries).map_err(map_image_error)?;
+        let base = inputs.optional("base");
+        let binaries = inputs
+            .extras(&IMAGE_SPEC)
+            .map(|(_, object)| object.clone())
+            .collect::<Vec<_>>();
+        validate_image_config(&config, base, &binaries).map_err(map_image_error)?;
 
         let mode = effective_image_mode(&config, base).map_err(map_image_error)?;
         cx.log_event(
@@ -200,11 +196,12 @@ impl TypedBuilder for ImageBuilder {
         let ref_name = config.ref_name.as_deref();
         let manifest_digest = match mode {
             "bootstrap" => {
-                run_bootstrap_mode(&staged_path, binaries, ref_name).map_err(map_image_error)?
+                run_bootstrap_mode(&staged_path, &binaries, ref_name).map_err(map_image_error)?
             }
             "layered" => {
                 let base = base.unwrap();
-                run_layered_mode(&staged_path, base, binaries, ref_name).map_err(map_image_error)?
+                run_layered_mode(&staged_path, base, &binaries, ref_name)
+                    .map_err(map_image_error)?
             }
             _ => unreachable!(),
         };
@@ -430,7 +427,7 @@ fn map_image_error(error: ImageError) -> BuilderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{Builder, BuilderInputObject, BuilderInputValue, BuilderInputs};
+    use mbuild_core::{Builder, BuilderInputObject, BuilderInputs};
     use sha2::{Digest, Sha256};
     use std::fs;
     use std::path::PathBuf;
@@ -637,7 +634,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("base", BuilderInputValue::Many(vec![]));
+        inputs.insert("unexpected", resolved_binary_output(temp.path(), "bin-out"));
 
         let error = ContainerImageBuilder
             .build_typed(
@@ -701,11 +698,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("base", BuilderInputValue::Optional(None));
-        inputs.insert(
-            "inputs",
-            BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
-        );
+        inputs.insert("in000", resolved_binary_output(temp.path(), "bin-out"));
 
         let result = ImageBuilder
             .build_typed(
@@ -738,11 +731,8 @@ mod tests {
         let mut cx = build_context(temp.path());
         let base = resolved_base_image(temp.path());
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("base", BuilderInputValue::Optional(Some(base)));
-        inputs.insert(
-            "inputs",
-            BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
-        );
+        inputs.insert("base", base);
+        inputs.insert("in000", resolved_binary_output(temp.path(), "bin-out"));
 
         let result = ImageBuilder
             .build_typed(
@@ -776,11 +766,8 @@ mod tests {
             meta: Map::new(),
         };
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("base", BuilderInputValue::Optional(Some(base)));
-        inputs.insert(
-            "inputs",
-            BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
-        );
+        inputs.insert("base", base);
+        inputs.insert("in000", resolved_binary_output(temp.path(), "bin-out"));
 
         let result = ImageBuilder
             .build_typed(
@@ -815,11 +802,8 @@ mod tests {
             meta: Map::new(),
         };
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("base", BuilderInputValue::Optional(Some(base)));
-        inputs.insert(
-            "inputs",
-            BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
-        );
+        inputs.insert("base", base);
+        inputs.insert("in000", resolved_binary_output(temp.path(), "bin-out"));
 
         let error = ImageBuilder
             .build_typed(
@@ -840,11 +824,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("base", BuilderInputValue::Optional(None));
-        inputs.insert(
-            "inputs",
-            BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
-        );
+        inputs.insert("in000", resolved_binary_output(temp.path(), "bin-out"));
 
         let error = ImageBuilder
             .build_typed(
@@ -865,11 +845,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("base", BuilderInputValue::Optional(None));
-        inputs.insert(
-            "inputs",
-            BuilderInputValue::Many(vec![resolved_binary_output(temp.path(), "bin-out")]),
-        );
+        inputs.insert("in000", resolved_binary_output(temp.path(), "bin-out"));
 
         let error = ImageBuilder
             .build_erased(

@@ -320,7 +320,9 @@ mod tests {
 
     static RUNTIME_TEST_SPEC: BuilderSpec = BuilderSpec {
         tag: "RuntimeTest",
-        inputs: &[],
+        required_inputs: &[],
+        optional_inputs: &[],
+        allow_extra_inputs: false,
     };
 
     #[derive(Debug)]

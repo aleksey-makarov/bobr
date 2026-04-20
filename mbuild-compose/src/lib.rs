@@ -1,7 +1,7 @@
 use globset::{Glob, GlobMatcher};
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
-    InputArity, InputSlot, StagedBuildResult, TypedBuilder,
+    StagedBuildResult, TypedBuilder,
 };
 use serde::Deserialize;
 use serde_json::Map;
@@ -130,14 +130,11 @@ struct RootManifest {
 
 pub struct Ext4RootfsBuilder;
 
-static EXT4_ROOTFS_INPUTS: &[InputSlot] = &[InputSlot {
-    name: "inputs",
-    arity: InputArity::Many,
-}];
-
 static EXT4_ROOTFS_SPEC: BuilderSpec = BuilderSpec {
     tag: "Ext4Rootfs",
-    inputs: EXT4_ROOTFS_INPUTS,
+    required_inputs: &[],
+    optional_inputs: &[],
+    allow_extra_inputs: true,
 };
 
 impl TypedBuilder for Ext4RootfsBuilder {
@@ -154,7 +151,10 @@ impl TypedBuilder for Ext4RootfsBuilder {
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         validate_config(&config).map_err(map_error)?;
-        let trees = inputs.many("inputs")?;
+        let trees = inputs
+            .extras(&EXT4_ROOTFS_SPEC)
+            .map(|(_, object)| object)
+            .collect::<Vec<_>>();
         if trees.is_empty() {
             return Err(map_error(ComposeError::InvalidConfig(
                 "Ext4Rootfs builder requires at least one directory input".to_string(),
@@ -956,10 +956,7 @@ mod tests {
         fs::create_dir_all(&tree).unwrap();
         fs::write(tree.join("file"), b"payload\n").unwrap();
         let mut inputs = BuilderInputs::empty();
-        inputs.insert(
-            "inputs",
-            mbuild_core::BuilderInputValue::Many(vec![builder_input(tree, Map::new())]),
-        );
+        inputs.insert("in000", builder_input(tree, Map::new()));
 
         let mut cx = test_context(temp.path());
         let error = Ext4RootfsBuilder
@@ -992,13 +989,7 @@ mod tests {
 
         let build_once = |suffix: &str| {
             let mut inputs = BuilderInputs::empty();
-            inputs.insert(
-                "inputs",
-                mbuild_core::BuilderInputValue::Many(vec![builder_input(
-                    tree.clone(),
-                    install_meta_with_overrides(),
-                )]),
-            );
+            inputs.insert("in000", builder_input(tree.clone(), install_meta_with_overrides()));
             let ctx_root = temp.path().join(format!("ctx-{suffix}"));
             fs::create_dir_all(&ctx_root).unwrap();
             let mut cx = test_context(&ctx_root);

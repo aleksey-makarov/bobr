@@ -107,7 +107,8 @@ Current limitations:
 
 Inputs:
 
-- repeated `inputs`: one or more installable directory objects
+- one or more named installable directory inputs
+- contribution order follows lexical input name order
 
 Current behavior:
 

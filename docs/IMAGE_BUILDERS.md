@@ -66,7 +66,8 @@ The current realized result metadata contains:
 `Image` accepts:
 
 - optional `base`: one OCI image layout directory
-- repeated `inputs`: one or more filesystem tree directories
+- one or more named filesystem tree inputs
+- layer order follows lexical input name order after `base`
 
 Config fields:
 
@@ -133,7 +134,7 @@ reference passed to `podman`.
 
 `Binary` mounts:
 
-- ordinary inputs under `/__mbuild/in0`, `/__mbuild/in1`, ...
+- ordinary named inputs under `/__mbuild/inputs/<name>`
 - the serialized `script_config` directory under `/__mbuild/config`
 
 `/__mbuild/build` and `/__mbuild/out` are container-private writable directories created
@@ -141,8 +142,6 @@ inside the container lifecycle, not host bind mounts.
 
 `Binary` also exports:
 
-- `MBUILD_IN=/__mbuild/in0` when at least one input exists
-- `MBUILD_IN0`, `MBUILD_IN1`, ...
 - `MBUILD_CONFIG_DIR=/__mbuild/config`
 - `MBUILD_BUILD_DIR=/__mbuild/build`
 - `MBUILD_OUT_DIR=/__mbuild/out`
@@ -157,19 +156,19 @@ inside the container lifecycle, not host bind mounts.
       "name": "configure",
       "run_as": "build-user",
       "cwd": "${build}",
-      "argv": ["${in0}", "configure"]
+      "argv": ["${script}", "configure"]
     },
     {
       "name": "build",
       "run_as": "build-user",
       "cwd": "${build}",
-      "argv": ["${in0}", "build"]
+      "argv": ["${script}", "build"]
     },
     {
       "name": "install",
       "run_as": "root",
       "cwd": "${build}",
-      "argv": ["${in0}", "install"]
+      "argv": ["${script}", "install"]
     }
   ],
   "script_config": { "...": "..." }
@@ -195,11 +194,10 @@ Each step contains:
 `Binary` performs controlled interpolation in `cwd`, `argv`, and step-local
 environment values. Supported variables are:
 
-- `${in}`
-- `${in0}`, `${in1}`, ...
 - `${config}`
 - `${build}`
 - `${out}`
+- any named input placeholder such as `${script}`, `${source}`, `${patch}`
 
 Interpolation is a simple path substitution:
 
@@ -211,7 +209,7 @@ Interpolation is a simple path substitution:
 
 This means:
 
-- directory input mutations inside `/__mbuild/inN` survive across all steps of
+- directory input mutations inside `/__mbuild/inputs/<name>` survive across all steps of
   one `Binary` build because all steps run in the same container lifecycle
 - the realized result is exported from `/__mbuild/out` via `podman cp` after the
   final successful step

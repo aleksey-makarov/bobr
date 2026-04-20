@@ -70,15 +70,8 @@ fn normalize_request(recipe: &Value) -> Value {
         next_id: &mut usize,
     ) -> Value {
         match value {
-            Value::Null => Value::Null,
-            Value::Array(items) => Value::Array(
-                items
-                    .iter()
-                    .map(|item| Value::String(visit(item, nodes, next_id, false)))
-                    .collect(),
-            ),
             Value::Object(_) => Value::String(visit(value, nodes, next_id, false)),
-            _ => panic!("recipe input must be null, object, or array"),
+            _ => panic!("recipe input must be an object"),
         }
     }
 
@@ -308,25 +301,25 @@ pub fn default_binary_steps() -> Value {
             "name": "configure",
             "run_as": "build-user",
             "cwd": "${build}",
-            "argv": ["${in0}", "configure"]
+            "argv": ["${script}", "configure"]
         },
         {
             "name": "build",
             "run_as": "build-user",
             "cwd": "${build}",
-            "argv": ["${in0}", "build"]
+            "argv": ["${script}", "build"]
         },
         {
             "name": "install",
             "run_as": "root",
             "cwd": "${build}",
-            "argv": ["${in0}", "install"]
+            "argv": ["${script}", "install"]
         },
         {
             "name": "post_install",
             "run_as": "root",
             "cwd": "${build}",
-            "argv": ["${in0}", "post_install"]
+            "argv": ["${script}", "post_install"]
         }
     ])
 }
@@ -340,19 +333,21 @@ pub fn binary_recipe(name: &str, url: &str, source_hash: &str, image: &str, dige
         }),
         json!({
             "image": base_image_recipe(image, digest),
-            "in": [script_recipe(), source_recipe(url, source_hash)],
+            "script": script_recipe(),
+            "source": source_recipe(url, source_hash),
         }),
     )
 }
 
 pub fn image_recipe(name: &str, inputs: Vec<Value>) -> Value {
+    let mut named_inputs = serde_json::Map::new();
+    for (index, input) in inputs.into_iter().enumerate() {
+        named_inputs.insert(format!("in{index:03}"), input);
+    }
     recipe_node(
         name,
         "Image",
         json!({ "mode": "bootstrap" }),
-        json!({
-            "base": null,
-            "inputs": inputs,
-        }),
+        Value::Object(named_inputs),
     )
 }

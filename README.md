@@ -20,7 +20,8 @@ Every recipe node still uses one generic shape:
     "config": {},
     "inputs": {
       "image": "image_1",
-      "in": ["script_1", "src_0"]
+      "script": "script_1",
+      "source": "src_0"
     }
   }
 }
@@ -31,20 +32,21 @@ Node payload fields:
 - `name`: publication name
 - `tag`: builder tag from the Rust builder registry
 - `config`: opaque builder payload
-- `inputs`: object keyed by input slot names from the selected `BuilderSpec`
+- `inputs`: object keyed by named input dependencies
 
-Input encoding is generic and follows the slot arity declared by the builder:
+Input encoding is generic:
 
-- `One`: one node id string
-- `Optional`: always present, either `null` or one node id string
-- `Many`: an array of node id strings
+- every present input value is one node id string
+- optional inputs are represented by field absence
+- ordered extra inputs are expressed by sortable names such as `in000`,
+  `in001`, ...
 
 The runtime rejects:
 
 - unknown builder tags
-- extra input slots
-- missing declared slots
-- wrong input arity for a slot
+- missing required inputs
+- extra inputs for builders that do not allow them
+- non-string input values
 
 `mbuild build` defaults to `./.mbuild/recipe.json`. On success it prints the
 realized root `Build` as JSON to `stdout`. Live progress goes to `stderr`. Use
@@ -75,9 +77,13 @@ Each direct input identity contains:
 - `object_hash`
 - `meta_hash`
 
-The dependency order comes from `BuilderSpec.inputs`, not from JSON field order
-or node id order. This lets `mbuild` keep the general runtime independent from
-concrete builders.
+The dependency order comes from the builder input contract:
+
+- reserved inputs in spec order
+- extra inputs in lexical name order
+
+It does not depend on JSON field order or node id order. This lets `mbuild`
+keep the general runtime independent from concrete builders.
 
 Concrete builder behavior is documented separately:
 

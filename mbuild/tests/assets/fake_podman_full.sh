@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-state_root="$(dirname "$0")/.fake-podman-state"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+state_root="$script_dir/.fake-podman-state"
 mkdir -p "$state_root"
 
 if [ "${1:-}" = image ] && [ "${2:-}" = exists ]; then
@@ -34,8 +35,8 @@ if [ "${1:-}" = create ]; then
           echo invalid volume spec: "$spec" >&2
           exit 1
         fi
-        if [[ "$mount" == /__mbuild/in* ]]; then
-          name="${mount#/__mbuild/}"
+        if [[ "$mount" == /__mbuild/inputs/* ]]; then
+          name="${mount#/__mbuild/inputs/}"
           mkdir -p "$state_root/create-mounts"
           printf '%s\n' "$host" > "$state_root/create-mounts/$name"
         elif [ "$mount" = "/__mbuild/config" ]; then

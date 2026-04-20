@@ -1,10 +1,10 @@
 use crate::builders;
 use crate::logging::{BuildRunLogger, RunOptions};
 use crate::recipe::{
-    CollectedGraph, PlannedInputValue, PlannedNode, PlannedRecipe, PlanningState, RecipeRequest,
-    ReuseOrigin, collect_graph,
+    CollectedGraph, PlannedNode, PlannedRecipe, PlanningState, RecipeRequest, ReuseOrigin,
+    collect_graph,
 };
-use crate::resolved_inputs::{ResolvedDependencyValue, ResolvedInputs};
+use crate::resolved_inputs::ResolvedInputs;
 use crate::runtime::{
     RuntimeError, build_to_published, execute_builder_node, log_runtime_event, lookup_build_handle,
     lookup_canonical_result, map_store_error, to_resolved_dependency,
@@ -413,51 +413,14 @@ fn execute_misses(
 
 fn build_resolved_inputs(
     layout: &StoreLayout,
-    builder: &'static dyn mbuild_core::Builder,
+    _builder: &'static dyn mbuild_core::Builder,
     recipe: &PlannedRecipe,
     completed: &HashMap<BuildKey, Build>,
 ) -> Result<ResolvedInputs, RuntimeError> {
     let mut inputs = ResolvedInputs::empty();
-    for slot in builder.spec().inputs {
-        let planned = recipe.inputs().get(slot.name).ok_or_else(|| {
-            RuntimeError::InvalidRequest(format!(
-                "planned recipe '{}' is missing input slot '{}' for builder '{}'",
-                recipe.build_name(),
-                slot.name,
-                builder.spec().tag
-            ))
-        })?;
-        match (slot.arity, planned) {
-            (mbuild_core::InputArity::One, PlannedInputValue::One(key)) => {
-                let dep = resolved_dependency_from_completed(layout, completed, *key)?;
-                inputs.insert(slot.name, ResolvedDependencyValue::One(dep));
-            }
-            (mbuild_core::InputArity::Optional, PlannedInputValue::Optional(maybe_key)) => {
-                let dep = match maybe_key {
-                    Some(key) => {
-                        let dep = resolved_dependency_from_completed(layout, completed, *key)?;
-                        Some(dep)
-                    }
-                    None => None,
-                };
-                inputs.insert(slot.name, ResolvedDependencyValue::Optional(dep));
-            }
-            (mbuild_core::InputArity::Many, PlannedInputValue::Many(keys)) => {
-                let mut deps = Vec::with_capacity(keys.len());
-                for key in keys {
-                    let dep = resolved_dependency_from_completed(layout, completed, *key)?;
-                    deps.push(dep);
-                }
-                inputs.insert(slot.name, ResolvedDependencyValue::Many(deps));
-            }
-            (arity, _) => {
-                return Err(RuntimeError::InvalidRequest(format!(
-                    "planned recipe '{}' has unexpected value shape for slot '{}' with arity '{arity:?}'",
-                    recipe.build_name(),
-                    slot.name,
-                )));
-            }
-        }
+    for (name, key) in recipe.inputs() {
+        let dep = resolved_dependency_from_completed(layout, completed, *key)?;
+        inputs.insert(name, dep);
     }
     Ok(inputs)
 }
@@ -515,7 +478,7 @@ mod tests {
                     "config": {},
                     "inputs": {
                         "image": "image",
-                        "in": ["script"]
+                        "script": "script"
                     }
                 },
                 "image": {

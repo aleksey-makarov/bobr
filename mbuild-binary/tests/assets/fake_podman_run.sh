@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-state_root="$(dirname "$0")/.fake-podman-state"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+state_root="$script_dir/.fake-podman-state"
 mkdir -p "$state_root"
 
 if [ "${1:-}" = image ] && [ "${2:-}" = exists ]; then
@@ -28,9 +29,6 @@ if [ "${1:-}" = create ]; then
   build_dir=""
   out_dir=""
   config_dir=""
-  input_dir=""
-  input0_dir=""
-  input1_dir=""
   config_host=""
   image_ref=""
   userns_mode=""
@@ -46,8 +44,8 @@ if [ "${1:-}" = create ]; then
           echo invalid volume spec: "$spec" >&2
           exit 1
         fi
-        if [[ "$mount" == /__mbuild/in* ]]; then
-          name="${mount#/__mbuild/}"
+        if [[ "$mount" == /__mbuild/inputs/* ]]; then
+          name="${mount#/__mbuild/inputs/}"
           mkdir -p "$state_root/create-mounts"
           printf '%s\n' "$host" > "$state_root/create-mounts/$name"
         elif [ "$mount" = "/__mbuild/config" ]; then
@@ -58,9 +56,6 @@ if [ "${1:-}" = create ]; then
       --env)
         kv="$2"
         case "$kv" in
-          MBUILD_IN=*) input_dir="${kv#*=}" ;;
-          MBUILD_IN0=*) input0_dir="${kv#*=}" ;;
-          MBUILD_IN1=*) input1_dir="${kv#*=}" ;;
           MBUILD_BUILD_DIR=*) build_dir="${kv#*=}" ;;
           MBUILD_OUT_DIR=*) out_dir="${kv#*=}" ;;
           MBUILD_CONFIG_DIR=*) config_dir="${kv#*=}" ;;
@@ -107,9 +102,6 @@ if [ "${1:-}" = create ]; then
   printf '%s\n' "$build_dir" > "$container_dir/build_dir"
   printf '%s\n' "$out_dir" > "$container_dir/out_dir"
   printf '%s\n' "$config_dir" > "$container_dir/config_dir"
-  printf '%s\n' "$input_dir" > "$container_dir/input_dir"
-  printf '%s\n' "$input0_dir" > "$container_dir/input0_dir"
-  printf '%s\n' "$input1_dir" > "$container_dir/input1_dir"
   printf '%s\n' "$config_host" > "$container_dir/config_host"
   printf '%s\n' "$image_ref" > "$container_dir/image_ref"
   printf '%s\n' "$userns_mode" > "$container_dir/userns_mode"
@@ -161,9 +153,6 @@ if [ "${1:-}" = exec ]; then
   config_host="$(cat "$container_dir/config_host")"
   config_dir="$(cat "$container_dir/config_dir")"
   build_dir="$(cat "$container_dir/build_dir")"
-  input_dir="$(cat "$container_dir/input_dir")"
-  input0_dir="$(cat "$container_dir/input0_dir")"
-  input1_dir="$(cat "$container_dir/input1_dir")"
   out_dir="$(cat "$container_dir/out_dir")"
   image_ref="$(cat "$container_dir/image_ref")"
   userns_mode="$(cat "$container_dir/userns_mode")"
@@ -218,9 +207,11 @@ if [ "${1:-}" = exec ]; then
         cp -R "$config_host/." "$out_root/script-config/" 2>/dev/null || true
         printf '%s\n' "$config_dir" > "$out_root/script-config-dir.txt"
       fi
-      printf '%s\n' "$input_dir" > "$out_root/in-env.txt"
-      printf '%s\n' "$input0_dir" > "$out_root/in0-env.txt"
-      printf '%s\n' "$input1_dir" > "$out_root/in1-env.txt"
+      for mount_file in "$container_dir"/in-mounts/*; do
+        [ -f "$mount_file" ] || continue
+        mount_name="$(basename "$mount_file")"
+        printf '/__mbuild/inputs/%s\n' "$mount_name" > "$out_root/$mount_name-mount.txt"
+      done
       printf '%s\n' "$build_dir" > "$out_root/build-dir.txt"
       printf '%s\n' "$out_dir" > "$out_root/out-dir.txt"
       ;;

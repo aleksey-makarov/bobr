@@ -32,20 +32,21 @@ Every node has the same outer shape:
 - `inputs`
 
 `tag` selects one registered builder. `config` is opaque builder payload.
-`inputs` is an object keyed by slot names from `BuilderSpec.inputs`.
+`inputs` is an object keyed by named input dependencies.
 
-Input values are encoded by declared slot arity:
+Input values are encoded generically:
 
-- `One`: one inline recipe object
-- `Optional`: always present, either `null` or one inline recipe object
-- `Many`: an array of inline recipe objects
+- every present input value is one node id string
+- optional inputs are omitted entirely
+- ordered extra inputs are expressed by sortable names such as `in000`,
+  `in001`, ...
 
 The runtime rejects:
 
 - unknown builder tags
-- extra input slots
-- missing declared slots
-- input values that do not match the declared arity
+- missing required inputs
+- extra inputs for builders that do not allow them
+- non-string input values
 
 Children are always referenced by node id.
 
@@ -57,8 +58,12 @@ For one recipe node, `build_key` is computed from:
 - normalized config payload
 - ordered direct dependency `build_key`s
 
-Dependency order follows `BuilderSpec.inputs` order, not the order of fields in
-JSON.
+Dependency order follows the builder input contract:
+
+- reserved inputs in spec order
+- extra inputs in lexical name order
+
+It does not follow the order of fields in JSON.
 
 `result_key` is computed from:
 
@@ -117,7 +122,7 @@ current filesystem composition builder contract is described in
 
 Builders may use both the realized payload content and the resolved input
 metadata they receive. Input validation is builder-specific and is based on
-slot semantics plus payload inspection.
+named input semantics plus payload inspection.
 
 Builder semantics depend only on:
 

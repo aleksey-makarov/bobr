@@ -97,16 +97,21 @@ fn cli_reports_invalid_json_recipe() {
 fn cli_reports_invalid_generic_input_shape() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("broken-shape.json");
-    let recipe = recipe_node(
-        "bin",
-        "Binary",
-        json!({}),
-        json!({
-            "image": [],
-            "in": []
-        }),
-    );
-    write_recipe(&recipe_path, &recipe);
+    fs::write(
+        &recipe_path,
+        serde_json::to_vec_pretty(&json!({
+            "root": {
+                "name": "bin",
+                "tag": "Binary",
+                "config": {},
+                "inputs": {
+                    "image": []
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
         .arg(&recipe_path)
@@ -117,10 +122,7 @@ fn cli_reports_invalid_generic_input_shape() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
-    assert!(
-        stderr.contains("input slot 'image' must be a single node id string"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("expected node id string"), "{stderr}");
 }
 
 #[test]
@@ -135,7 +137,7 @@ fn cli_reports_unknown_input_slot() {
             "executable": false
         }),
         json!({
-            "unexpected": null
+            "unexpected": text_recipe("dep", "hello", false)
         }),
     );
     write_recipe(&recipe_path, &recipe);
@@ -149,8 +151,5 @@ fn cli_reports_unknown_input_slot() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
-    assert!(
-        stderr.contains("does not define input slot 'unexpected'"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("does not accept extra input 'unexpected'"), "{stderr}");
 }

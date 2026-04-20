@@ -1,6 +1,6 @@
 use crate::builders;
 use crate::runtime::{RuntimeError, map_store_error};
-use mbuild_core::{BuildKey, BuilderSpec, InputArity, compute_build_key};
+use mbuild_core::{BuildKey, BuilderSpec, compute_build_key};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -14,14 +14,7 @@ pub struct Recipe {
     name: String,
     tag: String,
     config: Value,
-    inputs: BTreeMap<String, RecipeInputValue>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum RecipeInputValue {
-    One(String),
-    Null,
-    Many(Vec<String>),
+    inputs: BTreeMap<String, String>,
 }
 
 impl RecipeRequest {
@@ -44,7 +37,7 @@ pub(crate) struct PlannedRecipe {
     name: String,
     spec: &'static BuilderSpec,
     config: Value,
-    inputs: BTreeMap<String, PlannedInputValue>,
+    inputs: BTreeMap<String, BuildKey>,
 }
 
 impl PlannedRecipe {
@@ -60,7 +53,7 @@ impl PlannedRecipe {
         &self.config
     }
 
-    pub(crate) fn inputs(&self) -> &BTreeMap<String, PlannedInputValue> {
+    pub(crate) fn inputs(&self) -> &BTreeMap<String, BuildKey> {
         &self.inputs
     }
 
@@ -68,31 +61,15 @@ impl PlannedRecipe {
         &self,
         mut f: impl FnMut(BuildKey) -> Result<(), E>,
     ) -> Result<(), E> {
-        for slot in self.spec.inputs {
-            let input = self
+        for name in self.spec.ordered_present_input_names(&self.inputs) {
+            let key = self
                 .inputs
-                .get(slot.name)
+                .get(name)
                 .expect("planned recipe inputs must match builder spec");
-            match input {
-                PlannedInputValue::One(key) => f(*key)?,
-                PlannedInputValue::Optional(Some(key)) => f(*key)?,
-                PlannedInputValue::Optional(None) => {}
-                PlannedInputValue::Many(keys) => {
-                    for key in keys {
-                        f(*key)?;
-                    }
-                }
-            }
+            f(*key)?;
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum PlannedInputValue {
-    One(BuildKey),
-    Optional(Option<BuildKey>),
-    Many(Vec<BuildKey>),
 }
 
 #[derive(Debug, Clone)]
@@ -186,75 +163,37 @@ fn collect_graph_inner(
     })?;
     let spec = builder.spec();
 
+    let reserved_inputs = spec.reserved_input_names().collect::<Vec<_>>();
     for input_name in recipe.inputs.keys() {
-        if spec.inputs.iter().all(|slot| slot.name != input_name) {
+        if !spec.allow_extra_inputs && !spec.is_reserved_input(input_name) {
             return Err(RuntimeError::InvalidRequest(format!(
-                "builder '{}' does not define input slot '{}'; allowed slots: {}",
+                "builder '{}' does not accept extra input '{}'; allowed inputs: {}",
                 spec.tag,
                 input_name,
-                spec.inputs
-                    .iter()
-                    .map(|slot| slot.name)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                reserved_inputs.join(", ")
             )));
         }
     }
 
     let mut inputs = BTreeMap::new();
+    for required in spec.required_inputs {
+        if !recipe.inputs.contains_key(*required) {
+            return Err(RuntimeError::InvalidRequest(format!(
+                "builder '{}' is missing required input '{}' in recipe '{}'",
+                spec.tag, required, recipe.name
+            )));
+        }
+    }
+
     let mut ordered_direct_deps = Vec::new();
-    for slot in spec.inputs {
-        let input = recipe.inputs.get(slot.name).ok_or_else(|| {
-            RuntimeError::InvalidRequest(format!(
-                "builder '{}' is missing required input slot '{}' in recipe '{}'",
-                spec.tag, slot.name, recipe.name
-            ))
-        })?;
-        let planned = match (slot.arity, input) {
-            (InputArity::One, RecipeInputValue::One(child_id)) => {
-                let key =
-                    collect_graph_inner(request, child_id, nodes, stack, node_keys, topo_order)?;
-                ordered_direct_deps.push(key);
-                PlannedInputValue::One(key)
-            }
-            (InputArity::Optional, RecipeInputValue::Null) => PlannedInputValue::Optional(None),
-            (InputArity::Optional, RecipeInputValue::One(child_id)) => {
-                let key =
-                    collect_graph_inner(request, child_id, nodes, stack, node_keys, topo_order)?;
-                ordered_direct_deps.push(key);
-                PlannedInputValue::Optional(Some(key))
-            }
-            (InputArity::Many, RecipeInputValue::Many(child_ids)) => {
-                let mut keys = Vec::with_capacity(child_ids.len());
-                for child_id in child_ids {
-                    let key = collect_graph_inner(
-                        request, child_id, nodes, stack, node_keys, topo_order,
-                    )?;
-                    ordered_direct_deps.push(key);
-                    keys.push(key);
-                }
-                PlannedInputValue::Many(keys)
-            }
-            (InputArity::One, _) => {
-                return Err(RuntimeError::InvalidRequest(format!(
-                    "builder '{}' input slot '{}' must be a single node id string",
-                    spec.tag, slot.name
-                )));
-            }
-            (InputArity::Optional, _) => {
-                return Err(RuntimeError::InvalidRequest(format!(
-                    "builder '{}' optional input slot '{}' must be null or a single node id string",
-                    spec.tag, slot.name
-                )));
-            }
-            (InputArity::Many, _) => {
-                return Err(RuntimeError::InvalidRequest(format!(
-                    "builder '{}' repeated input slot '{}' must be an array of node id strings",
-                    spec.tag, slot.name
-                )));
-            }
-        };
-        inputs.insert(slot.name.to_string(), planned);
+    for (input_name, child_id) in &recipe.inputs {
+        let key = collect_graph_inner(request, child_id, nodes, stack, node_keys, topo_order)?;
+        inputs.insert(input_name.clone(), key);
+    }
+    for input_name in spec.ordered_present_input_names(&inputs) {
+        if let Some(key) = inputs.get(input_name) {
+            ordered_direct_deps.push(*key);
+        }
     }
 
     stack.remove(node_id);
@@ -326,6 +265,7 @@ fn parse_recipe_value(value: Value, path: &str) -> Result<Recipe, RuntimeError> 
         .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}.inputs: expected object")))?;
     let mut inputs = BTreeMap::new();
     for (slot_name, slot_value) in inputs_object {
+        validate_input_name(&slot_name, &format!("{path}.inputs"))?;
         let input_path = format!("{path}.inputs.{slot_name}");
         inputs.insert(slot_name, parse_input_value(slot_value, &input_path)?);
     }
@@ -338,24 +278,39 @@ fn parse_recipe_value(value: Value, path: &str) -> Result<Recipe, RuntimeError> 
     })
 }
 
-fn parse_input_value(value: Value, path: &str) -> Result<RecipeInputValue, RuntimeError> {
+fn parse_input_value(value: Value, path: &str) -> Result<String, RuntimeError> {
     match value {
-        Value::Null => Ok(RecipeInputValue::Null),
-        Value::Array(items) => {
-            let mut children = Vec::with_capacity(items.len());
-            for (index, item) in items.into_iter().enumerate() {
-                let child_id = item.as_str().ok_or_else(|| {
-                    RuntimeError::RecipeLoad(format!("{path}[{index}]: expected node id string"))
-                })?;
-                children.push(child_id.to_string());
-            }
-            Ok(RecipeInputValue::Many(children))
-        }
-        Value::String(child_id) => Ok(RecipeInputValue::One(child_id)),
+        Value::String(child_id) => Ok(child_id),
+        Value::Null => Err(RuntimeError::RecipeLoad(format!(
+            "{path}: expected node id string, got null"
+        ))),
+        Value::Array(_) => Err(RuntimeError::RecipeLoad(format!(
+            "{path}: expected node id string, got array"
+        ))),
         _ => Err(RuntimeError::RecipeLoad(format!(
-            "{path}: expected null, node id string, or array of node id strings"
+            "{path}: expected node id string"
         ))),
     }
+}
+
+fn validate_input_name(name: &str, path: &str) -> Result<(), RuntimeError> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{path}: input name must not be empty"
+        )));
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{path}: input name '{name}' must start with an ASCII letter or underscore"
+        )));
+    }
+    if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{path}: input name '{name}' must contain only ASCII letters, digits, and underscores"
+        )));
+    }
+    Ok(())
 }
 
 fn take_string(
@@ -424,14 +379,20 @@ mod tests {
                 "name": "text",
                 "tag": "Text",
                 "config": { "source": "hello", "executable": false },
-                "inputs": { "unexpected": null }
+                "inputs": { "unexpected": "dep" }
+            },
+            "dep": {
+                "name": "dep",
+                "tag": "Text",
+                "config": { "source": "dep", "executable": false },
+                "inputs": {}
             }
         });
         let error = collect_one(&request).unwrap_err();
         assert!(
             error
                 .to_string()
-                .contains("does not define input slot 'unexpected'"),
+                .contains("does not accept extra input 'unexpected'"),
             "{error}"
         );
     }
@@ -440,64 +401,10 @@ mod tests {
     fn missing_required_input_slot_is_rejected() {
         let request = json!({
             "root": {
-                "name": "img",
-                "tag": "Image",
-                "config": { "mode": "bootstrap" },
-                "inputs": {}
-            }
-        });
-        let error = collect_one(&request).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("missing required input slot 'base'"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn wrong_input_arity_is_rejected() {
-        let request = json!({
-            "root": {
                 "name": "bin",
                 "tag": "Binary",
                 "config": {},
-                "inputs": {
-                    "image": [],
-                    "in": []
-                }
-            }
-        });
-        let error = collect_one(&request).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("input slot 'image' must be a single node id string"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn old_binary_input_shape_is_rejected() {
-        let request = json!({
-            "root": {
-                "name": "bin",
-                "tag": "Binary",
-                "config": {},
-                "inputs": {
-                    "image": "image",
-                    "script": "script",
-                    "sources": []
-                }
-            },
-            "image": {
-                "name": "image",
-                "tag": "ContainerImage",
-                "config": {
-                    "image": "docker.io/library/buildpack-deps:bookworm",
-                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                },
-                "inputs": {}
+                "inputs": { "script": "script" }
             },
             "script": {
                 "name": "script",
@@ -510,7 +417,50 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("does not define input slot 'script'"),
+                .contains("builder 'Binary' is missing required input 'image'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn non_string_input_is_rejected() {
+        let request = json!({
+            "root": {
+                "name": "bin",
+                "tag": "Binary",
+                "config": {},
+                "inputs": {
+                    "image": []
+                }
+            }
+        });
+        let error = collect_one(&request).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("expected node id string, got array"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn null_input_is_rejected() {
+        let request = json!({
+            "root": {
+                "name": "img",
+                "tag": "Image",
+                "config": {},
+                "inputs": {
+                    "base": null
+                }
+            }
+        });
+        let error = RecipeRequest::parse_json(serde_json::to_vec(&request).unwrap().as_slice())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("expected node id string, got null"),
             "{error}"
         );
     }
@@ -551,8 +501,9 @@ mod tests {
                 "tag": "Binary",
                 "config": {},
                 "inputs": {
-                    "in": ["script", "source"],
-                    "image": "image"
+                    "source": "source",
+                    "image": "image",
+                    "script": "script"
                 }
             },
             "image": image.clone(),
@@ -582,8 +533,8 @@ mod tests {
                 "tag": "Image",
                 "config": { "mode": "bootstrap" },
                 "inputs": {
-                    "base": null,
-                    "inputs": ["binary-a", "binary-b"]
+                    "in001": "binary-b",
+                    "in000": "binary-a"
                 }
             },
             "binary-a": {
@@ -619,7 +570,7 @@ mod tests {
                 "config": {},
                 "inputs": {
                     "image": "root",
-                    "in": ["script"]
+                    "script": "script"
                 }
             },
             "script": {
@@ -643,7 +594,7 @@ mod tests {
                 "config": {},
                 "inputs": {
                     "image": "missing-image",
-                    "in": ["script"]
+                    "script": "script"
                 }
             },
             "script": {

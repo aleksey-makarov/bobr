@@ -200,11 +200,9 @@ fn binary_with_two_sources_recipe(
         }),
         json!({
             "image": base_image_recipe(image, digest),
-            "in": [
-                script_recipe(),
-                source_recipe(url_a, source_hash),
-                source_recipe(url_b, source_hash)
-            ]
+            "script": script_recipe(),
+            "source_a": source_recipe(url_a, source_hash),
+            "source_b": source_recipe(url_b, source_hash)
         }),
     )
 }
@@ -307,11 +305,8 @@ fn repeated_build_keys_are_built_once_but_published_under_all_names() {
             "Image",
             json!({ "mode": "bootstrap" }),
             json!({
-                "base": null,
-                "inputs": [
-                    binary_recipe("binary-a", &url, &source_hash, &image_ref, &pinned_digest),
-                    binary_recipe("binary-b", &url, &source_hash, &image_ref, &pinned_digest)
-                ]
+                "in000": binary_recipe("binary-a", &url, &source_hash, &image_ref, &pinned_digest),
+                "in001": binary_recipe("binary-b", &url, &source_hash, &image_ref, &pinned_digest)
             }),
         );
         let recipe_path = workspace.path().join("dedup.json");

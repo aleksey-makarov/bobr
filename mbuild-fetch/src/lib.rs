@@ -1,8 +1,8 @@
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, InputSlot,
-    StagedBuildResult, TypedBuilder, fsutil,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, StagedBuildResult,
+    TypedBuilder, fsutil,
 };
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
@@ -133,7 +133,9 @@ pub struct FetchBuilder;
 
 static FETCH_SPEC: BuilderSpec = BuilderSpec {
     tag: "Fetch",
-    inputs: &[] as &[InputSlot],
+    required_inputs: &[],
+    optional_inputs: &[],
+    allow_extra_inputs: false,
 };
 
 impl TypedBuilder for FetchBuilder {
@@ -859,7 +861,7 @@ fn map_error(error: FetchError) -> BuilderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{Builder, BuilderInputObject, BuilderInputValue, BuilderInputs};
+    use mbuild_core::{Builder, BuilderInputObject, BuilderInputs};
     use sha2::Digest;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -938,10 +940,10 @@ mod tests {
         let mut inputs = BuilderInputs::empty();
         inputs.insert(
             "unexpected",
-            BuilderInputValue::One(BuilderInputObject {
+            BuilderInputObject {
                 object_path: PathBuf::from("/tmp/input"),
                 meta: Map::new(),
-            }),
+            },
         );
         inputs
     }

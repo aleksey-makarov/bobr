@@ -20,7 +20,9 @@ pub struct TextBuilder;
 
 static TEXT_SPEC: BuilderSpec = BuilderSpec {
     tag: "Text",
-    inputs: &[],
+    required_inputs: &[],
+    optional_inputs: &[],
+    allow_extra_inputs: false,
 };
 
 impl TypedBuilder for TextBuilder {
@@ -89,7 +91,7 @@ impl TypedBuilder for TextBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{Builder, BuilderInputValue, BuilderInputs};
+    use mbuild_core::{Builder, BuilderInputs};
     use tempfile::tempdir;
 
     fn build_context(root: &std::path::Path) -> BuildContext {
@@ -181,7 +183,13 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("script", BuilderInputValue::Many(Vec::new()));
+        inputs.insert(
+            "script",
+            mbuild_core::BuilderInputObject {
+                object_path: temp.path().join("dummy"),
+                meta: Map::new(),
+            },
+        );
 
         let error = builder
             .build_typed(
