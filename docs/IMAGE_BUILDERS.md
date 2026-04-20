@@ -133,22 +133,19 @@ reference passed to `podman`.
 
 `Binary` mounts:
 
-- source inputs under `/in/sources*`
-- the build script
-- the serialized `script_config` directory
+- ordinary inputs under `/__mbuild/in0`, `/__mbuild/in1`, ...
+- the serialized `script_config` directory under `/__mbuild/config`
 
-`/work/build` and `/out/out` are container-private writable directories created
+`/__mbuild/build` and `/__mbuild/out` are container-private writable directories created
 inside the container lifecycle, not host bind mounts.
-
-The canonical source directory is:
-
-- `MBUILD_SOURCE_DIR=/in/sources0`
 
 `Binary` also exports:
 
-- `MBUILD_BUILD_DIR=/work/build`
-- `MBUILD_INSTALL_DIR=/out/out`
-- `MBUILD_SCRIPT_CONFIG_DIR=/__mbuild_script_config`
+- `MBUILD_IN=/__mbuild/in0` when at least one input exists
+- `MBUILD_IN0`, `MBUILD_IN1`, ...
+- `MBUILD_CONFIG_DIR=/__mbuild/config`
+- `MBUILD_BUILD_DIR=/__mbuild/build`
+- `MBUILD_OUT_DIR=/__mbuild/out`
 - `MBUILD_STEP_NAME=<step name>`
 
 `Binary.config` accepts an explicit linear execution plan:
@@ -159,20 +156,20 @@ The canonical source directory is:
     {
       "name": "configure",
       "run_as": "build-user",
-      "cwd": "${source}",
-      "argv": ["${script}", "configure"]
+      "cwd": "${build}",
+      "argv": ["${in0}", "configure"]
     },
     {
       "name": "build",
       "run_as": "build-user",
-      "cwd": "${build_dir}",
-      "argv": ["${script}", "build"]
+      "cwd": "${build}",
+      "argv": ["${in0}", "build"]
     },
     {
       "name": "install",
       "run_as": "root",
-      "cwd": "${build_dir}",
-      "argv": ["${script}", "install"]
+      "cwd": "${build}",
+      "argv": ["${in0}", "install"]
     }
   ],
   "script_config": { "...": "..." }
@@ -198,12 +195,11 @@ Each step contains:
 `Binary` performs controlled interpolation in `cwd`, `argv`, and step-local
 environment values. Supported variables are:
 
-- `${script}`
-- `${source}`
-- `${source0}`, `${source1}`, ...
-- `${build_dir}`
-- `${install_dir}`
-- `${script_config}`
+- `${in}`
+- `${in0}`, `${in1}`, ...
+- `${config}`
+- `${build}`
+- `${out}`
 
 Interpolation is a simple path substitution:
 
@@ -215,11 +211,11 @@ Interpolation is a simple path substitution:
 
 This means:
 
-- source-tree mutations inside `/in/sources0` survive across all steps of one
-  `Binary` build because all steps run in the same container lifecycle
-- the realized result is exported from `/out/out` via `podman cp` after the
+- directory input mutations inside `/__mbuild/inN` survive across all steps of
+  one `Binary` build because all steps run in the same container lifecycle
+- the realized result is exported from `/__mbuild/out` via `podman cp` after the
   final successful step
-- live filesystem changes outside `/out/out` are not published automatically
+- live filesystem changes outside `/__mbuild/out` are not published automatically
 
 The runtime does not assign package semantics to step names. Build-system
 knowledge lives in script libraries and recipe helpers. Common recipe helpers

@@ -103,8 +103,7 @@ fn cli_reports_invalid_generic_input_shape() {
         json!({}),
         json!({
             "image": [],
-            "script": text_recipe("script", "#!/bin/sh\nexit 0\n", true),
-            "sources": []
+            "in": []
         }),
     );
     write_recipe(&recipe_path, &recipe);

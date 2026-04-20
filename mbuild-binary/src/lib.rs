@@ -17,16 +17,17 @@ unsafe extern "C" {
 
 const BUILD_DIR_NAME: &str = "build";
 const OUTPUT_DIR_NAME: &str = "out";
-const SCRIPT_CONFIG_DIR_NAME: &str = "script-config";
-const SCRIPT_MOUNT_PATH: &str = "/__mbuild_binary_script";
-const SCRIPT_CONFIG_MOUNT_PATH: &str = "/__mbuild_script_config";
-const SCRIPT_CONFIG_ENV_VAR: &str = "MBUILD_SCRIPT_CONFIG_DIR";
-const SOURCE_DIR_ENV_VAR: &str = "MBUILD_SOURCE_DIR";
+const CONFIG_DIR_NAME: &str = "config";
+const INPUT_MOUNT_PREFIX: &str = "/__mbuild/in";
+const CONFIG_MOUNT_PATH: &str = "/__mbuild/config";
+const INPUT_ENV_VAR: &str = "MBUILD_IN";
+const INPUT_PREFIX_ENV_VAR: &str = "MBUILD_IN";
+const CONFIG_ENV_VAR: &str = "MBUILD_CONFIG_DIR";
 const BUILD_DIR_ENV_VAR: &str = "MBUILD_BUILD_DIR";
-const INSTALL_DIR_ENV_VAR: &str = "MBUILD_INSTALL_DIR";
+const OUT_DIR_ENV_VAR: &str = "MBUILD_OUT_DIR";
 const STEP_NAME_ENV_VAR: &str = "MBUILD_STEP_NAME";
-const BUILD_DIR_MOUNT_PATH: &str = "/work/build";
-const INSTALL_DIR_MOUNT_PATH: &str = "/out/out";
+const BUILD_DIR_MOUNT_PATH: &str = "/__mbuild/build";
+const OUT_DIR_MOUNT_PATH: &str = "/__mbuild/out";
 
 #[derive(Debug)]
 enum BinaryError {
@@ -115,10 +116,8 @@ struct InstallAttrs {
     symlink_mode: Option<u32>,
 }
 
-struct ScriptExecution {
-    script_host_path: PathBuf,
+struct InputExecution {
     config_host_path: PathBuf,
-    source_input_name: String,
 }
 
 struct ContainerExecution {
@@ -129,16 +128,6 @@ struct ContainerInstance {
     id: String,
 }
 
-impl ScriptExecution {
-    fn primary_source_mount_path(&self) -> String {
-        if self.source_input_name.is_empty() {
-            String::new()
-        } else {
-            format!("/in/{}", self.source_input_name)
-        }
-    }
-}
-
 pub struct BinaryBuilder;
 
 static BINARY_INPUTS: &[InputSlot] = &[
@@ -147,11 +136,7 @@ static BINARY_INPUTS: &[InputSlot] = &[
         arity: InputArity::One,
     },
     InputSlot {
-        name: "script",
-        arity: InputArity::One,
-    },
-    InputSlot {
-        name: "sources",
+        name: "in",
         arity: InputArity::Many,
     },
 ];
@@ -176,8 +161,7 @@ impl TypedBuilder for BinaryBuilder {
     ) -> Result<StagedBuildResult, BuilderError> {
         validate_config(&config).map_err(map_error)?;
         let image = inputs.one("image")?;
-        let script = inputs.one("script")?;
-        let sources = inputs.many("sources")?;
+        let in_inputs = inputs.many("in")?;
 
         let output_path = cx.temp_dir.join(OUTPUT_DIR_NAME);
         fsutil::recreate_empty_dir_force(&output_path)
@@ -187,29 +171,28 @@ impl TypedBuilder for BinaryBuilder {
         fsutil::recreate_empty_dir_force(&build_path)
             .map_err(map_fsutil_error)
             .map_err(map_error)?;
-        let config_path = cx.temp_dir.join(SCRIPT_CONFIG_DIR_NAME);
+        let config_path = cx.temp_dir.join(CONFIG_DIR_NAME);
         fsutil::recreate_empty_dir_force(&config_path)
             .map_err(map_fsutil_error)
             .map_err(map_error)?;
         write_script_config(&config_path, config.script_config.as_ref()).map_err(map_error)?;
 
-        let script_execution =
-            resolve_script_execution(script, &config_path, sources).map_err(map_error)?;
+        let input_execution = resolve_input_execution(&config_path, in_inputs).map_err(map_error)?;
         let container_execution = resolve_container_execution(image, cx).map_err(map_error)?;
         cx.log_event(
             BuildLogLevel::Info,
             "prepare",
             format!(
-                "resolved container image, build script, {} source input(s), and script config dir",
-                sources.len()
+                "resolved container image, {} input(s), and config dir",
+                in_inputs.len()
             ),
         );
 
         let build_result = run_container_build(
             &container_execution,
-            &script_execution,
+            &input_execution,
             &config.steps,
-            sources,
+            in_inputs,
             &build_path,
             &output_path,
             cx,
@@ -319,42 +302,21 @@ fn default_install_meta() -> InstallMeta {
     }
 }
 
-fn resolve_script_execution(
-    script: &BuilderInputObject,
+fn resolve_input_execution(
     script_config_dir: &Path,
-    sources: &[BuilderInputObject],
-) -> BResult<ScriptExecution> {
-    if !script.object_path.is_file() {
-        return Err(BinaryError::InputResolutionFailed(format!(
-            "script input must resolve to a file: {}",
-            script.object_path.display()
-        )));
-    }
-    if let Some((first, rest)) = sources.split_first() {
-        if !first.object_path.is_dir() {
+    inputs: &[BuilderInputObject],
+) -> BResult<InputExecution> {
+    for input in inputs {
+        if !input.object_path.is_dir() && !input.object_path.is_file() {
             return Err(BinaryError::InputResolutionFailed(format!(
-                "first source input must resolve to a directory: {}",
-                first.object_path.display()
+                "binary input must resolve to a file or directory: {}",
+                input.object_path.display()
             )));
-        }
-        for source in rest {
-            if !source.object_path.is_dir() && !source.object_path.is_file() {
-                return Err(BinaryError::InputResolutionFailed(format!(
-                    "additional source inputs must resolve to directories or files: {}",
-                    source.object_path.display()
-                )));
-            }
         }
     }
 
-    Ok(ScriptExecution {
-        script_host_path: script.object_path.clone(),
+    Ok(InputExecution {
         config_host_path: script_config_dir.to_path_buf(),
-        source_input_name: if sources.is_empty() {
-            String::new()
-        } else {
-            "sources0".to_string()
-        },
     })
 }
 
@@ -482,9 +444,9 @@ fn load_oci_to_podman(oci_dir: &std::path::Path, cx: &BuildContext) -> BResult<(
 
 fn run_container_build(
     container: &ContainerExecution,
-    script: &ScriptExecution,
+    input_execution: &InputExecution,
     steps: &[BuildStep],
-    sources: &[BuilderInputObject],
+    inputs: &[BuilderInputObject],
     build_path: &Path,
     output_path: &Path,
     cx: &BuildContext,
@@ -492,8 +454,8 @@ fn run_container_build(
     let (uid, gid) = current_uid_gid();
     let instance = create_container(
         container,
-        script,
-        sources,
+        input_execution,
+        inputs,
         build_path,
         output_path,
         uid,
@@ -504,7 +466,7 @@ fn run_container_build(
         start_container(&instance, cx)?;
         prepare_container_workspace(&instance, uid, gid, cx)?;
         for step in steps {
-            exec_step(&instance, step, script, sources, cx)?;
+            exec_step(&instance, step, inputs, cx)?;
         }
         export_container_output(&instance, output_path, cx)?;
         if !output_path.is_dir() {
@@ -536,8 +498,7 @@ fn current_uid_gid() -> (u32, u32) {
 
 fn interpolate_step_string(
     value: &str,
-    script: &ScriptExecution,
-    sources: &[BuilderInputObject],
+    inputs: &[BuilderInputObject],
 ) -> BResult<String> {
     let mut rendered = String::new();
     let mut rest = value;
@@ -551,7 +512,7 @@ fn interpolate_step_string(
             )));
         };
         let key = &after_start[..end];
-        let replacement = interpolation_value(key, script, sources)?;
+        let replacement = interpolation_value(key, inputs)?;
         rendered.push_str(&replacement);
         rest = &after_start[end + 1..];
     }
@@ -560,39 +521,33 @@ fn interpolate_step_string(
     Ok(rendered)
 }
 
-fn interpolation_value(
-    key: &str,
-    _script: &ScriptExecution,
-    sources: &[BuilderInputObject],
-) -> BResult<String> {
+fn interpolation_value(key: &str, inputs: &[BuilderInputObject]) -> BResult<String> {
     match key {
-        "script" => Ok(SCRIPT_MOUNT_PATH.to_string()),
-        "source" => {
-            if sources.is_empty() {
+        "in" => {
+            if inputs.is_empty() {
                 Err(BinaryError::InvalidConfig(
-                    "interpolation variable '${source}' requires at least one source input"
-                        .to_string(),
+                    "interpolation variable '${in}' requires at least one input".to_string(),
                 ))
             } else {
-                Ok("/in/sources0".to_string())
+                Ok(format!("{INPUT_MOUNT_PREFIX}0"))
             }
         }
-        "build_dir" => Ok(BUILD_DIR_MOUNT_PATH.to_string()),
-        "install_dir" => Ok(INSTALL_DIR_MOUNT_PATH.to_string()),
-        "script_config" => Ok(SCRIPT_CONFIG_MOUNT_PATH.to_string()),
+        "build" => Ok(BUILD_DIR_MOUNT_PATH.to_string()),
+        "out" => Ok(OUT_DIR_MOUNT_PATH.to_string()),
+        "config" => Ok(CONFIG_MOUNT_PATH.to_string()),
         _ => {
-            if let Some(index_str) = key.strip_prefix("source") {
+            if let Some(index_str) = key.strip_prefix("in") {
                 let index = index_str.parse::<usize>().map_err(|_| {
                     BinaryError::InvalidConfig(format!(
                         "unknown interpolation variable '${{{key}}}'"
                     ))
                 })?;
-                if index >= sources.len() {
+                if index >= inputs.len() {
                     return Err(BinaryError::InvalidConfig(format!(
-                        "interpolation variable '${{{key}}}' references missing source input"
+                        "interpolation variable '${{{key}}}' references missing input"
                     )));
                 }
-                Ok(format!("/in/sources{index}"))
+                Ok(format!("{INPUT_MOUNT_PREFIX}{index}"))
             } else {
                 Err(BinaryError::InvalidConfig(format!(
                     "unknown interpolation variable '${{{key}}}'"
@@ -604,10 +559,9 @@ fn interpolation_value(
 
 fn resolve_step_cwd(
     step: &BuildStep,
-    script: &ScriptExecution,
-    sources: &[BuilderInputObject],
+    inputs: &[BuilderInputObject],
 ) -> BResult<String> {
-    let cwd = interpolate_step_string(&step.cwd, script, sources)?;
+    let cwd = interpolate_step_string(&step.cwd, inputs)?;
     if cwd.is_empty() || !cwd.starts_with('/') {
         return Err(BinaryError::InvalidConfig(format!(
             "step '{}' resolved cwd must be an absolute path, got '{}'",
@@ -619,19 +573,17 @@ fn resolve_step_cwd(
 
 fn resolve_step_argv(
     step: &BuildStep,
-    script: &ScriptExecution,
-    sources: &[BuilderInputObject],
+    inputs: &[BuilderInputObject],
 ) -> BResult<Vec<String>> {
     step.argv
         .iter()
-        .map(|arg| interpolate_step_string(arg, script, sources))
+        .map(|arg| interpolate_step_string(arg, inputs))
         .collect()
 }
 
 fn resolve_step_env(
     step: &BuildStep,
-    script: &ScriptExecution,
-    sources: &[BuilderInputObject],
+    inputs: &[BuilderInputObject],
 ) -> BResult<Vec<(String, String)>> {
     let mut rendered = Vec::new();
     for (key, value) in &step.env {
@@ -643,7 +595,7 @@ fn resolve_step_env(
         })?;
         rendered.push((
             key.clone(),
-            interpolate_step_string(string_value, script, sources)?,
+            interpolate_step_string(string_value, inputs)?,
         ));
     }
     Ok(rendered)
@@ -651,8 +603,8 @@ fn resolve_step_env(
 
 fn create_container(
     container: &ContainerExecution,
-    script: &ScriptExecution,
-    sources: &[BuilderInputObject],
+    input_execution: &InputExecution,
+    inputs: &[BuilderInputObject],
     _build_path: &Path,
     _output_path: &Path,
     uid: u32,
@@ -675,43 +627,45 @@ fn create_container(
         .arg("--user")
         .arg(format!("{uid}:{gid}"));
 
-    for (index, source) in sources.iter().enumerate() {
-        let mount_spec = if source.object_path.is_dir() {
-            format!("{}:/in/sources{}:O", source.object_path.display(), index)
+    for (index, input) in inputs.iter().enumerate() {
+        let mount_spec = if input.object_path.is_dir() {
+            format!(
+                "{}:{INPUT_MOUNT_PREFIX}{index}:O",
+                input.object_path.display()
+            )
         } else {
-            format!("{}:/in/sources{}:ro", source.object_path.display(), index)
+            format!(
+                "{}:{INPUT_MOUNT_PREFIX}{index}:ro",
+                input.object_path.display()
+            )
         };
         process.arg("--volume").arg(mount_spec);
     }
 
     process.arg("--volume").arg(format!(
         "{}:{}:ro",
-        script.script_host_path.display(),
-        SCRIPT_MOUNT_PATH
-    ));
-    process.arg("--volume").arg(format!(
-        "{}:{}:ro",
-        script.config_host_path.display(),
-        SCRIPT_CONFIG_MOUNT_PATH
+        input_execution.config_host_path.display(),
+        CONFIG_MOUNT_PATH
     ));
 
     process
         .arg("--env")
-        .arg(format!(
-            "{SCRIPT_CONFIG_ENV_VAR}={SCRIPT_CONFIG_MOUNT_PATH}"
-        ))
-        .arg("--env")
-        .arg(format!(
-            "{SOURCE_DIR_ENV_VAR}={}",
-            script.primary_source_mount_path()
-        ))
+        .arg(format!("{CONFIG_ENV_VAR}={CONFIG_MOUNT_PATH}"))
         .arg("--env")
         .arg(format!("{BUILD_DIR_ENV_VAR}={BUILD_DIR_MOUNT_PATH}"))
         .arg("--env")
-        .arg(format!("{INSTALL_DIR_ENV_VAR}={INSTALL_DIR_MOUNT_PATH}"))
-        .arg(&container.image_ref)
-        .arg("sleep")
-        .arg("infinity");
+        .arg(format!("{OUT_DIR_ENV_VAR}={OUT_DIR_MOUNT_PATH}"));
+    if !inputs.is_empty() {
+        process
+            .arg("--env")
+            .arg(format!("{INPUT_ENV_VAR}={INPUT_MOUNT_PREFIX}0"));
+    }
+    for (index, _) in inputs.iter().enumerate() {
+        process
+            .arg("--env")
+            .arg(format!("{INPUT_PREFIX_ENV_VAR}{index}={INPUT_MOUNT_PREFIX}{index}"));
+    }
+    process.arg(&container.image_ref).arg("sleep").arg("infinity");
 
     let output = process.output().map_err(|error| {
         BinaryError::PodmanFailed(format!("failed to execute podman create: {error}"))
@@ -720,8 +674,7 @@ fn create_container(
         cx,
         "podman-create",
         &container.image_ref,
-        &script.script_host_path,
-        &script.source_input_name,
+        inputs,
         &output,
     );
 
@@ -771,12 +724,12 @@ fn export_container_output(
     let mut process = ProcessCommand::new("podman");
     process
         .arg("cp")
-        .arg(format!("{}:{}/.", instance.id, INSTALL_DIR_MOUNT_PATH))
+        .arg(format!("{}:{}/.", instance.id, OUT_DIR_MOUNT_PATH))
         .arg(output_path);
     let output = process.output().map_err(|error| {
         BinaryError::PodmanFailed(format!("failed to execute podman cp: {error}"))
     })?;
-    let log_path = write_command_log(cx, "podman-cp", "", Path::new(""), "", &output);
+    let log_path = write_command_log(cx, "podman-cp", "", &[], &output);
 
     if !output.status.success() {
         return Err(command_failure("podman-cp", "podman cp", &output, log_path));
@@ -815,14 +768,14 @@ fn prepare_container_workspace(
         .arg("-lc")
         .arg(format!(
             "mkdir -p '{}' '{}' && chown {}:{} '{}'",
-            BUILD_DIR_MOUNT_PATH, INSTALL_DIR_MOUNT_PATH, uid, gid, BUILD_DIR_MOUNT_PATH
+            BUILD_DIR_MOUNT_PATH, OUT_DIR_MOUNT_PATH, uid, gid, BUILD_DIR_MOUNT_PATH
         ));
     let output = process.output().map_err(|error| {
         BinaryError::PodmanFailed(format!(
             "failed to execute podman exec for workspace prepare: {error}"
         ))
     })?;
-    let log_path = write_command_log(cx, "podman-prepare", "", Path::new(""), "", &output);
+    let log_path = write_command_log(cx, "podman-prepare", "", &[], &output);
 
     if !output.status.success() {
         return Err(command_failure(
@@ -856,7 +809,7 @@ fn start_container(instance: &ContainerInstance, cx: &BuildContext) -> BResult<(
     let output = process.output().map_err(|error| {
         BinaryError::PodmanFailed(format!("failed to execute podman start: {error}"))
     })?;
-    let log_path = write_command_log(cx, "podman-start", "", Path::new(""), "", &output);
+    let log_path = write_command_log(cx, "podman-start", "", &[], &output);
 
     if !output.status.success() {
         return Err(command_failure(
@@ -882,14 +835,13 @@ fn start_container(instance: &ContainerInstance, cx: &BuildContext) -> BResult<(
 fn exec_step(
     instance: &ContainerInstance,
     step: &BuildStep,
-    script: &ScriptExecution,
-    sources: &[BuilderInputObject],
+    inputs: &[BuilderInputObject],
     cx: &BuildContext,
 ) -> BResult<()> {
     let log_tag = format!("step-{}", step.name);
-    let cwd = resolve_step_cwd(step, script, sources)?;
-    let argv = resolve_step_argv(step, script, sources)?;
-    let env = resolve_step_env(step, script, sources)?;
+    let cwd = resolve_step_cwd(step, inputs)?;
+    let argv = resolve_step_argv(step, inputs)?;
+    let env = resolve_step_env(step, inputs)?;
     cx.log_event(
         BuildLogLevel::Info,
         &log_tag,
@@ -918,7 +870,7 @@ fn exec_step(
             step.name
         ))
     })?;
-    let log_path = write_command_log(cx, &log_tag, "", Path::new(""), &step.name, &output);
+    let log_path = write_command_log(cx, &log_tag, "", inputs, &output);
 
     if !output.status.success() {
         return Err(command_failure(
@@ -952,7 +904,7 @@ fn remove_container(instance: &ContainerInstance, cx: &BuildContext) -> BResult<
     let output = process.output().map_err(|error| {
         BinaryError::PodmanFailed(format!("failed to execute podman rm: {error}"))
     })?;
-    let log_path = write_command_log(cx, "podman-cleanup", "", Path::new(""), "", &output);
+    let log_path = write_command_log(cx, "podman-cleanup", "", &[], &output);
 
     if !output.status.success() {
         return Err(command_failure(
@@ -1001,15 +953,22 @@ fn write_command_log(
     cx: &BuildContext,
     log_tag: &str,
     image_ref: &str,
-    script_path: &Path,
-    source_input_name: &str,
+    inputs: &[BuilderInputObject],
     output: &std::process::Output,
 ) -> Option<PathBuf> {
+    let input_paths = if inputs.is_empty() {
+        String::new()
+    } else {
+        let mut rendered = String::new();
+        for (index, input) in inputs.iter().enumerate() {
+            rendered.push_str(&format!("in{index}: {}\n", input.object_path.display()));
+        }
+        rendered
+    };
     let log_content = format!(
-        "image_ref: {}\nscript: {}\nsource_input: {}\nexit_code: {}\nstatus_success: {}\n\n=== stdout ===\n{}\n\n=== stderr ===\n{}\n",
+        "image_ref: {}\ninputs:\n{}exit_code: {}\nstatus_success: {}\n\n=== stdout ===\n{}\n\n=== stderr ===\n{}\n",
         image_ref,
-        script_path.display(),
-        source_input_name,
+        input_paths,
         output
             .status
             .code()
@@ -1311,33 +1270,32 @@ mod tests {
             BuilderInputValue::One(resolved_oci_layout(root, "image-oci", Map::new())),
         );
         inputs.insert(
-            "script",
-            BuilderInputValue::One(resolved_file(root, "script.sh", true, Map::new())),
-        );
-        inputs.insert(
-            "sources",
-            BuilderInputValue::Many(vec![resolved_directory(root, "src", Map::new())]),
+            "in",
+            BuilderInputValue::Many(vec![
+                resolved_file(root, "script.sh", true, Map::new()),
+                resolved_directory(root, "src", Map::new()),
+            ]),
         );
         inputs
     }
 
     fn sample_inputs_with_aux_file(root: &Path) -> BuilderInputs {
         let mut inputs = sample_inputs(root);
-        let mut sources = match inputs.many("sources").unwrap().to_vec() {
+        let mut values = match inputs.many("in").unwrap().to_vec() {
             values => values,
         };
-        sources.push(resolved_file(root, "patch.diff", false, Map::new()));
-        inputs.insert("sources", BuilderInputValue::Many(sources));
+        values.push(resolved_file(root, "patch.diff", false, Map::new()));
+        inputs.insert("in", BuilderInputValue::Many(values));
         inputs
     }
 
     fn sample_inputs_with_binary_output_aux(root: &Path) -> BuilderInputs {
         let mut inputs = sample_inputs(root);
-        let mut sources = match inputs.many("sources").unwrap().to_vec() {
+        let mut values = match inputs.many("in").unwrap().to_vec() {
             values => values,
         };
-        sources.push(resolved_directory(root, "linux-headers", Map::new()));
-        inputs.insert("sources", BuilderInputValue::Many(sources));
+        values.push(resolved_directory(root, "linux-headers", Map::new()));
+        inputs.insert("in", BuilderInputValue::Many(values));
         inputs
     }
 
@@ -1346,29 +1304,29 @@ mod tests {
             BuildStep {
                 name: "configure".to_string(),
                 run_as: StepUser::BuildUser,
-                cwd: "${source}".to_string(),
-                argv: vec!["${script}".to_string(), "configure".to_string()],
+                cwd: "${build}".to_string(),
+                argv: vec!["${in0}".to_string(), "configure".to_string()],
                 env: Map::new(),
             },
             BuildStep {
                 name: "build".to_string(),
                 run_as: StepUser::BuildUser,
-                cwd: "${build_dir}".to_string(),
-                argv: vec!["${script}".to_string(), "build".to_string()],
+                cwd: "${build}".to_string(),
+                argv: vec!["${in0}".to_string(), "build".to_string()],
                 env: Map::new(),
             },
             BuildStep {
                 name: "install".to_string(),
                 run_as: StepUser::Root,
-                cwd: "${build_dir}".to_string(),
-                argv: vec!["${script}".to_string(), "install".to_string()],
+                cwd: "${build}".to_string(),
+                argv: vec!["${in0}".to_string(), "install".to_string()],
                 env: Map::new(),
             },
             BuildStep {
                 name: "post_install".to_string(),
                 run_as: StepUser::Root,
-                cwd: "${build_dir}".to_string(),
-                argv: vec!["${script}".to_string(), "post_install".to_string()],
+                cwd: "${build}".to_string(),
+                argv: vec!["${in0}".to_string(), "post_install".to_string()],
                 env: Map::new(),
             },
         ]
@@ -1389,29 +1347,29 @@ mod tests {
                 BuildStep {
                     name: "configure".to_string(),
                     run_as: StepUser::BuildUser,
-                    cwd: "${build_dir}".to_string(),
-                    argv: vec!["${script}".to_string(), "configure".to_string()],
+                    cwd: "${build}".to_string(),
+                    argv: vec!["${in}".to_string(), "configure".to_string()],
                     env: Map::new(),
                 },
                 BuildStep {
                     name: "build".to_string(),
                     run_as: StepUser::BuildUser,
-                    cwd: "${build_dir}".to_string(),
-                    argv: vec!["${script}".to_string(), "build".to_string()],
+                    cwd: "${build}".to_string(),
+                    argv: vec!["${in}".to_string(), "build".to_string()],
                     env: Map::new(),
                 },
                 BuildStep {
                     name: "install".to_string(),
                     run_as: StepUser::Root,
-                    cwd: "${build_dir}".to_string(),
-                    argv: vec!["${script}".to_string(), "install".to_string()],
+                    cwd: "${build}".to_string(),
+                    argv: vec!["${in}".to_string(), "install".to_string()],
                     env: Map::new(),
                 },
                 BuildStep {
                     name: "post_install".to_string(),
                     run_as: StepUser::Root,
-                    cwd: "${build_dir}".to_string(),
-                    argv: vec!["${script}".to_string(), "post_install".to_string()],
+                    cwd: "${build}".to_string(),
+                    argv: vec!["${in}".to_string(), "post_install".to_string()],
                     env: Map::new(),
                 },
             ],
@@ -1432,6 +1390,26 @@ mod tests {
             assert_eq!(
                 fs::read_to_string(result.staged_path.join("copied").join("README.txt")).unwrap(),
                 "hello source\n"
+            );
+            assert_eq!(
+                fs::read_to_string(result.staged_path.join("in-env.txt")).unwrap(),
+                format!("{INPUT_MOUNT_PREFIX}0\n")
+            );
+            assert_eq!(
+                fs::read_to_string(result.staged_path.join("in0-env.txt")).unwrap(),
+                format!("{INPUT_MOUNT_PREFIX}0\n")
+            );
+            assert_eq!(
+                fs::read_to_string(result.staged_path.join("in1-env.txt")).unwrap(),
+                format!("{INPUT_MOUNT_PREFIX}1\n")
+            );
+            assert_eq!(
+                fs::read_to_string(result.staged_path.join("build-dir.txt")).unwrap(),
+                format!("{BUILD_DIR_MOUNT_PATH}\n")
+            );
+            assert_eq!(
+                fs::read_to_string(result.staged_path.join("out-dir.txt")).unwrap(),
+                format!("{OUT_DIR_MOUNT_PATH}\n")
             );
             let image_ref = fs::read_to_string(result.staged_path.join("image-ref.txt")).unwrap();
             let image_ref = image_ref.trim();
@@ -1468,7 +1446,7 @@ mod tests {
 
             assert_eq!(
                 fs::read_to_string(result.staged_path.join("script-config-dir.txt")).unwrap(),
-                format!("{SCRIPT_CONFIG_MOUNT_PATH}\n")
+                format!("{CONFIG_MOUNT_PATH}\n")
             );
             assert_eq!(
                 fs::read_to_string(
@@ -1545,8 +1523,7 @@ mod tests {
 
             let inputs = BuilderInputs::new(std::collections::BTreeMap::from([
                 ("image".to_string(), BuilderInputValue::One(image.clone())),
-                ("script".to_string(), BuilderInputValue::One(script.clone())),
-                ("sources".to_string(), BuilderInputValue::Many(vec![])),
+                ("in".to_string(), BuilderInputValue::Many(vec![script.clone()])),
             ]));
 
             let result = builder
@@ -1590,12 +1567,11 @@ mod tests {
             }),
         );
         inputs.insert(
-            "script",
-            BuilderInputValue::One(resolved_file(temp.path(), "script.sh", true, Map::new())),
-        );
-        inputs.insert(
-            "sources",
-            BuilderInputValue::Many(vec![resolved_directory(temp.path(), "src", Map::new())]),
+            "in",
+            BuilderInputValue::Many(vec![
+                resolved_file(temp.path(), "script.sh", true, Map::new()),
+                resolved_directory(temp.path(), "src", Map::new()),
+            ]),
         );
 
         let error = BinaryBuilder
@@ -1790,5 +1766,51 @@ mod tests {
             let message = error.to_string();
             assert!(message.contains("step 'configure'"), "{message}");
         });
+    }
+
+    #[test]
+    fn binary_builder_rejects_old_interpolation_names() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        let error = BinaryBuilder
+            .build_typed(
+                BinaryConfig {
+                    script_config: None,
+                    steps: vec![BuildStep {
+                        name: "configure".to_string(),
+                        run_as: StepUser::BuildUser,
+                        cwd: "${source}".to_string(),
+                        argv: vec!["${script}".to_string(), "configure".to_string()],
+                        env: Map::new(),
+                    }],
+                    install: None,
+                },
+                sample_inputs(temp.path()),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("unknown interpolation variable"), "{message}");
+    }
+
+    #[test]
+    fn binary_builder_rejects_missing_input_interpolation() {
+        let temp = tempdir().unwrap();
+        let step = BuildStep {
+            name: "install".to_string(),
+            run_as: StepUser::Root,
+            cwd: "${build}".to_string(),
+            argv: vec!["${in1}".to_string(), "install".to_string()],
+            env: Map::new(),
+        };
+        let error = resolve_step_argv(
+            &step,
+            &[resolved_file(temp.path(), "script.sh", true, Map::new())],
+        )
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("missing input"), "{message}");
     }
 }

@@ -201,18 +201,16 @@ mod tests {
     fn resolved_inputs_helpers_work() {
         let object = sample_object();
         let mut inputs = ResolvedInputs::empty();
-        inputs.insert("script", ResolvedDependencyValue::One(object.clone()));
-        inputs.insert("base", ResolvedDependencyValue::Optional(None));
         inputs.insert(
-            "sources",
+            "in",
             ResolvedDependencyValue::Many(vec![object.clone(), object.clone()]),
         );
+        inputs.insert("base", ResolvedDependencyValue::Optional(None));
 
-        assert!(inputs.one("script").unwrap().meta.is_empty());
+        assert_eq!(inputs.many("in").unwrap().len(), 2);
         assert!(inputs.optional("base").unwrap().is_none());
-        assert_eq!(inputs.many("sources").unwrap().len(), 2);
         assert!(matches!(
-            inputs.one("sources"),
+            inputs.one("in"),
             Err(BuilderError::ExecutionFailed(_))
         ));
     }
@@ -221,14 +219,10 @@ mod tests {
     fn resolved_inputs_missing_and_wrong_arity_are_errors() {
         let object = sample_object();
         let mut inputs = ResolvedInputs::empty();
-        inputs.insert("script", ResolvedDependencyValue::One(object));
+        inputs.insert("in", ResolvedDependencyValue::Many(vec![object]));
 
         assert!(matches!(
-            inputs.optional("script"),
-            Err(BuilderError::ExecutionFailed(_))
-        ));
-        assert!(matches!(
-            inputs.many("script"),
+            inputs.optional("in"),
             Err(BuilderError::ExecutionFailed(_))
         ));
         assert!(matches!(
@@ -255,11 +249,11 @@ mod tests {
         );
 
         let inputs = ResolvedInputs::new(BTreeMap::from([(
-            "sources".to_string(),
+            "in".to_string(),
             ResolvedDependencyValue::Many(vec![first.clone(), second.clone()]),
         )]));
 
-        let many = inputs.many("sources").unwrap();
+        let many = inputs.many("in").unwrap();
         assert_eq!(many[0].meta, first.meta);
         assert_eq!(many[1].meta, second.meta);
     }
@@ -268,10 +262,7 @@ mod tests {
     fn resolved_inputs_new_and_is_empty_work() {
         assert!(ResolvedInputs::empty().is_empty());
         let mut slots = BTreeMap::new();
-        slots.insert(
-            "script".to_string(),
-            ResolvedDependencyValue::One(sample_object()),
-        );
+        slots.insert("in".to_string(), ResolvedDependencyValue::Many(vec![sample_object()]));
         assert!(!ResolvedInputs::new(slots).is_empty());
     }
 
@@ -291,14 +282,14 @@ mod tests {
     fn resolved_inputs_convert_to_builder_inputs() {
         let object = sample_object();
         let inputs = ResolvedInputs::new(BTreeMap::from([(
-            "script".to_string(),
-            ResolvedDependencyValue::One(object.clone()),
+            "in".to_string(),
+            ResolvedDependencyValue::Many(vec![object.clone()]),
         )]));
 
         let builder_inputs = inputs.into_builder_inputs();
-        let resolved = builder_inputs.one("script").unwrap();
-        assert_eq!(resolved.object_path, object.object_path);
-        assert_eq!(resolved.meta, object.meta);
+        let resolved = builder_inputs.many("in").unwrap();
+        assert_eq!(resolved[0].object_path, object.object_path);
+        assert_eq!(resolved[0].meta, object.meta);
     }
 
     static ORDERED_SPEC: BuilderSpec = BuilderSpec {

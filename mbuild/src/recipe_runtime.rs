@@ -515,8 +515,7 @@ mod tests {
                     "config": {},
                     "inputs": {
                         "image": "image",
-                        "script": "script",
-                        "sources": []
+                        "in": ["script"]
                     }
                 },
                 "image": {

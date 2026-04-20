@@ -18,10 +18,8 @@ fi
 
 if [ "${1:-}" = create ]; then
   shift 1
-  source_input=""
-  source_dir=""
   build_dir=""
-  install_dir=""
+  out_dir=""
   config_dir=""
   config_host=""
   image_ref=""
@@ -36,11 +34,11 @@ if [ "${1:-}" = create ]; then
           echo invalid volume spec: "$spec" >&2
           exit 1
         fi
-        if [[ "$mount" == /in/* ]]; then
-          name="${mount#/in/}"
+        if [[ "$mount" == /__mbuild/in* ]]; then
+          name="${mount#/__mbuild/}"
           mkdir -p "$state_root/create-mounts"
           printf '%s\n' "$host" > "$state_root/create-mounts/$name"
-        elif [ "$mount" = "/__mbuild_script_config" ]; then
+        elif [ "$mount" = "/__mbuild/config" ]; then
           config_host="$host"
         fi
         shift 2
@@ -48,10 +46,9 @@ if [ "${1:-}" = create ]; then
       --env)
         kv="$2"
         case "$kv" in
-          MBUILD_SOURCE_DIR=*) source_dir="${kv#*=}" ;;
           MBUILD_BUILD_DIR=*) build_dir="${kv#*=}" ;;
-          MBUILD_INSTALL_DIR=*) install_dir="${kv#*=}" ;;
-          MBUILD_SCRIPT_CONFIG_DIR=*) config_dir="${kv#*=}" ;;
+          MBUILD_OUT_DIR=*) out_dir="${kv#*=}" ;;
+          MBUILD_CONFIG_DIR=*) config_dir="${kv#*=}" ;;
         esac
         shift 2
         ;;
@@ -82,15 +79,13 @@ if [ "${1:-}" = create ]; then
   container_dir="$state_root/$container_id"
   mkdir -p "$container_dir/in-mounts"
   mkdir -p "$container_dir/fs$build_dir"
-  mkdir -p "$container_dir/fs$install_dir"
+  mkdir -p "$container_dir/fs$out_dir"
   if [ -d "$state_root/create-mounts" ]; then
     cp -R "$state_root/create-mounts/." "$container_dir/in-mounts/"
     rm -rf "$state_root/create-mounts"
   fi
-  printf '%s\n' "$source_input" > "$container_dir/source_input"
-  printf '%s\n' "$source_dir" > "$container_dir/source_dir"
   printf '%s\n' "$build_dir" > "$container_dir/build_dir"
-  printf '%s\n' "$install_dir" > "$container_dir/install_dir"
+  printf '%s\n' "$out_dir" > "$container_dir/out_dir"
   printf '%s\n' "$config_dir" > "$container_dir/config_dir"
   printf '%s\n' "$config_host" > "$container_dir/config_host"
   printf '%s\n' "$image_ref" > "$container_dir/image_ref"
@@ -137,11 +132,11 @@ if [ "${1:-}" = exec ]; then
     exit 1
   fi
 
-  install_dir="$(cat "$container_dir/install_dir")"
+  out_dir="$(cat "$container_dir/out_dir")"
   image_ref="$(cat "$container_dir/image_ref")"
   config_host="$(cat "$container_dir/config_host")"
   config_dir="$(cat "$container_dir/config_dir")"
-  out_root="$container_dir/fs$install_dir"
+  out_root="$container_dir/fs$out_dir"
   if [ -z "$step_name" ]; then
     exit 0
   fi
@@ -156,11 +151,15 @@ if [ "${1:-}" = exec ]; then
       ;;
     install)
       test -f "$container_dir/built"
-      source_input="sources0"
-      if [ -f "$container_dir/in-mounts/$source_input" ]; then
-        mkdir -p "$out_root/copied"
-        cp -R "$(cat "$container_dir/in-mounts/$source_input")/." "$out_root/copied/"
-      fi
+      mkdir -p "$out_root/copied"
+      for mount_file in "$container_dir"/in-mounts/*; do
+        [ -f "$mount_file" ] || continue
+        host_path="$(cat "$mount_file")"
+        if [ -d "$host_path" ]; then
+          cp -R "$host_path/." "$out_root/copied/"
+          break
+        fi
+      done
       printf '%s\n' "$image_ref" > "$out_root/image-ref.txt"
       ;;
     post_install)

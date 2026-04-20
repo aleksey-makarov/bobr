@@ -20,8 +20,7 @@ Every recipe node still uses one generic shape:
     "config": {},
     "inputs": {
       "image": "image_1",
-      "script": "script_1",
-      "sources": ["src_0"]
+      "in": ["script_1", "src_0"]
     }
   }
 }

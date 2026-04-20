@@ -464,8 +464,7 @@ mod tests {
                 "config": {},
                 "inputs": {
                     "image": [],
-                    "script": null,
-                    "sources": []
+                    "in": []
                 }
             }
         });
@@ -474,6 +473,44 @@ mod tests {
             error
                 .to_string()
                 .contains("input slot 'image' must be a single node id string"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn old_binary_input_shape_is_rejected() {
+        let request = json!({
+            "root": {
+                "name": "bin",
+                "tag": "Binary",
+                "config": {},
+                "inputs": {
+                    "image": "image",
+                    "script": "script",
+                    "sources": []
+                }
+            },
+            "image": {
+                "name": "image",
+                "tag": "ContainerImage",
+                "config": {
+                    "image": "docker.io/library/buildpack-deps:bookworm",
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "inputs": {}
+            },
+            "script": {
+                "name": "script",
+                "tag": "Text",
+                "config": { "source": "#!/bin/sh\n", "executable": true },
+                "inputs": {}
+            }
+        });
+        let error = collect_one(&request).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not define input slot 'script'"),
             "{error}"
         );
     }
@@ -514,8 +551,7 @@ mod tests {
                 "tag": "Binary",
                 "config": {},
                 "inputs": {
-                    "sources": ["source"],
-                    "script": "script",
+                    "in": ["script", "source"],
                     "image": "image"
                 }
             },
@@ -583,8 +619,7 @@ mod tests {
                 "config": {},
                 "inputs": {
                     "image": "root",
-                    "script": "script",
-                    "sources": []
+                    "in": ["script"]
                 }
             },
             "script": {
@@ -608,8 +643,7 @@ mod tests {
                 "config": {},
                 "inputs": {
                     "image": "missing-image",
-                    "script": "script",
-                    "sources": []
+                    "in": ["script"]
                 }
             },
             "script": {

@@ -200,8 +200,8 @@ fn binary_with_two_sources_recipe(
         }),
         json!({
             "image": base_image_recipe(image, digest),
-            "script": script_recipe(),
-            "sources": [
+            "in": [
+                script_recipe(),
                 source_recipe(url_a, source_hash),
                 source_recipe(url_b, source_hash)
             ]

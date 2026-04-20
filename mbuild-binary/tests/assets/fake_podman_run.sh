@@ -25,11 +25,12 @@ fi
 
 if [ "${1:-}" = create ]; then
   shift 1
-  source_input=""
-  source_dir=""
   build_dir=""
-  install_dir=""
+  out_dir=""
   config_dir=""
+  input_dir=""
+  input0_dir=""
+  input1_dir=""
   config_host=""
   image_ref=""
   userns_mode=""
@@ -45,11 +46,11 @@ if [ "${1:-}" = create ]; then
           echo invalid volume spec: "$spec" >&2
           exit 1
         fi
-        if [[ "$mount" == /in/* ]]; then
-          name="${mount#/in/}"
+        if [[ "$mount" == /__mbuild/in* ]]; then
+          name="${mount#/__mbuild/}"
           mkdir -p "$state_root/create-mounts"
           printf '%s\n' "$host" > "$state_root/create-mounts/$name"
-        elif [ "$mount" = "/__mbuild_script_config" ]; then
+        elif [ "$mount" = "/__mbuild/config" ]; then
           config_host="$host"
         fi
         shift 2
@@ -57,10 +58,12 @@ if [ "${1:-}" = create ]; then
       --env)
         kv="$2"
         case "$kv" in
-          MBUILD_SOURCE_DIR=*) source_dir="${kv#*=}" ;;
+          MBUILD_IN=*) input_dir="${kv#*=}" ;;
+          MBUILD_IN0=*) input0_dir="${kv#*=}" ;;
+          MBUILD_IN1=*) input1_dir="${kv#*=}" ;;
           MBUILD_BUILD_DIR=*) build_dir="${kv#*=}" ;;
-          MBUILD_INSTALL_DIR=*) install_dir="${kv#*=}" ;;
-          MBUILD_SCRIPT_CONFIG_DIR=*) config_dir="${kv#*=}" ;;
+          MBUILD_OUT_DIR=*) out_dir="${kv#*=}" ;;
+          MBUILD_CONFIG_DIR=*) config_dir="${kv#*=}" ;;
         esac
         shift 2
         ;;
@@ -96,16 +99,17 @@ if [ "${1:-}" = create ]; then
   container_dir="$state_root/$container_id"
   mkdir -p "$container_dir/in-mounts"
   mkdir -p "$container_dir/fs$build_dir"
-  mkdir -p "$container_dir/fs$install_dir"
+  mkdir -p "$container_dir/fs$out_dir"
   if [ -d "$state_root/create-mounts" ]; then
     cp -R "$state_root/create-mounts/." "$container_dir/in-mounts/"
     rm -rf "$state_root/create-mounts"
   fi
-  printf '%s\n' "$source_input" > "$container_dir/source_input"
-  printf '%s\n' "$source_dir" > "$container_dir/source_dir"
   printf '%s\n' "$build_dir" > "$container_dir/build_dir"
-  printf '%s\n' "$install_dir" > "$container_dir/install_dir"
+  printf '%s\n' "$out_dir" > "$container_dir/out_dir"
   printf '%s\n' "$config_dir" > "$container_dir/config_dir"
+  printf '%s\n' "$input_dir" > "$container_dir/input_dir"
+  printf '%s\n' "$input0_dir" > "$container_dir/input0_dir"
+  printf '%s\n' "$input1_dir" > "$container_dir/input1_dir"
   printf '%s\n' "$config_host" > "$container_dir/config_host"
   printf '%s\n' "$image_ref" > "$container_dir/image_ref"
   printf '%s\n' "$userns_mode" > "$container_dir/userns_mode"
@@ -156,11 +160,15 @@ if [ "${1:-}" = exec ]; then
 
   config_host="$(cat "$container_dir/config_host")"
   config_dir="$(cat "$container_dir/config_dir")"
-  install_dir="$(cat "$container_dir/install_dir")"
+  build_dir="$(cat "$container_dir/build_dir")"
+  input_dir="$(cat "$container_dir/input_dir")"
+  input0_dir="$(cat "$container_dir/input0_dir")"
+  input1_dir="$(cat "$container_dir/input1_dir")"
+  out_dir="$(cat "$container_dir/out_dir")"
   image_ref="$(cat "$container_dir/image_ref")"
   userns_mode="$(cat "$container_dir/userns_mode")"
   create_user="$(cat "$container_dir/create_user")"
-  out_root="$container_dir/fs$install_dir"
+  out_root="$container_dir/fs$out_dir"
   effective_user="$run_user"
   if [ -z "$effective_user" ]; then
     effective_user="$create_user"
@@ -190,10 +198,14 @@ if [ "${1:-}" = exec ]; then
       test -f "$container_dir/built"
       printf '%s\n' "$effective_user" > "$out_root/install-user.txt"
       mkdir -p "$out_root/copied"
-      source_input="sources0"
-      if [ -n "$source_input" ] && [ -f "$container_dir/in-mounts/$source_input" ]; then
-        cp -R "$(cat "$container_dir/in-mounts/$source_input")/." "$out_root/copied/"
-      fi
+      for mount_file in "$container_dir"/in-mounts/*; do
+        [ -f "$mount_file" ] || continue
+        host_path="$(cat "$mount_file")"
+        if [ -d "$host_path" ]; then
+          cp -R "$host_path/." "$out_root/copied/"
+          break
+        fi
+      done
       printf '%s\n' "$image_ref" > "$out_root/image-ref.txt"
       printf '%s\n' "$userns_mode" > "$out_root/userns-mode.txt"
       ;;
@@ -206,6 +218,11 @@ if [ "${1:-}" = exec ]; then
         cp -R "$config_host/." "$out_root/script-config/" 2>/dev/null || true
         printf '%s\n' "$config_dir" > "$out_root/script-config-dir.txt"
       fi
+      printf '%s\n' "$input_dir" > "$out_root/in-env.txt"
+      printf '%s\n' "$input0_dir" > "$out_root/in0-env.txt"
+      printf '%s\n' "$input1_dir" > "$out_root/in1-env.txt"
+      printf '%s\n' "$build_dir" > "$out_root/build-dir.txt"
+      printf '%s\n' "$out_dir" > "$out_root/out-dir.txt"
       ;;
   esac
   exit 0

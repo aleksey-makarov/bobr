@@ -307,26 +307,26 @@ pub fn default_binary_steps() -> Value {
         {
             "name": "configure",
             "run_as": "build-user",
-            "cwd": "${source}",
-            "argv": ["${script}", "configure"]
+            "cwd": "${build}",
+            "argv": ["${in0}", "configure"]
         },
         {
             "name": "build",
             "run_as": "build-user",
-            "cwd": "${build_dir}",
-            "argv": ["${script}", "build"]
+            "cwd": "${build}",
+            "argv": ["${in0}", "build"]
         },
         {
             "name": "install",
             "run_as": "root",
-            "cwd": "${build_dir}",
-            "argv": ["${script}", "install"]
+            "cwd": "${build}",
+            "argv": ["${in0}", "install"]
         },
         {
             "name": "post_install",
             "run_as": "root",
-            "cwd": "${build_dir}",
-            "argv": ["${script}", "post_install"]
+            "cwd": "${build}",
+            "argv": ["${in0}", "post_install"]
         }
     ])
 }
@@ -340,8 +340,7 @@ pub fn binary_recipe(name: &str, url: &str, source_hash: &str, image: &str, dige
         }),
         json!({
             "image": base_image_recipe(image, digest),
-            "script": script_recipe(),
-            "sources": [source_recipe(url, source_hash)],
+            "in": [script_recipe(), source_recipe(url, source_hash)],
         }),
     )
 }
