@@ -1,8 +1,5 @@
 # mbuild
 
-This project is an independent personal open-source effort.
-It is not affiliated with, derived from, or endorsed by Qualcomm or the Yocto Project.
-
 `mbuild` executes one JSON DAG request.
 
 The entry file is a JSON document whose top-level object is a table of recipe
@@ -94,3 +91,8 @@ Concrete builder behavior is documented separately:
 - filesystem-related builders: [`docs/ROOTFS_BUILDERS.md`](./docs/ROOTFS_BUILDERS.md)
 
 For the architecture documents, start with [`docs/INDEX.md`](./docs/INDEX.md).
+
+## Independence and Affiliation
+
+This project is an independent personal open-source effort.
+It is not affiliated with, derived from, or endorsed by Qualcomm or the Yocto Project.
