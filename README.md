@@ -1,5 +1,8 @@
 # mbuild
 
+This project is an independent personal open-source effort.
+It is not affiliated with, derived from, or endorsed by Qualcomm or the Yocto Project.
+
 `mbuild` executes one JSON DAG request.
 
 The entry file is a JSON document whose top-level object is a table of recipe
