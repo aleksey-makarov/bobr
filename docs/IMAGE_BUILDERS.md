@@ -155,20 +155,20 @@ inside the container lifecycle, not host bind mounts.
     {
       "name": "configure",
       "run_as": "build-user",
-      "cwd": "${build}",
-      "argv": ["${script}", "configure"]
+      "cwd": "@{build}",
+      "argv": ["@{script}", "configure"]
     },
     {
       "name": "build",
       "run_as": "build-user",
-      "cwd": "${build}",
-      "argv": ["${script}", "build"]
+      "cwd": "@{build}",
+      "argv": ["@{script}", "build"]
     },
     {
       "name": "install",
       "run_as": "root",
-      "cwd": "${build}",
-      "argv": ["${script}", "install"]
+      "cwd": "@{build}",
+      "argv": ["@{script}", "install"]
     }
   ],
   "script_config": { "...": "..." }
@@ -194,10 +194,14 @@ Each step contains:
 `Binary` performs controlled interpolation in `cwd`, `argv`, and step-local
 environment values. Supported variables are:
 
-- `${config}`
-- `${build}`
-- `${out}`
-- any named input placeholder such as `${script}`, `${source}`, `${patch}`
+- `@{config}`
+- `@{build}`
+- `@{out}`
+- any named input placeholder such as `@{script}`, `@{source}`, `@{patch}`
+
+Use `@@{name}` to emit the literal text `@{name}` without interpolation.
+Legacy shell-style `${...}` remains plain text and is not interpreted by the
+builder.
 
 Interpolation is a simple path substitution:
 

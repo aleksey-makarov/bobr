@@ -300,26 +300,26 @@ pub fn default_binary_steps() -> Value {
         {
             "name": "configure",
             "run_as": "build-user",
-            "cwd": "${build}",
-            "argv": ["${script}", "configure"]
+            "cwd": "@{build}",
+            "argv": ["@{script}", "configure"]
         },
         {
             "name": "build",
             "run_as": "build-user",
-            "cwd": "${build}",
-            "argv": ["${script}", "build"]
+            "cwd": "@{build}",
+            "argv": ["@{script}", "build"]
         },
         {
             "name": "install",
             "run_as": "root",
-            "cwd": "${build}",
-            "argv": ["${script}", "install"]
+            "cwd": "@{build}",
+            "argv": ["@{script}", "install"]
         },
         {
             "name": "post_install",
             "run_as": "root",
-            "cwd": "${build}",
-            "argv": ["${script}", "post_install"]
+            "cwd": "@{build}",
+            "argv": ["@{script}", "post_install"]
         }
     ])
 }

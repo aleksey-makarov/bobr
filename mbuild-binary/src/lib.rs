@@ -530,24 +530,71 @@ fn interpolate_step_string(
     inputs: &[(String, BuilderInputObject)],
 ) -> BResult<String> {
     let mut rendered = String::new();
-    let mut rest = value;
+    let mut index = 0;
 
-    while let Some(start) = rest.find("${") {
-        rendered.push_str(&rest[..start]);
-        let after_start = &rest[start + 2..];
-        let Some(end) = after_start.find('}') else {
-            return Err(BinaryError::InvalidConfig(format!(
-                "unterminated interpolation in '{value}'"
-            )));
-        };
-        let key = &after_start[..end];
-        let replacement = interpolation_value(key, inputs)?;
-        rendered.push_str(&replacement);
-        rest = &after_start[end + 1..];
+    while index < value.len() {
+        let rest = &value[index..];
+        if let Some(after_escape) = rest.strip_prefix("@@{") {
+            let Some(end) = after_escape.find('}') else {
+                return Err(BinaryError::InvalidConfig(format!(
+                    "unterminated interpolation escape in '{value}'"
+                )));
+            };
+            let key = &after_escape[..end];
+            validate_interpolation_name(key, value, true)?;
+            rendered.push_str("@{");
+            rendered.push_str(key);
+            rendered.push('}');
+            index += 3 + end + 1;
+            continue;
+        }
+        if let Some(after_start) = rest.strip_prefix("@{") {
+            let Some(end) = after_start.find('}') else {
+                return Err(BinaryError::InvalidConfig(format!(
+                    "unterminated interpolation in '{value}'"
+                )));
+            };
+            let key = &after_start[..end];
+            validate_interpolation_name(key, value, false)?;
+            let replacement = interpolation_value(key, inputs)?;
+            rendered.push_str(&replacement);
+            index += 2 + end + 1;
+            continue;
+        }
+
+        let ch = rest.chars().next().expect("rest is non-empty");
+        rendered.push(ch);
+        index += ch.len_utf8();
     }
 
-    rendered.push_str(rest);
     Ok(rendered)
+}
+
+fn validate_interpolation_name(key: &str, value: &str, escaped: bool) -> BResult<()> {
+    let mut chars = key.chars();
+    let Some(first) = chars.next() else {
+        return Err(BinaryError::InvalidConfig(format!(
+            "invalid {} in '{value}'",
+            if escaped {
+                "interpolation escape '@@{}'"
+            } else {
+                "interpolation variable '@{}'"
+            }
+        )));
+    };
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return Err(BinaryError::InvalidConfig(format!(
+            "invalid {} in '{value}'",
+            if escaped {
+                format!("interpolation escape '@@{{{key}}}'")
+            } else {
+                format!("interpolation variable '@{{{key}}}'")
+            }
+        )));
+    }
+    Ok(())
 }
 
 fn interpolation_value(key: &str, inputs: &[(String, BuilderInputObject)]) -> BResult<String> {
@@ -566,7 +613,7 @@ fn interpolation_value(key: &str, inputs: &[(String, BuilderInputObject)]) -> BR
             })
             .ok_or_else(|| {
                 BinaryError::InvalidConfig(format!(
-                    "unknown interpolation variable '${{{key}}}'"
+                    "unknown interpolation variable '@{{{key}}}'"
                 ))
             }),
     }
@@ -1374,29 +1421,29 @@ mod tests {
             BuildStep {
                 name: "configure".to_string(),
                 run_as: StepUser::BuildUser,
-                cwd: "${build}".to_string(),
-                argv: vec!["${script}".to_string(), "configure".to_string()],
+                cwd: "@{build}".to_string(),
+                argv: vec!["@{script}".to_string(), "configure".to_string()],
                 env: Map::new(),
             },
             BuildStep {
                 name: "build".to_string(),
                 run_as: StepUser::BuildUser,
-                cwd: "${build}".to_string(),
-                argv: vec!["${script}".to_string(), "build".to_string()],
+                cwd: "@{build}".to_string(),
+                argv: vec!["@{script}".to_string(), "build".to_string()],
                 env: Map::new(),
             },
             BuildStep {
                 name: "install".to_string(),
                 run_as: StepUser::Root,
-                cwd: "${build}".to_string(),
-                argv: vec!["${script}".to_string(), "install".to_string()],
+                cwd: "@{build}".to_string(),
+                argv: vec!["@{script}".to_string(), "install".to_string()],
                 env: Map::new(),
             },
             BuildStep {
                 name: "post_install".to_string(),
                 run_as: StepUser::Root,
-                cwd: "${build}".to_string(),
-                argv: vec!["${script}".to_string(), "post_install".to_string()],
+                cwd: "@{build}".to_string(),
+                argv: vec!["@{script}".to_string(), "post_install".to_string()],
                 env: Map::new(),
             },
         ]
@@ -1417,29 +1464,29 @@ mod tests {
                 BuildStep {
                     name: "configure".to_string(),
                     run_as: StepUser::BuildUser,
-                    cwd: "${build}".to_string(),
-                    argv: vec!["${script}".to_string(), "configure".to_string()],
+                    cwd: "@{build}".to_string(),
+                    argv: vec!["@{script}".to_string(), "configure".to_string()],
                     env: Map::new(),
                 },
                 BuildStep {
                     name: "build".to_string(),
                     run_as: StepUser::BuildUser,
-                    cwd: "${build}".to_string(),
-                    argv: vec!["${script}".to_string(), "build".to_string()],
+                    cwd: "@{build}".to_string(),
+                    argv: vec!["@{script}".to_string(), "build".to_string()],
                     env: Map::new(),
                 },
                 BuildStep {
                     name: "install".to_string(),
                     run_as: StepUser::Root,
-                    cwd: "${build}".to_string(),
-                    argv: vec!["${script}".to_string(), "install".to_string()],
+                    cwd: "@{build}".to_string(),
+                    argv: vec!["@{script}".to_string(), "install".to_string()],
                     env: Map::new(),
                 },
                 BuildStep {
                     name: "post_install".to_string(),
                     run_as: StepUser::Root,
-                    cwd: "${build}".to_string(),
-                    argv: vec!["${script}".to_string(), "post_install".to_string()],
+                    cwd: "@{build}".to_string(),
+                    argv: vec!["@{script}".to_string(), "post_install".to_string()],
                     env: Map::new(),
                 },
             ],
@@ -1847,29 +1894,38 @@ mod tests {
     }
 
     #[test]
-    fn binary_builder_rejects_old_interpolation_names() {
+    fn binary_builder_treats_legacy_interpolation_syntax_as_literal_text() {
         let temp = tempdir().unwrap();
-        let mut cx = build_context(temp.path());
-        let error = BinaryBuilder
-            .build_typed(
-                BinaryConfig {
-                    script_config: None,
-                    steps: vec![BuildStep {
-                        name: "configure".to_string(),
-                        run_as: StepUser::BuildUser,
-                        cwd: "${in0}".to_string(),
-                        argv: vec!["${in}".to_string(), "configure".to_string()],
-                        env: Map::new(),
-                    }],
-                    install: None,
-                },
-                sample_inputs(temp.path()),
-                &mut cx,
-            )
-            .unwrap_err();
+        let step = BuildStep {
+            name: "install".to_string(),
+            run_as: StepUser::Root,
+            cwd: "@{build}".to_string(),
+            argv: vec!["${in}".to_string(), "${source}".to_string()],
+            env: Map::from_iter([("LITERAL".to_string(), Value::String("${out}".to_string()))]),
+        };
 
-        let message = error.to_string();
-        assert!(message.contains("unknown interpolation variable"), "{message}");
+        let argv = resolve_step_argv(
+            &step,
+            &[(
+                "source".to_string(),
+                resolved_directory(temp.path(), "source", Map::new()),
+            )],
+        )
+        .unwrap();
+        let env = resolve_step_env(
+            &step,
+            &[(
+                "source".to_string(),
+                resolved_directory(temp.path(), "source", Map::new()),
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(argv, vec!["${in}".to_string(), "${source}".to_string()]);
+        assert_eq!(
+            env,
+            vec![("LITERAL".to_string(), "${out}".to_string())]
+        );
     }
 
     #[test]
@@ -1878,8 +1934,8 @@ mod tests {
         let step = BuildStep {
             name: "install".to_string(),
             run_as: StepUser::Root,
-            cwd: "${build}".to_string(),
-            argv: vec!["${missing_patch}".to_string(), "install".to_string()],
+            cwd: "@{build}".to_string(),
+            argv: vec!["@{missing_patch}".to_string(), "install".to_string()],
             env: Map::new(),
         };
         let error = resolve_step_argv(
@@ -1893,5 +1949,77 @@ mod tests {
 
         let message = error.to_string();
         assert!(message.contains("unknown interpolation variable"), "{message}");
+    }
+
+    #[test]
+    fn binary_builder_resolves_interpolation_escape_as_literal() {
+        let temp = tempdir().unwrap();
+        let step = BuildStep {
+            name: "install".to_string(),
+            run_as: StepUser::Root,
+            cwd: "@{build}".to_string(),
+            argv: vec![
+                "@@{patch}".to_string(),
+                "cp".to_string(),
+                "@{source}/x".to_string(),
+                "$HOME/@@{literal}".to_string(),
+            ],
+            env: Map::new(),
+        };
+        let argv = resolve_step_argv(
+            &step,
+            &[(
+                "source".to_string(),
+                resolved_directory(temp.path(), "source", Map::new()),
+            )],
+        )
+        .unwrap();
+
+        assert_eq!(argv[0], "@{patch}");
+        assert_eq!(argv[1], "cp");
+        assert_eq!(argv[2], format!("{}/x", input_mount_path("source")));
+        assert_eq!(argv[3], "$HOME/@{literal}");
+    }
+
+    #[test]
+    fn binary_builder_rejects_unterminated_new_interpolation() {
+        let step = BuildStep {
+            name: "install".to_string(),
+            run_as: StepUser::Root,
+            cwd: "@{build".to_string(),
+            argv: vec!["@{missing".to_string(), "install".to_string()],
+            env: Map::new(),
+        };
+        let error = resolve_step_argv(&step, &[]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("unterminated interpolation"), "{message}");
+    }
+
+    #[test]
+    fn binary_builder_rejects_unterminated_interpolation_escape() {
+        let step = BuildStep {
+            name: "install".to_string(),
+            run_as: StepUser::Root,
+            cwd: "@{build}".to_string(),
+            argv: vec!["@@{literal".to_string(), "install".to_string()],
+            env: Map::new(),
+        };
+        let error = resolve_step_argv(&step, &[]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("unterminated interpolation escape"), "{message}");
+    }
+
+    #[test]
+    fn binary_builder_rejects_invalid_new_interpolation_name() {
+        let step = BuildStep {
+            name: "install".to_string(),
+            run_as: StepUser::Root,
+            cwd: "@{build}".to_string(),
+            argv: vec!["@{foo-bar}".to_string(), "install".to_string()],
+            env: Map::new(),
+        };
+        let error = resolve_step_argv(&step, &[]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("invalid interpolation variable"), "{message}");
     }
 }
