@@ -231,6 +231,10 @@ if [ "${1:-}" = cp ]; then
   container_path="${BASH_REMATCH[2]}"
   container_dir="$state_root/$container_id"
   src_path="$container_dir/fs${container_path%/.}"
+  if [ "${MBUILD_TEST_BINARY_PODMAN_CP_REMOVE_DEST:-}" = "1" ]; then
+    rm -rf "$dest"
+    exit 0
+  fi
   mkdir -p "$dest"
   cp -R "$src_path/." "$dest/"
   exit 0

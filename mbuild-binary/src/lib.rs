@@ -749,6 +749,71 @@ fn export_container_output(
         Map::new(),
     );
 
+    verify_exported_output(output_path, cx)?;
+
+    Ok(())
+}
+
+fn verify_exported_output(output_path: &Path, cx: &BuildContext) -> BResult<()> {
+    let map_io_error = |error: std::io::Error| {
+        BinaryError::FsFailed(format!(
+            "failed to inspect exported build result '{}': {error}",
+            output_path.display()
+        ))
+    };
+
+    if !output_path.exists() {
+        return Err(BinaryError::BuildFailed(format!(
+            "exported build result is missing: '{}'",
+            output_path.display()
+        )));
+    }
+    if !output_path.is_dir() {
+        return Err(BinaryError::BuildFailed(format!(
+            "exported build result is not a directory: '{}'",
+            output_path.display()
+        )));
+    }
+
+    let mut entries = fs::read_dir(output_path)
+        .map_err(map_io_error)?
+        .map(|entry| entry.map_err(&map_io_error))
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    let preview = entries
+        .iter()
+        .take(32)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    let listing = if preview.is_empty() {
+        "<empty>\n".to_string()
+    } else {
+        let mut rendered = preview.join("\n");
+        rendered.push('\n');
+        rendered
+    };
+    let raw_log_path = cx.write_raw_log("export-verify", &listing);
+
+    let mut details = Map::new();
+    details.insert(
+        "entry_count".to_string(),
+        Value::from(entries.len() as u64),
+    );
+    details.insert(
+        "entries_preview".to_string(),
+        Value::Array(preview.into_iter().map(Value::String).collect()),
+    );
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        "export-verify",
+        format!("verified exported build result at '{}'", output_path.display()),
+        None,
+        raw_log_path,
+        details,
+    );
+
     Ok(())
 }
 
@@ -1748,6 +1813,23 @@ mod tests {
             assert!(matches!(error, BuilderError::ExecutionFailed(_)));
             let message = error.to_string();
             assert!(message.contains("step 'configure'"), "{message}");
+        });
+    }
+
+    #[test]
+    fn binary_builder_rejects_missing_exported_output_after_podman_cp() {
+        with_fake_podman(|| {
+            let temp = tempdir().unwrap();
+            let mut cx = build_context(temp.path());
+            unsafe { env::set_var("MBUILD_TEST_BINARY_PODMAN_CP_REMOVE_DEST", "1") };
+            let error = BinaryBuilder
+                .build_typed(default_config(), sample_inputs(temp.path()), &mut cx)
+                .unwrap_err();
+            unsafe { env::remove_var("MBUILD_TEST_BINARY_PODMAN_CP_REMOVE_DEST") };
+
+            assert!(matches!(error, BuilderError::ExecutionFailed(_)));
+            let message = error.to_string();
+            assert!(message.contains("exported build result is missing"), "{message}");
         });
     }
 

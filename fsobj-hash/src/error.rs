@@ -4,6 +4,11 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub enum Error {
     Io(std::io::Error),
+    IoAtPath {
+        path: PathBuf,
+        action: &'static str,
+        error: std::io::Error,
+    },
     UnsupportedRootSymlink {
         path: PathBuf,
     },
@@ -90,6 +95,17 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(error) => write!(f, "io error: {error}"),
+            Self::IoAtPath {
+                path,
+                action,
+                error,
+            } => {
+                write!(
+                    f,
+                    "io error at '{}', while {action}: {error}",
+                    path.display()
+                )
+            }
             Self::UnsupportedRootSymlink { path } => {
                 write!(f, "root symlink is not supported: {}", path.display())
             }
@@ -125,6 +141,7 @@ impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) | Self::TarRead(error) => Some(error),
+            Self::IoAtPath { error, .. } => Some(error),
             _ => None,
         }
     }
