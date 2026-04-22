@@ -151,6 +151,7 @@ impl TypedBuilder for BinaryBuilder {
         validate_config(&config).map_err(map_error)?;
         let image = inputs.required("image")?;
         let named_inputs = collect_named_inputs(&inputs).map_err(map_error)?;
+        validate_step_interpolations(&config.steps, &named_inputs).map_err(map_error)?;
 
         let output_path = cx.temp_dir.join(OUTPUT_DIR_NAME);
         fsutil::recreate_empty_dir_force(&output_path)
@@ -613,6 +614,18 @@ fn resolve_step_env(
         ));
     }
     Ok(rendered)
+}
+
+fn validate_step_interpolations(
+    steps: &[BuildStep],
+    inputs: &[(String, BuilderInputObject)],
+) -> BResult<()> {
+    for step in steps {
+        let _ = resolve_step_cwd(step, inputs)?;
+        let _ = resolve_step_argv(step, inputs)?;
+        let _ = resolve_step_env(step, inputs)?;
+    }
+    Ok(())
 }
 
 fn create_container(
