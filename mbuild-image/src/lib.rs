@@ -140,16 +140,23 @@ impl TypedBuilder for ContainerImageBuilder {
             "fetch",
             format!("fetching image '{}' from registry", config.image),
         );
-        let manifest_digest =
-            registry::fetch_image_authenticated(&config.image, &config.digest, &staged_path)
-                .map_err(|e| {
-                    // On digest mismatch, resolve the current digest by tag and show a helpful hint.
-                    let hint = registry::resolve_current_digest(&config.image)
-                        .map(|d| format!("\n    digest = \"{d}\","))
-                        .unwrap_or_default();
-                    ContainerImageError::BuildFailed(format!("{e}{hint}"))
-                })
-                .map_err(map_container_image_error)?;
+        let mut progress = |message: &str| {
+            cx.log_event(BuildLogLevel::Info, "fetch-progress", message.to_string());
+        };
+        let manifest_digest = registry::fetch_image_authenticated_with_progress(
+            &config.image,
+            &config.digest,
+            &staged_path,
+            &mut progress,
+        )
+        .map_err(|e| {
+            // On digest mismatch, resolve the current digest by tag and show a helpful hint.
+            let hint = registry::resolve_current_digest(&config.image)
+                .map(|d| format!("\n    digest = \"{d}\","))
+                .unwrap_or_default();
+            ContainerImageError::BuildFailed(format!("{e}{hint}"))
+        })
+        .map_err(map_container_image_error)?;
 
         let mut meta = Map::new();
         meta.insert(

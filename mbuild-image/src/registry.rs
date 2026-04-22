@@ -2,6 +2,7 @@ use crate::oci::{self, MEDIA_TYPE_OCI_MANIFEST, OciDescriptor, OciManifest};
 use std::fmt;
 use std::io::Read;
 use std::path::Path;
+use std::time::Duration;
 
 const MEDIA_TYPE_OCI_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 const MEDIA_TYPE_DOCKER_MANIFEST_LIST: &str =
@@ -12,6 +13,10 @@ const ACCEPT_MANIFESTS: &str = concat!(
     "application/vnd.docker.distribution.manifest.list.v2+json, ",
     "application/vnd.docker.distribution.manifest.v2+json"
 );
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug)]
 pub enum RegistryError {
@@ -109,7 +114,8 @@ pub fn resolve_current_digest(image: &str) -> Result<String, RegistryError> {
         "https"
     };
     let url = format!("{scheme}://{registry_host}/v2/{repository}/manifests/{reference}");
-    let (bytes, _) = get_with_bearer_auth(&url, ACCEPT_MANIFESTS)?;
+    let mut progress = |_message: &str| {};
+    let (bytes, _) = get_with_bearer_auth(&url, ACCEPT_MANIFESTS, &mut progress)?;
     Ok(format!("sha256:{}", oci::sha256_hex(&bytes)))
 }
 
@@ -117,10 +123,21 @@ pub fn resolve_current_digest(image: &str) -> Result<String, RegistryError> {
 /// image layout directory to `target_dir` (which must already exist).
 ///
 /// Handles Bearer auth challenges automatically.
+#[allow(dead_code)]
 pub fn fetch_image_authenticated(
     image: &str,
     pinned_digest: &str,
     target_dir: &Path,
+) -> Result<String, RegistryError> {
+    let mut progress = |_message: &str| {};
+    fetch_image_authenticated_with_progress(image, pinned_digest, target_dir, &mut progress)
+}
+
+pub fn fetch_image_authenticated_with_progress(
+    image: &str,
+    pinned_digest: &str,
+    target_dir: &Path,
+    progress: &mut dyn FnMut(&str),
 ) -> Result<String, RegistryError> {
     let (registry_host, repository, reference) = parse_image_ref(image)?;
 
@@ -134,7 +151,12 @@ pub fn fetch_image_authenticated(
     // image string is only used to locate the registry and repository.
     let pinned_url =
         format!("{scheme}://{registry_host}/v2/{repository}/manifests/{pinned_digest}");
-    let (pinned_bytes, pinned_media_type) = get_with_bearer_auth(&pinned_url, ACCEPT_MANIFESTS)?;
+    let pinned_message = format!(
+        "fetching pinned manifest {pinned_digest} from {registry_host}/{repository}"
+    );
+    progress(&pinned_message);
+    let (pinned_bytes, pinned_media_type) =
+        get_with_bearer_auth(&pinned_url, ACCEPT_MANIFESTS, progress)?;
 
     // Verify that what the registry returned actually has the expected digest.
     let actual_digest = format!("sha256:{}", oci::sha256_hex(&pinned_bytes));
@@ -149,7 +171,10 @@ pub fn fetch_image_authenticated(
         let platform_digest = select_platform_manifest(&pinned_bytes, "linux", "amd64")?;
         let platform_url =
             format!("{scheme}://{registry_host}/v2/{repository}/manifests/{platform_digest}");
-        let (platform_bytes, _) = get_with_bearer_auth(&platform_url, ACCEPT_MANIFESTS)?;
+        let platform_message =
+            format!("selected linux/amd64 manifest {platform_digest}; fetching platform manifest");
+        progress(&platform_message);
+        let (platform_bytes, _) = get_with_bearer_auth(&platform_url, ACCEPT_MANIFESTS, progress)?;
         verify_digest(&platform_bytes, &platform_digest)?;
         platform_bytes
     } else {
@@ -162,18 +187,38 @@ pub fn fetch_image_authenticated(
     let manifest: OciManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| RegistryError::Parse(format!("failed to parse manifest: {e}")))?;
 
+    progress("initializing OCI image layout");
     oci::init_layout(target_dir)?;
 
+    progress("writing manifest blob");
     oci::write_blob(target_dir, &manifest_bytes, MEDIA_TYPE_OCI_MANIFEST)?;
 
-    let config_bytes =
-        get_blob_with_auth(scheme, &registry_host, &repository, &manifest.config.digest)?;
+    let config_message = format!("fetching config blob {}", manifest.config.digest);
+    progress(&config_message);
+    let config_bytes = get_blob_with_auth(
+        scheme,
+        &registry_host,
+        &repository,
+        &manifest.config.digest,
+        progress,
+    )?;
     verify_digest(&config_bytes, &manifest.config.digest)?;
+    progress("writing config blob");
     oci::write_blob(target_dir, &config_bytes, &manifest.config.media_type)?;
 
-    for layer in &manifest.layers {
-        let layer_bytes = get_blob_with_auth(scheme, &registry_host, &repository, &layer.digest)?;
+    for (index, layer) in manifest.layers.iter().enumerate() {
+        let layer_message = format!(
+            "fetching layer {}/{} {}",
+            index + 1,
+            manifest.layers.len(),
+            layer.digest
+        );
+        progress(&layer_message);
+        let layer_bytes =
+            get_blob_with_auth(scheme, &registry_host, &repository, &layer.digest, progress)?;
         verify_digest(&layer_bytes, &layer.digest)?;
+        let write_message = format!("writing layer {}/{}", index + 1, manifest.layers.len());
+        progress(&write_message);
         oci::write_blob(target_dir, &layer_bytes, &layer.media_type)?;
     }
 
@@ -185,22 +230,40 @@ pub fn fetch_image_authenticated(
         platform: None,
         annotations: None,
     };
+    progress("writing OCI index");
     oci::write_index(target_dir, manifest_descriptor, Some(image))?;
 
     Ok(stored_manifest_digest)
 }
 
+fn http_request(url: &str, accept: &str) -> ureq::Request {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(HTTP_CONNECT_TIMEOUT)
+        .timeout_read(HTTP_READ_TIMEOUT)
+        .timeout_write(HTTP_WRITE_TIMEOUT)
+        .build();
+    agent
+        .get(url)
+        .set("Accept", accept)
+        .timeout(HTTP_REQUEST_TIMEOUT)
+}
+
 /// GET a URL, attempting unauthenticated first; if challenged with 401,
 /// parse WWW-Authenticate Bearer and retry with token.
-fn get_with_bearer_auth(url: &str, accept: &str) -> Result<(Vec<u8>, String), RegistryError> {
-    let request = ureq::get(url).set("Accept", accept);
+fn get_with_bearer_auth(
+    url: &str,
+    accept: &str,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(Vec<u8>, String), RegistryError> {
+    let request = http_request(url, accept);
     match request.call() {
         Ok(resp) => read_response(resp),
         Err(ureq::Error::Status(401, resp)) => {
             let www_auth = resp.header("WWW-Authenticate").unwrap_or("").to_string();
-            let token = fetch_bearer_token(&www_auth)?;
-            let auth_request = ureq::get(url)
-                .set("Accept", accept)
+            progress("registry requested bearer token");
+            let token = fetch_bearer_token(&www_auth, progress)?;
+            progress("retrying registry request with bearer token");
+            let auth_request = http_request(url, accept)
                 .set("Authorization", &format!("Bearer {token}"));
             let resp = auth_request.call()?;
             read_response(resp)
@@ -225,14 +288,19 @@ fn read_response(resp: ureq::Response) -> Result<(Vec<u8>, String), RegistryErro
     Ok((bytes, content_type))
 }
 
-fn fetch_bearer_token(www_authenticate: &str) -> Result<String, RegistryError> {
+fn fetch_bearer_token(
+    www_authenticate: &str,
+    progress: &mut dyn FnMut(&str),
+) -> Result<String, RegistryError> {
     let (realm, service, scope) = parse_bearer_challenge(www_authenticate).ok_or_else(|| {
         RegistryError::Http(format!(
             "failed to parse WWW-Authenticate: {www_authenticate}"
         ))
     })?;
 
-    let resp = ureq::get(&realm)
+    let token_message = format!("fetching bearer token from {realm}");
+    progress(&token_message);
+    let resp = http_request(&realm, "application/json")
         .query("service", &service)
         .query("scope", &scope)
         .call()
@@ -301,9 +369,10 @@ fn get_blob_with_auth(
     registry_host: &str,
     repository: &str,
     digest: &str,
+    progress: &mut dyn FnMut(&str),
 ) -> Result<Vec<u8>, RegistryError> {
     let url = format!("{scheme}://{registry_host}/v2/{repository}/blobs/{digest}");
-    let (bytes, _) = get_with_bearer_auth(&url, "application/octet-stream")?;
+    let (bytes, _) = get_with_bearer_auth(&url, "application/octet-stream", progress)?;
     Ok(bytes)
 }
 
