@@ -246,6 +246,10 @@ if [ "${1:-}" = rm ]; then
     shift 1
   fi
   container_id="$1"
+  if [ "${MBUILD_TEST_BINARY_PODMAN_RM_FAIL:-}" = "1" ]; then
+    echo simulated podman rm failure for "$container_id" >&2
+    exit 125
+  fi
   rm -rf "$state_root/$container_id"
   exit 0
 fi

@@ -56,6 +56,12 @@ impl fmt::Display for BinaryError {
 
 type BResult<T> = Result<T, BinaryError>;
 
+#[derive(Debug)]
+struct CleanupError {
+    message: String,
+    raw_log_path: Option<PathBuf>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BinaryConfig {
@@ -508,8 +514,15 @@ fn run_container_build(
     })();
     let cleanup_result = remove_container(&instance, cx);
     match (build_result, cleanup_result) {
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup_error)) => {
+            log_cleanup_warning(cx, &instance.id, &cleanup_error, false);
+            Err(error)
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(cleanup_error)) => {
+            log_cleanup_warning(cx, &instance.id, &cleanup_error, true);
+            Ok(())
+        }
         (Ok(()), Ok(())) => Ok(()),
     }
 }
@@ -1023,7 +1036,7 @@ fn exec_step(
     Ok(())
 }
 
-fn remove_container(instance: &ContainerInstance, cx: &BuildContext) -> BResult<()> {
+fn remove_container(instance: &ContainerInstance, cx: &BuildContext) -> Result<(), CleanupError> {
     cx.log_event(
         BuildLogLevel::Info,
         "podman-cleanup",
@@ -1032,17 +1045,19 @@ fn remove_container(instance: &ContainerInstance, cx: &BuildContext) -> BResult<
     let mut process = ProcessCommand::new("podman");
     process.arg("rm").arg("--force").arg(&instance.id);
     let output = process.output().map_err(|error| {
-        BinaryError::PodmanFailed(format!("failed to execute podman rm: {error}"))
+        CleanupError {
+            message: format!("failed to execute podman rm: {error}"),
+            raw_log_path: None,
+        }
     })?;
     let log_path = write_command_log(cx, "podman-cleanup", "", &[], &output);
 
     if !output.status.success() {
-        return Err(command_failure(
-            "podman-cleanup",
-            "podman rm",
-            &output,
-            log_path,
-        ));
+        return Err(CleanupError {
+            message: command_failure("podman-cleanup", "podman rm", &output, log_path.clone())
+                .to_string(),
+            raw_log_path: log_path,
+        });
     }
 
     cx.log_event_with_details(
@@ -1055,6 +1070,33 @@ fn remove_container(instance: &ContainerInstance, cx: &BuildContext) -> BResult<
     );
 
     Ok(())
+}
+
+fn log_cleanup_warning(
+    cx: &BuildContext,
+    container_id: &str,
+    error: &CleanupError,
+    output_preserved: bool,
+) {
+    let message = if output_preserved {
+        format!(
+            "failed to remove build container {container_id} after successful output export; build result was preserved: {}",
+            error.message
+        )
+    } else {
+        format!(
+            "failed to remove build container {container_id} during cleanup: {}",
+            error.message
+        )
+    };
+    cx.log_event_with_details(
+        BuildLogLevel::Warn,
+        "cleanup-warning",
+        message,
+        None,
+        error.raw_log_path.clone(),
+        Map::new(),
+    );
 }
 
 fn command_failure(
@@ -1222,11 +1264,11 @@ fn write_script_config_node(path: &Path, value: &Value, debug_path: &str) -> BRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{Builder, BuilderInputObject, BuilderInputs};
+    use mbuild_core::{BuildLogEvent, BuildLogger, Builder, BuilderInputObject, BuilderInputs};
     use std::env;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
     use tempfile::tempdir;
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1240,6 +1282,43 @@ mod tests {
         fs::create_dir_all(&state_dir).unwrap();
         mbuild_core::fsutil::recreate_empty_dir_force(&temp_dir).unwrap();
         BuildContext::with_noop_logger(state_dir, temp_dir)
+    }
+
+    #[derive(Debug)]
+    struct CapturingLogger {
+        root: PathBuf,
+        events: Mutex<Vec<BuildLogEvent>>,
+    }
+
+    impl CapturingLogger {
+        fn new(root: PathBuf) -> Self {
+            fs::create_dir_all(&root).unwrap();
+            Self {
+                root,
+                events: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn events(&self) -> Vec<BuildLogEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl BuildLogger for CapturingLogger {
+        fn log_event(&self, event: BuildLogEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+
+        fn allocate_raw_log_path(&self, label: &str) -> Result<PathBuf, String> {
+            let mut index = self.events.lock().unwrap().len();
+            loop {
+                let path = self.root.join(format!("{label}-{index}.log"));
+                if !path.exists() {
+                    return Ok(path);
+                }
+                index += 1;
+            }
+        }
     }
 
     fn install_fake_podman(dir: &Path) {
@@ -1890,6 +1969,70 @@ mod tests {
             assert!(matches!(error, BuilderError::ExecutionFailed(_)));
             let message = error.to_string();
             assert!(message.contains("exported build result is missing"), "{message}");
+        });
+    }
+
+    #[test]
+    fn binary_builder_warns_when_cleanup_fails_after_successful_export() {
+        with_fake_podman(|| {
+            let temp = tempdir().unwrap();
+            let logger = Arc::new(CapturingLogger::new(temp.path().join("logs")));
+            let mut cx = build_context(temp.path()).with_logger(logger.clone());
+            unsafe { env::set_var("MBUILD_TEST_BINARY_PODMAN_RM_FAIL", "1") };
+            let result = BinaryBuilder
+                .build_typed(default_config(), sample_inputs(temp.path()), &mut cx)
+                .unwrap();
+            unsafe { env::remove_var("MBUILD_TEST_BINARY_PODMAN_RM_FAIL") };
+
+            assert!(result.staged_path.is_dir());
+            let events = logger.events();
+            let warning = events
+                .iter()
+                .find(|event| event.level == BuildLogLevel::Warn && event.phase == "cleanup-warning")
+                .expect("expected cleanup warning event");
+            assert!(
+                warning.message.contains("successful output export"),
+                "{}",
+                warning.message
+            );
+            assert!(
+                warning.message.contains("build result was preserved"),
+                "{}",
+                warning.message
+            );
+            assert!(warning.raw_log_path.is_some());
+        });
+    }
+
+    #[test]
+    fn binary_builder_preserves_step_failure_when_cleanup_also_fails() {
+        with_fake_podman(|| {
+            let temp = tempdir().unwrap();
+            let logger = Arc::new(CapturingLogger::new(temp.path().join("logs")));
+            let mut cx = build_context(temp.path()).with_logger(logger.clone());
+            unsafe {
+                env::set_var("MBUILD_TEST_BINARY_PODMAN_FAIL", "1");
+                env::set_var("MBUILD_TEST_BINARY_PODMAN_RM_FAIL", "1");
+            }
+            let error = BinaryBuilder
+                .build_typed(default_config(), sample_inputs(temp.path()), &mut cx)
+                .unwrap_err();
+            unsafe {
+                env::remove_var("MBUILD_TEST_BINARY_PODMAN_FAIL");
+                env::remove_var("MBUILD_TEST_BINARY_PODMAN_RM_FAIL");
+            }
+
+            let message = error.to_string();
+            assert!(message.contains("step 'configure'"), "{message}");
+            assert!(!message.contains("podman rm"), "{message}");
+
+            let events = logger.events();
+            let warning = events
+                .iter()
+                .find(|event| event.level == BuildLogLevel::Warn && event.phase == "cleanup-warning")
+                .expect("expected cleanup warning event");
+            assert!(warning.message.contains("during cleanup"), "{}", warning.message);
+            assert!(warning.raw_log_path.is_some());
         });
     }
 
