@@ -107,3 +107,36 @@ existence of `a/` and `a/b/` even if the archive does not list them explicitly.
 
 Repeated explicit directory entries are allowed as no-op. Duplicate file or
 symlink entries are rejected. Any path kind conflict is rejected.
+
+## CLI
+
+The `fsobj-hash` crate also provides a small helper binary:
+
+```text
+fsobj-hash <path> [--mode=auto|direct|tar]
+```
+
+It prints a single lowercase hex `object_hash` to stdout.
+
+`fsobj-hash --help` prints the command usage and available modes.
+
+### Modes
+
+- `direct`
+  - hash the given filesystem path with `hash_path`
+- `tar`
+  - hash the given tar archive with `hash_tar_file`
+- `auto`
+  - if `<path>` is a directory, use `hash_path`
+  - if `<path>` is a regular file whose basename ends with `.tar`, use `hash_tar_file`
+  - otherwise use `hash_path`
+
+### Tar From Stdin
+
+The CLI supports tar input from stdin only in explicit tar mode:
+
+```text
+fsobj-hash - --mode=tar
+```
+
+`-` is not accepted in `auto` or `direct` mode.
