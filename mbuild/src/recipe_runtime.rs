@@ -315,6 +315,7 @@ fn execute_misses(
     let mut remaining = HashMap::<BuildKey, usize>::new();
     let mut reverse = HashMap::<BuildKey, Vec<BuildKey>>::new();
     let mut ready = VecDeque::<BuildKey>::new();
+    let mut first_error: Option<RuntimeError> = None;
 
     for (key, node) in nodes {
         if !matches!(node.state, PlanningState::NeedsBuild) || node.active_names.is_empty() {
@@ -342,7 +343,7 @@ fn execute_misses(
     let mut in_flight = HashMap::<BuildKey, JoinHandle<()>>::new();
 
     while !completed.contains_key(&root_key) {
-        while in_flight.len() < jobs {
+        while first_error.is_none() && in_flight.len() < jobs {
             let Some(key) = ready.pop_front() else {
                 break;
             };
@@ -387,6 +388,9 @@ fn execute_misses(
         }
 
         if in_flight.is_empty() {
+            if let Some(error) = first_error.take() {
+                return Err(error);
+            }
             return Err(RuntimeError::Build(
                 "planner/executor stalled: no ready jobs and root result is still unresolved"
                     .to_string(),
@@ -401,7 +405,18 @@ fn execute_misses(
                 RuntimeError::Build(format!("worker thread for key '{}' panicked", key))
             })?;
         }
-        let executed = result?;
+        let executed = match result {
+            Ok(executed) => executed,
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+        };
+        if first_error.is_some() {
+            continue;
+        }
         let node = nodes.get(&key).ok_or_else(|| {
             RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
@@ -440,6 +455,9 @@ fn execute_misses(
         }
     }
 
+    if let Some(error) = first_error {
+        return Err(error);
+    }
     completed.get(&root_key).cloned().ok_or_else(|| {
         RuntimeError::Store(format!(
             "root result for key '{}' is missing after executor completion",

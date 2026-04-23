@@ -87,6 +87,16 @@ fn with_fake_podman<T>(f: impl FnOnce() -> T) -> T {
     result
 }
 
+fn fake_podman_state_root() -> std::path::PathBuf {
+    let first_path = env::var("PATH")
+        .unwrap()
+        .split(':')
+        .next()
+        .expect("PATH must have fake podman prefix")
+        .to_string();
+    Path::new(&first_path).join(".fake-podman-state")
+}
+
 fn spawn_http_server(
     body: Vec<u8>,
     content_type: &'static str,
@@ -224,6 +234,31 @@ fn binary_with_two_sources_recipe(
             "script": script_recipe(),
             "source_a": source_recipe(url_a, source_hash),
             "source_b": source_recipe(url_b, source_hash)
+        }),
+    )
+}
+
+fn binary_recipe_with_behavior(
+    name: &str,
+    url: &str,
+    source_hash: &str,
+    image: &str,
+    digest: &str,
+    behavior: &str,
+) -> Value {
+    recipe_node(
+        name,
+        "Binary",
+        json!({
+            "steps": default_binary_steps(),
+            "script_config": {
+                "test_behavior": behavior,
+            }
+        }),
+        json!({
+            "image": base_image_recipe(image, digest),
+            "script": script_recipe(),
+            "source": source_recipe(url, source_hash),
         }),
     )
 }
@@ -420,6 +455,80 @@ fn independent_fetch_sources_run_in_parallel() {
             .unwrap()
             .expect("expected binary Build to exist in store");
         assert!(published.build.meta.get("install").is_some());
+        drop(oci_server);
+    });
+}
+
+#[test]
+fn executor_waits_for_in_flight_workers_to_cleanup_after_first_failure() {
+    with_fake_podman(|| {
+        let workspace = tempdir().unwrap();
+        let (oci_server, image_ref, pinned_digest) = spawn_test_oci_registry();
+        let source_tar = {
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut tar = tar::Builder::new(encoder);
+            let body = b"hello from cleanup wait test\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_path("pkg/README.txt").unwrap();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append(&header, &body[..]).unwrap();
+            tar.into_inner().unwrap().finish().unwrap()
+        };
+        let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
+            Ok(server) => server,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to start test HTTP server: {error}"),
+        };
+        let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
+        let recipe = recipe_node(
+            "final-image",
+            "Image",
+            json!({ "mode": "bootstrap" }),
+            json!({
+                "in000": binary_recipe_with_behavior(
+                    "binary-fail",
+                    &url,
+                    &source_hash,
+                    &image_ref,
+                    &pinned_digest,
+                    "fail-fast"
+                ),
+                "in001": binary_recipe_with_behavior(
+                    "binary-slow",
+                    &url,
+                    &source_hash,
+                    &image_ref,
+                    &pinned_digest,
+                    "slow-success"
+                )
+            }),
+        );
+        let recipe_path = workspace.path().join("cleanup-wait.json");
+        write_recipe(&recipe_path, &recipe);
+
+        let error = run_recipe_json_in_workspace_with_options(
+            workspace.path(),
+            &recipe_path,
+            BuildRunOptions {
+                emit_progress: false,
+                jobs: 2,
+            },
+        )
+        .unwrap_err();
+        handle.join().unwrap();
+
+        let message = error.to_string();
+        assert!(message.contains("step 'configure'"), "{message}");
+
+        let state_root = fake_podman_state_root();
+        let leaked = fs::read_dir(&state_root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("fake-container-"))
+            .count();
+        assert_eq!(leaked, 0, "expected no leaked fake podman containers");
         drop(oci_server);
     });
 }
