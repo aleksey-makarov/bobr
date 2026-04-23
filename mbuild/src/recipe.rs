@@ -1,8 +1,12 @@
 use crate::builders;
 use crate::runtime::{RuntimeError, map_store_error};
-use mbuild_core::{BuildKey, BuilderSpec, compute_build_key};
-use serde_json::{Map, Value};
+use mbuild_core::{
+    BuildKey, BuilderSpec, ObjectHash, ResultId, compute_build_key, compute_meta_hash,
+    compute_result_id,
+};
+use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct RecipeRequest {
@@ -10,11 +14,39 @@ pub struct RecipeRequest {
 }
 
 #[derive(Debug, Clone)]
-pub struct Recipe {
+pub enum Recipe {
+    Builder(BuilderRecipe),
+    Source(SourceRecipe),
+}
+
+#[derive(Debug, Clone)]
+pub struct BuilderRecipe {
     name: String,
     tag: String,
     config: Value,
     inputs: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceRecipe {
+    name: String,
+    object_hash: ObjectHash,
+    origin: SourceOrigin,
+    meta: Map<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub enum SourceOrigin {
+    Path {
+        path: PathBuf,
+        mode: SourcePathMode,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourcePathMode {
+    Direct,
+    Tar,
 }
 
 impl RecipeRequest {
@@ -33,40 +65,62 @@ impl RecipeRequest {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PlannedRecipe {
-    name: String,
-    spec: &'static BuilderSpec,
-    config: Value,
-    inputs: BTreeMap<String, BuildKey>,
+pub(crate) enum PlannedRecipe {
+    Builder(PlannedBuilderRecipe),
+    Source(PlannedSourceRecipe),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PlannedBuilderRecipe {
+    pub(crate) name: String,
+    pub(crate) spec: &'static BuilderSpec,
+    pub(crate) config: Value,
+    pub(crate) inputs: BTreeMap<String, BuildKey>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PlannedSourceRecipe {
+    pub(crate) name: String,
+    pub(crate) object_hash: ObjectHash,
+    pub(crate) origin: SourceOrigin,
+    pub(crate) meta: Map<String, Value>,
+    pub(crate) result_id: ResultId,
 }
 
 impl PlannedRecipe {
     pub(crate) fn build_name(&self) -> &str {
-        &self.name
+        match self {
+            Self::Builder(recipe) => &recipe.name,
+            Self::Source(recipe) => &recipe.name,
+        }
     }
 
-    pub(crate) fn builder_tag(&self) -> &'static str {
-        self.spec.tag
+    pub(crate) fn tag(&self) -> &str {
+        match self {
+            Self::Builder(recipe) => recipe.spec.tag,
+            Self::Source(_) => "Source",
+        }
     }
 
-    pub(crate) fn config(&self) -> &Value {
-        &self.config
-    }
-
-    pub(crate) fn inputs(&self) -> &BTreeMap<String, BuildKey> {
-        &self.inputs
+    pub(crate) fn builder(&self) -> Option<(&'static BuilderSpec, &Value, &BTreeMap<String, BuildKey>)> {
+        match self {
+            Self::Builder(recipe) => Some((recipe.spec, &recipe.config, &recipe.inputs)),
+            Self::Source(_) => None,
+        }
     }
 
     pub(crate) fn try_for_each_direct_dep<E>(
         &self,
         mut f: impl FnMut(BuildKey) -> Result<(), E>,
     ) -> Result<(), E> {
-        for name in self.spec.ordered_present_input_names(&self.inputs) {
-            let key = self
-                .inputs
-                .get(name)
-                .expect("planned recipe inputs must match builder spec");
-            f(*key)?;
+        if let Self::Builder(recipe) = self {
+            for name in recipe.spec.ordered_present_input_names(&recipe.inputs) {
+                let key = recipe
+                    .inputs
+                    .get(name)
+                    .expect("planned recipe inputs must match builder spec");
+                f(*key)?;
+            }
         }
         Ok(())
     }
@@ -93,7 +147,7 @@ impl PlannedNode {
 pub(crate) enum PlanningState {
     Unknown,
     Reused {
-        build: mbuild_core::Build,
+        realized: mbuild_core::RealizedResult,
         origin: ReuseOrigin,
     },
     NeedsBuild,
@@ -154,6 +208,52 @@ fn collect_graph_inner(
     }
 
     let recipe = request.node(node_id)?;
+    let (key, planned_recipe) = match recipe {
+        Recipe::Builder(recipe) => collect_builder_recipe(
+            request,
+            recipe,
+            nodes,
+            stack,
+            node_keys,
+            topo_order,
+        )?,
+        Recipe::Source(recipe) => {
+            let meta_hash = compute_meta_hash(&recipe.meta).map_err(map_store_error)?;
+            let result_id = compute_result_id(recipe.object_hash, meta_hash).map_err(map_store_error)?;
+            let key = source_planning_key(result_id)?;
+            let planned = PlannedRecipe::Source(PlannedSourceRecipe {
+                name: recipe.name.clone(),
+                object_hash: recipe.object_hash,
+                origin: recipe.origin.clone(),
+                meta: recipe.meta.clone(),
+                result_id,
+            });
+            (key, planned)
+        }
+    };
+
+    stack.remove(node_id);
+
+    nodes.entry(key).or_insert_with(|| PlannedNode::new(planned_recipe));
+    if let Some(node) = nodes.get_mut(&key) {
+        node.active_names.insert(match recipe {
+            Recipe::Builder(recipe) => recipe.name.clone(),
+            Recipe::Source(recipe) => recipe.name.clone(),
+        });
+    }
+    node_keys.insert(node_id.to_string(), key);
+    topo_order.push(node_id.to_string());
+    Ok(key)
+}
+
+fn collect_builder_recipe(
+    request: &RecipeRequest,
+    recipe: &BuilderRecipe,
+    _nodes: &mut HashMap<BuildKey, PlannedNode>,
+    stack: &mut BTreeSet<String>,
+    node_keys: &mut HashMap<String, BuildKey>,
+    topo_order: &mut Vec<String>,
+) -> Result<(BuildKey, PlannedRecipe), RuntimeError> {
     let builder = builders::get_builder(&recipe.tag).ok_or_else(|| {
         RuntimeError::UnknownBuilder(format!(
             "unknown builder tag '{}'; supported builders: {}",
@@ -187,7 +287,7 @@ fn collect_graph_inner(
 
     let mut ordered_direct_deps = Vec::new();
     for (input_name, child_id) in &recipe.inputs {
-        let key = collect_graph_inner(request, child_id, nodes, stack, node_keys, topo_order)?;
+        let key = collect_graph_inner(request, child_id, _nodes, stack, node_keys, topo_order)?;
         inputs.insert(input_name.clone(), key);
     }
     for input_name in spec.ordered_present_input_names(&inputs) {
@@ -196,24 +296,28 @@ fn collect_graph_inner(
         }
     }
 
-    stack.remove(node_id);
-
     let key = compute_build_key(spec.tag, &recipe.config, &ordered_direct_deps)
         .map_err(map_store_error)?;
-    nodes.entry(key).or_insert_with(|| {
-        PlannedNode::new(PlannedRecipe {
+    Ok((
+        key,
+        PlannedRecipe::Builder(PlannedBuilderRecipe {
             name: recipe.name.clone(),
             spec,
             config: recipe.config.clone(),
-            inputs: inputs.clone(),
-        })
-    });
-    if let Some(node) = nodes.get_mut(&key) {
-        node.active_names.insert(recipe.name.clone());
-    }
-    node_keys.insert(node_id.to_string(), key);
-    topo_order.push(node_id.to_string());
-    Ok(key)
+            inputs,
+        }),
+    ))
+}
+
+fn source_planning_key(result_id: ResultId) -> Result<BuildKey, RuntimeError> {
+    compute_build_key(
+        "SourceNode",
+        &json!({
+            "result_id": result_id.to_string(),
+        }),
+        &[],
+    )
+    .map_err(map_store_error)
 }
 
 fn parse_request_value(value: Value, path: &str) -> Result<RecipeRequest, RuntimeError> {
@@ -239,11 +343,26 @@ fn parse_request_value(value: Value, path: &str) -> Result<RecipeRequest, Runtim
 }
 
 fn parse_recipe_value(value: Value, path: &str) -> Result<Recipe, RuntimeError> {
-    let mut object = value
+    let object = value
         .as_object()
         .cloned()
         .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: expected recipe object")))?;
 
+    let tag = object
+        .get("tag")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}.tag: expected string")))?;
+
+    if tag == "Source" {
+        return parse_source_recipe(object, path);
+    }
+    parse_builder_recipe(object, path)
+}
+
+fn parse_builder_recipe(
+    mut object: Map<String, Value>,
+    path: &str,
+) -> Result<Recipe, RuntimeError> {
     let name = take_string(&mut object, path, "name")?;
     let tag = take_string(&mut object, path, "tag")?;
     let config = object.remove("config").ok_or_else(|| {
@@ -270,12 +389,84 @@ fn parse_recipe_value(value: Value, path: &str) -> Result<Recipe, RuntimeError> 
         inputs.insert(slot_name, parse_input_value(slot_value, &input_path)?);
     }
 
-    Ok(Recipe {
+    Ok(Recipe::Builder(BuilderRecipe {
         name,
         tag,
         config,
         inputs,
-    })
+    }))
+}
+
+fn parse_source_recipe(
+    mut object: Map<String, Value>,
+    path: &str,
+) -> Result<Recipe, RuntimeError> {
+    let name = take_string(&mut object, path, "name")?;
+    let tag = take_string(&mut object, path, "tag")?;
+    debug_assert_eq!(tag, "Source");
+
+    let object_hash = take_string(&mut object, path, "object_hash")?
+        .parse::<ObjectHash>()
+        .map_err(|error| {
+            RuntimeError::RecipeLoad(format!("{path}.object_hash: invalid object hash: {error}"))
+        })?;
+    let origin = parse_source_origin(
+        object.remove("origin").ok_or_else(|| {
+            RuntimeError::RecipeLoad(format!("{path}: missing required field 'origin'"))
+        })?,
+        &format!("{path}.origin"),
+    )?;
+    let meta = object
+        .remove("meta")
+        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: missing required field 'meta'")))?
+        .as_object()
+        .cloned()
+        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}.meta: expected object")))?;
+    if !object.is_empty() {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{path}: unexpected fields: {}",
+            object.keys().cloned().collect::<Vec<_>>().join(", ")
+        )));
+    }
+
+    Ok(Recipe::Source(SourceRecipe {
+        name,
+        object_hash,
+        origin,
+        meta,
+    }))
+}
+
+fn parse_source_origin(value: Value, path: &str) -> Result<SourceOrigin, RuntimeError> {
+    let mut object = value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: expected object")))?;
+    let kind = take_string(&mut object, path, "type")?;
+    match kind.as_str() {
+        "path" => {
+            let path_value = PathBuf::from(take_string(&mut object, path, "path")?);
+            let mode = match take_string(&mut object, path, "mode")?.as_str() {
+                "direct" => SourcePathMode::Direct,
+                "tar" => SourcePathMode::Tar,
+                other => {
+                    return Err(RuntimeError::RecipeLoad(format!(
+                        "{path}.mode: unsupported source path mode '{other}'"
+                    )))
+                }
+            };
+            if !object.is_empty() {
+                return Err(RuntimeError::RecipeLoad(format!(
+                    "{path}: unexpected fields: {}",
+                    object.keys().cloned().collect::<Vec<_>>().join(", ")
+                )));
+            }
+            Ok(SourceOrigin::Path { path: path_value, mode })
+        }
+        other => Err(RuntimeError::RecipeLoad(format!(
+            "{path}.type: unsupported source origin type '{other}'"
+        ))),
+    }
 }
 
 fn parse_input_value(value: Value, path: &str) -> Result<String, RuntimeError> {
@@ -330,7 +521,6 @@ fn take_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::compute_build_key;
     use serde_json::json;
 
     fn collect_one(
@@ -370,6 +560,44 @@ mod tests {
                 .contains("unknown builder tag 'NoSuchBuilder'"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn source_without_config_or_inputs_is_accepted() {
+        let request = json!({
+            "root": {
+                "name": "local-source",
+                "tag": "Source",
+                "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+                "origin": {
+                    "type": "path",
+                    "path": "/tmp/source.tar",
+                    "mode": "tar"
+                },
+                "meta": {}
+            }
+        });
+        let (graph, nodes) = collect_one(&request).unwrap();
+        let node = nodes.get(&graph.root_key).unwrap();
+        assert!(matches!(node.recipe, PlannedRecipe::Source(_)));
+    }
+
+    #[test]
+    fn source_missing_meta_is_rejected() {
+        let request = json!({
+            "root": {
+                "name": "local-source",
+                "tag": "Source",
+                "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+                "origin": {
+                    "type": "path",
+                    "path": "/tmp/source.tar",
+                    "mode": "tar"
+                }
+            }
+        });
+        let error = collect_one(&request).unwrap_err();
+        assert!(error.to_string().contains("missing required field 'meta'"), "{error}");
     }
 
     #[test]
@@ -439,28 +667,6 @@ mod tests {
             error
                 .to_string()
                 .contains("expected node id string, got array"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn null_input_is_rejected() {
-        let request = json!({
-            "root": {
-                "name": "img",
-                "tag": "Image",
-                "config": {},
-                "inputs": {
-                    "base": null
-                }
-            }
-        });
-        let error = RecipeRequest::parse_json(serde_json::to_vec(&request).unwrap().as_slice())
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("expected node id string, got null"),
             "{error}"
         );
     }

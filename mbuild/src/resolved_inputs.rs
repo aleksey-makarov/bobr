@@ -1,5 +1,5 @@
 use mbuild_core::{
-    BuildKey, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec, MetaHash, ObjectHash,
+    BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec, MetaHash, ObjectHash,
     ResultInputIdentity,
 };
 use serde_json::{Map, Value};
@@ -10,7 +10,6 @@ use std::path::PathBuf;
 pub(crate) struct ResolvedDependency {
     pub(crate) object_hash: ObjectHash,
     pub(crate) meta_hash: MetaHash,
-    pub(crate) build_key: BuildKey,
     pub(crate) object_path: PathBuf,
     pub(crate) meta: Map<String, Value>,
 }
@@ -82,19 +81,6 @@ impl ResolvedInputs {
         })
     }
 
-    pub(crate) fn ordered_build_keys(
-        &self,
-        spec: &BuilderSpec,
-    ) -> Result<Vec<BuildKey>, BuilderError> {
-        let mut ordered = Vec::new();
-        for name in spec.ordered_present_input_names(&self.slots) {
-            if let Some(object) = self.get(name) {
-                ordered.push(object.build_key);
-            }
-        }
-        Ok(ordered)
-    }
-
     pub(crate) fn ordered_input_identities(
         &self,
         spec: &BuilderSpec,
@@ -140,10 +126,6 @@ mod tests {
             .unwrap(),
             meta_hash: MetaHash::from_str(
                 "3333333333333333333333333333333333333333333333333333333333333333",
-            )
-            .unwrap(),
-            build_key: BuildKey::from_str(
-                "2222222222222222222222222222222222222222222222222222222222222222",
             )
             .unwrap(),
             object_path: PathBuf::from("/tmp/object"),
@@ -225,7 +207,7 @@ mod tests {
         let inputs = ResolvedInputs::new(BTreeMap::from([("base".to_string(), object.clone())]));
 
         let resolved = inputs.optional("base").unwrap();
-        assert_eq!(resolved.build_key, object.build_key);
+        assert_eq!(resolved.object_path, object.object_path);
     }
 
     #[test]
@@ -245,56 +227,6 @@ mod tests {
         optional_inputs: &["optional"],
         allow_extra_inputs: true,
     };
-
-    #[test]
-    fn ordered_build_keys_follow_builder_spec_order() {
-        let mut first = sample_object();
-        first.build_key =
-            BuildKey::from_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                .unwrap();
-        let mut optional = sample_object();
-        optional.build_key =
-            BuildKey::from_str("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                .unwrap();
-        let mut extra_a = sample_object();
-        extra_a.build_key =
-            BuildKey::from_str("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
-                .unwrap();
-        let mut extra_b = sample_object();
-        extra_b.build_key =
-            BuildKey::from_str("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
-                .unwrap();
-
-        let inputs = ResolvedInputs::new(BTreeMap::from([
-            ("first".to_string(), first),
-            ("optional".to_string(), optional),
-            ("extra_b".to_string(), extra_b),
-            ("extra_a".to_string(), extra_a),
-        ]));
-
-        let ordered = inputs.ordered_build_keys(&ORDERED_SPEC).unwrap();
-        assert_eq!(
-            ordered,
-            vec![
-                BuildKey::from_str(
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                )
-                .unwrap(),
-                BuildKey::from_str(
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                )
-                .unwrap(),
-                BuildKey::from_str(
-                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                )
-                .unwrap(),
-                BuildKey::from_str(
-                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                )
-                .unwrap(),
-            ]
-        );
-    }
 
     #[test]
     fn ordered_input_identities_follow_builder_spec_order() {

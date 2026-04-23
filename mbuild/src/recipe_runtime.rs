@@ -1,24 +1,27 @@
 use crate::builders;
 use crate::logging::{BuildRunLogger, RunOptions};
 use crate::recipe::{
-    CollectedGraph, PlannedNode, PlannedRecipe, PlanningState, RecipeRequest, ReuseOrigin,
-    collect_graph,
+    CollectedGraph, PlannedBuilderRecipe, PlannedNode, PlannedRecipe, PlannedSourceRecipe,
+    PlanningState, RecipeRequest, ReuseOrigin, SourceOrigin, SourcePathMode, collect_graph,
 };
-use crate::resolved_inputs::ResolvedInputs;
+use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
-    RuntimeError, build_to_published, execute_builder_node, log_runtime_event, lookup_build_handle,
-    lookup_canonical_result, map_store_error, to_resolved_dependency,
+    RuntimeError, execute_builder_node, log_runtime_event, lookup_build_handle,
+    lookup_canonical_result, map_store_error,
 };
+use fsobj_hash::hash_path;
 use mbuild_core::{
-    Build, BuildKey, BuildLogEvent, BuildLogLevel, PublishedBuild, ResultInputIdentity,
-    StoreLayout, publish_refs,
+    BuildLogEvent, BuildLogLevel, BuildLogger, BuildKey, RealizedResult,
+    ResultInputIdentity, ResultRecord, StoreLayout, compute_meta_hash, compute_result_id, fsutil,
+    import_object, load_result_record, object_path, publish_result_refs, store_result_record,
 };
 use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
+use tar::Archive;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuildRunOptions {
@@ -35,10 +38,16 @@ impl Default for BuildRunOptions {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ExecutedNode {
+    realized: RealizedResult,
+    result: ResultRecord,
+}
+
 pub fn run_recipe_json_in_workspace(
     workspace_root: &Path,
     recipe_path: &Path,
-) -> Result<Build, RuntimeError> {
+) -> Result<RealizedResult, RuntimeError> {
     run_recipe_json_in_workspace_with_options(
         workspace_root,
         recipe_path,
@@ -50,7 +59,7 @@ pub fn run_recipe_json_in_workspace_with_options(
     workspace_root: &Path,
     recipe_path: &Path,
     options: BuildRunOptions,
-) -> Result<Build, RuntimeError> {
+) -> Result<RealizedResult, RuntimeError> {
     if !recipe_path.exists() {
         return Err(RuntimeError::RecipeLoad(format!(
             "recipe file '{}' does not exist",
@@ -96,13 +105,13 @@ pub fn run_recipe_json_in_workspace_with_options(
 
     let mut completed = HashMap::new();
     for (key, node) in &nodes {
-        if let PlanningState::Reused { build, .. } = &node.state {
-            completed.insert(*key, build.clone());
+        if let PlanningState::Reused { realized, .. } = &node.state {
+            completed.insert(*key, realized.clone());
         }
     }
 
-    if let Some(build) = completed.get(&root_key) {
-        return Ok(build.clone());
+    if let Some(realized) = completed.get(&root_key) {
+        return Ok(realized.clone());
     }
 
     execute_misses(
@@ -115,9 +124,9 @@ pub fn run_recipe_json_in_workspace_with_options(
     )
 }
 
-pub fn render_build_as_json(build: &Build) -> Result<String, RuntimeError> {
-    let mut rendered = to_string_pretty(build).map_err(|error| {
-        RuntimeError::InvalidRequest(format!("failed to render Build as JSON: {error}"))
+pub fn render_result_as_json(result: &RealizedResult) -> Result<String, RuntimeError> {
+    let mut rendered = to_string_pretty(result).map_err(|error| {
+        RuntimeError::InvalidRequest(format!("failed to render realized result as JSON: {error}"))
     })?;
     rendered.push('\n');
     Ok(rendered)
@@ -131,38 +140,65 @@ fn plan_top_down(
     for node_id in &graph.topo_order {
         let key = *graph.node_keys.get(node_id).ok_or_else(|| {
             RuntimeError::Store(format!(
-                "missing build key for request node id '{}'",
+                "missing planning key for request node id '{}'",
                 node_id
             ))
         })?;
         let node = nodes.get_mut(&key).ok_or_else(|| {
-            RuntimeError::Store(format!("missing planned node for build '{}'", key))
+            RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
         if !matches!(node.state, PlanningState::Unknown) {
             continue;
         }
 
-        if let Some(published) = lookup_build_handle(layout, key)? {
-            node.state = PlanningState::Reused {
-                build: published.build.clone(),
-                origin: ReuseOrigin::BuildHandle,
-            };
-            continue;
-        }
+        match &node.recipe {
+            PlannedRecipe::Builder(_) => {
+                if let Some(published) = lookup_build_handle(layout, key)? {
+                    node.state = PlanningState::Reused {
+                        realized: realized_result_from_record(
+                            Some(published.build.build_key),
+                            &published.result,
+                        ),
+                        origin: ReuseOrigin::BuildHandle,
+                    };
+                    continue;
+                }
 
-        if let Some(published) = lookup_canonical_for_planned_node(layout, nodes, key)? {
-            let node = nodes.get_mut(&key).ok_or_else(|| {
-                RuntimeError::Store(format!("missing planned node for build '{}'", key))
-            })?;
-            node.state = PlanningState::Reused {
-                build: published.build.clone(),
-                origin: ReuseOrigin::CanonicalResult,
-            };
-        } else {
-            let node = nodes.get_mut(&key).ok_or_else(|| {
-                RuntimeError::Store(format!("missing planned node for build '{}'", key))
-            })?;
-            node.state = PlanningState::NeedsBuild;
+                if let Some(realized) = lookup_canonical_for_planned_node(layout, nodes, key)? {
+                    let node = nodes.get_mut(&key).ok_or_else(|| {
+                        RuntimeError::Store(format!("missing planned node for key '{}'", key))
+                    })?;
+                    node.state = PlanningState::Reused {
+                        realized,
+                        origin: ReuseOrigin::CanonicalResult,
+                    };
+                } else {
+                    let node = nodes.get_mut(&key).ok_or_else(|| {
+                        RuntimeError::Store(format!("missing planned node for key '{}'", key))
+                    })?;
+                    node.state = PlanningState::NeedsBuild;
+                }
+            }
+            PlannedRecipe::Source(source) => {
+                if let Some(result) = load_result_record(layout, source.result_id)
+                    .map_err(map_store_error)?
+                {
+                    let published_object = object_path(layout, result.object_hash);
+                    if !published_object.exists() {
+                        return Err(RuntimeError::Store(format!(
+                            "result '{}' points to missing object '{}'",
+                            result.result_id,
+                            published_object.display()
+                        )));
+                    }
+                    node.state = PlanningState::Reused {
+                        realized: realized_result_from_record(None, &result),
+                        origin: ReuseOrigin::CanonicalResult,
+                    };
+                } else {
+                    node.state = PlanningState::NeedsBuild;
+                }
+            }
         }
     }
 
@@ -174,16 +210,24 @@ fn publish_reused_nodes(
     logger: &Arc<BuildRunLogger>,
     nodes: &HashMap<BuildKey, PlannedNode>,
 ) -> Result<(), RuntimeError> {
-    for node in nodes.values() {
-        let PlanningState::Reused { build, origin } = &node.state else {
+    for (key, node) in nodes {
+        let PlanningState::Reused { realized, origin } = &node.state else {
             continue;
         };
         if node.active_names.is_empty() {
             continue;
         }
-        let published = build_to_published(layout, build.clone())?;
+        let result = load_result_record(layout, realized.result_id)
+            .map_err(map_store_error)?
+            .ok_or_else(|| {
+                RuntimeError::Store(format!(
+                    "missing result '{}' for reused node '{}'",
+                    realized.result_id,
+                    node.recipe.build_name()
+                ))
+            })?;
         for name in &node.active_names {
-            let node_logger = logger.bind_node(node.recipe.builder_tag(), name, build.build_key);
+            let node_logger = logger.bind_node(node.recipe.tag(), name, *key);
             log_runtime_event(
                 node_logger.as_ref(),
                 BuildLogLevel::Info,
@@ -202,18 +246,18 @@ fn publish_reused_nodes(
                     ReuseOrigin::CanonicalResult => "reusing existing canonical result",
                 },
             );
-            publish_refs(layout, name, &published).map_err(map_store_error)?;
+            publish_result_refs(layout, name, &result).map_err(map_store_error)?;
             log_runtime_event(
                 node_logger.as_ref(),
                 BuildLogLevel::Info,
                 "publish",
-                format!("published '{}' -> {}", name, build.object_hash),
+                format!("published '{}' -> {}", name, realized.object_hash),
             );
             node_logger.log_event(BuildLogEvent {
                 level: BuildLogLevel::Info,
                 phase: "done".to_string(),
                 message: "builder node completed".to_string(),
-                object_hash: Some(build.object_hash),
+                object_hash: Some(realized.object_hash),
                 raw_log_path: None,
                 details: serde_json::Map::new(),
             });
@@ -226,23 +270,27 @@ fn lookup_canonical_for_planned_node(
     layout: &StoreLayout,
     nodes: &HashMap<BuildKey, PlannedNode>,
     key: BuildKey,
-) -> Result<Option<PublishedBuild>, RuntimeError> {
+) -> Result<Option<RealizedResult>, RuntimeError> {
     let node = nodes
         .get(&key)
-        .ok_or_else(|| RuntimeError::Store(format!("missing planned node for build '{}'", key)))?;
-    let mut inputs = Vec::<ResultInputIdentity>::new();
+        .ok_or_else(|| RuntimeError::Store(format!("missing planned node for key '{}'", key)))?;
+    let Some((spec, config, _inputs)) = node.recipe.builder() else {
+        return Ok(None);
+    };
+
+    let mut input_identities = Vec::<ResultInputIdentity>::new();
     let mut all_reused = true;
     node.recipe.try_for_each_direct_dep(|dep| {
         let dep_node = nodes.get(&dep).ok_or_else(|| {
             RuntimeError::Store(format!(
-                "missing dependency node '{}' for build '{}'",
+                "missing dependency node '{}' for key '{}'",
                 dep, key
             ))
         })?;
         match &dep_node.state {
-            PlanningState::Reused { build, .. } => inputs.push(ResultInputIdentity {
-                object_hash: build.object_hash,
-                meta_hash: build.meta_hash,
+            PlanningState::Reused { realized, .. } => input_identities.push(ResultInputIdentity {
+                object_hash: realized.object_hash,
+                meta_hash: realized.meta_hash,
             }),
             PlanningState::Unknown | PlanningState::NeedsBuild => all_reused = false,
         }
@@ -251,23 +299,19 @@ fn lookup_canonical_for_planned_node(
     if !all_reused {
         return Ok(None);
     }
-    lookup_canonical_result(
-        layout,
-        node.recipe.builder_tag(),
-        node.recipe.config(),
-        &inputs,
-        key,
-    )
+
+    Ok(lookup_canonical_result(layout, spec.tag, config, &input_identities, key)?
+        .map(|published| realized_result_from_record(Some(key), &published.result)))
 }
 
 fn execute_misses(
     layout: &StoreLayout,
     logger: Arc<BuildRunLogger>,
     nodes: &HashMap<BuildKey, PlannedNode>,
-    completed: &mut HashMap<BuildKey, Build>,
+    completed: &mut HashMap<BuildKey, RealizedResult>,
     root_key: BuildKey,
     jobs: usize,
-) -> Result<Build, RuntimeError> {
+) -> Result<RealizedResult, RuntimeError> {
     let mut remaining = HashMap::<BuildKey, usize>::new();
     let mut reverse = HashMap::<BuildKey, Vec<BuildKey>>::new();
     let mut ready = VecDeque::<BuildKey>::new();
@@ -279,13 +323,12 @@ fn execute_misses(
         let mut wait_for = 0usize;
         node.recipe
             .try_for_each_direct_dep(|dep| -> Result<(), RuntimeError> {
-                if let Some(dep_node) = nodes.get(&dep) {
-                    if matches!(dep_node.state, PlanningState::NeedsBuild)
-                        && !dep_node.active_names.is_empty()
-                    {
-                        wait_for += 1;
-                        reverse.entry(dep).or_default().push(*key);
-                    }
+                if let Some(dep_node) = nodes.get(&dep)
+                    && matches!(dep_node.state, PlanningState::NeedsBuild)
+                    && !dep_node.active_names.is_empty()
+                {
+                    wait_for += 1;
+                    reverse.entry(dep).or_default().push(*key);
                 }
                 Ok(())
             })?;
@@ -295,7 +338,7 @@ fn execute_misses(
         }
     }
 
-    let (tx, rx) = mpsc::channel::<(BuildKey, Result<PublishedBuild, RuntimeError>)>();
+    let (tx, rx) = mpsc::channel::<(BuildKey, Result<ExecutedNode, RuntimeError>)>();
     let mut in_flight = HashMap::<BuildKey, JoinHandle<()>>::new();
 
     while !completed.contains_key(&root_key) {
@@ -307,38 +350,32 @@ fn execute_misses(
                 continue;
             }
             let node = nodes.get(&key).ok_or_else(|| {
-                RuntimeError::Store(format!("missing planned node for build '{}'", key))
+                RuntimeError::Store(format!("missing planned node for key '{}'", key))
             })?;
-            let builder = builders::get_builder(node.recipe.builder_tag()).ok_or_else(|| {
-                RuntimeError::UnknownBuilder(format!(
-                    "unknown builder tag '{}'; supported builders: {}",
-                    node.recipe.builder_tag(),
-                    builders::supported_builder_tags().join(", ")
-                ))
-            })?;
-            let inputs = build_resolved_inputs(layout, builder, &node.recipe, completed)?;
-            let config = node.recipe.config().clone();
-            let build_name = node.recipe.build_name().to_string();
-            let builder_tag = node.recipe.builder_tag().to_string();
             let layout = layout.clone();
             let logger = logger.clone();
             let tx = tx.clone();
+            let recipe = node.recipe.clone();
+            let builder_inputs = match &recipe {
+                PlannedRecipe::Builder(builder_recipe) => {
+                    Some(build_resolved_inputs(&layout, builder_recipe, completed)?)
+                }
+                PlannedRecipe::Source(_) => None,
+            };
             let handle = thread::spawn(move || {
-                let result = match builders::get_builder(&builder_tag) {
-                    Some(builder) => execute_builder_node(
-                        &layout,
-                        builder,
-                        &build_name,
-                        logger.created_at(),
-                        logger.clone(),
-                        config,
-                        inputs,
-                    ),
-                    None => Err(RuntimeError::UnknownBuilder(format!(
-                        "worker failed to resolve builder tag '{}'; supported builders: {}",
-                        builder_tag,
-                        builders::supported_builder_tags().join(", ")
-                    ))),
+                let result = match recipe {
+                    PlannedRecipe::Builder(builder_recipe) => {
+                        execute_builder_recipe(
+                            &layout,
+                            logger,
+                            key,
+                            builder_recipe,
+                            builder_inputs.expect("builder inputs must be prepared"),
+                        )
+                    }
+                    PlannedRecipe::Source(source_recipe) => {
+                        execute_source_recipe(&layout, logger, key, source_recipe)
+                    }
                 };
                 let _ = tx.send((key, result));
             });
@@ -351,7 +388,7 @@ fn execute_misses(
 
         if in_flight.is_empty() {
             return Err(RuntimeError::Build(
-                "planner/executor stalled: no ready jobs and root build is still unresolved"
+                "planner/executor stalled: no ready jobs and root result is still unresolved"
                     .to_string(),
             ));
         }
@@ -361,37 +398,37 @@ fn execute_misses(
         })?;
         if let Some(handle) = in_flight.remove(&key) {
             handle.join().map_err(|_| {
-                RuntimeError::Build(format!("worker thread for build '{}' panicked", key))
+                RuntimeError::Build(format!("worker thread for key '{}' panicked", key))
             })?;
         }
-        let published = result?;
+        let executed = result?;
         let node = nodes.get(&key).ok_or_else(|| {
-            RuntimeError::Store(format!("missing planned node for build '{}'", key))
+            RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
         for name in &node.active_names {
-            let node_logger = logger.bind_node(node.recipe.builder_tag(), name, key);
-            publish_refs(layout, name, &published).map_err(map_store_error)?;
+            let node_logger = logger.bind_node(node.recipe.tag(), name, key);
+            publish_result_refs(layout, name, &executed.result).map_err(map_store_error)?;
             log_runtime_event(
                 node_logger.as_ref(),
                 BuildLogLevel::Info,
                 "publish",
-                format!("published '{}' -> {}", name, published.build.object_hash),
+                format!("published '{}' -> {}", name, executed.realized.object_hash),
             );
             node_logger.log_event(BuildLogEvent {
                 level: BuildLogLevel::Info,
                 phase: "done".to_string(),
                 message: "builder node completed".to_string(),
-                object_hash: Some(published.build.object_hash),
+                object_hash: Some(executed.realized.object_hash),
                 raw_log_path: None,
                 details: serde_json::Map::new(),
             });
         }
-        completed.insert(key, published.build.clone());
+        completed.insert(key, executed.realized);
         if let Some(parents) = reverse.get(&key) {
             for parent in parents {
                 let pending = remaining.get_mut(parent).ok_or_else(|| {
                     RuntimeError::Store(format!(
-                        "missing pending-dependency counter for build '{}'",
+                        "missing pending-dependency counter for key '{}'",
                         parent
                     ))
                 })?;
@@ -405,7 +442,7 @@ fn execute_misses(
 
     completed.get(&root_key).cloned().ok_or_else(|| {
         RuntimeError::Store(format!(
-            "root build '{}' is missing after executor completion",
+            "root result for key '{}' is missing after executor completion",
             root_key
         ))
     })
@@ -413,51 +450,403 @@ fn execute_misses(
 
 fn build_resolved_inputs(
     layout: &StoreLayout,
-    _builder: &'static dyn mbuild_core::Builder,
-    recipe: &PlannedRecipe,
-    completed: &HashMap<BuildKey, Build>,
+    recipe: &PlannedBuilderRecipe,
+    completed: &HashMap<BuildKey, RealizedResult>,
 ) -> Result<ResolvedInputs, RuntimeError> {
     let mut inputs = ResolvedInputs::empty();
-    for (name, key) in recipe.inputs() {
-        let dep = resolved_dependency_from_completed(layout, completed, *key)?;
-        inputs.insert(name, dep);
+    for input_name in recipe.spec.ordered_present_input_names(&recipe.inputs) {
+        let key = *recipe.inputs.get(input_name).ok_or_else(|| {
+            RuntimeError::Store(format!(
+                "planned builder input '{}' is missing for '{}'",
+                input_name, recipe.name
+            ))
+        })?;
+        let dep = resolved_dependency_from_completed(layout, completed, key)?;
+        inputs.insert(input_name, dep);
     }
     Ok(inputs)
 }
 
 fn resolved_dependency_from_completed(
     layout: &StoreLayout,
-    completed: &HashMap<BuildKey, Build>,
+    completed: &HashMap<BuildKey, RealizedResult>,
     key: BuildKey,
-) -> Result<crate::resolved_inputs::ResolvedDependency, RuntimeError> {
-    let build = completed.get(&key).cloned().ok_or_else(|| {
+) -> Result<ResolvedDependency, RuntimeError> {
+    let realized = completed.get(&key).cloned().ok_or_else(|| {
         RuntimeError::Build(format!(
-            "dependency build '{}' is not available in completed set",
+            "dependency result '{}' is not available in completed set",
             key
         ))
     })?;
-    let published = build_to_published(layout, build)?;
-    Ok(to_resolved_dependency(published))
+    Ok(ResolvedDependency {
+        object_hash: realized.object_hash,
+        meta_hash: realized.meta_hash,
+        object_path: object_path(layout, realized.object_hash),
+        meta: realized.meta,
+    })
+}
+
+fn execute_builder_recipe(
+    layout: &StoreLayout,
+    logger: Arc<BuildRunLogger>,
+    key: BuildKey,
+    recipe: PlannedBuilderRecipe,
+    inputs: ResolvedInputs,
+) -> Result<ExecutedNode, RuntimeError> {
+    let created_at = logger.created_at().to_string();
+    let published = execute_builder_node(
+        layout,
+        builders::get_builder(recipe.spec.tag).ok_or_else(|| {
+            RuntimeError::UnknownBuilder(format!(
+                "unknown builder tag '{}'; supported builders: {}",
+                recipe.spec.tag,
+                builders::supported_builder_tags().join(", ")
+            ))
+        })?,
+        key,
+        &recipe.name,
+        &created_at,
+        logger,
+        recipe.config,
+        inputs,
+    )?;
+    Ok(ExecutedNode {
+        realized: realized_result_from_record(Some(key), &published.result),
+        result: published.result,
+    })
+}
+
+fn execute_source_recipe(
+    layout: &StoreLayout,
+    run_logger: Arc<BuildRunLogger>,
+    key: BuildKey,
+    recipe: PlannedSourceRecipe,
+) -> Result<ExecutedNode, RuntimeError> {
+    let logger = run_logger.bind_node("Source", &recipe.name, key);
+    log_runtime_event(
+        logger.as_ref(),
+        BuildLogLevel::Info,
+        "start",
+        "starting builder node",
+    );
+    log_runtime_event(
+        logger.as_ref(),
+        BuildLogLevel::Info,
+        "cache-miss",
+        "materializing source",
+    );
+
+    if let Some(result) = load_result_record(layout, recipe.result_id).map_err(map_store_error)? {
+        let object_path = object_path(layout, result.object_hash);
+        if object_path.exists() {
+            log_runtime_event(
+                logger.as_ref(),
+                BuildLogLevel::Info,
+                "result-hit",
+                "reusing existing canonical result",
+            );
+            return Ok(ExecutedNode {
+                realized: realized_result_from_record(None, &result),
+                result,
+            });
+        }
+        return Err(RuntimeError::Store(format!(
+            "result '{}' points to missing object '{}'",
+            result.result_id,
+            object_path.display()
+        )));
+    }
+
+    let existing_object_path = object_path(layout, recipe.object_hash);
+    if existing_object_path.exists() {
+        log_runtime_event(
+            logger.as_ref(),
+            BuildLogLevel::Info,
+            "run",
+            "reusing existing object and publishing source result",
+        );
+        let result = make_source_result_record(
+            recipe.object_hash,
+            run_logger.created_at(),
+            recipe.meta.clone(),
+        )?;
+        store_result_record(layout, &result).map_err(map_store_error)?;
+        return Ok(ExecutedNode {
+            realized: realized_result_from_record(None, &result),
+            result,
+        });
+    }
+
+    let temp_root = layout.root.join("source-state").join("tmp").join(key.to_hex());
+    fsutil::recreate_empty_dir_force(&temp_root).map_err(|error| {
+        RuntimeError::Store(format!(
+            "failed to prepare source temp dir '{}': {error}",
+            temp_root.display()
+        ))
+    })?;
+    let staged_path = match materialize_source_origin(&temp_root, &recipe.origin) {
+        Ok(path) => path,
+        Err(error) => {
+            cleanup_source_temp_dir(&temp_root, logger.as_ref());
+            log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", error.to_string());
+            return Err(error);
+        }
+    };
+    log_runtime_event(
+        logger.as_ref(),
+        BuildLogLevel::Info,
+        "run",
+        "materializing source origin",
+    );
+
+    let actual_hash = hash_path(&staged_path).map_err(|error| {
+        cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        RuntimeError::Build(format!(
+            "failed to hash materialized source '{}': {error}",
+            staged_path.display()
+        ))
+    })?;
+    if actual_hash != recipe.object_hash {
+        cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        let message = format!(
+            "source '{}' materialized unexpected object hash: expected {}, got {}",
+            recipe.name, recipe.object_hash, actual_hash
+        );
+        log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
+        return Err(RuntimeError::Build(message));
+    }
+
+    let imported_hash = import_object(layout, &staged_path).map_err(|error| {
+        cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        map_store_error(error)
+    })?;
+    cleanup_source_temp_dir(&temp_root, logger.as_ref());
+    debug_assert_eq!(imported_hash, recipe.object_hash);
+
+    let result = make_source_result_record(
+        recipe.object_hash,
+        run_logger.created_at(),
+        recipe.meta.clone(),
+    )?;
+    store_result_record(layout, &result).map_err(map_store_error)?;
+    Ok(ExecutedNode {
+        realized: realized_result_from_record(None, &result),
+        result,
+    })
+}
+
+fn materialize_source_origin(
+    temp_root: &Path,
+    origin: &SourceOrigin,
+) -> Result<PathBuf, RuntimeError> {
+    match origin {
+        SourceOrigin::Path { path, mode } => match mode {
+            SourcePathMode::Direct => materialize_path_source_direct(temp_root, path),
+            SourcePathMode::Tar => materialize_path_source_tar(temp_root, path),
+        },
+    }
+}
+
+fn materialize_path_source_direct(temp_root: &Path, source_path: &Path) -> Result<PathBuf, RuntimeError> {
+    let source_meta = fs::metadata(source_path).map_err(|error| {
+        RuntimeError::Build(format!(
+            "failed to inspect source path '{}': {error}",
+            source_path.display()
+        ))
+    })?;
+    let staged_path = temp_root.join("staged");
+    if source_meta.is_dir() {
+        copy_dir_recursive(source_path, &staged_path)?;
+    } else if source_meta.is_file() {
+        if let Some(parent) = staged_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                RuntimeError::Build(format!(
+                    "failed to create staging parent '{}': {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        fs::copy(source_path, &staged_path).map_err(|error| {
+            RuntimeError::Build(format!(
+                "failed to copy source file '{}' to '{}': {error}",
+                source_path.display(),
+                staged_path.display()
+            ))
+        })?;
+    } else {
+        return Err(RuntimeError::Build(format!(
+            "source path '{}' must be a regular file or directory",
+            source_path.display()
+        )));
+    }
+    Ok(staged_path)
+}
+
+fn materialize_path_source_tar(temp_root: &Path, source_path: &Path) -> Result<PathBuf, RuntimeError> {
+    let file = fs::File::open(source_path).map_err(|error| {
+        RuntimeError::Build(format!(
+            "failed to open tar source '{}': {error}",
+            source_path.display()
+        ))
+    })?;
+    let staged_path = temp_root.join("staged");
+    fs::create_dir_all(&staged_path).map_err(|error| {
+        RuntimeError::Build(format!(
+            "failed to create tar staging dir '{}': {error}",
+            staged_path.display()
+        ))
+    })?;
+    let mut archive = Archive::new(file);
+    archive.unpack(&staged_path).map_err(|error| {
+        RuntimeError::Build(format!(
+            "failed to unpack tar source '{}' into '{}': {error}",
+            source_path.display(),
+            staged_path.display()
+        ))
+    })?;
+    Ok(staged_path)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), RuntimeError> {
+    fs::create_dir_all(dst).map_err(|error| {
+        RuntimeError::Build(format!(
+            "failed to create directory '{}': {error}",
+            dst.display()
+        ))
+    })?;
+    for entry in fs::read_dir(src).map_err(|error| {
+        RuntimeError::Build(format!(
+            "failed to read directory '{}': {error}",
+            src.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            RuntimeError::Build(format!(
+                "failed to read entry under '{}': {error}",
+                src.display()
+            ))
+        })?;
+        let file_type = entry.file_type().map_err(|error| {
+            RuntimeError::Build(format!(
+                "failed to inspect '{}' file type: {error}",
+                entry.path().display()
+            ))
+        })?;
+        let target = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &target).map_err(|error| {
+                RuntimeError::Build(format!(
+                    "failed to copy '{}' to '{}': {error}",
+                    entry.path().display(),
+                    target.display()
+                ))
+            })?;
+        } else if file_type.is_symlink() {
+            copy_symlink(entry.path().as_path(), &target)?;
+        } else {
+            return Err(RuntimeError::Build(format!(
+                "unsupported source entry '{}'",
+                entry.path().display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(src: &Path, dst: &Path) -> Result<(), RuntimeError> {
+    use std::os::unix::fs as unix_fs;
+    let target = fs::read_link(src).map_err(|error| {
+        RuntimeError::Build(format!(
+            "failed to read symlink '{}': {error}",
+            src.display()
+        ))
+    })?;
+    unix_fs::symlink(&target, dst).map_err(|error| {
+        RuntimeError::Build(format!(
+            "failed to create symlink '{}' -> '{}': {error}",
+            dst.display(),
+            target.display()
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn copy_symlink(_src: &Path, _dst: &Path) -> Result<(), RuntimeError> {
+    Err(RuntimeError::Build(
+        "copying symlink entries is unsupported on this platform".to_string(),
+    ))
+}
+
+fn cleanup_source_temp_dir(temp_dir: &Path, logger: &dyn BuildLogger) {
+    if let Err(error) = fsutil::remove_dir_force(temp_dir) {
+        log_runtime_event(
+            logger,
+            BuildLogLevel::Warn,
+            "cleanup-warning",
+            format!(
+                "failed to remove temp dir '{}': {error}",
+                temp_dir.display()
+            ),
+        );
+    }
+}
+
+fn make_source_result_record(
+    object_hash: fsobj_hash::ObjectHash,
+    created_at: &str,
+    meta: serde_json::Map<String, serde_json::Value>,
+) -> Result<ResultRecord, RuntimeError> {
+    let meta_hash = compute_meta_hash(&meta).map_err(map_store_error)?;
+    let result_id = compute_result_id(object_hash, meta_hash).map_err(map_store_error)?;
+    Ok(ResultRecord {
+        result_id,
+        object_hash,
+        meta_hash,
+        created_at: Some(created_at.to_string()),
+        inputs: Vec::new(),
+        meta,
+    })
+}
+
+fn realized_result_from_record(
+    build_key: Option<BuildKey>,
+    result: &ResultRecord,
+) -> RealizedResult {
+    RealizedResult {
+        result_id: result.result_id,
+        build_key,
+        object_hash: result.object_hash,
+        meta_hash: result.meta_hash,
+        created_at: result.created_at.clone(),
+        meta: result.meta.clone(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::recipe::{ReuseOrigin, collect_graph};
-    use mbuild_core::{MetaHash, PublishOutputRequest, publish_output};
+    use mbuild_core::{MetaHash, PublishOutputRequest, compute_reuse_key, publish_output};
     use serde_json::{Map, json};
     use std::collections::HashMap;
-    use std::fs;
     use std::str::FromStr;
     use tempfile::tempdir;
 
-    fn sample_build(
-        build_key: BuildKey,
+    fn sample_realized(
+        build_key: Option<BuildKey>,
         object_hash: &str,
         meta_hash: &str,
         meta: Map<String, serde_json::Value>,
-    ) -> Build {
-        Build {
+    ) -> RealizedResult {
+        RealizedResult {
+            result_id: compute_result_id(
+                object_hash.parse().unwrap(),
+                MetaHash::from_str(meta_hash).unwrap(),
+            )
+            .unwrap(),
             build_key,
             object_hash: object_hash.parse().unwrap(),
             meta_hash: MetaHash::from_str(meta_hash).unwrap(),
@@ -508,8 +897,7 @@ mod tests {
         let root_key = graph.root_key;
         let dep_keys = {
             let mut keys = Vec::new();
-            nodes
-                .get(&root_key)
+            nodes.get(&root_key)
                 .unwrap()
                 .recipe
                 .try_for_each_direct_dep(|dep| {
@@ -521,8 +909,8 @@ mod tests {
         };
         assert_eq!(dep_keys.len(), 2);
 
-        let image_build = sample_build(
-            dep_keys[0],
+        let image_realized = sample_realized(
+            Some(dep_keys[0]),
             "1111111111111111111111111111111111111111111111111111111111111111",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             Map::from_iter([(
@@ -533,74 +921,52 @@ mod tests {
                 ),
             )]),
         );
-        let script_build = sample_build(
-            dep_keys[1],
+        let script_realized = sample_realized(
+            Some(dep_keys[1]),
             "2222222222222222222222222222222222222222222222222222222222222222",
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             Map::new(),
         );
         nodes.get_mut(&dep_keys[0]).unwrap().state = PlanningState::Reused {
-            build: image_build.clone(),
+            realized: image_realized.clone(),
             origin: ReuseOrigin::CanonicalResult,
         };
         nodes.get_mut(&dep_keys[1]).unwrap().state = PlanningState::Reused {
-            build: script_build.clone(),
+            realized: script_realized.clone(),
             origin: ReuseOrigin::CanonicalResult,
         };
 
         let root_inputs = vec![
             ResultInputIdentity {
-                object_hash: image_build.object_hash,
-                meta_hash: image_build.meta_hash,
+                object_hash: image_realized.object_hash,
+                meta_hash: image_realized.meta_hash,
             },
             ResultInputIdentity {
-                object_hash: script_build.object_hash,
-                meta_hash: script_build.meta_hash,
+                object_hash: script_realized.object_hash,
+                meta_hash: script_realized.meta_hash,
             },
         ];
-        let result_key =
-            mbuild_core::compute_result_key("Binary", &json!({}), &root_inputs).unwrap();
-        let stage = temp.path().join("binary-out");
-        fs::create_dir_all(&stage).unwrap();
-        fs::write(stage.join("tool"), b"payload\n").unwrap();
+        let reuse_key = compute_reuse_key("Binary", &json!({}), &root_inputs).unwrap();
+        let stage_dir = temp.path().join("root-out");
+        fs::create_dir_all(&stage_dir).unwrap();
+        fs::write(stage_dir.join("payload"), b"ok\n").unwrap();
         publish_output(
             &layout,
             PublishOutputRequest {
                 output_name: "bin".to_string(),
-                build_key: BuildKey::from_str(
-                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                )
-                .unwrap(),
-                result_key,
+                build_key: root_key,
+                reuse_key,
                 created_at: "2026-04-05T12:00:00.000000000Z".to_string(),
-                staged_path: stage,
+                staged_path: stage_dir,
                 inputs: root_inputs,
-                meta: Map::from_iter([(
-                    "install".to_string(),
-                    serde_json::json!({"rules":[{"path":"**","attrs":{"uid":0,"gid":0,"directory_mode":493,"regular_file_mode":420,"executable_file_mode":493,"symlink_mode":511}}]}),
-                )]),
+                meta: Map::new(),
             },
         )
         .unwrap();
 
-        assert!(
-            lookup_canonical_for_planned_node(&layout, &nodes, root_key)
-                .unwrap()
-                .is_some()
-        );
-
-        let script_node = nodes.get_mut(&dep_keys[1]).unwrap();
-        if let PlanningState::Reused { build, .. } = &mut script_node.state {
-            build.meta_hash = MetaHash::from_str(
-                "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-            )
-            .unwrap();
-        }
-
-        assert!(
-            lookup_canonical_for_planned_node(&layout, &nodes, root_key)
-                .unwrap()
-                .is_none()
-        );
+        let published = lookup_canonical_for_planned_node(&layout, &nodes, root_key)
+            .unwrap()
+            .expect("expected canonical result hit");
+        assert_eq!(published.build_key, Some(root_key));
     }
 }

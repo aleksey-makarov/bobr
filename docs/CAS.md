@@ -7,13 +7,14 @@ results as result records, and public build handles as symlink refs to those
 results.
 
 - `objects/` holds payloads addressed by `object_hash`
-- `results/` holds canonical result records addressed by `result_key`
-- `builds/` holds public build-handle refs addressed by `build_key`
-- `meta-refs/` holds human-facing refs from publication name to build handle
+- `results/` holds canonical result records addressed by `result_id`
+- `reuses/` holds builder-only canonical reuse refs addressed by `reuse_key`
+- `builds/` holds builder-only public build-handle refs addressed by `build_key`
+- `meta-refs/` holds human-facing refs from publication name to result record
 - `object-refs/` holds human-facing refs from publication name to payload
 
 Publication names do not participate in object identity, `build_key`, or
-`result_key`.
+`reuse_key`. `result_id` is derived only from payload and metadata identity.
 
 ## Layout
 
@@ -21,12 +22,14 @@ Publication names do not participate in object identity, `build_key`, or
 .mbuild/
   objects/
     <object_hash>
+  reuses/
+    <reuse_key> -> ../results/<result_id>.json
   builds/
-    <build_key> -> ../results/<result_key>.json
+    <build_key> -> ../results/<result_id>.json
   results/
-    <result_key>.json
+    <result_id>.json
   meta-refs/
-    <name>.json -> ../builds/<build_key>
+    <name>.json -> ../results/<result_id>.json
   object-refs/
     <name> -> ../objects/<object_hash>
   logs/
@@ -42,10 +45,11 @@ Concrete directory payload formats are builder-specific. For example, the
 current image builders may realize image-related objects as OCI image layout
 directories.
 
-`results/<result_key>.json` stores one canonical realized result record.
+`results/<result_id>.json` stores one canonical realized result record.
 
 Each result record contains:
 
+- realized result identity: `result_id`
 - payload identity: `object_hash`
 - metadata identity: `meta_hash`
 - result metadata under `meta`
@@ -54,19 +58,29 @@ Each result record contains:
   - `meta_hash`
 
 `builds/<build_key>` stores the corresponding public build handle as a symlink
-to the canonical result record. The language-level `Build` value exposes
-`build_key`, not `result_key`.
+to the canonical result record. `reuses/<reuse_key>` stores the canonical
+builder reuse index. The language-level realized result is `RealizedResult`.
+For builders it may also carry `build_key`; for `Source` it does not.
 
 ## Result Reuse
 
-For one planned node, the runtime tries reuse in this order:
+For one planned builder node, the runtime tries reuse in this order:
 
 1. build-handle hit on `build_key`
-2. canonical result hit on `result_key`
+2. canonical reuse hit on `reuse_key`
 3. actual builder execution
 
-If a canonical result exists but the public build handle is missing, `mbuild`
+If a canonical builder result exists but the public build handle is missing,
+`mbuild`
 recreates the missing build-handle ref and reuses the result.
+
+For `Source`, there is no `build_key` and no `reuse_key`.
+
+The runtime tries reuse in this order:
+
+1. canonical result hit on `result_id`
+2. existing object hit on `object_hash`
+3. actual source materialization
 
 ## Publication
 
@@ -74,7 +88,7 @@ Every recipe node carries a publication name.
 
 After the runtime reuses or builds a node, it updates:
 
-- `meta-refs/<name>.json -> ../builds/<build_key>`
+- `meta-refs/<name>.json -> ../results/<result_id>.json`
 - `object-refs/<name> -> ../objects/<object_hash>`
 
 If the current publication name already points at a different result, the old

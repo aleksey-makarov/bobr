@@ -112,7 +112,11 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<(), FsUtilError> {
             ))
         })?;
 
-    let tmp_name = format!(".{file_name}.tmp");
+    let tmp_name = format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        current_epoch_nanos()?
+    );
     let tmp_path = path.with_file_name(tmp_name);
 
     fs::write(&tmp_path, content).map_err(|error| {

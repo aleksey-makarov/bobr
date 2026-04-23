@@ -1,9 +1,9 @@
 use crate::logging::BuildRunLogger;
-use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
+use crate::resolved_inputs::ResolvedInputs;
 use mbuild_core::{
     Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, Builder,
-    BuilderError, CasError, PublishedBuild, ResultInputIdentity, StoreLayout, compute_build_key,
-    compute_result_key, fsutil, load_build_handle, materialize_build, object_path,
+    BuilderError, CasError, PublishedBuild, ResultInputIdentity, StoreLayout, compute_reuse_key,
+    fsutil, load_build_handle, load_reuse_record, materialize_build, object_path,
 };
 use serde_json::Value;
 use std::fmt;
@@ -53,20 +53,16 @@ impl std::error::Error for RuntimeError {}
 pub(crate) fn execute_builder_node(
     layout: &StoreLayout,
     builder: &'static dyn Builder,
+    build_key: BuildKey,
     build_name: &str,
     created_at: &str,
     run_logger: Arc<BuildRunLogger>,
     config: Value,
     inputs: ResolvedInputs,
 ) -> Result<PublishedBuild, RuntimeError> {
-    let input_build_keys = inputs
-        .ordered_build_keys(builder.spec())
-        .map_err(map_builder_error)?;
     let inputs_identity = inputs
         .ordered_input_identities(builder.spec())
         .map_err(map_builder_error)?;
-    let build_key = compute_build_key(builder.spec().tag, &config, &input_build_keys)
-        .map_err(map_store_error)?;
     let logger = run_logger.bind_node(builder.spec().tag, build_name, build_key);
     log_runtime_event(
         logger.as_ref(),
@@ -85,10 +81,9 @@ pub(crate) fn execute_builder_node(
         return Ok(published);
     }
 
-    let result_key = compute_result_key(builder.spec().tag, &config, &inputs_identity)
+    let reuse_key = compute_reuse_key(builder.spec().tag, &config, &inputs_identity)
         .map_err(map_store_error)?;
-    if let Some(result) =
-        mbuild_core::load_result_record(layout, result_key).map_err(map_store_error)?
+    if let Some(result) = load_reuse_record(layout, reuse_key).map_err(map_store_error)?
     {
         let object_path = object_path(layout, result.object_hash);
         if !object_path.exists() {
@@ -103,11 +98,11 @@ pub(crate) fn execute_builder_node(
             );
             return Err(RuntimeError::Store(format!(
                 "result '{}' points to missing object '{}'",
-                result_key,
+                result.result_id,
                 object_path.display()
             )));
         }
-        mbuild_core::store_build_handle_ref(layout, build_key, result_key)
+        mbuild_core::store_build_handle_ref(layout, build_key, result.result_id)
             .map_err(map_store_error)?;
         log_runtime_event(
             logger.as_ref(),
@@ -118,11 +113,13 @@ pub(crate) fn execute_builder_node(
         return Ok(PublishedBuild {
             build: Build {
                 build_key,
+                result_id: result.result_id,
                 object_hash: result.object_hash,
                 meta_hash: result.meta_hash,
                 created_at: result.created_at.clone(),
                 meta: result.meta.clone(),
             },
+            reuse_key,
             result,
             object_path,
         });
@@ -157,7 +154,7 @@ pub(crate) fn execute_builder_node(
     let published = materialize_build(
         layout,
         build_key,
-        result_key,
+        reuse_key,
         created_at,
         inputs_identity,
         staged,
@@ -176,17 +173,6 @@ pub(crate) fn execute_builder_node(
     Ok(published)
 }
 
-pub(crate) fn build_to_published(
-    layout: &StoreLayout,
-    build: Build,
-) -> Result<PublishedBuild, RuntimeError> {
-    load_build_handle(layout, build.build_key)
-        .map_err(map_store_error)?
-        .ok_or_else(|| {
-            RuntimeError::Store(format!("build '{}' is missing from store", build.build_key))
-        })
-}
-
 pub(crate) fn lookup_build_handle(
     layout: &StoreLayout,
     build_key: BuildKey,
@@ -201,9 +187,8 @@ pub(crate) fn lookup_canonical_result(
     inputs: &[ResultInputIdentity],
     build_key: BuildKey,
 ) -> Result<Option<PublishedBuild>, RuntimeError> {
-    let result_key = compute_result_key(builder_tag, config, inputs).map_err(map_store_error)?;
-    let Some(result) =
-        mbuild_core::load_result_record(layout, result_key).map_err(map_store_error)?
+    let reuse_key = compute_reuse_key(builder_tag, config, inputs).map_err(map_store_error)?;
+    let Some(result) = load_reuse_record(layout, reuse_key).map_err(map_store_error)?
     else {
         return Ok(None);
     };
@@ -211,32 +196,25 @@ pub(crate) fn lookup_canonical_result(
     if !object_path.exists() {
         return Err(RuntimeError::Store(format!(
             "result '{}' points to missing object '{}'",
-            result_key,
+            result.result_id,
             object_path.display()
         )));
     }
-    mbuild_core::store_build_handle_ref(layout, build_key, result_key).map_err(map_store_error)?;
+    mbuild_core::store_build_handle_ref(layout, build_key, result.result_id)
+        .map_err(map_store_error)?;
     Ok(Some(PublishedBuild {
         build: Build {
             build_key,
+            result_id: result.result_id,
             object_hash: result.object_hash,
             meta_hash: result.meta_hash,
             created_at: result.created_at.clone(),
             meta: result.meta.clone(),
         },
+        reuse_key,
         result,
         object_path,
     }))
-}
-
-pub(crate) fn to_resolved_dependency(published: PublishedBuild) -> ResolvedDependency {
-    ResolvedDependency {
-        object_hash: published.build.object_hash,
-        meta_hash: published.build.meta_hash,
-        build_key: published.build.build_key,
-        object_path: published.object_path,
-        meta: published.build.meta,
-    }
 }
 
 pub(crate) fn build_context(
@@ -305,6 +283,7 @@ mod tests {
     use crate::logging::{BuildRunLogger, RunOptions};
     use mbuild_core::{
         BuildContext, BuilderInputs, BuilderSpec, PublishOutputRequest, ResultInputIdentity,
+        compute_build_key,
         StagedBuildResult, TypedBuilder, publish_output,
     };
     use serde::Deserialize;
@@ -429,7 +408,7 @@ mod tests {
                 .unwrap(),
         }];
         let payload = json!({ "source": "echo hi\n", "executable": true });
-        let result_key = compute_result_key("Text", &payload, &matching_inputs).unwrap();
+        let reuse_key = compute_reuse_key("Text", &payload, &matching_inputs).unwrap();
         let build_key_for_result =
             BuildKey::from_str("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
                 .unwrap();
@@ -446,7 +425,7 @@ mod tests {
             PublishOutputRequest {
                 output_name: "script".to_string(),
                 build_key: build_key_for_result,
-                result_key,
+                reuse_key,
                 created_at: "2026-04-05T12:00:00.000000000Z".to_string(),
                 staged_path: stage,
                 inputs: matching_inputs.clone(),
@@ -501,6 +480,7 @@ mod tests {
         let published = execute_builder_node(
             &layout,
             &RUNTIME_TEST_BUILDER,
+            build_key,
             "runtime-test",
             "2026-04-05T12:00:00.000000000Z",
             logger,
@@ -536,6 +516,7 @@ mod tests {
         let error = execute_builder_node(
             &layout,
             &RUNTIME_FAIL_BUILDER,
+            build_key,
             "runtime-fail",
             "2026-04-05T12:00:00.000000000Z",
             logger,
@@ -566,6 +547,7 @@ mod tests {
         let error = execute_builder_node(
             &layout,
             &RUNTIME_BROKEN_STAGE_BUILDER,
+            build_key,
             "runtime-broken-stage",
             "2026-04-05T12:00:00.000000000Z",
             logger,

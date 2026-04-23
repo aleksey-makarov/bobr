@@ -1,5 +1,5 @@
 use crate::BuilderError;
-use crate::cas::{BuildKey, MetaHash};
+use crate::cas::{BuildKey, MetaHash, ResultId, ReuseKey};
 use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -309,6 +309,7 @@ pub struct ResultInputIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Build {
     pub build_key: BuildKey,
+    pub result_id: ResultId,
     #[serde(with = "serde_object_hash")]
     pub object_hash: ObjectHash,
     pub meta_hash: MetaHash,
@@ -319,11 +320,24 @@ pub struct Build {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultRecord {
-    pub result_key: BuildKey,
+    pub result_id: ResultId,
     pub object_hash: ObjectHash,
     pub meta_hash: MetaHash,
     pub created_at: Option<String>,
     pub inputs: Vec<ResultInputIdentity>,
+    pub meta: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealizedResult {
+    pub result_id: ResultId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_key: Option<BuildKey>,
+    #[serde(with = "serde_object_hash")]
+    pub object_hash: ObjectHash,
+    pub meta_hash: MetaHash,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
     pub meta: Map<String, Value>,
 }
 
@@ -351,6 +365,7 @@ mod serde_object_hash {
 #[derive(Debug, Clone)]
 pub struct PublishedBuild {
     pub build: Build,
+    pub reuse_key: ReuseKey,
     pub result: ResultRecord,
     pub object_path: PathBuf,
 }

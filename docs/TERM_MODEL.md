@@ -24,7 +24,9 @@ There is no embedded Nickel runtime in `mbuild`.
 
 ## Recipe Model
 
-Every node has the same outer shape:
+There are two recipe node classes.
+
+Builder nodes have this outer shape:
 
 - `name`
 - `tag`
@@ -50,9 +52,24 @@ The runtime rejects:
 
 Children are always referenced by node id.
 
+`Source` is a separate execution class with this outer shape:
+
+- `name`
+- `tag = "Source"`
+- `object_hash`
+- `origin`
+- `meta`
+
+`Source` does not have `config` or `inputs`.
+
+In v1, `Source` supports only:
+
+- `origin.type = "path"`
+- `origin.mode = "direct" | "tar"`
+
 ## Build Identity
 
-For one recipe node, `build_key` is computed from:
+For one builder node, `build_key` is computed from:
 
 - builder tag
 - normalized config payload
@@ -65,7 +82,7 @@ Dependency order follows the builder input contract:
 
 It does not follow the order of fields in JSON.
 
-`result_key` is computed from:
+`reuse_key` is computed from:
 
 - builder tag
 - normalized config payload
@@ -76,22 +93,38 @@ Each direct input identity contains:
 - `object_hash`
 - `meta_hash`
 
-`build_key` is the public identity of a node in the dependency graph.
-`result_key` is the canonical identity of one realized result payload.
+`result_id` is computed from:
+
+- `object_hash`
+- `meta_hash`
+
+`build_key` is the builder invocation identity.
+`reuse_key` is the builder-only canonical reuse identity that can be computed
+before execution.
+`result_id` is the realized result identity shared by both builders and
+sources.
 
 ## Planning and Execution
 
 Planning starts at node `root`.
 
-For each node, Rust:
+For each builder node, Rust:
 
 1. computes `build_key`
 2. checks `.mbuild/builds/<build_key>`
-3. if that misses, checks the canonical result by `result_key`
+3. if that misses, checks the canonical builder reuse record by `reuse_key`
 4. only if both miss, recurses into direct dependencies
 
 This is the top-down phase. It determines the minimal missing subgraph needed
 to realize the root.
+
+For each `Source` node, Rust:
+
+1. computes `meta_hash`
+2. computes `result_id` from `object_hash + meta_hash`
+3. checks `.mbuild/results/<result_id>.json`
+4. if that misses, checks `.mbuild/objects/<object_hash>`
+5. only if both miss, materializes the source from `origin`
 
 Execution then proceeds bottom-up:
 
@@ -103,7 +136,9 @@ Execution then proceeds bottom-up:
 
 The request is already a DAG-level representation rather than a fully nested
 tree. The runtime still keeps planner and executor state keyed by `build_key`,
-so identical graph fragments reuse the same internal state.
+so identical builder graph fragments reuse the same internal state. `Source`
+participates in the same planner/executor flow, but does not have a public
+`build_key`.
 
 ## Builder Interface
 
@@ -131,14 +166,14 @@ Builder semantics depend only on:
 - realized payload content of direct inputs
 - resolved metadata of direct inputs
 
-Direct input metadata also participates in canonical result identity through
-direct input `meta_hash` values.
+Direct input metadata participates in builder reuse identity through direct
+input `meta_hash` values.
 
 ## CLI Contract
 
 `mbuild build [recipe.json]`
 
 - default input path: `./.mbuild/recipe.json`
-- `stdout`: JSON serialization of the realized root `Build`
+- `stdout`: JSON serialization of the realized root `RealizedResult`
 - `stderr`: live progress log unless `--quiet`
 - `--jobs/-j`: limit parallel execution, default = available CPU parallelism

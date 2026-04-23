@@ -3,7 +3,7 @@ mod support;
 use mbuild::recipe_runtime::{
     BuildRunOptions, run_recipe_json_in_workspace, run_recipe_json_in_workspace_with_options,
 };
-use mbuild_core::{StoreLayout, load_build_handle};
+use mbuild_core::{StoreLayout, load_build_handle, load_result_record};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::env;
@@ -23,6 +23,27 @@ use support::{
     tree_file_recipe, tree_symlink_recipe, write_recipe,
 };
 use tempfile::tempdir;
+
+fn source_recipe_node(
+    name: &str,
+    object_hash: &str,
+    origin_path: &Path,
+    mode: &str,
+) -> Value {
+    json!({
+        "root": {
+            "name": name,
+            "tag": "Source",
+            "object_hash": object_hash,
+            "origin": {
+                "type": "path",
+                "path": origin_path.to_string_lossy(),
+                "mode": mode
+            },
+            "meta": {}
+        }
+    })
+}
 
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -238,7 +259,7 @@ fn json_recipe_executes_all_real_builders() {
         handle.join().unwrap();
 
         let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
-        let published = load_build_handle(&layout, build.build_key)
+        let published = load_build_handle(&layout, build.build_key.expect("builder root"))
             .unwrap()
             .expect("expected final Build to exist in store");
 
@@ -317,7 +338,7 @@ fn repeated_build_keys_are_built_once_but_published_under_all_names() {
 
         let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
         assert!(
-            load_build_handle(&layout, build.build_key)
+            load_build_handle(&layout, build.build_key.expect("builder root"))
                 .unwrap()
                 .is_some()
         );
@@ -343,7 +364,7 @@ fn repeated_build_keys_are_built_once_but_published_under_all_names() {
                 .join("binary-b.json")
                 .exists()
         );
-        assert!(build_ref_path(workspace.path(), build.build_key).exists());
+        assert!(build_ref_path(workspace.path(), build.build_key.expect("builder root")).exists());
         drop(oci_server);
     });
 }
@@ -395,7 +416,7 @@ fn independent_fetch_sources_run_in_parallel() {
         handle.join().unwrap();
 
         let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
-        let published = load_build_handle(&layout, build.build_key)
+        let published = load_build_handle(&layout, build.build_key.expect("builder root"))
             .unwrap()
             .expect("expected binary Build to exist in store");
         assert!(published.build.meta.get("install").is_some());
@@ -415,7 +436,7 @@ fn tree_file_recipe_builds_successfully_via_runtime() {
     let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
     let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
-    let published = load_build_handle(&layout, build.build_key)
+    let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Tree Build to exist in store");
 
@@ -436,7 +457,7 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
     let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
     let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
-    let published = load_build_handle(&layout, build.build_key)
+    let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Tree Build to exist in store");
 
@@ -458,7 +479,7 @@ fn tree_symlink_recipe_builds_successfully_via_runtime() {
     let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
     let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
-    let published = load_build_handle(&layout, build.build_key)
+    let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Tree Build to exist in store");
 
@@ -472,4 +493,97 @@ fn tree_symlink_recipe_builds_successfully_via_runtime() {
         Path::new("/proc/self/mounts")
     );
     assert!(published.build.meta.get("install").is_some());
+}
+
+#[test]
+fn source_path_file_materializes_known_object_without_build_handle() {
+    let workspace = tempdir().unwrap();
+    let source_path = workspace.path().join("payload.txt");
+    fs::write(&source_path, b"hello source\n").unwrap();
+    let object_hash = fsobj_hash::hash_path(&source_path).unwrap();
+    let recipe_path = workspace.path().join("source-file.json");
+    fs::write(
+        &recipe_path,
+        serde_json::to_vec_pretty(&source_recipe_node(
+            "source-file",
+            &object_hash.to_string(),
+            &source_path,
+            "direct",
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+
+    let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+    assert!(realized.build_key.is_none());
+    assert_eq!(realized.object_hash, object_hash);
+    assert!(object_path_exists(&layout, object_hash));
+    let result = load_result_record(&layout, realized.result_id)
+        .unwrap()
+        .expect("expected source result record");
+    assert_eq!(result.object_hash, object_hash);
+    assert_eq!(
+        fs::read_dir(workspace.path().join(".mbuild").join("builds"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn source_path_tar_materializes_unpacked_tree_without_build_handle() {
+    let workspace = tempdir().unwrap();
+    let tar_path = workspace.path().join("payload.tar");
+    {
+        let file = fs::File::create(&tar_path).unwrap();
+        let mut tar = tar::Builder::new(file);
+        let body = b"hello tar source\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("pkg/README.txt").unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, &body[..]).unwrap();
+        tar.finish().unwrap();
+    }
+    let object_hash = fsobj_hash::hash_tar_file(&tar_path).unwrap();
+    let recipe_path = workspace.path().join("source-tar.json");
+    fs::write(
+        &recipe_path,
+        serde_json::to_vec_pretty(&source_recipe_node(
+            "source-tar",
+            &object_hash.to_string(),
+            &tar_path,
+            "tar",
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+
+    let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+    let object_path = workspace
+        .path()
+        .join(".mbuild")
+        .join("objects")
+        .join(object_hash.to_hex());
+    assert!(realized.build_key.is_none());
+    assert_eq!(realized.object_hash, object_hash);
+    assert!(object_path.is_dir());
+    assert_eq!(
+        fs::read_to_string(object_path.join("pkg/README.txt")).unwrap(),
+        "hello tar source\n"
+    );
+    assert!(
+        load_result_record(&layout, realized.result_id)
+            .unwrap()
+            .is_some()
+    );
+}
+
+fn object_path_exists(layout: &StoreLayout, object_hash: fsobj_hash::ObjectHash) -> bool {
+    layout.objects.join(object_hash.to_hex()).exists()
 }
