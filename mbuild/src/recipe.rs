@@ -19,6 +19,22 @@ pub enum Recipe {
     Source(SourceRecipe),
 }
 
+impl Recipe {
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Builder(recipe) => &recipe.name,
+            Self::Source(recipe) => &recipe.name,
+        }
+    }
+
+    pub(crate) fn tag(&self) -> &str {
+        match self {
+            Self::Builder(recipe) => &recipe.tag,
+            Self::Source(_) => "Source",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BuilderRecipe {
     name: String,
@@ -88,13 +104,6 @@ pub(crate) struct PlannedSourceRecipe {
 }
 
 impl PlannedRecipe {
-    pub(crate) fn build_name(&self) -> &str {
-        match self {
-            Self::Builder(recipe) => &recipe.name,
-            Self::Source(recipe) => &recipe.name,
-        }
-    }
-
     pub(crate) fn tag(&self) -> &str {
         match self {
             Self::Builder(recipe) => recipe.spec.tag,
@@ -159,6 +168,7 @@ pub(crate) enum ReuseOrigin {
     CanonicalResult,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct CollectedGraph {
     pub(crate) root_key: BuildKey,

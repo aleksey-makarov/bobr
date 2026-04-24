@@ -405,6 +405,80 @@ fn repeated_build_keys_are_built_once_but_published_under_all_names() {
 }
 
 #[test]
+fn second_run_reuses_root_without_republishing_dependency_refs() {
+    with_fake_podman(|| {
+        let workspace = tempdir().unwrap();
+        let (oci_server, image_ref, pinned_digest) = spawn_test_oci_registry();
+        let source_tar = {
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut tar = tar::Builder::new(encoder);
+            let body = b"hello from root reuse test\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_path("pkg/README.txt").unwrap();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append(&header, &body[..]).unwrap();
+            tar.into_inner().unwrap().finish().unwrap()
+        };
+        let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
+            Ok(server) => server,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to start test HTTP server: {error}"),
+        };
+        let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
+        let recipe = image_recipe(
+            "final-image",
+            vec![binary_recipe(
+                "binary",
+                &url,
+                &source_hash,
+                &image_ref,
+                &pinned_digest,
+            )],
+        );
+        let recipe_path = workspace.path().join("root-reuse.json");
+        write_recipe(&recipe_path, &recipe);
+
+        let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+        handle.join().unwrap();
+
+        assert!(
+            load_build_handle(
+                &StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap(),
+                first.build_key.expect("builder root"),
+            )
+            .unwrap()
+            .is_some()
+        );
+
+        let meta_refs = workspace.path().join(".mbuild").join("meta-refs");
+        let object_refs = workspace.path().join(".mbuild").join("object-refs");
+        for name in ["source", "script", "base-image", "binary", "final-image"] {
+            let meta_ref = meta_refs.join(format!("{name}.json"));
+            let object_ref = object_refs.join(name);
+            if meta_ref.exists() {
+                fs::remove_file(&meta_ref).unwrap();
+            }
+            if object_ref.exists() {
+                fs::remove_file(&object_ref).unwrap();
+            }
+        }
+
+        let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+
+        assert_eq!(first.build_key, second.build_key);
+        assert!(meta_refs.join("final-image.json").exists());
+        assert!(object_refs.join("final-image").exists());
+        for name in ["source", "script", "base-image", "binary"] {
+            assert!(!meta_refs.join(format!("{name}.json")).exists());
+            assert!(!object_refs.join(name).exists());
+        }
+        drop(oci_server);
+    });
+}
+
+#[test]
 fn independent_fetch_sources_run_in_parallel() {
     with_fake_podman(|| {
         let workspace = tempdir().unwrap();

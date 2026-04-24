@@ -1,8 +1,8 @@
 use crate::builders;
 use crate::logging::{BuildRunLogger, RunOptions};
 use crate::recipe::{
-    CollectedGraph, PlannedBuilderRecipe, PlannedNode, PlannedRecipe, PlannedSourceRecipe,
-    PlanningState, RecipeRequest, ReuseOrigin, SourceOrigin, SourcePathMode, collect_graph,
+    PlannedBuilderRecipe, PlannedNode, PlannedRecipe, PlannedSourceRecipe, PlanningState,
+    RecipeRequest, ReuseOrigin, SourceOrigin, SourcePathMode, collect_graph,
 };
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
@@ -100,8 +100,10 @@ pub fn run_recipe_json_in_workspace_with_options(
     let mut nodes = HashMap::new();
     let graph = collect_graph(&request, "root", &mut nodes)?;
     let root_key = graph.root_key;
-    plan_top_down(&layout, &mut nodes, &graph)?;
-    publish_reused_nodes(&layout, &logger, &nodes)?;
+    let root_recipe = request.node("root")?;
+    let root_name = root_recipe.name().to_string();
+    let root_tag = root_recipe.tag().to_string();
+    ensure_planned(&layout, &mut nodes, root_key)?;
 
     let mut completed = HashMap::new();
     for (key, node) in &nodes {
@@ -110,8 +112,22 @@ pub fn run_recipe_json_in_workspace_with_options(
         }
     }
 
-    if let Some(realized) = completed.get(&root_key) {
-        return Ok(realized.clone());
+    if let Some(realized) = completed.get(&root_key).cloned() {
+        let origin = match &nodes
+            .get(&root_key)
+            .ok_or_else(|| RuntimeError::Store(format!("missing planned node for key '{}'", root_key)))?
+            .state
+        {
+            PlanningState::Reused { origin, .. } => *origin,
+            _ => {
+                return Err(RuntimeError::Store(format!(
+                    "root key '{}' completed without reused state",
+                    root_key
+                )))
+            }
+        };
+        publish_reused_root(&layout, &logger, root_key, &root_tag, &root_name, &realized, origin)?;
+        return Ok(realized);
     }
 
     execute_misses(
@@ -132,72 +148,83 @@ pub fn render_result_as_json(result: &RealizedResult) -> Result<String, RuntimeE
     Ok(rendered)
 }
 
-fn plan_top_down(
+fn ensure_planned(
     layout: &StoreLayout,
     nodes: &mut HashMap<BuildKey, PlannedNode>,
-    graph: &CollectedGraph,
+    key: BuildKey,
 ) -> Result<(), RuntimeError> {
-    for node_id in &graph.topo_order {
-        let key = *graph.node_keys.get(node_id).ok_or_else(|| {
-            RuntimeError::Store(format!(
-                "missing planning key for request node id '{}'",
-                node_id
-            ))
-        })?;
-        let node = nodes.get_mut(&key).ok_or_else(|| {
-            RuntimeError::Store(format!("missing planned node for key '{}'", key))
-        })?;
+    let recipe = {
+        let node = nodes
+            .get(&key)
+            .ok_or_else(|| RuntimeError::Store(format!("missing planned node for key '{}'", key)))?;
         if !matches!(node.state, PlanningState::Unknown) {
-            continue;
+            return Ok(());
         }
+        node.recipe.clone()
+    };
 
-        match &node.recipe {
-            PlannedRecipe::Builder(_) => {
-                if let Some(published) = lookup_build_handle(layout, key)? {
-                    node.state = PlanningState::Reused {
-                        realized: realized_result_from_record(
-                            Some(published.build.build_key),
-                            &published.result,
-                        ),
-                        origin: ReuseOrigin::BuildHandle,
-                    };
-                    continue;
-                }
-
-                if let Some(realized) = lookup_canonical_for_planned_node(layout, nodes, key)? {
-                    let node = nodes.get_mut(&key).ok_or_else(|| {
-                        RuntimeError::Store(format!("missing planned node for key '{}'", key))
-                    })?;
-                    node.state = PlanningState::Reused {
-                        realized,
-                        origin: ReuseOrigin::CanonicalResult,
-                    };
-                } else {
-                    let node = nodes.get_mut(&key).ok_or_else(|| {
-                        RuntimeError::Store(format!("missing planned node for key '{}'", key))
-                    })?;
-                    node.state = PlanningState::NeedsBuild;
-                }
+    match &recipe {
+        PlannedRecipe::Builder(_) => {
+            if let Some(published) = lookup_build_handle(layout, key)? {
+                let node = nodes.get_mut(&key).ok_or_else(|| {
+                    RuntimeError::Store(format!("missing planned node for key '{}'", key))
+                })?;
+                node.state = PlanningState::Reused {
+                    realized: realized_result_from_record(
+                        Some(published.build.build_key),
+                        &published.result,
+                    ),
+                    origin: ReuseOrigin::BuildHandle,
+                };
+                return Ok(());
             }
-            PlannedRecipe::Source(source) => {
-                if let Some(result) = load_result_record(layout, source.result_id)
-                    .map_err(map_store_error)?
-                {
-                    let published_object = object_path(layout, result.object_hash);
-                    if !published_object.exists() {
-                        return Err(RuntimeError::Store(format!(
-                            "result '{}' points to missing object '{}'",
-                            result.result_id,
-                            published_object.display()
-                        )));
-                    }
-                    node.state = PlanningState::Reused {
-                        realized: realized_result_from_record(None, &result),
-                        origin: ReuseOrigin::CanonicalResult,
-                    };
-                } else {
-                    node.state = PlanningState::NeedsBuild;
+
+            let mut deps = Vec::new();
+            recipe.try_for_each_direct_dep(|dep| {
+                deps.push(dep);
+                Ok::<_, RuntimeError>(())
+            })?;
+            for dep in deps {
+                ensure_planned(layout, nodes, dep)?;
+            }
+
+            if let Some(realized) = lookup_canonical_for_planned_node(layout, nodes, key)? {
+                let node = nodes.get_mut(&key).ok_or_else(|| {
+                    RuntimeError::Store(format!("missing planned node for key '{}'", key))
+                })?;
+                node.state = PlanningState::Reused {
+                    realized,
+                    origin: ReuseOrigin::CanonicalResult,
+                };
+            } else {
+                let node = nodes.get_mut(&key).ok_or_else(|| {
+                    RuntimeError::Store(format!("missing planned node for key '{}'", key))
+                })?;
+                node.state = PlanningState::NeedsBuild;
+            }
+        }
+        PlannedRecipe::Source(source) => {
+            if let Some(result) = load_result_record(layout, source.result_id).map_err(map_store_error)? {
+                let published_object = object_path(layout, result.object_hash);
+                if !published_object.exists() {
+                    return Err(RuntimeError::Store(format!(
+                        "result '{}' points to missing object '{}'",
+                        result.result_id,
+                        published_object.display()
+                    )));
                 }
+                let node = nodes.get_mut(&key).ok_or_else(|| {
+                    RuntimeError::Store(format!("missing planned node for key '{}'", key))
+                })?;
+                node.state = PlanningState::Reused {
+                    realized: realized_result_from_record(None, &result),
+                    origin: ReuseOrigin::CanonicalResult,
+                };
+            } else {
+                let node = nodes.get_mut(&key).ok_or_else(|| {
+                    RuntimeError::Store(format!("missing planned node for key '{}'", key))
+                })?;
+                node.state = PlanningState::NeedsBuild;
             }
         }
     }
@@ -205,64 +232,57 @@ fn plan_top_down(
     Ok(())
 }
 
-fn publish_reused_nodes(
+fn publish_reused_root(
     layout: &StoreLayout,
     logger: &Arc<BuildRunLogger>,
-    nodes: &HashMap<BuildKey, PlannedNode>,
+    key: BuildKey,
+    root_tag: &str,
+    root_name: &str,
+    realized: &RealizedResult,
+    origin: ReuseOrigin,
 ) -> Result<(), RuntimeError> {
-    for (key, node) in nodes {
-        let PlanningState::Reused { realized, origin } = &node.state else {
-            continue;
-        };
-        if node.active_names.is_empty() {
-            continue;
-        }
-        let result = load_result_record(layout, realized.result_id)
-            .map_err(map_store_error)?
-            .ok_or_else(|| {
-                RuntimeError::Store(format!(
-                    "missing result '{}' for reused node '{}'",
-                    realized.result_id,
-                    node.recipe.build_name()
-                ))
-            })?;
-        for name in &node.active_names {
-            let node_logger = logger.bind_node(node.recipe.tag(), name, *key);
-            log_runtime_event(
-                node_logger.as_ref(),
-                BuildLogLevel::Info,
-                "start",
-                "starting builder node",
-            );
-            log_runtime_event(
-                node_logger.as_ref(),
-                BuildLogLevel::Info,
-                match origin {
-                    ReuseOrigin::BuildHandle => "cache-hit",
-                    ReuseOrigin::CanonicalResult => "result-hit",
-                },
-                match origin {
-                    ReuseOrigin::BuildHandle => "reusing existing build ref",
-                    ReuseOrigin::CanonicalResult => "reusing existing canonical result",
-                },
-            );
-            publish_result_refs(layout, name, &result).map_err(map_store_error)?;
-            log_runtime_event(
-                node_logger.as_ref(),
-                BuildLogLevel::Info,
-                "publish",
-                format!("published '{}' -> {}", name, realized.object_hash),
-            );
-            node_logger.log_event(BuildLogEvent {
-                level: BuildLogLevel::Info,
-                phase: "done".to_string(),
-                message: "builder node completed".to_string(),
-                object_hash: Some(realized.object_hash),
-                raw_log_path: None,
-                details: serde_json::Map::new(),
-            });
-        }
-    }
+    let result = load_result_record(layout, realized.result_id)
+        .map_err(map_store_error)?
+        .ok_or_else(|| {
+            RuntimeError::Store(format!(
+                "missing result '{}' for reused root '{}'",
+                realized.result_id, root_name
+            ))
+        })?;
+    let node_logger = logger.bind_node(root_tag, root_name, key);
+    log_runtime_event(
+        node_logger.as_ref(),
+        BuildLogLevel::Info,
+        "start",
+        "starting builder node",
+    );
+    log_runtime_event(
+        node_logger.as_ref(),
+        BuildLogLevel::Info,
+        match origin {
+            ReuseOrigin::BuildHandle => "cache-hit",
+            ReuseOrigin::CanonicalResult => "result-hit",
+        },
+        match origin {
+            ReuseOrigin::BuildHandle => "reusing existing build ref",
+            ReuseOrigin::CanonicalResult => "reusing existing canonical result",
+        },
+    );
+    publish_result_refs(layout, root_name, &result).map_err(map_store_error)?;
+    log_runtime_event(
+        node_logger.as_ref(),
+        BuildLogLevel::Info,
+        "publish",
+        format!("published '{}' -> {}", root_name, realized.object_hash),
+    );
+    node_logger.log_event(BuildLogEvent {
+        level: BuildLogLevel::Info,
+        phase: "done".to_string(),
+        message: "builder node completed".to_string(),
+        object_hash: Some(realized.object_hash),
+        raw_log_path: None,
+        details: serde_json::Map::new(),
+    });
     Ok(())
 }
 
