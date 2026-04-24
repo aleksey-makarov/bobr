@@ -6,11 +6,27 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn write_recipe(recipe_path: &Path, recipe: &Value) {
+    write_recipe_with_options(recipe_path, recipe, &json!({}));
+}
+
+pub fn write_recipe_with_options(recipe_path: &Path, recipe: &Value, options: &Value) {
     if let Some(parent) = recipe_path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
+    let root = recipe_path
+        .parent()
+        .expect("recipe path for tests must have a parent");
+    let store = store_root(root);
+    fs::create_dir_all(&store).unwrap();
     let request = normalize_request(recipe);
-    fs::write(recipe_path, serde_json::to_vec_pretty(&request).unwrap()).unwrap();
+    let envelope = json!({
+        "paths": {
+            "store": store.to_string_lossy(),
+        },
+        "options": options,
+        "nodes": request,
+    });
+    fs::write(recipe_path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
 }
 
 fn normalize_request(recipe: &Value) -> Value {
@@ -37,6 +53,33 @@ fn normalize_request(recipe: &Value) -> Value {
             .get("tag")
             .cloned()
             .expect("recipe node must have tag");
+
+        if tag.as_str() == Some("Source") {
+            let object_hash = object
+                .get("object_hash")
+                .cloned()
+                .expect("source recipe node must have object_hash");
+            let origin = object
+                .get("origin")
+                .cloned()
+                .expect("source recipe node must have origin");
+            let meta = object
+                .get("meta")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            nodes.insert(
+                id.clone(),
+                json!({
+                    "name": name,
+                    "tag": tag,
+                    "object_hash": object_hash,
+                    "origin": origin,
+                    "meta": meta,
+                }),
+            );
+            return id;
+        }
+
         let config = object
             .get("config")
             .cloned()
@@ -83,9 +126,11 @@ fn normalize_request(recipe: &Value) -> Value {
 }
 
 pub fn build_ref_path(root: &Path, build_key: impl ToString) -> PathBuf {
-    root.join(".mbuild")
-        .join("builds")
-        .join(build_key.to_string())
+    store_root(root).join("builds").join(build_key.to_string())
+}
+
+pub fn store_root(root: &Path) -> PathBuf {
+    root.join("store")
 }
 
 pub fn recipe_node(name: &str, tag: &str, config: Value, inputs: Value) -> Value {

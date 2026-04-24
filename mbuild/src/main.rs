@@ -1,9 +1,12 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, parser::ValueSource};
 use std::env;
 use std::fmt;
+use std::fs;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use mbuild::{RecipeEnvelope, RecipeOptions};
 use mbuild::recipe_runtime::{self, BuildRunOptions};
 
 type MResult<T> = Result<T, MbuildError>;
@@ -35,40 +38,25 @@ impl fmt::Display for MbuildError {
     }
 }
 
-#[derive(Args, Debug, Default)]
-struct BuildCli {
-    #[arg(long, help = "suppress live build progress on stderr")]
-    quiet: bool,
-
-    #[arg(short = 'j', long = "jobs", default_value_t = default_jobs())]
-    jobs: usize,
-
-    recipe_file: Option<PathBuf>,
-}
-
-#[derive(Subcommand, Debug)]
-enum Command {
-    #[command(about = "build a JSON recipe graph")]
-    Build(BuildCli),
-}
-
 #[derive(Parser, Debug)]
 #[command(name = "mbuild")]
 #[command(about = "mbuild runtime for JSON recipe graphs")]
 struct Cli {
-    #[command(subcommand)]
-    command: Option<Command>,
+    #[arg(long, action = ArgAction::SetTrue, help = "suppress live build progress on stderr")]
+    quiet: bool,
 
-    #[command(flatten)]
-    build: BuildCli,
+    #[arg(short = 'j', long = "jobs")]
+    jobs: Option<usize>,
+
+    recipe_file: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    let result = match cli.command {
-        Some(Command::Build(build_cli)) => build(build_cli),
-        None => build(cli.build),
-    };
+    let matches = Cli::command().get_matches();
+    let quiet_from_cli = matches.value_source("quiet") == Some(ValueSource::CommandLine);
+    let jobs_from_cli = matches.value_source("jobs") == Some(ValueSource::CommandLine);
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    let result = build(cli, quiet_from_cli, jobs_from_cli);
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -79,25 +67,85 @@ fn main() -> ExitCode {
     }
 }
 
-fn build(cli: BuildCli) -> MResult<()> {
-    let workspace_root = env::current_dir().map_err(|error| {
-        MbuildError::InvalidInput(format!("failed to get current directory: {error}"))
+fn build(cli: Cli, quiet_from_cli: bool, jobs_from_cli: bool) -> MResult<()> {
+    let recipe_bytes = read_recipe_bytes(cli.recipe_file.as_ref())?;
+    let envelope = RecipeEnvelope::parse_json(&recipe_bytes).map_err(map_runtime_error)?;
+
+    let store_path = envelope.paths.store.clone();
+    let metadata = fs::metadata(&store_path).map_err(|error| {
+        MbuildError::InvalidInput(format!(
+            "store path '{}' does not exist or is not accessible: {error}",
+            store_path.display()
+        ))
     })?;
-    let recipe_path = cli
-        .recipe_file
-        .unwrap_or_else(|| PathBuf::from(".mbuild/recipe.json"));
-    let build = recipe_runtime::run_recipe_json_in_workspace_with_options(
-        &workspace_root,
-        &recipe_path,
-        BuildRunOptions {
-            emit_progress: !cli.quiet,
-            jobs: cli.jobs,
-        },
+    if !metadata.is_dir() {
+        return Err(MbuildError::InvalidInput(format!(
+            "store path '{}' is not a directory",
+            store_path.display()
+        )));
+    }
+
+    env::set_current_dir(&store_path).map_err(|error| {
+        MbuildError::InvalidInput(format!(
+            "failed to change directory to store root '{}': {error}",
+            store_path.display()
+        ))
+    })?;
+
+    let options = resolve_build_options(
+        &envelope.options,
+        quiet_from_cli.then_some(cli.quiet),
+        if jobs_from_cli { cli.jobs } else { None },
+    )?;
+    let build = recipe_runtime::run_recipe_request_in_store_with_options(
+        &store_path,
+        envelope.request,
+        options,
     )
     .map_err(map_runtime_error)?;
     let rendered = recipe_runtime::render_result_as_json(&build).map_err(map_runtime_error)?;
     print!("{rendered}");
     Ok(())
+}
+
+fn read_recipe_bytes(recipe_file: Option<&PathBuf>) -> MResult<Vec<u8>> {
+    match recipe_file {
+        Some(path) => fs::read(path).map_err(|error| {
+            MbuildError::InvalidInput(format!(
+                "failed to read recipe file '{}': {error}",
+                path.display()
+            ))
+        }),
+        None => {
+            let mut bytes = Vec::new();
+            io::stdin().read_to_end(&mut bytes).map_err(|error| {
+                MbuildError::InvalidInput(format!("failed to read recipe JSON from stdin: {error}"))
+            })?;
+            Ok(bytes)
+        }
+    }
+}
+
+fn resolve_build_options(
+    recipe_options: &RecipeOptions,
+    quiet_from_cli: Option<bool>,
+    jobs_from_cli: Option<usize>,
+) -> MResult<BuildRunOptions> {
+    let quiet = quiet_from_cli
+        .or(recipe_options.quiet)
+        .unwrap_or(false);
+    let jobs = jobs_from_cli
+        .or(recipe_options.jobs)
+        .unwrap_or_else(default_jobs);
+    if jobs == 0 {
+        return Err(MbuildError::InvalidInput(
+            "--jobs and recipe options.jobs must be greater than zero".to_string(),
+        ));
+    }
+    Ok(BuildRunOptions {
+        emit_progress: !quiet,
+        jobs,
+    })
 }
 
 fn map_runtime_error(error: mbuild::RuntimeError) -> MbuildError {

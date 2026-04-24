@@ -2,7 +2,7 @@ mod support;
 
 use mbuild::recipe_runtime::run_recipe_json_in_workspace;
 use std::fs;
-use support::{build_ref_path, text_recipe, write_recipe};
+use support::{build_ref_path, store_root, text_recipe, write_recipe};
 use tempfile::tempdir;
 
 #[test]
@@ -13,12 +13,12 @@ fn second_run_reuses_existing_root_build_handle() {
     write_recipe(&recipe_path, &recipe);
 
     let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-    let builds_after_first = fs::read_dir(workspace.path().join(".mbuild").join("builds"))
+    let builds_after_first = fs::read_dir(store_root(workspace.path()).join("builds"))
         .unwrap()
         .count();
 
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-    let builds_after_second = fs::read_dir(workspace.path().join(".mbuild").join("builds"))
+    let builds_after_second = fs::read_dir(store_root(workspace.path()).join("builds"))
         .unwrap()
         .count();
 
@@ -40,10 +40,10 @@ fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
         workspace.path(),
         first.build_key.expect("builder root"),
     );
-    let results_after_first = fs::read_dir(workspace.path().join(".mbuild").join("results"))
+    let results_after_first = fs::read_dir(store_root(workspace.path()).join("results"))
         .unwrap()
         .count();
-    let objects_after_first = fs::read_dir(workspace.path().join(".mbuild").join("objects"))
+    let objects_after_first = fs::read_dir(store_root(workspace.path()).join("objects"))
         .unwrap()
         .count();
 
@@ -51,13 +51,13 @@ fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
     assert!(!build_ref.exists());
 
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-    let results_after_second = fs::read_dir(workspace.path().join(".mbuild").join("results"))
+    let results_after_second = fs::read_dir(store_root(workspace.path()).join("results"))
         .unwrap()
         .count();
-    let objects_after_second = fs::read_dir(workspace.path().join(".mbuild").join("objects"))
+    let objects_after_second = fs::read_dir(store_root(workspace.path()).join("objects"))
         .unwrap()
         .count();
-    let builds_after_second = fs::read_dir(workspace.path().join(".mbuild").join("builds"))
+    let builds_after_second = fs::read_dir(store_root(workspace.path()).join("builds"))
         .unwrap()
         .count();
 

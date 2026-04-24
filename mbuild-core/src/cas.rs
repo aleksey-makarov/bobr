@@ -21,7 +21,6 @@ const RESULT_SCHEMA: &str = "mbuild-result-v3";
 const BUILD_SCHEMA: &str = RESULT_SCHEMA;
 const INVOCATION_SCHEMA: &str = "mbuild-build-invocation-v1";
 const RESULT_INVOCATION_SCHEMA: &str = "mbuild-build-result-invocation-v2";
-const ROOT_DIR: &str = ".mbuild";
 const OBJECTS_DIR: &str = "objects";
 const BUILDS_DIR: &str = "builds";
 const RESULTS_DIR: &str = "results";
@@ -395,7 +394,7 @@ impl StoreLayout {
     pub fn discover_in_cwd() -> Result<Self, CasError> {
         let cwd = env::current_dir()
             .map_err(|error| CasError::Io(format!("failed to get current directory: {error}")))?;
-        Self::discover(&cwd.join(ROOT_DIR))
+        Self::discover(&cwd)
     }
 
     fn ensure(&self) -> Result<(), CasError> {
@@ -2313,7 +2312,7 @@ mod tests {
 
         std::env::set_current_dir(old_cwd).unwrap();
 
-        assert_eq!(layout.root, temp.path().join(ROOT_DIR));
+        assert_eq!(layout.root, temp.path());
         assert!(layout.objects.is_dir());
         assert!(layout.builds.is_dir());
         assert!(layout.meta_refs.is_dir());

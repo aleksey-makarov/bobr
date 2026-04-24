@@ -2,12 +2,19 @@
 
 `mbuild` executes one JSON DAG request.
 
-The entry file is a JSON document whose top-level object is a table of recipe
-nodes keyed by technical ids. The root build target is the entry with the
-reserved id `root`. Dependencies are encoded as id references in input slots.
-`mbuild` parses that DAG request, validates each node, performs top-down store
-lookups, and materializes only the missing nodes. Missing leaves and other
-ready nodes may execute in parallel.
+The input document is a JSON envelope with:
+
+- `paths`
+- `options` (optional)
+- `nodes`
+
+`nodes` is a table of recipe nodes keyed by technical ids. The root build
+target is the entry with the reserved id `root`. Dependencies are encoded as
+id references in input slots. `paths.store` points at the store root that
+`mbuild` should use for this request. `mbuild` parses that DAG request,
+validates each node, performs top-down store lookups, and materializes only
+the missing nodes. Missing leaves and other ready nodes may execute in
+parallel.
 
 There are two node classes.
 
@@ -15,14 +22,23 @@ Builder nodes use the generic builder shape:
 
 ```json
 {
-  "root": {
-    "name": "tar-1.35",
-    "tag": "Binary",
-    "config": {},
-    "inputs": {
-      "image": "image_1",
-      "script": "script_1",
-      "source": "src_0"
+  "paths": {
+    "store": "/abs/path/to/store"
+  },
+  "options": {
+    "quiet": false,
+    "jobs": 8
+  },
+  "nodes": {
+    "root": {
+      "name": "tar-1.35",
+      "tag": "Binary",
+      "config": {},
+      "inputs": {
+        "image": "image_1",
+        "script": "script_1",
+        "source": "src_0"
+      }
     }
   }
 }
@@ -53,16 +69,25 @@ The runtime rejects:
 
 ```json
 {
-  "root": {
-    "name": "linux-src",
-    "tag": "Source",
-    "object_hash": "0123...abcd",
-    "origin": {
-      "type": "path",
-      "path": "/work/linux.tar",
-      "mode": "tar"
+  "paths": {
+    "store": "/abs/path/to/store"
+  },
+  "options": {
+    "quiet": false,
+    "jobs": 8
+  },
+  "nodes": {
+    "root": {
+      "name": "linux-src",
+      "tag": "Source",
+      "object_hash": "0123...abcd",
+      "origin": {
+        "type": "path",
+        "path": "/work/linux.tar",
+        "mode": "tar"
+      },
+      "meta": {}
     },
-    "meta": {}
   }
 }
 ```
@@ -78,18 +103,28 @@ In v1, `Source` supports only one origin:
 - `origin.type = "path"`
 - `origin.mode = "direct" | "tar"`
 
-`mbuild build` defaults to `./.mbuild/recipe.json`. On success it prints the
-realized root `RealizedResult` as JSON to `stdout`. Live progress goes to
-`stderr`. Use `--quiet` to suppress progress output. Use `--jobs/-j` to limit
-parallel builder execution; the default is the available CPU parallelism.
+CLI contract:
+
+- `mbuild [recipe.json]`
+- if `recipe.json` is omitted, the JSON envelope is read from `stdin`
+- on success, `stdout` receives the realized root `RealizedResult` as JSON
+- live progress goes to `stderr` unless `--quiet` is set
+- `--jobs/-j` limits parallel builder execution; the default is the available
+  CPU parallelism
+- recipe-level `options.quiet` and `options.jobs` provide per-request defaults
+  that are overridden by explicit CLI flags
+
+`paths.store` must be an absolute path to an existing directory. That
+directory is the store root itself. A request may still choose a path named
+`.mbuild`, but `mbuild` no longer adds an extra `.mbuild/` layer implicitly.
 
 The store layout is content-addressed:
 
-- `.mbuild/objects/` stores payload objects by `object_hash`
-- `.mbuild/results/` stores canonical realized results by `result_id`
-- `.mbuild/reuses/` stores builder-only canonical reuse refs by `reuse_key`
-- `.mbuild/builds/` stores builder-only public build handles by `build_key`
-- `.mbuild/meta-refs/` and `.mbuild/object-refs/` store published current refs
+- `<store>/objects/` stores payload objects by `object_hash`
+- `<store>/results/` stores canonical realized results by `result_id`
+- `<store>/reuses/` stores builder-only canonical reuse refs by `reuse_key`
+- `<store>/builds/` stores builder-only public build handles by `build_key`
+- `<store>/meta-refs/` and `<store>/object-refs/` store published current refs
 
 `build_key` is computed from:
 

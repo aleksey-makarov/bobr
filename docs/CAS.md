@@ -15,11 +15,13 @@ results.
 
 Publication names do not participate in object identity, `build_key`, or
 `reuse_key`. `result_id` is derived only from payload and metadata identity.
+The store root is provided explicitly by `paths.store` in the JSON request
+envelope. `mbuild` does not add an implicit `.mbuild/` directory.
 
 ## Layout
 
 ```text
-.mbuild/
+<store>/
   objects/
     <object_hash>
   reuses/
@@ -98,8 +100,8 @@ current refs are rotated into timestamp-suffixed history refs.
 
 Each `mbuild` invocation writes:
 
-- one structured event log under `.mbuild/logs/runs/<YYMMDDHHMMSS>-<pid>.jsonl`
-- raw builder logs under `.mbuild/builder-state/<builder>/logs/<name>/`
+- one structured event log under `<store>/logs/runs/<YYMMDDHHMMSS>-<pid>.jsonl`
+- raw builder logs under `<store>/builder-state/<builder>/logs/<name>/`
 
 The event log records lifecycle events such as:
 

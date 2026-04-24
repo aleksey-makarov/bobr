@@ -9,6 +9,24 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
+pub struct RecipeEnvelope {
+    pub paths: RecipePaths,
+    pub options: RecipeOptions,
+    pub request: RecipeRequest,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecipePaths {
+    pub store: PathBuf,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RecipeOptions {
+    pub quiet: Option<bool>,
+    pub jobs: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RecipeRequest {
     nodes: BTreeMap<String, Recipe>,
 }
@@ -65,13 +83,16 @@ pub enum SourcePathMode {
     Tar,
 }
 
-impl RecipeRequest {
+impl RecipeEnvelope {
     pub fn parse_json(bytes: &[u8]) -> Result<Self, RuntimeError> {
         let value: Value = serde_json::from_slice(bytes).map_err(|error| {
             RuntimeError::RecipeLoad(format!("failed to decode recipe JSON value: {error}"))
         })?;
-        parse_request_value(value, "$")
+        parse_envelope_value(value, "$")
     }
+}
+
+impl RecipeRequest {
 
     pub(crate) fn node(&self, id: &str) -> Result<&Recipe, RuntimeError> {
         self.nodes.get(id).ok_or_else(|| {
@@ -138,15 +159,15 @@ impl PlannedRecipe {
 #[derive(Debug, Clone)]
 pub(crate) struct PlannedNode {
     pub(crate) recipe: PlannedRecipe,
-    pub(crate) active_names: BTreeSet<String>,
+    pub(crate) publish_name: String,
     pub(crate) state: PlanningState,
 }
 
 impl PlannedNode {
-    pub(crate) fn new(recipe: PlannedRecipe) -> Self {
+    pub(crate) fn new(recipe: PlannedRecipe, publish_name: String) -> Self {
         Self {
             recipe,
-            active_names: BTreeSet::new(),
+            publish_name,
             state: PlanningState::Unknown,
         }
     }
@@ -244,13 +265,13 @@ fn collect_graph_inner(
 
     stack.remove(node_id);
 
-    nodes.entry(key).or_insert_with(|| PlannedNode::new(planned_recipe));
-    if let Some(node) = nodes.get_mut(&key) {
-        node.active_names.insert(match recipe {
-            Recipe::Builder(recipe) => recipe.name.clone(),
-            Recipe::Source(recipe) => recipe.name.clone(),
-        });
-    }
+    let publish_name = match recipe {
+        Recipe::Builder(recipe) => recipe.name.clone(),
+        Recipe::Source(recipe) => recipe.name.clone(),
+    };
+    nodes
+        .entry(key)
+        .or_insert_with(|| PlannedNode::new(planned_recipe, publish_name));
     node_keys.insert(node_id.to_string(), key);
     topo_order.push(node_id.to_string());
     Ok(key)
@@ -328,6 +349,108 @@ fn source_planning_key(result_id: ResultId) -> Result<BuildKey, RuntimeError> {
         &[],
     )
     .map_err(map_store_error)
+}
+
+fn parse_envelope_value(value: Value, path: &str) -> Result<RecipeEnvelope, RuntimeError> {
+    let mut object = value.as_object().cloned().ok_or_else(|| {
+        RuntimeError::RecipeLoad(format!(
+            "{path}: expected top-level recipe object"
+        ))
+    })?;
+
+    let paths = parse_paths_value(
+        object
+            .remove("paths")
+            .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: missing required field 'paths'")))?,
+        &format!("{path}.paths"),
+    )?;
+    let options = match object.remove("options") {
+        Some(value) => parse_options_value(value, &format!("{path}.options"))?,
+        None => RecipeOptions::default(),
+    };
+    let request = parse_request_value(
+        object
+            .remove("nodes")
+            .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: missing required field 'nodes'")))?,
+        &format!("{path}.nodes"),
+    )?;
+    if !object.is_empty() {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{path}: unexpected fields: {}",
+            object.keys().cloned().collect::<Vec<_>>().join(", ")
+        )));
+    }
+
+    Ok(RecipeEnvelope {
+        paths,
+        options,
+        request,
+    })
+}
+
+fn parse_paths_value(value: Value, path: &str) -> Result<RecipePaths, RuntimeError> {
+    let mut object = value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: expected object")))?;
+    let store = PathBuf::from(take_string(&mut object, path, "store")?);
+    if !store.is_absolute() {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{path}.store: expected absolute path"
+        )));
+    }
+    if !object.is_empty() {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{path}: unexpected fields: {}",
+            object.keys().cloned().collect::<Vec<_>>().join(", ")
+        )));
+    }
+    Ok(RecipePaths { store })
+}
+
+fn parse_options_value(value: Value, path: &str) -> Result<RecipeOptions, RuntimeError> {
+    let mut object = value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: expected object")))?;
+
+    let quiet = match object.remove("quiet") {
+        Some(Value::Bool(value)) => Some(value),
+        Some(_) => {
+            return Err(RuntimeError::RecipeLoad(format!(
+                "{path}.quiet: expected boolean"
+            )))
+        }
+        None => None,
+    };
+    let jobs = match object.remove("jobs") {
+        Some(Value::Number(value)) => {
+            let jobs = value.as_u64().ok_or_else(|| {
+                RuntimeError::RecipeLoad(format!(
+                    "{path}.jobs: expected non-negative integer"
+                ))
+            })?;
+            let jobs = usize::try_from(jobs).map_err(|_| {
+                RuntimeError::RecipeLoad(format!(
+                    "{path}.jobs: value is too large for this platform"
+                ))
+            })?;
+            Some(jobs)
+        }
+        Some(_) => {
+            return Err(RuntimeError::RecipeLoad(format!(
+                "{path}.jobs: expected integer"
+            )))
+        }
+        None => None,
+    };
+    if !object.is_empty() {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{path}: unexpected fields: {}",
+            object.keys().cloned().collect::<Vec<_>>().join(", ")
+        )));
+    }
+    Ok(RecipeOptions { quiet, jobs })
 }
 
 fn parse_request_value(value: Value, path: &str) -> Result<RecipeRequest, RuntimeError> {
@@ -544,7 +667,7 @@ mod tests {
 
     #[test]
     fn recipe_requires_top_level_root_node() {
-        let error = RecipeRequest::parse_json(br#"{"kind":"Text"}"#).unwrap_err();
+        let error = parse_request_value(json!({"kind":"Text"}), "$").unwrap_err();
         assert!(
             error
                 .to_string()
@@ -742,7 +865,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_graph_populates_active_names_and_node_keys() {
+    fn collect_graph_keeps_first_publish_name_for_deduped_nodes() {
         let request = json!({
             "root": {
                 "name": "final-image",
@@ -772,8 +895,7 @@ mod tests {
         let b_key = *graph.node_keys.get("binary-b").unwrap();
         assert_eq!(a_key, b_key);
         let node = nodes.get(&a_key).unwrap();
-        assert!(node.active_names.contains("binary-a"));
-        assert!(node.active_names.contains("binary-b"));
+        assert_eq!(node.publish_name, "binary-a");
         assert_eq!(graph.topo_order.last().map(String::as_str), Some("root"));
     }
 
@@ -839,12 +961,12 @@ mod tests {
             "inputs": {}
         });
 
-        let error = RecipeRequest::parse_json(serde_json::to_vec(&old_shape).unwrap().as_slice())
-            .unwrap_err();
+        let error = RecipeEnvelope::parse_json(
+            serde_json::to_vec(&old_shape).unwrap().as_slice(),
+        )
+        .unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("missing required top-level node 'root'"),
+            error.to_string().contains("missing required field 'paths'"),
             "{error}"
         );
     }

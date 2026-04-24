@@ -19,8 +19,8 @@ use std::time::Duration;
 use std::time::Instant;
 use support::{
     base_image_recipe, binary_recipe, build_ref_path, default_binary_steps, image_recipe,
-    recipe_node, script_recipe, source_recipe, spawn_test_oci_registry, tree_directory_recipe,
-    tree_file_recipe, tree_symlink_recipe, write_recipe,
+    recipe_node, script_recipe, source_recipe, spawn_test_oci_registry, store_root,
+    tree_directory_recipe, tree_file_recipe, tree_symlink_recipe, write_recipe,
 };
 use tempfile::tempdir;
 
@@ -31,17 +31,15 @@ fn source_recipe_node(
     mode: &str,
 ) -> Value {
     json!({
-        "root": {
-            "name": name,
-            "tag": "Source",
-            "object_hash": object_hash,
-            "origin": {
-                "type": "path",
-                "path": origin_path.to_string_lossy(),
-                "mode": mode
-            },
-            "meta": {}
-        }
+        "name": name,
+        "tag": "Source",
+        "object_hash": object_hash,
+        "origin": {
+            "type": "path",
+            "path": origin_path.to_string_lossy(),
+            "mode": mode
+        },
+        "meta": {}
     })
 }
 
@@ -293,7 +291,7 @@ fn json_recipe_executes_all_real_builders() {
         let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
         handle.join().unwrap();
 
-        let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+        let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
         let published = load_build_handle(&layout, build.build_key.expect("builder root"))
             .unwrap()
             .expect("expected final Build to exist in store");
@@ -308,25 +306,21 @@ fn json_recipe_executes_all_real_builders() {
 
         for name in ["source", "script", "base-image", "binary", "final-image"] {
             assert!(
-                workspace
-                    .path()
-                    .join(".mbuild")
+                store_root(workspace.path())
                     .join("meta-refs")
                     .join(format!("{name}.json"))
                     .exists()
             );
             assert!(
-                workspace
-                    .path()
-                    .join(".mbuild")
+                store_root(workspace.path())
                     .join("object-refs")
                     .join(name)
                     .exists()
             );
         }
 
-        let builds_dir = workspace.path().join(".mbuild").join("builds");
-        let objects_dir = workspace.path().join(".mbuild").join("objects");
+        let builds_dir = store_root(workspace.path()).join("builds");
+        let objects_dir = store_root(workspace.path()).join("objects");
         assert_eq!(fs::read_dir(&builds_dir).unwrap().count(), 5);
         assert_eq!(fs::read_dir(&objects_dir).unwrap().count(), 5);
         drop(oci_server);
@@ -334,7 +328,7 @@ fn json_recipe_executes_all_real_builders() {
 }
 
 #[test]
-fn repeated_build_keys_are_built_once_but_published_under_all_names() {
+fn repeated_build_keys_are_built_once_with_one_publish_name() {
     with_fake_podman(|| {
         let workspace = tempdir().unwrap();
         let (oci_server, image_ref, pinned_digest) = spawn_test_oci_registry();
@@ -371,30 +365,26 @@ fn repeated_build_keys_are_built_once_but_published_under_all_names() {
         let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
         handle.join().unwrap();
 
-        let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+        let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
         assert!(
             load_build_handle(&layout, build.build_key.expect("builder root"))
                 .unwrap()
                 .is_some()
         );
         assert_eq!(
-            fs::read_dir(workspace.path().join(".mbuild").join("builds"))
+            fs::read_dir(store_root(workspace.path()).join("builds"))
                 .unwrap()
                 .count(),
             5
         );
         assert!(
-            workspace
-                .path()
-                .join(".mbuild")
+            store_root(workspace.path())
                 .join("meta-refs")
                 .join("binary-a.json")
                 .exists()
         );
         assert!(
-            workspace
-                .path()
-                .join(".mbuild")
+            !store_root(workspace.path())
                 .join("meta-refs")
                 .join("binary-b.json")
                 .exists()
@@ -445,15 +435,15 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
 
         assert!(
             load_build_handle(
-                &StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap(),
+                &StoreLayout::discover(&store_root(workspace.path())).unwrap(),
                 first.build_key.expect("builder root"),
             )
             .unwrap()
             .is_some()
         );
 
-        let meta_refs = workspace.path().join(".mbuild").join("meta-refs");
-        let object_refs = workspace.path().join(".mbuild").join("object-refs");
+        let meta_refs = store_root(workspace.path()).join("meta-refs");
+        let object_refs = store_root(workspace.path()).join("object-refs");
         for name in ["source", "script", "base-image", "binary", "final-image"] {
             let meta_ref = meta_refs.join(format!("{name}.json"));
             let object_ref = object_refs.join(name);
@@ -524,7 +514,7 @@ fn independent_fetch_sources_run_in_parallel() {
         .unwrap();
         handle.join().unwrap();
 
-        let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+        let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
         let published = load_build_handle(&layout, build.build_key.expect("builder root"))
             .unwrap()
             .expect("expected binary Build to exist in store");
@@ -618,7 +608,7 @@ fn tree_file_recipe_builds_successfully_via_runtime() {
 
     let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
-    let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Tree Build to exist in store");
@@ -639,7 +629,7 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
 
     let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
-    let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Tree Build to exist in store");
@@ -661,7 +651,7 @@ fn tree_symlink_recipe_builds_successfully_via_runtime() {
 
     let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
-    let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Tree Build to exist in store");
@@ -685,21 +675,14 @@ fn source_path_file_materializes_known_object_without_build_handle() {
     fs::write(&source_path, b"hello source\n").unwrap();
     let object_hash = fsobj_hash::hash_path(&source_path).unwrap();
     let recipe_path = workspace.path().join("source-file.json");
-    fs::write(
+    write_recipe(
         &recipe_path,
-        serde_json::to_vec_pretty(&source_recipe_node(
-            "source-file",
-            &object_hash.to_string(),
-            &source_path,
-            "direct",
-        ))
-        .unwrap(),
-    )
-    .unwrap();
+        &source_recipe_node("source-file", &object_hash.to_string(), &source_path, "direct"),
+    );
 
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
-    let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
+    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
     assert!(realized.build_key.is_none());
     assert_eq!(realized.object_hash, object_hash);
     assert!(object_path_exists(&layout, object_hash));
@@ -708,7 +691,7 @@ fn source_path_file_materializes_known_object_without_build_handle() {
         .expect("expected source result record");
     assert_eq!(result.object_hash, object_hash);
     assert_eq!(
-        fs::read_dir(workspace.path().join(".mbuild").join("builds"))
+        fs::read_dir(store_root(workspace.path()).join("builds"))
             .unwrap()
             .count(),
         0
@@ -733,24 +716,15 @@ fn source_path_tar_materializes_unpacked_tree_without_build_handle() {
     }
     let object_hash = fsobj_hash::hash_tar_file(&tar_path).unwrap();
     let recipe_path = workspace.path().join("source-tar.json");
-    fs::write(
+    write_recipe(
         &recipe_path,
-        serde_json::to_vec_pretty(&source_recipe_node(
-            "source-tar",
-            &object_hash.to_string(),
-            &tar_path,
-            "tar",
-        ))
-        .unwrap(),
-    )
-    .unwrap();
+        &source_recipe_node("source-tar", &object_hash.to_string(), &tar_path, "tar"),
+    );
 
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
-    let layout = StoreLayout::discover(&workspace.path().join(".mbuild")).unwrap();
-    let object_path = workspace
-        .path()
-        .join(".mbuild")
+    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let object_path = store_root(workspace.path())
         .join("objects")
         .join(object_hash.to_hex());
     assert!(realized.build_key.is_none());

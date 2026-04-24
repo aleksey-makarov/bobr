@@ -1,8 +1,8 @@
 use crate::builders;
 use crate::logging::{BuildRunLogger, RunOptions};
 use crate::recipe::{
-    PlannedBuilderRecipe, PlannedNode, PlannedRecipe, PlannedSourceRecipe, PlanningState,
-    RecipeRequest, ReuseOrigin, SourceOrigin, SourcePathMode, collect_graph,
+    RecipeEnvelope, PlannedBuilderRecipe, PlannedNode, PlannedRecipe, PlannedSourceRecipe,
+    PlanningState, RecipeRequest, ReuseOrigin, SourceOrigin, SourcePathMode, collect_graph,
 };
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
@@ -48,17 +48,13 @@ pub fn run_recipe_json_in_workspace(
     workspace_root: &Path,
     recipe_path: &Path,
 ) -> Result<RealizedResult, RuntimeError> {
-    run_recipe_json_in_workspace_with_options(
-        workspace_root,
-        recipe_path,
-        BuildRunOptions::default(),
-    )
+    run_recipe_json_in_workspace_with_options(workspace_root, recipe_path, BuildRunOptions::default())
 }
 
 pub fn run_recipe_json_in_workspace_with_options(
-    workspace_root: &Path,
+    _workspace_root: &Path,
     recipe_path: &Path,
-    options: BuildRunOptions,
+    cli_options: BuildRunOptions,
 ) -> Result<RealizedResult, RuntimeError> {
     if !recipe_path.exists() {
         return Err(RuntimeError::RecipeLoad(format!(
@@ -67,26 +63,62 @@ pub fn run_recipe_json_in_workspace_with_options(
         )));
     }
 
-    if options.jobs == 0 {
-        return Err(RuntimeError::InvalidRequest(
-            "--jobs must be greater than zero".to_string(),
-        ));
-    }
-
     let recipe_bytes = fs::read(recipe_path).map_err(|error| {
         RuntimeError::RecipeLoad(format!(
             "failed to read recipe file '{}': {error}",
             recipe_path.display()
         ))
     })?;
-    let request = RecipeRequest::parse_json(&recipe_bytes).map_err(|error| {
+    let envelope = RecipeEnvelope::parse_json(&recipe_bytes)?;
+    let options = BuildRunOptions {
+        emit_progress: cli_options.emit_progress,
+        jobs: if cli_options.jobs == BuildRunOptions::default().jobs {
+            envelope.options.jobs.unwrap_or(cli_options.jobs)
+        } else {
+            cli_options.jobs
+        },
+    };
+    let options = BuildRunOptions {
+        emit_progress: if cli_options.emit_progress == BuildRunOptions::default().emit_progress {
+            !envelope.options.quiet.unwrap_or(!cli_options.emit_progress)
+        } else {
+            cli_options.emit_progress
+        },
+        jobs: options.jobs,
+    };
+    if options.jobs == 0 {
+        return Err(RuntimeError::InvalidRequest(
+            "--jobs and recipe options.jobs must be greater than zero".to_string(),
+        ));
+    }
+    let store_root = &envelope.paths.store;
+    let metadata = fs::metadata(store_root).map_err(|error| {
         RuntimeError::RecipeLoad(format!(
-            "failed to parse recipe JSON '{}': {error}",
-            recipe_path.display()
+            "store path '{}' does not exist or is not accessible: {error}",
+            store_root.display()
         ))
     })?;
+    if !metadata.is_dir() {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "store path '{}' is not a directory",
+            store_root.display()
+        )));
+    }
+    run_recipe_request_in_store_with_options(store_root, envelope.request, options)
+}
 
-    let layout = StoreLayout::discover(&workspace_root.join(".mbuild")).map_err(map_store_error)?;
+pub fn run_recipe_request_in_store_with_options(
+    store_root: &Path,
+    request: RecipeRequest,
+    options: BuildRunOptions,
+) -> Result<RealizedResult, RuntimeError> {
+    if options.jobs == 0 {
+        return Err(RuntimeError::InvalidRequest(
+            "--jobs must be greater than zero".to_string(),
+        ));
+    }
+
+    let layout = StoreLayout::discover(store_root).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> = Arc::new(
         BuildRunLogger::new(
             &layout.root,
@@ -338,7 +370,7 @@ fn execute_misses(
     let mut first_error: Option<RuntimeError> = None;
 
     for (key, node) in nodes {
-        if !matches!(node.state, PlanningState::NeedsBuild) || node.active_names.is_empty() {
+        if !matches!(node.state, PlanningState::NeedsBuild) {
             continue;
         }
         let mut wait_for = 0usize;
@@ -346,7 +378,6 @@ fn execute_misses(
             .try_for_each_direct_dep(|dep| -> Result<(), RuntimeError> {
                 if let Some(dep_node) = nodes.get(&dep)
                     && matches!(dep_node.state, PlanningState::NeedsBuild)
-                    && !dep_node.active_names.is_empty()
                 {
                     wait_for += 1;
                     reverse.entry(dep).or_default().push(*key);
@@ -440,24 +471,25 @@ fn execute_misses(
         let node = nodes.get(&key).ok_or_else(|| {
             RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
-        for name in &node.active_names {
-            let node_logger = logger.bind_node(node.recipe.tag(), name, key);
-            publish_result_refs(layout, name, &executed.result).map_err(map_store_error)?;
-            log_runtime_event(
-                node_logger.as_ref(),
-                BuildLogLevel::Info,
-                "publish",
-                format!("published '{}' -> {}", name, executed.realized.object_hash),
-            );
-            node_logger.log_event(BuildLogEvent {
-                level: BuildLogLevel::Info,
-                phase: "done".to_string(),
-                message: "builder node completed".to_string(),
-                object_hash: Some(executed.realized.object_hash),
-                raw_log_path: None,
-                details: serde_json::Map::new(),
-            });
-        }
+        let node_logger = logger.bind_node(node.recipe.tag(), &node.publish_name, key);
+        publish_result_refs(layout, &node.publish_name, &executed.result).map_err(map_store_error)?;
+        log_runtime_event(
+            node_logger.as_ref(),
+            BuildLogLevel::Info,
+            "publish",
+            format!(
+                "published '{}' -> {}",
+                node.publish_name, executed.realized.object_hash
+            ),
+        );
+        node_logger.log_event(BuildLogEvent {
+            level: BuildLogLevel::Info,
+            phase: "done".to_string(),
+            message: "builder node completed".to_string(),
+            object_hash: Some(executed.realized.object_hash),
+            raw_log_path: None,
+            details: serde_json::Map::new(),
+        });
         completed.insert(key, executed.realized);
         if let Some(parents) = reverse.get(&key) {
             for parent in parents {
@@ -897,38 +929,44 @@ mod tests {
     fn lookup_canonical_for_planned_node_uses_dependency_meta_hashes() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
-        let request = RecipeRequest::parse_json(
+        let request = RecipeEnvelope::parse_json(
             br##"{
-                "root": {
-                    "name": "bin",
-                    "tag": "Binary",
-                    "config": {},
-                    "inputs": {
-                        "image": "image",
-                        "script": "script"
+                "paths": {
+                    "store": "/tmp/unused-store"
+                },
+                "nodes": {
+                    "root": {
+                        "name": "bin",
+                        "tag": "Binary",
+                        "config": {},
+                        "inputs": {
+                            "image": "image",
+                            "script": "script"
+                        }
+                    },
+                    "image": {
+                        "name": "image",
+                        "tag": "ContainerImage",
+                        "config": {
+                            "image": "docker.io/library/buildpack-deps:bookworm",
+                            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        },
+                        "inputs": {}
+                    },
+                    "script": {
+                        "name": "script",
+                        "tag": "Text",
+                        "config": {
+                            "source": "#!/bin/sh\nexit 0\n",
+                            "executable": true
+                        },
+                        "inputs": {}
                     }
-                },
-                "image": {
-                    "name": "image",
-                    "tag": "ContainerImage",
-                    "config": {
-                        "image": "docker.io/library/buildpack-deps:bookworm",
-                        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    },
-                    "inputs": {}
-                },
-                "script": {
-                    "name": "script",
-                    "tag": "Text",
-                    "config": {
-                        "source": "#!/bin/sh\nexit 0\n",
-                        "executable": true
-                    },
-                    "inputs": {}
                 }
             }"##,
         )
-        .unwrap();
+        .unwrap()
+        .request;
 
         let mut nodes = HashMap::new();
         let graph = collect_graph(&request, "root", &mut nodes).unwrap();

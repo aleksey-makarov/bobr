@@ -3,21 +3,31 @@ mod support;
 use mbuild_core::RealizedResult;
 use serde_json::json;
 use std::fs;
-use std::process::Command;
-use support::{recipe_node, text_recipe, write_recipe};
+use std::process::{Command, Stdio};
+use support::{recipe_node, store_root, text_recipe, write_recipe, write_recipe_with_options};
 use tempfile::tempdir;
 
 #[test]
-fn cli_uses_default_dot_mbuild_recipe_json() {
+fn cli_reads_recipe_from_stdin_when_path_is_omitted() {
     let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("stdin.json");
     write_recipe(
-        &workspace.path().join(".mbuild").join("recipe.json"),
-        &text_recipe("default-recipe", "hello default", false),
+        &recipe_path,
+        &text_recipe("stdin-recipe", "hello stdin", false),
     );
+    let recipe_bytes = fs::read(&recipe_path).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
         .current_dir(workspace.path())
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write as _;
+            child.stdin.as_mut().unwrap().write_all(&recipe_bytes)?;
+            child.wait_with_output()
+        })
         .unwrap();
 
     assert!(output.status.success(), "{output:?}");
@@ -25,8 +35,8 @@ fn cli_uses_default_dot_mbuild_recipe_json() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let build: RealizedResult = serde_json::from_str(&stdout).unwrap();
     assert!(build.meta.is_empty());
-    assert!(stderr.contains("[start] Text default-recipe"), "{stderr}");
-    assert!(stderr.contains("[done] Text default-recipe"), "{stderr}");
+    assert!(stderr.contains("[start] Text stdin-recipe"), "{stderr}");
+    assert!(stderr.contains("[done] Text stdin-recipe"), "{stderr}");
 }
 
 #[test]
@@ -76,6 +86,54 @@ fn cli_quiet_suppresses_live_progress() {
 }
 
 #[test]
+fn cli_flags_override_recipe_options() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("override-options.json");
+    write_recipe_with_options(
+        &recipe_path,
+        &text_recipe("override-recipe", "hello override", false),
+        &json!({
+            "quiet": false,
+            "jobs": 0,
+        }),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg("--jobs")
+        .arg("1")
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("[start] Text override-recipe"), "{stderr}");
+}
+
+#[test]
+fn recipe_options_apply_when_cli_flags_are_absent() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("recipe-options.json");
+    write_recipe_with_options(
+        &recipe_path,
+        &text_recipe("recipe-quiet", "hello recipe quiet", false),
+        &json!({
+            "quiet": true,
+        }),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+}
+
+#[test]
 fn cli_reports_invalid_json_recipe() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("broken.json");
@@ -90,22 +148,27 @@ fn cli_reports_invalid_json_recipe() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
-    assert!(stderr.contains("failed to parse recipe JSON"), "{stderr}");
+    assert!(stderr.contains("failed to decode recipe JSON value"), "{stderr}");
 }
 
 #[test]
 fn cli_reports_invalid_generic_input_shape() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("broken-shape.json");
+    let store = store_root(workspace.path());
+    fs::create_dir_all(&store).unwrap();
     fs::write(
         &recipe_path,
         serde_json::to_vec_pretty(&json!({
-            "root": {
-                "name": "bin",
-                "tag": "Binary",
-                "config": {},
-                "inputs": {
-                    "image": []
+            "paths": { "store": store.to_string_lossy() },
+            "nodes": {
+                "root": {
+                    "name": "bin",
+                    "tag": "Binary",
+                    "config": {},
+                    "inputs": {
+                        "image": []
+                    }
                 }
             }
         }))
@@ -123,6 +186,78 @@ fn cli_reports_invalid_generic_input_shape() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
     assert!(stderr.contains("expected node id string"), "{stderr}");
+}
+
+#[test]
+fn cli_reports_relative_store_path() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("relative-store.json");
+    fs::write(
+        &recipe_path,
+        serde_json::to_vec_pretty(&json!({
+            "paths": { "store": "relative/store" },
+            "nodes": {
+                "root": {
+                    "name": "text",
+                    "tag": "Text",
+                    "config": {
+                        "source": "hello",
+                        "executable": false
+                    },
+                    "inputs": {}
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("$.paths.store: expected absolute path"), "{stderr}");
+}
+
+#[test]
+fn cli_reports_missing_store_directory() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("missing-store.json");
+    let missing_store = workspace.path().join("missing-store");
+    fs::write(
+        &recipe_path,
+        serde_json::to_vec_pretty(&json!({
+            "paths": { "store": missing_store.to_string_lossy() },
+            "nodes": {
+                "root": {
+                    "name": "text",
+                    "tag": "Text",
+                    "config": {
+                        "source": "hello",
+                        "executable": false
+                    },
+                    "inputs": {}
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("error[invalid-input]"), "{stderr}");
+    assert!(stderr.contains("does not exist or is not accessible"), "{stderr}");
 }
 
 #[test]

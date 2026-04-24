@@ -4,11 +4,24 @@
 
 `mbuild` consumes one JSON DAG request and executes it entirely in Rust.
 
-The input file is a top-level object of recipe nodes keyed by technical ids.
-The reserved id `root` identifies the build target for the current invocation.
-Each node describes one builder node in a generic format driven by the Rust
-builder registry. Dependencies are encoded as id references rather than inline
-child recipe objects.
+The input is a JSON envelope with:
+
+- `paths`
+- `options` (optional)
+- `nodes`
+
+`nodes` is a top-level object of recipe nodes keyed by technical ids. The
+reserved id `root` identifies the build target for the current invocation.
+`paths.store` points at the store root for the request. Each node describes
+either one builder node or one source node. Dependencies are encoded as id
+references rather than inline child recipe objects.
+
+`options` currently supports:
+
+- `quiet: bool`
+- `jobs: integer`
+
+Explicit CLI flags override `options`.
 
 Rust is responsible for:
 
@@ -111,7 +124,7 @@ Planning starts at node `root`.
 For each builder node, Rust:
 
 1. computes `build_key`
-2. checks `.mbuild/builds/<build_key>`
+2. checks `<store>/builds/<build_key>`
 3. if that misses, checks the canonical builder reuse record by `reuse_key`
 4. only if both miss, recurses into direct dependencies
 
@@ -122,8 +135,8 @@ For each `Source` node, Rust:
 
 1. computes `meta_hash`
 2. computes `result_id` from `object_hash + meta_hash`
-3. checks `.mbuild/results/<result_id>.json`
-4. if that misses, checks `.mbuild/objects/<object_hash>`
+3. checks `<store>/results/<result_id>.json`
+4. if that misses, checks `<store>/objects/<object_hash>`
 5. only if both miss, materializes the source from `origin`
 
 Execution then proceeds bottom-up:
@@ -171,9 +184,10 @@ input `meta_hash` values.
 
 ## CLI Contract
 
-`mbuild build [recipe.json]`
+`mbuild [recipe.json]`
 
-- default input path: `./.mbuild/recipe.json`
+- if `recipe.json` is omitted, the JSON envelope is read from `stdin`
 - `stdout`: JSON serialization of the realized root `RealizedResult`
 - `stderr`: live progress log unless `--quiet`
 - `--jobs/-j`: limit parallel execution, default = available CPU parallelism
+- `paths.store`: absolute path to an existing store root directory
