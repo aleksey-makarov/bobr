@@ -72,17 +72,9 @@ fn build(cli: Cli, quiet_from_cli: bool, jobs_from_cli: bool) -> MResult<()> {
     let envelope = RecipeEnvelope::parse_json(&recipe_bytes).map_err(map_runtime_error)?;
 
     let store_path = envelope.paths.store.clone();
-    let metadata = fs::metadata(&store_path).map_err(|error| {
-        MbuildError::InvalidInput(format!(
-            "store path '{}' does not exist or is not accessible: {error}",
-            store_path.display()
-        ))
-    })?;
-    if !metadata.is_dir() {
-        return Err(MbuildError::InvalidInput(format!(
-            "store path '{}' is not a directory",
-            store_path.display()
-        )));
+    validate_existing_dir(&store_path, "store path")?;
+    if let Some(local_path) = envelope.paths.local.as_ref() {
+        validate_existing_dir(local_path, "local path")?;
     }
 
     env::set_current_dir(&store_path).map_err(|error| {
@@ -98,13 +90,29 @@ fn build(cli: Cli, quiet_from_cli: bool, jobs_from_cli: bool) -> MResult<()> {
         if jobs_from_cli { cli.jobs } else { None },
     )?;
     let build = recipe_runtime::run_recipe_request_in_store_with_options(
-        &store_path,
+        &envelope.paths,
         envelope.request,
         options,
     )
     .map_err(map_runtime_error)?;
     let rendered = recipe_runtime::render_result_as_json(&build).map_err(map_runtime_error)?;
     print!("{rendered}");
+    Ok(())
+}
+
+fn validate_existing_dir(path: &std::path::Path, label: &str) -> MResult<()> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        MbuildError::InvalidInput(format!(
+            "{label} '{}' does not exist or is not accessible: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(MbuildError::InvalidInput(format!(
+            "{label} '{}' is not a directory",
+            path.display()
+        )));
+    }
     Ok(())
 }
 

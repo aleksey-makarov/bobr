@@ -1,7 +1,7 @@
 use crate::builders;
 use crate::logging::{BuildRunLogger, RunOptions};
 use crate::recipe::{
-    RecipeEnvelope, PlannedBuilderRecipe, PlannedNode, PlannedRecipe, PlannedSourceRecipe,
+    RecipeEnvelope, RecipePaths, PlannedBuilderRecipe, PlannedNode, PlannedRecipe, PlannedSourceRecipe,
     PlanningState, RecipeRequest, ReuseOrigin, SourceOrigin, SourcePathMode, collect_graph,
 };
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
@@ -18,7 +18,7 @@ use mbuild_core::{
 use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use tar::Archive;
@@ -91,24 +91,12 @@ pub fn run_recipe_json_in_workspace_with_options(
             "--jobs and recipe options.jobs must be greater than zero".to_string(),
         ));
     }
-    let store_root = &envelope.paths.store;
-    let metadata = fs::metadata(store_root).map_err(|error| {
-        RuntimeError::RecipeLoad(format!(
-            "store path '{}' does not exist or is not accessible: {error}",
-            store_root.display()
-        ))
-    })?;
-    if !metadata.is_dir() {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "store path '{}' is not a directory",
-            store_root.display()
-        )));
-    }
-    run_recipe_request_in_store_with_options(store_root, envelope.request, options)
+    validate_runtime_paths(&envelope.paths)?;
+    run_recipe_request_in_store_with_options(&envelope.paths, envelope.request, options)
 }
 
 pub fn run_recipe_request_in_store_with_options(
-    store_root: &Path,
+    paths: &RecipePaths,
     request: RecipeRequest,
     options: BuildRunOptions,
 ) -> Result<RealizedResult, RuntimeError> {
@@ -117,8 +105,14 @@ pub fn run_recipe_request_in_store_with_options(
             "--jobs must be greater than zero".to_string(),
         ));
     }
+    validate_runtime_paths(paths)?;
+    if request.requires_local_path() && paths.local.is_none() {
+        return Err(RuntimeError::InvalidRequest(
+            "request contains Source path origins but paths.local is missing".to_string(),
+        ));
+    }
 
-    let layout = StoreLayout::discover(store_root).map_err(map_store_error)?;
+    let layout = StoreLayout::discover(&paths.store).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> = Arc::new(
         BuildRunLogger::new(
             &layout.root,
@@ -135,7 +129,7 @@ pub fn run_recipe_request_in_store_with_options(
     let root_recipe = request.node("root")?;
     let root_name = root_recipe.name().to_string();
     let root_tag = root_recipe.tag().to_string();
-    ensure_planned(&layout, &mut nodes, root_key)?;
+    ensure_planned(&layout, paths.local.as_deref(), &mut nodes, root_key)?;
 
     let mut completed = HashMap::new();
     for (key, node) in &nodes {
@@ -164,6 +158,7 @@ pub fn run_recipe_request_in_store_with_options(
 
     execute_misses(
         &layout,
+        paths.local.as_deref(),
         logger,
         &nodes,
         &mut completed,
@@ -180,8 +175,33 @@ pub fn render_result_as_json(result: &RealizedResult) -> Result<String, RuntimeE
     Ok(rendered)
 }
 
+fn validate_runtime_paths(paths: &RecipePaths) -> Result<(), RuntimeError> {
+    validate_existing_dir(&paths.store, "store path")?;
+    if let Some(local) = &paths.local {
+        validate_existing_dir(local, "local path")?;
+    }
+    Ok(())
+}
+
+fn validate_existing_dir(path: &Path, label: &str) -> Result<(), RuntimeError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        RuntimeError::RecipeLoad(format!(
+            "{label} '{}' does not exist or is not accessible: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{label} '{}' is not a directory",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn ensure_planned(
     layout: &StoreLayout,
+    local_root: Option<&Path>,
     nodes: &mut HashMap<BuildKey, PlannedNode>,
     key: BuildKey,
 ) -> Result<(), RuntimeError> {
@@ -217,7 +237,7 @@ fn ensure_planned(
                 Ok::<_, RuntimeError>(())
             })?;
             for dep in deps {
-                ensure_planned(layout, nodes, dep)?;
+                ensure_planned(layout, local_root, nodes, dep)?;
             }
 
             if let Some(realized) = lookup_canonical_for_planned_node(layout, nodes, key)? {
@@ -358,6 +378,7 @@ fn lookup_canonical_for_planned_node(
 
 fn execute_misses(
     layout: &StoreLayout,
+    local_root: Option<&Path>,
     logger: Arc<BuildRunLogger>,
     nodes: &HashMap<BuildKey, PlannedNode>,
     completed: &mut HashMap<BuildKey, RealizedResult>,
@@ -405,6 +426,7 @@ fn execute_misses(
                 RuntimeError::Store(format!("missing planned node for key '{}'", key))
             })?;
             let layout = layout.clone();
+            let local_root = local_root.map(Path::to_path_buf);
             let logger = logger.clone();
             let tx = tx.clone();
             let recipe = node.recipe.clone();
@@ -426,7 +448,7 @@ fn execute_misses(
                         )
                     }
                     PlannedRecipe::Source(source_recipe) => {
-                        execute_source_recipe(&layout, logger, key, source_recipe)
+                        execute_source_recipe(&layout, local_root.as_deref(), logger, key, source_recipe)
                     }
                 };
                 let _ = tx.send((key, result));
@@ -588,6 +610,7 @@ fn execute_builder_recipe(
 
 fn execute_source_recipe(
     layout: &StoreLayout,
+    local_root: Option<&Path>,
     run_logger: Arc<BuildRunLogger>,
     key: BuildKey,
     recipe: PlannedSourceRecipe,
@@ -647,6 +670,15 @@ fn execute_source_recipe(
         });
     }
 
+    if recipe.origin.is_none() {
+        let message = format!(
+            "source '{}' has no origin and object '{}' is not present in store",
+            recipe.name, recipe.object_hash
+        );
+        log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
+        return Err(RuntimeError::Build(message));
+    }
+
     let temp_root = layout.root.join("source-state").join("tmp").join(key.to_hex());
     fsutil::recreate_empty_dir_force(&temp_root).map_err(|error| {
         RuntimeError::Store(format!(
@@ -654,7 +686,11 @@ fn execute_source_recipe(
             temp_root.display()
         ))
     })?;
-    let staged_path = match materialize_source_origin(&temp_root, &recipe.origin) {
+    let staged_path = match materialize_source_origin(
+        temp_root.as_path(),
+        local_root,
+        recipe.origin.as_ref().expect("origin checked above"),
+    ) {
         Ok(path) => path,
         Err(error) => {
             cleanup_source_temp_dir(&temp_root, logger.as_ref());
@@ -707,18 +743,24 @@ fn execute_source_recipe(
 
 fn materialize_source_origin(
     temp_root: &Path,
+    local_root: Option<&Path>,
     origin: &SourceOrigin,
 ) -> Result<PathBuf, RuntimeError> {
     match origin {
         SourceOrigin::Path { path, mode } => match mode {
-            SourcePathMode::Direct => materialize_path_source_direct(temp_root, path),
-            SourcePathMode::Tar => materialize_path_source_tar(temp_root, path),
+            SourcePathMode::Direct => materialize_path_source_direct(temp_root, local_root, path),
+            SourcePathMode::Tar => materialize_path_source_tar(temp_root, local_root, path),
         },
     }
 }
 
-fn materialize_path_source_direct(temp_root: &Path, source_path: &Path) -> Result<PathBuf, RuntimeError> {
-    let source_meta = fs::metadata(source_path).map_err(|error| {
+fn materialize_path_source_direct(
+    temp_root: &Path,
+    local_root: Option<&Path>,
+    source_path: &Path,
+) -> Result<PathBuf, RuntimeError> {
+    let source_path = resolve_local_source_path(local_root, source_path)?;
+    let source_meta = fs::metadata(&source_path).map_err(|error| {
         RuntimeError::Build(format!(
             "failed to inspect source path '{}': {error}",
             source_path.display()
@@ -726,7 +768,7 @@ fn materialize_path_source_direct(temp_root: &Path, source_path: &Path) -> Resul
     })?;
     let staged_path = temp_root.join("staged");
     if source_meta.is_dir() {
-        copy_dir_recursive(source_path, &staged_path)?;
+        copy_dir_recursive(&source_path, &staged_path)?;
     } else if source_meta.is_file() {
         if let Some(parent) = staged_path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -736,7 +778,7 @@ fn materialize_path_source_direct(temp_root: &Path, source_path: &Path) -> Resul
                 ))
             })?;
         }
-        fs::copy(source_path, &staged_path).map_err(|error| {
+        fs::copy(&source_path, &staged_path).map_err(|error| {
             RuntimeError::Build(format!(
                 "failed to copy source file '{}' to '{}': {error}",
                 source_path.display(),
@@ -752,8 +794,13 @@ fn materialize_path_source_direct(temp_root: &Path, source_path: &Path) -> Resul
     Ok(staged_path)
 }
 
-fn materialize_path_source_tar(temp_root: &Path, source_path: &Path) -> Result<PathBuf, RuntimeError> {
-    let file = fs::File::open(source_path).map_err(|error| {
+fn materialize_path_source_tar(
+    temp_root: &Path,
+    local_root: Option<&Path>,
+    source_path: &Path,
+) -> Result<PathBuf, RuntimeError> {
+    let source_path = resolve_local_source_path(local_root, source_path)?;
+    let file = fs::File::open(&source_path).map_err(|error| {
         RuntimeError::Build(format!(
             "failed to open tar source '{}': {error}",
             source_path.display()
@@ -775,6 +822,34 @@ fn materialize_path_source_tar(temp_root: &Path, source_path: &Path) -> Result<P
         ))
     })?;
     Ok(staged_path)
+}
+
+fn resolve_local_source_path(
+    local_root: Option<&Path>,
+    relative_path: &Path,
+) -> Result<PathBuf, RuntimeError> {
+    let Some(local_root) = local_root else {
+        return Err(RuntimeError::Build(format!(
+            "missing local path base for source origin '{}'",
+            relative_path.display()
+        )));
+    };
+    if relative_path.is_absolute() {
+        return Err(RuntimeError::Build(format!(
+            "source path '{}' must be relative",
+            relative_path.display()
+        )));
+    }
+    if relative_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(RuntimeError::Build(format!(
+            "source path '{}' must not contain '..'",
+            relative_path.display()
+        )));
+    }
+    Ok(local_root.join(relative_path))
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), RuntimeError> {

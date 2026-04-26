@@ -23,7 +23,8 @@ Builder nodes use the generic builder shape:
 ```json
 {
   "paths": {
-    "store": "/abs/path/to/store"
+    "store": "/abs/path/to/store",
+    "local": "/abs/path/to/local-sources"
   },
   "options": {
     "quiet": false,
@@ -83,7 +84,7 @@ The runtime rejects:
       "object_hash": "0123...abcd",
       "origin": {
         "type": "path",
-        "path": "/work/linux.tar",
+        "path": "linux.tar",
         "mode": "tar"
       },
       "meta": {}
@@ -102,6 +103,12 @@ In v1, `Source` supports only one origin:
 
 - `origin.type = "path"`
 - `origin.mode = "direct" | "tar"`
+- `origin.path` must be a non-empty relative path without `..`
+
+`Source` may also omit `origin`. In that shape, the payload object must
+already exist in the store under `objects/<object_hash>`. If the canonical
+`<store>/results/<result_id>.json` record is missing, `mbuild` reconstructs
+it from the recipe metadata.
 
 CLI contract:
 
@@ -117,6 +124,8 @@ CLI contract:
 `paths.store` must be an absolute path to an existing directory. That
 directory is the store root itself. A request may still choose a path named
 `.mbuild`, but `mbuild` no longer adds an extra `.mbuild/` layer implicitly.
+`paths.local` is optional and is required only when the request contains a
+`Source` with `origin.type = "path"`.
 
 The store layout is content-addressed:
 

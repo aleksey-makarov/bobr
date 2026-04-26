@@ -18,6 +18,7 @@ pub struct RecipeEnvelope {
 #[derive(Debug, Clone)]
 pub struct RecipePaths {
     pub store: PathBuf,
+    pub local: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -65,7 +66,7 @@ pub struct BuilderRecipe {
 pub struct SourceRecipe {
     name: String,
     object_hash: ObjectHash,
-    origin: SourceOrigin,
+    origin: Option<SourceOrigin>,
     meta: Map<String, Value>,
 }
 
@@ -93,10 +94,16 @@ impl RecipeEnvelope {
 }
 
 impl RecipeRequest {
-
     pub(crate) fn node(&self, id: &str) -> Result<&Recipe, RuntimeError> {
         self.nodes.get(id).ok_or_else(|| {
             RuntimeError::InvalidRequest(format!("request references unknown node id '{id}'"))
+        })
+    }
+
+    pub(crate) fn requires_local_path(&self) -> bool {
+        self.nodes.values().any(|recipe| match recipe {
+            Recipe::Builder(_) => false,
+            Recipe::Source(source) => matches!(source.origin, Some(SourceOrigin::Path { .. })),
         })
     }
 }
@@ -119,7 +126,7 @@ pub(crate) struct PlannedBuilderRecipe {
 pub(crate) struct PlannedSourceRecipe {
     pub(crate) name: String,
     pub(crate) object_hash: ObjectHash,
-    pub(crate) origin: SourceOrigin,
+    pub(crate) origin: Option<SourceOrigin>,
     pub(crate) meta: Map<String, Value>,
     pub(crate) result_id: ResultId,
 }
@@ -381,6 +388,12 @@ fn parse_envelope_value(value: Value, path: &str) -> Result<RecipeEnvelope, Runt
         )));
     }
 
+    if request.requires_local_path() && paths.local.is_none() {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{path}.paths: missing required field 'local' for Source path origins"
+        )));
+    }
+
     Ok(RecipeEnvelope {
         paths,
         options,
@@ -399,13 +412,30 @@ fn parse_paths_value(value: Value, path: &str) -> Result<RecipePaths, RuntimeErr
             "{path}.store: expected absolute path"
         )));
     }
+    let local = match object.remove("local") {
+        Some(Value::String(value)) => {
+            let local = PathBuf::from(value);
+            if !local.is_absolute() {
+                return Err(RuntimeError::RecipeLoad(format!(
+                    "{path}.local: expected absolute path"
+                )));
+            }
+            Some(local)
+        }
+        Some(_) => {
+            return Err(RuntimeError::RecipeLoad(format!(
+                "{path}.local: expected string"
+            )))
+        }
+        None => None,
+    };
     if !object.is_empty() {
         return Err(RuntimeError::RecipeLoad(format!(
             "{path}: unexpected fields: {}",
             object.keys().cloned().collect::<Vec<_>>().join(", ")
         )));
     }
-    Ok(RecipePaths { store })
+    Ok(RecipePaths { store, local })
 }
 
 fn parse_options_value(value: Value, path: &str) -> Result<RecipeOptions, RuntimeError> {
@@ -539,16 +569,15 @@ fn parse_source_recipe(
     debug_assert_eq!(tag, "Source");
 
     let object_hash = take_string(&mut object, path, "object_hash")?
+        .trim()
         .parse::<ObjectHash>()
         .map_err(|error| {
             RuntimeError::RecipeLoad(format!("{path}.object_hash: invalid object hash: {error}"))
         })?;
-    let origin = parse_source_origin(
-        object.remove("origin").ok_or_else(|| {
-            RuntimeError::RecipeLoad(format!("{path}: missing required field 'origin'"))
-        })?,
-        &format!("{path}.origin"),
-    )?;
+    let origin = match object.remove("origin") {
+        Some(value) => Some(parse_source_origin(value, &format!("{path}.origin"))?),
+        None => None,
+    };
     let meta = object
         .remove("meta")
         .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: missing required field 'meta'")))?
@@ -579,6 +608,7 @@ fn parse_source_origin(value: Value, path: &str) -> Result<SourceOrigin, Runtime
     match kind.as_str() {
         "path" => {
             let path_value = PathBuf::from(take_string(&mut object, path, "path")?);
+            validate_relative_source_path(&path_value, &format!("{path}.path"))?;
             let mode = match take_string(&mut object, path, "mode")?.as_str() {
                 "direct" => SourcePathMode::Direct,
                 "tar" => SourcePathMode::Tar,
@@ -600,6 +630,30 @@ fn parse_source_origin(value: Value, path: &str) -> Result<SourceOrigin, Runtime
             "{path}.type: unsupported source origin type '{other}'"
         ))),
     }
+}
+
+fn validate_relative_source_path(path: &PathBuf, field_path: &str) -> Result<(), RuntimeError> {
+    use std::path::Component;
+
+    if path.as_os_str().is_empty() {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{field_path}: path must not be empty"
+        )));
+    }
+    if path.is_absolute() {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{field_path}: expected relative path"
+        )));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{field_path}: path must not contain '..'"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_input_value(value: Value, path: &str) -> Result<String, RuntimeError> {
@@ -704,7 +758,7 @@ mod tests {
                 "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
                 "origin": {
                     "type": "path",
-                    "path": "/tmp/source.tar",
+                    "path": "source.tar",
                     "mode": "tar"
                 },
                 "meta": {}
@@ -724,13 +778,90 @@ mod tests {
                 "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
                 "origin": {
                     "type": "path",
-                    "path": "/tmp/source.tar",
+                    "path": "source.tar",
                     "mode": "tar"
                 }
             }
         });
         let error = collect_one(&request).unwrap_err();
         assert!(error.to_string().contains("missing required field 'meta'"), "{error}");
+    }
+
+    #[test]
+    fn source_without_origin_is_accepted() {
+        let request = json!({
+            "root": {
+                "name": "local-source",
+                "tag": "Source",
+                "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+                "meta": {}
+            }
+        });
+        let (graph, nodes) = collect_one(&request).unwrap();
+        let node = nodes.get(&graph.root_key).unwrap();
+        let PlannedRecipe::Source(source) = &node.recipe else {
+            panic!("expected source recipe");
+        };
+        assert!(source.origin.is_none());
+    }
+
+    #[test]
+    fn source_path_origin_rejects_absolute_paths() {
+        let request = json!({
+            "root": {
+                "name": "local-source",
+                "tag": "Source",
+                "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+                "origin": {
+                    "type": "path",
+                    "path": "/tmp/source.tar",
+                    "mode": "tar"
+                },
+                "meta": {}
+            }
+        });
+        let error = collect_one(&request).unwrap_err();
+        assert!(error.to_string().contains("expected relative path"), "{error}");
+    }
+
+    #[test]
+    fn source_path_origin_rejects_parent_segments() {
+        let request = json!({
+            "root": {
+                "name": "local-source",
+                "tag": "Source",
+                "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+                "origin": {
+                    "type": "path",
+                    "path": "../source.tar",
+                    "mode": "tar"
+                },
+                "meta": {}
+            }
+        });
+        let error = collect_one(&request).unwrap_err();
+        assert!(error.to_string().contains("must not contain '..'"), "{error}");
+    }
+
+    #[test]
+    fn source_object_hash_allows_trailing_whitespace() {
+        let request = json!({
+            "root": {
+                "name": "local-source",
+                "tag": "Source",
+                "object_hash": "1111111111111111111111111111111111111111111111111111111111111111\n",
+                "meta": {}
+            }
+        });
+        let (graph, nodes) = collect_one(&request).unwrap();
+        let node = nodes.get(&graph.root_key).unwrap();
+        let PlannedRecipe::Source(source) = &node.recipe else {
+            panic!("expected source recipe");
+        };
+        assert_eq!(
+            source.object_hash.to_string(),
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        );
     }
 
     #[test]

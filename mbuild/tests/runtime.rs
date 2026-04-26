@@ -27,7 +27,7 @@ use tempfile::tempdir;
 fn source_recipe_node(
     name: &str,
     object_hash: &str,
-    origin_path: &Path,
+    origin_path: &str,
     mode: &str,
 ) -> Value {
     json!({
@@ -36,7 +36,7 @@ fn source_recipe_node(
         "object_hash": object_hash,
         "origin": {
             "type": "path",
-            "path": origin_path.to_string_lossy(),
+            "path": origin_path,
             "mode": mode
         },
         "meta": {}
@@ -677,7 +677,7 @@ fn source_path_file_materializes_known_object_without_build_handle() {
     let recipe_path = workspace.path().join("source-file.json");
     write_recipe(
         &recipe_path,
-        &source_recipe_node("source-file", &object_hash.to_string(), &source_path, "direct"),
+        &source_recipe_node("source-file", &object_hash.to_string(), "payload.txt", "direct"),
     );
 
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
@@ -718,7 +718,7 @@ fn source_path_tar_materializes_unpacked_tree_without_build_handle() {
     let recipe_path = workspace.path().join("source-tar.json");
     write_recipe(
         &recipe_path,
-        &source_recipe_node("source-tar", &object_hash.to_string(), &tar_path, "tar"),
+        &source_recipe_node("source-tar", &object_hash.to_string(), "payload.tar", "tar"),
     );
 
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
@@ -739,6 +739,89 @@ fn source_path_tar_materializes_unpacked_tree_without_build_handle() {
             .unwrap()
             .is_some()
     );
+}
+
+#[test]
+fn source_without_origin_reuses_existing_canonical_result() {
+    let workspace = tempdir().unwrap();
+    let source_path = workspace.path().join("payload.txt");
+    fs::write(&source_path, b"hello source\n").unwrap();
+    let object_hash = fsobj_hash::hash_path(&source_path).unwrap();
+    let materialized_recipe_path = workspace.path().join("source-materialized.json");
+    write_recipe(
+        &materialized_recipe_path,
+        &source_recipe_node("source-file", &object_hash.to_string(), "payload.txt", "direct"),
+    );
+    let first = run_recipe_json_in_workspace(workspace.path(), &materialized_recipe_path).unwrap();
+
+    let cutoff_recipe_path = workspace.path().join("source-cutoff.json");
+    write_recipe(
+        &cutoff_recipe_path,
+        &json!({
+            "name": "source-file",
+            "tag": "Source",
+            "object_hash": object_hash.to_string(),
+            "meta": {}
+        }),
+    );
+
+    let second = run_recipe_json_in_workspace(workspace.path(), &cutoff_recipe_path).unwrap();
+    assert_eq!(first.result_id, second.result_id);
+    assert_eq!(first.object_hash, second.object_hash);
+    assert!(second.build_key.is_none());
+}
+
+#[test]
+fn source_without_origin_republishes_existing_object() {
+    let workspace = tempdir().unwrap();
+    let source_path = workspace.path().join("payload.txt");
+    fs::write(&source_path, b"hello source\n").unwrap();
+    let object_hash = fsobj_hash::hash_path(&source_path).unwrap();
+    let materialized_recipe_path = workspace.path().join("source-materialized.json");
+    write_recipe(
+        &materialized_recipe_path,
+        &source_recipe_node("source-file", &object_hash.to_string(), "payload.txt", "direct"),
+    );
+    let first = run_recipe_json_in_workspace(workspace.path(), &materialized_recipe_path).unwrap();
+
+    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let result_path = layout.results.join(format!("{}.json", first.result_id));
+    fs::remove_file(&result_path).unwrap();
+
+    let recipe_path = workspace.path().join("source-cutoff-missing-result.json");
+    write_recipe(
+        &recipe_path,
+        &json!({
+            "name": "source-cutoff",
+            "tag": "Source",
+            "object_hash": object_hash.to_string(),
+            "meta": {}
+        }),
+    );
+
+    let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let restored = load_result_record(&layout, second.result_id)
+        .unwrap()
+        .expect("expected restored result record");
+    assert_eq!(restored.object_hash, object_hash);
+}
+
+#[test]
+fn source_without_origin_requires_existing_object_or_result() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("source-cutoff-missing-result.json");
+    write_recipe(
+        &recipe_path,
+        &json!({
+            "name": "source-cutoff",
+            "tag": "Source",
+            "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+            "meta": {}
+        }),
+    );
+
+    let error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
+    assert!(error.to_string().contains("has no origin and object"), "{error}");
 }
 
 fn object_path_exists(layout: &StoreLayout, object_hash: fsobj_hash::ObjectHash) -> bool {

@@ -70,7 +70,7 @@ Children are always referenced by node id.
 - `name`
 - `tag = "Source"`
 - `object_hash`
-- `origin`
+- optional `origin`
 - `meta`
 
 `Source` does not have `config` or `inputs`.
@@ -79,6 +79,11 @@ In v1, `Source` supports only:
 
 - `origin.type = "path"`
 - `origin.mode = "direct" | "tar"`
+- `origin.path` must be a non-empty relative path without `..`
+
+If `origin` is omitted, the payload object must already exist in the store.
+If the canonical result record is missing, Rust reconstructs it from the
+recipe metadata.
 
 ## Build Identity
 
@@ -136,8 +141,13 @@ For each `Source` node, Rust:
 1. computes `meta_hash`
 2. computes `result_id` from `object_hash + meta_hash`
 3. checks `<store>/results/<result_id>.json`
-4. if that misses, checks `<store>/objects/<object_hash>`
-5. only if both miss, materializes the source from `origin`
+4. if `origin` is missing and the result record is absent, checks whether
+   `<store>/objects/<object_hash>` already exists
+5. if the object exists, reconstructs the missing canonical result record from
+   `object_hash + meta`
+6. if `origin.type = "path"` is present, resolves `origin.path` against
+   `paths.local`
+7. otherwise materializes the source from the resolved local path
 
 Execution then proceeds bottom-up:
 
@@ -191,3 +201,5 @@ input `meta_hash` values.
 - `stderr`: live progress log unless `--quiet`
 - `--jobs/-j`: limit parallel execution, default = available CPU parallelism
 - `paths.store`: absolute path to an existing store root directory
+- `paths.local`: optional absolute path to an existing local-source root
+  directory; required only for `Source` path origins

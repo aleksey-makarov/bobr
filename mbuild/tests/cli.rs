@@ -224,6 +224,87 @@ fn cli_reports_relative_store_path() {
 }
 
 #[test]
+fn cli_reports_relative_local_path() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("relative-local.json");
+    let store = store_root(workspace.path());
+    fs::create_dir_all(&store).unwrap();
+    fs::write(
+        &recipe_path,
+        serde_json::to_vec_pretty(&json!({
+            "paths": {
+                "store": store.to_string_lossy(),
+                "local": "relative/local"
+            },
+            "nodes": {
+                "root": {
+                    "name": "source",
+                    "tag": "Source",
+                    "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "origin": {
+                        "type": "path",
+                        "path": "payload.txt",
+                        "mode": "direct"
+                    },
+                    "meta": {}
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("$.paths.local: expected absolute path"), "{stderr}");
+}
+
+#[test]
+fn cli_reports_missing_local_for_source_path_origin() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("missing-local.json");
+    let store = store_root(workspace.path());
+    fs::create_dir_all(&store).unwrap();
+    fs::write(
+        &recipe_path,
+        serde_json::to_vec_pretty(&json!({
+            "paths": { "store": store.to_string_lossy() },
+            "nodes": {
+                "root": {
+                    "name": "source",
+                    "tag": "Source",
+                    "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+                    "origin": {
+                        "type": "path",
+                        "path": "payload.txt",
+                        "mode": "direct"
+                    },
+                    "meta": {}
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("missing required field 'local'"), "{stderr}");
+}
+
+#[test]
 fn cli_reports_missing_store_directory() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("missing-store.json");

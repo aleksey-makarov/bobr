@@ -22,6 +22,7 @@ pub fn write_recipe_with_options(recipe_path: &Path, recipe: &Value, options: &V
     let envelope = json!({
         "paths": {
             "store": store.to_string_lossy(),
+            "local": root.to_string_lossy(),
         },
         "options": options,
         "nodes": request,
@@ -59,24 +60,19 @@ fn normalize_request(recipe: &Value) -> Value {
                 .get("object_hash")
                 .cloned()
                 .expect("source recipe node must have object_hash");
-            let origin = object
-                .get("origin")
-                .cloned()
-                .expect("source recipe node must have origin");
             let meta = object
                 .get("meta")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            nodes.insert(
-                id.clone(),
-                json!({
-                    "name": name,
-                    "tag": tag,
-                    "object_hash": object_hash,
-                    "origin": origin,
-                    "meta": meta,
-                }),
-            );
+            let mut source_node = serde_json::Map::new();
+            source_node.insert("name".to_string(), name);
+            source_node.insert("tag".to_string(), tag);
+            source_node.insert("object_hash".to_string(), object_hash);
+            if let Some(origin) = object.get("origin").cloned() {
+                source_node.insert("origin".to_string(), origin);
+            }
+            source_node.insert("meta".to_string(), meta);
+            nodes.insert(id.clone(), Value::Object(source_node));
             return id;
         }
 
