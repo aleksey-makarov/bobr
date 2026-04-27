@@ -889,6 +889,7 @@ dependencies = [
  "mbuild-core",
  "mbuild-image",
  "mbuild-origin-http",
+ "mbuild-origin-oci-registry",
  "mbuild-text",
  "mbuild-tree",
  "mockito",
@@ -943,13 +944,12 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "mbuild-core",
- "mockito",
+ "mbuild-origin-oci-registry",
  "serde",
  "serde_json",
  "sha2",
  "tar",
  "tempfile",
- "ureq",
 ]
 
 [[package]]
@@ -967,6 +967,19 @@ dependencies = [
  "tempfile",
  "xz2",
  "zip",
+]
+
+[[package]]
+name = "mbuild-origin-oci-registry"
+version = "0.1.0"
+dependencies = [
+ "mbuild-core",
+ "mockito",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "ureq",
 ]
 
 [[package]]

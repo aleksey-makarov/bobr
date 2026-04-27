@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use mbuild_origin_oci_registry::fetch_image_authenticated;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -241,13 +242,14 @@ pub fn tree_symlink_recipe(name: &str) -> Value {
 }
 
 /// Spawn a minimal OCI registry server and return
-/// `(server, image_ref, pinned_digest)`.
+/// `(server, image_ref, pinned_digest, object_hash)`.
 ///
 /// The `image_ref` is in the form `localhost:<port>/testimage@<pinned_digest>`
-/// and can be used directly in a ContainerImage recipe.
+/// and can be used directly in a `Source` recipe with `origin.type =
+/// "oci-registry"`.
 ///
 /// The server must be kept alive until the build completes.
-pub fn spawn_test_oci_registry() -> (mockito::ServerGuard, String, String) {
+pub fn spawn_test_oci_registry() -> (mockito::ServerGuard, String, String, String) {
     let config_bytes = b"{}";
     let config_hex = format!("{:x}", Sha256::digest(config_bytes));
     let config_digest = format!("sha256:{config_hex}");
@@ -301,19 +303,30 @@ pub fn spawn_test_oci_registry() -> (mockito::ServerGuard, String, String) {
         .create();
 
     let image_ref = format!("{}/{repo}@{pinned_digest}", server.host_with_port());
-    (server, image_ref, pinned_digest)
+    let object_hash = registry_layout_object_hash(&image_ref, &pinned_digest);
+    (server, image_ref, pinned_digest, object_hash)
 }
 
-pub fn base_image_recipe(image: &str, digest: &str) -> Value {
-    recipe_node(
-        "base-image",
-        "ContainerImage",
-        json!({
+fn registry_layout_object_hash(image_ref: &str, pinned_digest: &str) -> String {
+    let temp = tempfile::tempdir().unwrap();
+    let oci_dir = temp.path().join("image");
+    fs::create_dir(&oci_dir).unwrap();
+    fetch_image_authenticated(image_ref, pinned_digest, &oci_dir).unwrap();
+    fsobj_hash::hash_path(&oci_dir).unwrap().to_string()
+}
+
+pub fn base_image_recipe(image: &str, digest: &str, object_hash: &str) -> Value {
+    json!({
+        "name": "base-image",
+        "tag": "Source",
+        "object_hash": object_hash,
+        "origin": {
+            "type": "oci-registry",
             "image": image,
             "digest": digest,
-        }),
-        json!({}),
-    )
+        },
+        "meta": {}
+    })
 }
 
 pub fn script_recipe() -> Value {
@@ -363,7 +376,14 @@ pub fn default_binary_steps() -> Value {
     ])
 }
 
-pub fn binary_recipe(name: &str, url: &str, source_hash: &str, image: &str, digest: &str) -> Value {
+pub fn binary_recipe(
+    name: &str,
+    url: &str,
+    source_hash: &str,
+    image: &str,
+    digest: &str,
+    image_object_hash: &str,
+) -> Value {
     recipe_node(
         name,
         "Binary",
@@ -371,7 +391,7 @@ pub fn binary_recipe(name: &str, url: &str, source_hash: &str, image: &str, dige
             "steps": default_binary_steps(),
         }),
         json!({
-            "image": base_image_recipe(image, digest),
+            "image": base_image_recipe(image, digest, image_object_hash),
             "script": script_recipe(),
             "source": source_recipe(url, source_hash),
         }),

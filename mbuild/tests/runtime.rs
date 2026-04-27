@@ -230,10 +230,23 @@ fn source_tree_hash(source_tar: &[u8]) -> String {
     fsobj_hash::hash_path(&staged).unwrap().to_string()
 }
 
-fn make_full_recipe(url: &str, source_hash: &str, image: &str, digest: &str) -> Value {
+fn make_full_recipe(
+    url: &str,
+    source_hash: &str,
+    image: &str,
+    digest: &str,
+    image_object_hash: &str,
+) -> Value {
     image_recipe(
         "final-image",
-        vec![binary_recipe("binary", url, source_hash, image, digest)],
+        vec![binary_recipe(
+            "binary",
+            url,
+            source_hash,
+            image,
+            digest,
+            image_object_hash,
+        )],
     )
 }
 
@@ -243,6 +256,7 @@ fn binary_with_two_sources_recipe(
     source_hash: &str,
     image: &str,
     digest: &str,
+    image_object_hash: &str,
 ) -> Value {
     recipe_node(
         "binary",
@@ -251,7 +265,7 @@ fn binary_with_two_sources_recipe(
             "steps": default_binary_steps(),
         }),
         json!({
-            "image": base_image_recipe(image, digest),
+            "image": base_image_recipe(image, digest, image_object_hash),
             "script": script_recipe(),
             "source_a": {
                 "name": "source-a",
@@ -285,6 +299,7 @@ fn binary_recipe_with_behavior(
     source_hash: &str,
     image: &str,
     digest: &str,
+    image_object_hash: &str,
     behavior: &str,
 ) -> Value {
     recipe_node(
@@ -297,7 +312,7 @@ fn binary_recipe_with_behavior(
             }
         }),
         json!({
-            "image": base_image_recipe(image, digest),
+            "image": base_image_recipe(image, digest, image_object_hash),
             "script": script_recipe(),
             "source": source_recipe(url, source_hash),
         }),
@@ -308,7 +323,7 @@ fn binary_recipe_with_behavior(
 fn json_recipe_executes_all_real_builders() {
     with_fake_podman(|| {
         let workspace = tempdir().unwrap();
-        let (oci_server, image_ref, pinned_digest) = spawn_test_oci_registry();
+        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
         let source_tar = {
             let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             let mut tar = tar::Builder::new(encoder);
@@ -327,7 +342,13 @@ fn json_recipe_executes_all_real_builders() {
             Err(error) => panic!("failed to start test HTTP server: {error}"),
         };
         let source_hash = source_tree_hash(&source_tar);
-        let recipe = make_full_recipe(&url, &source_hash, &image_ref, &pinned_digest);
+        let recipe = make_full_recipe(
+            &url,
+            &source_hash,
+            &image_ref,
+            &pinned_digest,
+            &image_object_hash,
+        );
         let recipe_path = workspace.path().join("recipe.json");
         write_recipe(&recipe_path, &recipe);
 
@@ -364,7 +385,7 @@ fn json_recipe_executes_all_real_builders() {
 
         let builds_dir = store_root(workspace.path()).join("builds");
         let objects_dir = store_root(workspace.path()).join("objects");
-        assert_eq!(fs::read_dir(&builds_dir).unwrap().count(), 4);
+        assert_eq!(fs::read_dir(&builds_dir).unwrap().count(), 3);
         assert_eq!(fs::read_dir(&objects_dir).unwrap().count(), 5);
         drop(oci_server);
     });
@@ -374,7 +395,7 @@ fn json_recipe_executes_all_real_builders() {
 fn repeated_build_keys_are_built_once_with_one_publish_name() {
     with_fake_podman(|| {
         let workspace = tempdir().unwrap();
-        let (oci_server, image_ref, pinned_digest) = spawn_test_oci_registry();
+        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
         let source_tar = {
             let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             let mut tar = tar::Builder::new(encoder);
@@ -398,8 +419,8 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
             "Image",
             json!({ "mode": "bootstrap" }),
             json!({
-                "in000": binary_recipe("binary-a", &url, &source_hash, &image_ref, &pinned_digest),
-                "in001": binary_recipe("binary-b", &url, &source_hash, &image_ref, &pinned_digest)
+                "in000": binary_recipe("binary-a", &url, &source_hash, &image_ref, &pinned_digest, &image_object_hash),
+                "in001": binary_recipe("binary-b", &url, &source_hash, &image_ref, &pinned_digest, &image_object_hash)
             }),
         );
         let recipe_path = workspace.path().join("dedup.json");
@@ -418,7 +439,7 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
             fs::read_dir(store_root(workspace.path()).join("builds"))
                 .unwrap()
                 .count(),
-            4
+            3
         );
         assert!(
             store_root(workspace.path())
@@ -441,7 +462,7 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
 fn second_run_reuses_root_without_republishing_dependency_refs() {
     with_fake_podman(|| {
         let workspace = tempdir().unwrap();
-        let (oci_server, image_ref, pinned_digest) = spawn_test_oci_registry();
+        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
         let source_tar = {
             let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             let mut tar = tar::Builder::new(encoder);
@@ -468,6 +489,7 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
                 &source_hash,
                 &image_ref,
                 &pinned_digest,
+                &image_object_hash,
             )],
         );
         let recipe_path = workspace.path().join("root-reuse.json");
@@ -515,7 +537,7 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
 fn second_run_reuses_root_without_local_path_when_no_source_materialization_is_needed() {
     with_fake_podman(|| {
         let workspace = tempdir().unwrap();
-        let (oci_server, image_ref, pinned_digest) = spawn_test_oci_registry();
+        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
         let source_tar = {
             let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             let mut tar = tar::Builder::new(encoder);
@@ -542,6 +564,7 @@ fn second_run_reuses_root_without_local_path_when_no_source_materialization_is_n
                 &source_hash,
                 &image_ref,
                 &pinned_digest,
+                &image_object_hash,
             )],
         );
         let recipe_path = workspace.path().join("root-reuse-no-local.json");
@@ -569,7 +592,7 @@ fn second_run_reuses_root_without_local_path_when_no_source_materialization_is_n
 fn independent_fetch_sources_run_in_parallel() {
     with_fake_podman(|| {
         let workspace = tempdir().unwrap();
-        let (oci_server, image_ref, pinned_digest) = spawn_test_oci_registry();
+        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
         let source_tar = {
             let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             let mut tar = tar::Builder::new(encoder);
@@ -596,6 +619,7 @@ fn independent_fetch_sources_run_in_parallel() {
             &source_hash,
             &image_ref,
             &pinned_digest,
+            &image_object_hash,
         );
         let recipe_path = workspace.path().join("parallel.json");
         write_recipe(&recipe_path, &recipe);
@@ -624,7 +648,7 @@ fn independent_fetch_sources_run_in_parallel() {
 fn executor_waits_for_in_flight_workers_to_cleanup_after_first_failure() {
     with_fake_podman(|| {
         let workspace = tempdir().unwrap();
-        let (oci_server, image_ref, pinned_digest) = spawn_test_oci_registry();
+        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
         let source_tar = {
             let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             let mut tar = tar::Builder::new(encoder);
@@ -654,6 +678,7 @@ fn executor_waits_for_in_flight_workers_to_cleanup_after_first_failure() {
                     &source_hash,
                     &image_ref,
                     &pinned_digest,
+                    &image_object_hash,
                     "fail-fast"
                 ),
                 "in001": binary_recipe_with_behavior(
@@ -662,6 +687,7 @@ fn executor_waits_for_in_flight_workers_to_cleanup_after_first_failure() {
                     &source_hash,
                     &image_ref,
                     &pinned_digest,
+                    &image_object_hash,
                     "slow-success"
                 )
             }),
@@ -894,6 +920,35 @@ fn source_http_mismatch_imports_actual_object_without_canonical_result() {
 }
 
 #[test]
+fn source_oci_registry_mismatch_imports_actual_object_without_canonical_result() {
+    let workspace = tempdir().unwrap();
+    let (_oci_server, image_ref, pinned_digest, actual_hash) = spawn_test_oci_registry();
+    let wrong_hash = "1111111111111111111111111111111111111111111111111111111111111111";
+    let recipe_path = workspace.path().join("source-oci-registry-mismatch.json");
+    write_recipe(
+        &recipe_path,
+        &base_image_recipe(&image_ref, &pinned_digest, wrong_hash),
+    );
+
+    let error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains(&actual_hash), "{message}");
+
+    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    assert!(object_path_exists(&layout, actual_hash.parse().unwrap()));
+    let wrong_result_id = compute_result_id(
+        wrong_hash.parse().unwrap(),
+        compute_meta_hash(&serde_json::Map::new()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        load_result_record(&layout, wrong_result_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn source_http_mismatch_second_run_reuses_stored_object_without_second_download() {
     let workspace = tempdir().unwrap();
     let source_tar = {
@@ -930,6 +985,37 @@ fn source_http_mismatch_second_run_reuses_stored_object_without_second_download(
     );
 
     write_recipe(&recipe_path, &source_recipe(&url, &actual_hash));
+    let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    assert_eq!(realized.object_hash.to_string(), actual_hash);
+}
+
+#[test]
+fn source_oci_registry_mismatch_second_run_reuses_stored_object_without_second_fetch() {
+    let workspace = tempdir().unwrap();
+    let (oci_server, image_ref, pinned_digest, actual_hash) = spawn_test_oci_registry();
+    let recipe_path = workspace
+        .path()
+        .join("source-oci-registry-mismatch-retry.json");
+    write_recipe(
+        &recipe_path,
+        &base_image_recipe(
+            &image_ref,
+            &pinned_digest,
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        ),
+    );
+
+    let first_error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
+    assert!(
+        first_error.to_string().contains(&actual_hash),
+        "{first_error}"
+    );
+    drop(oci_server);
+
+    write_recipe(
+        &recipe_path,
+        &base_image_recipe(&image_ref, &pinned_digest, &actual_hash),
+    );
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
     assert_eq!(realized.object_hash.to_string(), actual_hash);
 }
@@ -1004,6 +1090,34 @@ fn source_without_origin_reuses_existing_canonical_result() {
             "name": "source-file",
             "tag": "Source",
             "object_hash": object_hash.to_string(),
+            "meta": {}
+        }),
+    );
+
+    let second = run_recipe_json_in_workspace(workspace.path(), &cutoff_recipe_path).unwrap();
+    assert_eq!(first.result_id, second.result_id);
+    assert_eq!(first.object_hash, second.object_hash);
+    assert!(second.build_key.is_none());
+}
+
+#[test]
+fn source_without_origin_reuses_existing_oci_layout_object_with_empty_meta() {
+    let workspace = tempdir().unwrap();
+    let (_oci_server, image_ref, pinned_digest, object_hash) = spawn_test_oci_registry();
+    let materialized_recipe_path = workspace.path().join("source-oci-registry.json");
+    write_recipe(
+        &materialized_recipe_path,
+        &base_image_recipe(&image_ref, &pinned_digest, &object_hash),
+    );
+    let first = run_recipe_json_in_workspace(workspace.path(), &materialized_recipe_path).unwrap();
+
+    let cutoff_recipe_path = workspace.path().join("source-oci-registry-cutoff.json");
+    write_recipe(
+        &cutoff_recipe_path,
+        &json!({
+            "name": "base-image",
+            "tag": "Source",
+            "object_hash": object_hash,
             "meta": {}
         }),
     );

@@ -79,14 +79,11 @@ pub fn sha256_digest(data: &[u8]) -> String {
     format!("sha256:{}", sha256_hex(data))
 }
 
-/// Path to a blob inside an OCI layout directory.
-/// digest must be "sha256:<hex64>".
 pub fn blob_path(oci_dir: &Path, digest: &str) -> PathBuf {
     let (alg, hex) = digest.split_once(':').unwrap_or(("sha256", digest));
     oci_dir.join("blobs").join(alg).join(hex)
 }
 
-/// Read index.json and return the first manifest descriptor.
 pub fn read_index(oci_dir: &Path) -> Result<OciDescriptor, OciError> {
     let path = oci_dir.join("index.json");
     let bytes = fs::read(&path).map_err(|e| {
@@ -104,7 +101,6 @@ pub fn read_index(oci_dir: &Path) -> Result<OciDescriptor, OciError> {
         .ok_or_else(|| OciError::Parse("index.json contains no manifests".to_string()))
 }
 
-/// Read a manifest blob from an OCI layout directory.
 pub fn read_manifest(oci_dir: &Path, descriptor: &OciDescriptor) -> Result<OciManifest, OciError> {
     let path = blob_path(oci_dir, &descriptor.digest);
     let bytes = fs::read(&path).map_err(|e| {
@@ -117,13 +113,11 @@ pub fn read_manifest(oci_dir: &Path, descriptor: &OciDescriptor) -> Result<OciMa
         .map_err(|e| OciError::Parse(format!("failed to parse manifest: {e}")))
 }
 
-/// Read and return the OCI manifest for the first entry in index.json.
 pub fn read_oci_manifest(oci_dir: &Path) -> Result<OciManifest, OciError> {
     let desc = read_index(oci_dir)?;
     read_manifest(oci_dir, &desc)
 }
 
-/// Read the config blob as a JSON Value (to preserve unknown fields).
 pub fn read_config(oci_dir: &Path, manifest: &OciManifest) -> Result<Value, OciError> {
     let path = blob_path(oci_dir, &manifest.config.digest);
     let bytes = fs::read(&path).map_err(|e| {
@@ -136,7 +130,6 @@ pub fn read_config(oci_dir: &Path, manifest: &OciManifest) -> Result<Value, OciE
         .map_err(|e| OciError::Parse(format!("failed to parse config blob: {e}")))
 }
 
-/// Write a blob to an OCI layout directory and return its descriptor.
 pub fn write_blob(
     oci_dir: &Path,
     data: &[u8],
@@ -155,7 +148,6 @@ pub fn write_blob(
     })
 }
 
-/// Initialize a new OCI layout directory (creates oci-layout, blobs/sha256/).
 pub fn init_layout(oci_dir: &Path) -> Result<(), OciError> {
     fs::create_dir_all(oci_dir.join("blobs").join("sha256")).map_err(|e| {
         OciError::Io(format!(
@@ -169,9 +161,6 @@ pub fn init_layout(oci_dir: &Path) -> Result<(), OciError> {
     Ok(())
 }
 
-/// Write index.json referencing a single manifest descriptor.
-/// If `image_ref` is provided, sets the `org.opencontainers.image.ref.name` annotation
-/// so that `podman load` assigns a recognizable name to the image.
 pub fn write_index(
     oci_dir: &Path,
     mut manifest_desc: OciDescriptor,
@@ -196,9 +185,6 @@ pub fn write_index(
     Ok(())
 }
 
-/// Hardlink only the layer blobs from src_oci_dir into dst_oci_dir.
-/// Reads the base manifest to find layer digests; skips base config and manifest blobs.
-/// dst_oci_dir must already have blobs/sha256/ created.
 pub fn hardlink_layer_blobs(src_oci_dir: &Path, dst_oci_dir: &Path) -> Result<(), OciError> {
     let manifest = read_oci_manifest(src_oci_dir)?;
     let dst_blobs = dst_oci_dir.join("blobs").join("sha256");

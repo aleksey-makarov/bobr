@@ -5,6 +5,7 @@ members = [
   "mbuild-compose",
   "mbuild-binary",
   "mbuild-origin-http",
+  "mbuild-origin-oci-registry",
   "mbuild-image",
   "mbuild-text",
   "mbuild-tree",

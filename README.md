@@ -101,7 +101,7 @@ The runtime rejects:
 - no `inputs`
 - no `build_key`
 
-In v1, `Source` supports two origins:
+In v1, `Source` supports three origins:
 
 - `origin.type = "path"`
 - `origin.mode = "direct" | "tar"`
@@ -110,6 +110,10 @@ In v1, `Source` supports two origins:
 - `origin.url` is one HTTP(S) URL or an ordered fallback list
 - `origin.unpack` defaults to `true`
 - `origin.archive_format` may override archive detection for unpacked sources
+- `origin.type = "oci-registry"`
+- `origin.image` is the registry image locator kept in the recipe
+- `origin.digest` is the pinned manifest or index digest requested from the registry
+- pinned manifest lists / OCI indexes are resolved to the `linux/amd64` manifest
 
 `Source.meta.install` carries install metadata for unpacked directory objects.
 

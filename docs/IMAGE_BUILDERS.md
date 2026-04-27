@@ -5,10 +5,10 @@
 `mbuild` currently implements store-owned OCI images for both imported images
 and images built from filesystem tree inputs.
 
-The current image path has three builders:
+The current image path has two builders plus one `Source` origin:
 
-- `ContainerImage`: import one pinned external image from a registry into the
-  store as an OCI image layout directory
+- `Source` with `origin.type = "oci-registry"`: import one pinned external
+  image from a registry into the store as an OCI image layout directory
 - `Image`: build one derived OCI image layout directory from filesystem tree
   inputs, optionally on top of a base image
 - `Binary`: execute an explicit step plan inside an OCI image layout input by
@@ -22,18 +22,23 @@ This means:
 - `podman` is still part of the current execution path for `Binary`
 - file-composition conflict detection is not yet part of the `Image` builder
 
-## `ContainerImage`
+## `Source/oci-registry`
 
-`ContainerImage` accepts this config:
+Imported registry images use a `Source` node like this:
 
 ```json
 {
-  "image": "docker.io/library/buildpack-deps:bookworm",
-  "digest": "sha256:<pinned digest>"
+  "name": "host-image",
+  "tag": "Source",
+  "object_hash": "<oci-layout object hash>",
+  "origin": {
+    "type": "oci-registry",
+    "image": "docker.io/library/buildpack-deps:bookworm",
+    "digest": "sha256:<pinned manifest-or-index digest>"
+  },
+  "meta": {}
 }
 ```
-
-It does not accept inputs.
 
 Current behavior:
 
@@ -44,6 +49,7 @@ Current behavior:
 - downloads the manifest, config blob, and all layer blobs
 - verifies the digest of every downloaded blob
 - writes the result to the staged object path as an OCI image layout directory
+- stores no image-specific metadata in the canonical `Source` result record
 
 The realized object is a directory with the standard OCI layout shape:
 
@@ -54,12 +60,7 @@ The realized object is a directory with the standard OCI layout shape:
   blobs/sha256/...
 ```
 
-The current realized result metadata contains:
-
-- `manifest_digest`: the digest of the manifest blob stored in the realized
-  OCI layout
-
-`ContainerImage` currently targets `linux/amd64` only.
+`Source/oci-registry` currently targets `linux/amd64` only.
 
 ## `Image`
 

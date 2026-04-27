@@ -10,6 +10,7 @@ mbuild-core = { path = "../mbuild-core" }
 mbuild-compose = { path = "../mbuild-compose" }
 mbuild-binary = { path = "../mbuild-binary" }
 mbuild-origin-http = { path = "../mbuild-origin-http" }
+mbuild-origin-oci-registry = { path = "../mbuild-origin-oci-registry" }
 mbuild-image = { path = "../mbuild-image" }
 mbuild-text = { path = "../mbuild-text" }
 mbuild-tree = { path = "../mbuild-tree" }

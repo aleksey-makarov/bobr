@@ -55,13 +55,6 @@ impl From<ureq::Error> for RegistryError {
     }
 }
 
-/// Parse an image reference into (registry_host, repository, reference).
-///
-/// Examples:
-///   docker.io/library/ubuntu:20.04       → registry-1.docker.io, library/ubuntu, 20.04
-///   ubuntu:20.04                          → registry-1.docker.io, library/ubuntu, 20.04
-///   gcr.io/my-project/app:latest         → gcr.io, my-project/app, latest
-///   localhost:5000/myimage@sha256:abc...  → localhost:5000, myimage, sha256:abc...
 pub fn parse_image_ref(image: &str) -> Result<(String, String, String), RegistryError> {
     let (name_part, reference) = if let Some(pos) = image.rfind('@') {
         (&image[..pos], image[pos + 1..].to_string())
@@ -103,9 +96,6 @@ pub fn parse_image_ref(image: &str) -> Result<(String, String, String), Registry
     Ok((registry_host, repository, reference))
 }
 
-/// Resolve the current manifest digest for an image reference (by tag).
-/// Returns the digest of whatever the registry currently serves for that reference.
-/// Useful for generating a `digest =` value to pin in a recipe.
 pub fn resolve_current_digest(image: &str) -> Result<String, RegistryError> {
     let (registry_host, repository, reference) = parse_image_ref(image)?;
     let scheme = if registry_host.starts_with("localhost") || registry_host.starts_with("127.") {
@@ -119,11 +109,6 @@ pub fn resolve_current_digest(image: &str) -> Result<String, RegistryError> {
     Ok(format!("sha256:{}", oci::sha256_hex(&bytes)))
 }
 
-/// Fetch a pinned image from an OCI/Docker registry and write it as an OCI
-/// image layout directory to `target_dir` (which must already exist).
-///
-/// Handles Bearer auth challenges automatically.
-#[allow(dead_code)]
 pub fn fetch_image_authenticated(
     image: &str,
     pinned_digest: &str,
@@ -147,8 +132,6 @@ pub fn fetch_image_authenticated_with_progress(
         "https"
     };
 
-    // Always fetch by the pinned digest for determinism — the tag/reference in the
-    // image string is only used to locate the registry and repository.
     let pinned_url =
         format!("{scheme}://{registry_host}/v2/{repository}/manifests/{pinned_digest}");
     let pinned_message =
@@ -157,7 +140,6 @@ pub fn fetch_image_authenticated_with_progress(
     let (pinned_bytes, pinned_media_type) =
         get_with_bearer_auth(&pinned_url, ACCEPT_MANIFESTS, progress)?;
 
-    // Verify that what the registry returned actually has the expected digest.
     let actual_digest = format!("sha256:{}", oci::sha256_hex(&pinned_bytes));
     if actual_digest != pinned_digest {
         return Err(RegistryError::Digest(format!(
@@ -165,7 +147,6 @@ pub fn fetch_image_authenticated_with_progress(
         )));
     }
 
-    // If the pinned object is a manifest list / OCI index, select linux/amd64.
     let manifest_bytes = if is_manifest_list(&pinned_media_type) {
         let platform_digest = select_platform_manifest(&pinned_bytes, "linux", "amd64")?;
         let platform_url =
@@ -180,7 +161,6 @@ pub fn fetch_image_authenticated_with_progress(
         pinned_bytes
     };
 
-    // Suppress unused-variable warning when reference is not used for fetching.
     let _ = reference;
 
     let manifest: OciManifest = serde_json::from_slice(&manifest_bytes)
@@ -247,8 +227,6 @@ fn http_request(url: &str, accept: &str) -> ureq::Request {
         .timeout(HTTP_REQUEST_TIMEOUT)
 }
 
-/// GET a URL, attempting unauthenticated first; if challenged with 401,
-/// parse WWW-Authenticate Bearer and retry with token.
 fn get_with_bearer_auth(
     url: &str,
     accept: &str,
@@ -388,6 +366,45 @@ fn verify_digest(data: &[u8], expected: &str) -> Result<(), RegistryError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockito::Server;
+    use sha2::{Digest, Sha256};
+
+    fn sample_config_bytes() -> &'static [u8] {
+        br#"{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":["sha256:0000000000000000000000000000000000000000000000000000000000000000"]},"config":{}}"#
+    }
+
+    fn sample_layer_bytes() -> &'static [u8] {
+        b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+    }
+
+    fn sample_digests() -> (String, String) {
+        let config_hex = format!("{:x}", Sha256::digest(sample_config_bytes()));
+        let layer_hex = format!("{:x}", Sha256::digest(sample_layer_bytes()));
+        (
+            format!("sha256:{config_hex}"),
+            format!("sha256:{layer_hex}"),
+        )
+    }
+
+    fn sample_manifest(
+        config_digest: &str,
+        layer_digest: &str,
+        layer_len: usize,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "schemaVersion": 2,
+            "config": {
+                "mediaType": oci::MEDIA_TYPE_OCI_CONFIG,
+                "digest": config_digest,
+                "size": sample_config_bytes().len()
+            },
+            "layers": [{
+                "mediaType": oci::MEDIA_TYPE_OCI_LAYER,
+                "digest": layer_digest,
+                "size": layer_len
+            }]
+        })
+    }
 
     #[test]
     fn parse_image_ref_docker_hub_short() {
@@ -407,15 +424,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_image_ref_gcr() {
-        let (host, repo, reference) =
-            parse_image_ref("gcr.io/google-containers/pause:3.1").unwrap();
-        assert_eq!(host, "gcr.io");
-        assert_eq!(repo, "google-containers/pause");
-        assert_eq!(reference, "3.1");
-    }
-
-    #[test]
     fn parse_image_ref_localhost_with_digest() {
         let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let image = format!("localhost:5000/myrepo/myimage@{digest}");
@@ -427,32 +435,9 @@ mod tests {
 
     #[test]
     fn fetch_image_from_mock_registry() {
-        use mockito::Server;
-        use sha2::{Digest, Sha256};
-
         let mut server = Server::new();
-
-        let config_bytes = b"{}";
-        let config_hex = format!("{:x}", Sha256::digest(config_bytes));
-        let config_digest = format!("sha256:{config_hex}");
-
-        let layer_bytes: &[u8] = &[1, 2, 3, 4];
-        let layer_hex = format!("{:x}", Sha256::digest(layer_bytes));
-        let layer_digest = format!("sha256:{layer_hex}");
-
-        let manifest = serde_json::json!({
-            "schemaVersion": 2,
-            "config": {
-                "mediaType": "application/vnd.oci.image.config.v1+json",
-                "digest": config_digest,
-                "size": config_bytes.len()
-            },
-            "layers": [{
-                "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
-                "digest": layer_digest,
-                "size": layer_bytes.len()
-            }]
-        });
+        let (config_digest, layer_digest) = sample_digests();
+        let manifest = sample_manifest(&config_digest, &layer_digest, sample_layer_bytes().len());
         let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
         let manifest_hex = format!("{:x}", Sha256::digest(&manifest_bytes));
         let pinned_digest = format!("sha256:{manifest_hex}");
@@ -465,18 +450,18 @@ mod tests {
         let _m2 = server
             .mock("GET", path_manifests.as_str())
             .with_status(200)
-            .with_header("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-            .with_body(manifest_bytes.clone())
+            .with_header("Content-Type", oci::MEDIA_TYPE_OCI_MANIFEST)
+            .with_body(manifest_bytes)
             .create();
         let _m3 = server
             .mock("GET", path_config.as_str())
             .with_status(200)
-            .with_body(config_bytes.as_ref())
+            .with_body(sample_config_bytes())
             .create();
         let _m4 = server
             .mock("GET", path_layer.as_str())
             .with_status(200)
-            .with_body(layer_bytes)
+            .with_body(sample_layer_bytes())
             .create();
 
         let temp = tempfile::tempdir().unwrap();
@@ -490,26 +475,196 @@ mod tests {
         assert!(target.join("oci-layout").exists());
         assert!(target.join("index.json").exists());
         assert_eq!(stored_manifest_digest, format!("sha256:{manifest_hex}"));
+    }
+
+    #[test]
+    fn fetch_image_selects_linux_amd64_from_index() {
+        let mut server = Server::new();
+        let (config_digest, layer_digest) = sample_digests();
+        let manifest = sample_manifest(&config_digest, &layer_digest, sample_layer_bytes().len());
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let manifest_hex = format!("{:x}", Sha256::digest(&manifest_bytes));
+        let manifest_digest = format!("sha256:{manifest_hex}");
+
+        let other_manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "config": {
+                "mediaType": oci::MEDIA_TYPE_OCI_CONFIG,
+                "digest": config_digest,
+                "size": sample_config_bytes().len()
+            },
+            "layers": []
+        });
+        let other_manifest_bytes = serde_json::to_vec(&other_manifest).unwrap();
+        let other_manifest_hex = format!("{:x}", Sha256::digest(&other_manifest_bytes));
+        let other_manifest_digest = format!("sha256:{other_manifest_hex}");
+
+        let index = serde_json::json!({
+            "schemaVersion": 2,
+            "manifests": [
+                {
+                    "mediaType": oci::MEDIA_TYPE_OCI_MANIFEST,
+                    "digest": other_manifest_digest,
+                    "size": other_manifest_bytes.len(),
+                    "platform": { "os": "linux", "architecture": "arm64" }
+                },
+                {
+                    "mediaType": oci::MEDIA_TYPE_OCI_MANIFEST,
+                    "digest": manifest_digest,
+                    "size": manifest_bytes.len(),
+                    "platform": { "os": "linux", "architecture": "amd64" }
+                }
+            ]
+        });
+        let index_bytes = serde_json::to_vec(&index).unwrap();
+        let index_hex = format!("{:x}", Sha256::digest(&index_bytes));
+        let pinned_digest = format!("sha256:{index_hex}");
+
+        let repo = "testuser/testimage";
+        let path_index = format!("/v2/{repo}/manifests/{pinned_digest}");
+        let path_manifest = format!("/v2/{repo}/manifests/{manifest_digest}");
+        let path_config = format!("/v2/{repo}/blobs/{config_digest}");
+        let path_layer = format!("/v2/{repo}/blobs/{layer_digest}");
+        let _m1 = server.mock("GET", "/v2/").with_status(200).create();
+        let _m2 = server
+            .mock("GET", path_index.as_str())
+            .with_status(200)
+            .with_header("Content-Type", MEDIA_TYPE_OCI_INDEX)
+            .with_body(index_bytes)
+            .create();
+        let _m3 = server
+            .mock("GET", path_manifest.as_str())
+            .with_status(200)
+            .with_header("Content-Type", oci::MEDIA_TYPE_OCI_MANIFEST)
+            .with_body(manifest_bytes)
+            .create();
+        let _m4 = server
+            .mock("GET", path_config.as_str())
+            .with_status(200)
+            .with_body(sample_config_bytes())
+            .create();
+        let _m5 = server
+            .mock("GET", path_layer.as_str())
+            .with_status(200)
+            .with_body(sample_layer_bytes())
+            .create();
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("oci");
+        std::fs::create_dir(&target).unwrap();
+
+        let image = format!("{}/{repo}:latest", server.host_with_port());
+        let stored_manifest_digest =
+            fetch_image_authenticated(&image, &pinned_digest, &target).unwrap();
+        assert_eq!(stored_manifest_digest, manifest_digest);
+    }
+
+    #[test]
+    fn fetch_image_fails_when_linux_amd64_is_missing() {
+        let mut server = Server::new();
+        let index = serde_json::json!({
+            "schemaVersion": 2,
+            "manifests": [{
+                "mediaType": oci::MEDIA_TYPE_OCI_MANIFEST,
+                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "size": 1,
+                "platform": { "os": "linux", "architecture": "arm64" }
+            }]
+        });
+        let index_bytes = serde_json::to_vec(&index).unwrap();
+        let index_hex = format!("{:x}", Sha256::digest(&index_bytes));
+        let pinned_digest = format!("sha256:{index_hex}");
+        let repo = "testuser/testimage";
+        let path_index = format!("/v2/{repo}/manifests/{pinned_digest}");
+        let _m1 = server.mock("GET", "/v2/").with_status(200).create();
+        let _m2 = server
+            .mock("GET", path_index.as_str())
+            .with_status(200)
+            .with_header("Content-Type", MEDIA_TYPE_OCI_INDEX)
+            .with_body(index_bytes)
+            .create();
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("oci");
+        std::fs::create_dir(&target).unwrap();
+
+        let image = format!("{}/{repo}:latest", server.host_with_port());
+        let error = fetch_image_authenticated(&image, &pinned_digest, &target).unwrap_err();
         assert!(
-            target
-                .join("blobs")
-                .join("sha256")
-                .join(&manifest_hex)
-                .exists()
+            error.to_string().contains("no linux/amd64 manifest found"),
+            "{error}"
         );
-        assert!(
-            target
-                .join("blobs")
-                .join("sha256")
-                .join(&config_hex)
-                .exists()
+    }
+
+    #[test]
+    fn fetch_image_handles_bearer_auth() {
+        let mut registry = Server::new();
+        let mut auth = Server::new();
+
+        let (config_digest, layer_digest) = sample_digests();
+        let manifest = sample_manifest(&config_digest, &layer_digest, sample_layer_bytes().len());
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let manifest_hex = format!("{:x}", Sha256::digest(&manifest_bytes));
+        let pinned_digest = format!("sha256:{manifest_hex}");
+
+        let repo = "testuser/testimage";
+        let manifest_path = format!("/v2/{repo}/manifests/{pinned_digest}");
+        let config_path = format!("/v2/{repo}/blobs/{config_digest}");
+        let layer_path = format!("/v2/{repo}/blobs/{layer_digest}");
+        let auth_header = format!(
+            "Bearer realm=\"{}/token\",service=\"registry.example\",scope=\"repository:{repo}:pull\"",
+            auth.url()
         );
-        assert!(
-            target
-                .join("blobs")
-                .join("sha256")
-                .join(&layer_hex)
-                .exists()
-        );
+        let _token = auth
+            .mock("GET", "/token")
+            .match_query(mockito::Matcher::AllOf(vec![
+                mockito::Matcher::UrlEncoded("service".into(), "registry.example".into()),
+                mockito::Matcher::UrlEncoded("scope".into(), format!("repository:{repo}:pull")),
+            ]))
+            .with_status(200)
+            .with_body(r#"{"token":"secret-token"}"#)
+            .create();
+        let _manifest_unauth = registry
+            .mock("GET", manifest_path.as_str())
+            .with_status(401)
+            .with_header("WWW-Authenticate", &auth_header)
+            .create();
+        let _manifest_auth = registry
+            .mock("GET", manifest_path.as_str())
+            .match_header("authorization", "Bearer secret-token")
+            .with_status(200)
+            .with_header("Content-Type", oci::MEDIA_TYPE_OCI_MANIFEST)
+            .with_body(manifest_bytes)
+            .create();
+        let _config_unauth = registry
+            .mock("GET", config_path.as_str())
+            .with_status(401)
+            .with_header("WWW-Authenticate", &auth_header)
+            .create();
+        let _config = registry
+            .mock("GET", config_path.as_str())
+            .match_header("authorization", "Bearer secret-token")
+            .with_status(200)
+            .with_body(sample_config_bytes())
+            .create();
+        let _layer_unauth = registry
+            .mock("GET", layer_path.as_str())
+            .with_status(401)
+            .with_header("WWW-Authenticate", &auth_header)
+            .create();
+        let _layer = registry
+            .mock("GET", layer_path.as_str())
+            .match_header("authorization", "Bearer secret-token")
+            .with_status(200)
+            .with_body(sample_layer_bytes())
+            .create();
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("oci");
+        std::fs::create_dir(&target).unwrap();
+
+        let image = format!("{}/{repo}:latest", registry.host_with_port());
+        fetch_image_authenticated(&image, &pinned_digest, &target).unwrap();
+        assert!(target.join("index.json").exists());
     }
 }

@@ -3,15 +3,17 @@ mod path;
 use crate::runtime::RuntimeError;
 use mbuild_core::{OriginHandler, ParsedOrigin};
 use mbuild_origin_http::HttpOriginHandler;
+use mbuild_origin_oci_registry::OciRegistryOriginHandler;
 use serde_json::Value;
 
 use self::path::PathOriginHandler;
 
 static PATH_ORIGIN: PathOriginHandler = PathOriginHandler;
 static HTTP_ORIGIN: HttpOriginHandler = HttpOriginHandler;
+static OCI_REGISTRY_ORIGIN: OciRegistryOriginHandler = OciRegistryOriginHandler;
 
-pub fn registered_origins() -> [&'static dyn OriginHandler; 2] {
-    [&PATH_ORIGIN, &HTTP_ORIGIN]
+pub fn registered_origins() -> [&'static dyn OriginHandler; 3] {
+    [&PATH_ORIGIN, &HTTP_ORIGIN, &OCI_REGISTRY_ORIGIN]
 }
 
 pub fn get_origin(tag: &str) -> Option<&'static dyn OriginHandler> {
@@ -65,5 +67,11 @@ mod tests {
     fn http_origin_is_registered() {
         let origin = get_origin("http").expect("http origin should be registered");
         assert_eq!(origin.spec().tag, "http");
+    }
+
+    #[test]
+    fn oci_registry_origin_is_registered() {
+        let origin = get_origin("oci-registry").expect("oci-registry origin should be registered");
+        assert_eq!(origin.spec().tag, "oci-registry");
     }
 }

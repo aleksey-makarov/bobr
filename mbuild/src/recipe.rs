@@ -720,6 +720,29 @@ mod tests {
     }
 
     #[test]
+    fn source_oci_registry_origin_is_accepted() {
+        let request = json!({
+            "root": {
+                "name": "base-image",
+                "tag": "Source",
+                "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+                "origin": {
+                    "type": "oci-registry",
+                    "image": "docker.io/library/alpine:3.20",
+                    "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                },
+                "meta": {}
+            }
+        });
+        let (graph, nodes) = collect_one(&request).unwrap();
+        let node = nodes.get(&graph.root_key).unwrap();
+        let PlannedRecipe::Source(source) = &node.recipe else {
+            panic!("expected source recipe");
+        };
+        assert_eq!(source.origin.as_ref().unwrap().spec().tag, "oci-registry");
+    }
+
+    #[test]
     fn source_path_origin_rejects_absolute_paths() {
         let request = json!({
             "root": {
@@ -859,12 +882,14 @@ mod tests {
     fn build_key_order_follows_builder_spec_not_json_field_order() {
         let image = json!({
             "name": "base-image",
-            "tag": "ContainerImage",
-            "config": {
+            "tag": "Source",
+            "object_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "origin": {
                 "image": "docker.io/library/buildpack-deps:bookworm",
+                "type": "oci-registry",
                 "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             },
-            "inputs": {}
+            "meta": {}
         });
         let script = json!({
             "name": "script",
@@ -903,7 +928,16 @@ mod tests {
         });
 
         let (graph, _) = collect_one(&request).unwrap();
-        let image_key = compute_build_key("ContainerImage", &image["config"], &[]).unwrap();
+        let image_key = source_planning_key(
+            compute_result_id(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .parse()
+                    .unwrap(),
+                compute_meta_hash(image["meta"].as_object().unwrap()).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let script_key = compute_build_key("Text", &script["config"], &[]).unwrap();
         let source_key = source_planning_key(
             compute_result_id(

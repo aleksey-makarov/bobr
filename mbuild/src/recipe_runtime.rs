@@ -857,12 +857,14 @@ mod tests {
                     },
                     "image": {
                         "name": "image",
-                        "tag": "ContainerImage",
-                        "config": {
+                        "tag": "Source",
+                        "object_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "origin": {
+                            "type": "oci-registry",
                             "image": "docker.io/library/buildpack-deps:bookworm",
                             "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         },
-                        "inputs": {}
+                        "meta": {}
                     },
                     "script": {
                         "name": "script",
@@ -901,13 +903,7 @@ mod tests {
             Some(dep_keys[0]),
             "1111111111111111111111111111111111111111111111111111111111111111",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            Map::from_iter([(
-                "manifest_digest".to_string(),
-                serde_json::Value::String(
-                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                        .to_string(),
-                ),
-            )]),
+            Map::new(),
         );
         let script_realized = sample_realized(
             Some(dep_keys[1]),

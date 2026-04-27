@@ -84,6 +84,10 @@ In v1, `Source` supports:
 - `origin.url` as one HTTP(S) URL or an ordered fallback list
 - `origin.unpack`, defaulting to `true`
 - `origin.archive_format` as an optional explicit unpack override
+- `origin.type = "oci-registry"`
+- `origin.image` as the registry image locator
+- `origin.digest` as the pinned manifest or index digest
+- manifest lists and OCI indexes resolve to the `linux/amd64` manifest only
 
 `Source.meta.install` is ordinary source metadata used for installable
 directory outputs.
