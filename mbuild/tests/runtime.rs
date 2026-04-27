@@ -469,6 +469,61 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
 }
 
 #[test]
+fn second_run_reuses_root_without_local_path_when_no_source_materialization_is_needed() {
+    with_fake_podman(|| {
+        let workspace = tempdir().unwrap();
+        let (oci_server, image_ref, pinned_digest) = spawn_test_oci_registry();
+        let source_tar = {
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut tar = tar::Builder::new(encoder);
+            let body = b"hello from lazy local path test\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_path("pkg/README.txt").unwrap();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append(&header, &body[..]).unwrap();
+            tar.into_inner().unwrap().finish().unwrap()
+        };
+        let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
+            Ok(server) => server,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to start test HTTP server: {error}"),
+        };
+        let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
+        let recipe = image_recipe(
+            "final-image",
+            vec![binary_recipe(
+                "binary",
+                &url,
+                &source_hash,
+                &image_ref,
+                &pinned_digest,
+            )],
+        );
+        let recipe_path = workspace.path().join("root-reuse-no-local.json");
+        write_recipe(&recipe_path, &recipe);
+
+        let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+        handle.join().unwrap();
+
+        let mut envelope: Value =
+            serde_json::from_slice(&fs::read(&recipe_path).unwrap()).unwrap();
+        envelope
+            .get_mut("paths")
+            .and_then(Value::as_object_mut)
+            .expect("recipe envelope must have paths")
+            .remove("local");
+        fs::write(&recipe_path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
+
+        let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+
+        assert_eq!(first.build_key, second.build_key);
+        drop(oci_server);
+    });
+}
+
+#[test]
 fn independent_fetch_sources_run_in_parallel() {
     with_fake_podman(|| {
         let workspace = tempdir().unwrap();

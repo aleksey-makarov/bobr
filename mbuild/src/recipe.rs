@@ -1,8 +1,9 @@
 use crate::builders;
+use crate::origins;
 use crate::runtime::{RuntimeError, map_store_error};
 use mbuild_core::{
-    BuildKey, BuilderSpec, ObjectHash, ResultId, compute_build_key, compute_meta_hash,
-    compute_result_id,
+    BuildKey, BuilderSpec, ObjectHash, ParsedOrigin, ResultId, compute_build_key,
+    compute_meta_hash, compute_result_id,
 };
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -66,22 +67,8 @@ pub struct BuilderRecipe {
 pub struct SourceRecipe {
     name: String,
     object_hash: ObjectHash,
-    origin: Option<SourceOrigin>,
+    origin: Option<Box<dyn ParsedOrigin>>,
     meta: Map<String, Value>,
-}
-
-#[derive(Debug, Clone)]
-pub enum SourceOrigin {
-    Path {
-        path: PathBuf,
-        mode: SourcePathMode,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourcePathMode {
-    Direct,
-    Tar,
 }
 
 impl RecipeEnvelope {
@@ -97,13 +84,6 @@ impl RecipeRequest {
     pub(crate) fn node(&self, id: &str) -> Result<&Recipe, RuntimeError> {
         self.nodes.get(id).ok_or_else(|| {
             RuntimeError::InvalidRequest(format!("request references unknown node id '{id}'"))
-        })
-    }
-
-    pub(crate) fn requires_local_path(&self) -> bool {
-        self.nodes.values().any(|recipe| match recipe {
-            Recipe::Builder(_) => false,
-            Recipe::Source(source) => matches!(source.origin, Some(SourceOrigin::Path { .. })),
         })
     }
 }
@@ -126,7 +106,7 @@ pub(crate) struct PlannedBuilderRecipe {
 pub(crate) struct PlannedSourceRecipe {
     pub(crate) name: String,
     pub(crate) object_hash: ObjectHash,
-    pub(crate) origin: Option<SourceOrigin>,
+    pub(crate) origin: Option<Box<dyn ParsedOrigin>>,
     pub(crate) meta: Map<String, Value>,
     pub(crate) result_id: ResultId,
 }
@@ -388,12 +368,6 @@ fn parse_envelope_value(value: Value, path: &str) -> Result<RecipeEnvelope, Runt
         )));
     }
 
-    if request.requires_local_path() && paths.local.is_none() {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "{path}.paths: missing required field 'local' for Source path origins"
-        )));
-    }
-
     Ok(RecipeEnvelope {
         paths,
         options,
@@ -575,7 +549,7 @@ fn parse_source_recipe(
             RuntimeError::RecipeLoad(format!("{path}.object_hash: invalid object hash: {error}"))
         })?;
     let origin = match object.remove("origin") {
-        Some(value) => Some(parse_source_origin(value, &format!("{path}.origin"))?),
+        Some(value) => Some(origins::parse_origin_value(value, &format!("{path}.origin"))?),
         None => None,
     };
     let meta = object
@@ -597,63 +571,6 @@ fn parse_source_recipe(
         origin,
         meta,
     }))
-}
-
-fn parse_source_origin(value: Value, path: &str) -> Result<SourceOrigin, RuntimeError> {
-    let mut object = value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: expected object")))?;
-    let kind = take_string(&mut object, path, "type")?;
-    match kind.as_str() {
-        "path" => {
-            let path_value = PathBuf::from(take_string(&mut object, path, "path")?);
-            validate_relative_source_path(&path_value, &format!("{path}.path"))?;
-            let mode = match take_string(&mut object, path, "mode")?.as_str() {
-                "direct" => SourcePathMode::Direct,
-                "tar" => SourcePathMode::Tar,
-                other => {
-                    return Err(RuntimeError::RecipeLoad(format!(
-                        "{path}.mode: unsupported source path mode '{other}'"
-                    )))
-                }
-            };
-            if !object.is_empty() {
-                return Err(RuntimeError::RecipeLoad(format!(
-                    "{path}: unexpected fields: {}",
-                    object.keys().cloned().collect::<Vec<_>>().join(", ")
-                )));
-            }
-            Ok(SourceOrigin::Path { path: path_value, mode })
-        }
-        other => Err(RuntimeError::RecipeLoad(format!(
-            "{path}.type: unsupported source origin type '{other}'"
-        ))),
-    }
-}
-
-fn validate_relative_source_path(path: &PathBuf, field_path: &str) -> Result<(), RuntimeError> {
-    use std::path::Component;
-
-    if path.as_os_str().is_empty() {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "{field_path}: path must not be empty"
-        )));
-    }
-    if path.is_absolute() {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "{field_path}: expected relative path"
-        )));
-    }
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "{field_path}: path must not contain '..'"
-        )));
-    }
-    Ok(())
 }
 
 fn parse_input_value(value: Value, path: &str) -> Result<String, RuntimeError> {

@@ -3,10 +3,12 @@ use std::fmt;
 pub mod builder;
 pub mod cas;
 pub mod fsutil;
+pub mod origin;
 
 pub use builder::*;
 pub use cas::*;
 pub use fsobj_hash::ObjectHash;
+pub use origin::*;
 
 #[derive(Debug)]
 pub enum BuilderError {

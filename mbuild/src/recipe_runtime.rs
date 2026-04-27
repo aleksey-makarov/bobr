@@ -2,7 +2,7 @@ use crate::builders;
 use crate::logging::{BuildRunLogger, RunOptions};
 use crate::recipe::{
     RecipeEnvelope, RecipePaths, PlannedBuilderRecipe, PlannedNode, PlannedRecipe, PlannedSourceRecipe,
-    PlanningState, RecipeRequest, ReuseOrigin, SourceOrigin, SourcePathMode, collect_graph,
+    PlanningState, RecipeRequest, ReuseOrigin, collect_graph,
 };
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
@@ -11,17 +11,17 @@ use crate::runtime::{
 };
 use fsobj_hash::hash_path;
 use mbuild_core::{
-    BuildLogEvent, BuildLogLevel, BuildLogger, BuildKey, RealizedResult,
-    ResultInputIdentity, ResultRecord, StoreLayout, compute_meta_hash, compute_result_id, fsutil,
-    import_object, load_result_record, object_path, publish_result_refs, store_result_record,
+    BuildLogEvent, BuildLogLevel, BuildLogger, BuildKey, OriginContext, RealizedResult,
+    ResultInputIdentity, ResultRecord, StoreLayout, compute_meta_hash, compute_result_id,
+    fsutil, import_object, load_result_record, object_path, publish_result_refs,
+    store_result_record,
 };
 use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
-use tar::Archive;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuildRunOptions {
@@ -106,11 +106,6 @@ pub fn run_recipe_request_in_store_with_options(
         ));
     }
     validate_runtime_paths(paths)?;
-    if request.requires_local_path() && paths.local.is_none() {
-        return Err(RuntimeError::InvalidRequest(
-            "request contains Source path origins but paths.local is missing".to_string(),
-        ));
-    }
 
     let layout = StoreLayout::discover(&paths.store).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> = Arc::new(
@@ -686,16 +681,20 @@ fn execute_source_recipe(
             temp_root.display()
         ))
     })?;
-    let staged_path = match materialize_source_origin(
-        temp_root.as_path(),
-        local_root,
-        recipe.origin.as_ref().expect("origin checked above"),
-    ) {
+    let staged_path = match recipe
+        .origin
+        .as_ref()
+        .expect("origin checked above")
+        .materialize(&OriginContext {
+            temp_root: temp_root.as_path(),
+            local_root,
+        })
+    {
         Ok(path) => path,
         Err(error) => {
             cleanup_source_temp_dir(&temp_root, logger.as_ref());
             log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", error.to_string());
-            return Err(error);
+            return Err(RuntimeError::Build(error));
         }
     };
     log_runtime_event(
@@ -739,190 +738,6 @@ fn execute_source_recipe(
         realized: realized_result_from_record(None, &result),
         result,
     })
-}
-
-fn materialize_source_origin(
-    temp_root: &Path,
-    local_root: Option<&Path>,
-    origin: &SourceOrigin,
-) -> Result<PathBuf, RuntimeError> {
-    match origin {
-        SourceOrigin::Path { path, mode } => match mode {
-            SourcePathMode::Direct => materialize_path_source_direct(temp_root, local_root, path),
-            SourcePathMode::Tar => materialize_path_source_tar(temp_root, local_root, path),
-        },
-    }
-}
-
-fn materialize_path_source_direct(
-    temp_root: &Path,
-    local_root: Option<&Path>,
-    source_path: &Path,
-) -> Result<PathBuf, RuntimeError> {
-    let source_path = resolve_local_source_path(local_root, source_path)?;
-    let source_meta = fs::metadata(&source_path).map_err(|error| {
-        RuntimeError::Build(format!(
-            "failed to inspect source path '{}': {error}",
-            source_path.display()
-        ))
-    })?;
-    let staged_path = temp_root.join("staged");
-    if source_meta.is_dir() {
-        copy_dir_recursive(&source_path, &staged_path)?;
-    } else if source_meta.is_file() {
-        if let Some(parent) = staged_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                RuntimeError::Build(format!(
-                    "failed to create staging parent '{}': {error}",
-                    parent.display()
-                ))
-            })?;
-        }
-        fs::copy(&source_path, &staged_path).map_err(|error| {
-            RuntimeError::Build(format!(
-                "failed to copy source file '{}' to '{}': {error}",
-                source_path.display(),
-                staged_path.display()
-            ))
-        })?;
-    } else {
-        return Err(RuntimeError::Build(format!(
-            "source path '{}' must be a regular file or directory",
-            source_path.display()
-        )));
-    }
-    Ok(staged_path)
-}
-
-fn materialize_path_source_tar(
-    temp_root: &Path,
-    local_root: Option<&Path>,
-    source_path: &Path,
-) -> Result<PathBuf, RuntimeError> {
-    let source_path = resolve_local_source_path(local_root, source_path)?;
-    let file = fs::File::open(&source_path).map_err(|error| {
-        RuntimeError::Build(format!(
-            "failed to open tar source '{}': {error}",
-            source_path.display()
-        ))
-    })?;
-    let staged_path = temp_root.join("staged");
-    fs::create_dir_all(&staged_path).map_err(|error| {
-        RuntimeError::Build(format!(
-            "failed to create tar staging dir '{}': {error}",
-            staged_path.display()
-        ))
-    })?;
-    let mut archive = Archive::new(file);
-    archive.unpack(&staged_path).map_err(|error| {
-        RuntimeError::Build(format!(
-            "failed to unpack tar source '{}' into '{}': {error}",
-            source_path.display(),
-            staged_path.display()
-        ))
-    })?;
-    Ok(staged_path)
-}
-
-fn resolve_local_source_path(
-    local_root: Option<&Path>,
-    relative_path: &Path,
-) -> Result<PathBuf, RuntimeError> {
-    let Some(local_root) = local_root else {
-        return Err(RuntimeError::Build(format!(
-            "missing local path base for source origin '{}'",
-            relative_path.display()
-        )));
-    };
-    if relative_path.is_absolute() {
-        return Err(RuntimeError::Build(format!(
-            "source path '{}' must be relative",
-            relative_path.display()
-        )));
-    }
-    if relative_path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(RuntimeError::Build(format!(
-            "source path '{}' must not contain '..'",
-            relative_path.display()
-        )));
-    }
-    Ok(local_root.join(relative_path))
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), RuntimeError> {
-    fs::create_dir_all(dst).map_err(|error| {
-        RuntimeError::Build(format!(
-            "failed to create directory '{}': {error}",
-            dst.display()
-        ))
-    })?;
-    for entry in fs::read_dir(src).map_err(|error| {
-        RuntimeError::Build(format!(
-            "failed to read directory '{}': {error}",
-            src.display()
-        ))
-    })? {
-        let entry = entry.map_err(|error| {
-            RuntimeError::Build(format!(
-                "failed to read entry under '{}': {error}",
-                src.display()
-            ))
-        })?;
-        let file_type = entry.file_type().map_err(|error| {
-            RuntimeError::Build(format!(
-                "failed to inspect '{}' file type: {error}",
-                entry.path().display()
-            ))
-        })?;
-        let target = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&entry.path(), &target)?;
-        } else if file_type.is_file() {
-            fs::copy(entry.path(), &target).map_err(|error| {
-                RuntimeError::Build(format!(
-                    "failed to copy '{}' to '{}': {error}",
-                    entry.path().display(),
-                    target.display()
-                ))
-            })?;
-        } else if file_type.is_symlink() {
-            copy_symlink(entry.path().as_path(), &target)?;
-        } else {
-            return Err(RuntimeError::Build(format!(
-                "unsupported source entry '{}'",
-                entry.path().display()
-            )));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn copy_symlink(src: &Path, dst: &Path) -> Result<(), RuntimeError> {
-    use std::os::unix::fs as unix_fs;
-    let target = fs::read_link(src).map_err(|error| {
-        RuntimeError::Build(format!(
-            "failed to read symlink '{}': {error}",
-            src.display()
-        ))
-    })?;
-    unix_fs::symlink(&target, dst).map_err(|error| {
-        RuntimeError::Build(format!(
-            "failed to create symlink '{}' -> '{}': {error}",
-            dst.display(),
-            target.display()
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn copy_symlink(_src: &Path, _dst: &Path) -> Result<(), RuntimeError> {
-    Err(RuntimeError::Build(
-        "copying symlink entries is unsupported on this platform".to_string(),
-    ))
 }
 
 fn cleanup_source_temp_dir(temp_dir: &Path, logger: &dyn BuildLogger) {
