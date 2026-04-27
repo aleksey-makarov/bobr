@@ -84,6 +84,11 @@ The runtime tries reuse in this order:
 2. existing object hit on `object_hash`
 3. actual source materialization
 
+If source materialization produces a different object than the declared
+`object_hash`, the actual object is still imported into `objects/`, but the
+canonical `results/<result_id>.json` record is not written and the build
+fails with the actual hash.
+
 ## Publication
 
 Every recipe node carries a publication name.

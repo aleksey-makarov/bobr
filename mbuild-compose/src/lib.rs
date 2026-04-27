@@ -989,7 +989,10 @@ mod tests {
 
         let build_once = |suffix: &str| {
             let mut inputs = BuilderInputs::empty();
-            inputs.insert("in000", builder_input(tree.clone(), install_meta_with_overrides()));
+            inputs.insert(
+                "in000",
+                builder_input(tree.clone(), install_meta_with_overrides()),
+            );
             let ctx_root = temp.path().join(format!("ctx-{suffix}"));
             fs::create_dir_all(&ctx_root).unwrap();
             let mut cx = test_context(&ctx_root);

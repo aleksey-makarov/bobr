@@ -119,7 +119,9 @@ impl PlannedRecipe {
         }
     }
 
-    pub(crate) fn builder(&self) -> Option<(&'static BuilderSpec, &Value, &BTreeMap<String, BuildKey>)> {
+    pub(crate) fn builder(
+        &self,
+    ) -> Option<(&'static BuilderSpec, &Value, &BTreeMap<String, BuildKey>)> {
         match self {
             Self::Builder(recipe) => Some((recipe.spec, &recipe.config, &recipe.inputs)),
             Self::Source(_) => None,
@@ -227,17 +229,13 @@ fn collect_graph_inner(
 
     let recipe = request.node(node_id)?;
     let (key, planned_recipe) = match recipe {
-        Recipe::Builder(recipe) => collect_builder_recipe(
-            request,
-            recipe,
-            nodes,
-            stack,
-            node_keys,
-            topo_order,
-        )?,
+        Recipe::Builder(recipe) => {
+            collect_builder_recipe(request, recipe, nodes, stack, node_keys, topo_order)?
+        }
         Recipe::Source(recipe) => {
             let meta_hash = compute_meta_hash(&recipe.meta).map_err(map_store_error)?;
-            let result_id = compute_result_id(recipe.object_hash, meta_hash).map_err(map_store_error)?;
+            let result_id =
+                compute_result_id(recipe.object_hash, meta_hash).map_err(map_store_error)?;
             let key = source_planning_key(result_id)?;
             let planned = PlannedRecipe::Source(PlannedSourceRecipe {
                 name: recipe.name.clone(),
@@ -340,15 +338,13 @@ fn source_planning_key(result_id: ResultId) -> Result<BuildKey, RuntimeError> {
 
 fn parse_envelope_value(value: Value, path: &str) -> Result<RecipeEnvelope, RuntimeError> {
     let mut object = value.as_object().cloned().ok_or_else(|| {
-        RuntimeError::RecipeLoad(format!(
-            "{path}: expected top-level recipe object"
-        ))
+        RuntimeError::RecipeLoad(format!("{path}: expected top-level recipe object"))
     })?;
 
     let paths = parse_paths_value(
-        object
-            .remove("paths")
-            .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: missing required field 'paths'")))?,
+        object.remove("paths").ok_or_else(|| {
+            RuntimeError::RecipeLoad(format!("{path}: missing required field 'paths'"))
+        })?,
         &format!("{path}.paths"),
     )?;
     let options = match object.remove("options") {
@@ -356,9 +352,9 @@ fn parse_envelope_value(value: Value, path: &str) -> Result<RecipeEnvelope, Runt
         None => RecipeOptions::default(),
     };
     let request = parse_request_value(
-        object
-            .remove("nodes")
-            .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: missing required field 'nodes'")))?,
+        object.remove("nodes").ok_or_else(|| {
+            RuntimeError::RecipeLoad(format!("{path}: missing required field 'nodes'"))
+        })?,
         &format!("{path}.nodes"),
     )?;
     if !object.is_empty() {
@@ -399,7 +395,7 @@ fn parse_paths_value(value: Value, path: &str) -> Result<RecipePaths, RuntimeErr
         Some(_) => {
             return Err(RuntimeError::RecipeLoad(format!(
                 "{path}.local: expected string"
-            )))
+            )));
         }
         None => None,
     };
@@ -423,16 +419,14 @@ fn parse_options_value(value: Value, path: &str) -> Result<RecipeOptions, Runtim
         Some(_) => {
             return Err(RuntimeError::RecipeLoad(format!(
                 "{path}.quiet: expected boolean"
-            )))
+            )));
         }
         None => None,
     };
     let jobs = match object.remove("jobs") {
         Some(Value::Number(value)) => {
             let jobs = value.as_u64().ok_or_else(|| {
-                RuntimeError::RecipeLoad(format!(
-                    "{path}.jobs: expected non-negative integer"
-                ))
+                RuntimeError::RecipeLoad(format!("{path}.jobs: expected non-negative integer"))
             })?;
             let jobs = usize::try_from(jobs).map_err(|_| {
                 RuntimeError::RecipeLoad(format!(
@@ -444,7 +438,7 @@ fn parse_options_value(value: Value, path: &str) -> Result<RecipeOptions, Runtim
         Some(_) => {
             return Err(RuntimeError::RecipeLoad(format!(
                 "{path}.jobs: expected integer"
-            )))
+            )));
         }
         None => None,
     };
@@ -534,10 +528,7 @@ fn parse_builder_recipe(
     }))
 }
 
-fn parse_source_recipe(
-    mut object: Map<String, Value>,
-    path: &str,
-) -> Result<Recipe, RuntimeError> {
+fn parse_source_recipe(mut object: Map<String, Value>, path: &str) -> Result<Recipe, RuntimeError> {
     let name = take_string(&mut object, path, "name")?;
     let tag = take_string(&mut object, path, "tag")?;
     debug_assert_eq!(tag, "Source");
@@ -549,7 +540,10 @@ fn parse_source_recipe(
             RuntimeError::RecipeLoad(format!("{path}.object_hash: invalid object hash: {error}"))
         })?;
     let origin = match object.remove("origin") {
-        Some(value) => Some(origins::parse_origin_value(value, &format!("{path}.origin"))?),
+        Some(value) => Some(origins::parse_origin_value(
+            value,
+            &format!("{path}.origin"),
+        )?),
         None => None,
     };
     let meta = object
@@ -701,7 +695,10 @@ mod tests {
             }
         });
         let error = collect_one(&request).unwrap_err();
-        assert!(error.to_string().contains("missing required field 'meta'"), "{error}");
+        assert!(
+            error.to_string().contains("missing required field 'meta'"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -738,7 +735,10 @@ mod tests {
             }
         });
         let error = collect_one(&request).unwrap_err();
-        assert!(error.to_string().contains("expected relative path"), "{error}");
+        assert!(
+            error.to_string().contains("expected relative path"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -757,7 +757,10 @@ mod tests {
             }
         });
         let error = collect_one(&request).unwrap_err();
-        assert!(error.to_string().contains("must not contain '..'"), "{error}");
+        assert!(
+            error.to_string().contains("must not contain '..'"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -874,13 +877,14 @@ mod tests {
         });
         let source = json!({
             "name": "source",
-            "tag": "Fetch",
-            "config": {
+            "tag": "Source",
+            "object_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "origin": {
+                "type": "http",
                 "url": "https://example.invalid/source.tar.gz",
-                "hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 "unpack": true
             },
-            "inputs": {}
+            "meta": {}
         });
         let request = json!({
             "root": {
@@ -901,7 +905,16 @@ mod tests {
         let (graph, _) = collect_one(&request).unwrap();
         let image_key = compute_build_key("ContainerImage", &image["config"], &[]).unwrap();
         let script_key = compute_build_key("Text", &script["config"], &[]).unwrap();
-        let source_key = compute_build_key("Fetch", &source["config"], &[]).unwrap();
+        let source_key = source_planning_key(
+            compute_result_id(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .parse()
+                    .unwrap(),
+                compute_meta_hash(source["meta"].as_object().unwrap()).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let expected = compute_build_key(
             "Binary",
             &request["root"]["config"],
@@ -1009,10 +1022,8 @@ mod tests {
             "inputs": {}
         });
 
-        let error = RecipeEnvelope::parse_json(
-            serde_json::to_vec(&old_shape).unwrap().as_slice(),
-        )
-        .unwrap_err();
+        let error = RecipeEnvelope::parse_json(serde_json::to_vec(&old_shape).unwrap().as_slice())
+            .unwrap_err();
         assert!(
             error.to_string().contains("missing required field 'paths'"),
             "{error}"

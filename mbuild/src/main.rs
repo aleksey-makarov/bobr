@@ -6,8 +6,8 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use mbuild::{RecipeEnvelope, RecipeOptions};
 use mbuild::recipe_runtime::{self, BuildRunOptions};
+use mbuild::{RecipeEnvelope, RecipeOptions};
 
 type MResult<T> = Result<T, MbuildError>;
 
@@ -139,9 +139,7 @@ fn resolve_build_options(
     quiet_from_cli: Option<bool>,
     jobs_from_cli: Option<usize>,
 ) -> MResult<BuildRunOptions> {
-    let quiet = quiet_from_cli
-        .or(recipe_options.quiet)
-        .unwrap_or(false);
+    let quiet = quiet_from_cli.or(recipe_options.quiet).unwrap_or(false);
     let jobs = jobs_from_cli
         .or(recipe_options.jobs)
         .unwrap_or_else(default_jobs);

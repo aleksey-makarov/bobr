@@ -75,11 +75,18 @@ Children are always referenced by node id.
 
 `Source` does not have `config` or `inputs`.
 
-In v1, `Source` supports only:
+In v1, `Source` supports:
 
 - `origin.type = "path"`
 - `origin.mode = "direct" | "tar"`
 - `origin.path` must be a non-empty relative path without `..`
+- `origin.type = "http"`
+- `origin.url` as one HTTP(S) URL or an ordered fallback list
+- `origin.unpack`, defaulting to `true`
+- `origin.archive_format` as an optional explicit unpack override
+
+`Source.meta.install` is ordinary source metadata used for installable
+directory outputs.
 
 If `origin` is omitted, the payload object must already exist in the store.
 If the canonical result record is missing, Rust reconstructs it from the
@@ -147,7 +154,12 @@ For each `Source` node, Rust:
    `object_hash + meta`
 6. if `origin.type = "path"` is present, resolves `origin.path` against
    `paths.local`
-7. otherwise materializes the source from the resolved local path
+7. if `origin.type = "http"` is present, downloads from `origin.url` in order
+   and either stages one file object or unpacks one directory object
+8. imports the staged object into `objects/<actual_hash>`
+9. if `actual_hash != object_hash`, fails without writing the canonical
+   result record and reports the actual hash
+10. otherwise writes the canonical result record for `object_hash + meta`
 
 Execution then proceeds bottom-up:
 

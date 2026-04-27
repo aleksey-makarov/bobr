@@ -16,10 +16,7 @@ fn direct_mode_hashes_regular_file() {
     let output = run_cli([path.to_str().unwrap(), "--mode=direct"], None);
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        stdout_hash(&output),
-        hash_path(&path).unwrap().to_string()
-    );
+    assert_eq!(stdout_hash(&output), hash_path(&path).unwrap().to_string());
 }
 
 #[test]
@@ -93,10 +90,7 @@ fn auto_mode_hashes_regular_non_tar_file_directly() {
     let output = run_cli([path.to_str().unwrap()], None);
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        stdout_hash(&output),
-        hash_path(&path).unwrap().to_string()
-    );
+    assert_eq!(stdout_hash(&output), hash_path(&path).unwrap().to_string());
 }
 
 #[test]
@@ -155,7 +149,10 @@ fn stdin_without_tar_mode_is_rejected() {
 
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("stdin is supported only with '--mode=tar'"), "{stderr}");
+    assert!(
+        stderr.contains("stdin is supported only with '--mode=tar'"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -218,7 +215,10 @@ fn run_cli<const N: usize>(args: [&str; N], stdin: Option<&[u8]>) -> Output {
 }
 
 fn stdout_hash(output: &Output) -> String {
-    String::from_utf8(output.stdout.clone()).unwrap().trim().to_string()
+    String::from_utf8(output.stdout.clone())
+        .unwrap()
+        .trim()
+        .to_string()
 }
 
 fn tar_bytes() -> Vec<u8> {

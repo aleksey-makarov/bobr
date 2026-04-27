@@ -9,7 +9,7 @@ fsobj-hash = { path = "../fsobj-hash" }
 mbuild-core = { path = "../mbuild-core" }
 mbuild-compose = { path = "../mbuild-compose" }
 mbuild-binary = { path = "../mbuild-binary" }
-mbuild-fetch = { path = "../mbuild-fetch" }
+mbuild-origin-http = { path = "../mbuild-origin-http" }
 mbuild-image = { path = "../mbuild-image" }
 mbuild-text = { path = "../mbuild-text" }
 mbuild-tree = { path = "../mbuild-tree" }

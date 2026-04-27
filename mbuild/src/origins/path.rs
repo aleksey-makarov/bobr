@@ -78,11 +78,7 @@ impl ParsedOrigin for PathOrigin {
     }
 }
 
-fn take_string(
-    object: &mut Map<String, Value>,
-    path: &str,
-    field: &str,
-) -> Result<String, String> {
+fn take_string(object: &mut Map<String, Value>, path: &str, field: &str) -> Result<String, String> {
     let value = object
         .remove(field)
         .ok_or_else(|| format!("{path}: missing required field '{field}'"))?;
@@ -114,8 +110,12 @@ fn materialize_path_source_direct(
     source_path: &Path,
 ) -> Result<PathBuf, String> {
     let source_path = resolve_local_source_path(local_root, source_path)?;
-    let source_meta = fs::metadata(&source_path)
-        .map_err(|error| format!("failed to inspect source path '{}': {error}", source_path.display()))?;
+    let source_meta = fs::metadata(&source_path).map_err(|error| {
+        format!(
+            "failed to inspect source path '{}': {error}",
+            source_path.display()
+        )
+    })?;
     let staged_path = temp_root.join("staged");
     if source_meta.is_dir() {
         copy_dir_recursive(&source_path, &staged_path)?;
@@ -150,8 +150,12 @@ fn materialize_path_source_tar(
     source_path: &Path,
 ) -> Result<PathBuf, String> {
     let source_path = resolve_local_source_path(local_root, source_path)?;
-    let file = fs::File::open(&source_path)
-        .map_err(|error| format!("failed to open tar source '{}': {error}", source_path.display()))?;
+    let file = fs::File::open(&source_path).map_err(|error| {
+        format!(
+            "failed to open tar source '{}': {error}",
+            source_path.display()
+        )
+    })?;
     let staged_path = temp_root.join("staged");
     fs::create_dir_all(&staged_path).map_err(|error| {
         format!(

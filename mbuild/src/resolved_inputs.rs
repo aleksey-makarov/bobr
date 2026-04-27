@@ -147,7 +147,10 @@ mod tests {
             allow_extra_inputs: true,
         };
 
-        assert_eq!(inputs.required("script").unwrap().object_path, object.object_path);
+        assert_eq!(
+            inputs.required("script").unwrap().object_path,
+            object.object_path
+        );
         assert!(inputs.optional("base").is_none());
         assert!(inputs.extra(&spec, "source").is_some());
         assert_eq!(inputs.extras(&spec).count(), 2);

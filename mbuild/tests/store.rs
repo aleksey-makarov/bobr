@@ -36,10 +36,7 @@ fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
     write_recipe(&recipe_path, &recipe);
 
     let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-    let build_ref = build_ref_path(
-        workspace.path(),
-        first.build_key.expect("builder root"),
-    );
+    let build_ref = build_ref_path(workspace.path(), first.build_key.expect("builder root"));
     let results_after_first = fs::read_dir(store_root(workspace.path()).join("results"))
         .unwrap()
         .count();

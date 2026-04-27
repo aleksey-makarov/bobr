@@ -625,17 +625,12 @@ fn interpolation_value(key: &str, inputs: &[(String, BuilderInputObject)]) -> BR
                 }
             })
             .ok_or_else(|| {
-                BinaryError::InvalidConfig(format!(
-                    "unknown interpolation variable '@{{{key}}}'"
-                ))
+                BinaryError::InvalidConfig(format!("unknown interpolation variable '@{{{key}}}'"))
             }),
     }
 }
 
-fn resolve_step_cwd(
-    step: &BuildStep,
-    inputs: &[(String, BuilderInputObject)],
-) -> BResult<String> {
+fn resolve_step_cwd(step: &BuildStep, inputs: &[(String, BuilderInputObject)]) -> BResult<String> {
     let cwd = interpolate_step_string(&step.cwd, inputs)?;
     if cwd.is_empty() || !cwd.starts_with('/') {
         return Err(BinaryError::InvalidConfig(format!(
@@ -668,10 +663,7 @@ fn resolve_step_env(
                 step.name, key
             ))
         })?;
-        rendered.push((
-            key.clone(),
-            interpolate_step_string(string_value, inputs)?,
-        ));
+        rendered.push((key.clone(), interpolate_step_string(string_value, inputs)?));
     }
     Ok(rendered)
 }
@@ -717,15 +709,9 @@ fn create_container(
     for (name, input) in inputs {
         let mount_path = input_mount_path(name);
         let mount_spec = if input.object_path.is_dir() {
-            format!(
-                "{}:{mount_path}:O",
-                input.object_path.display()
-            )
+            format!("{}:{mount_path}:O", input.object_path.display())
         } else {
-            format!(
-                "{}:{mount_path}:ro",
-                input.object_path.display()
-            )
+            format!("{}:{mount_path}:ro", input.object_path.display())
         };
         process.arg("--volume").arg(mount_spec);
     }
@@ -743,18 +729,15 @@ fn create_container(
         .arg(format!("{BUILD_DIR_ENV_VAR}={BUILD_DIR_MOUNT_PATH}"))
         .arg("--env")
         .arg(format!("{OUT_DIR_ENV_VAR}={OUT_DIR_MOUNT_PATH}"));
-    process.arg(&container.image_ref).arg("sleep").arg("infinity");
+    process
+        .arg(&container.image_ref)
+        .arg("sleep")
+        .arg("infinity");
 
     let output = process.output().map_err(|error| {
         BinaryError::PodmanFailed(format!("failed to execute podman create: {error}"))
     })?;
-    let log_path = write_command_log(
-        cx,
-        "podman-create",
-        &container.image_ref,
-        inputs,
-        &output,
-    );
+    let log_path = write_command_log(cx, "podman-create", &container.image_ref, inputs, &output);
 
     if !output.status.success() {
         return Err(command_failure(
@@ -870,10 +853,7 @@ fn verify_exported_output(output_path: &Path, cx: &BuildContext) -> BResult<()> 
     let raw_log_path = cx.write_raw_log("export-verify", &listing);
 
     let mut details = Map::new();
-    details.insert(
-        "entry_count".to_string(),
-        Value::from(entries.len() as u64),
-    );
+    details.insert("entry_count".to_string(), Value::from(entries.len() as u64));
     details.insert(
         "entries_preview".to_string(),
         Value::Array(preview.into_iter().map(Value::String).collect()),
@@ -881,7 +861,10 @@ fn verify_exported_output(output_path: &Path, cx: &BuildContext) -> BResult<()> 
     cx.log_event_with_details(
         BuildLogLevel::Info,
         "export-verify",
-        format!("verified exported build result at '{}'", output_path.display()),
+        format!(
+            "verified exported build result at '{}'",
+            output_path.display()
+        ),
         None,
         raw_log_path,
         details,
@@ -1044,11 +1027,9 @@ fn remove_container(instance: &ContainerInstance, cx: &BuildContext) -> Result<(
     );
     let mut process = ProcessCommand::new("podman");
     process.arg("rm").arg("--force").arg(&instance.id);
-    let output = process.output().map_err(|error| {
-        CleanupError {
-            message: format!("failed to execute podman rm: {error}"),
-            raw_log_path: None,
-        }
+    let output = process.output().map_err(|error| CleanupError {
+        message: format!("failed to execute podman rm: {error}"),
+        raw_log_path: None,
     })?;
     let log_path = write_command_log(cx, "podman-cleanup", "", &[], &output);
 
@@ -1482,7 +1463,10 @@ mod tests {
 
     fn sample_inputs_with_aux_file(root: &Path) -> BuilderInputs {
         let mut inputs = sample_inputs(root);
-        inputs.insert("patch", resolved_file(root, "patch.diff", false, Map::new()));
+        inputs.insert(
+            "patch",
+            resolved_file(root, "patch.diff", false, Map::new()),
+        );
         inputs
     }
 
@@ -1758,7 +1742,10 @@ mod tests {
                 meta: Map::new(),
             },
         );
-        inputs.insert("script", resolved_file(temp.path(), "script.sh", true, Map::new()));
+        inputs.insert(
+            "script",
+            resolved_file(temp.path(), "script.sh", true, Map::new()),
+        );
         inputs.insert("source", resolved_directory(temp.path(), "src", Map::new()));
 
         let error = BinaryBuilder
@@ -1968,7 +1955,10 @@ mod tests {
 
             assert!(matches!(error, BuilderError::ExecutionFailed(_)));
             let message = error.to_string();
-            assert!(message.contains("exported build result is missing"), "{message}");
+            assert!(
+                message.contains("exported build result is missing"),
+                "{message}"
+            );
         });
     }
 
@@ -1988,7 +1978,9 @@ mod tests {
             let events = logger.events();
             let warning = events
                 .iter()
-                .find(|event| event.level == BuildLogLevel::Warn && event.phase == "cleanup-warning")
+                .find(|event| {
+                    event.level == BuildLogLevel::Warn && event.phase == "cleanup-warning"
+                })
                 .expect("expected cleanup warning event");
             assert!(
                 warning.message.contains("successful output export"),
@@ -2029,9 +2021,15 @@ mod tests {
             let events = logger.events();
             let warning = events
                 .iter()
-                .find(|event| event.level == BuildLogLevel::Warn && event.phase == "cleanup-warning")
+                .find(|event| {
+                    event.level == BuildLogLevel::Warn && event.phase == "cleanup-warning"
+                })
                 .expect("expected cleanup warning event");
-            assert!(warning.message.contains("during cleanup"), "{}", warning.message);
+            assert!(
+                warning.message.contains("during cleanup"),
+                "{}",
+                warning.message
+            );
             assert!(warning.raw_log_path.is_some());
         });
     }
@@ -2065,10 +2063,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(argv, vec!["${in}".to_string(), "${source}".to_string()]);
-        assert_eq!(
-            env,
-            vec![("LITERAL".to_string(), "${out}".to_string())]
-        );
+        assert_eq!(env, vec![("LITERAL".to_string(), "${out}".to_string())]);
     }
 
     #[test]
@@ -2091,7 +2086,10 @@ mod tests {
         .unwrap_err();
 
         let message = error.to_string();
-        assert!(message.contains("unknown interpolation variable"), "{message}");
+        assert!(
+            message.contains("unknown interpolation variable"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -2149,7 +2147,10 @@ mod tests {
         };
         let error = resolve_step_argv(&step, &[]).unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("unterminated interpolation escape"), "{message}");
+        assert!(
+            message.contains("unterminated interpolation escape"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -2163,6 +2164,9 @@ mod tests {
         };
         let error = resolve_step_argv(&step, &[]).unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("invalid interpolation variable"), "{message}");
+        assert!(
+            message.contains("invalid interpolation variable"),
+            "{message}"
+        );
     }
 }

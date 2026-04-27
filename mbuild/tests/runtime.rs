@@ -3,12 +3,13 @@ mod support;
 use mbuild::recipe_runtime::{
     BuildRunOptions, run_recipe_json_in_workspace, run_recipe_json_in_workspace_with_options,
 };
-use mbuild_core::{StoreLayout, load_build_handle, load_result_record};
+use mbuild_core::{
+    StoreLayout, compute_meta_hash, compute_result_id, load_build_handle, load_result_record,
+};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Cursor, Read, Write};
 use std::net::{TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -24,12 +25,7 @@ use support::{
 };
 use tempfile::tempdir;
 
-fn source_recipe_node(
-    name: &str,
-    object_hash: &str,
-    origin_path: &str,
-    mode: &str,
-) -> Value {
+fn source_recipe_node(name: &str, object_hash: &str, origin_path: &str, mode: &str) -> Value {
     json!({
         "name": name,
         "tag": "Source",
@@ -207,6 +203,33 @@ fn drain_request(stream: &mut TcpStream) {
     }
 }
 
+fn source_tree_hash(source_tar: &[u8]) -> String {
+    let temp = tempdir().unwrap();
+    let staged = temp.path().join("staged");
+    fs::create_dir_all(&staged).unwrap();
+    let decoder = flate2::read::GzDecoder::new(Cursor::new(source_tar));
+    let mut archive = tar::Archive::new(decoder);
+    archive.unpack(&staged).unwrap();
+
+    let mut entries = fs::read_dir(&staged)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    if entries.len() == 1 {
+        let only = entries.remove(0);
+        if only.file_type().unwrap().is_dir() {
+            let only_path = only.path();
+            for child in fs::read_dir(&only_path).unwrap() {
+                let child = child.unwrap();
+                fs::rename(child.path(), staged.join(child.file_name())).unwrap();
+            }
+            fs::remove_dir(&only_path).unwrap();
+        }
+    }
+
+    fsobj_hash::hash_path(&staged).unwrap().to_string()
+}
+
 fn make_full_recipe(url: &str, source_hash: &str, image: &str, digest: &str) -> Value {
     image_recipe(
         "final-image",
@@ -230,8 +253,28 @@ fn binary_with_two_sources_recipe(
         json!({
             "image": base_image_recipe(image, digest),
             "script": script_recipe(),
-            "source_a": source_recipe(url_a, source_hash),
-            "source_b": source_recipe(url_b, source_hash)
+            "source_a": {
+                "name": "source-a",
+                "tag": "Source",
+                "object_hash": source_hash,
+                "origin": {
+                    "type": "http",
+                    "url": url_a,
+                    "unpack": true
+                },
+                "meta": { "variant": "a" }
+            },
+            "source_b": {
+                "name": "source-b",
+                "tag": "Source",
+                "object_hash": source_hash,
+                "origin": {
+                    "type": "http",
+                    "url": url_b,
+                    "unpack": true
+                },
+                "meta": { "variant": "b" }
+            }
         }),
     )
 }
@@ -283,7 +326,7 @@ fn json_recipe_executes_all_real_builders() {
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
             Err(error) => panic!("failed to start test HTTP server: {error}"),
         };
-        let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
+        let source_hash = source_tree_hash(&source_tar);
         let recipe = make_full_recipe(&url, &source_hash, &image_ref, &pinned_digest);
         let recipe_path = workspace.path().join("recipe.json");
         write_recipe(&recipe_path, &recipe);
@@ -321,7 +364,7 @@ fn json_recipe_executes_all_real_builders() {
 
         let builds_dir = store_root(workspace.path()).join("builds");
         let objects_dir = store_root(workspace.path()).join("objects");
-        assert_eq!(fs::read_dir(&builds_dir).unwrap().count(), 5);
+        assert_eq!(fs::read_dir(&builds_dir).unwrap().count(), 4);
         assert_eq!(fs::read_dir(&objects_dir).unwrap().count(), 5);
         drop(oci_server);
     });
@@ -349,7 +392,7 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
             Err(error) => panic!("failed to start test HTTP server: {error}"),
         };
-        let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
+        let source_hash = source_tree_hash(&source_tar);
         let recipe = recipe_node(
             "final-image",
             "Image",
@@ -375,7 +418,7 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
             fs::read_dir(store_root(workspace.path()).join("builds"))
                 .unwrap()
                 .count(),
-            5
+            4
         );
         assert!(
             store_root(workspace.path())
@@ -416,7 +459,7 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
             Err(error) => panic!("failed to start test HTTP server: {error}"),
         };
-        let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
+        let source_hash = source_tree_hash(&source_tar);
         let recipe = image_recipe(
             "final-image",
             vec![binary_recipe(
@@ -490,7 +533,7 @@ fn second_run_reuses_root_without_local_path_when_no_source_materialization_is_n
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
             Err(error) => panic!("failed to start test HTTP server: {error}"),
         };
-        let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
+        let source_hash = source_tree_hash(&source_tar);
         let recipe = image_recipe(
             "final-image",
             vec![binary_recipe(
@@ -507,8 +550,7 @@ fn second_run_reuses_root_without_local_path_when_no_source_materialization_is_n
         let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
         handle.join().unwrap();
 
-        let mut envelope: Value =
-            serde_json::from_slice(&fs::read(&recipe_path).unwrap()).unwrap();
+        let mut envelope: Value = serde_json::from_slice(&fs::read(&recipe_path).unwrap()).unwrap();
         envelope
             .get_mut("paths")
             .and_then(Value::as_object_mut)
@@ -547,7 +589,7 @@ fn independent_fetch_sources_run_in_parallel() {
             Duration::from_secs(2),
         )
         .unwrap();
-        let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
+        let source_hash = source_tree_hash(&source_tar);
         let recipe = binary_with_two_sources_recipe(
             &format!("{base_url}?a=1"),
             &format!("{base_url}?a=2"),
@@ -600,7 +642,7 @@ fn executor_waits_for_in_flight_workers_to_cleanup_after_first_failure() {
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
             Err(error) => panic!("failed to start test HTTP server: {error}"),
         };
-        let source_hash = format!("sha256:{:x}", Sha256::digest(&source_tar));
+        let source_hash = source_tree_hash(&source_tar);
         let recipe = recipe_node(
             "final-image",
             "Image",
@@ -645,7 +687,12 @@ fn executor_waits_for_in_flight_workers_to_cleanup_after_first_failure() {
         let leaked = fs::read_dir(&state_root)
             .unwrap()
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with("fake-container-"))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("fake-container-")
+            })
             .count();
         assert_eq!(leaked, 0, "expected no leaked fake podman containers");
         drop(oci_server);
@@ -732,7 +779,12 @@ fn source_path_file_materializes_known_object_without_build_handle() {
     let recipe_path = workspace.path().join("source-file.json");
     write_recipe(
         &recipe_path,
-        &source_recipe_node("source-file", &object_hash.to_string(), "payload.txt", "direct"),
+        &source_recipe_node(
+            "source-file",
+            &object_hash.to_string(),
+            "payload.txt",
+            "direct",
+        ),
     );
 
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
@@ -797,6 +849,137 @@ fn source_path_tar_materializes_unpacked_tree_without_build_handle() {
 }
 
 #[test]
+fn source_http_mismatch_imports_actual_object_without_canonical_result() {
+    let workspace = tempdir().unwrap();
+    let source_tar = {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        let body = b"hello mismatch\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("pkg/README.txt").unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, &body[..]).unwrap();
+        tar.into_inner().unwrap().finish().unwrap()
+    };
+    let actual_hash = source_tree_hash(&source_tar);
+    let wrong_hash = "1111111111111111111111111111111111111111111111111111111111111111";
+    let (url, handle) = match spawn_http_server(source_tar, "application/gzip") {
+        Ok(server) => server,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("failed to start test HTTP server: {error}"),
+    };
+    let recipe_path = workspace.path().join("source-http-mismatch.json");
+    write_recipe(&recipe_path, &source_recipe(&url, wrong_hash));
+
+    let error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
+    handle.join().unwrap();
+
+    let message = error.to_string();
+    assert!(message.contains(&actual_hash), "{message}");
+
+    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    assert!(object_path_exists(&layout, actual_hash.parse().unwrap()));
+    let wrong_result_id = compute_result_id(
+        wrong_hash.parse().unwrap(),
+        compute_meta_hash(&serde_json::Map::new()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        load_result_record(&layout, wrong_result_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn source_http_mismatch_second_run_reuses_stored_object_without_second_download() {
+    let workspace = tempdir().unwrap();
+    let source_tar = {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        let body = b"hello mismatch retry\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("pkg/README.txt").unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, &body[..]).unwrap();
+        tar.into_inner().unwrap().finish().unwrap()
+    };
+    let actual_hash = source_tree_hash(&source_tar);
+    let (url, handle) = match spawn_http_server(source_tar, "application/gzip") {
+        Ok(server) => server,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("failed to start test HTTP server: {error}"),
+    };
+    let recipe_path = workspace.path().join("source-http-mismatch-retry.json");
+    write_recipe(
+        &recipe_path,
+        &source_recipe(
+            &url,
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        ),
+    );
+    let first_error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
+    handle.join().unwrap();
+    assert!(
+        first_error.to_string().contains(&actual_hash),
+        "{first_error}"
+    );
+
+    write_recipe(&recipe_path, &source_recipe(&url, &actual_hash));
+    let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    assert_eq!(realized.object_hash.to_string(), actual_hash);
+}
+
+#[test]
+fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
+    let workspace = tempdir().unwrap();
+    let source_path = workspace.path().join("payload.txt");
+    fs::write(&source_path, b"hello mismatch source\n").unwrap();
+    let actual_hash = fsobj_hash::hash_path(&source_path).unwrap();
+    let wrong_hash = "1111111111111111111111111111111111111111111111111111111111111111";
+    let recipe_path = workspace.path().join("source-path-mismatch.json");
+    write_recipe(
+        &recipe_path,
+        &source_recipe_node("source-file", wrong_hash, "payload.txt", "direct"),
+    );
+
+    let error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
+    assert!(
+        error.to_string().contains(&actual_hash.to_string()),
+        "{error}"
+    );
+
+    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    assert!(object_path_exists(&layout, actual_hash));
+    let wrong_result_id = compute_result_id(
+        wrong_hash.parse().unwrap(),
+        compute_meta_hash(&serde_json::Map::new()).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        load_result_record(&layout, wrong_result_id)
+            .unwrap()
+            .is_none()
+    );
+
+    write_recipe(
+        &recipe_path,
+        &json!({
+            "name": "source-file",
+            "tag": "Source",
+            "object_hash": actual_hash.to_string(),
+            "meta": {}
+        }),
+    );
+    let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    assert_eq!(realized.object_hash, actual_hash);
+}
+
+#[test]
 fn source_without_origin_reuses_existing_canonical_result() {
     let workspace = tempdir().unwrap();
     let source_path = workspace.path().join("payload.txt");
@@ -805,7 +988,12 @@ fn source_without_origin_reuses_existing_canonical_result() {
     let materialized_recipe_path = workspace.path().join("source-materialized.json");
     write_recipe(
         &materialized_recipe_path,
-        &source_recipe_node("source-file", &object_hash.to_string(), "payload.txt", "direct"),
+        &source_recipe_node(
+            "source-file",
+            &object_hash.to_string(),
+            "payload.txt",
+            "direct",
+        ),
     );
     let first = run_recipe_json_in_workspace(workspace.path(), &materialized_recipe_path).unwrap();
 
@@ -835,7 +1023,12 @@ fn source_without_origin_republishes_existing_object() {
     let materialized_recipe_path = workspace.path().join("source-materialized.json");
     write_recipe(
         &materialized_recipe_path,
-        &source_recipe_node("source-file", &object_hash.to_string(), "payload.txt", "direct"),
+        &source_recipe_node(
+            "source-file",
+            &object_hash.to_string(),
+            "payload.txt",
+            "direct",
+        ),
     );
     let first = run_recipe_json_in_workspace(workspace.path(), &materialized_recipe_path).unwrap();
 
@@ -876,7 +1069,10 @@ fn source_without_origin_requires_existing_object_or_result() {
     );
 
     let error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
-    assert!(error.to_string().contains("has no origin and object"), "{error}");
+    assert!(
+        error.to_string().contains("has no origin and object"),
+        "{error}"
+    );
 }
 
 fn object_path_exists(layout: &StoreLayout, object_hash: fsobj_hash::ObjectHash) -> bool {

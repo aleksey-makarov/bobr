@@ -39,8 +39,7 @@ pub(crate) fn load_path(path: &Path) -> Result<Node, Error> {
 }
 
 fn read_file_node(path: &Path, mode: u32) -> Result<Node, Error> {
-    let mut file =
-        fs::File::open(path).map_err(|error| io_at_path(path, "opening file", error))?;
+    let mut file = fs::File::open(path).map_err(|error| io_at_path(path, "opening file", error))?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
         .map_err(|error| io_at_path(path, "reading file", error))?;
@@ -52,8 +51,7 @@ fn read_file_node(path: &Path, mode: u32) -> Result<Node, Error> {
 }
 
 fn read_symlink_node(path: &Path) -> Result<Node, Error> {
-    let target =
-        fs::read_link(path).map_err(|error| io_at_path(path, "reading symlink", error))?;
+    let target = fs::read_link(path).map_err(|error| io_at_path(path, "reading symlink", error))?;
     Ok(Node::Symlink(SymlinkNode {
         target: os_str_bytes(target.as_os_str()).to_vec(),
     }))
@@ -61,8 +59,7 @@ fn read_symlink_node(path: &Path) -> Result<Node, Error> {
 
 fn read_directory_node(path: &Path) -> Result<Node, Error> {
     let mut entries = Vec::new();
-    for entry in fs::read_dir(path).map_err(|error| io_at_path(path, "reading directory", error))?
-    {
+    for entry in fs::read_dir(path).map_err(|error| io_at_path(path, "reading directory", error))? {
         let entry = entry.map_err(|error| io_at_path(path, "reading directory entry", error))?;
         let child_path = entry.path();
         let name = entry.file_name();

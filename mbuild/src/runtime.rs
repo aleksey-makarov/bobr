@@ -83,8 +83,7 @@ pub(crate) fn execute_builder_node(
 
     let reuse_key = compute_reuse_key(builder.spec().tag, &config, &inputs_identity)
         .map_err(map_store_error)?;
-    if let Some(result) = load_reuse_record(layout, reuse_key).map_err(map_store_error)?
-    {
+    if let Some(result) = load_reuse_record(layout, reuse_key).map_err(map_store_error)? {
         let object_path = object_path(layout, result.object_hash);
         if !object_path.exists() {
             log_runtime_event(
@@ -188,8 +187,7 @@ pub(crate) fn lookup_canonical_result(
     build_key: BuildKey,
 ) -> Result<Option<PublishedBuild>, RuntimeError> {
     let reuse_key = compute_reuse_key(builder_tag, config, inputs).map_err(map_store_error)?;
-    let Some(result) = load_reuse_record(layout, reuse_key).map_err(map_store_error)?
-    else {
+    let Some(result) = load_reuse_record(layout, reuse_key).map_err(map_store_error)? else {
         return Ok(None);
     };
     let object_path = object_path(layout, result.object_hash);
@@ -283,8 +281,7 @@ mod tests {
     use crate::logging::{BuildRunLogger, RunOptions};
     use mbuild_core::{
         BuildContext, BuilderInputs, BuilderSpec, PublishOutputRequest, ResultInputIdentity,
-        compute_build_key,
-        StagedBuildResult, TypedBuilder, publish_output,
+        StagedBuildResult, TypedBuilder, compute_build_key, publish_output,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};

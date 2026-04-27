@@ -83,9 +83,11 @@ The runtime rejects:
       "tag": "Source",
       "object_hash": "0123...abcd",
       "origin": {
-        "type": "path",
-        "path": "linux.tar",
-        "mode": "tar"
+        "type": "http",
+        "url": [
+          "https://example.invalid/linux.tar.xz"
+        ],
+        "unpack": true
       },
       "meta": {}
     },
@@ -99,16 +101,28 @@ The runtime rejects:
 - no `inputs`
 - no `build_key`
 
-In v1, `Source` supports only one origin:
+In v1, `Source` supports two origins:
 
 - `origin.type = "path"`
 - `origin.mode = "direct" | "tar"`
 - `origin.path` must be a non-empty relative path without `..`
+- `origin.type = "http"`
+- `origin.url` is one HTTP(S) URL or an ordered fallback list
+- `origin.unpack` defaults to `true`
+- `origin.archive_format` may override archive detection for unpacked sources
+
+`Source.meta.install` carries install metadata for unpacked directory objects.
 
 `Source` may also omit `origin`. In that shape, the payload object must
 already exist in the store under `objects/<object_hash>`. If the canonical
 `<store>/results/<result_id>.json` record is missing, `mbuild` reconstructs
 it from the recipe metadata.
+
+If a source origin materializes a different object than the declared
+`object_hash`, `mbuild` still imports the actual object into
+`objects/<actual_hash>`, but it does not write the canonical result record or
+publish refs. The failing message includes the actual hash so the recipe can
+be updated and rerun without downloading again.
 
 CLI contract:
 

@@ -151,9 +151,8 @@ pub fn fetch_image_authenticated_with_progress(
     // image string is only used to locate the registry and repository.
     let pinned_url =
         format!("{scheme}://{registry_host}/v2/{repository}/manifests/{pinned_digest}");
-    let pinned_message = format!(
-        "fetching pinned manifest {pinned_digest} from {registry_host}/{repository}"
-    );
+    let pinned_message =
+        format!("fetching pinned manifest {pinned_digest} from {registry_host}/{repository}");
     progress(&pinned_message);
     let (pinned_bytes, pinned_media_type) =
         get_with_bearer_auth(&pinned_url, ACCEPT_MANIFESTS, progress)?;
@@ -263,8 +262,8 @@ fn get_with_bearer_auth(
             progress("registry requested bearer token");
             let token = fetch_bearer_token(&www_auth, progress)?;
             progress("retrying registry request with bearer token");
-            let auth_request = http_request(url, accept)
-                .set("Authorization", &format!("Bearer {token}"));
+            let auth_request =
+                http_request(url, accept).set("Authorization", &format!("Bearer {token}"));
             let resp = auth_request.call()?;
             read_response(resp)
         }

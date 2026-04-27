@@ -97,7 +97,7 @@ where
         (Mode::Auto | Mode::Direct, true) => {
             return Err(CliExit::Failure(
                 "stdin is supported only with '--mode=tar'".to_string(),
-            ))
+            ));
         }
         (mode, false) => {
             let path = PathBuf::from(path);
@@ -149,8 +149,7 @@ fn is_tar_path(path: &Path) -> bool {
     if !metadata.is_file() {
         return false;
     }
-    path
-        .file_name()
+    path.file_name()
         .map(|name| name.to_string_lossy().ends_with(".tar"))
         .unwrap_or(false)
 }

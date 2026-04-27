@@ -119,11 +119,7 @@ impl BuilderInputs {
         self.slots.get(name)
     }
 
-    pub fn extra<'a>(
-        &'a self,
-        spec: &BuilderSpec,
-        name: &str,
-    ) -> Option<&'a BuilderInputObject> {
+    pub fn extra<'a>(&'a self, spec: &BuilderSpec, name: &str) -> Option<&'a BuilderInputObject> {
         if spec.is_reserved_input(name) {
             None
         } else {

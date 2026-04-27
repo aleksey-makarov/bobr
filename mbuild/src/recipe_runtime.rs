@@ -1,8 +1,8 @@
 use crate::builders;
 use crate::logging::{BuildRunLogger, RunOptions};
 use crate::recipe::{
-    RecipeEnvelope, RecipePaths, PlannedBuilderRecipe, PlannedNode, PlannedRecipe, PlannedSourceRecipe,
-    PlanningState, RecipeRequest, ReuseOrigin, collect_graph,
+    PlannedBuilderRecipe, PlannedNode, PlannedRecipe, PlannedSourceRecipe, PlanningState,
+    RecipeEnvelope, RecipePaths, RecipeRequest, ReuseOrigin, collect_graph,
 };
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
@@ -11,10 +11,9 @@ use crate::runtime::{
 };
 use fsobj_hash::hash_path;
 use mbuild_core::{
-    BuildLogEvent, BuildLogLevel, BuildLogger, BuildKey, OriginContext, RealizedResult,
-    ResultInputIdentity, ResultRecord, StoreLayout, compute_meta_hash, compute_result_id,
-    fsutil, import_object, load_result_record, object_path, publish_result_refs,
-    store_result_record,
+    BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, OriginContext, RealizedResult,
+    ResultInputIdentity, ResultRecord, StoreLayout, compute_meta_hash, compute_result_id, fsutil,
+    import_object, load_result_record, object_path, publish_result_refs, store_result_record,
 };
 use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
@@ -48,7 +47,11 @@ pub fn run_recipe_json_in_workspace(
     workspace_root: &Path,
     recipe_path: &Path,
 ) -> Result<RealizedResult, RuntimeError> {
-    run_recipe_json_in_workspace_with_options(workspace_root, recipe_path, BuildRunOptions::default())
+    run_recipe_json_in_workspace_with_options(
+        workspace_root,
+        recipe_path,
+        BuildRunOptions::default(),
+    )
 }
 
 pub fn run_recipe_json_in_workspace_with_options(
@@ -136,7 +139,9 @@ pub fn run_recipe_request_in_store_with_options(
     if let Some(realized) = completed.get(&root_key).cloned() {
         let origin = match &nodes
             .get(&root_key)
-            .ok_or_else(|| RuntimeError::Store(format!("missing planned node for key '{}'", root_key)))?
+            .ok_or_else(|| {
+                RuntimeError::Store(format!("missing planned node for key '{}'", root_key))
+            })?
             .state
         {
             PlanningState::Reused { origin, .. } => *origin,
@@ -144,10 +149,12 @@ pub fn run_recipe_request_in_store_with_options(
                 return Err(RuntimeError::Store(format!(
                     "root key '{}' completed without reused state",
                     root_key
-                )))
+                )));
             }
         };
-        publish_reused_root(&layout, &logger, root_key, &root_tag, &root_name, &realized, origin)?;
+        publish_reused_root(
+            &layout, &logger, root_key, &root_tag, &root_name, &realized, origin,
+        )?;
         return Ok(realized);
     }
 
@@ -201,9 +208,9 @@ fn ensure_planned(
     key: BuildKey,
 ) -> Result<(), RuntimeError> {
     let recipe = {
-        let node = nodes
-            .get(&key)
-            .ok_or_else(|| RuntimeError::Store(format!("missing planned node for key '{}'", key)))?;
+        let node = nodes.get(&key).ok_or_else(|| {
+            RuntimeError::Store(format!("missing planned node for key '{}'", key))
+        })?;
         if !matches!(node.state, PlanningState::Unknown) {
             return Ok(());
         }
@@ -251,7 +258,9 @@ fn ensure_planned(
             }
         }
         PlannedRecipe::Source(source) => {
-            if let Some(result) = load_result_record(layout, source.result_id).map_err(map_store_error)? {
+            if let Some(result) =
+                load_result_record(layout, source.result_id).map_err(map_store_error)?
+            {
                 let published_object = object_path(layout, result.object_hash);
                 if !published_object.exists() {
                     return Err(RuntimeError::Store(format!(
@@ -367,8 +376,10 @@ fn lookup_canonical_for_planned_node(
         return Ok(None);
     }
 
-    Ok(lookup_canonical_result(layout, spec.tag, config, &input_identities, key)?
-        .map(|published| realized_result_from_record(Some(key), &published.result)))
+    Ok(
+        lookup_canonical_result(layout, spec.tag, config, &input_identities, key)?
+            .map(|published| realized_result_from_record(Some(key), &published.result)),
+    )
 }
 
 fn execute_misses(
@@ -433,18 +444,20 @@ fn execute_misses(
             };
             let handle = thread::spawn(move || {
                 let result = match recipe {
-                    PlannedRecipe::Builder(builder_recipe) => {
-                        execute_builder_recipe(
-                            &layout,
-                            logger,
-                            key,
-                            builder_recipe,
-                            builder_inputs.expect("builder inputs must be prepared"),
-                        )
-                    }
-                    PlannedRecipe::Source(source_recipe) => {
-                        execute_source_recipe(&layout, local_root.as_deref(), logger, key, source_recipe)
-                    }
+                    PlannedRecipe::Builder(builder_recipe) => execute_builder_recipe(
+                        &layout,
+                        logger,
+                        key,
+                        builder_recipe,
+                        builder_inputs.expect("builder inputs must be prepared"),
+                    ),
+                    PlannedRecipe::Source(source_recipe) => execute_source_recipe(
+                        &layout,
+                        local_root.as_deref(),
+                        logger,
+                        key,
+                        source_recipe,
+                    ),
                 };
                 let _ = tx.send((key, result));
             });
@@ -489,7 +502,8 @@ fn execute_misses(
             RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
         let node_logger = logger.bind_node(node.recipe.tag(), &node.publish_name, key);
-        publish_result_refs(layout, &node.publish_name, &executed.result).map_err(map_store_error)?;
+        publish_result_refs(layout, &node.publish_name, &executed.result)
+            .map_err(map_store_error)?;
         log_runtime_event(
             node_logger.as_ref(),
             BuildLogLevel::Info,
@@ -674,7 +688,11 @@ fn execute_source_recipe(
         return Err(RuntimeError::Build(message));
     }
 
-    let temp_root = layout.root.join("source-state").join("tmp").join(key.to_hex());
+    let temp_root = layout
+        .root
+        .join("source-state")
+        .join("tmp")
+        .join(key.to_hex());
     fsutil::recreate_empty_dir_force(&temp_root).map_err(|error| {
         RuntimeError::Store(format!(
             "failed to prepare source temp dir '{}': {error}",
@@ -688,12 +706,16 @@ fn execute_source_recipe(
         .materialize(&OriginContext {
             temp_root: temp_root.as_path(),
             local_root,
-        })
-    {
+        }) {
         Ok(path) => path,
         Err(error) => {
             cleanup_source_temp_dir(&temp_root, logger.as_ref());
-            log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", error.to_string());
+            log_runtime_event(
+                logger.as_ref(),
+                BuildLogLevel::Error,
+                "fail",
+                error.to_string(),
+            );
             return Err(RuntimeError::Build(error));
         }
     };
@@ -711,8 +733,14 @@ fn execute_source_recipe(
             staged_path.display()
         ))
     })?;
-    if actual_hash != recipe.object_hash {
+    let imported_hash = import_object(layout, &staged_path).map_err(|error| {
         cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        map_store_error(error)
+    })?;
+    cleanup_source_temp_dir(&temp_root, logger.as_ref());
+    debug_assert_eq!(imported_hash, actual_hash);
+
+    if actual_hash != recipe.object_hash {
         let message = format!(
             "source '{}' materialized unexpected object hash: expected {}, got {}",
             recipe.name, recipe.object_hash, actual_hash
@@ -720,13 +748,6 @@ fn execute_source_recipe(
         log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
         return Err(RuntimeError::Build(message));
     }
-
-    let imported_hash = import_object(layout, &staged_path).map_err(|error| {
-        cleanup_source_temp_dir(&temp_root, logger.as_ref());
-        map_store_error(error)
-    })?;
-    cleanup_source_temp_dir(&temp_root, logger.as_ref());
-    debug_assert_eq!(imported_hash, recipe.object_hash);
 
     let result = make_source_result_record(
         recipe.object_hash,
@@ -863,7 +884,8 @@ mod tests {
         let root_key = graph.root_key;
         let dep_keys = {
             let mut keys = Vec::new();
-            nodes.get(&root_key)
+            nodes
+                .get(&root_key)
                 .unwrap()
                 .recipe
                 .try_for_each_direct_dep(|dep| {

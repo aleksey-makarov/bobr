@@ -887,8 +887,8 @@ dependencies = [
  "mbuild-binary",
  "mbuild-compose",
  "mbuild-core",
- "mbuild-fetch",
  "mbuild-image",
+ "mbuild-origin-http",
  "mbuild-text",
  "mbuild-tree",
  "mockito",
@@ -938,24 +938,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mbuild-fetch"
-version = "0.1.0"
-dependencies = [
- "bzip2",
- "flate2",
- "mbuild-core",
- "md5",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
- "xz2",
- "zip",
-]
-
-[[package]]
 name = "mbuild-image"
 version = "0.1.0"
 dependencies = [
@@ -968,6 +950,23 @@ dependencies = [
  "tar",
  "tempfile",
  "ureq",
+]
+
+[[package]]
+name = "mbuild-origin-http"
+version = "0.1.0"
+dependencies = [
+ "bzip2",
+ "flate2",
+ "fsobj-hash",
+ "mbuild-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "xz2",
+ "zip",
 ]
 
 [[package]]
@@ -989,12 +988,6 @@ dependencies = [
  "serde_json",
  "tempfile",
 ]
-
-[[package]]
-name = "md5"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "memchr"

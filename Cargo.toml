@@ -4,7 +4,7 @@ members = [
   "mbuild-core",
   "mbuild-compose",
   "mbuild-binary",
-  "mbuild-fetch",
+  "mbuild-origin-http",
   "mbuild-image",
   "mbuild-text",
   "mbuild-tree",

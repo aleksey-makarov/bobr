@@ -60,10 +60,7 @@ fn normalize_request(recipe: &Value) -> Value {
                 .get("object_hash")
                 .cloned()
                 .expect("source recipe node must have object_hash");
-            let meta = object
-                .get("meta")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
+            let meta = object.get("meta").cloned().unwrap_or_else(|| json!({}));
             let mut source_node = serde_json::Map::new();
             source_node.insert("name".to_string(), name);
             source_node.insert("tag".to_string(), tag);
@@ -324,16 +321,17 @@ pub fn script_recipe() -> Value {
 }
 
 pub fn source_recipe(url: &str, source_hash: &str) -> Value {
-    recipe_node(
-        "source",
-        "Fetch",
-        json!({
+    json!({
+        "name": "source",
+        "tag": "Source",
+        "object_hash": source_hash,
+        "origin": {
+            "type": "http",
             "url": url,
-            "hash": source_hash,
             "unpack": true,
-        }),
-        json!({}),
-    )
+        },
+        "meta": {}
+    })
 }
 
 pub fn default_binary_steps() -> Value {

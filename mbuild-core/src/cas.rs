@@ -948,10 +948,7 @@ fn build_json_value(
     result_json_value(result_id, created_at, object_hash, meta_hash, inputs, meta)
 }
 
-fn parse_result_record_value(
-    result_id: ResultId,
-    value: &Value,
-) -> Result<ResultRecord, CasError> {
+fn parse_result_record_value(result_id: ResultId, value: &Value) -> Result<ResultRecord, CasError> {
     let object = value.as_object().ok_or_else(|| {
         CasError::Serialization("result record root must be a JSON object".to_string())
     })?;
@@ -1646,7 +1643,9 @@ mod tests {
         .unwrap();
 
         let build_ref_path = layout.builds.join(published.build_key.to_hex());
-        let result_path = layout.results.join(format!("{}.json", published.result_id.to_hex()));
+        let result_path = layout
+            .results
+            .join(format!("{}.json", published.result_id.to_hex()));
         assert!(build_ref_path.exists());
         assert!(result_path.exists());
         assert_eq!(
@@ -1900,8 +1899,8 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "producer-b".to_string(),
-                build_key: build_key_for("Fetch", json!({ "kind": "build-script" }), &[]),
-                reuse_key: reuse_key_for("Fetch", json!({ "kind": "build-script" }), &[]),
+                build_key: build_key_for("Binary", json!({ "kind": "build-script" }), &[]),
+                reuse_key: reuse_key_for("Binary", json!({ "kind": "build-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
@@ -2008,7 +2007,11 @@ mod tests {
             json!({ "kind": "build-script", "source": "hello" }),
             &[],
         );
-        let reuse_key = reuse_key_for("Text", json!({ "kind": "build-script", "source": "hello" }), &[]);
+        let reuse_key = reuse_key_for(
+            "Text",
+            json!({ "kind": "build-script", "source": "hello" }),
+            &[],
+        );
         let first = publish_output(
             &layout,
             PublishOutputRequest {
@@ -2192,8 +2195,8 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "tree".to_string(),
-                build_key: build_key_for("Fetch", json!({ "kind": "source-tree" }), &[]),
-                reuse_key: reuse_key_for("Fetch", json!({ "kind": "source-tree" }), &[]),
+                build_key: build_key_for("Tree", json!({ "kind": "source-tree" }), &[]),
+                reuse_key: reuse_key_for("Tree", json!({ "kind": "source-tree" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: stage_dir,
                 inputs: vec![],

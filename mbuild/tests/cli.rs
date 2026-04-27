@@ -148,7 +148,10 @@ fn cli_reports_invalid_json_recipe() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
-    assert!(stderr.contains("failed to decode recipe JSON value"), "{stderr}");
+    assert!(
+        stderr.contains("failed to decode recipe JSON value"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -220,7 +223,10 @@ fn cli_reports_relative_store_path() {
 
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("$.paths.store: expected absolute path"), "{stderr}");
+    assert!(
+        stderr.contains("$.paths.store: expected absolute path"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -262,7 +268,10 @@ fn cli_reports_relative_local_path() {
 
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("$.paths.local: expected absolute path"), "{stderr}");
+    assert!(
+        stderr.contains("$.paths.local: expected absolute path"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -302,7 +311,10 @@ fn cli_reports_missing_local_only_when_source_path_materializes() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[build-failed]"), "{stderr}");
-    assert!(stderr.contains("missing local path base for source origin"), "{stderr}");
+    assert!(
+        stderr.contains("missing local path base for source origin"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -339,7 +351,10 @@ fn cli_reports_missing_store_directory() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
-    assert!(stderr.contains("does not exist or is not accessible"), "{stderr}");
+    assert!(
+        stderr.contains("does not exist or is not accessible"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -368,5 +383,8 @@ fn cli_reports_unknown_input_slot() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
-    assert!(stderr.contains("does not accept extra input 'unexpected'"), "{stderr}");
+    assert!(
+        stderr.contains("does not accept extra input 'unexpected'"),
+        "{stderr}"
+    );
 }
