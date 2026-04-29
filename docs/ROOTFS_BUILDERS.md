@@ -2,10 +2,11 @@
 
 ## Summary
 
-`mbuild` currently implements two filesystem-related builders:
+`mbuild` currently implements three filesystem-related builders:
 
 - `Tree`: realize text files, symlinks, and explicit directories as one file object or
   one installable directory object
+- `Rootfs`: compose installable directory objects into one rootfs directory object
 - `Ext4Rootfs`: compose installable directory objects into one ext4 rootfs image
 
 `Tree` is a direct authoring path:
@@ -17,14 +18,15 @@
 - it publishes either one file object or one directory object, depending on the
   tree shape
 
-`Ext4Rootfs` is a direct composition path:
+`Rootfs` and `Ext4Rootfs` are direct composition paths:
 
 - the builder reads installable directory objects from the store
 - it applies install rules from each input's `meta.install`
 - it merges those filesystem contributions in memory
-- it writes one ext4 image file directly as the realized result
+- `Rootfs` writes one staged directory object as the realized result
+- `Ext4Rootfs` writes one ext4 image file directly as the realized result
 
-There is no intermediate composed directory object published to the store.
+`Rootfs` is the directory-producing counterpart to `Ext4Rootfs`.
 
 ## `Tree`
 
@@ -94,6 +96,41 @@ Current limitations:
 - tree entries currently support only UTF-8 text files, symlinks, and explicit directories
 - binary files and richer file mode control are not yet supported
 
+## `Rootfs`
+
+`Rootfs` accepts this config:
+
+```json
+{}
+```
+
+Inputs:
+
+- one or more named installable directory inputs
+- contribution order follows lexical input name order
+
+Current behavior:
+
+- requires every input to resolve to a directory object
+- requires every input to carry valid `meta.install.rules`
+- scans files, directories, and symlinks from all inputs
+- resolves install attributes per path using full coverage and field-wise last-match-wins semantics
+- merges all filesystem contributions with the same strict conflict checking as `Ext4Rootfs`
+- writes one staged directory object from the merged filesystem state
+
+Physical materialization:
+
+- directories are created as needed
+- symlinks are recreated with the same target
+- regular files are hardlinked from their source object when possible
+- when hardlinking is not supported or not permitted, regular file bytes are copied
+- target `uid`, `gid`, and mode values are not applied with `chown` or `chmod`
+- the source executable bit remains the physical filesystem identity for regular files
+
+The realized result payload is one directory object. The current realized result metadata is empty:
+
+- `{}`
+
 ## `Ext4Rootfs`
 
 `Ext4Rootfs` accepts this config:
@@ -148,7 +185,7 @@ The current realized result metadata is empty:
 
 ## Current Limitations
 
-`Ext4Rootfs` currently supports only filesystem content already supported by the object store:
+`Rootfs` and `Ext4Rootfs` currently support only filesystem content already supported by the object store:
 
 - regular files
 - directories
@@ -158,4 +195,6 @@ Current limitations:
 
 - special files such as block devices, character devices, FIFOs, and sockets are not supported
 - the ext4 image size must be provided explicitly through `size_mib`
+- `Rootfs` does not support a base input or replacement/overlay semantics
+- `Rootfs` does not physically apply target ownership or modes
 - the builder does not yet serve as the backend for `Image`; OCI-based composition remains a separate path

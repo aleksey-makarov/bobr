@@ -25,6 +25,11 @@ use support::{
 };
 use tempfile::tempdir;
 
+#[test]
+fn registered_builders_include_rootfs() {
+    assert!(mbuild::builders::supported_builder_tags().contains(&"Rootfs"));
+}
+
 fn source_recipe_node(name: &str, object_hash: &str, origin_path: &str, mode: &str) -> Value {
     json!({
         "name": name,
@@ -794,6 +799,41 @@ fn tree_symlink_recipe_builds_successfully_via_runtime() {
         Path::new("/proc/self/mounts")
     );
     assert!(published.build.meta.get("install").is_some());
+}
+
+#[test]
+fn rootfs_recipe_builds_directory_with_empty_metadata_and_reuses_result() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("rootfs.json");
+    let recipe = recipe_node(
+        "rootfs",
+        "Rootfs",
+        json!({}),
+        json!({
+            "tree": tree_directory_recipe("runtime-tree"),
+        }),
+    );
+    write_recipe(&recipe_path, &recipe);
+
+    let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+
+    assert_eq!(first.build_key, second.build_key);
+    assert_eq!(first.result_id, second.result_id);
+    assert_eq!(first.object_hash, second.object_hash);
+
+    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let published = load_build_handle(&layout, first.build_key.expect("builder root"))
+        .unwrap()
+        .expect("expected Rootfs Build to exist in store");
+
+    assert!(published.object_path.is_dir());
+    assert!(published.build.meta.is_empty());
+    assert_eq!(
+        fs::read_to_string(published.object_path.join("etc/hostname")).unwrap(),
+        "mbuild\n"
+    );
+    assert!(published.object_path.join("dev").is_dir());
 }
 
 #[test]

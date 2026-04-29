@@ -58,6 +58,10 @@ pub struct Ext4RootfsConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RootfsConfig {}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InstallMeta {
     rules: Vec<InstallRule>,
 }
@@ -129,9 +133,17 @@ struct RootManifest {
 }
 
 pub struct Ext4RootfsBuilder;
+pub struct RootfsBuilder;
 
 static EXT4_ROOTFS_SPEC: BuilderSpec = BuilderSpec {
     tag: "Ext4Rootfs",
+    required_inputs: &[],
+    optional_inputs: &[],
+    allow_extra_inputs: true,
+};
+
+static ROOTFS_SPEC: BuilderSpec = BuilderSpec {
+    tag: "Rootfs",
     required_inputs: &[],
     optional_inputs: &[],
     allow_extra_inputs: true,
@@ -167,17 +179,7 @@ impl TypedBuilder for Ext4RootfsBuilder {
             format!("composing {} install tree input(s)", trees.len()),
         );
 
-        let mut all_contributions = Vec::new();
-        for (index, input) in trees.iter().enumerate() {
-            validate_input_tree(index, input).map_err(map_error)?;
-            let install = parse_install_meta(input).map_err(map_error)?;
-            let compiled = compile_install_rules(&install.rules).map_err(map_error)?;
-            let contribution =
-                scan_install_tree(&input.object_path, &compiled).map_err(map_error)?;
-            all_contributions.extend(contribution);
-        }
-
-        let manifest = merge_contributions(all_contributions).map_err(map_error)?;
+        let manifest = compose_install_manifest(&trees).map_err(map_error)?;
         let output_path = cx.temp_dir.join(OUTPUT_FILE_NAME);
         cx.log_event(
             BuildLogLevel::Info,
@@ -185,6 +187,51 @@ impl TypedBuilder for Ext4RootfsBuilder {
             format!("writing ext4 rootfs image '{}'", output_path.display()),
         );
         write_ext4_image(&manifest, &output_path, &config).map_err(map_error)?;
+
+        Ok(StagedBuildResult {
+            meta: Map::new(),
+            staged_path: output_path,
+        })
+    }
+}
+
+impl TypedBuilder for RootfsBuilder {
+    type Config = RootfsConfig;
+
+    fn spec(&self) -> &'static BuilderSpec {
+        &ROOTFS_SPEC
+    }
+
+    fn build_typed(
+        &self,
+        _config: Self::Config,
+        inputs: BuilderInputs,
+        cx: &mut BuildContext,
+    ) -> Result<StagedBuildResult, BuilderError> {
+        let trees = inputs
+            .extras(&ROOTFS_SPEC)
+            .map(|(_, object)| object)
+            .collect::<Vec<_>>();
+        if trees.is_empty() {
+            return Err(map_error(ComposeError::InvalidConfig(
+                "Rootfs builder requires at least one directory input".to_string(),
+            )));
+        }
+
+        cx.log_event(
+            BuildLogLevel::Info,
+            "prepare",
+            format!("composing {} install tree input(s)", trees.len()),
+        );
+
+        let manifest = compose_install_manifest(&trees).map_err(map_error)?;
+        let output_path = cx.temp_dir.join("rootfs");
+        cx.log_event(
+            BuildLogLevel::Info,
+            "materialize",
+            format!("writing rootfs directory '{}'", output_path.display()),
+        );
+        materialize_rootfs_directory(&manifest, &output_path).map_err(map_error)?;
 
         Ok(StagedBuildResult {
             meta: Map::new(),
@@ -207,6 +254,19 @@ fn validate_config(config: &Ext4RootfsConfig) -> CResult<()> {
         ));
     }
     Ok(())
+}
+
+fn compose_install_manifest(trees: &[&BuilderInputObject]) -> CResult<RootManifest> {
+    let mut all_contributions = Vec::new();
+    for (index, input) in trees.iter().enumerate() {
+        validate_input_tree(index, input)?;
+        let install = parse_install_meta(input)?;
+        let compiled = compile_install_rules(&install.rules)?;
+        let contribution = scan_install_tree(&input.object_path, &compiled)?;
+        all_contributions.extend(contribution);
+    }
+
+    merge_contributions(all_contributions)
 }
 
 fn validate_input_tree(index: usize, input: &BuilderInputObject) -> CResult<()> {
@@ -744,6 +804,112 @@ fn append_symlink<W: Write>(
         })
 }
 
+fn materialize_rootfs_directory(manifest: &RootManifest, output_path: &Path) -> CResult<()> {
+    fs::create_dir_all(output_path).map_err(|error| {
+        ComposeError::FsFailed(format!(
+            "failed to create rootfs directory '{}': {error}",
+            output_path.display()
+        ))
+    })?;
+
+    for entry in &manifest.entries {
+        if entry.rel_path.is_empty() {
+            continue;
+        }
+
+        let destination = output_path.join(&entry.rel_path);
+        match &entry.kind {
+            EntryKind::Directory => {
+                fs::create_dir_all(&destination).map_err(|error| {
+                    ComposeError::FsFailed(format!(
+                        "failed to create rootfs directory '{}': {error}",
+                        destination.display()
+                    ))
+                })?;
+            }
+            EntryKind::File { source_path, .. } => {
+                ensure_parent_dir(&destination)?;
+                materialize_regular_file_with_linker(source_path, &destination, |src, dst| {
+                    fs::hard_link(src, dst)
+                })?;
+            }
+            EntryKind::Symlink { target } => {
+                ensure_parent_dir(&destination)?;
+                create_symlink(target, &destination)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn materialize_regular_file_with_linker<F>(
+    source_path: &Path,
+    destination: &Path,
+    hard_link: F,
+) -> CResult<()>
+where
+    F: FnOnce(&Path, &Path) -> io::Result<()>,
+{
+    match hard_link(source_path, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if can_copy_after_hardlink_error(&error) => {
+            fs::copy(source_path, destination).map(|_| ()).map_err(|copy_error| {
+                ComposeError::FsFailed(format!(
+                    "failed to copy rootfs file '{}' to '{}' after hardlink failed ({error}): {copy_error}",
+                    source_path.display(),
+                    destination.display()
+                ))
+            })
+        }
+        Err(error) => Err(ComposeError::FsFailed(format!(
+            "failed to hardlink rootfs file '{}' to '{}': {error}",
+            source_path.display(),
+            destination.display()
+        ))),
+    }
+}
+
+fn can_copy_after_hardlink_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::CrossesDevices
+            | io::ErrorKind::PermissionDenied
+            | io::ErrorKind::Unsupported
+            | io::ErrorKind::TooManyLinks
+    )
+}
+
+fn ensure_parent_dir(path: &Path) -> CResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            ComposeError::FsFailed(format!(
+                "failed to create parent directory '{}': {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink(target: &Path, path: &Path) -> CResult<()> {
+    std::os::unix::fs::symlink(target, path).map_err(|error| {
+        ComposeError::FsFailed(format!(
+            "failed to create rootfs symlink '{}' -> '{}': {error}",
+            path.display(),
+            target.display()
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn create_symlink(_target: &Path, _path: &Path) -> CResult<()> {
+    Err(ComposeError::FsFailed(
+        "Rootfs symlink materialization is only supported on unix platforms".to_string(),
+    ))
+}
+
 fn read_pipe_to_string(pipe: impl io::Read) -> io::Result<String> {
     let mut reader = io::BufReader::new(pipe);
     let mut out = String::new();
@@ -771,7 +937,7 @@ mod tests {
     use mbuild_core::BuildContext;
     use serde_json::{Value, json};
     #[cfg(unix)]
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use tempfile::tempdir;
 
     fn test_context(base: &Path) -> BuildContext {
@@ -947,6 +1113,149 @@ mod tests {
             },
         ];
         assert!(merge_contributions(mismatch).is_err());
+    }
+
+    #[test]
+    fn merge_rejects_file_directory_and_symlink_conflicts() {
+        let file_dir = vec![
+            ContributionEntry {
+                rel_path: "bin".to_string(),
+                kind: EntryKind::File {
+                    source_path: PathBuf::from("/tmp/file"),
+                    executable: false,
+                },
+                mode: 0o644,
+                uid: 0,
+                gid: 0,
+            },
+            ContributionEntry {
+                rel_path: "bin".to_string(),
+                kind: EntryKind::Directory,
+                mode: 0o755,
+                uid: 0,
+                gid: 0,
+            },
+        ];
+        assert!(merge_contributions(file_dir).is_err());
+
+        let symlinks = vec![
+            ContributionEntry {
+                rel_path: "lib".to_string(),
+                kind: EntryKind::Symlink {
+                    target: PathBuf::from("usr/lib"),
+                },
+                mode: 0o777,
+                uid: 0,
+                gid: 0,
+            },
+            ContributionEntry {
+                rel_path: "lib".to_string(),
+                kind: EntryKind::Symlink {
+                    target: PathBuf::from("lib64"),
+                },
+                mode: 0o777,
+                uid: 0,
+                gid: 0,
+            },
+        ];
+        assert!(merge_contributions(symlinks).is_err());
+    }
+
+    #[test]
+    fn rootfs_builder_rejects_empty_inputs() {
+        let temp = tempdir().unwrap();
+        let mut cx = test_context(temp.path());
+        let error = RootfsBuilder
+            .build_typed(RootfsConfig {}, BuilderInputs::empty(), &mut cx)
+            .unwrap_err();
+        assert!(error.to_string().contains("at least one directory input"));
+    }
+
+    #[test]
+    fn rootfs_builder_rejects_non_directory_input() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("payload");
+        fs::write(&file, b"payload\n").unwrap();
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert("in000", builder_input(file, install_meta_with_overrides()));
+
+        let mut cx = test_context(temp.path());
+        let error = RootfsBuilder
+            .build_typed(RootfsConfig {}, inputs, &mut cx)
+            .unwrap_err();
+        assert!(error.to_string().contains("must resolve to a directory"));
+    }
+
+    #[test]
+    fn rootfs_builder_rejects_missing_install_metadata() {
+        let temp = tempdir().unwrap();
+        let tree = temp.path().join("tree");
+        fs::create_dir_all(&tree).unwrap();
+        fs::write(tree.join("file"), b"payload\n").unwrap();
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert("in000", builder_input(tree, Map::new()));
+
+        let mut cx = test_context(temp.path());
+        let error = RootfsBuilder
+            .build_typed(RootfsConfig {}, inputs, &mut cx)
+            .unwrap_err();
+        assert!(error.to_string().contains("missing meta.install"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rootfs_builder_materializes_directory_files_and_symlinks() {
+        let temp = tempdir().unwrap();
+        let tree = temp.path().join("tree");
+        fs::create_dir_all(tree.join("bin")).unwrap();
+        fs::write(tree.join("bin/tool"), b"hello\n").unwrap();
+        let mut perms = fs::metadata(tree.join("bin/tool")).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(tree.join("bin/tool"), perms).unwrap();
+        symlink("tool", tree.join("bin/tool-link")).unwrap();
+
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert(
+            "pkg",
+            builder_input(tree.clone(), install_meta_with_overrides()),
+        );
+
+        let mut cx = test_context(temp.path());
+        let result = RootfsBuilder
+            .build_typed(RootfsConfig {}, inputs, &mut cx)
+            .unwrap();
+
+        assert_eq!(result.meta, Map::new());
+        assert!(result.staged_path.is_dir());
+        assert!(result.staged_path.join("bin").is_dir());
+        assert_eq!(
+            fs::read_to_string(result.staged_path.join("bin/tool")).unwrap(),
+            "hello\n"
+        );
+        assert_eq!(
+            fs::read_link(result.staged_path.join("bin/tool-link")).unwrap(),
+            Path::new("tool")
+        );
+
+        let source_meta = fs::metadata(tree.join("bin/tool")).unwrap();
+        let output_meta = fs::metadata(result.staged_path.join("bin/tool")).unwrap();
+        assert_eq!(source_meta.dev(), output_meta.dev());
+        assert_eq!(source_meta.ino(), output_meta.ino());
+    }
+
+    #[test]
+    fn rootfs_file_materialization_copies_when_hardlink_fallback_is_valid() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::write(&source, b"copy fallback\n").unwrap();
+
+        materialize_regular_file_with_linker(&source, &destination, |_, _| {
+            Err(io::Error::from(io::ErrorKind::CrossesDevices))
+        })
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(destination).unwrap(), "copy fallback\n");
     }
 
     #[test]
