@@ -28,6 +28,7 @@ use tempfile::tempdir;
 #[test]
 fn registered_builders_include_rootfs() {
     assert!(mbuild::builders::supported_builder_tags().contains(&"Rootfs"));
+    assert!(mbuild::builders::supported_builder_tags().contains(&"Container"));
 }
 
 fn source_recipe_node(name: &str, object_hash: &str, origin_path: &str, mode: &str) -> Value {
@@ -61,12 +62,49 @@ fn install_fake_podman(dir: &Path) {
     }
 }
 
+fn install_fake_bwrap(dir: &Path) {
+    let script_path = dir.join("bwrap");
+    let script = include_str!("assets/fake_bwrap_full.sh");
+    fs::write(&script_path, script).unwrap();
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).unwrap();
+    }
+}
+
 fn with_fake_podman<T>(f: impl FnOnce() -> T) -> T {
     let _guard = env_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let temp = tempdir().unwrap();
     install_fake_podman(temp.path());
+    let previous_path = env::var_os("PATH");
+    let new_path = match &previous_path {
+        Some(existing) => {
+            let mut joined = temp.path().as_os_str().to_os_string();
+            joined.push(":");
+            joined.push(existing);
+            joined
+        }
+        None => temp.path().as_os_str().to_os_string(),
+    };
+    unsafe { env::set_var("PATH", &new_path) };
+    let result = f();
+    match previous_path {
+        Some(path) => unsafe { env::set_var("PATH", path) },
+        None => unsafe { env::remove_var("PATH") },
+    }
+    result
+}
+
+fn with_fake_bwrap<T>(f: impl FnOnce() -> T) -> T {
+    let _guard = env_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temp = tempdir().unwrap();
+    install_fake_bwrap(temp.path());
     let previous_path = env::var_os("PATH");
     let new_path = match &previous_path {
         Some(existing) => {
@@ -834,6 +872,52 @@ fn rootfs_recipe_builds_directory_with_empty_metadata_and_reuses_result() {
         "mbuild\n"
     );
     assert!(published.object_path.join("dev").is_dir());
+}
+
+#[test]
+fn container_recipe_uses_rootfs_result_with_fake_bwrap() {
+    with_fake_bwrap(|| {
+        let workspace = tempdir().unwrap();
+        let rootfs = recipe_node(
+            "rootfs",
+            "Rootfs",
+            json!({}),
+            json!({
+                "tree": tree_directory_recipe("runtime-tree"),
+            }),
+        );
+        let recipe = recipe_node(
+            "container",
+            "Container",
+            json!({
+                "steps": [{
+                    "name": "install",
+                    "run_as": "root",
+                    "cwd": "@{build}",
+                    "argv": ["@{script}", "install"]
+                }]
+            }),
+            json!({
+                "rootfs": rootfs,
+                "script": script_recipe(),
+            }),
+        );
+        let recipe_path = workspace.path().join("container.json");
+        write_recipe(&recipe_path, &recipe);
+
+        let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+        let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+        let published = load_build_handle(&layout, build.build_key.expect("builder root"))
+            .unwrap()
+            .expect("expected Container Build to exist in store");
+
+        assert!(published.object_path.is_dir());
+        assert!(published.build.meta.get("install").is_some());
+        assert_eq!(
+            fs::read_to_string(published.object_path.join("container-steps.txt")).unwrap(),
+            "install\n"
+        );
+    });
 }
 
 #[test]

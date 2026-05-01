@@ -9,26 +9,36 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
+mod container;
+
+pub use container::ContainerBuilder;
+
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 #[cfg(unix)]
 unsafe extern "C" {
     fn geteuid() -> u32;
     fn getegid() -> u32;
 }
 
-const BUILD_DIR_NAME: &str = "build";
-const OUTPUT_DIR_NAME: &str = "out";
-const CONFIG_DIR_NAME: &str = "config";
-const INPUT_MOUNT_ROOT: &str = "/__mbuild/inputs";
-const CONFIG_MOUNT_PATH: &str = "/__mbuild/config";
-const CONFIG_ENV_VAR: &str = "MBUILD_CONFIG_DIR";
-const BUILD_DIR_ENV_VAR: &str = "MBUILD_BUILD_DIR";
-const OUT_DIR_ENV_VAR: &str = "MBUILD_OUT_DIR";
-const STEP_NAME_ENV_VAR: &str = "MBUILD_STEP_NAME";
-const BUILD_DIR_MOUNT_PATH: &str = "/__mbuild/build";
-const OUT_DIR_MOUNT_PATH: &str = "/__mbuild/out";
+pub(crate) const BUILD_DIR_NAME: &str = "build";
+pub(crate) const OUTPUT_DIR_NAME: &str = "out";
+pub(crate) const CONFIG_DIR_NAME: &str = "config";
+pub(crate) const INPUT_MOUNT_ROOT: &str = "/__mbuild/inputs";
+pub(crate) const CONFIG_MOUNT_PATH: &str = "/__mbuild/config";
+pub(crate) const CONFIG_ENV_VAR: &str = "MBUILD_CONFIG_DIR";
+pub(crate) const BUILD_DIR_ENV_VAR: &str = "MBUILD_BUILD_DIR";
+pub(crate) const OUT_DIR_ENV_VAR: &str = "MBUILD_OUT_DIR";
+pub(crate) const STEP_NAME_ENV_VAR: &str = "MBUILD_STEP_NAME";
+pub(crate) const BUILD_DIR_MOUNT_PATH: &str = "/__mbuild/build";
+pub(crate) const OUT_DIR_MOUNT_PATH: &str = "/__mbuild/out";
 
 #[derive(Debug)]
-enum BinaryError {
+pub(crate) enum BinaryError {
     InvalidConfig(String),
     InputResolutionFailed(String),
     PodmanFailed(String),
@@ -54,7 +64,7 @@ impl fmt::Display for BinaryError {
     }
 }
 
-type BResult<T> = Result<T, BinaryError>;
+pub(crate) type BResult<T> = Result<T, BinaryError>;
 
 #[derive(Debug)]
 struct CleanupError {
@@ -66,28 +76,28 @@ struct CleanupError {
 #[serde(deny_unknown_fields)]
 pub struct BinaryConfig {
     #[serde(default)]
-    script_config: Option<Value>,
-    steps: Vec<BuildStep>,
+    pub(crate) script_config: Option<Value>,
+    pub(crate) steps: Vec<BuildStep>,
     #[serde(default)]
-    install: Option<InstallMeta>,
+    pub(crate) install: Option<InstallMeta>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-enum StepUser {
+pub(crate) enum StepUser {
     BuildUser,
     Root,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct BuildStep {
-    name: String,
-    run_as: StepUser,
-    cwd: String,
-    argv: Vec<String>,
+pub(crate) struct BuildStep {
+    pub(crate) name: String,
+    pub(crate) run_as: StepUser,
+    pub(crate) cwd: String,
+    pub(crate) argv: Vec<String>,
     #[serde(default)]
-    env: Map<String, Value>,
+    pub(crate) env: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -134,7 +144,7 @@ struct ContainerInstance {
 
 pub struct BinaryBuilder;
 
-static BINARY_SPEC: BuilderSpec = BuilderSpec {
+pub(crate) static BINARY_SPEC: BuilderSpec = BuilderSpec {
     tag: "Binary",
     required_inputs: &["image"],
     optional_inputs: &[],
@@ -156,7 +166,8 @@ impl TypedBuilder for BinaryBuilder {
     ) -> Result<StagedBuildResult, BuilderError> {
         validate_config(&config).map_err(map_error)?;
         let image = inputs.required("image")?;
-        let named_inputs = collect_named_inputs(&inputs).map_err(map_error)?;
+        let named_inputs =
+            collect_named_inputs(&BINARY_SPEC, "Binary", &inputs).map_err(map_error)?;
         validate_step_interpolations(&config.steps, &named_inputs).map_err(map_error)?;
 
         let output_path = cx.temp_dir.join(OUTPUT_DIR_NAME);
@@ -217,7 +228,7 @@ impl TypedBuilder for BinaryBuilder {
     }
 }
 
-fn validate_config(config: &BinaryConfig) -> BResult<()> {
+pub(crate) fn validate_config(config: &BinaryConfig) -> BResult<()> {
     validate_script_config(config.script_config.as_ref())?;
     validate_steps(&config.steps)?;
     validate_install(config.install.as_ref())?;
@@ -283,7 +294,7 @@ fn validate_install(install: Option<&InstallMeta>) -> BResult<()> {
     Ok(())
 }
 
-fn default_install_meta() -> InstallMeta {
+pub(crate) fn default_install_meta() -> InstallMeta {
     InstallMeta {
         rules: vec![InstallRule {
             path: "**".to_string(),
@@ -319,17 +330,21 @@ fn validate_input_name(name: &str) -> BResult<()> {
     Ok(())
 }
 
-fn input_mount_path(name: &str) -> String {
+pub(crate) fn input_mount_path(name: &str) -> String {
     format!("{INPUT_MOUNT_ROOT}/{name}")
 }
 
-fn collect_named_inputs(inputs: &BuilderInputs) -> BResult<Vec<(String, BuilderInputObject)>> {
+pub(crate) fn collect_named_inputs(
+    spec: &BuilderSpec,
+    builder_name: &str,
+    inputs: &BuilderInputs,
+) -> BResult<Vec<(String, BuilderInputObject)>> {
     let mut named = Vec::new();
-    for (name, object) in inputs.extras(&BINARY_SPEC) {
+    for (name, object) in inputs.extras(spec) {
         validate_input_name(name)?;
         if matches!(name, "build" | "out" | "config") {
             return Err(BinaryError::InvalidConfig(format!(
-                "input name '{name}' conflicts with a reserved Binary interpolation variable"
+                "input name '{name}' conflicts with a reserved {builder_name} interpolation variable"
             )));
         }
         named.push((name.to_string(), object.clone()));
@@ -527,7 +542,7 @@ fn run_container_build(
     }
 }
 
-fn current_uid_gid() -> (u32, u32) {
+pub(crate) fn current_uid_gid() -> (u32, u32) {
     #[cfg(unix)]
     unsafe {
         (geteuid(), getegid())
@@ -630,7 +645,10 @@ fn interpolation_value(key: &str, inputs: &[(String, BuilderInputObject)]) -> BR
     }
 }
 
-fn resolve_step_cwd(step: &BuildStep, inputs: &[(String, BuilderInputObject)]) -> BResult<String> {
+pub(crate) fn resolve_step_cwd(
+    step: &BuildStep,
+    inputs: &[(String, BuilderInputObject)],
+) -> BResult<String> {
     let cwd = interpolate_step_string(&step.cwd, inputs)?;
     if cwd.is_empty() || !cwd.starts_with('/') {
         return Err(BinaryError::InvalidConfig(format!(
@@ -641,7 +659,7 @@ fn resolve_step_cwd(step: &BuildStep, inputs: &[(String, BuilderInputObject)]) -
     Ok(cwd)
 }
 
-fn resolve_step_argv(
+pub(crate) fn resolve_step_argv(
     step: &BuildStep,
     inputs: &[(String, BuilderInputObject)],
 ) -> BResult<Vec<String>> {
@@ -651,7 +669,7 @@ fn resolve_step_argv(
         .collect()
 }
 
-fn resolve_step_env(
+pub(crate) fn resolve_step_env(
     step: &BuildStep,
     inputs: &[(String, BuilderInputObject)],
 ) -> BResult<Vec<(String, String)>> {
@@ -668,7 +686,7 @@ fn resolve_step_env(
     Ok(rendered)
 }
 
-fn validate_step_interpolations(
+pub(crate) fn validate_step_interpolations(
     steps: &[BuildStep],
     inputs: &[(String, BuilderInputObject)],
 ) -> BResult<()> {
@@ -1080,7 +1098,7 @@ fn log_cleanup_warning(
     );
 }
 
-fn command_failure(
+pub(crate) fn command_failure(
     log_tag: &str,
     command_name: &str,
     output: &std::process::Output,
@@ -1102,7 +1120,7 @@ fn command_failure(
     }
 }
 
-fn write_command_log(
+pub(crate) fn write_command_log(
     cx: &BuildContext,
     log_tag: &str,
     image_ref: &str,
@@ -1134,7 +1152,7 @@ fn write_command_log(
     cx.write_raw_log(log_tag, &log_content)
 }
 
-fn command_details(output: &std::process::Output) -> String {
+pub(crate) fn command_details(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     match (stdout.is_empty(), stderr.is_empty()) {
@@ -1145,11 +1163,11 @@ fn command_details(output: &std::process::Output) -> String {
     }
 }
 
-fn map_fsutil_error(error: fsutil::FsUtilError) -> BinaryError {
+pub(crate) fn map_fsutil_error(error: fsutil::FsUtilError) -> BinaryError {
     BinaryError::FsFailed(error.to_string())
 }
 
-fn map_error(error: BinaryError) -> BuilderError {
+pub(crate) fn map_error(error: BinaryError) -> BuilderError {
     match error {
         BinaryError::InvalidConfig(message) => BuilderError::InvalidRecipe(message),
         BinaryError::InputResolutionFailed(message)
@@ -1204,7 +1222,7 @@ fn validate_script_config_key(key: &str, path: &str) -> BResult<()> {
     Ok(())
 }
 
-fn write_script_config(root: &Path, value: Option<&Value>) -> BResult<()> {
+pub(crate) fn write_script_config(root: &Path, value: Option<&Value>) -> BResult<()> {
     match value {
         None | Some(Value::Null) => Ok(()),
         Some(value) => write_script_config_node(root, value, "<root>"),
@@ -1249,12 +1267,11 @@ mod tests {
     use std::env;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
     fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::test_env_lock()
     }
 
     fn build_context(root: &Path) -> BuildContext {

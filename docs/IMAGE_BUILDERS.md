@@ -14,12 +14,16 @@ The current image path has two builders plus one `Source` origin:
 - `Binary`: execute an explicit step plan inside an OCI image layout input by
   loading the OCI layout into `podman` and then running ordered commands
   inside one long-lived container
+- `Container`: execute the same explicit step plan contract against a rootfs
+  directory input with `bwrap`
 
 This means:
 
 - the store, not the local `podman` image store, is the source of truth for
   imported and built image contents
 - `podman` is still part of the current execution path for `Binary`
+- `Container` does not consume an OCI image; it consumes a directory rootfs
+  object and runs one `bwrap` process per configured step
 - file-composition conflict detection is not yet part of the `Image` builder
 
 ## `Source/oci-registry`
@@ -109,7 +113,62 @@ The current realized result metadata contains:
 
 - `manifest_digest`: the digest of the newly written OCI manifest blob
 
-## `Binary` With An OCI Image Layout
+## Step Executors
+
+`Binary` and `Container` share the same config shape:
+
+- `steps`: a non-empty ordered list of execution steps
+- `script_config`: optional structured string payload serialized into
+  `/__mbuild/config`
+- `install`: optional install metadata for the published directory output
+
+Each step contains:
+
+- `name`
+- `run_as`
+- `cwd`
+- `argv`
+- optional `env`
+
+Both builders perform controlled interpolation in `cwd`, `argv`, and step-local
+environment values. Supported variables are:
+
+- `@{config}`
+- `@{build}`
+- `@{out}`
+- any named input placeholder such as `@{script}`, `@{source}`, `@{patch}`
+
+Use `@@{name}` to emit the literal text `@{name}` without interpolation.
+Legacy shell-style `${...}` remains plain text and is not interpreted by the
+builder.
+
+Interpolation is a simple path substitution:
+
+- no shell parsing
+- no word splitting
+- no globbing
+- no command substitution
+- unknown variables are rejected as invalid builder config
+
+The runtime does not assign package semantics to step names. Build-system
+knowledge lives in script libraries and recipe helpers. Common recipe helpers
+may still synthesize default step sequences such as:
+
+- `configure`
+- `build`
+- `install`
+- `post_install`
+
+but these are authoring conventions, not special runtime phases.
+
+Whether a build uses an out-of-tree build directory is a property of the
+selected build script:
+
+- `meson` uses `MBUILD_BUILD_DIR`
+- `gnu-make` builds in-tree by default
+- `autotools` builds out-of-tree by default and can opt out via script config
+
+### `Binary` With An OCI Image Layout
 
 `Binary` executes against an OCI image layout input in two stages:
 
@@ -176,14 +235,6 @@ inside the container lifecycle, not host bind mounts.
 }
 ```
 
-Each step contains:
-
-- `name`
-- `run_as`
-- `cwd`
-- `argv`
-- optional `env`
-
 `Binary` interprets only execution mechanics:
 
 - `run_as=build-user` executes as the container default user inside
@@ -191,26 +242,6 @@ Each step contains:
 - `run_as=root` executes as `--user 0:0`
 - steps run strictly in order
 - the build stops at the first failed step
-
-`Binary` performs controlled interpolation in `cwd`, `argv`, and step-local
-environment values. Supported variables are:
-
-- `@{config}`
-- `@{build}`
-- `@{out}`
-- any named input placeholder such as `@{script}`, `@{source}`, `@{patch}`
-
-Use `@@{name}` to emit the literal text `@{name}` without interpolation.
-Legacy shell-style `${...}` remains plain text and is not interpreted by the
-builder.
-
-Interpolation is a simple path substitution:
-
-- no shell parsing
-- no word splitting
-- no globbing
-- no command substitution
-- unknown variables are rejected as invalid builder config
 
 This means:
 
@@ -220,23 +251,84 @@ This means:
   final successful step
 - live filesystem changes outside `/__mbuild/out` are not published automatically
 
-The runtime does not assign package semantics to step names. Build-system
-knowledge lives in script libraries and recipe helpers. Common recipe helpers
-may still synthesize default step sequences such as:
+### `Container` With A Rootfs Directory
 
-- `configure`
+`Container` executes the same step contract against a rootfs directory object.
+It accepts:
+
+- required `rootfs`: one directory object exposed as a writable overlay under
+  `/`
+- any number of extra named file or directory inputs mounted under
+  `/__mbuild/inputs/<name>`
+
+`Container` does not load or create an OCI image. It starts one `bwrap` process
+per step, in strict step order. The host build temp directory contains:
+
 - `build`
-- `install`
-- `post_install`
+- `out`
+- `config`
+- `rootfs-overlay/upper`
+- `rootfs-overlay/work`
+- `input-overlays/<input-name>/upper`
+- `input-overlays/<input-name>/work`
 
-but these are authoring conventions, not special runtime phases.
+For every step, `Container` creates this sandbox shape:
 
-Whether a build uses an out-of-tree build directory is a property of the
-selected build script:
+- `--unshare-user`
+- `--unshare-pid`
+- `--unshare-net`
+- `--overlay-src <rootfs>`
+- `--overlay <rootfs_upper> <rootfs_work> /`
+- `--proc /proc`
+- `--dev /dev`
+- `--tmpfs /tmp`
+- `--dir /__mbuild`
+- `--dir /__mbuild/inputs`
+- `--ro-bind <config_dir> /__mbuild/config`
+- `--bind <build_dir> /__mbuild/build`
+- `--bind <out_dir> /__mbuild/out`
 
-- `meson` uses `MBUILD_BUILD_DIR`
-- `gnu-make` builds in-tree by default
-- `autotools` builds out-of-tree by default and can opt out via script config
+File inputs are read-only binds:
+
+```text
+--ro-bind <input> /__mbuild/inputs/<name>
+```
+
+Directory inputs use a per-build overlay:
+
+```text
+--overlay-src <input>
+--overlay <upper> <work> /__mbuild/inputs/<name>
+```
+
+The rootfs source store object remains unchanged. The rootfs overlay `upper`
+and `work` directories are reused across all steps of one `Container` build, so
+mutations to `/` are visible to later steps in that same build. Rootfs overlay
+state is temporary build state and is discarded with the build temp directory.
+
+Directory input overlays follow the same lifetime rule. The input source store
+object remains unchanged. The overlay `upper` and `work` directories are reused
+across all steps of one `Container` build, so mutations to a directory input are
+visible to later steps in that same build. The overlay state is temporary build
+state and is discarded with the build temp directory.
+
+`Container` exports the same core environment variables as `Binary`:
+
+- `MBUILD_CONFIG_DIR=/__mbuild/config`
+- `MBUILD_BUILD_DIR=/__mbuild/build`
+- `MBUILD_OUT_DIR=/__mbuild/out`
+- `MBUILD_STEP_NAME=<step name>`
+
+It runs with `--clearenv`, then sets a fixed baseline `PATH`, `HOME`, and
+`USER`, then applies step-local `env` entries after interpolation. Step-local
+entries override baseline values.
+
+`run_as=build-user` runs the bwrap process with the current host uid and gid.
+`run_as=root` runs it as uid `0`, gid `0` inside the user namespace.
+
+The staged result is the host temp `out` directory. It must exist and be a
+directory after all steps complete. Install metadata defaults to the same
+`**` rule used by `Binary` when `install` is omitted.
 
 ## Current Limitations
 
@@ -246,6 +338,8 @@ design.
 In particular:
 
 - `Binary` still depends on `podman load` and `podman`
+- `Container` depends on `bwrap` support for `--overlay-src` and `--overlay`
+- `Container` does not provide a `fuse-overlayfs` fallback
 - `Image` does not compute or persist canonical flattened `contents`
 - `Image` does not implement additive-only file-composition checks
 - `Image` does not reject path conflicts between incoming filesystem tree

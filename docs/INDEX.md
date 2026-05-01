@@ -7,8 +7,8 @@
    bottom-up execution of missing nodes.
 
 2. [IMAGE_BUILDERS.md](./IMAGE_BUILDERS.md)
-   Current behavior of `Source/oci-registry`, `Image`, and `Binary` on the
-   image path.
+   Current behavior of `Source/oci-registry`, `Image`, `Binary`, and
+   `Container` on the image and rootfs-backed execution paths.
 
 3. [ROOTFS_BUILDERS.md](./ROOTFS_BUILDERS.md)
    Current behavior of `Tree`, `Ext4Rootfs`, and the direct filesystem
