@@ -143,6 +143,16 @@ mod tests {
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     }
 
+    fn assert_no_ref_name_annotation(staged: &std::path::Path) {
+        let index: serde_json::Value =
+            serde_json::from_slice(&fs::read(staged.join("index.json")).unwrap()).unwrap();
+        let manifest = &index["manifests"][0];
+        assert!(
+            manifest.get("annotations").is_none(),
+            "registry source index must not include image ref annotations: {index:#}"
+        );
+    }
+
     #[test]
     fn parse_valid_oci_registry_origin() {
         let origin = OciRegistryOriginHandler
@@ -271,6 +281,7 @@ mod tests {
 
         assert!(staged.join("oci-layout").exists());
         assert!(staged.join("index.json").exists());
+        assert_no_ref_name_annotation(&staged);
         assert!(
             staged
                 .join("blobs")

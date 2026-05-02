@@ -53,6 +53,8 @@ Current behavior:
 - downloads the manifest, config blob, and all layer blobs
 - verifies the digest of every downloaded blob
 - writes the result to the staged object path as an OCI image layout directory
+- writes `index.json` without image-ref annotations, so the canonical object is
+  independent of the registry mirror named by `origin.image`
 - stores no image-specific metadata in the canonical `Source` result record
 
 The realized object is a directory with the standard OCI layout shape:

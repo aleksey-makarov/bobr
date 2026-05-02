@@ -210,7 +210,7 @@ pub fn fetch_image_authenticated_with_progress(
         annotations: None,
     };
     progress("writing OCI index");
-    oci::write_index(target_dir, manifest_descriptor, Some(image))?;
+    oci::write_index(target_dir, manifest_descriptor, None)?;
 
     Ok(stored_manifest_digest)
 }
@@ -406,6 +406,20 @@ mod tests {
         })
     }
 
+    fn index_json(path: &Path) -> serde_json::Value {
+        let bytes = std::fs::read(path.join("index.json")).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn assert_no_ref_name_annotation(path: &Path) {
+        let index = index_json(path);
+        let manifest = &index["manifests"][0];
+        assert!(
+            manifest.get("annotations").is_none(),
+            "registry source index must not include image ref annotations: {index:#}"
+        );
+    }
+
     #[test]
     fn parse_image_ref_docker_hub_short() {
         let (host, repo, reference) = parse_image_ref("ubuntu:20.04").unwrap();
@@ -474,7 +488,65 @@ mod tests {
 
         assert!(target.join("oci-layout").exists());
         assert!(target.join("index.json").exists());
+        assert_no_ref_name_annotation(&target);
         assert_eq!(stored_manifest_digest, format!("sha256:{manifest_hex}"));
+    }
+
+    #[test]
+    fn fetch_image_index_is_independent_of_image_ref() {
+        let mut server = Server::new();
+        let (config_digest, layer_digest) = sample_digests();
+        let manifest = sample_manifest(&config_digest, &layer_digest, sample_layer_bytes().len());
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let manifest_hex = format!("{:x}", Sha256::digest(&manifest_bytes));
+        let pinned_digest = format!("sha256:{manifest_hex}");
+
+        let mut mocks = Vec::new();
+        for repo in ["mirror-a/testimage", "mirror-b/testimage"] {
+            let path_manifests = format!("/v2/{repo}/manifests/{pinned_digest}");
+            let path_config = format!("/v2/{repo}/blobs/{config_digest}");
+            let path_layer = format!("/v2/{repo}/blobs/{layer_digest}");
+            mocks.push(
+                server
+                    .mock("GET", path_manifests.as_str())
+                    .with_status(200)
+                    .with_header("Content-Type", oci::MEDIA_TYPE_OCI_MANIFEST)
+                    .with_body(manifest_bytes.clone())
+                    .create(),
+            );
+            mocks.push(
+                server
+                    .mock("GET", path_config.as_str())
+                    .with_status(200)
+                    .with_body(sample_config_bytes())
+                    .create(),
+            );
+            mocks.push(
+                server
+                    .mock("GET", path_layer.as_str())
+                    .with_status(200)
+                    .with_body(sample_layer_bytes())
+                    .create(),
+            );
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let target_a = temp.path().join("oci-a");
+        let target_b = temp.path().join("oci-b");
+        std::fs::create_dir(&target_a).unwrap();
+        std::fs::create_dir(&target_b).unwrap();
+
+        let image_a = format!("{}/mirror-a/testimage:latest", server.host_with_port());
+        let image_b = format!("{}/mirror-b/testimage:bookworm", server.host_with_port());
+        fetch_image_authenticated(&image_a, &pinned_digest, &target_a).unwrap();
+        fetch_image_authenticated(&image_b, &pinned_digest, &target_b).unwrap();
+
+        assert_no_ref_name_annotation(&target_a);
+        assert_no_ref_name_annotation(&target_b);
+        assert_eq!(
+            std::fs::read(target_a.join("index.json")).unwrap(),
+            std::fs::read(target_b.join("index.json")).unwrap()
+        );
     }
 
     #[test]
@@ -666,5 +738,6 @@ mod tests {
         let image = format!("{}/{repo}:latest", registry.host_with_port());
         fetch_image_authenticated(&image, &pinned_digest, &target).unwrap();
         assert!(target.join("index.json").exists());
+        assert_no_ref_name_annotation(&target);
     }
 }
