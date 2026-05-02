@@ -641,11 +641,24 @@ fn write_ext4_image(
 
     normalize_ext4_hash_seed(output_path)?;
     rebuild_ext4_directory_indexes(output_path)?;
+    normalize_ext4_timestamps(output_path)?;
     Ok(())
 }
 
 fn normalize_ext4_hash_seed(output_path: &Path) -> CResult<()> {
     let script = format!("ssv hash_seed {ZERO_HASH_SEED}\nclose -a\nquit\n");
+    run_debugfs_script(output_path, &script, "normalizing ext4 hash seed")
+}
+
+fn normalize_ext4_timestamps(output_path: &Path) -> CResult<()> {
+    run_debugfs_script(
+        output_path,
+        "ssv wtime 0\nssv lastcheck 0\nclose -a\nquit\n",
+        "normalizing ext4 timestamps",
+    )
+}
+
+fn run_debugfs_script(output_path: &Path, script: &str, purpose: &str) -> CResult<()> {
     let mut child = Command::new("debugfs")
         .arg("-w")
         .arg(output_path)
@@ -673,7 +686,7 @@ fn normalize_ext4_hash_seed(output_path: &Path) -> CResult<()> {
     })?;
     if !output.status.success() {
         return Err(ComposeError::ExecutionFailed(format!(
-            "debugfs failed while normalizing ext4 hash seed: {}",
+            "debugfs failed while {purpose}: {}",
             String::from_utf8_lossy(&output.stderr)
         )));
     }
