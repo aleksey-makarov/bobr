@@ -527,9 +527,6 @@ fn execute_misses(
                 continue;
             }
         };
-        if first_error.is_some() {
-            continue;
-        }
         let node = nodes.get(&key).ok_or_else(|| {
             RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
@@ -554,7 +551,9 @@ fn execute_misses(
             details: serde_json::Map::new(),
         });
         completed.insert(key, executed.realized);
-        if let Some(parents) = reverse.get(&key) {
+        if first_error.is_none()
+            && let Some(parents) = reverse.get(&key)
+        {
             for parent in parents {
                 let pending = remaining.get_mut(parent).ok_or_else(|| {
                     RuntimeError::Store(format!(

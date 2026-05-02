@@ -771,6 +771,86 @@ fn executor_waits_for_in_flight_workers_to_cleanup_after_first_failure() {
 }
 
 #[test]
+fn failed_run_publishes_successful_in_flight_node_refs_without_downstream() {
+    with_fake_podman(|| {
+        let workspace = tempdir().unwrap();
+        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
+        let source_tar = {
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut tar = tar::Builder::new(encoder);
+            let body = b"hello from in-flight publish test\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_path("pkg/README.txt").unwrap();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append(&header, &body[..]).unwrap();
+            tar.into_inner().unwrap().finish().unwrap()
+        };
+        let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
+            Ok(server) => server,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to start test HTTP server: {error}"),
+        };
+        let source_hash = source_tree_hash(&source_tar);
+        let recipe = recipe_node(
+            "final-image",
+            "Image",
+            json!({ "mode": "bootstrap" }),
+            json!({
+                "in000": binary_recipe_with_behavior(
+                    "binary-fail",
+                    &url,
+                    &source_hash,
+                    &image_ref,
+                    &pinned_digest,
+                    &image_object_hash,
+                    "fail-fast"
+                ),
+                "in001": binary_recipe_with_behavior(
+                    "binary-slow",
+                    &url,
+                    &source_hash,
+                    &image_ref,
+                    &pinned_digest,
+                    &image_object_hash,
+                    "slow-success"
+                )
+            }),
+        );
+        let recipe_path = workspace
+            .path()
+            .join("in-flight-publish-after-failure.json");
+        write_recipe(&recipe_path, &recipe);
+
+        let error = run_recipe_json_in_workspace_with_options(
+            workspace.path(),
+            &recipe_path,
+            BuildRunOptions {
+                emit_progress: false,
+                jobs: 2,
+                ..BuildRunOptions::default()
+            },
+        )
+        .unwrap_err();
+        handle.join().unwrap();
+
+        let message = error.to_string();
+        assert!(message.contains("step 'configure'"), "{message}");
+
+        let meta_refs = store_root(workspace.path()).join("meta-refs");
+        let object_refs = store_root(workspace.path()).join("object-refs");
+        assert!(meta_refs.join("binary-slow.json").exists());
+        assert!(object_refs.join("binary-slow").exists());
+        assert!(!meta_refs.join("binary-fail.json").exists());
+        assert!(!object_refs.join("binary-fail").exists());
+        assert!(!meta_refs.join("final-image.json").exists());
+        assert!(!object_refs.join("final-image").exists());
+        drop(oci_server);
+    });
+}
+
+#[test]
 fn tree_file_recipe_builds_successfully_via_runtime() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("tree-file.json");
