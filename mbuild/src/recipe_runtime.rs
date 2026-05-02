@@ -6,14 +6,15 @@ use crate::recipe::{
 };
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
-    RuntimeError, execute_builder_node, log_runtime_event, lookup_build_handle,
+    RuntimeError, check_cancelled, execute_builder_node, log_runtime_event, lookup_build_handle,
     lookup_canonical_result, map_store_error,
 };
 use fsobj_hash::hash_path;
 use mbuild_core::{
-    BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, OriginContext, RealizedResult,
-    ResultInputIdentity, ResultRecord, StoreLayout, compute_meta_hash, compute_result_id, fsutil,
-    import_object, load_result_record, object_path, publish_result_refs, store_result_record,
+    BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, CancellationToken, OriginContext,
+    RealizedResult, ResultInputIdentity, ResultRecord, StoreLayout, compute_meta_hash,
+    compute_result_id, fsutil, import_object, load_result_record, object_path, publish_result_refs,
+    store_result_record,
 };
 use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
@@ -21,11 +22,13 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct BuildRunOptions {
     pub emit_progress: bool,
     pub jobs: usize,
+    pub cancellation: CancellationToken,
 }
 
 impl Default for BuildRunOptions {
@@ -33,6 +36,7 @@ impl Default for BuildRunOptions {
         Self {
             emit_progress: false,
             jobs: 1,
+            cancellation: CancellationToken::new(),
         }
     }
 }
@@ -80,6 +84,7 @@ pub fn run_recipe_json_in_workspace_with_options(
         } else {
             cli_options.jobs
         },
+        cancellation: cli_options.cancellation.clone(),
     };
     let options = BuildRunOptions {
         emit_progress: if cli_options.emit_progress == BuildRunOptions::default().emit_progress {
@@ -88,6 +93,7 @@ pub fn run_recipe_json_in_workspace_with_options(
             cli_options.emit_progress
         },
         jobs: options.jobs,
+        cancellation: options.cancellation,
     };
     if options.jobs == 0 {
         return Err(RuntimeError::InvalidRequest(
@@ -108,6 +114,7 @@ pub fn run_recipe_request_in_store_with_options(
             "--jobs must be greater than zero".to_string(),
         ));
     }
+    check_cancelled(&options.cancellation)?;
     validate_runtime_paths(paths)?;
 
     let layout = StoreLayout::discover(&paths.store).map_err(map_store_error)?;
@@ -166,6 +173,7 @@ pub fn run_recipe_request_in_store_with_options(
         &mut completed,
         root_key,
         options.jobs,
+        options.cancellation,
     )
 }
 
@@ -390,6 +398,7 @@ fn execute_misses(
     completed: &mut HashMap<BuildKey, RealizedResult>,
     root_key: BuildKey,
     jobs: usize,
+    cancellation: CancellationToken,
 ) -> Result<RealizedResult, RuntimeError> {
     let mut remaining = HashMap::<BuildKey, usize>::new();
     let mut reverse = HashMap::<BuildKey, Vec<BuildKey>>::new();
@@ -421,7 +430,13 @@ fn execute_misses(
     let mut in_flight = HashMap::<BuildKey, JoinHandle<()>>::new();
 
     while !completed.contains_key(&root_key) {
-        while first_error.is_none() && in_flight.len() < jobs {
+        if first_error.is_none() && cancellation.is_cancelled() {
+            first_error = Some(RuntimeError::Cancelled(
+                "build cancelled by signal".to_string(),
+            ));
+        }
+
+        while first_error.is_none() && !cancellation.is_cancelled() && in_flight.len() < jobs {
             let Some(key) = ready.pop_front() else {
                 break;
             };
@@ -435,6 +450,7 @@ fn execute_misses(
             let local_root = local_root.map(Path::to_path_buf);
             let logger = logger.clone();
             let tx = tx.clone();
+            let cancellation = cancellation.clone();
             let recipe = node.recipe.clone();
             let builder_inputs = match &recipe {
                 PlannedRecipe::Builder(builder_recipe) => {
@@ -449,6 +465,7 @@ fn execute_misses(
                         logger,
                         key,
                         builder_recipe,
+                        cancellation,
                         builder_inputs.expect("builder inputs must be prepared"),
                     ),
                     PlannedRecipe::Source(source_recipe) => execute_source_recipe(
@@ -456,6 +473,7 @@ fn execute_misses(
                         local_root.as_deref(),
                         logger,
                         key,
+                        cancellation,
                         source_recipe,
                     ),
                 };
@@ -478,9 +496,23 @@ fn execute_misses(
             ));
         }
 
-        let (key, result) = rx.recv().map_err(|error| {
-            RuntimeError::Build(format!("worker channel closed unexpectedly: {error}"))
-        })?;
+        let (key, result) = loop {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(message) => break message,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if first_error.is_none() && cancellation.is_cancelled() {
+                        first_error = Some(RuntimeError::Cancelled(
+                            "build cancelled by signal".to_string(),
+                        ));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(RuntimeError::Build(
+                        "worker channel closed unexpectedly".to_string(),
+                    ));
+                }
+            }
+        };
         if let Some(handle) = in_flight.remove(&key) {
             handle.join().map_err(|_| {
                 RuntimeError::Build(format!("worker thread for key '{}' panicked", key))
@@ -592,6 +624,7 @@ fn execute_builder_recipe(
     logger: Arc<BuildRunLogger>,
     key: BuildKey,
     recipe: PlannedBuilderRecipe,
+    cancellation: CancellationToken,
     inputs: ResolvedInputs,
 ) -> Result<ExecutedNode, RuntimeError> {
     let created_at = logger.created_at().to_string();
@@ -608,6 +641,7 @@ fn execute_builder_recipe(
         &recipe.name,
         &created_at,
         logger,
+        cancellation,
         recipe.config,
         inputs,
     )?;
@@ -622,6 +656,7 @@ fn execute_source_recipe(
     local_root: Option<&Path>,
     run_logger: Arc<BuildRunLogger>,
     key: BuildKey,
+    cancellation: CancellationToken,
     recipe: PlannedSourceRecipe,
 ) -> Result<ExecutedNode, RuntimeError> {
     let logger = run_logger.bind_node("Source", &recipe.name, key);
@@ -637,6 +672,7 @@ fn execute_source_recipe(
         "cache-miss",
         "materializing source",
     );
+    check_cancelled(&cancellation)?;
 
     if let Some(result) = load_result_record(layout, recipe.result_id).map_err(map_store_error)? {
         let object_path = object_path(layout, result.object_hash);
@@ -699,6 +735,10 @@ fn execute_source_recipe(
             temp_root.display()
         ))
     })?;
+    if let Err(error) = check_cancelled(&cancellation) {
+        cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        return Err(error);
+    }
     let staged_path = match recipe
         .origin
         .as_ref()
@@ -719,6 +759,10 @@ fn execute_source_recipe(
             return Err(RuntimeError::Build(error));
         }
     };
+    if let Err(error) = check_cancelled(&cancellation) {
+        cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        return Err(error);
+    }
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
@@ -733,10 +777,18 @@ fn execute_source_recipe(
             staged_path.display()
         ))
     })?;
+    if let Err(error) = check_cancelled(&cancellation) {
+        cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        return Err(error);
+    }
     let imported_hash = import_object(layout, &staged_path).map_err(|error| {
         cleanup_source_temp_dir(&temp_root, logger.as_ref());
         map_store_error(error)
     })?;
+    if let Err(error) = check_cancelled(&cancellation) {
+        cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        return Err(error);
+    }
     cleanup_source_temp_dir(&temp_root, logger.as_ref());
     debug_assert_eq!(imported_hash, actual_hash);
 
@@ -810,11 +862,41 @@ fn realized_result_from_record(
 mod tests {
     use super::*;
     use crate::recipe::{ReuseOrigin, collect_graph};
-    use mbuild_core::{MetaHash, PublishOutputRequest, compute_reuse_key, publish_output};
+    use mbuild_core::{
+        CancellationToken, MetaHash, OriginContext, OriginSpec, ParsedOrigin, PublishOutputRequest,
+        compute_reuse_key, publish_output,
+    };
     use serde_json::{Map, json};
     use std::collections::HashMap;
     use std::str::FromStr;
+    use std::sync::Arc;
     use tempfile::tempdir;
+
+    #[derive(Debug, Clone)]
+    struct CancellingOrigin {
+        cancellation: CancellationToken,
+    }
+
+    impl ParsedOrigin for CancellingOrigin {
+        fn spec(&self) -> &'static OriginSpec {
+            static SPEC: OriginSpec = OriginSpec {
+                tag: "cancelling-test",
+            };
+            &SPEC
+        }
+
+        fn materialize(&self, cx: &OriginContext<'_>) -> Result<std::path::PathBuf, String> {
+            let staged = cx.temp_root.join("staged");
+            fs::create_dir_all(&staged).map_err(|error| error.to_string())?;
+            fs::write(staged.join("payload"), b"cancel\n").map_err(|error| error.to_string())?;
+            self.cancellation.cancel();
+            Ok(staged)
+        }
+
+        fn clone_box(&self) -> Box<dyn ParsedOrigin> {
+            Box::new(self.clone())
+        }
+    }
 
     fn sample_realized(
         build_key: Option<BuildKey>,
@@ -952,5 +1034,43 @@ mod tests {
             .unwrap()
             .expect("expected canonical result hit");
         assert_eq!(published.build_key, Some(root_key));
+    }
+
+    #[test]
+    fn source_temp_dir_is_removed_when_cancelled_after_materialize() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let cancellation = CancellationToken::new();
+        let object_hash = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+        let meta = Map::new();
+        let result_id = compute_result_id(object_hash, compute_meta_hash(&meta).unwrap()).unwrap();
+        let key =
+            BuildKey::from_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap();
+        let recipe = PlannedSourceRecipe {
+            name: "cancel-source".to_string(),
+            object_hash,
+            origin: Some(Box::new(CancellingOrigin {
+                cancellation: cancellation.clone(),
+            })),
+            meta,
+            result_id,
+        };
+
+        let error = execute_source_recipe(&layout, None, logger, key, cancellation, recipe)
+            .expect_err("expected cancellation");
+
+        assert_eq!(error.class(), "cancelled");
+        assert!(
+            !layout
+                .root
+                .join("source-state")
+                .join("tmp")
+                .join(key.to_hex())
+                .exists()
+        );
     }
 }

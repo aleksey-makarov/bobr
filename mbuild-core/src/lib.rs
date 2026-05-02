@@ -1,11 +1,13 @@
 use std::fmt;
 
 pub mod builder;
+pub mod cancellation;
 pub mod cas;
 pub mod fsutil;
 pub mod origin;
 
 pub use builder::*;
+pub use cancellation::*;
 pub use cas::*;
 pub use fsobj_hash::ObjectHash;
 pub use origin::*;
@@ -13,6 +15,7 @@ pub use origin::*;
 #[derive(Debug)]
 pub enum BuilderError {
     InvalidRecipe(String),
+    Cancelled(String),
     ExecutionFailed(String),
     NotImplemented(String),
 }
@@ -21,6 +24,7 @@ impl fmt::Display for BuilderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidRecipe(message)
+            | Self::Cancelled(message)
             | Self::ExecutionFailed(message)
             | Self::NotImplemented(message) => f.write_str(message),
         }

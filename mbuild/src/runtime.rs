@@ -2,8 +2,9 @@ use crate::logging::BuildRunLogger;
 use crate::resolved_inputs::ResolvedInputs;
 use mbuild_core::{
     Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, Builder,
-    BuilderError, CasError, PublishedBuild, ResultInputIdentity, StoreLayout, compute_reuse_key,
-    fsutil, load_build_handle, load_reuse_record, materialize_build, object_path,
+    BuilderError, CancellationToken, CasError, PublishedBuild, ResultInputIdentity, StoreLayout,
+    compute_reuse_key, fsutil, load_build_handle, load_reuse_record, materialize_build,
+    object_path,
 };
 use serde_json::Value;
 use std::fmt;
@@ -16,6 +17,7 @@ pub enum RuntimeError {
     InvalidRequest(String),
     UnknownBuilder(String),
     RecipeLoad(String),
+    Cancelled(String),
     Build(String),
     Store(String),
 }
@@ -26,6 +28,7 @@ impl RuntimeError {
             Self::InvalidRequest(_) => "invalid-request",
             Self::UnknownBuilder(_) => "unknown-builder",
             Self::RecipeLoad(_) => "recipe-load",
+            Self::Cancelled(_) => "cancelled",
             Self::Build(_) => "build",
             Self::Store(_) => "store",
         }
@@ -36,6 +39,7 @@ impl RuntimeError {
             Self::InvalidRequest(message)
             | Self::UnknownBuilder(message)
             | Self::RecipeLoad(message)
+            | Self::Cancelled(message)
             | Self::Build(message)
             | Self::Store(message) => message,
         }
@@ -57,9 +61,11 @@ pub(crate) fn execute_builder_node(
     build_name: &str,
     created_at: &str,
     run_logger: Arc<BuildRunLogger>,
+    cancellation: CancellationToken,
     config: Value,
     inputs: ResolvedInputs,
 ) -> Result<PublishedBuild, RuntimeError> {
+    check_cancelled(&cancellation)?;
     let inputs_identity = inputs
         .ordered_input_identities(builder.spec())
         .map_err(map_builder_error)?;
@@ -130,7 +136,14 @@ pub(crate) fn execute_builder_node(
         "cache-miss",
         "executing builder",
     );
-    let mut context = build_context(layout, builder.spec().tag, build_key, logger.clone())?;
+    check_cancelled(&cancellation)?;
+    let mut context = build_context(
+        layout,
+        builder.spec().tag,
+        build_key,
+        logger.clone(),
+        cancellation.clone(),
+    )?;
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
@@ -150,6 +163,10 @@ pub(crate) fn execute_builder_node(
             cleanup_temp_dir(&context.temp_dir, logger.as_ref());
             runtime_error
         })?;
+    if let Err(error) = check_cancelled(&cancellation) {
+        cleanup_temp_dir(&context.temp_dir, logger.as_ref());
+        return Err(error);
+    }
     let published = materialize_build(
         layout,
         build_key,
@@ -220,6 +237,7 @@ pub(crate) fn build_context(
     builder_tag: &str,
     build_key: BuildKey,
     logger: Arc<dyn BuildLogger>,
+    cancellation: CancellationToken,
 ) -> Result<BuildContext, RuntimeError> {
     let state_dir = layout
         .root
@@ -234,11 +252,16 @@ pub(crate) fn build_context(
     })?;
     fsutil::recreate_empty_dir_force(&temp_dir)
         .map_err(|error| RuntimeError::Store(error.to_string()))?;
-    Ok(BuildContext::with_noop_logger(state_dir, temp_dir).with_logger(logger))
+    Ok(BuildContext::with_noop_logger(state_dir, temp_dir)
+        .with_logger(logger)
+        .with_cancellation_token(cancellation))
 }
 
 pub(crate) fn map_builder_error(error: BuilderError) -> RuntimeError {
-    RuntimeError::Build(error.to_string())
+    match error {
+        BuilderError::Cancelled(message) => RuntimeError::Cancelled(message),
+        other => RuntimeError::Build(other.to_string()),
+    }
 }
 
 pub(crate) fn map_store_error(error: CasError) -> RuntimeError {
@@ -261,6 +284,16 @@ pub(crate) fn log_runtime_event(
     });
 }
 
+pub(crate) fn check_cancelled(cancellation: &CancellationToken) -> Result<(), RuntimeError> {
+    if cancellation.is_cancelled() {
+        Err(RuntimeError::Cancelled(
+            "build cancelled by signal".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn cleanup_temp_dir(temp_dir: &Path, logger: &dyn BuildLogger) {
     if let Err(error) = fsutil::remove_dir_force(temp_dir) {
         log_runtime_event(
@@ -280,8 +313,8 @@ mod tests {
     use super::*;
     use crate::logging::{BuildRunLogger, RunOptions};
     use mbuild_core::{
-        BuildContext, BuilderInputs, BuilderSpec, PublishOutputRequest, ResultInputIdentity,
-        StagedBuildResult, TypedBuilder, compute_build_key, publish_output,
+        BuildContext, BuilderInputs, BuilderSpec, CancellationToken, PublishOutputRequest,
+        ResultInputIdentity, StagedBuildResult, TypedBuilder, compute_build_key, publish_output,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
@@ -481,6 +514,7 @@ mod tests {
             "runtime-test",
             "2026-04-05T12:00:00.000000000Z",
             logger,
+            CancellationToken::new(),
             config,
             inputs,
         )
@@ -517,6 +551,7 @@ mod tests {
             "runtime-fail",
             "2026-04-05T12:00:00.000000000Z",
             logger,
+            CancellationToken::new(),
             config,
             inputs,
         )
@@ -548,6 +583,7 @@ mod tests {
             "runtime-broken-stage",
             "2026-04-05T12:00:00.000000000Z",
             logger,
+            CancellationToken::new(),
             config,
             inputs,
         )
@@ -555,5 +591,41 @@ mod tests {
 
         assert_eq!(error.class(), "store");
         assert!(!temp_dir.exists());
+    }
+
+    #[test]
+    fn execute_builder_node_pre_cancelled_does_not_start_builder() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let config = json!({});
+        let inputs = ResolvedInputs::empty();
+        let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = execute_builder_node(
+            &layout,
+            &RUNTIME_TEST_BUILDER,
+            build_key,
+            "runtime-test",
+            "2026-04-05T12:00:00.000000000Z",
+            logger,
+            cancellation,
+            config,
+            inputs,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.class(), "cancelled");
+        assert!(
+            !layout
+                .root
+                .join("builder-state")
+                .join("runtimetest")
+                .join("tmp")
+                .join(build_key.to_hex())
+                .exists()
+        );
     }
 }

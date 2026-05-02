@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fmt;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 mod container;
+mod process;
 
 pub use container::ContainerBuilder;
 
@@ -40,6 +42,7 @@ pub(crate) const OUT_DIR_MOUNT_PATH: &str = "/__mbuild/out";
 #[derive(Debug)]
 pub(crate) enum BinaryError {
     InvalidConfig(String),
+    Cancelled(String),
     InputResolutionFailed(String),
     PodmanFailed(String),
     BuildFailed(String),
@@ -50,6 +53,7 @@ impl BinaryError {
     fn message(&self) -> &str {
         match self {
             Self::InvalidConfig(message)
+            | Self::Cancelled(message)
             | Self::InputResolutionFailed(message)
             | Self::PodmanFailed(message)
             | Self::BuildFailed(message)
@@ -65,6 +69,12 @@ impl fmt::Display for BinaryError {
 }
 
 pub(crate) type BResult<T> = Result<T, BinaryError>;
+
+#[derive(Debug)]
+pub(crate) enum RunCommandError {
+    Io(io::Error),
+    Cancelled,
+}
 
 #[derive(Debug)]
 struct CleanupError {
@@ -209,6 +219,7 @@ impl TypedBuilder for BinaryBuilder {
         if let Err(error) = build_result {
             return Err(map_error(error));
         }
+        cx.check_cancelled()?;
 
         let mut meta = Map::new();
         let install = config.install.unwrap_or_else(default_install_meta);
@@ -440,9 +451,8 @@ fn is_image_loaded_in_podman(config_digest: &str, cx: &BuildContext) -> BResult<
         "podman-image-exists",
         format!("checking podman for image {config_digest}"),
     );
-    let output = cmd.output().map_err(|e| {
-        BinaryError::PodmanFailed(format!("failed to run podman image exists: {e}"))
-    })?;
+    let output = run_command_or_cancel(cmd, cx, "podman-image-exists", "", &[])
+        .map_err(|error| map_command_run_error(error, "failed to run podman image exists"))?;
     Ok(output.status.success())
 }
 
@@ -480,9 +490,8 @@ fn load_oci_to_podman(oci_dir: &std::path::Path, cx: &BuildContext) -> BResult<(
     // Clear TMPDIR: podman uses it for temp files when processing oci-archive,
     // and a stale value (e.g. from an expired nix-shell) causes load to fail.
     cmd.env_remove("TMPDIR");
-    let output = cmd
-        .output()
-        .map_err(|e| BinaryError::PodmanFailed(format!("failed to run podman load: {e}")))?;
+    let output = run_command_or_cancel(cmd, cx, "podman-load", "", &[])
+        .map_err(|error| map_command_run_error(error, "failed to run podman load"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(BinaryError::PodmanFailed(format!(
@@ -752,9 +761,8 @@ fn create_container(
         .arg("sleep")
         .arg("infinity");
 
-    let output = process.output().map_err(|error| {
-        BinaryError::PodmanFailed(format!("failed to execute podman create: {error}"))
-    })?;
+    let output = run_command_or_cancel(process, cx, "podman-create", &container.image_ref, inputs)
+        .map_err(|error| map_command_run_error(error, "failed to execute podman create"))?;
     let log_path = write_command_log(cx, "podman-create", &container.image_ref, inputs, &output);
 
     if !output.status.success() {
@@ -805,9 +813,8 @@ fn export_container_output(
         .arg("cp")
         .arg(format!("{}:{}/.", instance.id, OUT_DIR_MOUNT_PATH))
         .arg(output_path);
-    let output = process.output().map_err(|error| {
-        BinaryError::PodmanFailed(format!("failed to execute podman cp: {error}"))
-    })?;
+    let output = run_command_or_cancel(process, cx, "podman-cp", "", &[])
+        .map_err(|error| map_command_run_error(error, "failed to execute podman cp"))?;
     let log_path = write_command_log(cx, "podman-cp", "", &[], &output);
 
     if !output.status.success() {
@@ -914,11 +921,10 @@ fn prepare_container_workspace(
             "mkdir -p '{}' '{}' && chown {}:{} '{}'",
             BUILD_DIR_MOUNT_PATH, OUT_DIR_MOUNT_PATH, uid, gid, BUILD_DIR_MOUNT_PATH
         ));
-    let output = process.output().map_err(|error| {
-        BinaryError::PodmanFailed(format!(
-            "failed to execute podman exec for workspace prepare: {error}"
-        ))
-    })?;
+    let output =
+        run_command_or_cancel(process, cx, "podman-prepare", "", &[]).map_err(|error| {
+            map_command_run_error(error, "failed to execute podman exec for workspace prepare")
+        })?;
     let log_path = write_command_log(cx, "podman-prepare", "", &[], &output);
 
     if !output.status.success() {
@@ -950,9 +956,8 @@ fn start_container(instance: &ContainerInstance, cx: &BuildContext) -> BResult<(
     );
     let mut process = ProcessCommand::new("podman");
     process.arg("start").arg(&instance.id);
-    let output = process.output().map_err(|error| {
-        BinaryError::PodmanFailed(format!("failed to execute podman start: {error}"))
-    })?;
+    let output = run_command_or_cancel(process, cx, "podman-start", "", &[])
+        .map_err(|error| map_command_run_error(error, "failed to execute podman start"))?;
     let log_path = write_command_log(cx, "podman-start", "", &[], &output);
 
     if !output.status.success() {
@@ -1008,11 +1013,11 @@ fn exec_step(
     for arg in &argv {
         process.arg(arg);
     }
-    let output = process.output().map_err(|error| {
-        BinaryError::PodmanFailed(format!(
-            "failed to execute podman exec for step '{}': {error}",
-            step.name
-        ))
+    let output = run_command_or_cancel(process, cx, &log_tag, "", inputs).map_err(|error| {
+        map_command_run_error(
+            error,
+            &format!("failed to execute podman exec for step '{}'", step.name),
+        )
     })?;
     let log_path = write_command_log(cx, &log_tag, "", inputs, &output);
 
@@ -1098,6 +1103,32 @@ fn log_cleanup_warning(
     );
 }
 
+pub(crate) fn run_command_or_cancel(
+    process: ProcessCommand,
+    cx: &BuildContext,
+    log_tag: &str,
+    image_ref: &str,
+    inputs: &[(String, BuilderInputObject)],
+) -> Result<std::process::Output, RunCommandError> {
+    match process::run_cancellable_command(process, cx).map_err(RunCommandError::Io)? {
+        process::CommandOutcome::Finished(output) => Ok(output),
+        process::CommandOutcome::CancelledBeforeStart => Err(RunCommandError::Cancelled),
+        process::CommandOutcome::Cancelled(output) => {
+            let _ = write_command_log(cx, log_tag, image_ref, inputs, &output);
+            Err(RunCommandError::Cancelled)
+        }
+    }
+}
+
+pub(crate) fn map_command_run_error(error: RunCommandError, io_context: &str) -> BinaryError {
+    match error {
+        RunCommandError::Io(error) => BinaryError::PodmanFailed(format!("{io_context}: {error}")),
+        RunCommandError::Cancelled => {
+            BinaryError::Cancelled("build cancelled by signal".to_string())
+        }
+    }
+}
+
 pub(crate) fn command_failure(
     log_tag: &str,
     command_name: &str,
@@ -1170,6 +1201,7 @@ pub(crate) fn map_fsutil_error(error: fsutil::FsUtilError) -> BinaryError {
 pub(crate) fn map_error(error: BinaryError) -> BuilderError {
     match error {
         BinaryError::InvalidConfig(message) => BuilderError::InvalidRecipe(message),
+        BinaryError::Cancelled(message) => BuilderError::Cancelled(message),
         BinaryError::InputResolutionFailed(message)
         | BinaryError::PodmanFailed(message)
         | BinaryError::BuildFailed(message)
@@ -1263,11 +1295,14 @@ fn write_script_config_node(path: &Path, value: &Value, debug_path: &str) -> BRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{BuildLogEvent, BuildLogger, Builder, BuilderInputObject, BuilderInputs};
+    use mbuild_core::{
+        BuildLogEvent, BuildLogger, Builder, BuilderInputObject, BuilderInputs, CancellationToken,
+    };
     use std::env;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
     fn env_lock() -> &'static Mutex<()> {
@@ -1280,6 +1315,28 @@ mod tests {
         fs::create_dir_all(&state_dir).unwrap();
         mbuild_core::fsutil::recreate_empty_dir_force(&temp_dir).unwrap();
         BuildContext::with_noop_logger(state_dir, temp_dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellable_command_stops_long_running_child() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+        let cancellation = CancellationToken::new();
+        cx = cx.with_cancellation_token(cancellation.clone());
+
+        let mut command = ProcessCommand::new("sh");
+        command.arg("-c").arg("sleep 10");
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            cancellation.cancel();
+        });
+
+        let error = run_command_or_cancel(command, &cx, "sleep", "", &[]).unwrap_err();
+
+        assert!(matches!(error, RunCommandError::Cancelled));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[derive(Debug)]

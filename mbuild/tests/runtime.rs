@@ -673,6 +673,7 @@ fn independent_fetch_sources_run_in_parallel() {
             BuildRunOptions {
                 emit_progress: false,
                 jobs: 4,
+                ..BuildRunOptions::default()
             },
         )
         .unwrap();
@@ -744,6 +745,7 @@ fn executor_waits_for_in_flight_workers_to_cleanup_after_first_failure() {
             BuildRunOptions {
                 emit_progress: false,
                 jobs: 2,
+                ..BuildRunOptions::default()
             },
         )
         .unwrap_err();

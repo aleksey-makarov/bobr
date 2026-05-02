@@ -4,7 +4,8 @@ use crate::{
     OUT_DIR_ENV_VAR, OUT_DIR_MOUNT_PATH, OUTPUT_DIR_NAME, STEP_NAME_ENV_VAR, StepUser,
     collect_named_inputs, command_failure, current_uid_gid, default_install_meta, input_mount_path,
     map_error, map_fsutil_error, resolve_step_argv, resolve_step_cwd, resolve_step_env,
-    validate_config, validate_step_interpolations, write_command_log, write_script_config,
+    run_command_or_cancel, validate_config, validate_step_interpolations, write_command_log,
+    write_script_config,
 };
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
@@ -98,6 +99,7 @@ impl TypedBuilder for ContainerBuilder {
             cx,
         )
         .map_err(map_error)?;
+        cx.check_cancelled()?;
 
         if !output_path.is_dir() {
             return Err(map_error(BinaryError::BuildFailed(format!(
@@ -320,11 +322,21 @@ fn exec_step(
         process.arg(arg);
     }
 
-    let output = process.output().map_err(|error| {
-        BinaryError::BuildFailed(format!(
+    let output = run_command_or_cancel(
+        process,
+        cx,
+        &log_tag,
+        &rootfs.object_path.display().to_string(),
+        named_inputs,
+    )
+    .map_err(|error| match error {
+        crate::RunCommandError::Io(error) => BinaryError::BuildFailed(format!(
             "failed to execute bwrap for step '{}': {error}",
             step.name
-        ))
+        )),
+        crate::RunCommandError::Cancelled => {
+            BinaryError::Cancelled("build cancelled by signal".to_string())
+        }
     })?;
     let log_path = write_command_log(
         cx,

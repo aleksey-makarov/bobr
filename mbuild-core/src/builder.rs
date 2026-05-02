@@ -1,4 +1,5 @@
 use crate::BuilderError;
+use crate::cancellation::CancellationToken;
 use crate::cas::{BuildKey, MetaHash, ResultId, ReuseKey};
 use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -198,6 +199,7 @@ pub struct BuildContext {
     pub state_dir: PathBuf,
     pub temp_dir: PathBuf,
     logger: Arc<dyn BuildLogger>,
+    cancellation: CancellationToken,
 }
 
 impl fmt::Debug for BuildContext {
@@ -215,12 +217,26 @@ impl BuildContext {
             state_dir,
             temp_dir,
             logger: Arc::new(NoopBuildLogger),
+            cancellation: CancellationToken::new(),
         }
     }
 
     pub fn with_logger(mut self, logger: Arc<dyn BuildLogger>) -> Self {
         self.logger = logger;
         self
+    }
+
+    pub fn with_cancellation_token(mut self, cancellation: CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
+    pub fn cancellation_token(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+
+    pub fn check_cancelled(&self) -> Result<(), BuilderError> {
+        self.cancellation.check_cancelled()
     }
 
     pub fn log_event(

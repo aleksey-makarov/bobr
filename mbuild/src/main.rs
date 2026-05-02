@@ -8,12 +8,14 @@ use std::process::ExitCode;
 
 use mbuild::recipe_runtime::{self, BuildRunOptions};
 use mbuild::{RecipeEnvelope, RecipeOptions};
+use mbuild_core::CancellationToken;
 
 type MResult<T> = Result<T, MbuildError>;
 
 #[derive(Debug)]
 enum MbuildError {
     InvalidInput(String),
+    Cancelled(String),
     BuildFailed(String),
 }
 
@@ -21,13 +23,16 @@ impl MbuildError {
     fn class(&self) -> &'static str {
         match self {
             Self::InvalidInput(_) => "invalid-input",
+            Self::Cancelled(_) => "cancelled",
             Self::BuildFailed(_) => "build-failed",
         }
     }
 
     fn message(&self) -> &str {
         match self {
-            Self::InvalidInput(message) | Self::BuildFailed(message) => message,
+            Self::InvalidInput(message) | Self::Cancelled(message) | Self::BuildFailed(message) => {
+                message
+            }
         }
     }
 }
@@ -56,18 +61,29 @@ fn main() -> ExitCode {
     let quiet_from_cli = matches.value_source("quiet") == Some(ValueSource::CommandLine);
     let jobs_from_cli = matches.value_source("jobs") == Some(ValueSource::CommandLine);
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
-    let result = build(cli, quiet_from_cli, jobs_from_cli);
+    let cancellation = CancellationToken::new();
+    signal::install_handlers(cancellation.clone());
+    let result = build(cli, quiet_from_cli, jobs_from_cli, cancellation);
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error[{}]: {}", error.class(), error);
-            ExitCode::from(1)
+            if matches!(error, MbuildError::Cancelled(_)) {
+                ExitCode::from(130)
+            } else {
+                ExitCode::from(1)
+            }
         }
     }
 }
 
-fn build(cli: Cli, quiet_from_cli: bool, jobs_from_cli: bool) -> MResult<()> {
+fn build(
+    cli: Cli,
+    quiet_from_cli: bool,
+    jobs_from_cli: bool,
+    cancellation: CancellationToken,
+) -> MResult<()> {
     let recipe_bytes = read_recipe_bytes(cli.recipe_file.as_ref())?;
     let envelope = RecipeEnvelope::parse_json(&recipe_bytes).map_err(map_runtime_error)?;
 
@@ -88,6 +104,7 @@ fn build(cli: Cli, quiet_from_cli: bool, jobs_from_cli: bool) -> MResult<()> {
         &envelope.options,
         quiet_from_cli.then_some(cli.quiet),
         if jobs_from_cli { cli.jobs } else { None },
+        cancellation,
     )?;
     let build = recipe_runtime::run_recipe_request_in_store_with_options(
         &envelope.paths,
@@ -138,6 +155,7 @@ fn resolve_build_options(
     recipe_options: &RecipeOptions,
     quiet_from_cli: Option<bool>,
     jobs_from_cli: Option<usize>,
+    cancellation: CancellationToken,
 ) -> MResult<BuildRunOptions> {
     let quiet = quiet_from_cli.or(recipe_options.quiet).unwrap_or(false);
     let jobs = jobs_from_cli
@@ -151,6 +169,7 @@ fn resolve_build_options(
     Ok(BuildRunOptions {
         emit_progress: !quiet,
         jobs,
+        cancellation,
     })
 }
 
@@ -159,10 +178,58 @@ fn map_runtime_error(error: mbuild::RuntimeError) -> MbuildError {
         mbuild::RuntimeError::InvalidRequest(_)
         | mbuild::RuntimeError::UnknownBuilder(_)
         | mbuild::RuntimeError::RecipeLoad(_) => MbuildError::InvalidInput(error.to_string()),
+        mbuild::RuntimeError::Cancelled(_) => MbuildError::Cancelled(error.to_string()),
         mbuild::RuntimeError::Build(_) | mbuild::RuntimeError::Store(_) => {
             MbuildError::BuildFailed(error.to_string())
         }
     }
+}
+
+#[cfg(unix)]
+mod signal {
+    use mbuild_core::CancellationToken;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    static SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn handle_signal(_signal: libc::c_int) {
+        if SIGNAL_COUNT.fetch_add(1, Ordering::SeqCst) > 0 {
+            unsafe {
+                libc::_exit(130);
+            }
+        }
+    }
+
+    pub fn install_handlers(cancellation: CancellationToken) {
+        unsafe {
+            libc::signal(
+                libc::SIGINT,
+                handle_signal as *const () as libc::sighandler_t,
+            );
+            libc::signal(
+                libc::SIGTERM,
+                handle_signal as *const () as libc::sighandler_t,
+            );
+        }
+        thread::spawn(move || {
+            loop {
+                if SIGNAL_COUNT.load(Ordering::SeqCst) > 0 {
+                    cancellation.cancel();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+mod signal {
+    use mbuild_core::CancellationToken;
+
+    pub fn install_handlers(_cancellation: CancellationToken) {}
 }
 
 fn default_jobs() -> usize {

@@ -1333,16 +1333,47 @@ fn replace_symlink(target: &Path, link_path: &Path) -> Result<(), CasError> {
                     link_path.display()
                 ))
             })?;
-        } else {
-            fs::remove_file(link_path).map_err(|error| {
-                CasError::Io(format!(
-                    "failed to remove existing ref '{}': {error}",
-                    link_path.display()
-                ))
-            })?;
         }
     }
-    create_symlink(target, link_path)
+
+    let parent = link_path.parent().ok_or_else(|| {
+        CasError::Io(format!(
+            "ref path '{}' has no parent directory",
+            link_path.display()
+        ))
+    })?;
+    let file_name = link_path.file_name().ok_or_else(|| {
+        CasError::Io(format!(
+            "ref path '{}' has no file name",
+            link_path.display()
+        ))
+    })?;
+    let file_name = file_name.to_string_lossy();
+    let pid = std::process::id();
+
+    for attempt in 0..1000u32 {
+        let temp_path = parent.join(format!(".{file_name}.tmp.{pid}.{attempt}"));
+        if temp_path.exists() || temp_path.is_symlink() {
+            continue;
+        }
+        create_symlink(target, &temp_path)?;
+        match fs::rename(&temp_path, link_path) {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let _ = fs::remove_file(&temp_path);
+                return Err(CasError::Io(format!(
+                    "failed to replace ref '{}' with temporary symlink '{}': {error}",
+                    link_path.display(),
+                    temp_path.display()
+                )));
+            }
+        }
+    }
+
+    Err(CasError::Io(format!(
+        "failed to allocate temporary ref symlink for '{}'",
+        link_path.display()
+    )))
 }
 
 #[cfg(unix)]
@@ -2150,6 +2181,41 @@ mod tests {
                 .join(OBJECTS_DIR)
                 .join(third.object_hash.to_hex())
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_symlink_replaces_existing_ref_atomically() {
+        let temp = tempdir().unwrap();
+        let link = temp.path().join("current");
+        let old_target = Path::new("../objects/old");
+        let new_target = Path::new("../objects/new");
+
+        replace_symlink(old_target, &link).unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), old_target);
+
+        replace_symlink(new_target, &link).unwrap();
+        assert_eq!(fs::read_link(&link).unwrap(), new_target);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replace_symlink_temp_names_do_not_conflict_on_repeated_replace() {
+        let temp = tempdir().unwrap();
+        let link = temp.path().join("current");
+
+        for index in 0..16 {
+            let target = PathBuf::from(format!("../objects/{index}"));
+            replace_symlink(&target, &link).unwrap();
+            assert_eq!(fs::read_link(&link).unwrap(), target);
+        }
+
+        let temp_refs = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .count();
+        assert_eq!(temp_refs, 0);
     }
 
     #[test]
