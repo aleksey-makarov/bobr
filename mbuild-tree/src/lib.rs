@@ -1,13 +1,15 @@
+use globset::{Glob, GlobMatcher};
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, StagedBuildResult,
-    TypedBuilder, fsutil,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, FsTreeEntry,
+    FsTreeManifest, FsTreeObjectError, FsTreeOwnerMap, StagedBuildResult, TypedBuilder,
+    create_fs_tree_staging_dir, fsutil, validate_fs_tree_object,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Map;
 use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +113,36 @@ enum OutputKind {
     Directory,
 }
 
+#[derive(Debug)]
+struct CompiledInstallRule {
+    pattern: String,
+    matcher: GlobMatcher,
+    attrs: InstallAttrs,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MaterializedKind {
+    File { executable: bool },
+    Directory,
+    Symlink,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PhysicalOwnerMap {
+    uid: u32,
+    gid: u32,
+}
+
+impl FsTreeOwnerMap for PhysicalOwnerMap {
+    fn physical_uid(&self, _logical_uid: u32) -> Result<u32, FsTreeObjectError> {
+        Ok(self.uid)
+    }
+
+    fn physical_gid(&self, _logical_gid: u32) -> Result<u32, FsTreeObjectError> {
+        Ok(self.gid)
+    }
+}
+
 pub struct TreeBuilder;
 
 static TREE_SPEC: BuilderSpec = BuilderSpec {
@@ -159,11 +191,11 @@ impl TypedBuilder for TreeBuilder {
                 Map::new()
             }
             OutputKind::Directory => {
-                materialize_directory_output(&output_path, &normalized)?;
                 let install = config
                     .install
                     .expect("validated install for directory output");
-                install_meta_map(&install)?
+                materialize_directory_output(&output_path, &normalized, &install)?;
+                Map::new()
             }
         };
 
@@ -362,122 +394,248 @@ fn materialize_file_output(path: &Path, entries: &[NormalizedEntry]) -> Result<(
 }
 
 fn materialize_directory_output(
-    root: &Path,
+    object_dir: &Path,
     entries: &[NormalizedEntry],
+    install: &InstallMeta,
 ) -> Result<(), BuilderError> {
-    fs::create_dir_all(root).map_err(|error| {
-        BuilderError::ExecutionFailed(format!(
-            "failed to create staged tree root '{}': {error}",
-            root.display()
-        ))
-    })?;
+    let rules = compile_install_rules(&install.rules)?;
+    let manifest = fs_tree_manifest_for_entries(entries, &rules)?;
+    let paths = create_fs_tree_staging_dir(object_dir, &manifest).map_err(map_fs_tree_error)?;
 
-    #[cfg(unix)]
-    fs::set_permissions(root, fs::Permissions::from_mode(0o755)).map_err(|error| {
-        BuilderError::ExecutionFailed(format!(
-            "failed to set permissions on staged tree root '{}': {error}",
-            root.display()
-        ))
-    })?;
+    for manifest_entry in manifest.entries() {
+        if let FsTreeEntry::Directory { path, mode, .. } = manifest_entry {
+            if path.is_empty() {
+                continue;
+            }
+            let dst = paths.root_dir.join(path);
+            fs::create_dir(&dst).map_err(|error| {
+                BuilderError::ExecutionFailed(format!(
+                    "failed to create staged directory '{}': {error}",
+                    dst.display()
+                ))
+            })?;
+            set_mode(&dst, *mode)?;
+        }
+    }
 
     for entry in entries {
         match entry {
-            NormalizedEntry::Dir { rel_path } => {
-                let path = root.join(rel_path);
-                fs::create_dir_all(&path).map_err(|error| {
-                    BuilderError::ExecutionFailed(format!(
-                        "failed to create staged directory '{}': {error}",
-                        path.display()
-                    ))
-                })?;
-                #[cfg(unix)]
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).map_err(|error| {
-                    BuilderError::ExecutionFailed(format!(
-                        "failed to set permissions on staged directory '{}': {error}",
-                        path.display()
-                    ))
-                })?;
-            }
-            NormalizedEntry::File {
-                rel_path,
-                text,
-                executable,
-            } => {
-                let path = root.join(rel_path);
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).map_err(|error| {
-                        BuilderError::ExecutionFailed(format!(
-                            "failed to create parent directory '{}': {error}",
-                            parent.display()
-                        ))
-                    })?;
-                    #[cfg(unix)]
-                    ensure_parent_dirs_0755(root, parent)?;
-                }
+            NormalizedEntry::Dir { .. } => {}
+            NormalizedEntry::File { rel_path, text, .. } => {
+                let path = paths.root_dir.join(rel_path);
                 fs::write(&path, text).map_err(|error| {
                     BuilderError::ExecutionFailed(format!(
                         "failed to write staged file '{}': {error}",
                         path.display()
                     ))
                 })?;
-                set_file_mode(&path, *executable)?;
+                if let Some(FsTreeEntry::File { mode, .. }) = manifest
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.path() == rel_path)
+                {
+                    set_mode(&path, *mode)?;
+                }
             }
             NormalizedEntry::Symlink { rel_path, target } => {
-                let path = root.join(rel_path);
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).map_err(|error| {
-                        BuilderError::ExecutionFailed(format!(
-                            "failed to create parent directory '{}': {error}",
-                            parent.display()
-                        ))
-                    })?;
-                    #[cfg(unix)]
-                    ensure_parent_dirs_0755(root, parent)?;
-                }
+                let path = paths.root_dir.join(rel_path);
                 create_symlink(target, &path)?;
             }
         }
     }
 
+    let owner_map = physical_owner_map(&paths.root_dir)?;
+    validate_fs_tree_object(object_dir, &owner_map).map_err(map_fs_tree_error)?;
     Ok(())
 }
 
-#[cfg(unix)]
-fn ensure_parent_dirs_0755(root: &Path, path: &Path) -> Result<(), BuilderError> {
-    let mut current = root.to_path_buf();
-    if let Ok(relative) = path.strip_prefix(root) {
-        for component in relative.components() {
-            if let Component::Normal(segment) = component {
-                current.push(segment);
-                fs::set_permissions(&current, fs::Permissions::from_mode(0o755)).map_err(
-                    |error| {
-                        BuilderError::ExecutionFailed(format!(
-                            "failed to set permissions on staged directory '{}': {error}",
-                            current.display()
-                        ))
-                    },
-                )?;
+fn fs_tree_manifest_for_entries(
+    entries: &[NormalizedEntry],
+    rules: &[CompiledInstallRule],
+) -> Result<FsTreeManifest, BuilderError> {
+    let mut manifest_entries = BTreeMap::<String, FsTreeEntry>::new();
+    manifest_entries.insert(String::new(), FsTreeEntry::directory("", 0, 0, 0o755));
+
+    for entry in entries {
+        add_parent_directories(entry.rel_path(), &mut manifest_entries, rules)?;
+        let fs_entry = match entry {
+            NormalizedEntry::File {
+                rel_path,
+                executable,
+                ..
+            } => fs_tree_entry_for_path(
+                rel_path,
+                MaterializedKind::File {
+                    executable: *executable,
+                },
+                rules,
+            )?,
+            NormalizedEntry::Dir { rel_path } => {
+                fs_tree_entry_for_path(rel_path, MaterializedKind::Directory, rules)?
             }
+            NormalizedEntry::Symlink { rel_path, .. } => {
+                fs_tree_entry_for_path(rel_path, MaterializedKind::Symlink, rules)?
+            }
+        };
+        manifest_entries.insert(entry.rel_path().to_string(), fs_entry);
+    }
+
+    FsTreeManifest::from_entries(manifest_entries.into_values().collect()).map_err(|error| {
+        BuilderError::InvalidRecipe(format!("invalid builder config: fs-tree manifest: {error}"))
+    })
+}
+
+fn add_parent_directories(
+    rel_path: &str,
+    manifest_entries: &mut BTreeMap<String, FsTreeEntry>,
+    rules: &[CompiledInstallRule],
+) -> Result<(), BuilderError> {
+    let mut current = PathBuf::new();
+    let components = rel_path.split('/').collect::<Vec<_>>();
+    for segment in components.iter().take(components.len().saturating_sub(1)) {
+        current.push(segment);
+        let path = current.to_string_lossy().replace('\\', "/");
+        if !manifest_entries.contains_key(&path) {
+            let entry = fs_tree_entry_for_path(&path, MaterializedKind::Directory, rules)?;
+            manifest_entries.insert(path, entry);
         }
     }
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn ensure_parent_dirs_0755(_root: &Path, _path: &Path) -> Result<(), BuilderError> {
-    Ok(())
+fn fs_tree_entry_for_path(
+    rel_path: &str,
+    kind: MaterializedKind,
+    rules: &[CompiledInstallRule],
+) -> Result<FsTreeEntry, BuilderError> {
+    let attrs = resolve_install_attrs(rel_path, rules)?;
+    let uid = required_attr(attrs.uid, rel_path, "uid")?;
+    let gid = required_attr(attrs.gid, rel_path, "gid")?;
+    match kind {
+        MaterializedKind::Directory => Ok(FsTreeEntry::directory(
+            rel_path,
+            uid,
+            gid,
+            required_attr(attrs.directory_mode, rel_path, "directory_mode")?,
+        )),
+        MaterializedKind::File { executable } => {
+            let mode = if executable {
+                required_attr(attrs.executable_file_mode, rel_path, "executable_file_mode")?
+            } else {
+                required_attr(attrs.regular_file_mode, rel_path, "regular_file_mode")?
+            };
+            Ok(FsTreeEntry::file(rel_path, uid, gid, mode))
+        }
+        MaterializedKind::Symlink => Ok(FsTreeEntry::symlink(rel_path, uid, gid)),
+    }
+}
+
+fn required_attr(value: Option<u32>, rel_path: &str, name: &str) -> Result<u32, BuilderError> {
+    value.ok_or_else(|| {
+        BuilderError::InvalidRecipe(format!(
+            "invalid builder config: path '{rel_path}' is missing resolved {name}"
+        ))
+    })
+}
+
+fn compile_install_rules(rules: &[InstallRule]) -> Result<Vec<CompiledInstallRule>, BuilderError> {
+    rules
+        .iter()
+        .map(|rule| {
+            let glob = Glob::new(&rule.path).map_err(|error| {
+                BuilderError::InvalidRecipe(format!(
+                    "invalid builder config: invalid install rule pattern '{}': {error}",
+                    rule.path
+                ))
+            })?;
+            Ok(CompiledInstallRule {
+                pattern: rule.path.clone(),
+                matcher: glob.compile_matcher(),
+                attrs: rule.attrs.clone(),
+            })
+        })
+        .collect()
+}
+
+fn resolve_install_attrs(
+    rel_path: &str,
+    rules: &[CompiledInstallRule],
+) -> Result<InstallAttrs, BuilderError> {
+    let mut resolved = InstallAttrs::default();
+    let mut matched_any = false;
+    for rule in rules {
+        if install_rule_matches(rule, rel_path) {
+            matched_any = true;
+            if let Some(uid) = rule.attrs.uid {
+                resolved.uid = Some(uid);
+            }
+            if let Some(gid) = rule.attrs.gid {
+                resolved.gid = Some(gid);
+            }
+            if let Some(mode) = rule.attrs.directory_mode {
+                resolved.directory_mode = Some(mode);
+            }
+            if let Some(mode) = rule.attrs.regular_file_mode {
+                resolved.regular_file_mode = Some(mode);
+            }
+            if let Some(mode) = rule.attrs.executable_file_mode {
+                resolved.executable_file_mode = Some(mode);
+            }
+            if let Some(mode) = rule.attrs.symlink_mode {
+                resolved.symlink_mode = Some(mode);
+            }
+        }
+    }
+
+    if matched_any {
+        Ok(resolved)
+    } else {
+        let known = rules
+            .iter()
+            .map(|rule| rule.pattern.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(BuilderError::InvalidRecipe(format!(
+            "invalid builder config: path '{rel_path}' is not covered by any install rule (known patterns: {known})"
+        )))
+    }
+}
+
+fn install_rule_matches(rule: &CompiledInstallRule, rel_path: &str) -> bool {
+    if rule.matcher.is_match(rel_path) {
+        return true;
+    }
+
+    if let Some(prefix) = rule.pattern.strip_suffix("/**") {
+        return rel_path == prefix;
+    }
+
+    false
 }
 
 fn set_file_mode(path: &Path, executable: bool) -> Result<(), BuilderError> {
     #[cfg(unix)]
     {
         let mode = if executable { 0o755 } else { 0o644 };
+        set_mode(path, mode)?;
+    }
+    Ok(())
+}
+
+fn set_mode(path: &Path, mode: u32) -> Result<(), BuilderError> {
+    #[cfg(unix)]
+    {
         fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|error| {
             BuilderError::ExecutionFailed(format!(
-                "failed to set permissions on staged file '{}': {error}",
+                "failed to set permissions on staged path '{}': {error}",
                 path.display()
             ))
         })?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        let _ = mode;
     }
     Ok(())
 }
@@ -500,13 +658,27 @@ fn create_symlink(_target: &str, _path: &Path) -> Result<(), BuilderError> {
     ))
 }
 
-fn install_meta_map(install: &InstallMeta) -> Result<Map<String, Value>, BuilderError> {
-    let value = serde_json::to_value(install).map_err(|error| {
-        BuilderError::ExecutionFailed(format!("failed to serialize install metadata: {error}"))
+#[cfg(unix)]
+fn physical_owner_map(path: &Path) -> Result<PhysicalOwnerMap, BuilderError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to inspect fs-tree root '{}': {error}",
+            path.display()
+        ))
     })?;
-    let mut meta = Map::new();
-    meta.insert("install".to_string(), value);
-    Ok(meta)
+    Ok(PhysicalOwnerMap {
+        uid: metadata.uid(),
+        gid: metadata.gid(),
+    })
+}
+
+#[cfg(not(unix))]
+fn physical_owner_map(_path: &Path) -> Result<PhysicalOwnerMap, BuilderError> {
+    Ok(PhysicalOwnerMap { uid: 0, gid: 0 })
+}
+
+fn map_fs_tree_error(error: impl std::fmt::Display) -> BuilderError {
+    BuilderError::ExecutionFailed(error.to_string())
 }
 
 #[cfg(test)]
@@ -537,6 +709,44 @@ mod tests {
                 },
             }],
         }
+    }
+
+    fn install_with_attrs(
+        uid: u32,
+        gid: u32,
+        directory_mode: u32,
+        regular_file_mode: u32,
+    ) -> InstallMeta {
+        InstallMeta {
+            rules: vec![InstallRule {
+                path: "**".to_string(),
+                attrs: InstallAttrs {
+                    uid: Some(uid),
+                    gid: Some(gid),
+                    directory_mode: Some(directory_mode),
+                    regular_file_mode: Some(regular_file_mode),
+                    executable_file_mode: Some(0o755),
+                    symlink_mode: None,
+                },
+            }],
+        }
+    }
+
+    fn install_with_modes(directory_mode: u32, regular_file_mode: u32) -> InstallMeta {
+        install_with_attrs(0, 0, directory_mode, regular_file_mode)
+    }
+
+    fn fs_tree_root(result: &StagedBuildResult) -> PathBuf {
+        result.staged_path.join("root")
+    }
+
+    fn fs_tree_manifest(result: &StagedBuildResult) -> FsTreeManifest {
+        FsTreeManifest::read_canonical(&result.staged_path.join("manifest.jsonl")).unwrap()
+    }
+
+    fn assert_valid_fs_tree(result: &StagedBuildResult) {
+        let owner_map = physical_owner_map(&result.staged_path.join("root")).unwrap();
+        validate_fs_tree_object(&result.staged_path, &owner_map).unwrap();
     }
 
     #[test]
@@ -619,8 +829,10 @@ mod tests {
             .unwrap();
 
         assert!(result.staged_path.is_dir());
-        assert!(result.staged_path.join("dev").is_dir());
-        assert!(result.meta.get("install").is_some());
+        assert!(result.staged_path.join("manifest.jsonl").is_file());
+        assert!(fs_tree_root(&result).join("dev").is_dir());
+        assert!(result.meta.is_empty());
+        assert_valid_fs_tree(&result);
     }
 
     #[test]
@@ -652,27 +864,14 @@ mod tests {
             )
             .unwrap();
 
-        assert!(result.staged_path.join("dev").is_dir());
-        assert!(result.staged_path.join("proc").is_dir());
-        assert!(result.staged_path.join("sys").is_dir());
-        assert_eq!(
-            fs::read_dir(result.staged_path.join("dev"))
-                .unwrap()
-                .count(),
-            0
-        );
-        assert_eq!(
-            fs::read_dir(result.staged_path.join("proc"))
-                .unwrap()
-                .count(),
-            0
-        );
-        assert_eq!(
-            fs::read_dir(result.staged_path.join("sys"))
-                .unwrap()
-                .count(),
-            0
-        );
+        let root = fs_tree_root(&result);
+        assert!(root.join("dev").is_dir());
+        assert!(root.join("proc").is_dir());
+        assert!(root.join("sys").is_dir());
+        assert_eq!(fs::read_dir(root.join("dev")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(root.join("proc")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(root.join("sys")).unwrap().count(), 0);
+        assert_valid_fs_tree(&result);
     }
 
     #[test]
@@ -702,8 +901,9 @@ mod tests {
             )
             .unwrap();
 
-        let target = fs::read_link(result.staged_path.join("bin")).unwrap();
+        let target = fs::read_link(fs_tree_root(&result).join("bin")).unwrap();
         assert_eq!(target, PathBuf::from("usr/bin"));
+        assert_valid_fs_tree(&result);
     }
 
     #[test]
@@ -728,12 +928,13 @@ mod tests {
             )
             .unwrap();
 
-        let target = fs::read_link(result.staged_path.join("etc/mtab")).unwrap();
+        let target = fs::read_link(fs_tree_root(&result).join("etc/mtab")).unwrap();
         assert_eq!(target, PathBuf::from("/proc/self/mounts"));
+        assert_valid_fs_tree(&result);
     }
 
     #[test]
-    fn directory_tree_builds_directory_and_preserves_install_meta() {
+    fn directory_tree_builds_fs_tree_with_empty_meta_and_manifest() {
         let builder = TreeBuilder;
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
@@ -770,30 +971,171 @@ mod tests {
             .unwrap();
 
         assert!(result.staged_path.is_dir());
-        assert!(result.staged_path.join("dev").is_dir());
+        let root = fs_tree_root(&result);
+        assert!(root.join("dev").is_dir());
         assert_eq!(
-            fs::read_to_string(result.staged_path.join("etc/hostname")).unwrap(),
+            fs::read_to_string(root.join("etc/hostname")).unwrap(),
             "mbuild\n"
         );
         assert_eq!(
-            fs::read_link(result.staged_path.join("bin")).unwrap(),
+            fs::read_link(root.join("bin")).unwrap(),
             PathBuf::from("usr/bin")
         );
-        assert!(result.meta.get("install").is_some());
+        assert!(result.meta.is_empty());
+
+        let manifest = fs_tree_manifest(&result);
+        assert_eq!(
+            manifest.entries(),
+            &[
+                FsTreeEntry::directory("", 0, 0, 0o755),
+                FsTreeEntry::symlink("bin", 0, 0),
+                FsTreeEntry::directory("dev", 0, 0, 0o755),
+                FsTreeEntry::directory("etc", 0, 0, 0o755),
+                FsTreeEntry::file("etc/hostname", 0, 0, 0o644),
+                FsTreeEntry::file("init", 0, 0, 0o755),
+            ]
+        );
+        assert_valid_fs_tree(&result);
 
         #[cfg(unix)]
         {
-            let init_mode = fs::metadata(result.staged_path.join("init"))
+            let init_mode = fs::metadata(root.join("init"))
                 .unwrap()
                 .permissions()
                 .mode();
-            let etc_mode = fs::metadata(result.staged_path.join("etc"))
-                .unwrap()
-                .permissions()
-                .mode();
+            let etc_mode = fs::metadata(root.join("etc")).unwrap().permissions().mode();
             assert_eq!(init_mode & 0o777, 0o755);
             assert_eq!(etc_mode & 0o777, 0o755);
         }
+    }
+
+    #[test]
+    fn tree_fs_object_hash_changes_with_manifest_attrs_bytes_and_symlink_target() {
+        let builder = TreeBuilder;
+        let temp = tempdir().unwrap();
+
+        let mut cx = build_context(temp.path());
+        let base = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "etc/hostname".to_string(),
+                            text: "mbuild\n".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: Some(install_with_modes(0o755, 0o644)),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+        let base_hash = fsobj_hash::hash_path(&base.staged_path).unwrap();
+
+        let mut cx = build_context(temp.path());
+        let changed_mode = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "etc/hostname".to_string(),
+                            text: "mbuild\n".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: Some(install_with_modes(0o700, 0o600)),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+        assert_ne!(
+            base_hash,
+            fsobj_hash::hash_path(&changed_mode.staged_path).unwrap()
+        );
+
+        let mut cx = build_context(temp.path());
+        let changed_owner = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "etc/hostname".to_string(),
+                            text: "mbuild\n".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: Some(install_with_attrs(42, 43, 0o755, 0o644)),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+        assert_ne!(
+            base_hash,
+            fsobj_hash::hash_path(&changed_owner.staged_path).unwrap()
+        );
+
+        let mut cx = build_context(temp.path());
+        let changed_bytes = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "etc/hostname".to_string(),
+                            text: "other\n".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: Some(install_with_modes(0o755, 0o644)),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+        assert_ne!(
+            base_hash,
+            fsobj_hash::hash_path(&changed_bytes.staged_path).unwrap()
+        );
+
+        let mut cx = build_context(temp.path());
+        let link_a = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::Symlink {
+                            path: "bin".to_string(),
+                            target: "usr/bin".to_string(),
+                        }],
+                    },
+                    install: Some(sample_install()),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+        let link_a_hash = fsobj_hash::hash_path(&link_a.staged_path).unwrap();
+        let mut cx = build_context(temp.path());
+        let link_b = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::Symlink {
+                            path: "bin".to_string(),
+                            target: "sbin".to_string(),
+                        }],
+                    },
+                    install: Some(sample_install()),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+        assert_ne!(
+            link_a_hash,
+            fsobj_hash::hash_path(&link_b.staged_path).unwrap()
+        );
     }
 
     #[test]
@@ -882,6 +1224,77 @@ mod tests {
                 .to_string()
                 .contains("install.rules must contain at least one rule")
         );
+    }
+
+    #[test]
+    fn directory_output_rejects_uncovered_paths_and_missing_attrs() {
+        let builder = TreeBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let error = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "etc/hostname".to_string(),
+                            text: "mbuild\n".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: Some(InstallMeta {
+                        rules: vec![InstallRule {
+                            path: "bin/**".to_string(),
+                            attrs: InstallAttrs {
+                                uid: Some(0),
+                                gid: Some(0),
+                                directory_mode: Some(0o755),
+                                regular_file_mode: Some(0o644),
+                                executable_file_mode: Some(0o755),
+                                symlink_mode: None,
+                            },
+                        }],
+                    }),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("is not covered by any install rule")
+        );
+
+        let error = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "etc/hostname".to_string(),
+                            text: "mbuild\n".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: Some(InstallMeta {
+                        rules: vec![InstallRule {
+                            path: "**".to_string(),
+                            attrs: InstallAttrs {
+                                uid: Some(0),
+                                gid: None,
+                                directory_mode: Some(0o755),
+                                regular_file_mode: Some(0o644),
+                                executable_file_mode: Some(0o755),
+                                symlink_mode: None,
+                            },
+                        }],
+                    }),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("missing resolved gid"));
     }
 
     #[test]

@@ -5,9 +5,9 @@
 `mbuild` currently implements three filesystem-related builders:
 
 - `Tree`: realize text files, symlinks, and explicit directories as one file object or
-  one installable directory object
-- `Rootfs`: compose installable directory objects into one rootfs directory object
-- `Ext4Rootfs`: compose installable directory objects into one ext4 rootfs image
+  one fs-tree directory object
+- `Rootfs`: compose installable legacy directory objects into one rootfs directory object
+- `Ext4Rootfs`: compose installable legacy directory objects into one ext4 rootfs image
 
 `Tree` is a direct authoring path:
 
@@ -15,12 +15,12 @@
 - generated `*-tree.ncl` modules import UTF-8 text from the adjacent `*-tree-src`
   tree instead of embedding file contents inline
 - it stages UTF-8 text files, symlinks, and explicit directories
-- it publishes either one file object or one directory object, depending on the
-  tree shape
+- it publishes either one file object or one fs-tree directory object,
+  depending on the tree shape
 
-`Rootfs` and `Ext4Rootfs` are direct composition paths:
+`Rootfs` and `Ext4Rootfs` are legacy direct composition paths:
 
-- the builder reads installable directory objects from the store
+- the builder reads installable legacy directory objects from the store
 - it applies install rules from each input's `meta.install`
 - it merges those filesystem contributions in memory
 - `Rootfs` writes one staged directory object as the realized result
@@ -82,9 +82,17 @@ Current behavior:
 - symlink entries carry one literal target string
 - parent directories for file entries are created automatically
 - if the tree contains exactly one top-level file entry, the result is a file object
-- otherwise the result is a directory object
+- otherwise the result is an fs-tree directory object:
+  ```text
+  manifest.jsonl
+  root/
+  ```
 - `install` is rejected for file output and required for directory output
 - `install.rules` uses path selectors with partial field overrides
+- directory output consumes `install.rules` into `manifest.jsonl`
+- directory output publishes empty result metadata: `{}`
+- `symlink_mode` is accepted in `install.rules` for config compatibility, but
+  symlink modes are not represented in the fs-tree manifest
 - authoring usually starts with one broad `**` rule carrying full defaults, then
   adds narrower overrides
 - when authoring `*-tree-src`, empty directories must contain `.gitkeep`; the generator ignores `.gitkeep` and still emits an empty `dir` entry
@@ -106,13 +114,14 @@ Current limitations:
 
 Inputs:
 
-- one or more named installable directory inputs
+- one or more named installable legacy directory inputs
 - contribution order follows lexical input name order
 
 Current behavior:
 
 - requires every input to resolve to a directory object
 - requires every input to carry valid `meta.install.rules`
+- does not yet accept fs-tree inputs from `Tree`
 - scans files, directories, and symlinks from all inputs
 - resolves install attributes per path using full coverage and field-wise last-match-wins semantics
 - merges all filesystem contributions with the same strict conflict checking as `Ext4Rootfs`
@@ -144,13 +153,14 @@ The realized result payload is one directory object. The current realized result
 
 Inputs:
 
-- one or more named installable directory inputs
+- one or more named installable legacy directory inputs
 - contribution order follows lexical input name order
 
 Current behavior:
 
 - requires every input to resolve to a directory object
 - requires every input to carry valid `meta.install.rules`
+- does not yet accept fs-tree inputs from `Tree`
 - scans files, directories, and symlinks from all inputs
 - resolves install attributes per path using full coverage and field-wise last-match-wins semantics
 - merges all filesystem contributions with strict conflict checking
@@ -185,7 +195,13 @@ The current realized result metadata is empty:
 
 ## Current Limitations
 
-`Rootfs` and `Ext4Rootfs` currently support only filesystem content already supported by the object store:
+`Tree` fs-tree directory outputs currently support:
+
+- regular files
+- directories
+- symlinks
+
+`Rootfs` and `Ext4Rootfs` currently support only filesystem content already supported by the legacy directory object path:
 
 - regular files
 - directories

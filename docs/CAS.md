@@ -34,6 +34,7 @@ envelope. `mbuild` does not add an implicit `.mbuild/` directory.
     <name>.json -> ../results/<result_id>.json
   object-refs/
     <name> -> ../objects/<object_hash>
+    <fs-tree-name> -> ../objects/<object_hash>/root
   logs/
     runs/
       <YYMMDDHHMMSS>-<pid>.jsonl
@@ -96,7 +97,10 @@ Every recipe node carries a publication name.
 After the runtime reuses or builds a node, it updates:
 
 - `meta-refs/<name>.json -> ../results/<result_id>.json`
-- `object-refs/<name> -> ../objects/<object_hash>`
+- `object-refs/<name> -> ../objects/<object_hash>` for ordinary file and
+  directory objects
+- `object-refs/<name> -> ../objects/<object_hash>/root` for filesystem tree
+  objects
 
 If the current publication name already points at a different result, the old
 current refs are rotated into timestamp-suffixed history refs.

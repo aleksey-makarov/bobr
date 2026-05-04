@@ -45,6 +45,45 @@ fn source_recipe_node(name: &str, object_hash: &str, origin_path: &str, mode: &s
     })
 }
 
+fn legacy_install_meta() -> Value {
+    json!({
+        "install": {
+            "rules": [{
+                "path": "**",
+                "attrs": {
+                    "uid": 0,
+                    "gid": 0,
+                    "directory_mode": 493,
+                    "regular_file_mode": 420,
+                    "executable_file_mode": 493,
+                    "symlink_mode": 511
+                }
+            }]
+        }
+    })
+}
+
+fn legacy_rootfs_source_recipe(workspace: &Path, name: &str) -> Value {
+    let source_name = format!("{name}-source");
+    let source_dir = workspace.join(&source_name);
+    fs::create_dir_all(source_dir.join("dev")).unwrap();
+    fs::create_dir_all(source_dir.join("etc")).unwrap();
+    fs::write(source_dir.join("etc/hostname"), b"mbuild\n").unwrap();
+
+    let object_hash = fsobj_hash::hash_path(&source_dir).unwrap();
+    json!({
+        "name": name,
+        "tag": "Source",
+        "object_hash": object_hash.to_string(),
+        "origin": {
+            "type": "path",
+            "path": source_name,
+            "mode": "direct"
+        },
+        "meta": legacy_install_meta()
+    })
+}
+
 fn env_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -888,12 +927,21 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
         .expect("expected Tree Build to exist in store");
 
     assert!(published.object_path.is_dir());
-    assert!(published.object_path.join("dev").is_dir());
+    assert!(published.build.meta.is_empty());
+    assert!(published.object_path.join("manifest.jsonl").is_file());
     assert_eq!(
-        fs::read_to_string(published.object_path.join("etc/hostname")).unwrap(),
+        fs::read_link(layout.object_refs.join("runtime-tree")).unwrap(),
+        Path::new("..")
+            .join("objects")
+            .join(published.build.object_hash.to_string())
+            .join("root")
+    );
+    let root = published.object_path.join("root");
+    assert!(root.join("dev").is_dir());
+    assert_eq!(
+        fs::read_to_string(root.join("etc/hostname")).unwrap(),
         "mbuild\n"
     );
-    assert!(published.build.meta.get("install").is_some());
 }
 
 #[test]
@@ -910,15 +958,17 @@ fn tree_symlink_recipe_builds_successfully_via_runtime() {
         .expect("expected Tree Build to exist in store");
 
     assert!(published.object_path.is_dir());
+    assert!(published.build.meta.is_empty());
+    assert!(published.object_path.join("manifest.jsonl").is_file());
+    let root = published.object_path.join("root");
     assert_eq!(
-        fs::read_link(published.object_path.join("bin")).unwrap(),
+        fs::read_link(root.join("bin")).unwrap(),
         Path::new("usr/bin")
     );
     assert_eq!(
-        fs::read_link(published.object_path.join("etc/mtab")).unwrap(),
+        fs::read_link(root.join("etc/mtab")).unwrap(),
         Path::new("/proc/self/mounts")
     );
-    assert!(published.build.meta.get("install").is_some());
 }
 
 #[test]
@@ -930,7 +980,7 @@ fn rootfs_recipe_builds_directory_with_empty_metadata_and_reuses_result() {
         "Rootfs",
         json!({}),
         json!({
-            "tree": tree_directory_recipe("runtime-tree"),
+            "tree": legacy_rootfs_source_recipe(workspace.path(), "runtime-tree"),
         }),
     );
     write_recipe(&recipe_path, &recipe);
@@ -965,7 +1015,7 @@ fn container_recipe_uses_rootfs_result_with_fake_bwrap() {
             "Rootfs",
             json!({}),
             json!({
-                "tree": tree_directory_recipe("runtime-tree"),
+                "tree": legacy_rootfs_source_recipe(workspace.path(), "runtime-tree"),
             }),
         );
         let recipe = recipe_node(

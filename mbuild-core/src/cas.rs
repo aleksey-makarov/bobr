@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::fmt;
 use std::fs;
+use std::io;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
@@ -642,9 +643,7 @@ pub fn publish_result_refs(
         }
     }
 
-    let object_ref_target = PathBuf::from("..")
-        .join(OBJECTS_DIR)
-        .join(result.object_hash.to_hex());
+    let object_ref_target = object_ref_target_for_result(layout, result)?;
     replace_symlink(&object_ref_target, &current_object_ref_path)?;
 
     let meta_ref_target = PathBuf::from("..")
@@ -652,6 +651,60 @@ pub fn publish_result_refs(
         .join(format!("{}.json", result.result_id.to_hex()));
     replace_symlink(&meta_ref_target, &current_meta_ref_path)?;
     Ok(())
+}
+
+fn object_ref_target_for_result(
+    layout: &StoreLayout,
+    result: &ResultRecord,
+) -> Result<PathBuf, CasError> {
+    let object_hash = result.object_hash.to_hex();
+    let object_path = layout.objects.join(&object_hash);
+    let mut target = PathBuf::from("..").join(OBJECTS_DIR).join(&object_hash);
+    if is_fs_tree_object_shape(&object_path)? {
+        target.push("root");
+    }
+    Ok(target)
+}
+
+fn is_fs_tree_object_shape(object_path: &Path) -> Result<bool, CasError> {
+    let metadata = match fs::symlink_metadata(object_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(CasError::Io(format!(
+                "failed to inspect object '{}': {error}",
+                object_path.display()
+            )));
+        }
+    };
+    if !metadata.file_type().is_dir() {
+        return Ok(false);
+    }
+
+    let manifest_path = object_path.join("manifest.jsonl");
+    let root_path = object_path.join("root");
+    let manifest = match fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(CasError::Io(format!(
+                "failed to inspect fs-tree manifest '{}': {error}",
+                manifest_path.display()
+            )));
+        }
+    };
+    let root = match fs::symlink_metadata(&root_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(CasError::Io(format!(
+                "failed to inspect fs-tree root '{}': {error}",
+                root_path.display()
+            )));
+        }
+    };
+
+    Ok(manifest.file_type().is_file() && root.file_type().is_dir())
 }
 
 pub fn publish_refs(
@@ -1401,6 +1454,7 @@ fn map_fsutil_error(error: fsutil::FsUtilError) -> CasError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{FsTreeEntry, FsTreeManifest, create_fs_tree_staging_dir};
     use serde_json::json;
     use std::fs;
     #[cfg(unix)]
@@ -2275,6 +2329,39 @@ mod tests {
         assert!(object_path.is_dir());
         assert!(object_path.join("bin").join("tool").exists());
         assert!(layout.builds.join(published.build_key.to_hex()).exists());
+    }
+
+    #[test]
+    fn publish_output_points_fs_tree_object_ref_at_root_payload() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let stage_dir = temp.path().join("fs-tree");
+        let manifest =
+            FsTreeManifest::from_entries(vec![FsTreeEntry::directory("", 0, 0, 0o755)]).unwrap();
+        create_fs_tree_staging_dir(&stage_dir, &manifest).unwrap();
+
+        let published = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "tree".to_string(),
+                build_key: build_key_for("Tree", json!({ "kind": "fs-tree" }), &[]),
+                reuse_key: reuse_key_for("Tree", json!({ "kind": "fs-tree" }), &[]),
+                created_at: sample_created_at().to_string(),
+                staged_path: stage_dir,
+                inputs: vec![],
+                meta: Map::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_link(layout.object_refs.join("tree")).unwrap(),
+            PathBuf::from("..")
+                .join(OBJECTS_DIR)
+                .join(published.object_hash.to_hex())
+                .join("root")
+        );
     }
 
     #[test]

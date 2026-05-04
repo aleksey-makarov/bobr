@@ -998,6 +998,8 @@ dependencies = [
 name = "mbuild-tree"
 version = "0.1.0"
 dependencies = [
+ "fsobj-hash",
+ "globset",
  "mbuild-core",
  "serde",
  "serde_json",
