@@ -68,16 +68,8 @@ if [ "${1:-}" = create ]; then
     esac
   done
 
-  counter_file="$state_root/counter"
-  if [ -f "$counter_file" ]; then
-    counter="$(cat "$counter_file")"
-  else
-    counter=0
-  fi
-  counter=$((counter + 1))
-  printf '%s\n' "$counter" > "$counter_file"
-  container_id="fake-container-$counter"
-  container_dir="$state_root/$container_id"
+  container_dir="$(mktemp -d "$state_root/fake-container-XXXXXX")"
+  container_id="$(basename "$container_dir")"
   mkdir -p "$container_dir/in-mounts"
   mkdir -p "$container_dir/fs$build_dir"
   mkdir -p "$container_dir/fs$out_dir"

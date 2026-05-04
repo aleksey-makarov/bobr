@@ -4,6 +4,7 @@ pub mod builder;
 pub mod cancellation;
 pub mod cas;
 pub mod fs_tree_manifest;
+pub mod fs_tree_object;
 pub mod fsutil;
 pub mod origin;
 
@@ -11,6 +12,7 @@ pub use builder::*;
 pub use cancellation::*;
 pub use cas::*;
 pub use fs_tree_manifest::*;
+pub use fs_tree_object::*;
 pub use fsobj_hash::ObjectHash;
 pub use origin::*;
 
