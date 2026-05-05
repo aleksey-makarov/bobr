@@ -128,20 +128,34 @@ enum MaterializedKind {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PhysicalOwnerMap {
-    uid: u32,
-    gid: u32,
+struct RootOnlyOwnerMap {
+    root_uid: u32,
+    root_gid: u32,
 }
 
-impl FsTreeOwnerMap for PhysicalOwnerMap {
-    fn physical_uid(&self, _logical_uid: u32) -> Result<u32, FsTreeObjectError> {
-        Ok(self.uid)
+impl FsTreeOwnerMap for RootOnlyOwnerMap {
+    fn physical_uid(&self, logical_uid: u32) -> Result<u32, FsTreeObjectError> {
+        if logical_uid == 0 {
+            Ok(self.root_uid)
+        } else {
+            Err(FsTreeObjectError::Invalid(format!(
+                "Tree fs-tree directory output currently supports only logical uid 0, got {logical_uid}"
+            )))
+        }
     }
 
-    fn physical_gid(&self, _logical_gid: u32) -> Result<u32, FsTreeObjectError> {
-        Ok(self.gid)
+    fn physical_gid(&self, logical_gid: u32) -> Result<u32, FsTreeObjectError> {
+        if logical_gid == 0 {
+            Ok(self.root_gid)
+        } else {
+            Err(FsTreeObjectError::Invalid(format!(
+                "Tree fs-tree directory output currently supports only logical gid 0, got {logical_gid}"
+            )))
+        }
     }
 }
+
+const ROOT_ONLY_OWNER_ERROR: &str = "invalid builder config: Tree fs-tree directory output currently supports only uid=0,gid=0 until fs-tree owner materialization is implemented";
 
 pub struct TreeBuilder;
 
@@ -305,9 +319,22 @@ fn validate_install(kind: OutputKind, install: Option<&InstallMeta>) -> Result<(
                         .to_string(),
                 ));
             }
+            validate_root_only_owner_rules(install)?;
             Ok(())
         }
     }
+}
+
+fn validate_root_only_owner_rules(install: &InstallMeta) -> Result<(), BuilderError> {
+    for rule in &install.rules {
+        if rule.attrs.uid.is_some_and(|uid| uid != 0) || rule.attrs.gid.is_some_and(|gid| gid != 0)
+        {
+            return Err(BuilderError::InvalidRecipe(
+                ROOT_ONLY_OWNER_ERROR.to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_rel_path(path: &str) -> Result<String, BuilderError> {
@@ -444,7 +471,7 @@ fn materialize_directory_output(
         }
     }
 
-    let owner_map = physical_owner_map(&paths.root_dir)?;
+    let owner_map = root_only_owner_map(&paths.root_dir)?;
     validate_fs_tree_object(object_dir, &owner_map).map_err(map_fs_tree_error)?;
     Ok(())
 }
@@ -511,6 +538,7 @@ fn fs_tree_entry_for_path(
     let attrs = resolve_install_attrs(rel_path, rules)?;
     let uid = required_attr(attrs.uid, rel_path, "uid")?;
     let gid = required_attr(attrs.gid, rel_path, "gid")?;
+    require_root_owner(uid, gid)?;
     match kind {
         MaterializedKind::Directory => Ok(FsTreeEntry::directory(
             rel_path,
@@ -536,6 +564,16 @@ fn required_attr(value: Option<u32>, rel_path: &str, name: &str) -> Result<u32, 
             "invalid builder config: path '{rel_path}' is missing resolved {name}"
         ))
     })
+}
+
+fn require_root_owner(uid: u32, gid: u32) -> Result<(), BuilderError> {
+    if uid == 0 && gid == 0 {
+        Ok(())
+    } else {
+        Err(BuilderError::InvalidRecipe(
+            ROOT_ONLY_OWNER_ERROR.to_string(),
+        ))
+    }
 }
 
 fn compile_install_rules(rules: &[InstallRule]) -> Result<Vec<CompiledInstallRule>, BuilderError> {
@@ -659,22 +697,25 @@ fn create_symlink(_target: &str, _path: &Path) -> Result<(), BuilderError> {
 }
 
 #[cfg(unix)]
-fn physical_owner_map(path: &Path) -> Result<PhysicalOwnerMap, BuilderError> {
+fn root_only_owner_map(path: &Path) -> Result<RootOnlyOwnerMap, BuilderError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
             "failed to inspect fs-tree root '{}': {error}",
             path.display()
         ))
     })?;
-    Ok(PhysicalOwnerMap {
-        uid: metadata.uid(),
-        gid: metadata.gid(),
+    Ok(RootOnlyOwnerMap {
+        root_uid: metadata.uid(),
+        root_gid: metadata.gid(),
     })
 }
 
 #[cfg(not(unix))]
-fn physical_owner_map(_path: &Path) -> Result<PhysicalOwnerMap, BuilderError> {
-    Ok(PhysicalOwnerMap { uid: 0, gid: 0 })
+fn root_only_owner_map(_path: &Path) -> Result<RootOnlyOwnerMap, BuilderError> {
+    Ok(RootOnlyOwnerMap {
+        root_uid: 0,
+        root_gid: 0,
+    })
 }
 
 fn map_fs_tree_error(error: impl std::fmt::Display) -> BuilderError {
@@ -745,7 +786,7 @@ mod tests {
     }
 
     fn assert_valid_fs_tree(result: &StagedBuildResult) {
-        let owner_map = physical_owner_map(&result.staged_path.join("root")).unwrap();
+        let owner_map = root_only_owner_map(&result.staged_path.join("root")).unwrap();
         validate_fs_tree_object(&result.staged_path, &owner_map).unwrap();
     }
 
@@ -1010,7 +1051,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_fs_object_hash_changes_with_manifest_attrs_bytes_and_symlink_target() {
+    fn tree_fs_object_hash_changes_with_mode_bytes_and_symlink_target() {
         let builder = TreeBuilder;
         let temp = tempdir().unwrap();
 
@@ -1053,28 +1094,6 @@ mod tests {
         assert_ne!(
             base_hash,
             fsobj_hash::hash_path(&changed_mode.staged_path).unwrap()
-        );
-
-        let mut cx = build_context(temp.path());
-        let changed_owner = builder
-            .build_typed(
-                TreeConfig {
-                    tree: TreePayload {
-                        entries: vec![TreeEntry::File {
-                            path: "etc/hostname".to_string(),
-                            text: "mbuild\n".to_string(),
-                            executable: false,
-                        }],
-                    },
-                    install: Some(install_with_attrs(42, 43, 0o755, 0o644)),
-                },
-                BuilderInputs::empty(),
-                &mut cx,
-            )
-            .unwrap();
-        assert_ne!(
-            base_hash,
-            fsobj_hash::hash_path(&changed_owner.staged_path).unwrap()
         );
 
         let mut cx = build_context(temp.path());
@@ -1223,6 +1242,155 @@ mod tests {
             error
                 .to_string()
                 .contains("install.rules must contain at least one rule")
+        );
+    }
+
+    #[test]
+    fn directory_output_rejects_non_root_owner_attrs() {
+        let builder = TreeBuilder;
+        let temp = tempdir().unwrap();
+
+        let mut cx = build_context(temp.path());
+        let uid_error = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "etc/hostname".to_string(),
+                            text: "mbuild\n".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: Some(install_with_attrs(42, 0, 0o755, 0o644)),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+        assert!(matches!(uid_error, BuilderError::InvalidRecipe(_)));
+        assert!(uid_error.to_string().contains(ROOT_ONLY_OWNER_ERROR));
+
+        let mut cx = build_context(temp.path());
+        let gid_error = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "etc/hostname".to_string(),
+                            text: "mbuild\n".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: Some(install_with_attrs(0, 43, 0o755, 0o644)),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+        assert!(matches!(gid_error, BuilderError::InvalidRecipe(_)));
+        assert!(gid_error.to_string().contains(ROOT_ONLY_OWNER_ERROR));
+    }
+
+    #[test]
+    fn directory_output_allows_partial_ownerless_overrides_resolving_to_root() {
+        let builder = TreeBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let result = builder
+            .build_typed(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "etc/hostname".to_string(),
+                            text: "mbuild\n".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: Some(InstallMeta {
+                        rules: vec![
+                            InstallRule {
+                                path: "**".to_string(),
+                                attrs: InstallAttrs {
+                                    uid: Some(0),
+                                    gid: Some(0),
+                                    directory_mode: Some(0o755),
+                                    regular_file_mode: Some(0o644),
+                                    executable_file_mode: Some(0o755),
+                                    symlink_mode: None,
+                                },
+                            },
+                            InstallRule {
+                                path: "etc/**".to_string(),
+                                attrs: InstallAttrs {
+                                    uid: None,
+                                    gid: None,
+                                    directory_mode: Some(0o700),
+                                    regular_file_mode: Some(0o600),
+                                    executable_file_mode: None,
+                                    symlink_mode: None,
+                                },
+                            },
+                        ],
+                    }),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+
+        let manifest = fs_tree_manifest(&result);
+        assert!(
+            manifest
+                .entries()
+                .contains(&FsTreeEntry::directory("etc", 0, 0, 0o700))
+        );
+        assert!(
+            manifest
+                .entries()
+                .contains(&FsTreeEntry::file("etc/hostname", 0, 0, 0o600))
+        );
+        assert_valid_fs_tree(&result);
+    }
+
+    #[test]
+    fn root_only_owner_map_rejects_non_zero_logical_owner() {
+        let temp = tempdir().unwrap();
+
+        let uid_manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::file("hostname", 1, 0, 0o644),
+        ])
+        .unwrap();
+        let uid_paths =
+            create_fs_tree_staging_dir(&temp.path().join("uid-object"), &uid_manifest).unwrap();
+        fs::write(uid_paths.root_dir.join("hostname"), "mbuild\n").unwrap();
+        set_mode(&uid_paths.root_dir.join("hostname"), 0o644).unwrap();
+        let owner_map = root_only_owner_map(&uid_paths.root_dir).unwrap();
+        let uid_error = validate_fs_tree_object(&uid_paths.object_dir, &owner_map).unwrap_err();
+        assert!(matches!(uid_error, FsTreeObjectError::Invalid(_)));
+        assert!(
+            uid_error
+                .to_string()
+                .contains("supports only logical uid 0")
+        );
+
+        let gid_manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::file("hostname", 0, 1, 0o644),
+        ])
+        .unwrap();
+        let gid_paths =
+            create_fs_tree_staging_dir(&temp.path().join("gid-object"), &gid_manifest).unwrap();
+        fs::write(gid_paths.root_dir.join("hostname"), "mbuild\n").unwrap();
+        set_mode(&gid_paths.root_dir.join("hostname"), 0o644).unwrap();
+        let owner_map = root_only_owner_map(&gid_paths.root_dir).unwrap();
+        let gid_error = validate_fs_tree_object(&gid_paths.object_dir, &owner_map).unwrap_err();
+        assert!(matches!(gid_error, FsTreeObjectError::Invalid(_)));
+        assert!(
+            gid_error
+                .to_string()
+                .contains("supports only logical gid 0")
         );
     }
 

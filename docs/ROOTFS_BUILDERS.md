@@ -90,6 +90,9 @@ Current behavior:
 - `install` is rejected for file output and required for directory output
 - `install.rules` uses path selectors with partial field overrides
 - directory output consumes `install.rules` into `manifest.jsonl`
+- directory output currently supports only logical `uid=0,gid=0`; any
+  non-root `uid` or `gid` in `install.rules` is rejected until fs-tree owner
+  materialization is implemented
 - directory output publishes empty result metadata: `{}`
 - `symlink_mode` is accepted in `install.rules` for config compatibility, but
   symlink modes are not represented in the fs-tree manifest
@@ -200,6 +203,7 @@ The current realized result metadata is empty:
 - regular files
 - directories
 - symlinks
+- logical `uid=0,gid=0` ownership only
 
 `Rootfs` and `Ext4Rootfs` currently support only filesystem content already supported by the legacy directory object path:
 
