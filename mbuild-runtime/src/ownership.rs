@@ -1,6 +1,9 @@
 //! Public ownership materialization entrypoints.
 
-use crate::{ExecutorErrorReport, write_executor_error_report};
+use crate::{
+    ExecutorErrorReport, MbuildIdmap, RuntimeError, build_ownership_spec, create_bundle,
+    run_init_with_executor, write_executor_error_report,
+};
 use libcontainer::oci_spec::runtime::Spec;
 use libcontainer::workload::{
     Executor, ExecutorError, ExecutorSetEnvsError, ExecutorValidationError,
@@ -14,6 +17,24 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
+
+pub fn apply_ownership_batch(
+    target_root: &Path,
+    manifest: &FsTreeManifest,
+    idmap: &MbuildIdmap,
+    workspace: &Path,
+) -> Result<(), RuntimeError> {
+    require_directory(target_root, "ownership target root")?;
+    require_directory(workspace, "ownership workspace")?;
+    precheck_manifest_owners(manifest, idmap)?;
+
+    let spec = build_ownership_spec(idmap, target_root)?;
+    let bundle = create_bundle(workspace, &spec)?;
+    let executor = OwnershipExecutor::new(manifest);
+    run_init_with_executor(&bundle, workspace, executor)?;
+
+    Ok(())
+}
 
 #[derive(Debug, Clone)]
 pub struct OwnershipExecutor {
@@ -209,6 +230,41 @@ fn entry_attrs(entry: &FsTreeEntry) -> (u32, u32, Option<u32>) {
         FsTreeEntry::File { uid, gid, mode, .. }
         | FsTreeEntry::Directory { uid, gid, mode, .. } => (*uid, *gid, Some(*mode)),
         FsTreeEntry::Symlink { uid, gid, .. } => (*uid, *gid, None),
+    }
+}
+
+fn require_directory(path: &Path, label: &str) -> Result<(), RuntimeError> {
+    if path.is_dir() {
+        Ok(())
+    } else {
+        Err(RuntimeError::InvalidInput(format!(
+            "{label} '{}' must exist and be a directory",
+            path.display()
+        )))
+    }
+}
+
+fn precheck_manifest_owners(
+    manifest: &FsTreeManifest,
+    idmap: &MbuildIdmap,
+) -> Result<(), RuntimeError> {
+    for entry in manifest.entries() {
+        let (uid, gid, _) = entry_attrs(entry);
+        idmap.physical_uid(uid).map_err(|error| {
+            RuntimeError::InvalidInput(format!("fs-tree entry '{}': {error}", entry_label(entry)))
+        })?;
+        idmap.physical_gid(gid).map_err(|error| {
+            RuntimeError::InvalidInput(format!("fs-tree entry '{}': {error}", entry_label(entry)))
+        })?;
+    }
+    Ok(())
+}
+
+fn entry_label(entry: &FsTreeEntry) -> &str {
+    if entry.path().is_empty() {
+        "."
+    } else {
+        entry.path()
     }
 }
 
@@ -533,8 +589,108 @@ mod tests {
         assert!(report.message.contains("failed to inspect fs-tree entry"));
     }
 
+    #[test]
+    fn require_directory_rejects_missing_and_non_directory_paths() {
+        let temp = tempdir().unwrap();
+        let missing = temp.path().join("missing");
+        let file = temp.path().join("file");
+        fs::write(&file, b"not a directory").unwrap();
+
+        let missing_error = require_directory(&missing, "ownership target root").unwrap_err();
+        let file_error = require_directory(&file, "ownership workspace").unwrap_err();
+
+        assert!(matches!(missing_error, RuntimeError::InvalidInput(_)));
+        assert!(missing_error.to_string().contains("ownership target root"));
+        assert!(matches!(file_error, RuntimeError::InvalidInput(_)));
+        assert!(file_error.to_string().contains("ownership workspace"));
+    }
+
+    #[test]
+    fn apply_ownership_batch_rejects_invalid_target_root_before_container_setup() {
+        let temp = tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&workspace).unwrap();
+        let missing_target = temp.path().join("missing-target");
+        let manifest = root_only_manifest();
+
+        let error = apply_ownership_batch(&missing_target, &manifest, &test_idmap(), &workspace)
+            .unwrap_err();
+
+        assert!(matches!(error, RuntimeError::InvalidInput(_)));
+        assert!(error.to_string().contains("ownership target root"));
+    }
+
+    #[test]
+    fn apply_ownership_batch_rejects_invalid_workspace_before_container_setup() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("target");
+        let workspace_file = temp.path().join("workspace-file");
+        fs::create_dir(&target).unwrap();
+        fs::write(&workspace_file, b"not a directory").unwrap();
+        let manifest = root_only_manifest();
+
+        let error =
+            apply_ownership_batch(&target, &manifest, &test_idmap(), &workspace_file).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::InvalidInput(_)));
+        assert!(error.to_string().contains("ownership workspace"));
+    }
+
+    #[test]
+    fn precheck_manifest_owners_accepts_mapped_logical_ids() {
+        let idmap = test_idmap();
+        let manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::file("file", 1, 1, 0o644),
+            FsTreeEntry::symlink("link", 1, 1),
+        ])
+        .unwrap();
+
+        precheck_manifest_owners(&manifest, &idmap).unwrap();
+    }
+
+    #[test]
+    fn precheck_manifest_owners_rejects_out_of_range_uid_with_entry_path() {
+        let idmap = test_idmap();
+        let manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::file("file", 2, 1, 0o644),
+        ])
+        .unwrap();
+
+        let error = precheck_manifest_owners(&manifest, &idmap).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::InvalidInput(_)));
+        assert!(error.to_string().contains("fs-tree entry 'file'"));
+        assert!(error.to_string().contains("logical uid 2"));
+    }
+
+    #[test]
+    fn precheck_manifest_owners_rejects_out_of_range_gid_with_entry_path() {
+        let idmap = test_idmap();
+        let manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::directory("dir", 1, 2, 0o755),
+        ])
+        .unwrap();
+
+        let error = precheck_manifest_owners(&manifest, &idmap).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::InvalidInput(_)));
+        assert!(error.to_string().contains("fs-tree entry 'dir'"));
+        assert!(error.to_string().contains("logical gid 2"));
+    }
+
     fn current_owner() -> (u32, u32) {
         (unsafe { libc::geteuid() }, unsafe { libc::getegid() })
+    }
+
+    fn test_idmap() -> MbuildIdmap {
+        MbuildIdmap::for_tests(1000, 1001, 100000, 1, 200000, 1)
+    }
+
+    fn root_only_manifest() -> FsTreeManifest {
+        FsTreeManifest::from_entries(vec![FsTreeEntry::directory("", 0, 0, 0o755)]).unwrap()
     }
 
     fn assert_mode(path: impl AsRef<Path>, mode: u32) {
