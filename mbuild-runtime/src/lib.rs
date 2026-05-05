@@ -8,3 +8,4 @@ pub mod spec;
 mod executor;
 
 pub use error::{IdmapError, RuntimeError};
+pub use idmap::{MbuildIdmap, cached_host_idmap};
