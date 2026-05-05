@@ -1,6 +1,6 @@
 //! `libcontainer` run lifecycle helpers.
 
-use crate::{Bundle, RuntimeError, read_executor_error_report};
+use crate::{bundle::Bundle, error::RuntimeError, executor::read_executor_error_report};
 use libcontainer::container::builder::ContainerBuilder;
 use libcontainer::syscall::syscall::SyscallType;
 use nix::sys::wait::{WaitStatus, waitpid};
@@ -10,11 +10,11 @@ use tracing::warn;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ExecutorOutcome {
-    pub exit_code: i32,
+pub(crate) struct ExecutorOutcome {
+    pub(crate) exit_code: i32,
 }
 
-pub fn run_init_with_executor<E>(
+pub(crate) fn run_init_with_executor<E>(
     bundle: &Bundle,
     workspace: &Path,
     executor: E,
@@ -140,7 +140,19 @@ fn libcontainer_error(error: impl std::fmt::Display) -> RuntimeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(feature = "integration-tests", target_os = "linux"))]
+    use libcontainer::oci_spec::runtime::Spec;
+    #[cfg(all(feature = "integration-tests", target_os = "linux"))]
+    use libcontainer::workload::{
+        Executor, ExecutorError, ExecutorSetEnvsError, ExecutorValidationError,
+    };
+    #[cfg(all(feature = "integration-tests", target_os = "linux"))]
+    use std::collections::HashMap;
+    #[cfg(all(feature = "integration-tests", target_os = "linux"))]
+    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
+    #[cfg(all(feature = "integration-tests", target_os = "linux"))]
+    use tracing_subscriber::EnvFilter;
 
     #[test]
     fn run_init_rejects_missing_workspace() {
@@ -309,20 +321,89 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    #[cfg(all(feature = "integration-tests", target_os = "linux"))]
+    struct ExitExecutor {
+        code: i32,
+    }
+
+    #[cfg(all(feature = "integration-tests", target_os = "linux"))]
+    impl Executor for ExitExecutor {
+        fn setup_envs(&self, _: HashMap<String, String>) -> Result<(), ExecutorSetEnvsError> {
+            Ok(())
+        }
+
+        fn validate(&self, _: &Spec) -> Result<(), ExecutorValidationError> {
+            Ok(())
+        }
+
+        fn exec(&self, _: &Spec) -> Result<(), ExecutorError> {
+            std::process::exit(self.code);
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "integration-tests", target_os = "linux"))]
+    fn run_init_reports_success_and_cleans_state() {
+        let _guard = runtime_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        init_tracing();
+        let workspace = tempdir().unwrap();
+        let target_dir = workspace.path().join("target");
+        fs::create_dir(&target_dir).unwrap();
+        let spec = runtime_ownership_spec(&target_dir);
+        let bundle = crate::bundle::create_bundle(workspace.path(), &spec).unwrap();
+        let bundle_dir = bundle.dir().to_path_buf();
+
+        let outcome =
+            run_init_with_executor(&bundle, workspace.path(), ExitExecutor { code: 0 }).unwrap();
+
+        assert_eq!(outcome, ExecutorOutcome { exit_code: 0 });
+        assert_state_root_is_empty(workspace.path());
+        assert!(bundle_dir.is_dir());
+    }
+
+    #[test]
+    #[cfg(all(feature = "integration-tests", target_os = "linux"))]
+    fn run_init_reports_executor_failure_and_cleans_state() {
+        let _guard = runtime_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        init_tracing();
+        let workspace = tempdir().unwrap();
+        let target_dir = workspace.path().join("target");
+        fs::create_dir(&target_dir).unwrap();
+        let spec = runtime_ownership_spec(&target_dir);
+        let bundle = crate::bundle::create_bundle(workspace.path(), &spec).unwrap();
+        let bundle_dir = bundle.dir().to_path_buf();
+
+        let error = run_init_with_executor(&bundle, workspace.path(), ExitExecutor { code: 7 })
+            .expect_err("non-zero executor exit should fail the lifecycle");
+
+        assert!(
+            matches!(error, RuntimeError::Executor(_)),
+            "expected RuntimeError::Executor, got {error:?}: {error}"
+        );
+        assert!(error.to_string().contains("Exited"));
+        assert_state_root_is_empty(workspace.path());
+        assert!(bundle_dir.is_dir());
+    }
+
     fn test_bundle(workspace: &Path) -> Bundle {
-        let spec = crate::build_ownership_spec(
-            &crate::MbuildIdmap::for_tests(1000, 1001, 100000, 65536, 200000, 65536),
+        let spec = crate::spec::build_ownership_spec(
+            &crate::idmap::MbuildIdmap::for_tests(1000, 1001, 100000, 65536, 200000, 65536),
             Path::new("/tmp/mbuild-runtime-target"),
         )
         .unwrap();
 
-        crate::create_bundle(workspace, &spec).unwrap()
+        crate::bundle::create_bundle(workspace, &spec).unwrap()
     }
 
     fn write_report(path: &Path) {
-        crate::write_executor_error_report(
+        crate::executor::write_executor_error_report(
             path,
-            &crate::ExecutorErrorReport {
+            &crate::executor::ExecutorErrorReport {
                 kind: "chown".to_string(),
                 path: "/target/etc/passwd".to_string(),
                 message: "failed to chown".to_string(),
@@ -330,5 +411,32 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    #[cfg(all(feature = "integration-tests", target_os = "linux"))]
+    fn runtime_ownership_spec(target_dir: &Path) -> Spec {
+        let idmap = crate::idmap::MbuildIdmap::from_host_environment().unwrap();
+        crate::spec::build_ownership_spec(&idmap, target_dir).unwrap()
+    }
+
+    #[cfg(all(feature = "integration-tests", target_os = "linux"))]
+    fn assert_state_root_is_empty(workspace: &Path) {
+        let state_root = workspace.join("state");
+        assert!(state_root.is_dir());
+        assert!(fs::read_dir(state_root).unwrap().next().is_none());
+    }
+
+    #[cfg(all(feature = "integration-tests", target_os = "linux"))]
+    fn runtime_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[cfg(all(feature = "integration-tests", target_os = "linux"))]
+    fn init_tracing() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .with_test_writer()
+            .try_init();
     }
 }

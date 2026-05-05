@@ -1,6 +1,6 @@
 //! Child-side executors used by runtime containers.
 
-use crate::RuntimeError;
+use crate::error::RuntimeError;
 use libcontainer::workload::ExecutorError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -8,11 +8,11 @@ use std::fs;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecutorErrorReport {
-    pub kind: String,
-    pub path: String,
-    pub message: String,
-    pub errno: Option<i32>,
+pub(crate) struct ExecutorErrorReport {
+    pub(crate) kind: String,
+    pub(crate) path: String,
+    pub(crate) message: String,
+    pub(crate) errno: Option<i32>,
 }
 
 impl fmt::Display for ExecutorErrorReport {
@@ -29,7 +29,7 @@ impl fmt::Display for ExecutorErrorReport {
     }
 }
 
-pub fn write_executor_error_report(
+pub(crate) fn write_executor_error_report(
     path: &Path,
     report: &ExecutorErrorReport,
 ) -> Result<(), ExecutorError> {
@@ -37,7 +37,7 @@ pub fn write_executor_error_report(
     fs::write(path, bytes).map_err(executor_error)
 }
 
-pub fn read_executor_error_report(
+pub(crate) fn read_executor_error_report(
     path: &Path,
 ) -> Result<Option<ExecutorErrorReport>, RuntimeError> {
     let bytes = fs::read(path)?;

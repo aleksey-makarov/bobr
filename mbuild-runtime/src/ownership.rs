@@ -1,8 +1,12 @@
 //! Public ownership materialization entrypoints.
 
+use crate::bundle::create_bundle;
 use crate::{
-    ExecutorErrorReport, MbuildIdmap, RuntimeError, build_ownership_spec, create_bundle,
-    run_init_with_executor, write_executor_error_report,
+    error::RuntimeError,
+    executor::{ExecutorErrorReport, write_executor_error_report},
+    idmap::MbuildIdmap,
+    run::run_init_with_executor,
+    spec::build_ownership_spec,
 };
 use libcontainer::oci_spec::runtime::Spec;
 use libcontainer::workload::{
@@ -18,6 +22,17 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
+/// Apply fs-tree owners and modes to an existing directory tree.
+///
+/// `manifest` describes paths relative to `target_root` using logical uid/gid
+/// values. The runtime validates that every logical owner is representable by
+/// `idmap`, starts an internal ownership helper in the mapped user namespace,
+/// applies file, directory, and symlink ownership, then applies file and
+/// directory modes.
+///
+/// `workspace` must exist and is used for temporary runtime bundle and state
+/// directories. Runtime-owned temporary directories are removed before the
+/// function returns.
 pub fn apply_ownership_batch(
     target_root: &Path,
     manifest: &FsTreeManifest,
@@ -37,14 +52,14 @@ pub fn apply_ownership_batch(
 }
 
 #[derive(Debug, Clone)]
-pub struct OwnershipExecutor {
+pub(crate) struct OwnershipExecutor {
     target_inside: PathBuf,
     entries: Vec<FsTreeEntry>,
     error_log_inside: PathBuf,
 }
 
 impl OwnershipExecutor {
-    pub fn new(manifest: &FsTreeManifest) -> Self {
+    pub(crate) fn new(manifest: &FsTreeManifest) -> Self {
         Self::with_paths(
             manifest,
             PathBuf::from("/target"),
@@ -451,7 +466,7 @@ fn report_errno(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::read_executor_error_report;
+    use crate::executor::read_executor_error_report;
     use libcontainer::oci_spec::runtime::Spec;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use tempfile::tempdir;

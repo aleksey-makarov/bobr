@@ -1,6 +1,6 @@
 //! OCI spec construction for ownership materialization.
 
-use crate::{MbuildIdmap, RuntimeError};
+use crate::{error::RuntimeError, idmap::MbuildIdmap};
 use libcontainer::oci_spec::runtime::{
     Capabilities, Capability, LinuxBuilder, LinuxCapabilities, LinuxCapabilitiesBuilder,
     LinuxIdMapping, LinuxIdMappingBuilder, LinuxNamespaceBuilder, LinuxNamespaceType,
@@ -9,7 +9,7 @@ use libcontainer::oci_spec::runtime::{
 use std::fmt::Display;
 use std::path::Path;
 
-pub fn build_ownership_spec(
+pub(crate) fn build_ownership_spec(
     idmap: &MbuildIdmap,
     target_host_path: &Path,
 ) -> Result<Spec, RuntimeError> {

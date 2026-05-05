@@ -1,4 +1,4 @@
-use crate::RuntimeError;
+use crate::error::RuntimeError;
 use libcontainer::oci_spec::runtime::Spec;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,22 +6,22 @@ use tracing::warn;
 use uuid::Uuid;
 
 #[derive(Debug)]
-pub struct Bundle {
+pub(crate) struct Bundle {
     dir: PathBuf,
     rootfs_dir: PathBuf,
     error_log_path: PathBuf,
 }
 
 impl Bundle {
-    pub fn dir(&self) -> &Path {
+    pub(crate) fn dir(&self) -> &Path {
         &self.dir
     }
 
-    pub fn rootfs_dir(&self) -> &Path {
+    pub(crate) fn rootfs_dir(&self) -> &Path {
         &self.rootfs_dir
     }
 
-    pub fn error_log_path(&self) -> &Path {
+    pub(crate) fn error_log_path(&self) -> &Path {
         &self.error_log_path
     }
 }
@@ -37,7 +37,7 @@ impl Drop for Bundle {
     }
 }
 
-pub fn create_bundle(workspace: &Path, spec: &Spec) -> Result<Bundle, RuntimeError> {
+pub(crate) fn create_bundle(workspace: &Path, spec: &Spec) -> Result<Bundle, RuntimeError> {
     if !workspace.is_dir() {
         return Err(RuntimeError::InvalidInput(format!(
             "runtime bundle workspace '{}' must exist and be a directory",
@@ -79,7 +79,7 @@ pub fn create_bundle(workspace: &Path, spec: &Spec) -> Result<Bundle, RuntimeErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MbuildIdmap, build_ownership_spec};
+    use crate::{idmap::MbuildIdmap, spec::build_ownership_spec};
     use tempfile::tempdir;
 
     #[test]
