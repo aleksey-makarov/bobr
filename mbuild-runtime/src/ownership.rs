@@ -1,0 +1,1 @@
+//! Public ownership materialization entrypoints.
