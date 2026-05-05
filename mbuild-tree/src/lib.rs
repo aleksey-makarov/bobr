@@ -1,15 +1,15 @@
 use globset::{Glob, GlobMatcher};
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, FsTreeEntry,
-    FsTreeManifest, FsTreeObjectError, FsTreeOwnerMap, StagedBuildResult, TypedBuilder,
-    create_fs_tree_staging_dir, fsutil, validate_fs_tree_object,
+    FsTreeManifest, StagedBuildResult, TypedBuilder, create_fs_tree_staging_dir, fsutil,
+    validate_fs_tree_object,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
@@ -127,35 +127,36 @@ enum MaterializedKind {
     Symlink,
 }
 
+trait OwnershipMaterializer {
+    fn materialize_and_validate(
+        &self,
+        root_dir: &Path,
+        object_dir: &Path,
+        manifest: &FsTreeManifest,
+        temp_dir: &Path,
+    ) -> Result<(), BuilderError>;
+}
+
 #[derive(Debug, Clone, Copy)]
-struct RootOnlyOwnerMap {
-    root_uid: u32,
-    root_gid: u32,
-}
+struct RuntimeOwnershipMaterializer;
 
-impl FsTreeOwnerMap for RootOnlyOwnerMap {
-    fn physical_uid(&self, logical_uid: u32) -> Result<u32, FsTreeObjectError> {
-        if logical_uid == 0 {
-            Ok(self.root_uid)
-        } else {
-            Err(FsTreeObjectError::Invalid(format!(
-                "Tree fs-tree directory output currently supports only logical uid 0, got {logical_uid}"
-            )))
-        }
-    }
-
-    fn physical_gid(&self, logical_gid: u32) -> Result<u32, FsTreeObjectError> {
-        if logical_gid == 0 {
-            Ok(self.root_gid)
-        } else {
-            Err(FsTreeObjectError::Invalid(format!(
-                "Tree fs-tree directory output currently supports only logical gid 0, got {logical_gid}"
-            )))
-        }
+impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
+    fn materialize_and_validate(
+        &self,
+        root_dir: &Path,
+        object_dir: &Path,
+        manifest: &FsTreeManifest,
+        temp_dir: &Path,
+    ) -> Result<(), BuilderError> {
+        let idmap = mbuild_runtime::cached_host_idmap()
+            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+        mbuild_runtime::apply_ownership_batch(root_dir, manifest, idmap.as_ref(), temp_dir)
+            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+        validate_fs_tree_object(object_dir, idmap.as_ref())
+            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+        Ok(())
     }
 }
-
-const ROOT_ONLY_OWNER_ERROR: &str = "invalid builder config: Tree fs-tree directory output currently supports only uid=0,gid=0 until fs-tree owner materialization is implemented";
 
 pub struct TreeBuilder;
 
@@ -179,45 +180,60 @@ impl TypedBuilder for TreeBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
-        if !inputs.is_empty() {
-            return Err(BuilderError::ExecutionFailed(
-                "Tree builder does not accept input objects".to_string(),
-            ));
-        }
-
-        let normalized = normalize_entries(config.tree.entries)?;
-        let output_kind = determine_output_kind(&normalized);
-        validate_install(output_kind, config.install.as_ref())?;
-
-        let now_nanos = fsutil::current_epoch_nanos()
-            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-        let output_path = cx.temp_dir.join(format!("tree-{now_nanos}.obj"));
-
-        cx.log_event(
-            BuildLogLevel::Info,
-            "stage",
-            format!("materializing tree output '{}'", output_path.display()),
-        );
-
-        let meta = match output_kind {
-            OutputKind::File => {
-                materialize_file_output(&output_path, &normalized)?;
-                Map::new()
-            }
-            OutputKind::Directory => {
-                let install = config
-                    .install
-                    .expect("validated install for directory output");
-                materialize_directory_output(&output_path, &normalized, &install)?;
-                Map::new()
-            }
-        };
-
-        Ok(StagedBuildResult {
-            meta,
-            staged_path: output_path,
-        })
+        build_tree(config, inputs, cx, &RuntimeOwnershipMaterializer)
     }
+}
+
+fn build_tree(
+    config: TreeConfig,
+    inputs: BuilderInputs,
+    cx: &mut BuildContext,
+    materializer: &impl OwnershipMaterializer,
+) -> Result<StagedBuildResult, BuilderError> {
+    if !inputs.is_empty() {
+        return Err(BuilderError::ExecutionFailed(
+            "Tree builder does not accept input objects".to_string(),
+        ));
+    }
+
+    let normalized = normalize_entries(config.tree.entries)?;
+    let output_kind = determine_output_kind(&normalized);
+    validate_install(output_kind, config.install.as_ref())?;
+
+    let now_nanos = fsutil::current_epoch_nanos()
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+    let output_path = cx.temp_dir.join(format!("tree-{now_nanos}.obj"));
+
+    cx.log_event(
+        BuildLogLevel::Info,
+        "stage",
+        format!("materializing tree output '{}'", output_path.display()),
+    );
+
+    let meta = match output_kind {
+        OutputKind::File => {
+            materialize_file_output(&output_path, &normalized)?;
+            Map::new()
+        }
+        OutputKind::Directory => {
+            let install = config
+                .install
+                .expect("validated install for directory output");
+            materialize_directory_output(
+                &output_path,
+                &normalized,
+                &install,
+                &cx.temp_dir,
+                materializer,
+            )?;
+            Map::new()
+        }
+    };
+
+    Ok(StagedBuildResult {
+        meta,
+        staged_path: output_path,
+    })
 }
 
 fn normalize_entries(entries: Vec<TreeEntry>) -> Result<Vec<NormalizedEntry>, BuilderError> {
@@ -319,22 +335,9 @@ fn validate_install(kind: OutputKind, install: Option<&InstallMeta>) -> Result<(
                         .to_string(),
                 ));
             }
-            validate_root_only_owner_rules(install)?;
             Ok(())
         }
     }
-}
-
-fn validate_root_only_owner_rules(install: &InstallMeta) -> Result<(), BuilderError> {
-    for rule in &install.rules {
-        if rule.attrs.uid.is_some_and(|uid| uid != 0) || rule.attrs.gid.is_some_and(|gid| gid != 0)
-        {
-            return Err(BuilderError::InvalidRecipe(
-                ROOT_ONLY_OWNER_ERROR.to_string(),
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn validate_rel_path(path: &str) -> Result<String, BuilderError> {
@@ -424,6 +427,8 @@ fn materialize_directory_output(
     object_dir: &Path,
     entries: &[NormalizedEntry],
     install: &InstallMeta,
+    temp_dir: &Path,
+    materializer: &impl OwnershipMaterializer,
 ) -> Result<(), BuilderError> {
     let rules = compile_install_rules(&install.rules)?;
     let manifest = fs_tree_manifest_for_entries(entries, &rules)?;
@@ -471,8 +476,7 @@ fn materialize_directory_output(
         }
     }
 
-    let owner_map = root_only_owner_map(&paths.root_dir)?;
-    validate_fs_tree_object(object_dir, &owner_map).map_err(map_fs_tree_error)?;
+    materializer.materialize_and_validate(&paths.root_dir, object_dir, &manifest, temp_dir)?;
     Ok(())
 }
 
@@ -538,7 +542,6 @@ fn fs_tree_entry_for_path(
     let attrs = resolve_install_attrs(rel_path, rules)?;
     let uid = required_attr(attrs.uid, rel_path, "uid")?;
     let gid = required_attr(attrs.gid, rel_path, "gid")?;
-    require_root_owner(uid, gid)?;
     match kind {
         MaterializedKind::Directory => Ok(FsTreeEntry::directory(
             rel_path,
@@ -564,16 +567,6 @@ fn required_attr(value: Option<u32>, rel_path: &str, name: &str) -> Result<u32, 
             "invalid builder config: path '{rel_path}' is missing resolved {name}"
         ))
     })
-}
-
-fn require_root_owner(uid: u32, gid: u32) -> Result<(), BuilderError> {
-    if uid == 0 && gid == 0 {
-        Ok(())
-    } else {
-        Err(BuilderError::InvalidRecipe(
-            ROOT_ONLY_OWNER_ERROR.to_string(),
-        ))
-    }
 }
 
 fn compile_install_rules(rules: &[InstallRule]) -> Result<Vec<CompiledInstallRule>, BuilderError> {
@@ -696,28 +689,6 @@ fn create_symlink(_target: &str, _path: &Path) -> Result<(), BuilderError> {
     ))
 }
 
-#[cfg(unix)]
-fn root_only_owner_map(path: &Path) -> Result<RootOnlyOwnerMap, BuilderError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        BuilderError::ExecutionFailed(format!(
-            "failed to inspect fs-tree root '{}': {error}",
-            path.display()
-        ))
-    })?;
-    Ok(RootOnlyOwnerMap {
-        root_uid: metadata.uid(),
-        root_gid: metadata.gid(),
-    })
-}
-
-#[cfg(not(unix))]
-fn root_only_owner_map(_path: &Path) -> Result<RootOnlyOwnerMap, BuilderError> {
-    Ok(RootOnlyOwnerMap {
-        root_uid: 0,
-        root_gid: 0,
-    })
-}
-
 fn map_fs_tree_error(error: impl std::fmt::Display) -> BuilderError {
     BuilderError::ExecutionFailed(error.to_string())
 }
@@ -725,8 +696,81 @@ fn map_fs_tree_error(error: impl std::fmt::Display) -> BuilderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{Builder, BuilderInputObject, BuilderInputs};
+    use mbuild_core::{
+        Builder, BuilderInputObject, BuilderInputs, FsTreeObjectError, FsTreeOwnerMap,
+    };
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     use tempfile::tempdir;
+
+    #[derive(Debug, Clone, Copy)]
+    struct CurrentOwnerMaterializer;
+
+    impl OwnershipMaterializer for CurrentOwnerMaterializer {
+        fn materialize_and_validate(
+            &self,
+            root_dir: &Path,
+            object_dir: &Path,
+            manifest: &FsTreeManifest,
+            _temp_dir: &Path,
+        ) -> Result<(), BuilderError> {
+            let owner_map = current_owner_map(root_dir)?;
+            for entry in manifest.entries() {
+                let (uid, gid) = match entry {
+                    FsTreeEntry::File { uid, gid, .. }
+                    | FsTreeEntry::Directory { uid, gid, .. }
+                    | FsTreeEntry::Symlink { uid, gid, .. } => (*uid, *gid),
+                };
+                if uid != 0 || gid != 0 {
+                    return Err(BuilderError::ExecutionFailed(format!(
+                        "test materializer supports only logical uid=0,gid=0, got uid={uid},gid={gid} for '{}'",
+                        entry.path()
+                    )));
+                }
+            }
+            validate_fs_tree_object(object_dir, &owner_map).map_err(map_fs_tree_error)?;
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct CurrentOwnerMap {
+        uid: u32,
+        gid: u32,
+    }
+
+    impl FsTreeOwnerMap for CurrentOwnerMap {
+        fn physical_uid(&self, logical_uid: u32) -> Result<u32, FsTreeObjectError> {
+            if logical_uid == 0 {
+                Ok(self.uid)
+            } else {
+                Err(FsTreeObjectError::Invalid(format!(
+                    "test owner map supports only logical uid 0, got {logical_uid}"
+                )))
+            }
+        }
+
+        fn physical_gid(&self, logical_gid: u32) -> Result<u32, FsTreeObjectError> {
+            if logical_gid == 0 {
+                Ok(self.gid)
+            } else {
+                Err(FsTreeObjectError::Invalid(format!(
+                    "test owner map supports only logical gid 0, got {logical_gid}"
+                )))
+            }
+        }
+    }
+
+    impl TreeBuilder {
+        fn build_typed_for_tests(
+            &self,
+            config: TreeConfig,
+            inputs: BuilderInputs,
+            cx: &mut BuildContext,
+        ) -> Result<StagedBuildResult, BuilderError> {
+            build_tree(config, inputs, cx, &CurrentOwnerMaterializer)
+        }
+    }
 
     fn build_context(root: &std::path::Path) -> BuildContext {
         let state_dir = root.join("tree");
@@ -786,8 +830,27 @@ mod tests {
     }
 
     fn assert_valid_fs_tree(result: &StagedBuildResult) {
-        let owner_map = root_only_owner_map(&result.staged_path.join("root")).unwrap();
+        let owner_map = current_owner_map(&result.staged_path.join("root")).unwrap();
         validate_fs_tree_object(&result.staged_path, &owner_map).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn current_owner_map(path: &Path) -> Result<CurrentOwnerMap, BuilderError> {
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            BuilderError::ExecutionFailed(format!(
+                "failed to inspect fs-tree root '{}': {error}",
+                path.display()
+            ))
+        })?;
+        Ok(CurrentOwnerMap {
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn current_owner_map(_path: &Path) -> Result<CurrentOwnerMap, BuilderError> {
+        Ok(CurrentOwnerMap { uid: 0, gid: 0 })
     }
 
     #[test]
@@ -797,7 +860,7 @@ mod tests {
         let mut cx = build_context(temp.path());
 
         let result = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -825,7 +888,7 @@ mod tests {
         let mut cx = build_context(temp.path());
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -855,7 +918,7 @@ mod tests {
         let mut cx = build_context(temp.path());
 
         let result = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::Dir {
@@ -883,7 +946,7 @@ mod tests {
         let mut cx = build_context(temp.path());
 
         let result = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![
@@ -922,7 +985,7 @@ mod tests {
         let mut cx = build_context(temp.path());
 
         let result = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![
@@ -954,7 +1017,7 @@ mod tests {
         let mut cx = build_context(temp.path());
 
         let result = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::Symlink {
@@ -981,7 +1044,7 @@ mod tests {
         let mut cx = build_context(temp.path());
 
         let result = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![
@@ -1057,7 +1120,7 @@ mod tests {
 
         let mut cx = build_context(temp.path());
         let base = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -1076,7 +1139,7 @@ mod tests {
 
         let mut cx = build_context(temp.path());
         let changed_mode = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -1098,7 +1161,7 @@ mod tests {
 
         let mut cx = build_context(temp.path());
         let changed_bytes = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -1120,7 +1183,7 @@ mod tests {
 
         let mut cx = build_context(temp.path());
         let link_a = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::Symlink {
@@ -1137,7 +1200,7 @@ mod tests {
         let link_a_hash = fsobj_hash::hash_path(&link_a.staged_path).unwrap();
         let mut cx = build_context(temp.path());
         let link_b = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::Symlink {
@@ -1164,7 +1227,7 @@ mod tests {
         let mut cx = build_context(temp.path());
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -1194,7 +1257,7 @@ mod tests {
         let mut cx = build_context(temp.path());
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -1224,7 +1287,7 @@ mod tests {
         let mut cx = build_context(temp.path());
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::Dir {
@@ -1246,151 +1309,76 @@ mod tests {
     }
 
     #[test]
-    fn directory_output_rejects_non_root_owner_attrs() {
-        let builder = TreeBuilder;
-        let temp = tempdir().unwrap();
+    fn directory_manifest_preserves_non_root_owner_attrs() {
+        let entries = normalize_entries(vec![TreeEntry::File {
+            path: "etc/hostname".to_string(),
+            text: "mbuild\n".to_string(),
+            executable: false,
+        }])
+        .unwrap();
+        let rules = compile_install_rules(&install_with_attrs(42, 43, 0o755, 0o644).rules).unwrap();
 
-        let mut cx = build_context(temp.path());
-        let uid_error = builder
-            .build_typed(
-                TreeConfig {
-                    tree: TreePayload {
-                        entries: vec![TreeEntry::File {
-                            path: "etc/hostname".to_string(),
-                            text: "mbuild\n".to_string(),
-                            executable: false,
-                        }],
-                    },
-                    install: Some(install_with_attrs(42, 0, 0o755, 0o644)),
-                },
-                BuilderInputs::empty(),
-                &mut cx,
-            )
-            .unwrap_err();
-        assert!(matches!(uid_error, BuilderError::InvalidRecipe(_)));
-        assert!(uid_error.to_string().contains(ROOT_ONLY_OWNER_ERROR));
+        let manifest = fs_tree_manifest_for_entries(&entries, &rules).unwrap();
 
-        let mut cx = build_context(temp.path());
-        let gid_error = builder
-            .build_typed(
-                TreeConfig {
-                    tree: TreePayload {
-                        entries: vec![TreeEntry::File {
-                            path: "etc/hostname".to_string(),
-                            text: "mbuild\n".to_string(),
-                            executable: false,
-                        }],
-                    },
-                    install: Some(install_with_attrs(0, 43, 0o755, 0o644)),
-                },
-                BuilderInputs::empty(),
-                &mut cx,
-            )
-            .unwrap_err();
-        assert!(matches!(gid_error, BuilderError::InvalidRecipe(_)));
-        assert!(gid_error.to_string().contains(ROOT_ONLY_OWNER_ERROR));
-    }
-
-    #[test]
-    fn directory_output_allows_partial_ownerless_overrides_resolving_to_root() {
-        let builder = TreeBuilder;
-        let temp = tempdir().unwrap();
-        let mut cx = build_context(temp.path());
-
-        let result = builder
-            .build_typed(
-                TreeConfig {
-                    tree: TreePayload {
-                        entries: vec![TreeEntry::File {
-                            path: "etc/hostname".to_string(),
-                            text: "mbuild\n".to_string(),
-                            executable: false,
-                        }],
-                    },
-                    install: Some(InstallMeta {
-                        rules: vec![
-                            InstallRule {
-                                path: "**".to_string(),
-                                attrs: InstallAttrs {
-                                    uid: Some(0),
-                                    gid: Some(0),
-                                    directory_mode: Some(0o755),
-                                    regular_file_mode: Some(0o644),
-                                    executable_file_mode: Some(0o755),
-                                    symlink_mode: None,
-                                },
-                            },
-                            InstallRule {
-                                path: "etc/**".to_string(),
-                                attrs: InstallAttrs {
-                                    uid: None,
-                                    gid: None,
-                                    directory_mode: Some(0o700),
-                                    regular_file_mode: Some(0o600),
-                                    executable_file_mode: None,
-                                    symlink_mode: None,
-                                },
-                            },
-                        ],
-                    }),
-                },
-                BuilderInputs::empty(),
-                &mut cx,
-            )
-            .unwrap();
-
-        let manifest = fs_tree_manifest(&result);
         assert!(
             manifest
                 .entries()
-                .contains(&FsTreeEntry::directory("etc", 0, 0, 0o700))
+                .contains(&FsTreeEntry::directory("etc", 42, 43, 0o755))
         );
         assert!(
             manifest
                 .entries()
-                .contains(&FsTreeEntry::file("etc/hostname", 0, 0, 0o600))
+                .contains(&FsTreeEntry::file("etc/hostname", 42, 43, 0o644))
         );
-        assert_valid_fs_tree(&result);
     }
 
     #[test]
-    fn root_only_owner_map_rejects_non_zero_logical_owner() {
-        let temp = tempdir().unwrap();
-
-        let uid_manifest = FsTreeManifest::from_entries(vec![
-            FsTreeEntry::directory("", 0, 0, 0o755),
-            FsTreeEntry::file("hostname", 1, 0, 0o644),
-        ])
+    fn partial_ownerless_overrides_inherit_non_root_owner_attrs() {
+        let entries = normalize_entries(vec![TreeEntry::File {
+            path: "etc/hostname".to_string(),
+            text: "mbuild\n".to_string(),
+            executable: false,
+        }])
         .unwrap();
-        let uid_paths =
-            create_fs_tree_staging_dir(&temp.path().join("uid-object"), &uid_manifest).unwrap();
-        fs::write(uid_paths.root_dir.join("hostname"), "mbuild\n").unwrap();
-        set_mode(&uid_paths.root_dir.join("hostname"), 0o644).unwrap();
-        let owner_map = root_only_owner_map(&uid_paths.root_dir).unwrap();
-        let uid_error = validate_fs_tree_object(&uid_paths.object_dir, &owner_map).unwrap_err();
-        assert!(matches!(uid_error, FsTreeObjectError::Invalid(_)));
+        let install = InstallMeta {
+            rules: vec![
+                InstallRule {
+                    path: "**".to_string(),
+                    attrs: InstallAttrs {
+                        uid: Some(42),
+                        gid: Some(43),
+                        directory_mode: Some(0o755),
+                        regular_file_mode: Some(0o644),
+                        executable_file_mode: Some(0o755),
+                        symlink_mode: None,
+                    },
+                },
+                InstallRule {
+                    path: "etc/**".to_string(),
+                    attrs: InstallAttrs {
+                        uid: None,
+                        gid: None,
+                        directory_mode: Some(0o700),
+                        regular_file_mode: Some(0o600),
+                        executable_file_mode: None,
+                        symlink_mode: None,
+                    },
+                },
+            ],
+        };
+        let rules = compile_install_rules(&install.rules).unwrap();
+
+        let manifest = fs_tree_manifest_for_entries(&entries, &rules).unwrap();
+
         assert!(
-            uid_error
-                .to_string()
-                .contains("supports only logical uid 0")
+            manifest
+                .entries()
+                .contains(&FsTreeEntry::directory("etc", 42, 43, 0o700))
         );
-
-        let gid_manifest = FsTreeManifest::from_entries(vec![
-            FsTreeEntry::directory("", 0, 0, 0o755),
-            FsTreeEntry::file("hostname", 0, 1, 0o644),
-        ])
-        .unwrap();
-        let gid_paths =
-            create_fs_tree_staging_dir(&temp.path().join("gid-object"), &gid_manifest).unwrap();
-        fs::write(gid_paths.root_dir.join("hostname"), "mbuild\n").unwrap();
-        set_mode(&gid_paths.root_dir.join("hostname"), 0o644).unwrap();
-        let owner_map = root_only_owner_map(&gid_paths.root_dir).unwrap();
-        let gid_error = validate_fs_tree_object(&gid_paths.object_dir, &owner_map).unwrap_err();
-        assert!(matches!(gid_error, FsTreeObjectError::Invalid(_)));
         assert!(
-            gid_error
-                .to_string()
-                .contains("supports only logical gid 0")
+            manifest
+                .entries()
+                .contains(&FsTreeEntry::file("etc/hostname", 42, 43, 0o600))
         );
     }
 
@@ -1401,7 +1389,7 @@ mod tests {
         let mut cx = build_context(temp.path());
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -1435,7 +1423,7 @@ mod tests {
         );
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -1480,7 +1468,7 @@ mod tests {
         );
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -1506,7 +1494,7 @@ mod tests {
         let mut cx = build_context(temp.path());
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![
@@ -1536,7 +1524,7 @@ mod tests {
         );
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -1555,7 +1543,7 @@ mod tests {
         assert!(error.to_string().contains("must not contain '..'"));
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![
@@ -1583,7 +1571,7 @@ mod tests {
         );
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -1602,7 +1590,7 @@ mod tests {
         assert!(error.to_string().contains("must be relative"));
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -1621,7 +1609,7 @@ mod tests {
         assert!(error.to_string().contains("must not contain '.'"));
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -1640,7 +1628,7 @@ mod tests {
         assert!(error.to_string().contains("must use '/' separators"));
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
@@ -1663,7 +1651,7 @@ mod tests {
         );
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![
@@ -1692,7 +1680,7 @@ mod tests {
         );
 
         let error = builder
-            .build_typed(
+            .build_typed_for_tests(
                 TreeConfig {
                     tree: TreePayload {
                         entries: vec![

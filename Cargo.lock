@@ -1323,6 +1323,7 @@ dependencies = [
  "fsobj-hash",
  "globset",
  "mbuild-core",
+ "mbuild-runtime",
  "serde",
  "serde_json",
  "tempfile",

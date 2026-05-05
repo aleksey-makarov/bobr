@@ -11,6 +11,7 @@ use mbuild_runtime::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use tempfile::tempdir;
 use tracing_subscriber::EnvFilter;
 
@@ -37,6 +38,9 @@ impl Executor for ExitExecutor {
 
 #[test]
 fn run_init_reports_success_and_cleans_state() -> TestResult<()> {
+    let _guard = runtime_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     init_tracing();
     let workspace = tempdir()?;
     let target_dir = workspace.path().join("target");
@@ -56,6 +60,9 @@ fn run_init_reports_success_and_cleans_state() -> TestResult<()> {
 
 #[test]
 fn run_init_reports_executor_failure_and_cleans_state() -> TestResult<()> {
+    let _guard = runtime_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     init_tracing();
     let workspace = tempdir()?;
     let target_dir = workspace.path().join("target");
@@ -67,12 +74,20 @@ fn run_init_reports_executor_failure_and_cleans_state() -> TestResult<()> {
     let error = run_init_with_executor(&bundle, workspace.path(), ExitExecutor { code: 7 })
         .expect_err("non-zero executor exit should fail the lifecycle");
 
-    assert!(matches!(error, RuntimeError::Executor(_)));
+    assert!(
+        matches!(error, RuntimeError::Executor(_)),
+        "expected RuntimeError::Executor, got {error:?}: {error}"
+    );
     assert!(error.to_string().contains("Exited"));
     assert_state_root_is_empty(workspace.path())?;
     assert!(bundle_dir.is_dir());
 
     Ok(())
+}
+
+fn runtime_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn ownership_spec(target_dir: &Path) -> Result<Spec, RuntimeError> {

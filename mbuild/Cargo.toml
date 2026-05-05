@@ -3,6 +3,9 @@ name = "mbuild"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+integration-tests = ["mbuild-tree/integration-tests"]
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 fsobj-hash = { path = "../fsobj-hash" }

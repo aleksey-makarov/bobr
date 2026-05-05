@@ -21,8 +21,10 @@ use std::time::Instant;
 use support::{
     base_image_recipe, binary_recipe, build_ref_path, default_binary_steps, image_recipe,
     recipe_node, script_recipe, source_recipe, spawn_test_oci_registry, store_root,
-    tree_directory_recipe, tree_file_recipe, tree_symlink_recipe, write_recipe,
+    tree_file_recipe, write_recipe,
 };
+#[cfg(feature = "integration-tests")]
+use support::{tree_directory_recipe, tree_symlink_recipe};
 use tempfile::tempdir;
 
 #[test]
@@ -85,6 +87,12 @@ fn legacy_rootfs_source_recipe(workspace: &Path, name: &str) -> Value {
 }
 
 fn env_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(feature = "integration-tests")]
+fn ownership_runtime_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -914,7 +922,11 @@ fn tree_file_recipe_builds_successfully_via_runtime() {
 }
 
 #[test]
+#[cfg(feature = "integration-tests")]
 fn tree_directory_recipe_builds_successfully_via_runtime() {
+    let _guard = ownership_runtime_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("tree-dir.json");
     write_recipe(&recipe_path, &tree_directory_recipe("runtime-tree"));
@@ -945,7 +957,11 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
 }
 
 #[test]
+#[cfg(feature = "integration-tests")]
 fn tree_symlink_recipe_builds_successfully_via_runtime() {
+    let _guard = ownership_runtime_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("recipe.json");
     write_recipe(&recipe_path, &tree_symlink_recipe("runtime-tree-symlink"));

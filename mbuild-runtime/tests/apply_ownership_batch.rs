@@ -5,6 +5,7 @@ use mbuild_runtime::{MbuildIdmap, RuntimeError, apply_ownership_batch};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use tempfile::tempdir;
 use tracing_subscriber::EnvFilter;
 
@@ -12,6 +13,9 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 #[test]
 fn apply_ownership_batch_materializes_logical_owners_and_modes() -> TestResult<()> {
+    let _guard = runtime_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     init_tracing();
     let idmap = MbuildIdmap::from_host_environment()?;
     let temp = tempdir()?;
@@ -56,6 +60,9 @@ fn apply_ownership_batch_materializes_logical_owners_and_modes() -> TestResult<(
 
 #[test]
 fn apply_ownership_batch_returns_structured_executor_error() -> TestResult<()> {
+    let _guard = runtime_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     init_tracing();
     let idmap = MbuildIdmap::from_host_environment()?;
     let temp = tempdir()?;
@@ -73,12 +80,20 @@ fn apply_ownership_batch_returns_structured_executor_error() -> TestResult<()> {
     let error = apply_ownership_batch(&target, &manifest, &idmap, &workspace)
         .expect_err("kind mismatch should surface structured executor error");
 
-    assert!(matches!(error, RuntimeError::Executor(_)));
+    assert!(
+        matches!(error, RuntimeError::Executor(_)),
+        "expected RuntimeError::Executor, got {error:?}: {error}"
+    );
     assert!(error.to_string().contains("kind error at /target/entry"));
     assert!(error.to_string().contains("expected file"));
     assert_runtime_workspace_empty(&workspace)?;
 
     Ok(())
+}
+
+fn runtime_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn assert_owner_and_mode(path: impl AsRef<Path>, uid: u32, gid: u32, mode: u32) -> TestResult<()> {
