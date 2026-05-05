@@ -19,6 +19,29 @@ pub struct MbuildIdmap {
 }
 
 impl MbuildIdmap {
+    #[cfg(test)]
+    pub(crate) fn for_tests(
+        current_uid: u32,
+        current_gid: u32,
+        subuid_base: u32,
+        subuid_count: u32,
+        subgid_base: u32,
+        subgid_count: u32,
+    ) -> Self {
+        Self {
+            current_uid,
+            current_gid,
+            subuid: SubidRange {
+                base: subuid_base,
+                count: subuid_count,
+            },
+            subgid: SubidRange {
+                base: subgid_base,
+                count: subgid_count,
+            },
+        }
+    }
+
     pub fn from_host_environment() -> Result<Self, IdmapError> {
         let current_uid = geteuid().as_raw();
         let current_gid = getegid().as_raw();

@@ -9,3 +9,4 @@ mod executor;
 
 pub use error::{IdmapError, RuntimeError};
 pub use idmap::{MbuildIdmap, cached_host_idmap};
+pub use spec::build_ownership_spec;
