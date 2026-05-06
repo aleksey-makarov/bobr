@@ -13,6 +13,11 @@ pub enum RuntimeError {
     #[error("invalid runtime input: {0}")]
     InvalidInput(String),
 
+    /// The host environment is missing prerequisites needed before starting a
+    /// runtime container.
+    #[error("runtime preflight failed: {0}")]
+    Preflight(String),
+
     /// `libcontainer` failed while creating, starting, waiting for, or deleting
     /// a runtime container.
     #[error("libcontainer error: {0}")]

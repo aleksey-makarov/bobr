@@ -5,6 +5,7 @@ use crate::{
     error::RuntimeError,
     executor::{ExecutorErrorReport, write_executor_error_report},
     idmap::MbuildIdmap,
+    preflight::preflight_ownership_runtime,
     run::run_init_with_executor,
     spec::build_ownership_spec,
 };
@@ -42,6 +43,7 @@ pub fn apply_ownership_batch(
     require_directory(target_root, "ownership target root")?;
     require_directory(workspace, "ownership workspace")?;
     precheck_manifest_owners(manifest, idmap)?;
+    preflight_ownership_runtime(idmap)?;
 
     let spec = build_ownership_spec(idmap, target_root)?;
     let bundle = create_bundle(workspace, &spec)?;

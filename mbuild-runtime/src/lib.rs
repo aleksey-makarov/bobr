@@ -19,6 +19,7 @@ mod bundle;
 mod error;
 mod idmap;
 mod ownership;
+mod preflight;
 mod run;
 mod spec;
 
