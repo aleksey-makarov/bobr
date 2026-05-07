@@ -6,8 +6,9 @@
 //! lifecycle handling, and child-side error reporting are internal details.
 //!
 //! The current public capability is fs-tree ownership materialization through
-//! [`apply_ownership_batch`]. It applies logical fs-tree owners and modes in a
-//! user namespace described by [`MbuildIdmap`].
+//! [`apply_ownership_batch`] and [`apply_ownership_batch_and_hash`]. It applies
+//! logical fs-tree owners and modes in a user namespace described by
+//! [`MbuildIdmap`].
 //!
 //! Runtime ownership materialization currently targets Linux hosts with
 //! configured `/etc/subuid` and `/etc/subgid` ranges, unprivileged user
@@ -27,4 +28,4 @@ mod executor;
 
 pub use error::{IdmapError, RuntimeError};
 pub use idmap::{MbuildIdmap, cached_host_idmap};
-pub use ownership::apply_ownership_batch;
+pub use ownership::{apply_ownership_batch, apply_ownership_batch_and_hash};

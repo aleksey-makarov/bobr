@@ -1296,6 +1296,7 @@ dependencies = [
 name = "mbuild-runtime"
 version = "0.1.0"
 dependencies = [
+ "fsobj-hash",
  "libc",
  "libcontainer",
  "mbuild-core",

@@ -7,6 +7,7 @@ edition = "2024"
 integration-tests = []
 
 [dependencies]
+fsobj-hash = { path = "../fsobj-hash" }
 libc = "0.2"
 libcontainer = { version = "0.6.0", default-features = false, features = ["systemd", "v2"] }
 mbuild-core = { path = "../mbuild-core" }

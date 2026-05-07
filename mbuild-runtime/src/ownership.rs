@@ -3,12 +3,16 @@
 use crate::bundle::create_bundle;
 use crate::{
     error::RuntimeError,
-    executor::{ExecutorErrorReport, write_executor_error_report},
+    executor::{
+        ExecutorErrorReport, read_executor_result_report, write_executor_error_report,
+        write_executor_result_report,
+    },
     idmap::MbuildIdmap,
     preflight::preflight_ownership_runtime,
     run::run_init_with_executor,
     spec::build_ownership_spec,
 };
+use fsobj_hash::{ObjectHash, hash_path};
 use libcontainer::oci_spec::runtime::Spec;
 use libcontainer::workload::{
     Executor, ExecutorError, ExecutorSetEnvsError, ExecutorValidationError,
@@ -40,6 +44,38 @@ pub fn apply_ownership_batch(
     idmap: &MbuildIdmap,
     workspace: &Path,
 ) -> Result<(), RuntimeError> {
+    run_ownership_batch(target_root, manifest, idmap, workspace, false)?;
+    Ok(())
+}
+
+/// Apply fs-tree owners and modes, then compute the fs object hash inside the
+/// same user namespace.
+///
+/// The returned hash is computed after ownership and mode materialization. This
+/// lets callers publish target-owned trees without requiring the host user to
+/// recursively read the materialized root.
+pub fn apply_ownership_batch_and_hash(
+    target_root: &Path,
+    manifest: &FsTreeManifest,
+    idmap: &MbuildIdmap,
+    workspace: &Path,
+) -> Result<ObjectHash, RuntimeError> {
+    let bundle = run_ownership_batch(target_root, manifest, idmap, workspace, true)?;
+    read_executor_result_report(bundle.result_log_path())?.ok_or_else(|| {
+        RuntimeError::Executor(format!(
+            "executor result report '{}' is empty",
+            bundle.result_log_path().display()
+        ))
+    })
+}
+
+fn run_ownership_batch(
+    target_root: &Path,
+    manifest: &FsTreeManifest,
+    idmap: &MbuildIdmap,
+    workspace: &Path,
+    hash_result: bool,
+) -> Result<crate::bundle::Bundle, RuntimeError> {
     require_directory(target_root, "ownership target root")?;
     require_directory(workspace, "ownership workspace")?;
     precheck_manifest_owners(manifest, idmap)?;
@@ -47,10 +83,14 @@ pub fn apply_ownership_batch(
 
     let spec = build_ownership_spec(idmap, target_root)?;
     let bundle = create_bundle(workspace, &spec)?;
-    let executor = OwnershipExecutor::new(manifest);
+    let executor = if hash_result {
+        OwnershipExecutor::new_with_hash_report(manifest)
+    } else {
+        OwnershipExecutor::new(manifest)
+    };
     run_init_with_executor(&bundle, workspace, executor)?;
 
-    Ok(())
+    Ok(bundle)
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +98,7 @@ pub(crate) struct OwnershipExecutor {
     target_inside: PathBuf,
     entries: Vec<FsTreeEntry>,
     error_log_inside: PathBuf,
+    result_log_inside: Option<PathBuf>,
 }
 
 impl OwnershipExecutor {
@@ -69,19 +110,38 @@ impl OwnershipExecutor {
         )
     }
 
+    pub(crate) fn new_with_hash_report(manifest: &FsTreeManifest) -> Self {
+        Self::with_paths_and_result(
+            manifest,
+            PathBuf::from("/target"),
+            PathBuf::from("/error.json"),
+            Some(PathBuf::from("/result.json")),
+        )
+    }
+
     pub(crate) fn with_paths(
         manifest: &FsTreeManifest,
         target_inside: PathBuf,
         error_log_inside: PathBuf,
     ) -> Self {
+        Self::with_paths_and_result(manifest, target_inside, error_log_inside, None)
+    }
+
+    pub(crate) fn with_paths_and_result(
+        manifest: &FsTreeManifest,
+        target_inside: PathBuf,
+        error_log_inside: PathBuf,
+        result_log_inside: Option<PathBuf>,
+    ) -> Self {
         Self {
             target_inside,
             entries: manifest.entries().to_vec(),
             error_log_inside,
+            result_log_inside,
         }
     }
 
-    pub(crate) fn apply(&self) -> Result<(), ExecutorErrorReport> {
+    pub(crate) fn apply(&self) -> Result<Option<ObjectHash>, ExecutorErrorReport> {
         let entries = self.validate_entries()?;
 
         for entry in &entries {
@@ -117,7 +177,21 @@ impl OwnershipExecutor {
         }
 
         Self::validate_applied_entries(&entries)?;
-        Ok(())
+        if self.result_log_inside.is_some() {
+            hash_path(&self.target_inside).map(Some).map_err(|error| {
+                report(
+                    "hash",
+                    &self.target_inside,
+                    format!(
+                        "failed to hash fs-tree target '{}': {error}",
+                        self.target_inside.display()
+                    ),
+                    None,
+                )
+            })
+        } else {
+            Ok(None)
+        }
     }
 
     fn validate_entries(&self) -> Result<Vec<ResolvedEntry>, ExecutorErrorReport> {
@@ -249,7 +323,12 @@ impl Executor for OwnershipExecutor {
 
     fn exec(&self, _: &Spec) -> Result<(), ExecutorError> {
         match self.apply() {
-            Ok(()) => std::process::exit(0),
+            Ok(object_hash) => {
+                if let (Some(path), Some(object_hash)) = (&self.result_log_inside, object_hash) {
+                    write_executor_result_report(path, object_hash)?;
+                }
+                std::process::exit(0)
+            }
             Err(report) => {
                 write_executor_error_report(&self.error_log_inside, &report)?;
                 Err(ExecutorError::Other(report.to_string()))
@@ -594,6 +673,33 @@ mod tests {
     }
 
     #[test]
+    fn apply_returns_hash_when_result_path_is_requested() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("tool"), b"tool").unwrap();
+
+        let owner = current_owner();
+        let manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", owner.0, owner.1, 0o755),
+            FsTreeEntry::file("tool", owner.0, owner.1, 0o755),
+        ])
+        .unwrap();
+
+        let got = OwnershipExecutor::with_paths_and_result(
+            &manifest,
+            target.clone(),
+            temp.path().join("error.json"),
+            Some(temp.path().join("result.json")),
+        )
+        .apply()
+        .unwrap();
+
+        assert_eq!(got, Some(hash_path(&target).unwrap()));
+        assert_mode(target.join("tool"), 0o755);
+    }
+
+    #[test]
     fn exec_writes_missing_path_report() {
         let temp = tempdir().unwrap();
         let target = temp.path().join("target");
@@ -660,6 +766,7 @@ mod tests {
                 mode: 0o644,
             }],
             error_log_inside: temp.path().join("error.json"),
+            result_log_inside: None,
         };
 
         let report = executor.apply().unwrap_err();
@@ -683,6 +790,7 @@ mod tests {
                 mode: 0o644,
             }],
             error_log_inside: temp.path().join("error.json"),
+            result_log_inside: None,
         };
 
         let report = executor.apply().unwrap_err();

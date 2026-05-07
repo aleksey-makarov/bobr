@@ -110,6 +110,7 @@ fn helper_capabilities() -> Result<LinuxCapabilities, RuntimeError> {
     let caps = [
         Capability::Chown,
         Capability::DacOverride,
+        Capability::DacReadSearch,
         Capability::Fowner,
         Capability::Fsetid,
     ]
@@ -258,6 +259,7 @@ mod tests {
         let expected = [
             Capability::Chown,
             Capability::DacOverride,
+            Capability::DacReadSearch,
             Capability::Fowner,
             Capability::Fsetid,
         ]

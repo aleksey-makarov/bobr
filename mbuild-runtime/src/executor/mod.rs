@@ -1,11 +1,13 @@
 //! Child-side executors used by runtime containers.
 
 use crate::error::RuntimeError;
+use fsobj_hash::ObjectHash;
 use libcontainer::workload::ExecutorError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs;
 use std::path::Path;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ExecutorErrorReport {
@@ -13,6 +15,11 @@ pub(crate) struct ExecutorErrorReport {
     pub(crate) path: String,
     pub(crate) message: String,
     pub(crate) errno: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ExecutorResultReport {
+    pub(crate) object_hash: String,
 }
 
 impl fmt::Display for ExecutorErrorReport {
@@ -51,6 +58,48 @@ pub(crate) fn read_executor_error_report(
             path.display()
         ))
     })
+}
+
+pub(crate) fn write_executor_result_report(
+    path: &Path,
+    object_hash: ObjectHash,
+) -> Result<(), ExecutorError> {
+    let report = ExecutorResultReport {
+        object_hash: object_hash.to_string(),
+    };
+    let bytes = serde_json::to_vec(&report).map_err(executor_error)?;
+    fs::write(path, bytes).map_err(executor_error)
+}
+
+pub(crate) fn read_executor_result_report(path: &Path) -> Result<Option<ObjectHash>, RuntimeError> {
+    let bytes = fs::read(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RuntimeError::Executor(format!(
+                "executor result report '{}' is missing",
+                path.display()
+            ))
+        } else {
+            RuntimeError::Io(error)
+        }
+    })?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+
+    let report = serde_json::from_slice::<ExecutorResultReport>(&bytes).map_err(|error| {
+        RuntimeError::Executor(format!(
+            "failed to parse executor result report '{}': {error}",
+            path.display()
+        ))
+    })?;
+    ObjectHash::from_str(&report.object_hash)
+        .map(Some)
+        .map_err(|error| {
+            RuntimeError::Executor(format!(
+                "failed to parse executor result hash '{}': {error}",
+                path.display()
+            ))
+        })
 }
 
 fn executor_error(error: impl std::fmt::Display) -> ExecutorError {
@@ -123,6 +172,74 @@ mod tests {
     }
 
     #[test]
+    fn executor_result_report_serializes_object_hash() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("result.json");
+        let object_hash = test_object_hash();
+
+        write_executor_result_report(&path, object_hash).unwrap();
+
+        assert_eq!(
+            read_executor_result_report(&path).unwrap(),
+            Some(object_hash)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["object_hash"], object_hash.to_string());
+    }
+
+    #[test]
+    fn read_executor_result_report_treats_empty_file_as_no_report() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("result.json");
+        fs::write(&path, b"").unwrap();
+
+        assert_eq!(read_executor_result_report(&path).unwrap(), None);
+    }
+
+    #[test]
+    fn read_executor_result_report_rejects_malformed_json() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("result.json");
+        fs::write(&path, b"not json").unwrap();
+
+        let error = read_executor_result_report(&path).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::Executor(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse executor result report")
+        );
+    }
+
+    #[test]
+    fn read_executor_result_report_rejects_invalid_hash() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("result.json");
+        fs::write(&path, br#"{"object_hash":"not-a-hash"}"#).unwrap();
+
+        let error = read_executor_result_report(&path).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::Executor(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse executor result hash")
+        );
+    }
+
+    #[test]
+    fn read_executor_result_report_returns_executor_for_missing_file() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("missing-result.json");
+
+        let error = read_executor_result_report(&path).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::Executor(_)));
+        assert!(error.to_string().contains("result report"));
+    }
+
+    #[test]
     fn executor_error_report_display_includes_errno_when_present() {
         assert_eq!(
             test_report().to_string(),
@@ -146,5 +263,10 @@ mod tests {
             message: "failed to chown".to_string(),
             errno: Some(1),
         }
+    }
+
+    fn test_object_hash() -> ObjectHash {
+        ObjectHash::from_str("1111111111111111111111111111111111111111111111111111111111111111")
+            .unwrap()
     }
 }

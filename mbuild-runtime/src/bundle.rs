@@ -10,6 +10,7 @@ pub(crate) struct Bundle {
     dir: PathBuf,
     rootfs_dir: PathBuf,
     error_log_path: PathBuf,
+    result_log_path: PathBuf,
 }
 
 impl Bundle {
@@ -23,6 +24,10 @@ impl Bundle {
 
     pub(crate) fn error_log_path(&self) -> &Path {
         &self.error_log_path
+    }
+
+    pub(crate) fn result_log_path(&self) -> &Path {
+        &self.result_log_path
     }
 }
 
@@ -53,10 +58,12 @@ pub(crate) fn create_bundle(workspace: &Path, spec: &Spec) -> Result<Bundle, Run
 
     let rootfs_dir = dir.join("rootfs");
     let error_log_path = rootfs_dir.join("error.json");
+    let result_log_path = rootfs_dir.join("result.json");
     let bundle = Bundle {
         dir,
         rootfs_dir,
         error_log_path,
+        result_log_path,
     };
 
     fs::create_dir(bundle.rootfs_dir())?;
@@ -64,6 +71,7 @@ pub(crate) fn create_bundle(workspace: &Path, spec: &Spec) -> Result<Bundle, Run
     fs::create_dir(bundle.rootfs_dir().join("proc"))?;
     fs::create_dir(bundle.rootfs_dir().join("target"))?;
     fs::File::create(bundle.error_log_path())?;
+    fs::File::create(bundle.result_log_path())?;
 
     let config_path = bundle.dir().join("config.json");
     spec.save(&config_path).map_err(|error| {
@@ -98,10 +106,15 @@ mod tests {
             bundle.error_log_path(),
             &bundle.dir().join("rootfs").join("error.json")
         );
+        assert_eq!(
+            bundle.result_log_path(),
+            &bundle.dir().join("rootfs").join("result.json")
+        );
         assert!(bundle.rootfs_dir().join("dev").is_dir());
         assert!(bundle.rootfs_dir().join("proc").is_dir());
         assert!(bundle.rootfs_dir().join("target").is_dir());
         assert_eq!(fs::read(bundle.error_log_path()).unwrap(), b"");
+        assert_eq!(fs::read(bundle.result_log_path()).unwrap(), b"");
 
         let loaded = Spec::load(bundle.dir().join("config.json")).unwrap();
         assert_eq!(loaded, spec);
