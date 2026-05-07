@@ -31,6 +31,7 @@ use tempfile::tempdir;
 fn registered_builders_include_rootfs() {
     assert!(mbuild::builders::supported_builder_tags().contains(&"Rootfs"));
     assert!(mbuild::builders::supported_builder_tags().contains(&"Container"));
+    assert!(mbuild::builders::supported_builder_tags().contains(&"OciExtract"));
 }
 
 fn source_recipe_node(name: &str, object_hash: &str, origin_path: &str, mode: &str) -> Value {

@@ -1,10 +1,12 @@
 mod layer;
+pub mod oci_extract;
 
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     StagedBuildResult, TypedBuilder,
 };
 use mbuild_origin_oci_registry::oci;
+pub use oci_extract::{OciExtractBuilder, OciExtractConfig};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::fmt;

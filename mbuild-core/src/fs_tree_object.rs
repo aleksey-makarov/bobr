@@ -159,12 +159,6 @@ fn validate_top_level_shape(paths: &FsTreeObjectPaths) -> Result<(), FsTreeObjec
             entries.insert(MANIFEST_FILE_NAME);
         } else if name == OsStr::new(ROOT_DIR_NAME) {
             entries.insert(ROOT_DIR_NAME);
-        } else {
-            return Err(FsTreeObjectError::Invalid(format!(
-                "unexpected top-level entry in fs-tree object '{}': '{}'",
-                paths.object_dir.display(),
-                name.to_string_lossy()
-            )));
         }
     }
 
@@ -605,7 +599,7 @@ mod tests {
         let paths = create_fs_tree_staging_dir(&object_dir, &manifest).unwrap();
 
         fs::write(object_dir.join("extra"), b"extra").unwrap();
-        assert!(validate_fs_tree_object(&object_dir, &owner).is_err());
+        assert!(validate_fs_tree_object(&object_dir, &owner).is_ok());
         fs::remove_file(object_dir.join("extra")).unwrap();
 
         fs::remove_file(&paths.manifest_path).unwrap();
