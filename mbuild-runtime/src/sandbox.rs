@@ -9,9 +9,8 @@ use fsobj_hash::{ObjectHash, hash_path};
 use libcontainer::container::builder::ContainerBuilder;
 use libcontainer::oci_spec::runtime::{
     Capabilities, Capability, LinuxBuilder, LinuxCapabilities, LinuxCapabilitiesBuilder,
-    LinuxIdMapping, LinuxIdMappingBuilder, LinuxNamespaceBuilder, LinuxNamespaceType,
-    LinuxResources, Mount, MountBuilder, ProcessBuilder, RootBuilder, Spec, SpecBuilder,
-    UserBuilder,
+    LinuxIdMapping, LinuxIdMappingBuilder, LinuxNamespaceBuilder, LinuxNamespaceType, Mount,
+    MountBuilder, ProcessBuilder, RootBuilder, Spec, SpecBuilder, UserBuilder,
 };
 use libcontainer::syscall::syscall::SyscallType;
 use libcontainer::workload::{
@@ -37,6 +36,7 @@ const BUILD_USER_UID: u32 = 1;
 const BUILD_USER_GID: u32 = 1;
 const ROOT_UID: u32 = 0;
 const ROOT_GID: u32 = 0;
+const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const ROOT_STEP_CAPABILITIES: &[&str] = &[
     "CAP_CHOWN",
     "CAP_DAC_OVERRIDE",
@@ -212,7 +212,8 @@ impl PreparedSandbox {
     fn create(config: &SandboxBuildConfig, idmap: &MbuildIdmap) -> Result<Self, RuntimeError> {
         let mut dirs = SandboxDirs::create(&config.workspace)?;
         let host_files = SandboxHostFiles::create(&dirs.host_files)?;
-        let spec = build_sandbox_spec(config, idmap, &mut dirs, &host_files)?;
+        let cgroup_path = prepare_sandbox_cgroup()?;
+        let spec = build_sandbox_spec(config, idmap, &mut dirs, &host_files, Some(cgroup_path))?;
         let bundle = create_bundle(&config.workspace, &spec)?;
         populate_bundle_rootfs_skeleton(bundle.rootfs_dir(), &config.rootfs)?;
         Ok(Self {
@@ -511,6 +512,7 @@ fn build_sandbox_spec(
     idmap: &MbuildIdmap,
     dirs: &mut SandboxDirs,
     host_files: &SandboxHostFiles,
+    cgroup_path: Option<PathBuf>,
 ) -> Result<Spec, RuntimeError> {
     let uid_mappings = vec![
         linux_id_mapping(0, idmap.current_uid(), 1)?,
@@ -521,7 +523,7 @@ fn build_sandbox_spec(
         linux_id_mapping(1, idmap.subgid_base(), idmap.subgid_count())?,
     ];
 
-    let linux = build_oci(
+    let mut linux = build_oci(
         LinuxBuilder::default()
             .namespaces(vec![
                 namespace(LinuxNamespaceType::User)?,
@@ -533,11 +535,14 @@ fn build_sandbox_spec(
             ])
             .uid_mappings(uid_mappings)
             .gid_mappings(gid_mappings)
-            .resources(LinuxResources::default())
             .masked_paths(Vec::<String>::new())
             .readonly_paths(Vec::<String>::new())
             .build(),
     )?;
+    linux.set_resources(None);
+    if let Some(cgroup_path) = cgroup_path {
+        linux.set_cgroups_path(Some(cgroup_path));
+    }
 
     let mut mounts = rootfs_top_level_mounts(&config.rootfs, dirs)?;
     mounts.extend([
@@ -633,6 +638,35 @@ fn rootfs_top_level_mounts(
     }
 
     Ok(mounts)
+}
+
+fn prepare_sandbox_cgroup() -> Result<PathBuf, RuntimeError> {
+    let current = current_cgroup_v2_path()?;
+    let name = format!("mbuild-sandbox-{}", Uuid::new_v4().simple());
+    let cgroup_path = current.join(name);
+    let full_path = Path::new(CGROUP_ROOT).join(&cgroup_path);
+    fs::create_dir(&full_path).map_err(|error| {
+        RuntimeError::Executor(format!(
+            "failed to create sandbox cgroup '{}': {error}",
+            full_path.display()
+        ))
+    })?;
+    Ok(Path::new("/").join(cgroup_path))
+}
+
+fn current_cgroup_v2_path() -> Result<PathBuf, RuntimeError> {
+    let cgroup = fs::read_to_string("/proc/self/cgroup")?;
+    for line in cgroup.lines() {
+        if let Some(path) = line.strip_prefix("0::") {
+            return Ok(path
+                .strip_prefix('/')
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(path)));
+        }
+    }
+    Err(RuntimeError::Executor(
+        "failed to find current cgroup v2 path in /proc/self/cgroup".to_string(),
+    ))
 }
 
 fn rootfs_top_level_entries(rootfs: &Path) -> Result<Vec<fs::DirEntry>, RuntimeError> {
@@ -988,8 +1022,20 @@ mod tests {
         let host_files = SandboxHostFiles::create(&dirs.host_files).unwrap();
         let idmap = MbuildIdmap::for_tests(1000, 1001, 100000, 65536, 200000, 65536);
 
-        let spec = build_sandbox_spec(&build_config, &idmap, &mut dirs, &host_files).unwrap();
+        let cgroup_path = PathBuf::from("/user.slice/mbuild-test.scope");
+        let spec = build_sandbox_spec(
+            &build_config,
+            &idmap,
+            &mut dirs,
+            &host_files,
+            Some(cgroup_path.clone()),
+        )
+        .unwrap();
         let mounts = spec.mounts().as_ref().unwrap();
+        let linux = spec.linux().as_ref().unwrap();
+
+        assert_eq!(linux.cgroups_path().as_ref(), Some(&cgroup_path));
+        assert!(linux.resources().is_none());
 
         assert!(
             !mounts
