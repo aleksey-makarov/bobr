@@ -27,6 +27,7 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::warn;
@@ -213,6 +214,7 @@ impl PreparedSandbox {
         let host_files = SandboxHostFiles::create(&dirs.host_files)?;
         let spec = build_sandbox_spec(config, idmap, &mut dirs, &host_files)?;
         let bundle = create_bundle(&config.workspace, &spec)?;
+        populate_bundle_rootfs_skeleton(bundle.rootfs_dir(), &config.rootfs)?;
         Ok(Self {
             bundle,
             output_hash_path: host_files.output_hash,
@@ -221,8 +223,8 @@ impl PreparedSandbox {
 }
 
 struct SandboxDirs {
-    root_upper: PathBuf,
-    root_work: PathBuf,
+    root: PathBuf,
+    rootfs_overlays: HashMap<String, InputOverlayDirs>,
     input_overlays: HashMap<String, InputOverlayDirs>,
     host_files: PathBuf,
 }
@@ -237,32 +239,41 @@ impl SandboxDirs {
         let root = workspace
             .join("sandbox")
             .join(Uuid::new_v4().simple().to_string());
-        let root_upper = root.join("rootfs-upper");
-        let root_work = root.join("rootfs-work");
+        let rootfs_overlays = root.join("rootfs-overlays");
         let inputs = root.join("inputs");
         let host_files = root.join("host-files");
 
-        fs::create_dir_all(&root_upper)?;
-        fs::create_dir_all(&root_work)?;
+        fs::create_dir_all(&rootfs_overlays)?;
         fs::create_dir_all(&inputs)?;
         fs::create_dir_all(&host_files)?;
 
         Ok(Self {
-            root_upper,
-            root_work,
+            root,
+            rootfs_overlays: HashMap::new(),
             input_overlays: HashMap::new(),
             host_files,
         })
     }
 
+    fn rootfs_overlay(&mut self, name: &str) -> Result<&InputOverlayDirs, RuntimeError> {
+        if !self.rootfs_overlays.contains_key(name) {
+            let root = self.root.join("rootfs-overlays").join(name);
+            let upper = root.join("upper");
+            let work = root.join("work");
+            fs::create_dir_all(&upper)?;
+            fs::create_dir_all(&work)?;
+            self.rootfs_overlays
+                .insert(name.to_string(), InputOverlayDirs { upper, work });
+        }
+        Ok(self
+            .rootfs_overlays
+            .get(name)
+            .expect("rootfs overlay exists"))
+    }
+
     fn input_overlay(&mut self, name: &str) -> Result<&InputOverlayDirs, RuntimeError> {
         if !self.input_overlays.contains_key(name) {
-            let root = self
-                .root_work
-                .parent()
-                .expect("root work has parent")
-                .join("inputs")
-                .join(name);
+            let root = self.root.join("inputs").join(name);
             let upper = root.join("upper");
             let work = root.join("work");
             fs::create_dir_all(&upper)?;
@@ -527,13 +538,8 @@ fn build_sandbox_spec(
             .build(),
     )?;
 
-    let mut mounts = vec![
-        overlay_mount(
-            Path::new("/"),
-            &config.rootfs,
-            &dirs.root_upper,
-            &dirs.root_work,
-        )?,
+    let mut mounts = rootfs_top_level_mounts(&config.rootfs, dirs)?;
+    mounts.extend([
         proc_mount()?,
         tmpfs_mount(Path::new("/tmp"), &["mode=1777"])?,
         tmpfs_mount(Path::new("/run"), &["mode=755"])?,
@@ -546,7 +552,7 @@ fn build_sandbox_spec(
             Path::new("/__mbuild/runtime/output-hash.json"),
             false,
         )?,
-    ];
+    ]);
 
     for input in &config.inputs {
         if input.host_path.is_dir() {
@@ -588,6 +594,83 @@ fn build_sandbox_spec(
             .linux(linux)
             .build(),
     )
+}
+
+fn rootfs_top_level_mounts(
+    rootfs: &Path,
+    dirs: &mut SandboxDirs,
+) -> Result<Vec<Mount>, RuntimeError> {
+    let mut entries = rootfs_top_level_entries(rootfs)?;
+    entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+
+    let mut mounts = Vec::new();
+    for entry in entries {
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(|| {
+            RuntimeError::InvalidInput(format!(
+                "sandbox rootfs '{}' contains non-UTF-8 top-level entry",
+                rootfs.display()
+            ))
+        })?;
+        let source = entry.path();
+        let destination = Path::new("/").join(name);
+        let file_type = entry.file_type()?;
+
+        if file_type.is_dir() {
+            if should_mount_rootfs_directory(name) {
+                let overlay = dirs.rootfs_overlay(name)?;
+                mounts.push(overlay_mount(
+                    &destination,
+                    &source,
+                    &overlay.upper,
+                    &overlay.work,
+                )?);
+            }
+        } else if file_type.is_file() {
+            mounts.push(bind_mount(&source, &destination, true)?);
+        }
+    }
+
+    Ok(mounts)
+}
+
+fn rootfs_top_level_entries(rootfs: &Path) -> Result<Vec<fs::DirEntry>, RuntimeError> {
+    fs::read_dir(rootfs)?
+        .collect::<Result<Vec<_>, io::Error>>()
+        .map_err(RuntimeError::from)
+}
+
+fn should_mount_rootfs_directory(name: &str) -> bool {
+    !matches!(name, "dev" | "proc" | "run" | "tmp")
+}
+
+fn populate_bundle_rootfs_skeleton(
+    bundle_rootfs: &Path,
+    lower_rootfs: &Path,
+) -> Result<(), RuntimeError> {
+    for entry in rootfs_top_level_entries(lower_rootfs)? {
+        let name = entry.file_name();
+        let destination = bundle_rootfs.join(&name);
+        let file_type = entry.file_type()?;
+
+        if file_type.is_symlink() {
+            let target = fs::read_link(entry.path())?;
+            if !destination.exists() && !destination.is_symlink() {
+                symlink(target, destination)?;
+            }
+        } else if file_type.is_dir() {
+            let name = name.to_str().ok_or_else(|| {
+                RuntimeError::InvalidInput(format!(
+                    "sandbox rootfs '{}' contains non-UTF-8 top-level entry",
+                    lower_rootfs.display()
+                ))
+            })?;
+            if !should_mount_rootfs_directory(name) {
+                fs::create_dir_all(destination)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn overlay_mount(
@@ -866,7 +949,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn sandbox_spec_uses_rootfs_overlay_and_output_bind() {
+    fn sandbox_spec_uses_top_level_rootfs_overlays_and_output_bind() {
         let temp = tempdir().unwrap();
         let rootfs = temp.path().join("rootfs");
         let out = temp.path().join("out");
@@ -876,6 +959,10 @@ mod tests {
         for path in [&rootfs, &out, &config, &workspace, &state] {
             fs::create_dir_all(path).unwrap();
         }
+        for name in ["dev", "etc", "proc", "run", "tmp", "usr"] {
+            fs::create_dir(rootfs.join(name)).unwrap();
+        }
+        symlink("usr/bin", rootfs.join("bin")).unwrap();
         let build_config = SandboxBuildConfig {
             rootfs: rootfs.clone(),
             out_dir: out.clone(),
@@ -892,20 +979,33 @@ mod tests {
         let spec = build_sandbox_spec(&build_config, &idmap, &mut dirs, &host_files).unwrap();
         let mounts = spec.mounts().as_ref().unwrap();
 
-        let root_overlay = mounts
+        assert!(
+            !mounts
+                .iter()
+                .any(|mount| mount.destination() == Path::new("/")
+                    && mount.typ().as_deref() == Some("overlay"))
+        );
+        assert!(
+            !mounts
+                .iter()
+                .any(|mount| mount.destination() == Path::new("/dev")
+                    && mount.typ().as_deref() == Some("overlay"))
+        );
+        let usr_overlay = mounts
             .iter()
             .find(|mount| {
-                mount.destination() == Path::new("/") && mount.typ().as_deref() == Some("overlay")
+                mount.destination() == Path::new("/usr")
+                    && mount.typ().as_deref() == Some("overlay")
             })
-            .expect("root overlay mount exists");
-        let root_overlay_options = root_overlay.options().as_ref().unwrap();
+            .expect("/usr overlay mount exists");
+        let usr_overlay_options = usr_overlay.options().as_ref().unwrap();
         assert!(
-            root_overlay_options
+            usr_overlay_options
                 .iter()
                 .any(|option| option == "userxattr")
         );
         assert!(
-            !root_overlay_options
+            !usr_overlay_options
                 .iter()
                 .any(|option| option == "metacopy=on")
         );
@@ -915,5 +1015,26 @@ mod tests {
                 .any(|mount| mount.destination() == Path::new("/__mbuild/out")
                     && mount.source().as_deref() == Some(out.as_path()))
         );
+    }
+
+    #[test]
+    fn sandbox_bundle_skeleton_copies_top_level_symlinks_and_skipped_dirs() {
+        let temp = tempdir().unwrap();
+        let lower = temp.path().join("lower");
+        let bundle = temp.path().join("bundle");
+        fs::create_dir_all(&lower).unwrap();
+        fs::create_dir_all(&bundle).unwrap();
+        fs::create_dir(lower.join("run")).unwrap();
+        fs::create_dir(lower.join("usr")).unwrap();
+        symlink("usr/bin", lower.join("bin")).unwrap();
+
+        populate_bundle_rootfs_skeleton(&bundle, &lower).unwrap();
+
+        assert_eq!(
+            fs::read_link(bundle.join("bin")).unwrap(),
+            Path::new("usr/bin")
+        );
+        assert!(bundle.join("run").is_dir());
+        assert!(!bundle.join("usr").exists());
     }
 }

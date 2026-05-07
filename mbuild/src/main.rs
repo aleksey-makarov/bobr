@@ -9,6 +9,7 @@ use std::process::ExitCode;
 use mbuild::recipe_runtime::{self, BuildRunOptions};
 use mbuild::{RecipeEnvelope, RecipeOptions};
 use mbuild_core::CancellationToken;
+use tracing_subscriber::EnvFilter;
 
 type MResult<T> = Result<T, MbuildError>;
 
@@ -57,6 +58,8 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
+    init_tracing();
+
     let matches = Cli::command().get_matches();
     let quiet_from_cli = matches.value_source("quiet") == Some(ValueSource::CommandLine);
     let jobs_from_cli = matches.value_source("jobs") == Some(ValueSource::CommandLine);
@@ -76,6 +79,14 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+fn init_tracing() {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("error"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .without_time()
+        .try_init();
 }
 
 fn build(
