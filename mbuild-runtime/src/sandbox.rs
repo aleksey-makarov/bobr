@@ -431,6 +431,7 @@ impl SandboxLifecycle {
             .with_root_path(&self.state_dir)
             .map_err(libcontainer_error)?
             .as_tenant()
+            .with_container_args(vec![label.to_string()])
             .with_user(Some(uid))
             .with_group(Some(gid))
             .with_no_new_privs(true)
@@ -823,11 +824,22 @@ impl Executor for KeepAliveExecutor {
     }
 
     fn exec(&self, _: &Spec) -> Result<(), ExecutorError> {
+        set_dumpable(true).map_err(executor_error)?;
         loop {
             unsafe {
                 libc::pause();
             }
         }
+    }
+}
+
+fn set_dumpable(enabled: bool) -> io::Result<()> {
+    let value = if enabled { 1 } else { 0 };
+    let result = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, value, 0, 0, 0) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
