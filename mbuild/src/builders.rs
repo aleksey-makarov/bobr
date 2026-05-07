@@ -1,4 +1,4 @@
-use mbuild_binary::{BinaryBuilder, ContainerBuilder};
+use mbuild_binary::{BinaryBuilder, ContainerBuilder, SandboxBuilder};
 use mbuild_compose::{Ext4RootfsBuilder, RootfsBuilder};
 use mbuild_core::Builder;
 use mbuild_image::{ImageBuilder, OciExtractBuilder};
@@ -7,6 +7,7 @@ use mbuild_tree::TreeBuilder;
 
 static BINARY_BUILDER: BinaryBuilder = BinaryBuilder;
 static CONTAINER_BUILDER: ContainerBuilder = ContainerBuilder;
+static SANDBOX_BUILDER: SandboxBuilder = SandboxBuilder;
 static EXT4_ROOTFS_BUILDER: Ext4RootfsBuilder = Ext4RootfsBuilder;
 static ROOTFS_BUILDER: RootfsBuilder = RootfsBuilder;
 static IMAGE_BUILDER: ImageBuilder = ImageBuilder;
@@ -14,12 +15,13 @@ static OCI_EXTRACT_BUILDER: OciExtractBuilder = OciExtractBuilder;
 static TEXT_BUILDER: TextBuilder = TextBuilder;
 static TREE_BUILDER: TreeBuilder = TreeBuilder;
 
-pub fn registered_builders() -> [&'static dyn Builder; 8] {
+pub fn registered_builders() -> [&'static dyn Builder; 9] {
     [
         &TEXT_BUILDER,
         &TREE_BUILDER,
         &BINARY_BUILDER,
         &CONTAINER_BUILDER,
+        &SANDBOX_BUILDER,
         &EXT4_ROOTFS_BUILDER,
         &ROOTFS_BUILDER,
         &IMAGE_BUILDER,

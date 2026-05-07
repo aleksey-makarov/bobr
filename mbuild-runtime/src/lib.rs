@@ -22,6 +22,7 @@ mod idmap;
 mod ownership;
 mod preflight;
 mod run;
+mod sandbox;
 mod spec;
 
 mod executor;
@@ -29,3 +30,7 @@ mod executor;
 pub use error::{IdmapError, RuntimeError};
 pub use idmap::{MbuildIdmap, cached_host_idmap};
 pub use ownership::{apply_ownership_batch, apply_ownership_batch_and_hash};
+pub use sandbox::{
+    SandboxBuildConfig, SandboxBuildOutcome, SandboxInput, SandboxRunAs, SandboxStep,
+    SandboxStepReport, run_sandbox_build,
+};

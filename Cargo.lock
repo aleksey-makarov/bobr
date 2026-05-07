@@ -1213,6 +1213,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "mbuild-core",
+ "mbuild-runtime",
  "serde",
  "serde_json",
  "tar",

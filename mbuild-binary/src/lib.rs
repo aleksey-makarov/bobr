@@ -12,8 +12,10 @@ use std::process::Command as ProcessCommand;
 
 mod container;
 mod process;
+mod sandbox;
 
 pub use container::ContainerBuilder;
+pub use sandbox::SandboxBuilder;
 
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {

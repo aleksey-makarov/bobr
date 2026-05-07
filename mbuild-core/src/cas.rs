@@ -890,6 +890,7 @@ fn import_object_with_hash(
     staged_path: &Path,
     object_hash: Option<ObjectHash>,
 ) -> Result<ObjectHash, CasError> {
+    let precomputed = object_hash.is_some();
     let object_hash = match object_hash {
         Some(object_hash) => object_hash,
         None => hash_path(staged_path).map_err(|error| {
@@ -901,13 +902,17 @@ fn import_object_with_hash(
     };
     let destination = layout.objects.join(object_hash.to_hex());
     if destination.exists() {
-        remove_path_force(staged_path)?;
+        if !precomputed {
+            remove_path_force(staged_path)?;
+        }
         return Ok(object_hash);
     }
 
     if let Err(error) = fs::rename(staged_path, &destination) {
         if destination.exists() {
-            remove_path_force(staged_path)?;
+            if !precomputed {
+                remove_path_force(staged_path)?;
+            }
             return Ok(object_hash);
         }
         return Err(CasError::Io(format!(
@@ -2454,6 +2459,48 @@ mod tests {
         .unwrap();
 
         assert!(!second_stage_path.exists());
+    }
+
+    #[test]
+    fn existing_precomputed_object_reuse_leaves_staged_path_for_runtime_cleanup() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let first_stage = temp.path().join("first.txt");
+        fs::write(&first_stage, b"hello").unwrap();
+        let object_hash = hash_path(&first_stage).unwrap();
+        materialize_build(
+            &layout,
+            build_key_for("Text", json!({ "kind": "first" }), &[]),
+            reuse_key_for("Text", json!({ "kind": "first" }), &[]),
+            sample_created_at(),
+            vec![],
+            StagedBuildResult {
+                meta: Map::new(),
+                staged_path: first_stage,
+                object_hash: Some(object_hash),
+            },
+        )
+        .unwrap();
+
+        let second_stage = temp.path().join("second.txt");
+        fs::write(&second_stage, b"hello").unwrap();
+        let second_stage_path = second_stage.clone();
+        materialize_build(
+            &layout,
+            build_key_for("Text", json!({ "kind": "second" }), &[]),
+            reuse_key_for("Text", json!({ "kind": "second" }), &[]),
+            sample_created_at(),
+            vec![],
+            StagedBuildResult {
+                meta: Map::new(),
+                staged_path: second_stage,
+                object_hash: Some(object_hash),
+            },
+        )
+        .unwrap();
+
+        assert!(second_stage_path.exists());
     }
 
     #[test]

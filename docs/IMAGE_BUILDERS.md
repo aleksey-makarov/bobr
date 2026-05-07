@@ -5,7 +5,7 @@
 `mbuild` currently implements store-owned OCI images for both imported images
 and images built from filesystem tree inputs.
 
-The current image path has two builders plus one `Source` origin:
+The current image path has these builders plus one `Source` origin:
 
 - `Source` with `origin.type = "oci-registry"`: import one pinned external
   image from a registry into the store as an OCI image layout directory
@@ -16,6 +16,8 @@ The current image path has two builders plus one `Source` origin:
   inside one long-lived container
 - `Container`: execute the same explicit step plan contract against a rootfs
   directory input with `bwrap`
+- `Sandbox`: execute the same explicit step plan contract against a rootfs
+  directory input with `mbuild-runtime` and libcontainer
 
 This means:
 
@@ -24,6 +26,8 @@ This means:
 - `podman` is still part of the current execution path for `Binary`
 - `Container` does not consume an OCI image; it consumes a directory rootfs
   object and runs one `bwrap` process per configured step
+- `Sandbox` does not consume an OCI image; it consumes a directory rootfs
+  object and runs all steps in one libcontainer lifecycle
 - file-composition conflict detection is not yet part of the `Image` builder
 
 ## `Source/oci-registry`
@@ -117,7 +121,7 @@ The current realized result metadata contains:
 
 ## Step Executors
 
-`Binary` and `Container` share the same config shape:
+`Binary`, `Container`, and `Sandbox` share the same config shape:
 
 - `steps`: a non-empty ordered list of execution steps
 - `script_config`: optional structured string payload serialized into
@@ -132,8 +136,8 @@ Each step contains:
 - `argv`
 - optional `env`
 
-Both builders perform controlled interpolation in `cwd`, `argv`, and step-local
-environment values. Supported variables are:
+These builders perform controlled interpolation in `cwd`, `argv`, and
+step-local environment values. Supported variables are:
 
 - `@{config}`
 - `@{build}`
@@ -332,6 +336,50 @@ The staged result is the host temp `out` directory. It must exist and be a
 directory after all steps complete. Install metadata defaults to the same
 `**` rule used by `Binary` when `install` is omitted.
 
+### `Sandbox` With A Rootfs Directory
+
+`Sandbox` executes the same step contract against a rootfs directory object.
+It accepts:
+
+- required `rootfs`: one directory object exposed as a writable overlay under
+  `/`
+- any number of extra named file or directory inputs mounted under
+  `/__mbuild/inputs/<name>`
+
+`Sandbox` uses `mbuild-runtime` and libcontainer directly. It creates one
+container lifecycle for the whole build, then runs each configured step as a
+separate tenant exec operation inside that lifecycle. The rootfs overlay is
+shared by all steps and discarded after the build.
+
+`/__mbuild/build` is created inside the rootfs overlay and is owned by the
+numeric build user `1:1`. `/__mbuild/out` is a host bind mount and is the only
+published output path.
+
+File inputs are read-only bind mounts. Directory inputs use a per-build overlay
+with the store object as `lowerdir` and temporary `upperdir`/`workdir`
+directories. Before user steps run, `Sandbox` prepares directory input overlay
+views as owned by `1:1`. The store object is never mutated. The v1 directory
+input path requires metadata-only overlay copy-up support through
+`metacopy=on`; unsupported hosts fail during runtime setup instead of silently
+copying full input trees.
+
+The sandbox mount policy is intentionally small:
+
+- no host network connectivity
+- `/proc` is mounted
+- `/sys` is not mounted
+- `/tmp` and `/run` are tmpfs mounts
+- `/etc/hosts` and `/etc/resolv.conf` are generated readonly files
+- hostname is `mbuild`
+
+`run_as=build-user` runs as numeric uid `1`, gid `1` with an empty capability
+set. `run_as=root` runs as numeric uid `0`, gid `0` with only `CHOWN`,
+`DAC_OVERRIDE`, `DAC_READ_SEARCH`, `FOWNER`, and `FSETID`.
+
+After all steps complete, `Sandbox` computes the fs object hash for
+`/__mbuild/out` inside the sandbox and returns it to the CAS as a precomputed
+hash. Output ownership is not normalized; non-root-owned entries are allowed.
+
 ## Current Limitations
 
 The current image path intentionally does not yet implement the final image
@@ -342,6 +390,8 @@ In particular:
 - `Binary` still depends on `podman load` and `podman`
 - `Container` depends on `bwrap` support for `--overlay-src` and `--overlay`
 - `Container` does not provide a `fuse-overlayfs` fallback
+- `Sandbox` depends on libcontainer rootless runtime support and kernel
+  overlay support for the configured rootfs/input overlays
 - `Image` does not compute or persist canonical flattened `contents`
 - `Image` does not implement additive-only file-composition checks
 - `Image` does not reject path conflicts between incoming filesystem tree
