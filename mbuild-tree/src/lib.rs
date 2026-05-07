@@ -435,7 +435,7 @@ fn materialize_directory_output(
     let paths = create_fs_tree_staging_dir(object_dir, &manifest).map_err(map_fs_tree_error)?;
 
     for manifest_entry in manifest.entries() {
-        if let FsTreeEntry::Directory { path, mode, .. } = manifest_entry {
+        if let FsTreeEntry::Directory { path, .. } = manifest_entry {
             if path.is_empty() {
                 continue;
             }
@@ -446,7 +446,6 @@ fn materialize_directory_output(
                     dst.display()
                 ))
             })?;
-            set_mode(&dst, *mode)?;
         }
     }
 
@@ -476,7 +475,38 @@ fn materialize_directory_output(
         }
     }
 
+    apply_directory_modes_post_order(&manifest, &paths.root_dir)?;
     materializer.materialize_and_validate(&paths.root_dir, object_dir, &manifest, temp_dir)?;
+    Ok(())
+}
+
+fn apply_directory_modes_post_order(
+    manifest: &FsTreeManifest,
+    root_dir: &Path,
+) -> Result<(), BuilderError> {
+    let mut dirs = manifest
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            FsTreeEntry::Directory { path, mode, .. } if !path.is_empty() => {
+                Some((path.as_str(), *mode))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    dirs.sort_by(|(left, _), (right, _)| {
+        right
+            .split('/')
+            .count()
+            .cmp(&left.split('/').count())
+            .then_with(|| right.cmp(left))
+    });
+
+    for (path, mode) in dirs {
+        set_mode(&root_dir.join(path), mode)?;
+    }
+
     Ok(())
 }
 
@@ -1110,6 +1140,76 @@ mod tests {
             let etc_mode = fs::metadata(root.join("etc")).unwrap().permissions().mode();
             assert_eq!(init_mode & 0o777, 0o755);
             assert_eq!(etc_mode & 0o777, 0o755);
+        }
+    }
+
+    #[test]
+    fn directory_tree_applies_restrictive_directory_modes_after_children() {
+        let builder = TreeBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let result = builder
+            .build_typed_for_tests(
+                TreeConfig {
+                    tree: TreePayload {
+                        entries: vec![TreeEntry::File {
+                            path: "share/info.txt".to_string(),
+                            text: "inline\n".to_string(),
+                            executable: false,
+                        }],
+                    },
+                    install: Some(InstallMeta {
+                        rules: vec![
+                            InstallRule {
+                                path: "**".to_string(),
+                                attrs: InstallAttrs {
+                                    uid: Some(0),
+                                    gid: Some(0),
+                                    directory_mode: Some(0o755),
+                                    regular_file_mode: Some(0o644),
+                                    executable_file_mode: Some(0o755),
+                                    symlink_mode: None,
+                                },
+                            },
+                            InstallRule {
+                                path: "share/**".to_string(),
+                                attrs: InstallAttrs {
+                                    uid: None,
+                                    gid: None,
+                                    directory_mode: Some(0o555),
+                                    regular_file_mode: Some(0o444),
+                                    executable_file_mode: None,
+                                    symlink_mode: None,
+                                },
+                            },
+                        ],
+                    }),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(fs_tree_root(&result).join("share/info.txt")).unwrap(),
+            "inline\n"
+        );
+        assert_valid_fs_tree(&result);
+
+        #[cfg(unix)]
+        {
+            let root = fs_tree_root(&result);
+            let share_mode = fs::metadata(root.join("share"))
+                .unwrap()
+                .permissions()
+                .mode();
+            let file_mode = fs::metadata(root.join("share/info.txt"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(share_mode & 0o777, 0o555);
+            assert_eq!(file_mode & 0o777, 0o444);
         }
     }
 
