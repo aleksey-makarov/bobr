@@ -84,6 +84,7 @@ impl TypedBuilder for TextBuilder {
         Ok(StagedBuildResult {
             meta: Map::new(),
             staged_path: tmp_path,
+            object_hash: None,
         })
     }
 }

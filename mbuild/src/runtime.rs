@@ -362,6 +362,7 @@ mod tests {
             Ok(StagedBuildResult {
                 meta: Map::new(),
                 staged_path: cx.temp_dir.join("out"),
+                object_hash: None,
             })
         }
     }
@@ -420,6 +421,7 @@ mod tests {
             Ok(StagedBuildResult {
                 meta: Map::new(),
                 staged_path: cx.temp_dir.join("missing-output"),
+                object_hash: None,
             })
         }
     }

@@ -116,6 +116,7 @@ impl OwnershipExecutor {
             chmod(&entry.path, entry.mode.expect("directory entry has mode"))?;
         }
 
+        Self::validate_applied_entries(&entries)?;
         Ok(())
     }
 
@@ -171,6 +172,69 @@ impl OwnershipExecutor {
             gid,
             mode,
         })
+    }
+
+    fn validate_applied_entries(entries: &[ResolvedEntry]) -> Result<(), ExecutorErrorReport> {
+        for entry in entries {
+            let metadata = fs::symlink_metadata(&entry.path).map_err(|error| {
+                report_io(
+                    "stat",
+                    &entry.path,
+                    format!("failed to inspect fs-tree entry '{}'", entry.path.display()),
+                    error,
+                )
+            })?;
+
+            let actual_kind = EntryKind::from_metadata(&metadata);
+            if actual_kind != Some(entry.kind) {
+                return Err(report(
+                    "kind",
+                    &entry.path,
+                    format!(
+                        "fs-tree entry '{}' has kind {}, expected {} after ownership materialization",
+                        entry.path.display(),
+                        actual_kind.map_or("other", EntryKind::as_str),
+                        entry.kind.as_str()
+                    ),
+                    None,
+                ));
+            }
+
+            if metadata.uid() != entry.uid || metadata.gid() != entry.gid {
+                return Err(report(
+                    "owner",
+                    &entry.path,
+                    format!(
+                        "fs-tree entry '{}' has owner {}:{}, expected {}:{}",
+                        entry.path.display(),
+                        metadata.uid(),
+                        metadata.gid(),
+                        entry.uid,
+                        entry.gid
+                    ),
+                    None,
+                ));
+            }
+
+            if let Some(expected_mode) = entry.mode {
+                let actual_mode = metadata.permissions().mode() & 0o777;
+                if actual_mode != expected_mode {
+                    return Err(report(
+                        "mode",
+                        &entry.path,
+                        format!(
+                            "fs-tree entry '{}' has mode {:o}, expected {:o}",
+                            entry.path.display(),
+                            actual_mode,
+                            expected_mode
+                        ),
+                        None,
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 

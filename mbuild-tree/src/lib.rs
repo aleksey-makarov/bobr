@@ -1,8 +1,8 @@
+use fsobj_hash::{ObjectHash, hash_path};
 use globset::{Glob, GlobMatcher};
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, FsTreeEntry,
     FsTreeManifest, StagedBuildResult, TypedBuilder, create_fs_tree_staging_dir, fsutil,
-    validate_fs_tree_object,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
@@ -144,15 +144,13 @@ impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
     fn materialize_and_validate(
         &self,
         root_dir: &Path,
-        object_dir: &Path,
+        _object_dir: &Path,
         manifest: &FsTreeManifest,
         temp_dir: &Path,
     ) -> Result<(), BuilderError> {
         let idmap = mbuild_runtime::cached_host_idmap()
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
         mbuild_runtime::apply_ownership_batch(root_dir, manifest, idmap.as_ref(), temp_dir)
-            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-        validate_fs_tree_object(object_dir, idmap.as_ref())
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
         Ok(())
     }
@@ -210,29 +208,30 @@ fn build_tree(
         format!("materializing tree output '{}'", output_path.display()),
     );
 
-    let meta = match output_kind {
+    let (meta, object_hash) = match output_kind {
         OutputKind::File => {
             materialize_file_output(&output_path, &normalized)?;
-            Map::new()
+            (Map::new(), None)
         }
         OutputKind::Directory => {
             let install = config
                 .install
                 .expect("validated install for directory output");
-            materialize_directory_output(
+            let object_hash = materialize_directory_output(
                 &output_path,
                 &normalized,
                 &install,
                 &cx.temp_dir,
                 materializer,
             )?;
-            Map::new()
+            (Map::new(), Some(object_hash))
         }
     };
 
     Ok(StagedBuildResult {
         meta,
         staged_path: output_path,
+        object_hash,
     })
 }
 
@@ -429,7 +428,7 @@ fn materialize_directory_output(
     install: &InstallMeta,
     temp_dir: &Path,
     materializer: &impl OwnershipMaterializer,
-) -> Result<(), BuilderError> {
+) -> Result<ObjectHash, BuilderError> {
     let rules = compile_install_rules(&install.rules)?;
     let manifest = fs_tree_manifest_for_entries(entries, &rules)?;
     let paths = create_fs_tree_staging_dir(object_dir, &manifest).map_err(map_fs_tree_error)?;
@@ -476,8 +475,14 @@ fn materialize_directory_output(
     }
 
     apply_directory_modes_post_order(&manifest, &paths.root_dir)?;
+    let object_hash = hash_path(object_dir).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to hash staged tree object '{}': {error}",
+            object_dir.display()
+        ))
+    })?;
     materializer.materialize_and_validate(&paths.root_dir, object_dir, &manifest, temp_dir)?;
-    Ok(())
+    Ok(object_hash)
 }
 
 fn apply_directory_modes_post_order(
@@ -728,6 +733,7 @@ mod tests {
     use super::*;
     use mbuild_core::{
         Builder, BuilderInputObject, BuilderInputs, FsTreeObjectError, FsTreeOwnerMap,
+        validate_fs_tree_object,
     };
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;

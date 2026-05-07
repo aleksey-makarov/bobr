@@ -470,6 +470,7 @@ pub fn publish_output(
     let staged = StagedBuildResult {
         meta: request.meta,
         staged_path: request.staged_path,
+        object_hash: None,
     };
     let published = materialize_build(
         layout,
@@ -593,7 +594,7 @@ pub fn materialize_build(
     inputs: Vec<ResultInputIdentity>,
     staged: StagedBuildResult,
 ) -> Result<PublishedBuild, CasError> {
-    let object_hash = import_object(layout, &staged.staged_path)?;
+    let object_hash = import_object_with_hash(layout, &staged.staged_path, staged.object_hash)?;
     let meta_hash = compute_meta_hash(&staged.meta)?;
     let result_id = compute_result_id(object_hash, meta_hash)?;
     let result = ResultRecord {
@@ -881,12 +882,23 @@ fn build_from_result(build_key: BuildKey, result: &ResultRecord) -> Build {
 }
 
 pub fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectHash, CasError> {
-    let object_hash = hash_path(staged_path).map_err(|error| {
-        CasError::Hashing(format!(
-            "failed to hash staged object '{}': {error}",
-            staged_path.display()
-        ))
-    })?;
+    import_object_with_hash(layout, staged_path, None)
+}
+
+fn import_object_with_hash(
+    layout: &StoreLayout,
+    staged_path: &Path,
+    object_hash: Option<ObjectHash>,
+) -> Result<ObjectHash, CasError> {
+    let object_hash = match object_hash {
+        Some(object_hash) => object_hash,
+        None => hash_path(staged_path).map_err(|error| {
+            CasError::Hashing(format!(
+                "failed to hash staged object '{}': {error}",
+                staged_path.display()
+            ))
+        })?,
+    };
     let destination = layout.objects.join(object_hash.to_hex());
     if destination.exists() {
         remove_path_force(staged_path)?;
@@ -2329,6 +2341,45 @@ mod tests {
         assert!(object_path.is_dir());
         assert!(object_path.join("bin").join("tool").exists());
         assert!(layout.builds.join(published.build_key.to_hex()).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialize_build_accepts_precomputed_hash_for_unreadable_object() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let stage_dir = temp.path().join("tree");
+        fs::create_dir_all(stage_dir.join("private")).unwrap();
+        fs::write(stage_dir.join("private").join("secret"), b"secret\n").unwrap();
+        let object_hash = hash_path(&stage_dir).unwrap();
+        fs::set_permissions(stage_dir.join("private"), fs::Permissions::from_mode(0o000)).unwrap();
+
+        let build_key = build_key_for("Tree", json!({ "kind": "private-tree" }), &[]);
+        let reuse_key = reuse_key_for("Tree", json!({ "kind": "private-tree" }), &[]);
+        let published = materialize_build(
+            &layout,
+            build_key,
+            reuse_key,
+            sample_created_at(),
+            vec![],
+            StagedBuildResult {
+                meta: Map::new(),
+                staged_path: stage_dir,
+                object_hash: Some(object_hash),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(published.build.object_hash, object_hash);
+        let object_path = layout.objects.join(object_hash.to_hex());
+        assert!(object_path.join("private").exists());
+
+        fs::set_permissions(
+            object_path.join("private"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
     }
 
     #[test]

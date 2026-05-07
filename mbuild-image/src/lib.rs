@@ -111,7 +111,11 @@ impl TypedBuilder for ImageBuilder {
             Value::String(manifest_digest),
         );
 
-        Ok(StagedBuildResult { meta, staged_path })
+        Ok(StagedBuildResult {
+            meta,
+            staged_path,
+            object_hash: None,
+        })
     }
 }
 

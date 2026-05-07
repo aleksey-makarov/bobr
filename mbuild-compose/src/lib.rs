@@ -191,6 +191,7 @@ impl TypedBuilder for Ext4RootfsBuilder {
         Ok(StagedBuildResult {
             meta: Map::new(),
             staged_path: output_path,
+            object_hash: None,
         })
     }
 }
@@ -236,6 +237,7 @@ impl TypedBuilder for RootfsBuilder {
         Ok(StagedBuildResult {
             meta: Map::new(),
             staged_path: output_path,
+            object_hash: None,
         })
     }
 }

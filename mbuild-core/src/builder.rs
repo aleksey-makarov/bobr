@@ -310,6 +310,7 @@ impl BuildContext {
 pub struct StagedBuildResult {
     pub meta: Map<String, Value>,
     pub staged_path: PathBuf,
+    pub object_hash: Option<ObjectHash>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -503,6 +504,7 @@ mod tests {
             Ok(StagedBuildResult {
                 meta: Map::new(),
                 staged_path: PathBuf::from("/tmp/out"),
+                object_hash: None,
             })
         }
     }

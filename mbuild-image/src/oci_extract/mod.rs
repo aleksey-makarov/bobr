@@ -115,6 +115,7 @@ impl OciExtractBuilder {
         Ok(StagedBuildResult {
             staged_path: staged,
             meta: Map::new(),
+            object_hash: None,
         })
     }
 }

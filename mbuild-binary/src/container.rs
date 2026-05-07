@@ -122,6 +122,7 @@ impl TypedBuilder for ContainerBuilder {
         Ok(StagedBuildResult {
             meta,
             staged_path: output_path,
+            object_hash: None,
         })
     }
 }

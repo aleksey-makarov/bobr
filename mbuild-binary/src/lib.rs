@@ -235,6 +235,7 @@ impl TypedBuilder for BinaryBuilder {
         Ok(StagedBuildResult {
             meta,
             staged_path: output_path,
+            object_hash: None,
         })
     }
 }
