@@ -9,7 +9,7 @@ use mbuild_core::{
 use serde_json::Value;
 use std::fmt;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -160,11 +160,11 @@ pub(crate) fn execute_builder_node(
                 error.to_string(),
             );
             let runtime_error = map_builder_error(error);
-            cleanup_temp_dir(&context.temp_dir, logger.as_ref());
+            cleanup_temp_dir(&context.temp_dir, &context.state_dir, logger.as_ref());
             runtime_error
         })?;
     if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_temp_dir(&context.temp_dir, logger.as_ref());
+        cleanup_temp_dir(&context.temp_dir, &context.state_dir, logger.as_ref());
         return Err(error);
     }
     let published = materialize_build(
@@ -184,7 +184,7 @@ pub(crate) fn execute_builder_node(
         );
         map_store_error(error)
     });
-    cleanup_temp_dir(&context.temp_dir, logger.as_ref());
+    cleanup_temp_dir(&context.temp_dir, &context.state_dir, logger.as_ref());
     let published = published?;
     Ok(published)
 }
@@ -250,8 +250,7 @@ pub(crate) fn build_context(
             state_dir.display()
         ))
     })?;
-    fsutil::recreate_empty_dir_force(&temp_dir)
-        .map_err(|error| RuntimeError::Store(error.to_string()))?;
+    recreate_empty_temp_dir_with_quarantine(&temp_dir, &state_dir, logger.as_ref())?;
     Ok(BuildContext::with_noop_logger(state_dir, temp_dir)
         .with_logger(logger)
         .with_cancellation_token(cancellation))
@@ -294,8 +293,48 @@ pub(crate) fn check_cancelled(cancellation: &CancellationToken) -> Result<(), Ru
     }
 }
 
-fn cleanup_temp_dir(temp_dir: &Path, logger: &dyn BuildLogger) {
+fn recreate_empty_temp_dir_with_quarantine(
+    temp_dir: &Path,
+    state_dir: &Path,
+    logger: &dyn BuildLogger,
+) -> Result<(), RuntimeError> {
+    match fsutil::recreate_empty_dir_force(temp_dir) {
+        Ok(()) => return Ok(()),
+        Err(error) if fs::symlink_metadata(temp_dir).is_ok() => {
+            quarantine_temp_path(temp_dir, state_dir, logger, error.to_string())
+                .map_err(RuntimeError::Store)?;
+        }
+        Err(error) => return Err(RuntimeError::Store(error.to_string())),
+    }
+
+    fs::create_dir_all(temp_dir).map_err(|error| {
+        RuntimeError::Store(format!(
+            "failed to create directory '{}': {error}",
+            temp_dir.display()
+        ))
+    })
+}
+
+fn cleanup_temp_dir(temp_dir: &Path, state_dir: &Path, logger: &dyn BuildLogger) {
     if let Err(error) = fsutil::remove_dir_force(temp_dir) {
+        if fs::symlink_metadata(temp_dir).is_ok() {
+            match quarantine_temp_path(temp_dir, state_dir, logger, error.to_string()) {
+                Ok(_) => return,
+                Err(quarantine_error) => {
+                    log_runtime_event(
+                        logger,
+                        BuildLogLevel::Warn,
+                        "cleanup-warning",
+                        format!(
+                            "failed to remove temp dir '{}': {error}; failed to quarantine it: {quarantine_error}",
+                            temp_dir.display()
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
+
         log_runtime_event(
             logger,
             BuildLogLevel::Warn,
@@ -306,6 +345,67 @@ fn cleanup_temp_dir(temp_dir: &Path, logger: &dyn BuildLogger) {
             ),
         );
     }
+}
+
+fn quarantine_temp_path(
+    temp_dir: &Path,
+    state_dir: &Path,
+    logger: &dyn BuildLogger,
+    reason: String,
+) -> Result<PathBuf, String> {
+    let name = temp_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("invalid temp dir path '{}'", temp_dir.display()))?;
+    let quarantine_dir = state_dir.join("quarantine");
+    fs::create_dir_all(&quarantine_dir).map_err(|error| {
+        format!(
+            "failed to create quarantine directory '{}': {error}",
+            quarantine_dir.display()
+        )
+    })?;
+    let stamp = fsutil::current_epoch_nanos().map_err(|error| error.to_string())?;
+
+    for attempt in 0..100 {
+        let suffix = if attempt == 0 {
+            stamp.to_string()
+        } else {
+            format!("{stamp}-{attempt}")
+        };
+        let target = quarantine_dir.join(format!("{name}-{suffix}"));
+        if target.exists() || target.is_symlink() {
+            continue;
+        }
+        match fs::rename(temp_dir, &target) {
+            Ok(()) => {
+                log_runtime_event(
+                    logger,
+                    BuildLogLevel::Warn,
+                    "temp-quarantine",
+                    format!(
+                        "moved temp dir '{}' to '{}' after cleanup failed: {reason}",
+                        temp_dir.display(),
+                        target.display()
+                    ),
+                );
+                return Ok(target);
+            }
+            Err(_) if target.exists() || target.is_symlink() => continue,
+            Err(error) => {
+                return Err(format!(
+                    "failed to move temp dir '{}' to '{}': {error}",
+                    temp_dir.display(),
+                    target.display()
+                ));
+            }
+        }
+    }
+
+    Err(format!(
+        "failed to find quarantine target for temp dir '{}' under '{}'",
+        temp_dir.display(),
+        quarantine_dir.display()
+    ))
 }
 
 #[cfg(test)]
@@ -529,6 +629,50 @@ mod tests {
         assert!(published.object_path.join("payload").is_file());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn build_context_quarantines_stale_temp_dir_when_recreate_fails() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let config = json!({});
+        let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
+        let run_logger =
+            Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let logger = run_logger.bind_node("RuntimeTest", "runtime-test", build_key);
+        let state_dir = layout.root.join("builder-state").join("runtimetest");
+        let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
+        fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
+        let stale_target = temp.path().join("missing-stale-target");
+        symlink(&stale_target, &temp_dir).unwrap();
+
+        let context = build_context(
+            &layout,
+            "RuntimeTest",
+            build_key,
+            logger,
+            CancellationToken::new(),
+        )
+        .unwrap();
+
+        assert!(context.temp_dir.is_dir());
+        assert!(
+            !fs::symlink_metadata(&context.temp_dir)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let quarantined = quarantine_entries(&state_dir);
+        assert_eq!(quarantined.len(), 1);
+        assert!(
+            fs::symlink_metadata(&quarantined[0])
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
     #[test]
     fn execute_builder_node_cleans_temp_on_failure() {
         let temp = tempdir().unwrap();
@@ -561,6 +705,36 @@ mod tests {
 
         assert_eq!(error.class(), "build");
         assert!(!temp_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_temp_dir_quarantines_when_remove_fails() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let run_logger =
+            Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let logger = run_logger.bind_node(
+            "RuntimeTest",
+            "runtime-test",
+            compute_build_key("RuntimeTest", &json!({}), &[]).unwrap(),
+        );
+        let state_dir = layout.root.join("builder-state").join("runtimetest");
+        let temp_dir = state_dir.join("tmp").join("stale");
+        fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
+        fs::write(&temp_dir, b"not a directory\n").unwrap();
+
+        cleanup_temp_dir(&temp_dir, &state_dir, logger.as_ref());
+
+        assert!(fs::symlink_metadata(&temp_dir).is_err());
+        let quarantined = quarantine_entries(&state_dir);
+        assert_eq!(quarantined.len(), 1);
+        assert!(
+            fs::symlink_metadata(&quarantined[0])
+                .unwrap()
+                .file_type()
+                .is_file()
+        );
     }
 
     #[test]
@@ -629,5 +803,14 @@ mod tests {
                 .join(build_key.to_hex())
                 .exists()
         );
+    }
+
+    fn quarantine_entries(state_dir: &Path) -> Vec<PathBuf> {
+        let mut entries = fs::read_dir(state_dir.join("quarantine"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        entries.sort();
+        entries
     }
 }
