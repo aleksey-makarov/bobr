@@ -21,6 +21,7 @@ use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::{Gid, Uid, chown};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::error::Error;
 use std::ffi::CString;
 use std::fs;
 use std::fs::File;
@@ -604,7 +605,7 @@ fn overlay_mount(
                 format!("lowerdir={}", lower.display()),
                 format!("upperdir={}", upper.display()),
                 format!("workdir={}", work.display()),
-                "metacopy=on".to_string(),
+                "userxattr".to_string(),
             ])
             .build(),
     )
@@ -840,8 +841,19 @@ fn build_oci<T>(result: Result<T, impl std::fmt::Display>) -> Result<T, RuntimeE
     result.map_err(|error| RuntimeError::Libcontainer(error.to_string()))
 }
 
-fn libcontainer_error(error: impl std::fmt::Display) -> RuntimeError {
-    RuntimeError::Libcontainer(error.to_string())
+fn libcontainer_error(error: impl Error) -> RuntimeError {
+    RuntimeError::Libcontainer(format_error_chain(&error))
+}
+
+fn format_error_chain(error: &dyn Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        message.push_str(": ");
+        message.push_str(&error.to_string());
+        source = error.source();
+    }
+    message
 }
 
 fn executor_error(error: impl std::fmt::Display) -> ExecutorError {
@@ -880,11 +892,22 @@ mod tests {
         let spec = build_sandbox_spec(&build_config, &idmap, &mut dirs, &host_files).unwrap();
         let mounts = spec.mounts().as_ref().unwrap();
 
+        let root_overlay = mounts
+            .iter()
+            .find(|mount| {
+                mount.destination() == Path::new("/") && mount.typ().as_deref() == Some("overlay")
+            })
+            .expect("root overlay mount exists");
+        let root_overlay_options = root_overlay.options().as_ref().unwrap();
         assert!(
-            mounts
+            root_overlay_options
                 .iter()
-                .any(|mount| mount.destination() == Path::new("/")
-                    && mount.typ().as_deref() == Some("overlay"))
+                .any(|option| option == "userxattr")
+        );
+        assert!(
+            !root_overlay_options
+                .iter()
+                .any(|option| option == "metacopy=on")
         );
         assert!(
             mounts
