@@ -217,7 +217,7 @@ impl OwnershipExecutor {
             }
 
             if let Some(expected_mode) = entry.mode {
-                let actual_mode = metadata.permissions().mode() & 0o777;
+                let actual_mode = metadata.permissions().mode() & 0o7777;
                 if actual_mode != expected_mode {
                     return Err(report(
                         "mode",
@@ -570,6 +570,27 @@ mod tests {
         assert!(link.file_type().is_symlink());
         assert_eq!(link.uid(), owner.0);
         assert_eq!(link.gid(), owner.1);
+    }
+
+    #[test]
+    fn apply_preserves_special_mode_bits() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(target.join("tmp")).unwrap();
+
+        let owner = current_owner();
+        let manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", owner.0, owner.1, 0o755),
+            FsTreeEntry::directory("tmp", owner.0, owner.1, 0o1777),
+        ])
+        .unwrap();
+
+        OwnershipExecutor::with_paths(&manifest, target.clone(), temp.path().join("error.json"))
+            .apply()
+            .unwrap();
+
+        assert_mode(target.join("tmp"), 0o1777);
     }
 
     #[test]
