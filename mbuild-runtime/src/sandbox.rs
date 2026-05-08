@@ -525,6 +525,13 @@ fn build_sandbox_spec(
 
     let mut linux = build_oci(
         LinuxBuilder::default()
+            // Cgroup namespace must be unshared by the init container so that
+            // tenant exec joins the init's own cgroup namespace rather than
+            // the host's (libcontainer's tenant_builder copies all
+            // NAMESPACE_TYPES from /proc/<init-pid>/ns/* unconditionally; if
+            // we don't unshare cgroup, init keeps the host cgroup ns and
+            // setns into it from the tenant's intermediate process fails
+            // with EPERM in rootless mode).
             .namespaces(vec![
                 namespace(LinuxNamespaceType::User)?,
                 namespace(LinuxNamespaceType::Mount)?,
@@ -532,6 +539,7 @@ fn build_sandbox_spec(
                 namespace(LinuxNamespaceType::Uts)?,
                 namespace(LinuxNamespaceType::Ipc)?,
                 namespace(LinuxNamespaceType::Network)?,
+                namespace(LinuxNamespaceType::Cgroup)?,
             ])
             .uid_mappings(uid_mappings)
             .gid_mappings(gid_mappings)
