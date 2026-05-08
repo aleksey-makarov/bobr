@@ -141,6 +141,7 @@ pub fn run_sandbox_build(
     let mut lifecycle = SandboxLifecycle::start(
         prepared.bundle,
         prepared.output_hash_path,
+        prepared.host_cgroup_path,
         &config.state_dir,
     )?;
     let result = run_sandbox_build_inner(&mut lifecycle, &config);
@@ -206,19 +207,29 @@ fn validate_config(config: &SandboxBuildConfig) -> Result<(), RuntimeError> {
 struct PreparedSandbox {
     bundle: Bundle,
     output_hash_path: PathBuf,
+    /// Real `/sys/fs/cgroup/...` directory we created and own; must be
+    /// cleaned up after the sandbox shuts down.
+    host_cgroup_path: PathBuf,
 }
 
 impl PreparedSandbox {
     fn create(config: &SandboxBuildConfig, idmap: &MbuildIdmap) -> Result<Self, RuntimeError> {
         let mut dirs = SandboxDirs::create(&config.workspace)?;
         let host_files = SandboxHostFiles::create(&dirs.host_files)?;
-        let cgroup_path = prepare_sandbox_cgroup()?;
-        let spec = build_sandbox_spec(config, idmap, &mut dirs, &host_files, Some(cgroup_path))?;
+        let cgroup = prepare_sandbox_cgroup()?;
+        let spec = build_sandbox_spec(
+            config,
+            idmap,
+            &mut dirs,
+            &host_files,
+            Some(cgroup.container_path),
+        )?;
         let bundle = create_bundle(&config.workspace, &spec)?;
         populate_bundle_rootfs_skeleton(bundle.rootfs_dir(), &config.rootfs)?;
         Ok(Self {
             bundle,
             output_hash_path: host_files.output_hash,
+            host_cgroup_path: cgroup.host_path,
         })
     }
 }
@@ -314,15 +325,30 @@ struct SandboxLifecycle {
     state_dir: PathBuf,
     _bundle: Bundle,
     output_hash_path: PathBuf,
+    /// Real `/sys/fs/cgroup/...` directory created by prepare_sandbox_cgroup;
+    /// removed by Drop (and explicit cleanup) to avoid orphan cgroup leaves
+    /// when the sandbox finishes — gracefully or via panic/unwind.
+    host_cgroup_path: PathBuf,
+    /// True once `cleanup()` has run successfully, so Drop does not redo the
+    /// kill/delete/rmdir dance and does not log spurious warnings.
+    cleaned_up: bool,
 }
 
 impl SandboxLifecycle {
     fn start(
         bundle: Bundle,
         output_hash_path: PathBuf,
+        host_cgroup_path: PathBuf,
         state_dir: &Path,
     ) -> Result<Self, RuntimeError> {
         let container_id = format!("mbuild-sandbox-{}", Uuid::new_v4().simple());
+        // .with_systemd(false) is largely advisory: libcontainer's
+        // create_cgroup_manager (libcgroups/src/common.rs) routes through the
+        // cgroupfs v2 manager whenever spec.linux.cgroups_path is absolute,
+        // bypassing systemd DBus regardless of this flag. We rely on
+        // prepare_sandbox_cgroup() supplying that absolute path inside a
+        // user-delegated slice. If a future change drops the absolute path,
+        // libcontainer would fall back to the systemd cgroup manager.
         let mut container = ContainerBuilder::new(container_id.clone(), SyscallType::Linux)
             .with_executor(KeepAliveExecutor)
             .with_root_path(state_dir)
@@ -340,6 +366,8 @@ impl SandboxLifecycle {
             state_dir: state_dir.to_path_buf(),
             _bundle: bundle,
             output_hash_path,
+            host_cgroup_path,
+            cleaned_up: false,
         })
     }
 
@@ -476,7 +504,58 @@ impl SandboxLifecycle {
     }
 
     fn cleanup(&mut self) -> Result<(), RuntimeError> {
-        self.container.delete(true).map_err(libcontainer_error)
+        if self.cleaned_up {
+            return Ok(());
+        }
+        // delete(true) sends SIGKILL if the container is still running, then
+        // removes libcontainer's state directory and the cgroup it created
+        // for us (when cgroupfs manager is in use, that is the directory we
+        // pre-created).
+        let result = self.container.delete(true).map_err(libcontainer_error);
+        // Best-effort rmdir of the cgroup we own. After successful delete it
+        // is normally already gone; the call here is a safety net for builds
+        // that placed the container in a non-trivial cgroup state.
+        if let Err(error) = fs::remove_dir(&self.host_cgroup_path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            warn!(
+                "failed to remove sandbox cgroup '{}': {error}",
+                self.host_cgroup_path.display()
+            );
+        }
+        self.cleaned_up = true;
+        result
+    }
+}
+
+impl Drop for SandboxLifecycle {
+    fn drop(&mut self) {
+        if self.cleaned_up {
+            return;
+        }
+        // Best-effort cleanup for unwind/panic paths where cleanup() was
+        // never called explicitly. Without this, the init container would
+        // outlive mbuild and stay parked in pause(), leaving a stuck cgroup
+        // (with a pid 1 zombie that no one reaps when the user systemd
+        // session is degraded).
+        if let Err(error) = self.container.kill(nix::sys::signal::SIGKILL, true) {
+            warn!(
+                "failed to SIGKILL sandbox container during drop: {error}"
+            );
+        }
+        if let Err(error) = self.container.delete(true) {
+            warn!(
+                "failed to delete sandbox container during drop: {error}"
+            );
+        }
+        if let Err(error) = fs::remove_dir(&self.host_cgroup_path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            warn!(
+                "failed to remove sandbox cgroup '{}' during drop: {error}",
+                self.host_cgroup_path.display()
+            );
+        }
     }
 }
 
@@ -648,18 +727,37 @@ fn rootfs_top_level_mounts(
     Ok(mounts)
 }
 
-fn prepare_sandbox_cgroup() -> Result<PathBuf, RuntimeError> {
+/// Host-side and container-side paths of a freshly created sandbox cgroup.
+struct SandboxCgroup {
+    /// Real `/sys/fs/cgroup/...` path; used to rmdir at cleanup time.
+    host_path: PathBuf,
+    /// Absolute path within the cgroup hierarchy used in `linux.cgroups_path`
+    /// of the OCI spec.
+    container_path: PathBuf,
+}
+
+// Pre-create a cgroup directory inside the user-delegated slice so that the
+// container ends up with an absolute cgroup path. libcontainer's
+// create_cgroup_manager (libcgroups/src/common.rs) uses the cgroupfs v2
+// manager whenever the path is absolute, bypassing the systemd DBus path that
+// would otherwise be forced by user namespaces (and which can deadlock if the
+// user systemd session is unhealthy).
+fn prepare_sandbox_cgroup() -> Result<SandboxCgroup, RuntimeError> {
     let current = current_cgroup_v2_path()?;
     let name = format!("mbuild-sandbox-{}", Uuid::new_v4().simple());
-    let cgroup_path = current.join(name);
-    let full_path = Path::new(CGROUP_ROOT).join(&cgroup_path);
-    fs::create_dir(&full_path).map_err(|error| {
+    let relative = current.join(name);
+    let host_path = Path::new(CGROUP_ROOT).join(&relative);
+    fs::create_dir(&host_path).map_err(|error| {
         RuntimeError::Executor(format!(
             "failed to create sandbox cgroup '{}': {error}",
-            full_path.display()
+            host_path.display()
         ))
     })?;
-    Ok(Path::new("/").join(cgroup_path))
+    let container_path = Path::new("/").join(relative);
+    Ok(SandboxCgroup {
+        host_path,
+        container_path,
+    })
 }
 
 fn current_cgroup_v2_path() -> Result<PathBuf, RuntimeError> {
