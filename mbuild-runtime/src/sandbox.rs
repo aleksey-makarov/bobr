@@ -866,22 +866,20 @@ impl Executor for KeepAliveExecutor {
     }
 
     fn exec(&self, _: &Spec) -> Result<(), ExecutorError> {
-        set_dumpable(true).map_err(executor_error)?;
+        // No set_dumpable here: dumpable=true is needed in the intermediate
+        // process so the parent can write uid/gid maps into a new user
+        // namespace (see libcontainer's container_intermediate_process), but
+        // by the time the init-process executor runs, the user namespace
+        // setup has already completed and the main_sender is closed. Calling
+        // prctl(PR_SET_DUMPABLE, 1) here is unnecessary and on some kernels
+        // returns EBUSY in this state, which would surface as
+        // ExecutorError::Other("Device or resource busy ...") and abort the
+        // sandbox before it ever reaches sandbox-prepare.
         loop {
             unsafe {
                 libc::pause();
             }
         }
-    }
-}
-
-fn set_dumpable(enabled: bool) -> io::Result<()> {
-    let value = if enabled { 1 } else { 0 };
-    let result = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, value, 0, 0, 0) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
     }
 }
 
