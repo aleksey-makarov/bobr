@@ -853,6 +853,29 @@ fn step_env(step: &SandboxStep) -> HashMap<String, String> {
     env
 }
 
+// Async-signal-safe handler: just exit. We are the pid namespace's init
+// process; once we exit, the kernel terminates the rest of the namespace
+// and libcontainer's cleanup observes the child status normally.
+extern "C" fn sandbox_init_signal_exit(_: libc::c_int) {
+    unsafe {
+        libc::_exit(0);
+    }
+}
+
+fn install_sandbox_init_signal_handlers() {
+    let mut sa: libc::sigaction = unsafe { std::mem::zeroed() };
+    // sa_sigaction is `usize` in libc, but assigning a function item directly
+    // triggers Rust's `function_casts_as_integer` lint. Going through
+    // `*const ()` is the recommended path.
+    sa.sa_sigaction = sandbox_init_signal_exit as *const () as usize;
+    sa.sa_flags = libc::SA_RESTART;
+    unsafe {
+        libc::sigemptyset(&mut sa.sa_mask);
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+    }
+}
+
 #[derive(Clone)]
 struct KeepAliveExecutor;
 
@@ -875,6 +898,16 @@ impl Executor for KeepAliveExecutor {
         // returns EBUSY in this state, which would surface as
         // ExecutorError::Other("Device or resource busy ...") and abort the
         // sandbox before it ever reaches sandbox-prepare.
+
+        // Install explicit handlers for SIGTERM/SIGINT. This process is pid 1
+        // in the container's pid namespace; the kernel will silently drop any
+        // signal that has the default disposition for the namespace's init
+        // process (other than SIGKILL/SIGSTOP). Without these handlers, sending
+        // SIGTERM via container.kill() would not terminate the sandbox and
+        // leaves the init blocked in pause() forever — the failure mode that
+        // caused orphan sandboxes to outlive a crashed mbuild.
+        install_sandbox_init_signal_handlers();
+
         loop {
             unsafe {
                 libc::pause();
