@@ -6,8 +6,9 @@
 //! lifecycle handling, and child-side error reporting are internal details.
 //!
 //! The current public capability is fs-tree ownership materialization through
-//! [`apply_ownership_batch`] and [`apply_ownership_batch_and_hash`]. It applies
-//! logical fs-tree owners and modes in a user namespace described by
+//! [`apply_ownership_batch`], [`apply_ownership_batch_and_hash`], and
+//! [`apply_ownership_batch_and_hash_fs_tree_object`]. It applies logical
+//! fs-tree owners and modes in a user namespace described by
 //! [`MbuildIdmap`].
 //!
 //! Runtime ownership materialization currently targets Linux hosts with
@@ -29,7 +30,10 @@ mod executor;
 
 pub use error::{IdmapError, RuntimeError};
 pub use idmap::{MbuildIdmap, cached_host_idmap};
-pub use ownership::{apply_ownership_batch, apply_ownership_batch_and_hash};
+pub use ownership::{
+    apply_ownership_batch, apply_ownership_batch_and_hash,
+    apply_ownership_batch_and_hash_fs_tree_object,
+};
 pub use sandbox::{
     SandboxBuildConfig, SandboxBuildOutcome, SandboxInput, SandboxRunAs, SandboxStep,
     SandboxStepReport, run_sandbox_build,

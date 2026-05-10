@@ -3,8 +3,7 @@ use globset::{Glob, GlobMatcher};
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     ComposedFsTree, ComposedFsTreeEntry, FsTreeComposeInput, FsTreeEntry, FsTreeManifest,
-    FsTreeOwnerMap, StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir,
-    fsutil, validate_fs_tree_object,
+    StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir, fsutil,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
@@ -138,6 +137,22 @@ trait OwnershipMaterializer {
         manifest: &FsTreeManifest,
         temp_dir: &Path,
     ) -> Result<(), BuilderError>;
+
+    fn materialize_and_hash(
+        &self,
+        root_dir: &Path,
+        object_dir: &Path,
+        manifest: &FsTreeManifest,
+        temp_dir: &Path,
+    ) -> Result<ObjectHash, BuilderError> {
+        self.materialize_and_validate(root_dir, object_dir, manifest, temp_dir)?;
+        hash_path(object_dir).map_err(|error| {
+            BuilderError::ExecutionFailed(format!(
+                "failed to hash staged tree object '{}': {error}",
+                object_dir.display()
+            ))
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -156,6 +171,24 @@ impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
         mbuild_runtime::apply_ownership_batch(root_dir, manifest, idmap.as_ref(), temp_dir)
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
         Ok(())
+    }
+
+    fn materialize_and_hash(
+        &self,
+        root_dir: &Path,
+        _object_dir: &Path,
+        manifest: &FsTreeManifest,
+        temp_dir: &Path,
+    ) -> Result<ObjectHash, BuilderError> {
+        let idmap = mbuild_runtime::cached_host_idmap()
+            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+        mbuild_runtime::apply_ownership_batch_and_hash_fs_tree_object(
+            root_dir,
+            manifest,
+            idmap.as_ref(),
+            temp_dir,
+        )
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))
     }
 }
 
@@ -210,15 +243,7 @@ impl TypedBuilder for TreeMergeBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
-        let idmap = mbuild_runtime::cached_host_idmap()
-            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-        build_tree_merge(
-            config,
-            inputs,
-            cx,
-            idmap.as_ref(),
-            &RuntimeOwnershipMaterializer,
-        )
+        build_tree_merge(config, inputs, cx, &RuntimeOwnershipMaterializer)
     }
 }
 
@@ -279,7 +304,6 @@ fn build_tree_merge(
     _config: TreeMergeConfig,
     inputs: BuilderInputs,
     cx: &mut BuildContext,
-    owner_map: &impl FsTreeOwnerMap,
     materializer: &impl OwnershipMaterializer,
 ) -> Result<StagedBuildResult, BuilderError> {
     let inputs = inputs.extras(&TREE_MERGE_SPEC).collect::<Vec<_>>();
@@ -297,7 +321,7 @@ fn build_tree_merge(
 
     let compose_inputs = inputs
         .iter()
-        .map(|(name, object)| tree_merge_input(name, object, owner_map))
+        .map(|(name, object)| tree_merge_input(name, object))
         .collect::<Result<Vec<_>, _>>()?;
     let composed = compose_fs_trees(&compose_inputs).map_err(map_fs_tree_error)?;
 
@@ -311,26 +335,77 @@ fn build_tree_merge(
         format!("materializing merged fs-tree '{}'", output_path.display()),
     );
 
-    materialize_tree_merge_output(&output_path, &composed, &cx.temp_dir, materializer)?;
+    let object_hash =
+        materialize_tree_merge_output(&output_path, &composed, &cx.temp_dir, materializer)?;
 
     Ok(StagedBuildResult {
         meta: Map::new(),
         staged_path: output_path,
-        object_hash: None,
+        object_hash: Some(object_hash),
     })
 }
 
 fn tree_merge_input(
     name: &str,
     object: &BuilderInputObject,
-    owner_map: &impl FsTreeOwnerMap,
 ) -> Result<FsTreeComposeInput, BuilderError> {
-    let validated = validate_fs_tree_object(&object.object_path, owner_map).map_err(|error| {
+    let input = load_fs_tree_compose_input(&object.object_path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
             "TreeMerge input '{name}' is not a valid fs-tree object: {error}"
         ))
     })?;
-    Ok(FsTreeComposeInput::from(validated))
+    Ok(input)
+}
+
+fn load_fs_tree_compose_input(object_path: &Path) -> Result<FsTreeComposeInput, BuilderError> {
+    let manifest_path = object_path.join("manifest.jsonl");
+    let root_dir = object_path.join("root");
+    require_directory(object_path, "fs-tree object directory")?;
+    require_regular_non_executable_file(&manifest_path, "fs-tree manifest")?;
+    require_directory(&root_dir, "fs-tree root directory")?;
+    let manifest = FsTreeManifest::read_canonical(&manifest_path)
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+    Ok(FsTreeComposeInput { manifest, root_dir })
+}
+
+fn require_directory(path: &Path, label: &str) -> Result<(), BuilderError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to inspect {label} '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_dir() {
+        Ok(())
+    } else {
+        Err(BuilderError::ExecutionFailed(format!(
+            "{label} '{}' must be a directory",
+            path.display()
+        )))
+    }
+}
+
+fn require_regular_non_executable_file(path: &Path, label: &str) -> Result<(), BuilderError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to inspect {label} '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(BuilderError::ExecutionFailed(format!(
+            "{label} '{}' must be a regular file",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o111 != 0 {
+        return Err(BuilderError::ExecutionFailed(format!(
+            "{label} '{}' must not be executable",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn materialize_tree_merge_output(
@@ -338,7 +413,7 @@ fn materialize_tree_merge_output(
     composed: &ComposedFsTree,
     temp_dir: &Path,
     materializer: &impl OwnershipMaterializer,
-) -> Result<(), BuilderError> {
+) -> Result<ObjectHash, BuilderError> {
     let paths =
         create_fs_tree_staging_dir(output_path, composed.manifest()).map_err(map_fs_tree_error)?;
 
@@ -374,7 +449,7 @@ fn materialize_tree_merge_output(
     }
 
     apply_directory_modes_post_order(composed.manifest(), &paths.root_dir)?;
-    materializer.materialize_and_validate(
+    materializer.materialize_and_hash(
         &paths.root_dir,
         &paths.object_dir,
         composed.manifest(),
@@ -949,6 +1024,9 @@ mod tests {
     #[derive(Debug, Clone, Copy)]
     struct CurrentOwnerMaterializer;
 
+    #[derive(Debug, Clone, Copy)]
+    struct FixedHashMaterializer;
+
     impl OwnershipMaterializer for CurrentOwnerMaterializer {
         fn materialize_and_validate(
             &self,
@@ -973,6 +1051,28 @@ mod tests {
             }
             validate_fs_tree_object(object_dir, &owner_map).map_err(map_fs_tree_error)?;
             Ok(())
+        }
+    }
+
+    impl OwnershipMaterializer for FixedHashMaterializer {
+        fn materialize_and_validate(
+            &self,
+            _root_dir: &Path,
+            _object_dir: &Path,
+            _manifest: &FsTreeManifest,
+            _temp_dir: &Path,
+        ) -> Result<(), BuilderError> {
+            Ok(())
+        }
+
+        fn materialize_and_hash(
+            &self,
+            _root_dir: &Path,
+            _object_dir: &Path,
+            _manifest: &FsTreeManifest,
+            _temp_dir: &Path,
+        ) -> Result<ObjectHash, BuilderError> {
+            Ok(fixed_object_hash())
         }
     }
 
@@ -1022,8 +1122,7 @@ mod tests {
             inputs: BuilderInputs,
             cx: &mut BuildContext,
         ) -> Result<StagedBuildResult, BuilderError> {
-            let owner_map = current_owner_map(&cx.temp_dir)?;
-            build_tree_merge(config, inputs, cx, &owner_map, &CurrentOwnerMaterializer)
+            build_tree_merge(config, inputs, cx, &CurrentOwnerMaterializer)
         }
     }
 
@@ -1121,6 +1220,12 @@ mod tests {
             );
         }
         builder_inputs
+    }
+
+    fn fixed_object_hash() -> ObjectHash {
+        "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap()
     }
 
     #[cfg(unix)]
@@ -1239,6 +1344,70 @@ mod tests {
                 .any(|entry| entry.path() == "bin")
         );
         assert_valid_fs_tree(&result);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_merge_does_not_scan_input_directories_during_manifest_compose() {
+        let temp = tempdir().unwrap();
+        let base_object = temp.path().join("base");
+        let base_manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::directory("locked", 0, 0, 0o000),
+        ])
+        .unwrap();
+        let base_paths = create_fs_tree_staging_dir(&base_object, &base_manifest).unwrap();
+        fs::create_dir(base_paths.root_dir.join("locked")).unwrap();
+        fs::set_permissions(
+            base_paths.root_dir.join("locked"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+
+        let right = build_fs_tree_for_tests(
+            temp.path(),
+            "right",
+            vec![TreeEntry::File {
+                path: "bin/right".to_string(),
+                text: "right\n".to_string(),
+                executable: true,
+            }],
+            sample_install(),
+        );
+        let mut inputs = tree_merge_inputs(&[("right", &right)]);
+        inputs.insert(
+            "base",
+            BuilderInputObject {
+                object_path: base_object,
+                meta: Map::new(),
+            },
+        );
+        let mut cx = build_context(&temp.path().join("merge"));
+
+        let result =
+            build_tree_merge(TreeMergeConfig {}, inputs, &mut cx, &FixedHashMaterializer).unwrap();
+
+        assert_eq!(result.object_hash, Some(fixed_object_hash()));
+        assert!(fs_tree_root(&result).join("locked").is_dir());
+        assert_eq!(
+            fs::metadata(fs_tree_root(&result).join("locked"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o000
+        );
+
+        fs::set_permissions(
+            base_paths.root_dir.join("locked"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        fs::set_permissions(
+            fs_tree_root(&result).join("locked"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
     }
 
     #[test]

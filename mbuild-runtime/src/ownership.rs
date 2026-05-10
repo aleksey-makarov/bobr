@@ -12,7 +12,7 @@ use crate::{
     run::run_init_with_executor,
     spec::build_ownership_spec,
 };
-use fsobj_hash::{ObjectHash, hash_path};
+use fsobj_hash::{ObjectHash, hash_fs_tree_object, hash_path};
 use libcontainer::oci_spec::runtime::Spec;
 use libcontainer::workload::{
     Executor, ExecutorError, ExecutorSetEnvsError, ExecutorValidationError,
@@ -44,7 +44,7 @@ pub fn apply_ownership_batch(
     idmap: &MbuildIdmap,
     workspace: &Path,
 ) -> Result<(), RuntimeError> {
-    run_ownership_batch(target_root, manifest, idmap, workspace, false)?;
+    run_ownership_batch(target_root, manifest, idmap, workspace, None)?;
     Ok(())
 }
 
@@ -60,7 +60,41 @@ pub fn apply_ownership_batch_and_hash(
     idmap: &MbuildIdmap,
     workspace: &Path,
 ) -> Result<ObjectHash, RuntimeError> {
-    let bundle = run_ownership_batch(target_root, manifest, idmap, workspace, true)?;
+    let bundle = run_ownership_batch(
+        target_root,
+        manifest,
+        idmap,
+        workspace,
+        Some(HashReportKind::TargetRoot),
+    )?;
+    read_executor_result_report(bundle.result_log_path())?.ok_or_else(|| {
+        RuntimeError::Executor(format!(
+            "executor result report '{}' is empty",
+            bundle.result_log_path().display()
+        ))
+    })
+}
+
+/// Apply fs-tree owners and modes, then compute the hash of a synthetic
+/// fs-tree object made from `manifest.jsonl` and `target_root`.
+///
+/// The returned hash matches the object shape created by mbuild fs-tree
+/// builders: a directory with canonical `manifest.jsonl` plus `root/`.
+/// Hashing happens inside the ownership user namespace so callers can publish
+/// trees that are not recursively readable by the host user.
+pub fn apply_ownership_batch_and_hash_fs_tree_object(
+    target_root: &Path,
+    manifest: &FsTreeManifest,
+    idmap: &MbuildIdmap,
+    workspace: &Path,
+) -> Result<ObjectHash, RuntimeError> {
+    let bundle = run_ownership_batch(
+        target_root,
+        manifest,
+        idmap,
+        workspace,
+        Some(HashReportKind::FsTreeObject),
+    )?;
     read_executor_result_report(bundle.result_log_path())?.ok_or_else(|| {
         RuntimeError::Executor(format!(
             "executor result report '{}' is empty",
@@ -74,7 +108,7 @@ fn run_ownership_batch(
     manifest: &FsTreeManifest,
     idmap: &MbuildIdmap,
     workspace: &Path,
-    hash_result: bool,
+    hash_report: Option<HashReportKind>,
 ) -> Result<crate::bundle::Bundle, RuntimeError> {
     require_directory(target_root, "ownership target root")?;
     require_directory(workspace, "ownership workspace")?;
@@ -83,8 +117,8 @@ fn run_ownership_batch(
 
     let spec = build_ownership_spec(idmap, target_root)?;
     let bundle = create_bundle(workspace, &spec)?;
-    let executor = if hash_result {
-        OwnershipExecutor::new_with_hash_report(manifest)
+    let executor = if let Some(kind) = hash_report {
+        OwnershipExecutor::new_with_hash_report(manifest, kind)
     } else {
         OwnershipExecutor::new(manifest)
     };
@@ -93,12 +127,20 @@ fn run_ownership_batch(
     Ok(bundle)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HashReportKind {
+    TargetRoot,
+    FsTreeObject,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct OwnershipExecutor {
     target_inside: PathBuf,
+    manifest: FsTreeManifest,
     entries: Vec<FsTreeEntry>,
     error_log_inside: PathBuf,
     result_log_inside: Option<PathBuf>,
+    hash_report_kind: Option<HashReportKind>,
 }
 
 impl OwnershipExecutor {
@@ -110,12 +152,13 @@ impl OwnershipExecutor {
         )
     }
 
-    pub(crate) fn new_with_hash_report(manifest: &FsTreeManifest) -> Self {
+    pub(crate) fn new_with_hash_report(manifest: &FsTreeManifest, kind: HashReportKind) -> Self {
         Self::with_paths_and_result(
             manifest,
             PathBuf::from("/target"),
             PathBuf::from("/error.json"),
             Some(PathBuf::from("/result.json")),
+            Some(kind),
         )
     }
 
@@ -124,7 +167,7 @@ impl OwnershipExecutor {
         target_inside: PathBuf,
         error_log_inside: PathBuf,
     ) -> Self {
-        Self::with_paths_and_result(manifest, target_inside, error_log_inside, None)
+        Self::with_paths_and_result(manifest, target_inside, error_log_inside, None, None)
     }
 
     pub(crate) fn with_paths_and_result(
@@ -132,12 +175,15 @@ impl OwnershipExecutor {
         target_inside: PathBuf,
         error_log_inside: PathBuf,
         result_log_inside: Option<PathBuf>,
+        hash_report_kind: Option<HashReportKind>,
     ) -> Self {
         Self {
             target_inside,
+            manifest: manifest.clone(),
             entries: manifest.entries().to_vec(),
             error_log_inside,
             result_log_inside,
+            hash_report_kind,
         }
     }
 
@@ -177,8 +223,16 @@ impl OwnershipExecutor {
         }
 
         Self::validate_applied_entries(&entries)?;
-        if self.result_log_inside.is_some() {
-            hash_path(&self.target_inside).map(Some).map_err(|error| {
+        if let Some(kind) = self.hash_report_kind {
+            self.hash_result(kind).map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn hash_result(&self, kind: HashReportKind) -> Result<ObjectHash, ExecutorErrorReport> {
+        match kind {
+            HashReportKind::TargetRoot => hash_path(&self.target_inside).map_err(|error| {
                 report(
                     "hash",
                     &self.target_inside,
@@ -188,9 +242,28 @@ impl OwnershipExecutor {
                     ),
                     None,
                 )
-            })
-        } else {
-            Ok(None)
+            }),
+            HashReportKind::FsTreeObject => {
+                let manifest_bytes = self.manifest.to_canonical_bytes().map_err(|error| {
+                    report(
+                        "hash",
+                        &self.target_inside,
+                        format!("failed to serialize fs-tree manifest for hashing: {error}"),
+                        None,
+                    )
+                })?;
+                hash_fs_tree_object(&manifest_bytes, &self.target_inside).map_err(|error| {
+                    report(
+                        "hash",
+                        &self.target_inside,
+                        format!(
+                            "failed to hash fs-tree object rooted at '{}': {error}",
+                            self.target_inside.display()
+                        ),
+                        None,
+                    )
+                })
+            }
         }
     }
 
@@ -691,11 +764,45 @@ mod tests {
             target.clone(),
             temp.path().join("error.json"),
             Some(temp.path().join("result.json")),
+            Some(HashReportKind::TargetRoot),
         )
         .apply()
         .unwrap();
 
         assert_eq!(got, Some(hash_path(&target).unwrap()));
+        assert_mode(target.join("tool"), 0o755);
+    }
+
+    #[test]
+    fn apply_returns_fs_tree_object_hash_when_requested() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("tool"), b"tool").unwrap();
+
+        let owner = current_owner();
+        let manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", owner.0, owner.1, 0o755),
+            FsTreeEntry::file("tool", owner.0, owner.1, 0o755),
+        ])
+        .unwrap();
+
+        let got = OwnershipExecutor::with_paths_and_result(
+            &manifest,
+            target.clone(),
+            temp.path().join("error.json"),
+            Some(temp.path().join("result.json")),
+            Some(HashReportKind::FsTreeObject),
+        )
+        .apply()
+        .unwrap();
+        let manifest_bytes = manifest.to_canonical_bytes().unwrap();
+
+        assert_eq!(
+            got,
+            Some(hash_fs_tree_object(&manifest_bytes, &target).unwrap())
+        );
+        assert_ne!(got, Some(hash_path(&target).unwrap()));
         assert_mode(target.join("tool"), 0o755);
     }
 
@@ -759,6 +866,10 @@ mod tests {
         let owner = current_owner();
         let executor = OwnershipExecutor {
             target_inside: target.clone(),
+            manifest: FsTreeManifest::from_entries(vec![FsTreeEntry::directory(
+                "", owner.0, owner.1, 0o755,
+            )])
+            .unwrap(),
             entries: vec![FsTreeEntry::File {
                 path: "../escape".to_string(),
                 uid: owner.0,
@@ -767,6 +878,7 @@ mod tests {
             }],
             error_log_inside: temp.path().join("error.json"),
             result_log_inside: None,
+            hash_report_kind: None,
         };
 
         let report = executor.apply().unwrap_err();
@@ -783,6 +895,10 @@ mod tests {
         let owner = current_owner();
         let executor = OwnershipExecutor {
             target_inside: target,
+            manifest: FsTreeManifest::from_entries(vec![FsTreeEntry::directory(
+                "", owner.0, owner.1, 0o755,
+            )])
+            .unwrap(),
             entries: vec![FsTreeEntry::File {
                 path: "child".to_string(),
                 uid: owner.0,
@@ -791,6 +907,7 @@ mod tests {
             }],
             error_log_inside: temp.path().join("error.json"),
             result_log_inside: None,
+            hash_report_kind: None,
         };
 
         let report = executor.apply().unwrap_err();
