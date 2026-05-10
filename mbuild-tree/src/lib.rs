@@ -3,7 +3,8 @@ use globset::{Glob, GlobMatcher};
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     ComposedFsTree, ComposedFsTreeEntry, FsTreeComposeInput, FsTreeEntry, FsTreeManifest,
-    StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir, fsutil,
+    FsTreeOwnerMap, StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir,
+    fsutil,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
@@ -11,7 +12,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 #[cfg(unix)]
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
@@ -138,14 +139,15 @@ trait OwnershipMaterializer {
         temp_dir: &Path,
     ) -> Result<(), BuilderError>;
 
-    fn materialize_and_hash(
+    fn materialize_selected_and_hash(
         &self,
         root_dir: &Path,
         object_dir: &Path,
-        manifest: &FsTreeManifest,
+        materialize_manifest: &FsTreeManifest,
+        _object_manifest: &FsTreeManifest,
         temp_dir: &Path,
     ) -> Result<ObjectHash, BuilderError> {
-        self.materialize_and_validate(root_dir, object_dir, manifest, temp_dir)?;
+        self.materialize_and_validate(root_dir, object_dir, materialize_manifest, temp_dir)?;
         hash_path(object_dir).map_err(|error| {
             BuilderError::ExecutionFailed(format!(
                 "failed to hash staged tree object '{}': {error}",
@@ -153,6 +155,12 @@ trait OwnershipMaterializer {
             ))
         })
     }
+
+    fn validate_hardlinked_file(
+        &self,
+        source: &Path,
+        manifest_entry: &FsTreeEntry,
+    ) -> Result<(), BuilderError>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -173,22 +181,34 @@ impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
         Ok(())
     }
 
-    fn materialize_and_hash(
+    fn materialize_selected_and_hash(
         &self,
         root_dir: &Path,
         _object_dir: &Path,
-        manifest: &FsTreeManifest,
+        materialize_manifest: &FsTreeManifest,
+        object_manifest: &FsTreeManifest,
         temp_dir: &Path,
     ) -> Result<ObjectHash, BuilderError> {
         let idmap = mbuild_runtime::cached_host_idmap()
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-        mbuild_runtime::apply_ownership_batch_and_hash_fs_tree_object(
+        mbuild_runtime::apply_selected_ownership_batch_and_hash_fs_tree_object(
             root_dir,
-            manifest,
+            materialize_manifest,
+            object_manifest,
             idmap.as_ref(),
             temp_dir,
         )
         .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))
+    }
+
+    fn validate_hardlinked_file(
+        &self,
+        source: &Path,
+        manifest_entry: &FsTreeEntry,
+    ) -> Result<(), BuilderError> {
+        let idmap = mbuild_runtime::cached_host_idmap()
+            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+        validate_tree_merge_file_attrs(source, manifest_entry, idmap.as_ref())
     }
 }
 
@@ -416,6 +436,7 @@ fn materialize_tree_merge_output(
 ) -> Result<ObjectHash, BuilderError> {
     let paths =
         create_fs_tree_staging_dir(output_path, composed.manifest()).map_err(map_fs_tree_error)?;
+    let mut materialize_entries = Vec::new();
 
     for (manifest_entry, composed_entry) in
         composed.manifest().entries().iter().zip(composed.entries())
@@ -430,14 +451,23 @@ fn materialize_tree_merge_output(
                         ))
                     })?;
                 }
+                materialize_entries.push(manifest_entry.clone());
             }
-            (FsTreeEntry::File { path, mode, .. }, ComposedFsTreeEntry::File { source_path }) => {
+            (FsTreeEntry::File { path, .. }, ComposedFsTreeEntry::File { source_path }) => {
                 let dst = paths.root_dir.join(path);
-                link_or_copy_tree_merge_file(source_path, &dst, *mode)?;
+                if link_or_copy_tree_merge_file(source_path, &dst, manifest_entry, materializer)?
+                    == TreeMergeFileMaterialization::Copied
+                {
+                    materialize_entries.push(manifest_entry.clone());
+                }
             }
-            (FsTreeEntry::Symlink { path, .. }, ComposedFsTreeEntry::Symlink { source_path }) => {
+            (
+                FsTreeEntry::Symlink { path, target, .. },
+                ComposedFsTreeEntry::Symlink { source_path },
+            ) => {
                 let dst = paths.root_dir.join(path);
-                create_tree_merge_symlink(source_path, &dst)?;
+                create_tree_merge_symlink(source_path, &dst, target)?;
+                materialize_entries.push(manifest_entry.clone());
             }
             _ => {
                 return Err(BuilderError::ExecutionFailed(format!(
@@ -448,18 +478,32 @@ fn materialize_tree_merge_output(
         }
     }
 
-    apply_directory_modes_post_order(composed.manifest(), &paths.root_dir)?;
-    materializer.materialize_and_hash(
+    let materialize_manifest =
+        FsTreeManifest::from_entries(materialize_entries).map_err(map_fs_tree_error)?;
+    materializer.materialize_selected_and_hash(
         &paths.root_dir,
         &paths.object_dir,
+        &materialize_manifest,
         composed.manifest(),
         temp_dir,
     )
 }
 
-fn link_or_copy_tree_merge_file(source: &Path, dst: &Path, mode: u32) -> Result<(), BuilderError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TreeMergeFileMaterialization {
+    Hardlinked,
+    Copied,
+}
+
+fn link_or_copy_tree_merge_file(
+    source: &Path,
+    dst: &Path,
+    manifest_entry: &FsTreeEntry,
+    materializer: &impl OwnershipMaterializer,
+) -> Result<TreeMergeFileMaterialization, BuilderError> {
+    materializer.validate_hardlinked_file(source, manifest_entry)?;
     match fs::hard_link(source, dst) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(TreeMergeFileMaterialization::Hardlinked),
         Err(error) if should_copy_after_link_error(error.kind()) => {
             fs::copy(source, dst).map_err(|copy_error| {
                 BuilderError::ExecutionFailed(format!(
@@ -468,7 +512,7 @@ fn link_or_copy_tree_merge_file(source: &Path, dst: &Path, mode: u32) -> Result<
                     dst.display()
                 ))
             })?;
-            set_mode(dst, mode)
+            Ok(TreeMergeFileMaterialization::Copied)
         }
         Err(error) => Err(BuilderError::ExecutionFailed(format!(
             "failed to hardlink merged fs-tree file '{}' to '{}': {error}",
@@ -489,13 +533,109 @@ fn should_copy_after_link_error(kind: io::ErrorKind) -> bool {
 }
 
 #[cfg(unix)]
-fn create_tree_merge_symlink(source: &Path, dst: &Path) -> Result<(), BuilderError> {
+fn validate_tree_merge_file_attrs(
+    source: &Path,
+    manifest_entry: &FsTreeEntry,
+    owner_map: &impl FsTreeOwnerMap,
+) -> Result<(), BuilderError> {
+    let FsTreeEntry::File {
+        path,
+        uid,
+        gid,
+        mode,
+    } = manifest_entry
+    else {
+        return Err(BuilderError::ExecutionFailed(format!(
+            "expected file manifest entry for '{}'",
+            source.display()
+        )));
+    };
+
+    let metadata = fs::symlink_metadata(source).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to inspect merged fs-tree source file '{}': {error}",
+            source.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(BuilderError::ExecutionFailed(format!(
+            "merged fs-tree source '{}' for '{}' must be a file",
+            source.display(),
+            path
+        )));
+    }
+
+    let expected_uid = owner_map.physical_uid(*uid).map_err(map_fs_tree_error)?;
+    let expected_gid = owner_map.physical_gid(*gid).map_err(map_fs_tree_error)?;
+    if metadata.uid() != expected_uid || metadata.gid() != expected_gid {
+        return Err(BuilderError::ExecutionFailed(format!(
+            "merged fs-tree source file '{}' for '{}' has owner {}:{}, expected {}:{}",
+            source.display(),
+            path,
+            metadata.uid(),
+            metadata.gid(),
+            expected_uid,
+            expected_gid
+        )));
+    }
+
+    let actual_mode = metadata.permissions().mode() & 0o7777;
+    if actual_mode != *mode {
+        return Err(BuilderError::ExecutionFailed(format!(
+            "merged fs-tree source file '{}' for '{}' has mode {:o}, expected {:o}",
+            source.display(),
+            path,
+            actual_mode,
+            mode
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_tree_merge_file_attrs(
+    source: &Path,
+    manifest_entry: &FsTreeEntry,
+    _owner_map: &impl FsTreeOwnerMap,
+) -> Result<(), BuilderError> {
+    if source.is_file() {
+        Ok(())
+    } else {
+        Err(BuilderError::ExecutionFailed(format!(
+            "merged fs-tree source '{}' for '{}' must be a file",
+            source.display(),
+            manifest_entry.path()
+        )))
+    }
+}
+
+#[cfg(unix)]
+fn create_tree_merge_symlink(
+    source: &Path,
+    dst: &Path,
+    expected: &str,
+) -> Result<(), BuilderError> {
     let target = fs::read_link(source).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
             "failed to read merged fs-tree source symlink '{}': {error}",
             source.display()
         ))
     })?;
+    let actual = target.to_str().ok_or_else(|| {
+        BuilderError::ExecutionFailed(format!(
+            "merged fs-tree source symlink '{}' has non-UTF-8 target",
+            source.display()
+        ))
+    })?;
+    if actual != expected {
+        return Err(BuilderError::ExecutionFailed(format!(
+            "merged fs-tree source symlink '{}' has target '{}', expected '{}'",
+            source.display(),
+            actual,
+            expected
+        )));
+    }
     symlink(&target, dst).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
             "failed to create merged fs-tree symlink '{}': {error}",
@@ -505,7 +645,11 @@ fn create_tree_merge_symlink(source: &Path, dst: &Path) -> Result<(), BuilderErr
 }
 
 #[cfg(not(unix))]
-fn create_tree_merge_symlink(_source: &Path, _dst: &Path) -> Result<(), BuilderError> {
+fn create_tree_merge_symlink(
+    _source: &Path,
+    _dst: &Path,
+    _expected: &str,
+) -> Result<(), BuilderError> {
     Err(BuilderError::ExecutionFailed(
         "TreeMerge symlink materialization is only supported on unix platforms".to_string(),
     ))
@@ -1017,6 +1161,7 @@ mod tests {
         Builder, BuilderInputObject, BuilderInputs, FsTreeObjectError, FsTreeOwnerMap,
         validate_fs_tree_object,
     };
+    use std::cell::RefCell;
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
     use tempfile::tempdir;
@@ -1026,6 +1171,11 @@ mod tests {
 
     #[derive(Debug, Clone, Copy)]
     struct FixedHashMaterializer;
+
+    #[derive(Debug)]
+    struct RecordingMaterializer {
+        materialized_paths: RefCell<Vec<String>>,
+    }
 
     impl OwnershipMaterializer for CurrentOwnerMaterializer {
         fn materialize_and_validate(
@@ -1052,6 +1202,34 @@ mod tests {
             validate_fs_tree_object(object_dir, &owner_map).map_err(map_fs_tree_error)?;
             Ok(())
         }
+
+        fn materialize_selected_and_hash(
+            &self,
+            root_dir: &Path,
+            object_dir: &Path,
+            materialize_manifest: &FsTreeManifest,
+            _object_manifest: &FsTreeManifest,
+            _temp_dir: &Path,
+        ) -> Result<ObjectHash, BuilderError> {
+            apply_test_modes(materialize_manifest, root_dir)?;
+            let owner_map = current_owner_map(root_dir)?;
+            validate_fs_tree_object(object_dir, &owner_map).map_err(map_fs_tree_error)?;
+            hash_path(object_dir).map_err(|error| {
+                BuilderError::ExecutionFailed(format!(
+                    "failed to hash staged tree object '{}': {error}",
+                    object_dir.display()
+                ))
+            })
+        }
+
+        fn validate_hardlinked_file(
+            &self,
+            source: &Path,
+            manifest_entry: &FsTreeEntry,
+        ) -> Result<(), BuilderError> {
+            let owner_map = current_owner_map(source)?;
+            validate_tree_merge_file_attrs(source, manifest_entry, &owner_map)
+        }
     }
 
     impl OwnershipMaterializer for FixedHashMaterializer {
@@ -1065,14 +1243,63 @@ mod tests {
             Ok(())
         }
 
-        fn materialize_and_hash(
+        fn materialize_selected_and_hash(
+            &self,
+            root_dir: &Path,
+            _object_dir: &Path,
+            materialize_manifest: &FsTreeManifest,
+            _object_manifest: &FsTreeManifest,
+            _temp_dir: &Path,
+        ) -> Result<ObjectHash, BuilderError> {
+            apply_test_modes(materialize_manifest, root_dir)?;
+            Ok(fixed_object_hash())
+        }
+
+        fn validate_hardlinked_file(
+            &self,
+            _source: &Path,
+            _manifest_entry: &FsTreeEntry,
+        ) -> Result<(), BuilderError> {
+            Ok(())
+        }
+    }
+
+    impl OwnershipMaterializer for RecordingMaterializer {
+        fn materialize_and_validate(
             &self,
             _root_dir: &Path,
             _object_dir: &Path,
             _manifest: &FsTreeManifest,
             _temp_dir: &Path,
+        ) -> Result<(), BuilderError> {
+            Ok(())
+        }
+
+        fn materialize_selected_and_hash(
+            &self,
+            _root_dir: &Path,
+            _object_dir: &Path,
+            materialize_manifest: &FsTreeManifest,
+            _object_manifest: &FsTreeManifest,
+            _temp_dir: &Path,
         ) -> Result<ObjectHash, BuilderError> {
+            self.materialized_paths.replace(
+                materialize_manifest
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.path().to_string())
+                    .collect(),
+            );
             Ok(fixed_object_hash())
+        }
+
+        fn validate_hardlinked_file(
+            &self,
+            source: &Path,
+            manifest_entry: &FsTreeEntry,
+        ) -> Result<(), BuilderError> {
+            let owner_map = current_owner_map(source)?;
+            validate_tree_merge_file_attrs(source, manifest_entry, &owner_map)
         }
     }
 
@@ -1226,6 +1453,15 @@ mod tests {
         "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
             .unwrap()
+    }
+
+    fn apply_test_modes(manifest: &FsTreeManifest, root_dir: &Path) -> Result<(), BuilderError> {
+        for entry in manifest.entries() {
+            if let FsTreeEntry::File { path, mode, .. } = entry {
+                set_mode(&root_dir.join(path), *mode)?;
+            }
+        }
+        apply_directory_modes_post_order(manifest, root_dir)
     }
 
     #[cfg(unix)]
@@ -1408,6 +1644,115 @@ mod tests {
             fs::Permissions::from_mode(0o755),
         )
         .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_merge_rejects_hardlink_source_attr_mismatch_without_mutating_source() {
+        let temp = tempdir().unwrap();
+        let base_object = temp.path().join("base");
+        let base_manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::directory("bin", 0, 0, 0o755),
+            FsTreeEntry::file("bin/tool", 0, 0, 0o755),
+        ])
+        .unwrap();
+        let base_paths = create_fs_tree_staging_dir(&base_object, &base_manifest).unwrap();
+        fs::create_dir(base_paths.root_dir.join("bin")).unwrap();
+        fs::write(base_paths.root_dir.join("bin/tool"), b"tool").unwrap();
+        fs::set_permissions(
+            base_paths.root_dir.join("bin/tool"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+
+        let right = build_fs_tree_for_tests(
+            temp.path(),
+            "right",
+            vec![TreeEntry::File {
+                path: "etc/right.conf".to_string(),
+                text: "right\n".to_string(),
+                executable: false,
+            }],
+            sample_install(),
+        );
+        let mut inputs = tree_merge_inputs(&[("right", &right)]);
+        inputs.insert(
+            "base",
+            BuilderInputObject {
+                object_path: base_object,
+                meta: Map::new(),
+            },
+        );
+        let mut cx = build_context(&temp.path().join("merge"));
+
+        let error = build_tree_merge(
+            TreeMergeConfig {},
+            inputs,
+            &mut cx,
+            &CurrentOwnerMaterializer,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("has mode 644, expected 755"));
+        assert_eq!(
+            fs::metadata(base_paths.root_dir.join("bin/tool"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o644
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_merge_excludes_hardlinked_files_from_materialize_manifest() {
+        let temp = tempdir().unwrap();
+        let left = build_fs_tree_for_tests(
+            temp.path(),
+            "left",
+            vec![TreeEntry::File {
+                path: "bin/left".to_string(),
+                text: "left\n".to_string(),
+                executable: true,
+            }],
+            sample_install(),
+        );
+        let right = build_fs_tree_for_tests(
+            temp.path(),
+            "right",
+            vec![TreeEntry::File {
+                path: "etc/right.conf".to_string(),
+                text: "right\n".to_string(),
+                executable: false,
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("merge"));
+        let materializer = RecordingMaterializer {
+            materialized_paths: RefCell::new(Vec::new()),
+        };
+
+        let result = build_tree_merge(
+            TreeMergeConfig {},
+            tree_merge_inputs(&[("right", &right), ("left", &left)]),
+            &mut cx,
+            &materializer,
+        )
+        .unwrap();
+
+        assert_eq!(result.object_hash, Some(fixed_object_hash()));
+        let materialized_paths = materializer.materialized_paths.borrow();
+        assert!(materialized_paths.iter().any(|path| path == ""));
+        assert!(materialized_paths.iter().any(|path| path == "bin"));
+        assert!(materialized_paths.iter().any(|path| path == "etc"));
+        assert!(!materialized_paths.iter().any(|path| path == "bin/left"));
+        assert!(
+            !materialized_paths
+                .iter()
+                .any(|path| path == "etc/right.conf")
+        );
     }
 
     #[test]

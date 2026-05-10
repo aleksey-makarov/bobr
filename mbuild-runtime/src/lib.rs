@@ -7,7 +7,7 @@
 //!
 //! The current public capability is fs-tree ownership materialization through
 //! [`apply_ownership_batch`], [`apply_ownership_batch_and_hash`], and
-//! [`apply_ownership_batch_and_hash_fs_tree_object`]. It applies logical
+//! [`apply_selected_ownership_batch_and_hash_fs_tree_object`]. It applies logical
 //! fs-tree owners and modes in a user namespace described by
 //! [`MbuildIdmap`].
 //!
@@ -33,6 +33,7 @@ pub use idmap::{MbuildIdmap, cached_host_idmap};
 pub use ownership::{
     apply_ownership_batch, apply_ownership_batch_and_hash,
     apply_ownership_batch_and_hash_fs_tree_object,
+    apply_selected_ownership_batch_and_hash_fs_tree_object,
 };
 pub use sandbox::{
     SandboxBuildConfig, SandboxBuildOutcome, SandboxInput, SandboxRunAs, SandboxStep,
