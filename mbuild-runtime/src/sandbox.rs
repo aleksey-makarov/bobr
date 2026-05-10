@@ -45,7 +45,7 @@ const ROOT_STEP_CAPABILITIES: &[&str] = &[
     "CAP_FOWNER",
     "CAP_FSETID",
 ];
-const RUNNER_EXTRA_CAPABILITIES: &[&str] = &["CAP_SETGID", "CAP_SETUID"];
+const RUNNER_EXTRA_CAPABILITIES: &[&str] = &["CAP_SETGID", "CAP_SETPCAP", "CAP_SETUID"];
 
 /// User identity used for a sandbox step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -590,7 +590,15 @@ impl SandboxRunnerStep {
         }
 
         let status = command.status().map_err(|error| {
-            SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
+            SandboxRunnerFailureReport::step_runtime(
+                self,
+                format!(
+                    "failed to spawn '{}' as {}: {error}",
+                    executable,
+                    self.run_as.as_str()
+                ),
+                elapsed_ms(start),
+            )
         })?;
         reap_finished_children();
         let duration_ms = elapsed_ms(start);
@@ -1132,6 +1140,7 @@ fn oci_capability_from_name(name: &str) -> Result<Capability, RuntimeError> {
         "CAP_FOWNER" => Ok(Capability::Fowner),
         "CAP_FSETID" => Ok(Capability::Fsetid),
         "CAP_SETGID" => Ok(Capability::Setgid),
+        "CAP_SETPCAP" => Ok(Capability::Setpcap),
         "CAP_SETUID" => Ok(Capability::Setuid),
         _ => Err(RuntimeError::InvalidInput(format!(
             "unsupported sandbox capability '{name}'"
@@ -1151,10 +1160,6 @@ fn root_step_caps() -> caps::CapsHashSet {
     .collect()
 }
 
-fn empty_caps() -> caps::CapsHashSet {
-    caps::CapsHashSet::new()
-}
-
 fn set_process_caps(cap_set: &caps::CapsHashSet) -> io::Result<()> {
     // Ambient must be cleared before narrowing the permitted/inheritable sets.
     caps::clear(None, caps::CapSet::Ambient).map_err(io::Error::other)?;
@@ -1172,8 +1177,7 @@ fn apply_step_credentials(run_as: SandboxRunAs) -> io::Result<()> {
         SandboxRunAs::BuildUser => {
             setgroups(&[]).map_err(io::Error::other)?;
             setgid(Gid::from_raw(BUILD_USER_GID)).map_err(io::Error::other)?;
-            setuid(Uid::from_raw(BUILD_USER_UID)).map_err(io::Error::other)?;
-            set_process_caps(&empty_caps())
+            setuid(Uid::from_raw(BUILD_USER_UID)).map_err(io::Error::other)
         }
         SandboxRunAs::Root => set_process_caps(&root_step_caps()),
     }
