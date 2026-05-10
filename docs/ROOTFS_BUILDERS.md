@@ -2,10 +2,11 @@
 
 ## Summary
 
-`mbuild` currently implements three filesystem-related builders:
+`mbuild` currently implements four filesystem-related builders:
 
 - `Tree`: realize text files, symlinks, and explicit directories as one file object or
   one fs-tree directory object
+- `TreeMerge`: compose fs-tree directory objects into one fs-tree directory object
 - `Rootfs`: compose installable legacy directory objects into one rootfs directory object
 - `Ext4Rootfs`: compose installable legacy directory objects into one ext4 rootfs image
 
@@ -27,6 +28,16 @@
 - `Ext4Rootfs` writes one ext4 image file directly as the realized result
 
 `Rootfs` is the directory-producing counterpart to `Ext4Rootfs`.
+
+`TreeMerge` is the manifest-based composition path for fs-tree objects:
+
+- the builder reads canonical `manifest.jsonl` files from fs-tree inputs
+- it validates each input `root/` directory against its manifest
+- it merges manifest entries with strict conflict checking
+- it writes a new fs-tree directory object
+- regular files are hardlinked from input fs-trees when possible, with copy
+  fallback for filesystems that do not support the hardlink
+- symlinks are recreated with the same target
 
 ## `Tree`
 
@@ -106,6 +117,47 @@ Current limitations:
 
 - tree entries currently support only UTF-8 text files, symlinks, and explicit directories
 - binary files and richer file mode control are not yet supported
+
+## `TreeMerge`
+
+`TreeMerge` accepts this config:
+
+```json
+{}
+```
+
+Inputs:
+
+- two or more named fs-tree directory inputs
+- input order follows the standard builder input order: required inputs,
+  optional inputs, then extra inputs in lexical input-name order
+
+Current behavior:
+
+- requires every input to be a valid fs-tree directory object:
+  ```text
+  manifest.jsonl
+  root/
+  ```
+- reads canonical manifests and treats them as the source of truth
+- validates each input `root/` directory against its manifest before merging
+- allows overlapping directory paths only when `uid`, `gid`, and `mode` match
+- rejects duplicate file or symlink paths
+- rejects file-vs-directory, symlink-vs-directory, and parent/child leaf conflicts
+- writes one fs-tree directory object with a canonical merged manifest
+
+Physical materialization:
+
+- directories are created as needed
+- regular files are hardlinked from their source fs-tree when possible
+- when hardlinking is not supported or not permitted, regular file bytes are copied
+- symlinks are recreated with the same target
+- ownership and modes are materialized and validated against the merged manifest
+
+The realized result payload is one fs-tree directory object. The current realized
+result metadata is empty:
+
+- `{}`
 
 ## `Rootfs`
 

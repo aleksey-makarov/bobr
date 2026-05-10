@@ -3,7 +3,7 @@ use mbuild_compose::{Ext4RootfsBuilder, RootfsBuilder};
 use mbuild_core::Builder;
 use mbuild_image::{ImageBuilder, OciExtractBuilder};
 use mbuild_text::TextBuilder;
-use mbuild_tree::TreeBuilder;
+use mbuild_tree::{TreeBuilder, TreeMergeBuilder};
 
 static BINARY_BUILDER: BinaryBuilder = BinaryBuilder;
 static CONTAINER_BUILDER: ContainerBuilder = ContainerBuilder;
@@ -14,11 +14,13 @@ static IMAGE_BUILDER: ImageBuilder = ImageBuilder;
 static OCI_EXTRACT_BUILDER: OciExtractBuilder = OciExtractBuilder;
 static TEXT_BUILDER: TextBuilder = TextBuilder;
 static TREE_BUILDER: TreeBuilder = TreeBuilder;
+static TREE_MERGE_BUILDER: TreeMergeBuilder = TreeMergeBuilder;
 
-pub fn registered_builders() -> [&'static dyn Builder; 9] {
+pub fn registered_builders() -> [&'static dyn Builder; 10] {
     [
         &TEXT_BUILDER,
         &TREE_BUILDER,
+        &TREE_MERGE_BUILDER,
         &BINARY_BUILDER,
         &CONTAINER_BUILDER,
         &SANDBOX_BUILDER,

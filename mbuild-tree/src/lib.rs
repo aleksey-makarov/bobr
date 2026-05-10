@@ -1,15 +1,18 @@
 use fsobj_hash::{ObjectHash, hash_path};
 use globset::{Glob, GlobMatcher};
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, FsTreeEntry,
-    FsTreeManifest, StagedBuildResult, TypedBuilder, create_fs_tree_staging_dir, fsutil,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
+    ComposedFsTree, ComposedFsTreeEntry, FsTreeComposeInput, FsTreeEntry, FsTreeManifest,
+    FsTreeOwnerMap, StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir,
+    fsutil, validate_fs_tree_object,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
@@ -157,12 +160,24 @@ impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
 }
 
 pub struct TreeBuilder;
+pub struct TreeMergeBuilder;
 
 static TREE_SPEC: BuilderSpec = BuilderSpec {
     tag: "Tree",
     required_inputs: &[],
     optional_inputs: &[],
     allow_extra_inputs: false,
+};
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TreeMergeConfig {}
+
+static TREE_MERGE_SPEC: BuilderSpec = BuilderSpec {
+    tag: "TreeMerge",
+    required_inputs: &[],
+    optional_inputs: &[],
+    allow_extra_inputs: true,
 };
 
 impl TypedBuilder for TreeBuilder {
@@ -179,6 +194,31 @@ impl TypedBuilder for TreeBuilder {
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         build_tree(config, inputs, cx, &RuntimeOwnershipMaterializer)
+    }
+}
+
+impl TypedBuilder for TreeMergeBuilder {
+    type Config = TreeMergeConfig;
+
+    fn spec(&self) -> &'static BuilderSpec {
+        &TREE_MERGE_SPEC
+    }
+
+    fn build_typed(
+        &self,
+        config: Self::Config,
+        inputs: BuilderInputs,
+        cx: &mut BuildContext,
+    ) -> Result<StagedBuildResult, BuilderError> {
+        let idmap = mbuild_runtime::cached_host_idmap()
+            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+        build_tree_merge(
+            config,
+            inputs,
+            cx,
+            idmap.as_ref(),
+            &RuntimeOwnershipMaterializer,
+        )
     }
 }
 
@@ -233,6 +273,167 @@ fn build_tree(
         staged_path: output_path,
         object_hash,
     })
+}
+
+fn build_tree_merge(
+    _config: TreeMergeConfig,
+    inputs: BuilderInputs,
+    cx: &mut BuildContext,
+    owner_map: &impl FsTreeOwnerMap,
+    materializer: &impl OwnershipMaterializer,
+) -> Result<StagedBuildResult, BuilderError> {
+    let inputs = inputs.extras(&TREE_MERGE_SPEC).collect::<Vec<_>>();
+    if inputs.len() < 2 {
+        return Err(BuilderError::ExecutionFailed(
+            "TreeMerge builder requires at least two fs-tree inputs".to_string(),
+        ));
+    }
+
+    cx.log_event(
+        BuildLogLevel::Info,
+        "prepare",
+        format!("merging {} fs-tree input(s)", inputs.len()),
+    );
+
+    let compose_inputs = inputs
+        .iter()
+        .map(|(name, object)| tree_merge_input(name, object, owner_map))
+        .collect::<Result<Vec<_>, _>>()?;
+    let composed = compose_fs_trees(&compose_inputs).map_err(map_fs_tree_error)?;
+
+    let now_nanos = fsutil::current_epoch_nanos()
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+    let output_path = cx.temp_dir.join(format!("tree-merge-{now_nanos}.obj"));
+
+    cx.log_event(
+        BuildLogLevel::Info,
+        "materialize",
+        format!("materializing merged fs-tree '{}'", output_path.display()),
+    );
+
+    materialize_tree_merge_output(&output_path, &composed, &cx.temp_dir, materializer)?;
+
+    Ok(StagedBuildResult {
+        meta: Map::new(),
+        staged_path: output_path,
+        object_hash: None,
+    })
+}
+
+fn tree_merge_input(
+    name: &str,
+    object: &BuilderInputObject,
+    owner_map: &impl FsTreeOwnerMap,
+) -> Result<FsTreeComposeInput, BuilderError> {
+    let validated = validate_fs_tree_object(&object.object_path, owner_map).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "TreeMerge input '{name}' is not a valid fs-tree object: {error}"
+        ))
+    })?;
+    Ok(FsTreeComposeInput::from(validated))
+}
+
+fn materialize_tree_merge_output(
+    output_path: &Path,
+    composed: &ComposedFsTree,
+    temp_dir: &Path,
+    materializer: &impl OwnershipMaterializer,
+) -> Result<(), BuilderError> {
+    let paths =
+        create_fs_tree_staging_dir(output_path, composed.manifest()).map_err(map_fs_tree_error)?;
+
+    for (manifest_entry, composed_entry) in
+        composed.manifest().entries().iter().zip(composed.entries())
+    {
+        match (manifest_entry, composed_entry) {
+            (FsTreeEntry::Directory { path, .. }, ComposedFsTreeEntry::Directory) => {
+                if !path.is_empty() {
+                    fs::create_dir(paths.root_dir.join(path)).map_err(|error| {
+                        BuilderError::ExecutionFailed(format!(
+                            "failed to create merged fs-tree directory '{}': {error}",
+                            paths.root_dir.join(path).display()
+                        ))
+                    })?;
+                }
+            }
+            (FsTreeEntry::File { path, mode, .. }, ComposedFsTreeEntry::File { source_path }) => {
+                let dst = paths.root_dir.join(path);
+                link_or_copy_tree_merge_file(source_path, &dst, *mode)?;
+            }
+            (FsTreeEntry::Symlink { path, .. }, ComposedFsTreeEntry::Symlink { source_path }) => {
+                let dst = paths.root_dir.join(path);
+                create_tree_merge_symlink(source_path, &dst)?;
+            }
+            _ => {
+                return Err(BuilderError::ExecutionFailed(format!(
+                    "merged fs-tree entry for '{}' does not match manifest kind",
+                    manifest_entry.path()
+                )));
+            }
+        }
+    }
+
+    apply_directory_modes_post_order(composed.manifest(), &paths.root_dir)?;
+    materializer.materialize_and_validate(
+        &paths.root_dir,
+        &paths.object_dir,
+        composed.manifest(),
+        temp_dir,
+    )
+}
+
+fn link_or_copy_tree_merge_file(source: &Path, dst: &Path, mode: u32) -> Result<(), BuilderError> {
+    match fs::hard_link(source, dst) {
+        Ok(()) => Ok(()),
+        Err(error) if should_copy_after_link_error(error.kind()) => {
+            fs::copy(source, dst).map_err(|copy_error| {
+                BuilderError::ExecutionFailed(format!(
+                    "failed to copy merged fs-tree file '{}' to '{}': {copy_error}",
+                    source.display(),
+                    dst.display()
+                ))
+            })?;
+            set_mode(dst, mode)
+        }
+        Err(error) => Err(BuilderError::ExecutionFailed(format!(
+            "failed to hardlink merged fs-tree file '{}' to '{}': {error}",
+            source.display(),
+            dst.display()
+        ))),
+    }
+}
+
+fn should_copy_after_link_error(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::CrossesDevices
+            | io::ErrorKind::PermissionDenied
+            | io::ErrorKind::Unsupported
+            | io::ErrorKind::TooManyLinks
+    )
+}
+
+#[cfg(unix)]
+fn create_tree_merge_symlink(source: &Path, dst: &Path) -> Result<(), BuilderError> {
+    let target = fs::read_link(source).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to read merged fs-tree source symlink '{}': {error}",
+            source.display()
+        ))
+    })?;
+    symlink(&target, dst).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to create merged fs-tree symlink '{}': {error}",
+            dst.display()
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn create_tree_merge_symlink(_source: &Path, _dst: &Path) -> Result<(), BuilderError> {
+    Err(BuilderError::ExecutionFailed(
+        "TreeMerge symlink materialization is only supported on unix platforms".to_string(),
+    ))
 }
 
 fn normalize_entries(entries: Vec<TreeEntry>) -> Result<Vec<NormalizedEntry>, BuilderError> {
@@ -808,6 +1009,18 @@ mod tests {
         }
     }
 
+    impl TreeMergeBuilder {
+        fn build_typed_for_tests(
+            &self,
+            config: TreeMergeConfig,
+            inputs: BuilderInputs,
+            cx: &mut BuildContext,
+        ) -> Result<StagedBuildResult, BuilderError> {
+            let owner_map = current_owner_map(&cx.temp_dir)?;
+            build_tree_merge(config, inputs, cx, &owner_map, &CurrentOwnerMaterializer)
+        }
+    }
+
     fn build_context(root: &std::path::Path) -> BuildContext {
         let state_dir = root.join("tree");
         let temp_dir = state_dir.join("tmp");
@@ -870,6 +1083,40 @@ mod tests {
         validate_fs_tree_object(&result.staged_path, &owner_map).unwrap();
     }
 
+    fn build_fs_tree_for_tests(
+        root: &Path,
+        name: &str,
+        entries: Vec<TreeEntry>,
+        install: InstallMeta,
+    ) -> StagedBuildResult {
+        let builder = TreeBuilder;
+        let mut cx = build_context(&root.join(name));
+        builder
+            .build_typed_for_tests(
+                TreeConfig {
+                    tree: TreePayload { entries },
+                    install: Some(install),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap()
+    }
+
+    fn tree_merge_inputs(inputs: &[(&str, &StagedBuildResult)]) -> BuilderInputs {
+        let mut builder_inputs = BuilderInputs::empty();
+        for (name, result) in inputs {
+            builder_inputs.insert(
+                *name,
+                BuilderInputObject {
+                    object_path: result.staged_path.clone(),
+                    meta: Map::new(),
+                },
+            );
+        }
+        builder_inputs
+    }
+
     #[cfg(unix)]
     fn current_owner_map(path: &Path) -> Result<CurrentOwnerMap, BuilderError> {
         let metadata = fs::symlink_metadata(path).map_err(|error| {
@@ -887,6 +1134,320 @@ mod tests {
     #[cfg(not(unix))]
     fn current_owner_map(_path: &Path) -> Result<CurrentOwnerMap, BuilderError> {
         Ok(CurrentOwnerMap { uid: 0, gid: 0 })
+    }
+
+    #[test]
+    fn tree_merge_requires_at_least_two_inputs() {
+        let builder = TreeMergeBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(temp.path());
+
+        let error = builder
+            .build_typed_for_tests(TreeMergeConfig {}, BuilderInputs::empty(), &mut cx)
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires at least two fs-tree inputs")
+        );
+    }
+
+    #[test]
+    fn tree_merge_rejects_non_fs_tree_input() {
+        let builder = TreeMergeBuilder;
+        let temp = tempdir().unwrap();
+        let left = build_fs_tree_for_tests(
+            temp.path(),
+            "left",
+            vec![TreeEntry::Dir {
+                path: "left".to_string(),
+            }],
+            sample_install(),
+        );
+        let not_tree = temp.path().join("not-tree");
+        fs::write(&not_tree, b"not a tree").unwrap();
+        let mut inputs = tree_merge_inputs(&[("left", &left)]);
+        inputs.insert(
+            "bad",
+            BuilderInputObject {
+                object_path: not_tree,
+                meta: Map::new(),
+            },
+        );
+        let mut cx = build_context(&temp.path().join("merge"));
+
+        let error = builder
+            .build_typed_for_tests(TreeMergeConfig {}, inputs, &mut cx)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("is not a valid fs-tree object"));
+    }
+
+    #[test]
+    fn tree_merge_combines_disjoint_fs_trees() {
+        let builder = TreeMergeBuilder;
+        let temp = tempdir().unwrap();
+        let left = build_fs_tree_for_tests(
+            temp.path(),
+            "left",
+            vec![TreeEntry::File {
+                path: "bin/left".to_string(),
+                text: "left\n".to_string(),
+                executable: true,
+            }],
+            sample_install(),
+        );
+        let right = build_fs_tree_for_tests(
+            temp.path(),
+            "right",
+            vec![TreeEntry::File {
+                path: "etc/right.conf".to_string(),
+                text: "right\n".to_string(),
+                executable: false,
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("merge"));
+
+        let result = builder
+            .build_typed_for_tests(
+                TreeMergeConfig {},
+                tree_merge_inputs(&[("right", &right), ("left", &left)]),
+                &mut cx,
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(fs_tree_root(&result).join("bin/left")).unwrap(),
+            "left\n"
+        );
+        assert_eq!(
+            fs::read_to_string(fs_tree_root(&result).join("etc/right.conf")).unwrap(),
+            "right\n"
+        );
+        assert!(
+            fs_tree_manifest(&result)
+                .entries()
+                .iter()
+                .any(|entry| entry.path() == "bin")
+        );
+        assert_valid_fs_tree(&result);
+    }
+
+    #[test]
+    fn tree_merge_allows_matching_directory_overlap() {
+        let builder = TreeMergeBuilder;
+        let temp = tempdir().unwrap();
+        let left = build_fs_tree_for_tests(
+            temp.path(),
+            "left",
+            vec![TreeEntry::File {
+                path: "usr/bin/left".to_string(),
+                text: "left\n".to_string(),
+                executable: true,
+            }],
+            sample_install(),
+        );
+        let right = build_fs_tree_for_tests(
+            temp.path(),
+            "right",
+            vec![TreeEntry::File {
+                path: "usr/lib/right".to_string(),
+                text: "right\n".to_string(),
+                executable: false,
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("merge"));
+
+        let result = builder
+            .build_typed_for_tests(
+                TreeMergeConfig {},
+                tree_merge_inputs(&[("left", &left), ("right", &right)]),
+                &mut cx,
+            )
+            .unwrap();
+
+        assert!(fs_tree_root(&result).join("usr/bin/left").is_file());
+        assert!(fs_tree_root(&result).join("usr/lib/right").is_file());
+        assert_valid_fs_tree(&result);
+    }
+
+    #[test]
+    fn tree_merge_rejects_directory_attr_mismatch() {
+        let builder = TreeMergeBuilder;
+        let temp = tempdir().unwrap();
+        let left = build_fs_tree_for_tests(
+            temp.path(),
+            "left",
+            vec![TreeEntry::Dir {
+                path: "var".to_string(),
+            }],
+            install_with_modes(0o755, 0o644),
+        );
+        let right = build_fs_tree_for_tests(
+            temp.path(),
+            "right",
+            vec![TreeEntry::Dir {
+                path: "var".to_string(),
+            }],
+            install_with_modes(0o700, 0o644),
+        );
+        let mut cx = build_context(&temp.path().join("merge"));
+
+        let error = builder
+            .build_typed_for_tests(
+                TreeMergeConfig {},
+                tree_merge_inputs(&[("left", &left), ("right", &right)]),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("conflicting fs-tree entries"));
+    }
+
+    #[test]
+    fn tree_merge_rejects_duplicate_files_and_symlinks() {
+        let builder = TreeMergeBuilder;
+        let temp = tempdir().unwrap();
+        let left_file = build_fs_tree_for_tests(
+            temp.path(),
+            "left-file",
+            vec![TreeEntry::File {
+                path: "bin/tool".to_string(),
+                text: "left\n".to_string(),
+                executable: true,
+            }],
+            sample_install(),
+        );
+        let right_file = build_fs_tree_for_tests(
+            temp.path(),
+            "right-file",
+            vec![TreeEntry::File {
+                path: "bin/tool".to_string(),
+                text: "right\n".to_string(),
+                executable: true,
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("merge-files"));
+        let error = builder
+            .build_typed_for_tests(
+                TreeMergeConfig {},
+                tree_merge_inputs(&[("left", &left_file), ("right", &right_file)]),
+                &mut cx,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("conflicting fs-tree entries"));
+
+        let left_link = build_fs_tree_for_tests(
+            temp.path(),
+            "left-link",
+            vec![TreeEntry::Symlink {
+                path: "bin/tool".to_string(),
+                target: "left".to_string(),
+            }],
+            sample_install(),
+        );
+        let right_link = build_fs_tree_for_tests(
+            temp.path(),
+            "right-link",
+            vec![TreeEntry::Symlink {
+                path: "bin/tool".to_string(),
+                target: "right".to_string(),
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("merge-links"));
+        let error = builder
+            .build_typed_for_tests(
+                TreeMergeConfig {},
+                tree_merge_inputs(&[("left", &left_link), ("right", &right_link)]),
+                &mut cx,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("conflicting fs-tree entries"));
+    }
+
+    #[test]
+    fn tree_merge_rejects_leaf_parent_conflicts() {
+        let builder = TreeMergeBuilder;
+        let temp = tempdir().unwrap();
+        let leaf = build_fs_tree_for_tests(
+            temp.path(),
+            "leaf",
+            vec![
+                TreeEntry::File {
+                    path: "opt".to_string(),
+                    text: "leaf\n".to_string(),
+                    executable: false,
+                },
+                TreeEntry::Dir {
+                    path: "other".to_string(),
+                },
+            ],
+            sample_install(),
+        );
+        let child = build_fs_tree_for_tests(
+            temp.path(),
+            "child",
+            vec![TreeEntry::File {
+                path: "opt/tool".to_string(),
+                text: "child\n".to_string(),
+                executable: false,
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("merge"));
+
+        let error = builder
+            .build_typed_for_tests(
+                TreeMergeConfig {},
+                tree_merge_inputs(&[("leaf", &leaf), ("child", &child)]),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("conflict"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_merge_hardlinks_files_when_possible() {
+        let builder = TreeMergeBuilder;
+        let temp = tempdir().unwrap();
+        let left = build_fs_tree_for_tests(
+            temp.path(),
+            "left",
+            vec![TreeEntry::File {
+                path: "bin/tool".to_string(),
+                text: "tool\n".to_string(),
+                executable: true,
+            }],
+            sample_install(),
+        );
+        let right = build_fs_tree_for_tests(
+            temp.path(),
+            "right",
+            vec![TreeEntry::Dir {
+                path: "etc".to_string(),
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("merge"));
+
+        let result = builder
+            .build_typed_for_tests(
+                TreeMergeConfig {},
+                tree_merge_inputs(&[("left", &left), ("right", &right)]),
+                &mut cx,
+            )
+            .unwrap();
+
+        let src = fs::metadata(fs_tree_root(&left).join("bin/tool")).unwrap();
+        let dst = fs::metadata(fs_tree_root(&result).join("bin/tool")).unwrap();
+        assert_eq!((src.dev(), src.ino()), (dst.dev(), dst.ino()));
     }
 
     #[test]
