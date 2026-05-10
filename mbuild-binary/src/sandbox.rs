@@ -103,10 +103,11 @@ impl TypedBuilder for SandboxBuilder {
 }
 
 fn validate_rootfs(rootfs: &BuilderInputObject) -> BResult<()> {
-    if !rootfs.object_path.is_dir() {
+    let rootfs_path = object_payload_path(&rootfs.object_path);
+    if !rootfs_path.is_dir() {
         return Err(BinaryError::InputResolutionFailed(format!(
             "rootfs input must resolve to a directory: {}",
-            rootfs.object_path.display()
+            rootfs_path.display()
         )));
     }
     Ok(())
@@ -123,15 +124,16 @@ fn resolve_sandbox_config(
     let sandbox_inputs = inputs
         .iter()
         .map(|(name, input)| {
-            if !input.object_path.is_dir() && !input.object_path.is_file() {
+            let host_path = object_payload_path(&input.object_path);
+            if !host_path.is_dir() && !host_path.is_file() {
                 return Err(BinaryError::InputResolutionFailed(format!(
                     "sandbox input must resolve to a file or directory: {}",
-                    input.object_path.display()
+                    host_path.display()
                 )));
             }
             Ok(SandboxInput {
                 name: name.clone(),
-                host_path: input.object_path.clone(),
+                host_path,
                 mount_path: PathBuf::from(input_mount_path(name)),
             })
         })
@@ -158,7 +160,7 @@ fn resolve_sandbox_config(
     })?;
 
     Ok(SandboxBuildConfig {
-        rootfs: rootfs.object_path.clone(),
+        rootfs: object_payload_path(&rootfs.object_path),
         out_dir: output_path.to_path_buf(),
         config_dir: config_path.to_path_buf(),
         workspace,
@@ -166,6 +168,15 @@ fn resolve_sandbox_config(
         inputs: sandbox_inputs,
         steps: sandbox_steps,
     })
+}
+
+fn object_payload_path(object_path: &Path) -> PathBuf {
+    let fs_tree_root = object_path.join("root");
+    if object_path.join("manifest.jsonl").is_file() && fs_tree_root.is_dir() {
+        fs_tree_root
+    } else {
+        object_path.to_path_buf()
+    }
 }
 
 fn resolve_sandbox_step(
@@ -361,5 +372,47 @@ mod tests {
             config.steps[0].cwd,
             PathBuf::from("/__mbuild/inputs/source")
         );
+    }
+
+    #[test]
+    fn resolve_sandbox_config_uses_fs_tree_payload_roots() {
+        let temp = tempdir().unwrap();
+        let rootfs = temp.path().join("rootfs-object");
+        let rootfs_payload = rootfs.join("root");
+        let source = temp.path().join("source-object");
+        let source_payload = source.join("root");
+        let out = temp.path().join("out");
+        let config = temp.path().join("config");
+        for path in [&rootfs_payload, &source_payload, &out, &config] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(rootfs.join("manifest.jsonl"), "").unwrap();
+        std::fs::write(source.join("manifest.jsonl"), "").unwrap();
+        let cx = BuildContext::with_noop_logger(temp.path().join("state"), temp.path().join("tmp"));
+        std::fs::create_dir_all(&cx.temp_dir).unwrap();
+        let rootfs_input = BuilderInputObject {
+            object_path: rootfs,
+            meta: Map::new(),
+        };
+        let inputs = vec![(
+            "source".to_string(),
+            BuilderInputObject {
+                object_path: source,
+                meta: Map::new(),
+            },
+        )];
+        let step = BuildStep {
+            name: "build".to_string(),
+            run_as: StepUser::BuildUser,
+            cwd: "@{source}".to_string(),
+            argv: vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
+            env: Map::new(),
+        };
+
+        let config =
+            resolve_sandbox_config(&rootfs_input, &inputs, &[step], &out, &config, &cx).unwrap();
+
+        assert_eq!(config.rootfs, rootfs_payload);
+        assert_eq!(config.inputs[0].host_path, source_payload);
     }
 }
