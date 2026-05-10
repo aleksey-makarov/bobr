@@ -1162,14 +1162,13 @@ fn root_step_caps() -> caps::CapsHashSet {
 }
 
 fn set_process_caps(cap_set: &caps::CapsHashSet) -> io::Result<()> {
-    // Ambient must be cleared before narrowing the permitted/inheritable sets.
-    caps::clear(None, caps::CapSet::Ambient).map_err(io::Error::other)?;
+    // The runner already starts as uid 0 inside the user namespace. Keep the
+    // step capability transition to base capset(2) operations: ambient
+    // capability prctl calls are not needed here and are fragile in rootless
+    // containers.
     caps::set(None, caps::CapSet::Inheritable, cap_set).map_err(io::Error::other)?;
     caps::set(None, caps::CapSet::Permitted, cap_set).map_err(io::Error::other)?;
     caps::set(None, caps::CapSet::Effective, cap_set).map_err(io::Error::other)?;
-    if !cap_set.is_empty() {
-        caps::set(None, caps::CapSet::Ambient, cap_set).map_err(io::Error::other)?;
-    }
     Ok(())
 }
 
