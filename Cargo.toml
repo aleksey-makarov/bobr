@@ -14,11 +14,3 @@ members = [
 ]
 
 resolver = "3"
-
-# Override crates.io libcontainer with a fork that includes the fix for
-# rootless tenant exec into a container with its own PID namespace.
-# See https://github.com/aleksey-makarov/youki/tree/fix-tenant-exec-userns
-# (commit 5cc30f9a "tenant exec: include user namespace in NAMESPACE_TYPES").
-# Drop this once the fix is merged upstream and a release is published.
-[patch.crates-io]
-libcontainer = { git = "https://github.com/aleksey-makarov/youki.git", rev = "5cc30f9a24e25fc22620879ad70dc2d320e03114" }

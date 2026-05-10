@@ -2,7 +2,6 @@
 
 use crate::bundle::{Bundle, create_bundle};
 use crate::error::RuntimeError;
-use crate::executor::{read_executor_result_report, write_executor_result_report};
 use crate::idmap::MbuildIdmap;
 use crate::preflight::preflight_ownership_runtime;
 use fsobj_hash::{ObjectHash, hash_path};
@@ -16,8 +15,8 @@ use libcontainer::syscall::syscall::SyscallType;
 use libcontainer::workload::{
     Executor, ExecutorError, ExecutorSetEnvsError, ExecutorValidationError,
 };
-use nix::sys::wait::{WaitStatus, waitpid};
-use nix::unistd::{Gid, Uid, chown};
+use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+use nix::unistd::{Gid, Pid, Uid, chown, setgid, setgroups, setuid};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
@@ -27,15 +26,17 @@ use std::fs::File;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus, Stdio};
+use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::warn;
 use uuid::Uuid;
 
 const BUILD_USER_UID: u32 = 1;
 const BUILD_USER_GID: u32 = 1;
-const ROOT_UID: u32 = 0;
-const ROOT_GID: u32 = 0;
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 const ROOT_STEP_CAPABILITIES: &[&str] = &[
     "CAP_CHOWN",
@@ -44,6 +45,7 @@ const ROOT_STEP_CAPABILITIES: &[&str] = &[
     "CAP_FOWNER",
     "CAP_FSETID",
 ];
+const RUNNER_EXTRA_CAPABILITIES: &[&str] = &["CAP_SETGID", "CAP_SETUID"];
 
 /// User identity used for a sandbox step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,13 +140,15 @@ pub fn run_sandbox_build(
     preflight_ownership_runtime(idmap)?;
 
     let prepared = PreparedSandbox::create(&config, idmap)?;
+    let runner = SandboxRunnerExecutor::new(&config, &prepared.runtime_files)?;
     let mut lifecycle = SandboxLifecycle::start(
         prepared.bundle,
-        prepared.output_hash_path,
+        runner,
+        prepared.runtime_files,
         prepared.host_cgroup_path,
         &config.state_dir,
     )?;
-    let result = run_sandbox_build_inner(&mut lifecycle, &config);
+    let result = lifecycle.wait_for_outcome();
     let cleanup = lifecycle.cleanup();
 
     match (result, cleanup) {
@@ -159,24 +163,6 @@ pub fn run_sandbox_build(
             Err(error)
         }
     }
-}
-
-fn run_sandbox_build_inner(
-    lifecycle: &mut SandboxLifecycle,
-    config: &SandboxBuildConfig,
-) -> Result<SandboxBuildOutcome, RuntimeError> {
-    lifecycle.exec_prepare(&config.inputs)?;
-
-    let mut reports = Vec::new();
-    for step in &config.steps {
-        reports.push(lifecycle.exec_step(step)?);
-    }
-
-    let object_hash = lifecycle.hash_output()?;
-    Ok(SandboxBuildOutcome {
-        object_hash,
-        steps: reports,
-    })
 }
 
 fn validate_config(config: &SandboxBuildConfig) -> Result<(), RuntimeError> {
@@ -206,7 +192,7 @@ fn validate_config(config: &SandboxBuildConfig) -> Result<(), RuntimeError> {
 
 struct PreparedSandbox {
     bundle: Bundle,
-    output_hash_path: PathBuf,
+    runtime_files: SandboxRuntimeFiles,
     /// Real `/sys/fs/cgroup/...` directory we created and own; must be
     /// cleaned up after the sandbox shuts down.
     host_cgroup_path: PathBuf,
@@ -215,20 +201,20 @@ struct PreparedSandbox {
 impl PreparedSandbox {
     fn create(config: &SandboxBuildConfig, idmap: &MbuildIdmap) -> Result<Self, RuntimeError> {
         let mut dirs = SandboxDirs::create(&config.workspace)?;
-        let host_files = SandboxHostFiles::create(&dirs.host_files)?;
+        let runtime_files = SandboxRuntimeFiles::create(&dirs.host_files)?;
         let cgroup = prepare_sandbox_cgroup()?;
         let spec = build_sandbox_spec(
             config,
             idmap,
             &mut dirs,
-            &host_files,
+            &runtime_files,
             Some(cgroup.container_path),
         )?;
         let bundle = create_bundle(&config.workspace, &spec)?;
         populate_bundle_rootfs_skeleton(bundle.rootfs_dir(), &config.rootfs)?;
         Ok(Self {
             bundle,
-            output_hash_path: host_files.output_hash,
+            runtime_files,
             host_cgroup_path: cgroup.host_path,
         })
     }
@@ -297,34 +283,38 @@ impl SandboxDirs {
     }
 }
 
-struct SandboxHostFiles {
+struct SandboxRuntimeFiles {
     hosts: PathBuf,
     resolv_conf: PathBuf,
-    output_hash: PathBuf,
+    success_report: PathBuf,
+    failure_report: PathBuf,
 }
 
-impl SandboxHostFiles {
+impl SandboxRuntimeFiles {
     fn create(root: &Path) -> Result<Self, RuntimeError> {
         let hosts = root.join("hosts");
         let resolv_conf = root.join("resolv.conf");
-        let output_hash = root.join("output-hash.json");
+        let success_report = root.join("sandbox-success.json");
+        let failure_report = root.join("sandbox-failure.json");
         fs::write(&hosts, "127.0.0.1 localhost mbuild\n::1 localhost mbuild\n")?;
         fs::write(&resolv_conf, "")?;
-        File::create(&output_hash)?;
+        File::create(&success_report)?;
+        File::create(&failure_report)?;
         Ok(Self {
             hosts,
             resolv_conf,
-            output_hash,
+            success_report,
+            failure_report,
         })
     }
 }
 
 struct SandboxLifecycle {
     container: libcontainer::container::Container,
-    container_id: String,
-    state_dir: PathBuf,
+    init_pid: Pid,
     _bundle: Bundle,
-    output_hash_path: PathBuf,
+    success_report_path: PathBuf,
+    failure_report_path: PathBuf,
     /// Real `/sys/fs/cgroup/...` directory created by prepare_sandbox_cgroup;
     /// removed by Drop (and explicit cleanup) to avoid orphan cgroup leaves
     /// when the sandbox finishes — gracefully or via panic/unwind.
@@ -337,7 +327,8 @@ struct SandboxLifecycle {
 impl SandboxLifecycle {
     fn start(
         bundle: Bundle,
-        output_hash_path: PathBuf,
+        runner: SandboxRunnerExecutor,
+        runtime_files: SandboxRuntimeFiles,
         host_cgroup_path: PathBuf,
         state_dir: &Path,
     ) -> Result<Self, RuntimeError> {
@@ -350,157 +341,45 @@ impl SandboxLifecycle {
         // user-delegated slice. If a future change drops the absolute path,
         // libcontainer would fall back to the systemd cgroup manager.
         let mut container = ContainerBuilder::new(container_id.clone(), SyscallType::Linux)
-            .with_executor(KeepAliveExecutor)
+            .with_executor(runner)
             .with_root_path(state_dir)
             .map_err(libcontainer_error)?
             .as_init(bundle.dir())
             .with_systemd(false)
-            .with_detach(true)
+            .with_detach(false)
             .build()
             .map_err(libcontainer_error)?;
+        let init_pid = container.pid().ok_or_else(|| {
+            RuntimeError::Libcontainer("libcontainer did not expose sandbox init pid".to_string())
+        })?;
         container.start().map_err(libcontainer_error)?;
 
         Ok(Self {
             container,
-            container_id,
-            state_dir: state_dir.to_path_buf(),
+            init_pid,
             _bundle: bundle,
-            output_hash_path,
+            success_report_path: runtime_files.success_report,
+            failure_report_path: runtime_files.failure_report,
             host_cgroup_path,
             cleaned_up: false,
         })
     }
 
-    fn exec_prepare(&self, inputs: &[SandboxInput]) -> Result<(), RuntimeError> {
-        let mut paths = vec![PathBuf::from("/__mbuild/build")];
-        paths.extend(
-            inputs
-                .iter()
-                .filter(|input| input.host_path.is_dir())
-                .map(|input| input.mount_path.clone()),
-        );
-        self.exec_custom(
-            "sandbox-prepare",
-            PrepareExecutor {
-                paths,
-                uid: BUILD_USER_UID,
-                gid: BUILD_USER_GID,
-            },
-            ROOT_UID,
-            ROOT_GID,
-            root_capabilities(),
-            None,
-        )
-        .map(|_| ())
-    }
-
-    fn exec_step(&self, step: &SandboxStep) -> Result<SandboxStepReport, RuntimeError> {
-        let start = Instant::now();
-        let (uid, gid, capabilities) = match step.run_as {
-            SandboxRunAs::BuildUser => (BUILD_USER_UID, BUILD_USER_GID, Vec::new()),
-            SandboxRunAs::Root => (ROOT_UID, ROOT_GID, root_capabilities()),
-        };
-        let exit_code = self.exec_default(
-            &step.name,
-            uid,
-            gid,
-            capabilities,
-            Some(step.cwd.clone()),
-            step.argv.clone(),
-            step_env(step),
-            Some((&step.stdout_path, &step.stderr_path)),
-        )?;
-        Ok(SandboxStepReport {
-            name: step.name.clone(),
-            run_as: match step.run_as {
-                SandboxRunAs::BuildUser => "build-user".to_string(),
-                SandboxRunAs::Root => "root".to_string(),
-            },
-            exit_code,
-            duration_ms: start.elapsed().as_millis(),
-            stdout_path: step.stdout_path.clone(),
-            stderr_path: step.stderr_path.clone(),
-        })
-    }
-
-    fn hash_output(&self) -> Result<ObjectHash, RuntimeError> {
-        self.exec_custom(
-            "sandbox-hash-output",
-            HashExecutor {
-                path: PathBuf::from("/__mbuild/out"),
-                result_path: PathBuf::from("/__mbuild/runtime/output-hash.json"),
-            },
-            ROOT_UID,
-            ROOT_GID,
-            root_capabilities(),
-            None,
-        )?;
-        read_executor_result_report(&self.output_hash_path)?.ok_or_else(|| {
-            RuntimeError::Executor(format!(
-                "sandbox output hash report '{}' is empty",
-                self.output_hash_path.display()
-            ))
-        })
-    }
-
-    fn exec_custom<E>(
-        &self,
-        label: &str,
-        executor: E,
-        uid: u32,
-        gid: u32,
-        capabilities: Vec<String>,
-        cwd: Option<PathBuf>,
-    ) -> Result<i32, RuntimeError>
-    where
-        E: Executor + 'static,
-    {
-        let builder = ContainerBuilder::new(self.container_id.clone(), SyscallType::Linux)
-            .with_executor(executor)
-            .with_root_path(&self.state_dir)
-            .map_err(libcontainer_error)?
-            .as_tenant()
-            .with_container_args(vec![label.to_string()])
-            .with_user(Some(uid))
-            .with_group(Some(gid))
-            .with_no_new_privs(true)
-            .with_capabilities(capabilities)
-            .with_cwd(cwd)
-            .with_detach(false);
-
-        let pid = builder.build().map_err(libcontainer_error)?;
-        wait_for_tenant(label, pid)
-    }
-
-    fn exec_default(
-        &self,
-        label: &str,
-        uid: u32,
-        gid: u32,
-        capabilities: Vec<String>,
-        cwd: Option<PathBuf>,
-        argv: Vec<String>,
-        env: HashMap<String, String>,
-        logs: Option<(&Path, &Path)>,
-    ) -> Result<i32, RuntimeError> {
-        let mut base = ContainerBuilder::new(self.container_id.clone(), SyscallType::Linux)
-            .with_root_path(&self.state_dir)
-            .map_err(libcontainer_error)?;
-        if let Some((stdout, stderr)) = logs {
-            base = with_stdio_logs(base, stdout, stderr)?;
+    fn wait_for_outcome(&self) -> Result<SandboxBuildOutcome, RuntimeError> {
+        match waitpid(self.init_pid, None).map_err(libcontainer_error)? {
+            WaitStatus::Exited(_, 0) => read_sandbox_success_report(&self.success_report_path),
+            WaitStatus::Exited(_, code) => Err(read_sandbox_failure_report(
+                &self.failure_report_path,
+                format!("sandbox runner exited with status {code}"),
+            )),
+            WaitStatus::Signaled(_, signal, _) => Err(read_sandbox_failure_report(
+                &self.failure_report_path,
+                format!("sandbox runner was killed by signal {signal}"),
+            )),
+            status => Err(RuntimeError::Executor(format!(
+                "sandbox runner ended with wait status {status:?}"
+            ))),
         }
-        let builder = base
-            .as_tenant()
-            .with_container_args(argv)
-            .with_env(env)
-            .with_cwd(cwd)
-            .with_user(Some(uid))
-            .with_group(Some(gid))
-            .with_no_new_privs(true)
-            .with_capabilities(capabilities)
-            .with_detach(false);
-        let pid = builder.build().map_err(libcontainer_error)?;
-        wait_for_tenant(label, pid)
     }
 
     fn cleanup(&mut self) -> Result<(), RuntimeError> {
@@ -534,19 +413,14 @@ impl Drop for SandboxLifecycle {
             return;
         }
         // Best-effort cleanup for unwind/panic paths where cleanup() was
-        // never called explicitly. Without this, the init container would
-        // outlive mbuild and stay parked in pause(), leaving a stuck cgroup
-        // (with a pid 1 zombie that no one reaps when the user systemd
-        // session is degraded).
+        // never called explicitly. Without this, the runner init process and
+        // its children could outlive mbuild and leave a stuck cgroup when the
+        // user systemd session is degraded.
         if let Err(error) = self.container.kill(nix::sys::signal::SIGKILL, true) {
-            warn!(
-                "failed to SIGKILL sandbox container during drop: {error}"
-            );
+            warn!("failed to SIGKILL sandbox container during drop: {error}");
         }
         if let Err(error) = self.container.delete(true) {
-            warn!(
-                "failed to delete sandbox container during drop: {error}"
-            );
+            warn!("failed to delete sandbox container during drop: {error}");
         }
         if let Err(error) = fs::remove_dir(&self.host_cgroup_path)
             && error.kind() != io::ErrorKind::NotFound
@@ -559,30 +433,369 @@ impl Drop for SandboxLifecycle {
     }
 }
 
-fn with_stdio_logs(
-    builder: ContainerBuilder,
-    stdout: &Path,
-    stderr: &Path,
-) -> Result<ContainerBuilder, RuntimeError> {
-    let stdout = File::create(stdout)?;
-    let stderr = File::create(stderr)?;
-    Ok(builder.with_stdout(stdout).with_stderr(stderr))
+#[derive(Clone)]
+struct SandboxRunnerExecutor {
+    prepare_paths: Vec<PathBuf>,
+    steps: Vec<SandboxRunnerStep>,
+    success_report: Arc<File>,
+    failure_report: Arc<File>,
 }
 
-fn wait_for_tenant(label: &str, pid: nix::unistd::Pid) -> Result<i32, RuntimeError> {
-    match waitpid(pid, None).map_err(libcontainer_error)? {
-        WaitStatus::Exited(_, code) => {
-            if code == 0 {
-                Ok(code)
-            } else {
-                Err(RuntimeError::Executor(format!(
-                    "sandbox step '{label}' failed with exit status {code}"
-                )))
-            }
+impl SandboxRunnerExecutor {
+    fn new(
+        config: &SandboxBuildConfig,
+        runtime_files: &SandboxRuntimeFiles,
+    ) -> Result<Self, RuntimeError> {
+        let mut prepare_paths = vec![PathBuf::from("/__mbuild/build")];
+        prepare_paths.extend(
+            config
+                .inputs
+                .iter()
+                .filter(|input| input.host_path.is_dir())
+                .map(|input| input.mount_path.clone()),
+        );
+        let steps = config
+            .steps
+            .iter()
+            .map(SandboxRunnerStep::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            prepare_paths,
+            steps,
+            success_report: Arc::new(File::create(&runtime_files.success_report)?),
+            failure_report: Arc::new(File::create(&runtime_files.failure_report)?),
+        })
+    }
+
+    fn run(&self) -> Result<SandboxBuildOutcome, SandboxRunnerFailureReport> {
+        self.prepare()?;
+
+        let mut reports = Vec::new();
+        for step in &self.steps {
+            reports.push(step.run()?);
         }
-        status => Err(RuntimeError::Executor(format!(
-            "sandbox step '{label}' ended with wait status {status:?}"
-        ))),
+
+        let object_hash = hash_path(Path::new("/__mbuild/out")).map_err(|error| {
+            SandboxRunnerFailureReport::runtime("sandbox-hash-output", error.to_string())
+        })?;
+        Ok(SandboxBuildOutcome {
+            object_hash,
+            steps: reports,
+        })
+    }
+
+    fn prepare(&self) -> Result<(), SandboxRunnerFailureReport> {
+        if let Err(error) = fs::remove_file("/dev/tty")
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            return Err(SandboxRunnerFailureReport::runtime(
+                "sandbox-prepare",
+                error.to_string(),
+            ));
+        }
+        for path in &self.prepare_paths {
+            fs::create_dir_all(path).map_err(|error| {
+                SandboxRunnerFailureReport::runtime("sandbox-prepare", error.to_string())
+            })?;
+            chown_tree(path, BUILD_USER_UID, BUILD_USER_GID).map_err(|error| {
+                SandboxRunnerFailureReport::runtime("sandbox-prepare", error.to_string())
+            })?;
+        }
+        Ok(())
+    }
+
+    fn write_success(&self, outcome: &SandboxBuildOutcome) -> Result<(), ExecutorError> {
+        let report = SandboxRunnerSuccessReport {
+            object_hash: outcome.object_hash.to_string(),
+            steps: outcome.steps.clone(),
+        };
+        serde_json::to_writer(&*self.success_report, &report).map_err(executor_error)
+    }
+
+    fn write_failure(&self, report: &SandboxRunnerFailureReport) -> Result<(), ExecutorError> {
+        serde_json::to_writer(&*self.failure_report, report).map_err(executor_error)
+    }
+}
+
+impl Executor for SandboxRunnerExecutor {
+    fn setup_envs(&self, _: HashMap<String, String>) -> Result<(), ExecutorSetEnvsError> {
+        Ok(())
+    }
+
+    fn validate(&self, _: &Spec) -> Result<(), ExecutorValidationError> {
+        Ok(())
+    }
+
+    fn exec(&self, _: &Spec) -> Result<(), ExecutorError> {
+        let exit_code = match self.run() {
+            Ok(outcome) => {
+                self.write_success(&outcome)?;
+                0
+            }
+            Err(report) => {
+                self.write_failure(&report)?;
+                1
+            }
+        };
+        terminate_remaining_children();
+        std::process::exit(exit_code);
+    }
+}
+
+#[derive(Clone)]
+struct SandboxRunnerStep {
+    name: String,
+    run_as: SandboxRunAs,
+    cwd: PathBuf,
+    argv: Vec<String>,
+    env: HashMap<String, String>,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+    stdout: Arc<File>,
+    stderr: Arc<File>,
+}
+
+impl SandboxRunnerStep {
+    fn new(step: &SandboxStep) -> Result<Self, RuntimeError> {
+        Ok(Self {
+            name: step.name.clone(),
+            run_as: step.run_as,
+            cwd: step.cwd.clone(),
+            argv: step.argv.clone(),
+            env: step_env(step),
+            stdout_path: step.stdout_path.clone(),
+            stderr_path: step.stderr_path.clone(),
+            stdout: Arc::new(File::create(&step.stdout_path)?),
+            stderr: Arc::new(File::create(&step.stderr_path)?),
+        })
+    }
+
+    fn run(&self) -> Result<SandboxStepReport, SandboxRunnerFailureReport> {
+        let executable = self.argv.first().ok_or_else(|| {
+            SandboxRunnerFailureReport::step_runtime(
+                self,
+                "step argument vector must contain at least one element".to_string(),
+                0,
+            )
+        })?;
+        let start = Instant::now();
+        let stdout = self.stdout.try_clone().map_err(|error| {
+            SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
+        })?;
+        let stderr = self.stderr.try_clone().map_err(|error| {
+            SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
+        })?;
+
+        let mut command = Command::new(executable);
+        command
+            .args(&self.argv[1..])
+            .current_dir(&self.cwd)
+            .env_clear()
+            .envs(&self.env)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+        let run_as = self.run_as;
+        unsafe {
+            command.pre_exec(move || apply_step_credentials(run_as));
+        }
+
+        let status = command.status().map_err(|error| {
+            SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
+        })?;
+        reap_finished_children();
+        let duration_ms = elapsed_ms(start);
+        if status.success() {
+            Ok(SandboxStepReport {
+                name: self.name.clone(),
+                run_as: self.run_as.as_str().to_string(),
+                exit_code: status.code().unwrap_or(0),
+                duration_ms,
+                stdout_path: self.stdout_path.clone(),
+                stderr_path: self.stderr_path.clone(),
+            })
+        } else {
+            Err(SandboxRunnerFailureReport::failed_step(
+                self,
+                &status,
+                duration_ms,
+            ))
+        }
+    }
+}
+
+impl SandboxRunAs {
+    fn as_str(self) -> &'static str {
+        match self {
+            SandboxRunAs::BuildUser => "build-user",
+            SandboxRunAs::Root => "root",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SandboxRunnerSuccessReport {
+    object_hash: String,
+    steps: Vec<SandboxStepReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SandboxRunnerFailureReport {
+    label: String,
+    message: String,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    duration_ms: Option<u128>,
+    stdout_path: Option<PathBuf>,
+    stderr_path: Option<PathBuf>,
+}
+
+impl SandboxRunnerFailureReport {
+    fn runtime(label: &str, message: String) -> Self {
+        Self {
+            label: label.to_string(),
+            message,
+            exit_code: None,
+            signal: None,
+            duration_ms: None,
+            stdout_path: None,
+            stderr_path: None,
+        }
+    }
+
+    fn step_runtime(step: &SandboxRunnerStep, message: String, duration_ms: u128) -> Self {
+        Self {
+            label: step.name.clone(),
+            message,
+            exit_code: None,
+            signal: None,
+            duration_ms: Some(duration_ms),
+            stdout_path: Some(step.stdout_path.clone()),
+            stderr_path: Some(step.stderr_path.clone()),
+        }
+    }
+
+    fn failed_step(step: &SandboxRunnerStep, status: &ExitStatus, duration_ms: u128) -> Self {
+        let (message, exit_code, signal) = if let Some(code) = status.code() {
+            (
+                format!(
+                    "sandbox step '{}' failed with exit status {code}",
+                    step.name
+                ),
+                Some(code),
+                None,
+            )
+        } else if let Some(signal) = status.signal() {
+            (
+                format!("sandbox step '{}' was killed by signal {signal}", step.name),
+                None,
+                Some(signal),
+            )
+        } else {
+            (
+                format!("sandbox step '{}' ended with status {status:?}", step.name),
+                None,
+                None,
+            )
+        };
+        Self {
+            label: step.name.clone(),
+            message,
+            exit_code,
+            signal,
+            duration_ms: Some(duration_ms),
+            stdout_path: Some(step.stdout_path.clone()),
+            stderr_path: Some(step.stderr_path.clone()),
+        }
+    }
+
+    fn to_error_message(&self) -> String {
+        let mut message = format!("{}: {}", self.label, self.message);
+        if let Some(code) = self.exit_code {
+            message.push_str(&format!("; exit_status={code}"));
+        }
+        if let Some(signal) = self.signal {
+            message.push_str(&format!("; signal={signal}"));
+        }
+        if let Some(duration_ms) = self.duration_ms {
+            message.push_str(&format!("; duration_ms={duration_ms}"));
+        }
+        if let Some(stdout) = &self.stdout_path {
+            message.push_str(&format!("; stdout={}", stdout.display()));
+        }
+        if let Some(stderr) = &self.stderr_path {
+            message.push_str(&format!("; stderr={}", stderr.display()));
+        }
+        message
+    }
+}
+
+fn read_sandbox_success_report(path: &Path) -> Result<SandboxBuildOutcome, RuntimeError> {
+    let bytes = fs::read(path)?;
+    if bytes.is_empty() {
+        return Err(RuntimeError::Executor(format!(
+            "sandbox success report '{}' is empty",
+            path.display()
+        )));
+    }
+    let report = serde_json::from_slice::<SandboxRunnerSuccessReport>(&bytes).map_err(|error| {
+        RuntimeError::Executor(format!(
+            "failed to parse sandbox success report '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let object_hash = ObjectHash::from_str(&report.object_hash).map_err(|error| {
+        RuntimeError::Executor(format!(
+            "failed to parse sandbox output hash '{}': {error}",
+            path.display()
+        ))
+    })?;
+    Ok(SandboxBuildOutcome {
+        object_hash,
+        steps: report.steps,
+    })
+}
+
+fn read_sandbox_failure_report(path: &Path, fallback: String) -> RuntimeError {
+    match fs::read(path) {
+        Ok(bytes) if bytes.is_empty() => RuntimeError::Executor(fallback),
+        Ok(bytes) => match serde_json::from_slice::<SandboxRunnerFailureReport>(&bytes) {
+            Ok(report) => RuntimeError::Executor(report.to_error_message()),
+            Err(error) => RuntimeError::Executor(format!(
+                "{fallback}; failed to parse sandbox failure report '{}': {error}",
+                path.display()
+            )),
+        },
+        Err(error) => RuntimeError::Executor(format!(
+            "{fallback}; failed to read sandbox failure report '{}': {error}",
+            path.display()
+        )),
+    }
+}
+
+fn elapsed_ms(start: Instant) -> u128 {
+    start.elapsed().as_millis()
+}
+
+fn terminate_remaining_children() {
+    unsafe {
+        libc::kill(-1, libc::SIGTERM);
+    }
+    reap_finished_children();
+    unsafe {
+        libc::kill(-1, libc::SIGKILL);
+    }
+    reap_finished_children();
+}
+
+fn reap_finished_children() {
+    loop {
+        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => break,
+            Ok(_) => continue,
+            Err(nix::errno::Errno::ECHILD) => break,
+            Err(_) => break,
+        }
     }
 }
 
@@ -590,7 +803,7 @@ fn build_sandbox_spec(
     config: &SandboxBuildConfig,
     idmap: &MbuildIdmap,
     dirs: &mut SandboxDirs,
-    host_files: &SandboxHostFiles,
+    host_files: &SandboxRuntimeFiles,
     cgroup_path: Option<PathBuf>,
 ) -> Result<Spec, RuntimeError> {
     let uid_mappings = vec![
@@ -604,13 +817,9 @@ fn build_sandbox_spec(
 
     let mut linux = build_oci(
         LinuxBuilder::default()
-            // Cgroup namespace must be unshared by the init container so that
-            // tenant exec joins the init's own cgroup namespace rather than
-            // the host's (libcontainer's tenant_builder copies all
-            // NAMESPACE_TYPES from /proc/<init-pid>/ns/* unconditionally; if
-            // we don't unshare cgroup, init keeps the host cgroup ns and
-            // setns into it from the tenant's intermediate process fails
-            // with EPERM in rootless mode).
+            // Cgroup namespace is unshared so the sandbox init-runner sees a
+            // container-local cgroup view while libcontainer still places the
+            // process in the per-sandbox absolute cgroup path prepared below.
             .namespaces(vec![
                 namespace(LinuxNamespaceType::User)?,
                 namespace(LinuxNamespaceType::Mount)?,
@@ -640,11 +849,6 @@ fn build_sandbox_spec(
         bind_mount(&config.out_dir, Path::new("/__mbuild/out"), false)?,
         bind_mount(&host_files.hosts, Path::new("/etc/hosts"), true)?,
         bind_mount(&host_files.resolv_conf, Path::new("/etc/resolv.conf"), true)?,
-        bind_mount(
-            &host_files.output_hash,
-            Path::new("/__mbuild/runtime/output-hash.json"),
-            false,
-        )?,
     ]);
 
     for input in &config.inputs {
@@ -679,7 +883,7 @@ fn build_sandbox_spec(
                     )?)
                     .args(vec!["mbuild-sandbox-init".to_string()])
                     .cwd("/")
-                    .capabilities(root_linux_capabilities()?)
+                    .capabilities(runner_linux_capabilities()?)
                     .no_new_privileges(true)
                     .build(),
             )?)
@@ -899,16 +1103,11 @@ fn linux_id_mapping(
     )
 }
 
-fn root_linux_capabilities() -> Result<LinuxCapabilities, RuntimeError> {
-    let caps = [
-        Capability::Chown,
-        Capability::DacOverride,
-        Capability::DacReadSearch,
-        Capability::Fowner,
-        Capability::Fsetid,
-    ]
-    .into_iter()
-    .collect::<Capabilities>();
+fn runner_linux_capabilities() -> Result<LinuxCapabilities, RuntimeError> {
+    let caps = runner_capability_names()
+        .into_iter()
+        .map(oci_capability_from_name)
+        .collect::<Result<Capabilities, _>>()?;
 
     build_oci(
         LinuxCapabilitiesBuilder::default()
@@ -921,11 +1120,67 @@ fn root_linux_capabilities() -> Result<LinuxCapabilities, RuntimeError> {
     )
 }
 
-fn root_capabilities() -> Vec<String> {
+fn runner_capability_names() -> Vec<&'static str> {
     ROOT_STEP_CAPABILITIES
         .iter()
-        .map(|capability| capability.to_string())
+        .chain(RUNNER_EXTRA_CAPABILITIES.iter())
+        .copied()
         .collect()
+}
+
+fn oci_capability_from_name(name: &str) -> Result<Capability, RuntimeError> {
+    match name {
+        "CAP_CHOWN" => Ok(Capability::Chown),
+        "CAP_DAC_OVERRIDE" => Ok(Capability::DacOverride),
+        "CAP_DAC_READ_SEARCH" => Ok(Capability::DacReadSearch),
+        "CAP_FOWNER" => Ok(Capability::Fowner),
+        "CAP_FSETID" => Ok(Capability::Fsetid),
+        "CAP_SETGID" => Ok(Capability::Setgid),
+        "CAP_SETUID" => Ok(Capability::Setuid),
+        _ => Err(RuntimeError::InvalidInput(format!(
+            "unsupported sandbox capability '{name}'"
+        ))),
+    }
+}
+
+fn root_step_caps() -> caps::CapsHashSet {
+    [
+        caps::Capability::CAP_CHOWN,
+        caps::Capability::CAP_DAC_OVERRIDE,
+        caps::Capability::CAP_DAC_READ_SEARCH,
+        caps::Capability::CAP_FOWNER,
+        caps::Capability::CAP_FSETID,
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn empty_caps() -> caps::CapsHashSet {
+    caps::CapsHashSet::new()
+}
+
+fn set_process_caps(cap_set: &caps::CapsHashSet) -> io::Result<()> {
+    // Ambient must be cleared before narrowing the permitted/inheritable sets.
+    caps::clear(None, caps::CapSet::Ambient).map_err(io::Error::other)?;
+    caps::set(None, caps::CapSet::Inheritable, cap_set).map_err(io::Error::other)?;
+    caps::set(None, caps::CapSet::Permitted, cap_set).map_err(io::Error::other)?;
+    caps::set(None, caps::CapSet::Effective, cap_set).map_err(io::Error::other)?;
+    if !cap_set.is_empty() {
+        caps::set(None, caps::CapSet::Ambient, cap_set).map_err(io::Error::other)?;
+    }
+    Ok(())
+}
+
+fn apply_step_credentials(run_as: SandboxRunAs) -> io::Result<()> {
+    match run_as {
+        SandboxRunAs::BuildUser => {
+            setgroups(&[]).map_err(io::Error::other)?;
+            setgid(Gid::from_raw(BUILD_USER_GID)).map_err(io::Error::other)?;
+            setuid(Uid::from_raw(BUILD_USER_UID)).map_err(io::Error::other)?;
+            set_process_caps(&empty_caps())
+        }
+        SandboxRunAs::Root => set_process_caps(&root_step_caps()),
+    }
 }
 
 fn step_env(step: &SandboxStep) -> HashMap<String, String> {
@@ -949,121 +1204,6 @@ fn step_env(step: &SandboxStep) -> HashMap<String, String> {
     ]);
     env.extend(step.env.clone());
     env
-}
-
-// Async-signal-safe handler: just exit. We are the pid namespace's init
-// process; once we exit, the kernel terminates the rest of the namespace
-// and libcontainer's cleanup observes the child status normally.
-extern "C" fn sandbox_init_signal_exit(_: libc::c_int) {
-    unsafe {
-        libc::_exit(0);
-    }
-}
-
-fn install_sandbox_init_signal_handlers() {
-    let mut sa: libc::sigaction = unsafe { std::mem::zeroed() };
-    // sa_sigaction is `usize` in libc, but assigning a function item directly
-    // triggers Rust's `function_casts_as_integer` lint. Going through
-    // `*const ()` is the recommended path.
-    sa.sa_sigaction = sandbox_init_signal_exit as *const () as usize;
-    sa.sa_flags = libc::SA_RESTART;
-    unsafe {
-        libc::sigemptyset(&mut sa.sa_mask);
-        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
-        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
-    }
-}
-
-#[derive(Clone)]
-struct KeepAliveExecutor;
-
-impl Executor for KeepAliveExecutor {
-    fn setup_envs(&self, _: HashMap<String, String>) -> Result<(), ExecutorSetEnvsError> {
-        Ok(())
-    }
-
-    fn validate(&self, _: &Spec) -> Result<(), ExecutorValidationError> {
-        Ok(())
-    }
-
-    fn exec(&self, _: &Spec) -> Result<(), ExecutorError> {
-        // No set_dumpable here: dumpable=true is needed in the intermediate
-        // process so the parent can write uid/gid maps into a new user
-        // namespace (see libcontainer's container_intermediate_process), but
-        // by the time the init-process executor runs, the user namespace
-        // setup has already completed and the main_sender is closed. Calling
-        // prctl(PR_SET_DUMPABLE, 1) here is unnecessary and on some kernels
-        // returns EBUSY in this state, which would surface as
-        // ExecutorError::Other("Device or resource busy ...") and abort the
-        // sandbox before it ever reaches sandbox-prepare.
-
-        // Install explicit handlers for SIGTERM/SIGINT. This process is pid 1
-        // in the container's pid namespace; the kernel will silently drop any
-        // signal that has the default disposition for the namespace's init
-        // process (other than SIGKILL/SIGSTOP). Without these handlers, sending
-        // SIGTERM via container.kill() would not terminate the sandbox and
-        // leaves the init blocked in pause() forever — the failure mode that
-        // caused orphan sandboxes to outlive a crashed mbuild.
-        install_sandbox_init_signal_handlers();
-
-        loop {
-            unsafe {
-                libc::pause();
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-struct PrepareExecutor {
-    paths: Vec<PathBuf>,
-    uid: u32,
-    gid: u32,
-}
-
-impl Executor for PrepareExecutor {
-    fn setup_envs(&self, _: HashMap<String, String>) -> Result<(), ExecutorSetEnvsError> {
-        Ok(())
-    }
-
-    fn validate(&self, _: &Spec) -> Result<(), ExecutorValidationError> {
-        Ok(())
-    }
-
-    fn exec(&self, _: &Spec) -> Result<(), ExecutorError> {
-        if let Err(error) = fs::remove_file("/dev/tty")
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            return Err(executor_error(error));
-        }
-        for path in &self.paths {
-            fs::create_dir_all(path).map_err(executor_error)?;
-            chown_tree(path, self.uid, self.gid).map_err(executor_error)?;
-        }
-        std::process::exit(0)
-    }
-}
-
-#[derive(Clone)]
-struct HashExecutor {
-    path: PathBuf,
-    result_path: PathBuf,
-}
-
-impl Executor for HashExecutor {
-    fn setup_envs(&self, _: HashMap<String, String>) -> Result<(), ExecutorSetEnvsError> {
-        Ok(())
-    }
-
-    fn validate(&self, _: &Spec) -> Result<(), ExecutorValidationError> {
-        Ok(())
-    }
-
-    fn exec(&self, _: &Spec) -> Result<(), ExecutorError> {
-        let object_hash = hash_path(&self.path).map_err(executor_error)?;
-        write_executor_result_report(&self.result_path, object_hash)?;
-        std::process::exit(0)
-    }
 }
 
 fn chown_tree(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
@@ -1156,7 +1296,7 @@ mod tests {
             steps: Vec::new(),
         };
         let mut dirs = SandboxDirs::create(&workspace).unwrap();
-        let host_files = SandboxHostFiles::create(&dirs.host_files).unwrap();
+        let host_files = SandboxRuntimeFiles::create(&dirs.host_files).unwrap();
         let idmap = MbuildIdmap::for_tests(1000, 1001, 100000, 65536, 200000, 65536);
 
         let cgroup_path = PathBuf::from("/user.slice/mbuild-test.scope");
@@ -1210,6 +1350,25 @@ mod tests {
                 .any(|mount| mount.destination() == Path::new("/__mbuild/out")
                     && mount.source().as_deref() == Some(out.as_path()))
         );
+        assert!(
+            !mounts
+                .iter()
+                .any(|mount| mount.destination()
+                    == Path::new("/__mbuild/runtime/output-hash.json"))
+        );
+        let capabilities = spec
+            .process()
+            .as_ref()
+            .unwrap()
+            .capabilities()
+            .as_ref()
+            .unwrap()
+            .effective()
+            .as_ref()
+            .unwrap();
+        assert!(capabilities.contains(&Capability::Setuid));
+        assert!(capabilities.contains(&Capability::Setgid));
+        assert!(capabilities.contains(&Capability::Chown));
     }
 
     #[test]
@@ -1231,5 +1390,54 @@ mod tests {
         );
         assert!(bundle.join("run").is_dir());
         assert!(!bundle.join("usr").exists());
+    }
+
+    #[test]
+    fn sandbox_failure_report_message_includes_step_status_and_logs() {
+        let report = SandboxRunnerFailureReport {
+            label: "compile".to_string(),
+            message: "sandbox step 'compile' failed with exit status 2".to_string(),
+            exit_code: Some(2),
+            signal: None,
+            duration_ms: Some(123),
+            stdout_path: Some(PathBuf::from("/tmp/compile.stdout")),
+            stderr_path: Some(PathBuf::from("/tmp/compile.stderr")),
+        };
+
+        let message = report.to_error_message();
+
+        assert!(message.contains("compile"));
+        assert!(message.contains("exit_status=2"));
+        assert!(message.contains("duration_ms=123"));
+        assert!(message.contains("stdout=/tmp/compile.stdout"));
+        assert!(message.contains("stderr=/tmp/compile.stderr"));
+    }
+
+    #[test]
+    fn sandbox_success_report_round_trips_outcome() {
+        let temp = tempdir().unwrap();
+        let out = temp.path().join("out");
+        fs::create_dir(&out).unwrap();
+        fs::write(out.join("file"), "contents").unwrap();
+        let object_hash = hash_path(&out).unwrap();
+        let path = temp.path().join("success.json");
+        let report = SandboxRunnerSuccessReport {
+            object_hash: object_hash.to_string(),
+            steps: vec![SandboxStepReport {
+                name: "install".to_string(),
+                run_as: "build-user".to_string(),
+                exit_code: 0,
+                duration_ms: 7,
+                stdout_path: PathBuf::from("/tmp/install.stdout"),
+                stderr_path: PathBuf::from("/tmp/install.stderr"),
+            }],
+        };
+        fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+
+        let outcome = read_sandbox_success_report(&path).unwrap();
+
+        assert_eq!(outcome.object_hash, object_hash);
+        assert_eq!(outcome.steps.len(), 1);
+        assert_eq!(outcome.steps[0].name, "install");
     }
 }
