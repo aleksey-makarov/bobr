@@ -6,7 +6,7 @@ use mbuild_core::{
     compute_reuse_key, fsutil, load_build_handle, load_reuse_record, materialize_build,
     object_path,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -137,6 +137,7 @@ pub(crate) fn execute_builder_node(
         "executing builder",
     );
     check_cancelled(&cancellation)?;
+    let cleanup = TempCleanupContext::new(layout, builder.spec().tag, build_key);
     let mut context = build_context(
         layout,
         builder.spec().tag,
@@ -160,11 +161,11 @@ pub(crate) fn execute_builder_node(
                 error.to_string(),
             );
             let runtime_error = map_builder_error(error);
-            cleanup_temp_dir(&context.temp_dir, &context.state_dir, logger.as_ref());
+            cleanup_temp_dir(&context.temp_dir, &cleanup, logger.as_ref());
             runtime_error
         })?;
     if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_temp_dir(&context.temp_dir, &context.state_dir, logger.as_ref());
+        cleanup_temp_dir(&context.temp_dir, &cleanup, logger.as_ref());
         return Err(error);
     }
     let published = materialize_build(
@@ -184,7 +185,7 @@ pub(crate) fn execute_builder_node(
         );
         map_store_error(error)
     });
-    cleanup_temp_dir(&context.temp_dir, &context.state_dir, logger.as_ref());
+    cleanup_temp_dir(&context.temp_dir, &cleanup, logger.as_ref());
     let published = published?;
     Ok(published)
 }
@@ -250,7 +251,8 @@ pub(crate) fn build_context(
             state_dir.display()
         ))
     })?;
-    recreate_empty_temp_dir_with_quarantine(&temp_dir, &state_dir, logger.as_ref())?;
+    let cleanup = TempCleanupContext::new(layout, builder_tag, build_key);
+    recreate_empty_temp_dir_with_quarantine(&temp_dir, &cleanup, logger.as_ref())?;
     Ok(BuildContext::with_noop_logger(state_dir, temp_dir)
         .with_logger(logger)
         .with_cancellation_token(cancellation))
@@ -295,13 +297,31 @@ pub(crate) fn check_cancelled(cancellation: &CancellationToken) -> Result<(), Ru
 
 fn recreate_empty_temp_dir_with_quarantine(
     temp_dir: &Path,
-    state_dir: &Path,
+    cleanup: &TempCleanupContext,
     logger: &dyn BuildLogger,
 ) -> Result<(), RuntimeError> {
+    if cleanup.mode == TempCleanupMode::DirectQuarantine {
+        if fs::symlink_metadata(temp_dir).is_ok() {
+            quarantine_temp_path(
+                temp_dir,
+                cleanup,
+                logger,
+                "stale sandbox temp dir may contain userns-owned files".to_string(),
+            )
+            .map_err(RuntimeError::Store)?;
+        }
+        return fs::create_dir_all(temp_dir).map_err(|error| {
+            RuntimeError::Store(format!(
+                "failed to create directory '{}': {error}",
+                temp_dir.display()
+            ))
+        });
+    }
+
     match fsutil::recreate_empty_dir_force(temp_dir) {
         Ok(()) => return Ok(()),
         Err(error) if fs::symlink_metadata(temp_dir).is_ok() => {
-            quarantine_temp_path(temp_dir, state_dir, logger, error.to_string())
+            quarantine_temp_path(temp_dir, cleanup, logger, error.to_string())
                 .map_err(RuntimeError::Store)?;
         }
         Err(error) => return Err(RuntimeError::Store(error.to_string())),
@@ -315,10 +335,69 @@ fn recreate_empty_temp_dir_with_quarantine(
     })
 }
 
-fn cleanup_temp_dir(temp_dir: &Path, state_dir: &Path, logger: &dyn BuildLogger) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TempCleanupMode {
+    RemoveThenQuarantine,
+    DirectQuarantine,
+}
+
+#[derive(Debug)]
+struct TempCleanupContext {
+    quarantine_dir: PathBuf,
+    builder_tag: String,
+    build_key: BuildKey,
+    mode: TempCleanupMode,
+}
+
+impl TempCleanupContext {
+    fn new(layout: &StoreLayout, builder_tag: &str, build_key: BuildKey) -> Self {
+        Self {
+            quarantine_dir: layout.root.join("quarantine"),
+            builder_tag: builder_tag.to_string(),
+            build_key,
+            mode: cleanup_mode_for_builder(builder_tag),
+        }
+    }
+}
+
+fn cleanup_mode_for_builder(builder_tag: &str) -> TempCleanupMode {
+    if builder_tag.eq_ignore_ascii_case("Sandbox") {
+        TempCleanupMode::DirectQuarantine
+    } else {
+        TempCleanupMode::RemoveThenQuarantine
+    }
+}
+
+fn cleanup_temp_dir(temp_dir: &Path, cleanup: &TempCleanupContext, logger: &dyn BuildLogger) {
+    if cleanup.mode == TempCleanupMode::DirectQuarantine {
+        if fs::symlink_metadata(temp_dir).is_ok() {
+            match quarantine_temp_path(
+                temp_dir,
+                cleanup,
+                logger,
+                "sandbox temp may contain userns-owned files".to_string(),
+            ) {
+                Ok(_) => return,
+                Err(quarantine_error) => {
+                    log_runtime_event(
+                        logger,
+                        BuildLogLevel::Warn,
+                        "cleanup-warning",
+                        format!(
+                            "failed to quarantine sandbox temp dir '{}': {quarantine_error}",
+                            temp_dir.display()
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
+        return;
+    }
+
     if let Err(error) = fsutil::remove_dir_force(temp_dir) {
         if fs::symlink_metadata(temp_dir).is_ok() {
-            match quarantine_temp_path(temp_dir, state_dir, logger, error.to_string()) {
+            match quarantine_temp_path(temp_dir, cleanup, logger, error.to_string()) {
                 Ok(_) => return,
                 Err(quarantine_error) => {
                     log_runtime_event(
@@ -349,7 +428,7 @@ fn cleanup_temp_dir(temp_dir: &Path, state_dir: &Path, logger: &dyn BuildLogger)
 
 fn quarantine_temp_path(
     temp_dir: &Path,
-    state_dir: &Path,
+    cleanup: &TempCleanupContext,
     logger: &dyn BuildLogger,
     reason: String,
 ) -> Result<PathBuf, String> {
@@ -357,8 +436,8 @@ fn quarantine_temp_path(
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| format!("invalid temp dir path '{}'", temp_dir.display()))?;
-    let quarantine_dir = state_dir.join("quarantine");
-    fs::create_dir_all(&quarantine_dir).map_err(|error| {
+    let quarantine_dir = &cleanup.quarantine_dir;
+    fs::create_dir_all(quarantine_dir).map_err(|error| {
         format!(
             "failed to create quarantine directory '{}': {error}",
             quarantine_dir.display()
@@ -372,18 +451,27 @@ fn quarantine_temp_path(
         } else {
             format!("{stamp}-{attempt}")
         };
-        let target = quarantine_dir.join(format!("{name}-{suffix}"));
+        let target = quarantine_dir.join(format!(
+            "{}-{}-{}-{name}",
+            suffix,
+            safe_quarantine_component(&cleanup.builder_tag),
+            cleanup.build_key.to_hex(),
+        ));
         if target.exists() || target.is_symlink() {
             continue;
         }
         match fs::rename(temp_dir, &target) {
             Ok(()) => {
+                write_quarantine_metadata(&target, temp_dir, cleanup, &reason, stamp, logger);
                 log_runtime_event(
                     logger,
-                    BuildLogLevel::Warn,
+                    match cleanup.mode {
+                        TempCleanupMode::DirectQuarantine => BuildLogLevel::Info,
+                        TempCleanupMode::RemoveThenQuarantine => BuildLogLevel::Warn,
+                    },
                     "temp-quarantine",
                     format!(
-                        "moved temp dir '{}' to '{}' after cleanup failed: {reason}",
+                        "moved temp dir '{}' to global quarantine '{}': {reason}",
                         temp_dir.display(),
                         target.display()
                     ),
@@ -406,6 +494,65 @@ fn quarantine_temp_path(
         temp_dir.display(),
         quarantine_dir.display()
     ))
+}
+
+fn safe_quarantine_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn write_quarantine_metadata(
+    target: &Path,
+    original_path: &Path,
+    cleanup: &TempCleanupContext,
+    reason: &str,
+    stamp: u128,
+    logger: &dyn BuildLogger,
+) {
+    let Some(file_name) = target.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let metadata_path = target.with_file_name(format!("{file_name}.json"));
+    let metadata = json!({
+        "schema": "mbuild-quarantine-v1",
+        "builder_tag": &cleanup.builder_tag,
+        "build_key": cleanup.build_key.to_hex(),
+        "original_path": original_path.display().to_string(),
+        "quarantine_path": target.display().to_string(),
+        "reason": reason,
+        "created_at_unix_nanos": stamp.to_string(),
+    });
+    match serde_json::to_vec_pretty(&metadata) {
+        Ok(bytes) => {
+            if let Err(error) = fs::write(&metadata_path, bytes) {
+                log_runtime_event(
+                    logger,
+                    BuildLogLevel::Warn,
+                    "cleanup-warning",
+                    format!(
+                        "failed to write quarantine metadata '{}': {error}",
+                        metadata_path.display()
+                    ),
+                );
+            }
+        }
+        Err(error) => {
+            log_runtime_event(
+                logger,
+                BuildLogLevel::Warn,
+                "cleanup-warning",
+                format!("failed to encode quarantine metadata: {error}"),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -458,6 +605,47 @@ mod tests {
 
             fs::create_dir_all(cx.temp_dir.join("out")).unwrap();
             fs::write(cx.temp_dir.join("out").join("payload"), b"ok\n").unwrap();
+
+            Ok(StagedBuildResult {
+                meta: Map::new(),
+                staged_path: cx.temp_dir.join("out"),
+                object_hash: None,
+            })
+        }
+    }
+
+    static SANDBOX_RUNTIME_TEST_SPEC: BuilderSpec = BuilderSpec {
+        tag: "Sandbox",
+        required_inputs: &[],
+        optional_inputs: &[],
+        allow_extra_inputs: false,
+    };
+
+    #[derive(Debug)]
+    struct SandboxRuntimeTestBuilder;
+    static SANDBOX_RUNTIME_TEST_BUILDER: SandboxRuntimeTestBuilder = SandboxRuntimeTestBuilder;
+
+    impl TypedBuilder for SandboxRuntimeTestBuilder {
+        type Config = RuntimeTestConfig;
+
+        fn spec(&self) -> &'static BuilderSpec {
+            &SANDBOX_RUNTIME_TEST_SPEC
+        }
+
+        fn build_typed(
+            &self,
+            _config: Self::Config,
+            inputs: BuilderInputs,
+            cx: &mut BuildContext,
+        ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+            assert!(inputs.is_empty());
+            assert!(cx.state_dir.is_dir());
+            assert!(cx.temp_dir.is_dir());
+            assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
+
+            fs::create_dir_all(cx.temp_dir.join("out")).unwrap();
+            fs::write(cx.temp_dir.join("out").join("payload"), b"ok\n").unwrap();
+            fs::write(cx.temp_dir.join("sandbox-scratch"), b"keep in quarantine\n").unwrap();
 
             Ok(StagedBuildResult {
                 meta: Map::new(),
@@ -663,13 +851,83 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
-        let quarantined = quarantine_entries(&state_dir);
+        let quarantined = quarantine_entries(&layout);
         assert_eq!(quarantined.len(), 1);
         assert!(
             fs::symlink_metadata(&quarantined[0])
                 .unwrap()
                 .file_type()
                 .is_symlink()
+        );
+        assert_quarantine_metadata(&quarantined[0], "RuntimeTest", build_key);
+    }
+
+    #[test]
+    fn execute_sandbox_builder_quarantines_temp_without_removing_it() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let config = json!({});
+        let inputs = ResolvedInputs::empty();
+        let build_key = compute_build_key("Sandbox", &config, &[]).unwrap();
+        let state_dir = layout.root.join("builder-state").join("sandbox");
+        let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
+
+        let published = execute_builder_node(
+            &layout,
+            &SANDBOX_RUNTIME_TEST_BUILDER,
+            build_key,
+            "sandbox-runtime-test",
+            "2026-04-05T12:00:00.000000000Z",
+            logger,
+            CancellationToken::new(),
+            config,
+            inputs,
+        )
+        .unwrap();
+
+        assert!(!temp_dir.exists());
+        assert!(published.object_path.join("payload").is_file());
+        let quarantined = quarantine_entries(&layout);
+        assert_eq!(quarantined.len(), 1);
+        assert!(quarantined[0].join("sandbox-scratch").is_file());
+        assert_quarantine_metadata(&quarantined[0], "Sandbox", build_key);
+    }
+
+    #[test]
+    fn execute_sandbox_builder_quarantines_stale_temp_before_recreate() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let config = json!({});
+        let inputs = ResolvedInputs::empty();
+        let build_key = compute_build_key("Sandbox", &config, &[]).unwrap();
+        let state_dir = layout.root.join("builder-state").join("sandbox");
+        let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(temp_dir.join("stale"), b"old\n").unwrap();
+
+        execute_builder_node(
+            &layout,
+            &SANDBOX_RUNTIME_TEST_BUILDER,
+            build_key,
+            "sandbox-runtime-test",
+            "2026-04-05T12:00:00.000000000Z",
+            logger,
+            CancellationToken::new(),
+            config,
+            inputs,
+        )
+        .unwrap();
+
+        assert!(!temp_dir.exists());
+        let quarantined = quarantine_entries(&layout);
+        assert_eq!(quarantined.len(), 2);
+        assert!(quarantined.iter().any(|path| path.join("stale").is_file()));
+        assert!(
+            quarantined
+                .iter()
+                .any(|path| path.join("sandbox-scratch").is_file())
         );
     }
 
@@ -724,10 +982,15 @@ mod tests {
         fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
         fs::write(&temp_dir, b"not a directory\n").unwrap();
 
-        cleanup_temp_dir(&temp_dir, &state_dir, logger.as_ref());
+        let cleanup = TempCleanupContext::new(
+            &layout,
+            "RuntimeTest",
+            compute_build_key("RuntimeTest", &json!({}), &[]).unwrap(),
+        );
+        cleanup_temp_dir(&temp_dir, &cleanup, logger.as_ref());
 
         assert!(fs::symlink_metadata(&temp_dir).is_err());
-        let quarantined = quarantine_entries(&state_dir);
+        let quarantined = quarantine_entries(&layout);
         assert_eq!(quarantined.len(), 1);
         assert!(
             fs::symlink_metadata(&quarantined[0])
@@ -805,12 +1068,23 @@ mod tests {
         );
     }
 
-    fn quarantine_entries(state_dir: &Path) -> Vec<PathBuf> {
-        let mut entries = fs::read_dir(state_dir.join("quarantine"))
+    fn quarantine_entries(layout: &StoreLayout) -> Vec<PathBuf> {
+        let mut entries = fs::read_dir(layout.root.join("quarantine"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) != Some("json"))
             .collect::<Vec<_>>();
         entries.sort();
         entries
+    }
+
+    fn assert_quarantine_metadata(path: &Path, builder_tag: &str, build_key: BuildKey) {
+        let file_name = path.file_name().unwrap().to_str().unwrap();
+        let metadata_path = path.with_file_name(format!("{file_name}.json"));
+        let metadata: Value = serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        assert_eq!(metadata["schema"], "mbuild-quarantine-v1");
+        assert_eq!(metadata["builder_tag"], builder_tag);
+        assert_eq!(metadata["build_key"], build_key.to_hex());
+        assert_eq!(metadata["quarantine_path"], path.display().to_string());
     }
 }
