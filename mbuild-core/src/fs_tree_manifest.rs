@@ -27,6 +27,7 @@ pub enum FsTreeEntry {
         path: String,
         uid: u32,
         gid: u32,
+        target: String,
     },
 }
 
@@ -155,11 +156,12 @@ impl FsTreeEntry {
         }
     }
 
-    pub fn symlink(path: impl Into<String>, uid: u32, gid: u32) -> Self {
+    pub fn symlink(path: impl Into<String>, uid: u32, gid: u32, target: impl Into<String>) -> Self {
         Self::Symlink {
             path: path.into(),
             uid,
             gid,
+            target: target.into(),
         }
     }
 
@@ -199,6 +201,7 @@ fn validate_entries(entries: &[FsTreeEntry]) -> Result<(), FsTreeManifestError> 
 
     for entry in entries {
         validate_path(entry.path())?;
+        validate_entry_strings(entry)?;
         validate_entry_numbers(entry)?;
 
         if let Some(previous_path) = previous_path
@@ -251,6 +254,23 @@ fn validate_entries(entries: &[FsTreeEntry]) -> Result<(), FsTreeManifestError> 
         }
     }
 
+    Ok(())
+}
+
+fn validate_entry_strings(entry: &FsTreeEntry) -> Result<(), FsTreeManifestError> {
+    if let FsTreeEntry::Symlink { target, .. } = entry {
+        validate_canonical_string("fs-tree symlink target", target)?;
+    }
+    Ok(())
+}
+
+fn validate_canonical_string(label: &str, value: &str) -> Result<(), FsTreeManifestError> {
+    if value.chars().any(char::is_control) {
+        return Err(FsTreeManifestError::Invalid(format!(
+            "{label} contains a control character: '{}'",
+            printable_path(value)
+        )));
+    }
     Ok(())
 }
 
@@ -347,11 +367,12 @@ fn parse_entry_line(line: &str, line_number: usize) -> Result<FsTreeEntry, FsTre
             })
         }
         "l" => {
-            require_exact_keys(object, &["p", "t", "u", "g"], line_number)?;
+            require_exact_keys(object, &["p", "t", "u", "g", "x"], line_number)?;
             Ok(FsTreeEntry::Symlink {
                 path,
                 uid: required_u32(object, "u", line_number)?,
                 gid: required_u32(object, "g", line_number)?,
+                target: required_string(object, "x", line_number)?.to_string(),
             })
         }
         _ => Err(FsTreeManifestError::Parse(format!(
@@ -481,13 +502,20 @@ fn write_canonical_entry(
             write_u32(*mode, out);
             out.extend_from_slice(b"}\n");
         }
-        FsTreeEntry::Symlink { path, uid, gid } => {
+        FsTreeEntry::Symlink {
+            path,
+            uid,
+            gid,
+            target,
+        } => {
             out.extend_from_slice(br#"{"p":""#);
             write_canonical_string(path, out)?;
             out.extend_from_slice(br#","t":"l","u":"#);
             write_u32(*uid, out);
             out.extend_from_slice(br#","g":"#);
             write_u32(*gid, out);
+            out.extend_from_slice(br#","x":""#);
+            write_canonical_string(target, out)?;
             out.extend_from_slice(b"}\n");
         }
     }
@@ -557,7 +585,7 @@ mod tests {
             root(),
             FsTreeEntry::directory("bin", 0, 0, 0o755),
             FsTreeEntry::file("bin/tool", 1000, 1001, 0o755),
-            FsTreeEntry::symlink("tool-link", 2, 3),
+            FsTreeEntry::symlink("tool-link", 2, 3, "bin/tool"),
         ]);
 
         assert_eq!(
@@ -569,7 +597,7 @@ mod tests {
                 "\n",
                 r#"{"p":"bin/tool","t":"f","u":1000,"g":1001,"m":493}"#,
                 "\n",
-                r#"{"p":"tool-link","t":"l","u":2,"g":3}"#,
+                r#"{"p":"tool-link","t":"l","u":2,"g":3,"x":"bin/tool"}"#,
                 "\n",
             )
         );
@@ -629,7 +657,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_symlink_mode_and_old_symlink_target_field() {
+    fn rejects_symlink_mode_and_missing_symlink_target_field() {
         assert_parse_rejects(concat!(
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
@@ -639,7 +667,7 @@ mod tests {
         assert_parse_rejects(concat!(
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
-            r#"{"p":"l","t":"l","u":0,"g":0,"x":"target"}"#,
+            r#"{"p":"l","t":"l","u":0,"g":0}"#,
             "\n",
         ));
     }

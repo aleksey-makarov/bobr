@@ -123,11 +123,11 @@ struct CompiledInstallRule {
     attrs: InstallAttrs,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum MaterializedKind {
     File { executable: bool },
     Directory,
-    Symlink,
+    Symlink { target: String },
 }
 
 trait OwnershipMaterializer {
@@ -740,9 +740,13 @@ fn fs_tree_manifest_for_entries(
             NormalizedEntry::Dir { rel_path } => {
                 fs_tree_entry_for_path(rel_path, MaterializedKind::Directory, rules)?
             }
-            NormalizedEntry::Symlink { rel_path, .. } => {
-                fs_tree_entry_for_path(rel_path, MaterializedKind::Symlink, rules)?
-            }
+            NormalizedEntry::Symlink { rel_path, target } => fs_tree_entry_for_path(
+                rel_path,
+                MaterializedKind::Symlink {
+                    target: target.clone(),
+                },
+                rules,
+            )?,
         };
         manifest_entries.insert(entry.rel_path().to_string(), fs_entry);
     }
@@ -793,7 +797,9 @@ fn fs_tree_entry_for_path(
             };
             Ok(FsTreeEntry::file(rel_path, uid, gid, mode))
         }
-        MaterializedKind::Symlink => Ok(FsTreeEntry::symlink(rel_path, uid, gid)),
+        MaterializedKind::Symlink { target } => {
+            Ok(FsTreeEntry::symlink(rel_path, uid, gid, target))
+        }
     }
 }
 
@@ -1689,7 +1695,7 @@ mod tests {
             manifest.entries(),
             &[
                 FsTreeEntry::directory("", 0, 0, 0o755),
-                FsTreeEntry::symlink("bin", 0, 0),
+                FsTreeEntry::symlink("bin", 0, 0, "usr/bin"),
                 FsTreeEntry::directory("dev", 0, 0, 0o755),
                 FsTreeEntry::directory("etc", 0, 0, 0o755),
                 FsTreeEntry::file("etc/hostname", 0, 0, 0o644),

@@ -249,7 +249,7 @@ pub(crate) fn validate_config(config: &BinaryConfig) -> BResult<()> {
     Ok(())
 }
 
-fn validate_steps(steps: &[BuildStep]) -> BResult<()> {
+pub(crate) fn validate_steps(steps: &[BuildStep]) -> BResult<()> {
     if steps.is_empty() {
         return Err(BinaryError::InvalidConfig(
             "steps must contain at least one step".to_string(),
@@ -1212,7 +1212,7 @@ pub(crate) fn map_error(error: BinaryError) -> BuilderError {
     }
 }
 
-fn validate_script_config(value: Option<&Value>) -> BResult<()> {
+pub(crate) fn validate_script_config(value: Option<&Value>) -> BResult<()> {
     match value {
         None | Some(Value::Null) => Ok(()),
         Some(value) => validate_script_config_node(value, "<root>"),

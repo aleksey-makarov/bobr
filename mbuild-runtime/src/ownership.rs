@@ -632,7 +632,7 @@ mod tests {
             FsTreeEntry::directory("dir", owner.0, owner.1, 0o700),
             FsTreeEntry::directory("dir/nested", owner.0, owner.1, 0o500),
             FsTreeEntry::file("file", owner.0, owner.1, 0o640),
-            FsTreeEntry::symlink("link", owner.0, owner.1),
+            FsTreeEntry::symlink("link", owner.0, owner.1, "target"),
         ])
         .unwrap();
 
@@ -852,7 +852,7 @@ mod tests {
         let manifest = FsTreeManifest::from_entries(vec![
             FsTreeEntry::directory("", 0, 0, 0o755),
             FsTreeEntry::file("file", 1, 1, 0o644),
-            FsTreeEntry::symlink("link", 1, 1),
+            FsTreeEntry::symlink("link", 1, 1, "target"),
         ])
         .unwrap();
 

@@ -121,12 +121,16 @@ The current realized result metadata contains:
 
 ## Step Executors
 
-`Binary`, `Container`, and `Sandbox` share the same config shape:
+`Binary`, `Container`, and `Sandbox` share the same step execution shape:
 
 - `steps`: a non-empty ordered list of execution steps
 - `script_config`: optional structured string payload serialized into
   `/__mbuild/config`
-- `install`: optional install metadata for the published directory output
+
+`Binary` and `Container` also accept legacy `install` metadata for their
+published directory output. `Sandbox` does not accept `install`; final
+ownership and modes are whatever the sandbox steps created under
+`/__mbuild/out`.
 
 Each step contains:
 
@@ -376,9 +380,22 @@ The sandbox mount policy is intentionally small:
 set. `run_as=root` runs as numeric uid `0`, gid `0` with only `CHOWN`,
 `DAC_OVERRIDE`, `DAC_READ_SEARCH`, `FOWNER`, and `FSETID`.
 
-After all steps complete, `Sandbox` computes the fs object hash for
-`/__mbuild/out` inside the sandbox and returns it to the CAS as a precomputed
-hash. Output ownership is not normalized; non-root-owned entries are allowed.
+After all steps complete, `Sandbox` scans `/__mbuild/out` inside the sandbox
+with `lstat` and `readlink`, then publishes a canonical fs-tree object:
+
+```text
+manifest.jsonl
+root/
+```
+
+The manifest records the actual sandbox namespace uid, gid, unix mode, entry
+kind, and symlink target for every output path. The raw `/__mbuild/out`
+directory becomes the object's `root/`; `Sandbox` does not normalize ownership
+or modes on the host after runtime success.
+
+`Sandbox` computes the fs-tree object hash inside the sandbox from the
+canonical manifest bytes plus the existing `/__mbuild/out` tree and returns it
+to the CAS as a precomputed hash. The realized result metadata is `{}`.
 
 ## Current Limitations
 

@@ -305,6 +305,7 @@ pub struct TarEntryRecord {
     uid: u32,
     gid: u32,
     mode: Option<u32>,
+    symlink_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -463,7 +464,7 @@ fn extract_file_entry(
 
     records.insert(
         path.to_string(),
-        record_from_entry(path, TarRecordKind::File, entry)?,
+        record_from_entry(path, TarRecordKind::File, entry, None)?,
     );
     Ok(())
 }
@@ -490,7 +491,7 @@ fn extract_directory_entry(
     })?;
     records.insert(
         path.to_string(),
-        record_from_entry(path, TarRecordKind::Directory, entry)?,
+        record_from_entry(path, TarRecordKind::Directory, entry, None)?,
     );
     Ok(())
 }
@@ -512,6 +513,9 @@ fn extract_symlink_entry(
     let target = target.ok_or_else(|| {
         OciExtractError::InvalidLayer(format!("symlink entry '{path}' has no target"))
     })?;
+    let target_string = target.to_str().ok_or_else(|| {
+        OciExtractError::InvalidLayer(format!("symlink target for '{path}' is not UTF-8"))
+    })?;
     let dst = target_root.join(path);
     symlink(&target, &dst).map_err(|error| {
         OciExtractError::Io(format!(
@@ -521,7 +525,12 @@ fn extract_symlink_entry(
     })?;
     records.insert(
         path.to_string(),
-        record_from_entry(path, TarRecordKind::Symlink, entry)?,
+        record_from_entry(
+            path,
+            TarRecordKind::Symlink,
+            entry,
+            Some(target_string.to_string()),
+        )?,
     );
     Ok(())
 }
@@ -549,7 +558,7 @@ fn extract_hardlink_entry(
         )));
     }
 
-    let mut link_record = record_from_entry(path, TarRecordKind::File, entry)?;
+    let mut link_record = record_from_entry(path, TarRecordKind::File, entry, None)?;
     if link_record.mode == Some(0) {
         link_record.mode = target_record.mode;
     }
@@ -581,6 +590,7 @@ fn record_from_entry(
     path: &str,
     kind: TarRecordKind,
     entry: &tar::Entry<'_, impl Read>,
+    symlink_target: Option<String>,
 ) -> Result<TarEntryRecord, OciExtractError> {
     let uid = checked_u32(
         entry.header().uid().map_err(|error| {
@@ -611,6 +621,7 @@ fn record_from_entry(
         uid,
         gid,
         mode,
+        symlink_target,
     })
 }
 
@@ -786,6 +797,7 @@ fn ensure_parent_directories(
                         uid: 0,
                         gid: 0,
                         mode: Some(0o755),
+                        symlink_target: None,
                     },
                 );
             }
@@ -815,7 +827,15 @@ pub fn build_manifest_from_tar_records(
                 record.gid,
                 record.mode.expect("directory record has mode"),
             ),
-            TarRecordKind::Symlink => FsTreeEntry::symlink(&record.path, record.uid, record.gid),
+            TarRecordKind::Symlink => FsTreeEntry::symlink(
+                &record.path,
+                record.uid,
+                record.gid,
+                record
+                    .symlink_target
+                    .as_deref()
+                    .expect("symlink record has target"),
+            ),
         };
         by_path.insert(record.path.clone(), entry);
     }
@@ -966,7 +986,15 @@ mod tests {
             matches!(entry, FsTreeEntry::File { path, uid: 1, gid: 2, mode: 0o755 } if path == "bin/tool")
         }));
         assert!(manifest.entries().iter().any(|entry| {
-            matches!(entry, FsTreeEntry::Symlink { path, uid: 3, gid: 4 } if path == "tool-link")
+            matches!(
+                entry,
+                FsTreeEntry::Symlink {
+                    path,
+                    uid: 3,
+                    gid: 4,
+                    target,
+                } if path == "tool-link" && target == "bin/tool"
+            )
         }));
     }
 
@@ -1090,6 +1118,7 @@ mod tests {
             uid: 0,
             gid: 0,
             mode: Some(0o755),
+            symlink_target: None,
         }];
 
         let manifest = build_manifest_from_tar_records(&records).unwrap();

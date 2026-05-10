@@ -89,7 +89,7 @@ fn tree_directory_output_materializes_runtime_ownership() -> TestResult<()> {
     assert!(
         manifest
             .entries()
-            .contains(&FsTreeEntry::symlink("owned/link", 1, 1))
+            .contains(&FsTreeEntry::symlink("owned/link", 1, 1, "file"))
     );
 
     let root = result.staged_path.join("root");

@@ -1,8 +1,8 @@
 use crate::{
-    BResult, BinaryConfig, BinaryError, BuildStep, CONFIG_DIR_NAME, OUTPUT_DIR_NAME, StepUser,
-    collect_named_inputs, default_install_meta, input_mount_path, map_error, map_fsutil_error,
-    resolve_step_argv, resolve_step_cwd, resolve_step_env, validate_config,
-    validate_step_interpolations, write_script_config,
+    BResult, BinaryError, BuildStep, CONFIG_DIR_NAME, OUTPUT_DIR_NAME, StepUser,
+    collect_named_inputs, input_mount_path, map_error, map_fsutil_error, resolve_step_argv,
+    resolve_step_cwd, resolve_step_env, validate_script_config, validate_step_interpolations,
+    validate_steps, write_script_config,
 };
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
@@ -12,11 +12,21 @@ use mbuild_runtime::{
     SandboxBuildConfig, SandboxInput, SandboxRunAs, SandboxStep, cached_host_idmap,
     run_sandbox_build,
 };
+use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 pub struct SandboxBuilder;
+const FS_TREE_OBJECT_DIR_NAME: &str = "fs-tree-object";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxConfig {
+    #[serde(default)]
+    pub(crate) script_config: Option<Value>,
+    pub(crate) steps: Vec<BuildStep>,
+}
 
 pub(crate) static SANDBOX_SPEC: BuilderSpec = BuilderSpec {
     tag: "Sandbox",
@@ -26,7 +36,7 @@ pub(crate) static SANDBOX_SPEC: BuilderSpec = BuilderSpec {
 };
 
 impl TypedBuilder for SandboxBuilder {
-    type Config = BinaryConfig;
+    type Config = SandboxConfig;
 
     fn spec(&self) -> &'static BuilderSpec {
         &SANDBOX_SPEC
@@ -38,7 +48,7 @@ impl TypedBuilder for SandboxBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
-        validate_config(&config).map_err(map_error)?;
+        validate_sandbox_config(&config).map_err(map_error)?;
         let rootfs = inputs.required("rootfs")?;
         validate_rootfs(rootfs).map_err(map_error)?;
 
@@ -83,23 +93,20 @@ impl TypedBuilder for SandboxBuilder {
         })?;
         write_build_report(cx, &outcome);
 
-        let mut meta = Map::new();
-        let install = config.install.unwrap_or_else(default_install_meta);
-        meta.insert(
-            "install".to_string(),
-            serde_json::to_value(&install).map_err(|error| {
-                map_error(BinaryError::BuildFailed(format!(
-                    "failed to serialize install metadata: {error}"
-                )))
-            })?,
-        );
+        let staged_path =
+            stage_fs_tree_output(cx, &output_path, &outcome.manifest).map_err(map_error)?;
 
         Ok(StagedBuildResult {
-            meta,
-            staged_path: output_path,
+            meta: Map::new(),
+            staged_path,
             object_hash: Some(outcome.object_hash),
         })
     }
+}
+
+fn validate_sandbox_config(config: &SandboxConfig) -> BResult<()> {
+    validate_script_config(config.script_config.as_ref())?;
+    validate_steps(&config.steps)
 }
 
 fn validate_rootfs(rootfs: &BuilderInputObject) -> BResult<()> {
@@ -177,6 +184,31 @@ fn object_payload_path(object_path: &Path) -> PathBuf {
     } else {
         object_path.to_path_buf()
     }
+}
+
+fn stage_fs_tree_output(
+    cx: &BuildContext,
+    output_path: &Path,
+    manifest: &mbuild_core::FsTreeManifest,
+) -> BResult<PathBuf> {
+    let staged_path = cx.temp_dir.join(FS_TREE_OBJECT_DIR_NAME);
+    fsutil::recreate_empty_dir_force(&staged_path).map_err(map_fsutil_error)?;
+    let manifest_path = staged_path.join("manifest.jsonl");
+    manifest.write_canonical(&manifest_path).map_err(|error| {
+        BinaryError::BuildFailed(format!(
+            "failed to write sandbox fs-tree manifest '{}': {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let root_path = staged_path.join("root");
+    std::fs::rename(output_path, &root_path).map_err(|error| {
+        BinaryError::FsFailed(format!(
+            "failed to stage sandbox output '{}' -> '{}': {error}",
+            output_path.display(),
+            root_path.display()
+        ))
+    })?;
+    Ok(staged_path)
 }
 
 fn resolve_sandbox_step(
@@ -274,8 +306,15 @@ fn write_build_report(cx: &BuildContext, outcome: &mbuild_runtime::SandboxBuildO
             Value::Object(object)
         })
         .collect::<Vec<_>>();
+    let manifest_jsonl = outcome
+        .manifest
+        .to_canonical_bytes()
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_default();
     let report = serde_json::json!({
         "object_hash": outcome.object_hash.to_string(),
+        "manifest_jsonl": manifest_jsonl,
         "steps": steps,
     });
     if let Ok(text) = serde_json::to_string_pretty(&report) {
@@ -327,6 +366,71 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("rootfs"));
+    }
+
+    #[test]
+    fn sandbox_builder_rejects_install_config() {
+        let temp = tempdir().unwrap();
+        let mut cx =
+            BuildContext::with_noop_logger(temp.path().join("state"), temp.path().join("tmp"));
+        std::fs::create_dir_all(&cx.state_dir).unwrap();
+        std::fs::create_dir_all(&cx.temp_dir).unwrap();
+
+        let config = json!({
+            "steps": [{
+                "name": "build",
+                "run_as": "build-user",
+                "cwd": "/",
+                "argv": ["true"]
+            }],
+            "install": {
+                "rules": [{
+                    "path": "**",
+                    "attrs": {
+                        "uid": 0,
+                        "gid": 0,
+                        "directory_mode": 493,
+                        "regular_file_mode": 420,
+                        "executable_file_mode": 493,
+                        "symlink_mode": 511
+                    }
+                }]
+            }
+        });
+
+        let error = SandboxBuilder
+            .build_erased(config, BuilderInputs::empty(), &mut cx)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("unknown field `install`"));
+    }
+
+    #[test]
+    fn stage_fs_tree_output_writes_manifest_and_moves_raw_output_to_root() {
+        let temp = tempdir().unwrap();
+        let cx = BuildContext::with_noop_logger(temp.path().join("state"), temp.path().join("tmp"));
+        std::fs::create_dir_all(&cx.temp_dir).unwrap();
+        let output = cx.temp_dir.join("out");
+        std::fs::create_dir(&output).unwrap();
+        std::fs::write(output.join("file"), "contents").unwrap();
+        let manifest = mbuild_core::FsTreeManifest::from_entries(vec![
+            mbuild_core::FsTreeEntry::directory("", 0, 0, 0o755),
+            mbuild_core::FsTreeEntry::file("file", 0, 0, 0o644),
+        ])
+        .unwrap();
+
+        let staged = stage_fs_tree_output(&cx, &output, &manifest).unwrap();
+
+        assert!(staged.join("manifest.jsonl").is_file());
+        assert_eq!(
+            mbuild_core::FsTreeManifest::read_canonical(&staged.join("manifest.jsonl")).unwrap(),
+            manifest
+        );
+        assert_eq!(
+            std::fs::read_to_string(staged.join("root").join("file")).unwrap(),
+            "contents"
+        );
+        assert!(!output.exists());
     }
 
     #[test]

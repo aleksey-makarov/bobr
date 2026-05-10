@@ -1,4 +1,4 @@
-use fsobj_hash::{Error, hash_path};
+use fsobj_hash::{Error, hash_fs_tree_object, hash_path};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -86,4 +86,23 @@ fn root_symlink_is_rejected() {
     symlink("target", dir.path().join("root-link")).unwrap();
     let error = hash_path(dir.path().join("root-link")).unwrap_err();
     assert!(matches!(error, Error::UnsupportedRootSymlink { .. }));
+}
+
+#[test]
+fn synthetic_fs_tree_hash_matches_materialized_object_shape() {
+    let dir = tempdir().unwrap();
+    let object = dir.path().join("object");
+    let root = object.join("root");
+    fs::create_dir(&object).unwrap();
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("file.txt"), b"hello\n").unwrap();
+    let manifest = br#"{"p":"","t":"d","u":0,"g":0,"m":493}
+{"p":"file.txt","t":"f","u":0,"g":0,"m":420}
+"#;
+    fs::write(object.join("manifest.jsonl"), manifest).unwrap();
+
+    assert_eq!(
+        hash_fs_tree_object(manifest, &root).unwrap(),
+        hash_path(&object).unwrap()
+    );
 }

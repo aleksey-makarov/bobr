@@ -4,7 +4,7 @@ use crate::bundle::{Bundle, create_bundle};
 use crate::error::RuntimeError;
 use crate::idmap::MbuildIdmap;
 use crate::preflight::preflight_ownership_runtime;
-use fsobj_hash::{ObjectHash, hash_path};
+use fsobj_hash::{ObjectHash, hash_fs_tree_object};
 use libcontainer::container::builder::ContainerBuilder;
 use libcontainer::oci_spec::runtime::{
     Capabilities, Capability, LinuxBuilder, LinuxCapabilities, LinuxCapabilitiesBuilder,
@@ -15,6 +15,7 @@ use libcontainer::syscall::syscall::SyscallType;
 use libcontainer::workload::{
     Executor, ExecutorError, ExecutorSetEnvsError, ExecutorValidationError,
 };
+use mbuild_core::{FsTreeEntry, FsTreeManifest};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::{Gid, Pid, Uid, chown, setgid, setgroups, setuid};
 use serde::{Deserialize, Serialize};
@@ -25,7 +26,7 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -110,6 +111,8 @@ pub struct SandboxBuildConfig {
 pub struct SandboxBuildOutcome {
     /// Runtime-side output object hash.
     pub object_hash: ObjectHash,
+    /// Canonical manifest built from the actual sandbox output tree.
+    pub manifest: FsTreeManifest,
     /// Structured per-step reports.
     pub steps: Vec<SandboxStepReport>,
 }
@@ -475,11 +478,17 @@ impl SandboxRunnerExecutor {
             reports.push(step.run()?);
         }
 
-        let object_hash = hash_path(Path::new("/__mbuild/out")).map_err(|error| {
+        let out_dir = Path::new("/__mbuild/out");
+        let manifest = scan_output_manifest(out_dir)?;
+        let manifest_bytes = manifest.to_canonical_bytes().map_err(|error| {
+            SandboxRunnerFailureReport::runtime("sandbox-manifest-output", error.to_string())
+        })?;
+        let object_hash = hash_fs_tree_object(&manifest_bytes, out_dir).map_err(|error| {
             SandboxRunnerFailureReport::runtime("sandbox-hash-output", error.to_string())
         })?;
         Ok(SandboxBuildOutcome {
             object_hash,
+            manifest,
             steps: reports,
         })
     }
@@ -494,8 +503,16 @@ impl SandboxRunnerExecutor {
     }
 
     fn write_success(&self, outcome: &SandboxBuildOutcome) -> Result<(), ExecutorError> {
+        let manifest_jsonl = String::from_utf8(
+            outcome
+                .manifest
+                .to_canonical_bytes()
+                .map_err(executor_error)?,
+        )
+        .map_err(executor_error)?;
         let report = SandboxRunnerSuccessReport {
             object_hash: outcome.object_hash.to_string(),
+            manifest_jsonl,
             steps: outcome.steps.clone(),
         };
         serde_json::to_writer(&*self.success_report, &report).map_err(executor_error)
@@ -634,6 +651,7 @@ impl SandboxRunAs {
 #[derive(Debug, Serialize, Deserialize)]
 struct SandboxRunnerSuccessReport {
     object_hash: String,
+    manifest_jsonl: String,
     steps: Vec<SandboxStepReport>,
 }
 
@@ -748,8 +766,16 @@ fn read_sandbox_success_report(path: &Path) -> Result<SandboxBuildOutcome, Runti
             path.display()
         ))
     })?;
+    let manifest = FsTreeManifest::parse_canonical_bytes(report.manifest_jsonl.as_bytes())
+        .map_err(|error| {
+            RuntimeError::Executor(format!(
+                "failed to parse sandbox output manifest '{}': {error}",
+                path.display()
+            ))
+        })?;
     Ok(SandboxBuildOutcome {
         object_hash,
+        manifest,
         steps: report.steps,
     })
 }
@@ -769,6 +795,97 @@ fn read_sandbox_failure_report(path: &Path, fallback: String) -> RuntimeError {
             path.display()
         )),
     }
+}
+
+fn scan_output_manifest(root: &Path) -> Result<FsTreeManifest, SandboxRunnerFailureReport> {
+    let mut entries = Vec::new();
+    scan_output_entry(root, "", &mut entries)?;
+    FsTreeManifest::from_entries(entries).map_err(|error| {
+        SandboxRunnerFailureReport::runtime("sandbox-manifest-output", error.to_string())
+    })
+}
+
+fn scan_output_entry(
+    path: &Path,
+    rel_path: &str,
+    entries: &mut Vec<FsTreeEntry>,
+) -> Result<(), SandboxRunnerFailureReport> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        SandboxRunnerFailureReport::runtime(
+            "sandbox-manifest-output",
+            format!("failed to inspect '{}': {error}", path.display()),
+        )
+    })?;
+    let file_type = metadata.file_type();
+    let uid = metadata.uid();
+    let gid = metadata.gid();
+
+    if file_type.is_dir() {
+        entries.push(FsTreeEntry::directory(
+            rel_path,
+            uid,
+            gid,
+            metadata.permissions().mode() & 0o7777,
+        ));
+        let children = fs::read_dir(path).map_err(|error| {
+            SandboxRunnerFailureReport::runtime(
+                "sandbox-manifest-output",
+                format!("failed to read directory '{}': {error}", path.display()),
+            )
+        })?;
+        for child in children {
+            let child = child.map_err(|error| {
+                SandboxRunnerFailureReport::runtime(
+                    "sandbox-manifest-output",
+                    format!(
+                        "failed to read directory entry in '{}': {error}",
+                        path.display()
+                    ),
+                )
+            })?;
+            let name = child.file_name();
+            let name = name.to_str().ok_or_else(|| {
+                SandboxRunnerFailureReport::runtime(
+                    "sandbox-manifest-output",
+                    format!("output path under '{}' is not UTF-8", path.display()),
+                )
+            })?;
+            let child_rel_path = if rel_path.is_empty() {
+                name.to_string()
+            } else {
+                format!("{rel_path}/{name}")
+            };
+            scan_output_entry(&child.path(), &child_rel_path, entries)?;
+        }
+    } else if file_type.is_file() {
+        entries.push(FsTreeEntry::file(
+            rel_path,
+            uid,
+            gid,
+            metadata.permissions().mode() & 0o7777,
+        ));
+    } else if file_type.is_symlink() {
+        let target = fs::read_link(path).map_err(|error| {
+            SandboxRunnerFailureReport::runtime(
+                "sandbox-manifest-output",
+                format!("failed to read symlink '{}': {error}", path.display()),
+            )
+        })?;
+        let target = target.to_str().ok_or_else(|| {
+            SandboxRunnerFailureReport::runtime(
+                "sandbox-manifest-output",
+                format!("symlink target for '{}' is not UTF-8", path.display()),
+            )
+        })?;
+        entries.push(FsTreeEntry::symlink(rel_path, uid, gid, target));
+    } else {
+        return Err(SandboxRunnerFailureReport::runtime(
+            "sandbox-manifest-output",
+            format!("unsupported output file type '{}'", path.display()),
+        ));
+    }
+
+    Ok(())
 }
 
 fn elapsed_ms(start: Instant) -> u128 {
@@ -1415,10 +1532,17 @@ mod tests {
         let out = temp.path().join("out");
         fs::create_dir(&out).unwrap();
         fs::write(out.join("file"), "contents").unwrap();
-        let object_hash = hash_path(&out).unwrap();
+        let manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::file("file", 0, 0, 0o644),
+        ])
+        .unwrap();
+        let manifest_jsonl = String::from_utf8(manifest.to_canonical_bytes().unwrap()).unwrap();
+        let object_hash = hash_fs_tree_object(manifest_jsonl.as_bytes(), &out).unwrap();
         let path = temp.path().join("success.json");
         let report = SandboxRunnerSuccessReport {
             object_hash: object_hash.to_string(),
+            manifest_jsonl,
             steps: vec![SandboxStepReport {
                 name: "install".to_string(),
                 run_as: "build-user".to_string(),
@@ -1433,8 +1557,58 @@ mod tests {
         let outcome = read_sandbox_success_report(&path).unwrap();
 
         assert_eq!(outcome.object_hash, object_hash);
+        assert_eq!(outcome.manifest, manifest);
         assert_eq!(outcome.steps.len(), 1);
         assert_eq!(outcome.steps[0].name, "install");
+    }
+
+    #[test]
+    fn scan_output_manifest_records_kinds_modes_owners_and_symlink_targets() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("out");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("dir")).unwrap();
+        fs::write(root.join("file"), "contents").unwrap();
+        fs::write(root.join("exe"), "contents").unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(root.join("dir"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(root.join("file"), fs::Permissions::from_mode(0o640)).unwrap();
+        fs::set_permissions(root.join("exe"), fs::Permissions::from_mode(0o755)).unwrap();
+        symlink("file", root.join("link")).unwrap();
+        let owner = fs::symlink_metadata(&root).unwrap();
+
+        let manifest = scan_output_manifest(&root).unwrap();
+
+        assert!(manifest.entries().contains(&FsTreeEntry::directory(
+            "",
+            owner.uid(),
+            owner.gid(),
+            0o755
+        )));
+        assert!(manifest.entries().contains(&FsTreeEntry::directory(
+            "dir",
+            owner.uid(),
+            owner.gid(),
+            0o700
+        )));
+        assert!(manifest.entries().contains(&FsTreeEntry::file(
+            "file",
+            owner.uid(),
+            owner.gid(),
+            0o640
+        )));
+        assert!(manifest.entries().contains(&FsTreeEntry::file(
+            "exe",
+            owner.uid(),
+            owner.gid(),
+            0o755
+        )));
+        assert!(manifest.entries().contains(&FsTreeEntry::symlink(
+            "link",
+            owner.uid(),
+            owner.gid(),
+            "file"
+        )));
     }
 
     #[test]

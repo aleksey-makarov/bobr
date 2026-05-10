@@ -38,6 +38,17 @@ pub(crate) fn load_path(path: &Path) -> Result<Node, Error> {
     })
 }
 
+pub(crate) fn load_directory_path(path: &Path) -> Result<Node, Error> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| io_at_path(path, "reading metadata", error))?;
+    if !metadata.file_type().is_dir() {
+        return Err(Error::UnsupportedFileType {
+            path: path.to_path_buf(),
+        });
+    }
+    read_directory_node(path)
+}
+
 fn read_file_node(path: &Path, mode: u32) -> Result<Node, Error> {
     let mut file = fs::File::open(path).map_err(|error| io_at_path(path, "opening file", error))?;
     let mut bytes = Vec::new();

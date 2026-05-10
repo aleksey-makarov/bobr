@@ -408,17 +408,34 @@ fn materialize_composed_fs_tree_inner(
                 )?;
             }
             (
-                FsTreeEntry::Symlink { path, uid, gid },
+                FsTreeEntry::Symlink {
+                    path,
+                    uid,
+                    gid,
+                    target,
+                },
                 ComposedFsTreeEntry::Symlink { source_path },
             ) => {
                 let dst = paths.root_dir.join(path);
-                let target = fs::read_link(source_path).map_err(|error| {
+                let source_target = fs::read_link(source_path).map_err(|error| {
                     FsTreeComposeError::Io(format!(
                         "failed to read fs-tree source symlink '{}': {error}",
                         source_path.display()
                     ))
                 })?;
-                symlink(&target, &dst).map_err(|error| {
+                let source_target = source_target.to_str().ok_or_else(|| {
+                    FsTreeComposeError::Invalid(format!(
+                        "fs-tree source symlink '{}' target is not UTF-8",
+                        source_path.display()
+                    ))
+                })?;
+                if source_target != target {
+                    return Err(FsTreeComposeError::Invalid(format!(
+                        "fs-tree source symlink '{}' target differs from manifest",
+                        source_path.display()
+                    )));
+                }
+                symlink(target.as_str(), &dst).map_err(|error| {
                     FsTreeComposeError::Io(format!(
                         "failed to create fs-tree symlink '{}': {error}",
                         dst.display()
@@ -700,7 +717,7 @@ mod tests {
                 root(),
                 FsTreeEntry::directory("bin", 0, 0, 0o755),
                 FsTreeEntry::file("bin/tool", 0, 0, 0o755),
-                FsTreeEntry::symlink("bin/tool-link", 0, 0),
+                FsTreeEntry::symlink("bin/tool-link", 0, 0, "tool"),
             ],
         );
 
@@ -815,12 +832,12 @@ mod tests {
         let left_link = input(
             temp.path(),
             "left-link",
-            vec![root(), FsTreeEntry::symlink("x", 0, 0)],
+            vec![root(), FsTreeEntry::symlink("x", 0, 0, "target")],
         );
         let right_link = input(
             temp.path(),
             "right-link",
-            vec![root(), FsTreeEntry::symlink("x", 0, 0)],
+            vec![root(), FsTreeEntry::symlink("x", 0, 0, "target")],
         );
         assert!(matches!(
             compose_fs_trees(&[left_link, right_link]),
@@ -849,7 +866,7 @@ mod tests {
         let link = input(
             temp.path(),
             "link",
-            vec![root(), FsTreeEntry::symlink("x", 0, 0)],
+            vec![root(), FsTreeEntry::symlink("x", 0, 0, "target")],
         );
         let file = input(
             temp.path(),
@@ -899,7 +916,7 @@ mod tests {
                 root(),
                 FsTreeEntry::directory("bin", 0, 0, 0o755),
                 FsTreeEntry::file("bin/tool", 0, 0, 0o644),
-                FsTreeEntry::symlink("bin/tool-link", 0, 0),
+                FsTreeEntry::symlink("bin/tool-link", 0, 0, "tool"),
             ],
         );
         create_input_dir(&input, "bin", 0o755);

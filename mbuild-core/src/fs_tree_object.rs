@@ -327,14 +327,44 @@ fn validate_path_against_entry(
             validate_owner(rel_path, &metadata, *uid, *gid, owner_map)?;
             validate_mode(rel_path, &metadata, *mode)?;
         }
-        FsTreeEntry::Symlink { uid, gid, .. } => {
+        FsTreeEntry::Symlink {
+            uid, gid, target, ..
+        } => {
             if !file_type.is_symlink() {
                 return Err(kind_mismatch(rel_path, "symlink", &file_type));
             }
             validate_owner(rel_path, &metadata, *uid, *gid, owner_map)?;
+            validate_symlink_target(path, rel_path, target)?;
         }
     }
 
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_symlink_target(
+    path: &Path,
+    rel_path: &str,
+    expected_target: &str,
+) -> Result<(), FsTreeObjectError> {
+    let actual = fs::read_link(path).map_err(|error| {
+        FsTreeObjectError::Io(format!(
+            "failed to read fs-tree symlink '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let actual = actual.to_str().ok_or_else(|| {
+        FsTreeObjectError::Invalid(format!(
+            "symlink target for fs-tree entry '{}' is not UTF-8",
+            rel_path
+        ))
+    })?;
+    if actual != expected_target {
+        return Err(FsTreeObjectError::Invalid(format!(
+            "symlink target mismatch for fs-tree entry '{}': expected '{}', got '{}'",
+            rel_path, expected_target, actual
+        )));
+    }
     Ok(())
 }
 
@@ -544,7 +574,7 @@ mod tests {
             root(0, 0),
             FsTreeEntry::directory("bin", 0, 0, 0o755),
             FsTreeEntry::file("bin/tool", 0, 0, 0o644),
-            FsTreeEntry::symlink("bin/tool-link", 0, 0),
+            FsTreeEntry::symlink("bin/tool-link", 0, 0, "tool"),
         ]);
         let paths = create_fs_tree_staging_dir(&object_dir, &manifest).unwrap();
         fs::create_dir(paths.root_dir.join("bin")).unwrap();
@@ -715,7 +745,10 @@ mod tests {
 
         let temp = tempdir().unwrap();
         let object_dir = temp.path().join("object");
-        let manifest = make_manifest(vec![root(0, 0), FsTreeEntry::symlink("entry", 0, 0)]);
+        let manifest = make_manifest(vec![
+            root(0, 0),
+            FsTreeEntry::symlink("entry", 0, 0, "target"),
+        ]);
         let paths = create_fs_tree_staging_dir(&object_dir, &manifest).unwrap();
         write_file(&paths.root_dir.join("entry"), 0o644);
         assert!(validate_fs_tree_object(&object_dir, &owner).is_err());
@@ -756,7 +789,10 @@ mod tests {
     fn accepts_symlink_without_mode_comparison() {
         let temp = tempdir().unwrap();
         let object_dir = temp.path().join("object");
-        let manifest = make_manifest(vec![root(0, 0), FsTreeEntry::symlink("link", 0, 0)]);
+        let manifest = make_manifest(vec![
+            root(0, 0),
+            FsTreeEntry::symlink("link", 0, 0, "target"),
+        ]);
         let paths = create_fs_tree_staging_dir(&object_dir, &manifest).unwrap();
         symlink("target", paths.root_dir.join("link")).unwrap();
 

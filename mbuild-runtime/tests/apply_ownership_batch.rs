@@ -33,7 +33,7 @@ fn apply_ownership_batch_materializes_logical_owners_and_modes() -> TestResult<(
         FsTreeEntry::directory("", 0, 0, 0o755),
         FsTreeEntry::directory("dir", 1, 1, 0o700),
         FsTreeEntry::file("file", 1, 1, 0o640),
-        FsTreeEntry::symlink("link", 1, 1),
+        FsTreeEntry::symlink("link", 1, 1, "target"),
     ])?;
 
     apply_ownership_batch(&target, &manifest, &idmap, &workspace)?;
