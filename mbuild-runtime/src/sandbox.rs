@@ -485,21 +485,10 @@ impl SandboxRunnerExecutor {
     }
 
     fn prepare(&self) -> Result<(), SandboxRunnerFailureReport> {
-        if let Err(error) = fs::remove_file("/dev/tty")
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            return Err(SandboxRunnerFailureReport::runtime(
-                "sandbox-prepare",
-                error.to_string(),
-            ));
-        }
         for path in &self.prepare_paths {
-            fs::create_dir_all(path).map_err(|error| {
-                SandboxRunnerFailureReport::runtime("sandbox-prepare", error.to_string())
-            })?;
-            chown_tree(path, BUILD_USER_UID, BUILD_USER_GID).map_err(|error| {
-                SandboxRunnerFailureReport::runtime("sandbox-prepare", error.to_string())
-            })?;
+            fs::create_dir_all(path).map_err(|error| prepare_error("create dir", path, error))?;
+            chown_tree(path, BUILD_USER_UID, BUILD_USER_GID)
+                .map_err(|error| prepare_error("chown", path, error))?;
         }
         Ok(())
     }
@@ -775,6 +764,13 @@ fn read_sandbox_failure_report(path: &Path, fallback: String) -> RuntimeError {
 
 fn elapsed_ms(start: Instant) -> u128 {
     start.elapsed().as_millis()
+}
+
+fn prepare_error(operation: &str, path: &Path, error: io::Error) -> SandboxRunnerFailureReport {
+    SandboxRunnerFailureReport::runtime(
+        "sandbox-prepare",
+        format!("{operation} '{}': {error}", path.display()),
+    )
 }
 
 fn terminate_remaining_children() {
