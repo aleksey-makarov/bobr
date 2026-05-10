@@ -585,8 +585,9 @@ impl SandboxRunnerStep {
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
         let run_as = self.run_as;
+        let setgroups_allowed = setgroups_allowed();
         unsafe {
-            command.pre_exec(move || apply_step_credentials(run_as));
+            command.pre_exec(move || apply_step_credentials(run_as, setgroups_allowed));
         }
 
         let status = command.status().map_err(|error| {
@@ -1172,12 +1173,31 @@ fn set_process_caps(cap_set: &caps::CapsHashSet) -> io::Result<()> {
     Ok(())
 }
 
-fn apply_step_credentials(run_as: SandboxRunAs) -> io::Result<()> {
+fn credential_error(operation: &str, error: impl std::fmt::Display) -> io::Error {
+    io::Error::other(format!("{operation}: {error}"))
+}
+
+fn setgroups_allowed() -> bool {
+    match fs::read_to_string("/proc/self/setgroups") {
+        Ok(value) => setgroups_value_allows_setgroups(&value),
+        Err(_) => true,
+    }
+}
+
+fn setgroups_value_allows_setgroups(value: &str) -> bool {
+    value.trim() != "deny"
+}
+
+fn apply_step_credentials(run_as: SandboxRunAs, setgroups_allowed: bool) -> io::Result<()> {
     match run_as {
         SandboxRunAs::BuildUser => {
-            setgroups(&[]).map_err(io::Error::other)?;
-            setgid(Gid::from_raw(BUILD_USER_GID)).map_err(io::Error::other)?;
-            setuid(Uid::from_raw(BUILD_USER_UID)).map_err(io::Error::other)
+            if setgroups_allowed {
+                setgroups(&[]).map_err(|error| credential_error("setgroups([])", error))?;
+            }
+            setgid(Gid::from_raw(BUILD_USER_GID))
+                .map_err(|error| credential_error("setgid(1)", error))?;
+            setuid(Uid::from_raw(BUILD_USER_UID))
+                .map_err(|error| credential_error("setuid(1)", error))
         }
         SandboxRunAs::Root => set_process_caps(&root_step_caps()),
     }
@@ -1439,5 +1459,12 @@ mod tests {
         assert_eq!(outcome.object_hash, object_hash);
         assert_eq!(outcome.steps.len(), 1);
         assert_eq!(outcome.steps[0].name, "install");
+    }
+
+    #[test]
+    fn setgroups_value_detects_rootless_deny() {
+        assert!(!setgroups_value_allows_setgroups("deny\n"));
+        assert!(setgroups_value_allows_setgroups("allow\n"));
+        assert!(setgroups_value_allows_setgroups(""));
     }
 }
