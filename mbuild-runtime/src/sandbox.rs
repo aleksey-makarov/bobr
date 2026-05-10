@@ -1149,29 +1149,6 @@ fn oci_capability_from_name(name: &str) -> Result<Capability, RuntimeError> {
     }
 }
 
-fn root_step_caps() -> caps::CapsHashSet {
-    [
-        caps::Capability::CAP_CHOWN,
-        caps::Capability::CAP_DAC_OVERRIDE,
-        caps::Capability::CAP_DAC_READ_SEARCH,
-        caps::Capability::CAP_FOWNER,
-        caps::Capability::CAP_FSETID,
-    ]
-    .into_iter()
-    .collect()
-}
-
-fn set_process_caps(cap_set: &caps::CapsHashSet) -> io::Result<()> {
-    // The runner already starts as uid 0 inside the user namespace. Keep the
-    // step capability transition to base capset(2) operations: ambient
-    // capability prctl calls are not needed here and are fragile in rootless
-    // containers.
-    caps::set(None, caps::CapSet::Inheritable, cap_set).map_err(io::Error::other)?;
-    caps::set(None, caps::CapSet::Permitted, cap_set).map_err(io::Error::other)?;
-    caps::set(None, caps::CapSet::Effective, cap_set).map_err(io::Error::other)?;
-    Ok(())
-}
-
 fn credential_error(operation: &str, error: impl std::fmt::Display) -> io::Error {
     io::Error::other(format!("{operation}: {error}"))
 }
@@ -1198,7 +1175,7 @@ fn apply_step_credentials(run_as: SandboxRunAs, setgroups_allowed: bool) -> io::
             setuid(Uid::from_raw(BUILD_USER_UID))
                 .map_err(|error| credential_error("setuid(1)", error))
         }
-        SandboxRunAs::Root => set_process_caps(&root_step_caps()),
+        SandboxRunAs::Root => Ok(()),
     }
 }
 
