@@ -82,7 +82,7 @@ In v1, `Source` supports:
 - `origin.path` must be a non-empty relative path without `..`
 - `origin.type = "http"`
 - `origin.url` as one HTTP(S) URL or an ordered fallback list
-- `origin.unpack`, defaulting to `true`
+- `origin.unpack`, defaulting to `false`
 - `origin.archive_format` as an optional explicit unpack override
 - `origin.type = "oci-registry"`
 - `origin.image` as the registry image locator

@@ -108,14 +108,15 @@ In v1, `Source` supports three origins:
 - `origin.path` must be a non-empty relative path without `..`
 - `origin.type = "http"`
 - `origin.url` is one HTTP(S) URL or an ordered fallback list
-- `origin.unpack` defaults to `true`
+- `origin.unpack` defaults to `false`
 - `origin.archive_format` may override archive detection for unpacked sources
 - `origin.type = "oci-registry"`
 - `origin.image` is the registry image locator kept in the recipe
 - `origin.digest` is the pinned manifest or index digest requested from the registry
 - pinned manifest lists / OCI indexes are resolved to the `linux/amd64` manifest
 
-`Source.meta.install` carries install metadata for unpacked directory objects.
+`Source.meta.install` carries install metadata for unpacked directory objects
+when `origin.unpack = true`.
 
 `Source` may also omit `origin`. In that shape, the payload object must
 already exist in the store under `objects/<object_hash>`. If the canonical

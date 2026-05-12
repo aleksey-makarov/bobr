@@ -103,7 +103,7 @@ impl OriginHandler for HttpOriginHandler {
                 ));
             }
         }
-        let unpack = take_optional_bool(&mut object, field_path, "unpack")?.unwrap_or(true);
+        let unpack = take_optional_bool(&mut object, field_path, "unpack")?.unwrap_or(false);
         let archive_format =
             take_optional_archive_format(&mut object, field_path, "archive_format")?;
         if !object.is_empty() {
@@ -799,6 +799,31 @@ mod tests {
             "type": "http",
             "url": url,
             "unpack": false
+        }))
+        .unwrap();
+        let staged = origin
+            .materialize(&OriginContext {
+                temp_root: temp.path(),
+                local_root: None,
+            })
+            .unwrap();
+        handle.join().unwrap();
+        assert!(staged.is_file());
+        assert_eq!(fs::read(staged).unwrap(), payload);
+    }
+
+    #[test]
+    fn omitted_unpack_yields_file_object() {
+        let temp = tempdir().unwrap();
+        let payload = b"hello default file\n".to_vec();
+        let (url, handle) = match spawn_http_server(payload.clone(), "application/octet-stream") {
+            Ok(server) => server,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to start test HTTP server: {error}"),
+        };
+        let origin = parse_origin(serde_json::json!({
+            "type": "http",
+            "url": url
         }))
         .unwrap();
         let staged = origin
