@@ -6,6 +6,7 @@ use libcontainer::syscall::syscall::SyscallType;
 use nix::sys::wait::{WaitStatus, waitpid};
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -54,6 +55,7 @@ where
     E: libcontainer::workload::Executor + 'static,
 {
     let container_id = format!("mbuild-runtime-{suffix}");
+    let _start_guard = libcontainer_start_lock()?;
     let mut container = ContainerBuilder::new(container_id, SyscallType::Linux)
         .with_executor(executor)
         .with_root_path(state_dir)
@@ -67,20 +69,23 @@ where
     let mut result = match container.pid() {
         Some(pid) => {
             let start_result = container.start();
-            let wait_result = waitpid(pid, None);
+            drop(_start_guard);
 
             if let Err(error) = start_result {
                 Err(libcontainer_error(error))
             } else {
-                match wait_result {
+                match waitpid(pid, None) {
                     Ok(status) => wait_status_outcome(status),
                     Err(error) => Err(libcontainer_error(error)),
                 }
             }
         }
-        None => Err(RuntimeError::Libcontainer(
-            "libcontainer did not expose init pid".to_string(),
-        )),
+        None => {
+            drop(_start_guard);
+            Err(RuntimeError::Libcontainer(
+                "libcontainer did not expose init pid".to_string(),
+            ))
+        }
     };
 
     if let Err(error) = container.delete(true) {
@@ -92,6 +97,15 @@ where
     }
 
     result
+}
+
+pub(crate) fn libcontainer_start_lock() -> Result<MutexGuard<'static, ()>, RuntimeError> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    // libcontainer 0.6 creates/connects notify.sock by temporarily changing the
+    // process cwd, so concurrent container build/start calls are unsafe.
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| RuntimeError::Libcontainer("libcontainer start lock is poisoned".to_string()))
 }
 
 fn wait_status_outcome(status: WaitStatus) -> Result<ExecutorOutcome, RuntimeError> {

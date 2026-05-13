@@ -4,6 +4,7 @@ use crate::bundle::{Bundle, create_bundle};
 use crate::error::RuntimeError;
 use crate::idmap::MbuildIdmap;
 use crate::preflight::preflight_ownership_runtime;
+use crate::run::libcontainer_start_lock;
 use fsobj_hash::{ObjectHash, hash_fs_tree_object};
 use libcontainer::container::builder::ContainerBuilder;
 use libcontainer::oci_spec::runtime::{
@@ -290,6 +291,7 @@ impl SandboxLifecycle {
         // prepare_sandbox_cgroup() supplying that absolute path inside a
         // user-delegated slice. If a future change drops the absolute path,
         // libcontainer would fall back to the systemd cgroup manager.
+        let _start_guard = libcontainer_start_lock()?;
         let mut container = ContainerBuilder::new(container_id.clone(), SyscallType::Linux)
             .with_executor(runner)
             .with_root_path(state_dir)
@@ -303,6 +305,7 @@ impl SandboxLifecycle {
             RuntimeError::Libcontainer("libcontainer did not expose sandbox init pid".to_string())
         })?;
         container.start().map_err(libcontainer_error)?;
+        drop(_start_guard);
 
         Ok(Self {
             container,
