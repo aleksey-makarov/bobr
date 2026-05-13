@@ -25,7 +25,7 @@ use std::error::Error;
 use std::ffi::CString;
 use std::fs;
 use std::fs::File;
-use std::io;
+use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -245,17 +245,21 @@ impl SandboxDirs {
 struct SandboxRuntimeFiles {
     success_report: PathBuf,
     failure_report: PathBuf,
+    breadcrumbs: PathBuf,
 }
 
 impl SandboxRuntimeFiles {
     fn create(root: &Path) -> Result<Self, RuntimeError> {
         let success_report = root.join("sandbox-success.json");
         let failure_report = root.join("sandbox-failure.json");
+        let breadcrumbs = root.join("sandbox-breadcrumbs.log");
         File::create(&success_report)?;
         File::create(&failure_report)?;
+        File::create(&breadcrumbs)?;
         Ok(Self {
             success_report,
             failure_report,
+            breadcrumbs,
         })
     }
 }
@@ -392,6 +396,7 @@ struct SandboxRunnerExecutor {
     steps: Vec<SandboxRunnerStep>,
     success_report: Arc<File>,
     failure_report: Arc<File>,
+    breadcrumbs: Arc<File>,
 }
 
 impl SandboxRunnerExecutor {
@@ -399,35 +404,48 @@ impl SandboxRunnerExecutor {
         config: &SandboxBuildConfig,
         runtime_files: &SandboxRuntimeFiles,
     ) -> Result<Self, RuntimeError> {
+        let breadcrumbs = Arc::new(File::create(&runtime_files.breadcrumbs)?);
         let steps = config
             .steps
             .iter()
-            .map(SandboxRunnerStep::new)
+            .map(|step| SandboxRunnerStep::new(step, Arc::clone(&breadcrumbs)))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             prepare_paths: vec![PathBuf::from("/__mbuild/build")],
             steps,
             success_report: Arc::new(File::create(&runtime_files.success_report)?),
             failure_report: Arc::new(File::create(&runtime_files.failure_report)?),
+            breadcrumbs,
         })
     }
 
     fn run(&self) -> Result<SandboxBuildOutcome, SandboxRunnerFailureReport> {
+        self.breadcrumb("run:start");
+        self.breadcrumb("prepare:start");
         self.prepare()?;
+        self.breadcrumb("prepare:done");
 
         let mut reports = Vec::new();
         for step in &self.steps {
+            self.breadcrumb(&format!("step:{}:run:start", step.name));
             reports.push(step.run()?);
+            self.breadcrumb(&format!("step:{}:run:done", step.name));
         }
 
+        self.breadcrumb("manifest:scan:start");
         let out_dir = Path::new("/__mbuild/out");
         let manifest = scan_output_manifest(out_dir)?;
+        self.breadcrumb("manifest:scan:done");
+        self.breadcrumb("manifest:canonical:start");
         let manifest_bytes = manifest.to_canonical_bytes().map_err(|error| {
             SandboxRunnerFailureReport::runtime("sandbox-manifest-output", error.to_string())
         })?;
+        self.breadcrumb("manifest:canonical:done");
+        self.breadcrumb("hash-output:start");
         let object_hash = hash_fs_tree_object(&manifest_bytes, out_dir).map_err(|error| {
             SandboxRunnerFailureReport::runtime("sandbox-hash-output", error.to_string())
         })?;
+        self.breadcrumb("hash-output:done");
         Ok(SandboxBuildOutcome {
             object_hash,
             manifest,
@@ -437,14 +455,19 @@ impl SandboxRunnerExecutor {
 
     fn prepare(&self) -> Result<(), SandboxRunnerFailureReport> {
         for path in &self.prepare_paths {
+            self.breadcrumb(&format!("prepare:create-dir:start:{}", path.display()));
             fs::create_dir_all(path).map_err(|error| prepare_error("create dir", path, error))?;
+            self.breadcrumb(&format!("prepare:create-dir:done:{}", path.display()));
+            self.breadcrumb(&format!("prepare:chown:start:{}", path.display()));
             chown_tree(path, BUILD_USER_UID, BUILD_USER_GID)
                 .map_err(|error| prepare_error("chown", path, error))?;
+            self.breadcrumb(&format!("prepare:chown:done:{}", path.display()));
         }
         Ok(())
     }
 
     fn write_success(&self, outcome: &SandboxBuildOutcome) -> Result<(), ExecutorError> {
+        self.breadcrumb("write-success:start");
         let manifest_jsonl = String::from_utf8(
             outcome
                 .manifest
@@ -457,35 +480,54 @@ impl SandboxRunnerExecutor {
             manifest_jsonl,
             steps: outcome.steps.clone(),
         };
-        serde_json::to_writer(&*self.success_report, &report).map_err(executor_error)
+        serde_json::to_writer(&*self.success_report, &report).map_err(executor_error)?;
+        self.breadcrumb("write-success:done");
+        Ok(())
     }
 
     fn write_failure(&self, report: &SandboxRunnerFailureReport) -> Result<(), ExecutorError> {
-        serde_json::to_writer(&*self.failure_report, report).map_err(executor_error)
+        self.breadcrumb(&format!(
+            "write-failure:start:{}",
+            report.to_error_message()
+        ));
+        serde_json::to_writer(&*self.failure_report, report).map_err(executor_error)?;
+        self.breadcrumb("write-failure:done");
+        Ok(())
+    }
+
+    fn breadcrumb(&self, message: &str) {
+        write_breadcrumb(&self.breadcrumbs, message);
     }
 }
 
 impl Executor for SandboxRunnerExecutor {
     fn setup_envs(&self, _: HashMap<String, String>) -> Result<(), ExecutorSetEnvsError> {
+        self.breadcrumb("executor:setup-envs");
         Ok(())
     }
 
     fn validate(&self, _: &Spec) -> Result<(), ExecutorValidationError> {
+        self.breadcrumb("executor:validate");
         Ok(())
     }
 
     fn exec(&self, _: &Spec) -> Result<(), ExecutorError> {
+        self.breadcrumb("executor:exec:start");
         let exit_code = match self.run() {
             Ok(outcome) => {
+                self.breadcrumb("executor:run:ok");
                 self.write_success(&outcome)?;
                 0
             }
             Err(report) => {
+                self.breadcrumb(&format!("executor:run:error:{}", report.to_error_message()));
                 self.write_failure(&report)?;
                 1
             }
         };
+        self.breadcrumb("terminate-remaining-children:start");
         terminate_remaining_children();
+        self.breadcrumb(&format!("process-exit:{exit_code}"));
         std::process::exit(exit_code);
     }
 }
@@ -501,10 +543,11 @@ struct SandboxRunnerStep {
     stderr_path: PathBuf,
     stdout: Arc<File>,
     stderr: Arc<File>,
+    breadcrumbs: Arc<File>,
 }
 
 impl SandboxRunnerStep {
-    fn new(step: &SandboxStep) -> Result<Self, RuntimeError> {
+    fn new(step: &SandboxStep, breadcrumbs: Arc<File>) -> Result<Self, RuntimeError> {
         Ok(Self {
             name: step.name.clone(),
             run_as: step.run_as,
@@ -515,10 +558,12 @@ impl SandboxRunnerStep {
             stderr_path: step.stderr_path.clone(),
             stdout: Arc::new(File::create(&step.stdout_path)?),
             stderr: Arc::new(File::create(&step.stderr_path)?),
+            breadcrumbs,
         })
     }
 
     fn run(&self) -> Result<SandboxStepReport, SandboxRunnerFailureReport> {
+        self.breadcrumb("start");
         let executable = self.argv.first().ok_or_else(|| {
             SandboxRunnerFailureReport::step_runtime(
                 self,
@@ -526,14 +571,26 @@ impl SandboxRunnerStep {
                 0,
             )
         })?;
+        self.breadcrumb(&format!(
+            "argv-ready: executable={} argc={} cwd={} run_as={}",
+            executable,
+            self.argv.len(),
+            self.cwd.display(),
+            self.run_as.as_str()
+        ));
         let start = Instant::now();
+        self.breadcrumb("stdout-clone:start");
         let stdout = self.stdout.try_clone().map_err(|error| {
             SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
         })?;
+        self.breadcrumb("stdout-clone:done");
+        self.breadcrumb("stderr-clone:start");
         let stderr = self.stderr.try_clone().map_err(|error| {
             SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
         })?;
+        self.breadcrumb("stderr-clone:done");
 
+        self.breadcrumb("command-build:start");
         let mut command = Command::new(executable);
         command
             .args(&self.argv[1..])
@@ -548,8 +605,13 @@ impl SandboxRunnerStep {
         unsafe {
             command.pre_exec(move || apply_step_credentials(run_as, setgroups_allowed));
         }
+        self.breadcrumb(&format!(
+            "command-build:done setgroups_allowed={setgroups_allowed}"
+        ));
 
+        self.breadcrumb("command-status:start");
         let status = command.status().map_err(|error| {
+            self.breadcrumb(&format!("command-status:spawn-error:{error}"));
             SandboxRunnerFailureReport::step_runtime(
                 self,
                 format!(
@@ -560,9 +622,13 @@ impl SandboxRunnerStep {
                 elapsed_ms(start),
             )
         })?;
+        self.breadcrumb(&format!("command-status:done:{status:?}"));
+        self.breadcrumb("reap-children:start");
         reap_finished_children();
+        self.breadcrumb("reap-children:done");
         let duration_ms = elapsed_ms(start);
         if status.success() {
+            self.breadcrumb(&format!("success:duration_ms={duration_ms}"));
             Ok(SandboxStepReport {
                 name: self.name.clone(),
                 run_as: self.run_as.as_str().to_string(),
@@ -572,6 +638,9 @@ impl SandboxRunnerStep {
                 stderr_path: self.stderr_path.clone(),
             })
         } else {
+            self.breadcrumb(&format!(
+                "failed:duration_ms={duration_ms} status={status:?}"
+            ));
             Err(SandboxRunnerFailureReport::failed_step(
                 self,
                 &status,
@@ -579,6 +648,20 @@ impl SandboxRunnerStep {
             ))
         }
     }
+
+    fn breadcrumb(&self, message: &str) {
+        write_breadcrumb(&self.breadcrumbs, &format!("step:{}:{message}", self.name));
+    }
+}
+
+fn write_breadcrumb(file: &File, message: &str) {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| format!("{}.{:09}", duration.as_secs(), duration.subsec_nanos()))
+        .unwrap_or_else(|_| "time-error".to_string());
+    let mut file = file;
+    let _ = writeln!(file, "{elapsed} pid={} {message}", std::process::id());
+    let _ = file.flush();
 }
 
 impl SandboxRunAs {
