@@ -83,7 +83,7 @@ impl TypedBuilder for SandboxBuilder {
             BuildLogLevel::Info,
             "sandbox-prepare",
             format!(
-                "resolved rootfs, {} input(s), overlays, and config dir",
+                "resolved rootfs, {} input mount(s), overlays, and config dir",
                 named_inputs.len()
             ),
         );

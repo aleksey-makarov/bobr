@@ -359,13 +359,15 @@ shared by all steps and discarded after the build.
 numeric build user `1:1`. `/__mbuild/out` is a host bind mount and is the only
 published output path.
 
-File inputs are read-only bind mounts. Directory inputs use a per-build overlay
-with the store object as `lowerdir` and temporary `upperdir`/`workdir`
-directories. Before user steps run, `Sandbox` prepares directory input overlay
-views as owned by `1:1`. The store object is never mutated. The v1 directory
-input path requires metadata-only overlay copy-up support through
-`metacopy=on`; unsupported hosts fail during runtime setup instead of silently
-copying full input trees.
+File and directory inputs are read-only bind mounts. Directory inputs are
+mounted recursively and remain immutable for the whole sandbox lifecycle. The
+store object is never mutated, and `Sandbox` does not create per-input overlay
+state or perform runtime copy-up for inputs.
+
+Any step that needs a mutable source tree must copy or unpack it into
+`/__mbuild/build` first. Before user steps run, `Sandbox` creates only
+`/__mbuild/build` as a writable directory owned by `1:1`; it does not change
+ownership under `/__mbuild/inputs/<name>`.
 
 The sandbox mount policy is intentionally small:
 
@@ -408,7 +410,7 @@ In particular:
 - `Container` depends on `bwrap` support for `--overlay-src` and `--overlay`
 - `Container` does not provide a `fuse-overlayfs` fallback
 - `Sandbox` depends on libcontainer rootless runtime support and kernel
-  overlay support for the configured rootfs/input overlays
+  overlay support for the configured rootfs overlay
 - `Image` does not compute or persist canonical flattened `contents`
 - `Image` does not implement additive-only file-composition checks
 - `Image` does not reject path conflicts between incoming filesystem tree

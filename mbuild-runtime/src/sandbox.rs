@@ -225,12 +225,11 @@ impl PreparedSandbox {
 
 struct SandboxDirs {
     root: PathBuf,
-    rootfs_overlays: HashMap<String, InputOverlayDirs>,
-    input_overlays: HashMap<String, InputOverlayDirs>,
+    rootfs_overlays: HashMap<String, OverlayDirs>,
     host_files: PathBuf,
 }
 
-struct InputOverlayDirs {
+struct OverlayDirs {
     upper: PathBuf,
     work: PathBuf,
 }
@@ -241,22 +240,19 @@ impl SandboxDirs {
             .join("sandbox")
             .join(Uuid::new_v4().simple().to_string());
         let rootfs_overlays = root.join("rootfs-overlays");
-        let inputs = root.join("inputs");
         let host_files = root.join("host-files");
 
         fs::create_dir_all(&rootfs_overlays)?;
-        fs::create_dir_all(&inputs)?;
         fs::create_dir_all(&host_files)?;
 
         Ok(Self {
             root,
             rootfs_overlays: HashMap::new(),
-            input_overlays: HashMap::new(),
             host_files,
         })
     }
 
-    fn rootfs_overlay(&mut self, name: &str) -> Result<&InputOverlayDirs, RuntimeError> {
+    fn rootfs_overlay(&mut self, name: &str) -> Result<&OverlayDirs, RuntimeError> {
         if !self.rootfs_overlays.contains_key(name) {
             let root = self.root.join("rootfs-overlays").join(name);
             let upper = root.join("upper");
@@ -264,25 +260,12 @@ impl SandboxDirs {
             fs::create_dir_all(&upper)?;
             fs::create_dir_all(&work)?;
             self.rootfs_overlays
-                .insert(name.to_string(), InputOverlayDirs { upper, work });
+                .insert(name.to_string(), OverlayDirs { upper, work });
         }
         Ok(self
             .rootfs_overlays
             .get(name)
             .expect("rootfs overlay exists"))
-    }
-
-    fn input_overlay(&mut self, name: &str) -> Result<&InputOverlayDirs, RuntimeError> {
-        if !self.input_overlays.contains_key(name) {
-            let root = self.root.join("inputs").join(name);
-            let upper = root.join("upper");
-            let work = root.join("work");
-            fs::create_dir_all(&upper)?;
-            fs::create_dir_all(&work)?;
-            self.input_overlays
-                .insert(name.to_string(), InputOverlayDirs { upper, work });
-        }
-        Ok(self.input_overlays.get(name).expect("input overlay exists"))
     }
 }
 
@@ -449,21 +432,13 @@ impl SandboxRunnerExecutor {
         config: &SandboxBuildConfig,
         runtime_files: &SandboxRuntimeFiles,
     ) -> Result<Self, RuntimeError> {
-        let mut prepare_paths = vec![PathBuf::from("/__mbuild/build")];
-        prepare_paths.extend(
-            config
-                .inputs
-                .iter()
-                .filter(|input| input.host_path.is_dir())
-                .map(|input| input.mount_path.clone()),
-        );
         let steps = config
             .steps
             .iter()
             .map(SandboxRunnerStep::new)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
-            prepare_paths,
+            prepare_paths: vec![PathBuf::from("/__mbuild/build")],
             steps,
             success_report: Arc::new(File::create(&runtime_files.success_report)?),
             failure_report: Arc::new(File::create(&runtime_files.failure_report)?),
@@ -974,17 +949,7 @@ fn build_sandbox_spec(
     ]);
 
     for input in &config.inputs {
-        if input.host_path.is_dir() {
-            let overlay = dirs.input_overlay(&input.name)?;
-            mounts.push(overlay_mount(
-                &input.mount_path,
-                &input.host_path,
-                &overlay.upper,
-                &overlay.work,
-            )?);
-        } else {
-            mounts.push(bind_mount(&input.host_path, &input.mount_path, true)?);
-        }
+        mounts.push(bind_mount(&input.host_path, &input.mount_path, true)?);
     }
 
     build_oci(
@@ -1388,13 +1353,15 @@ mod tests {
     fn sandbox_spec_uses_top_level_rootfs_overlays_and_output_bind() {
         let temp = tempdir().unwrap();
         let rootfs = temp.path().join("rootfs");
+        let source = temp.path().join("source");
         let out = temp.path().join("out");
         let config = temp.path().join("config");
         let workspace = temp.path().join("workspace");
         let state = temp.path().join("state");
-        for path in [&rootfs, &out, &config, &workspace, &state] {
+        for path in [&rootfs, &source, &out, &config, &workspace, &state] {
             fs::create_dir_all(path).unwrap();
         }
+        fs::write(source.join("main.c"), "int main(void) { return 0; }\n").unwrap();
         for name in ["dev", "etc", "proc", "run", "tmp", "usr"] {
             fs::create_dir(rootfs.join(name)).unwrap();
         }
@@ -1405,7 +1372,11 @@ mod tests {
             config_dir: config,
             workspace: workspace.clone(),
             state_dir: state,
-            inputs: Vec::new(),
+            inputs: vec![SandboxInput {
+                name: "source".to_string(),
+                host_path: source.clone(),
+                mount_path: PathBuf::from("/__mbuild/inputs/source"),
+            }],
             steps: Vec::new(),
         };
         let mut dirs = SandboxDirs::create(&workspace).unwrap();
@@ -1463,6 +1434,25 @@ mod tests {
                 .any(|mount| mount.destination() == Path::new("/__mbuild/out")
                     && mount.source().as_deref() == Some(out.as_path()))
         );
+        let source_bind = mounts
+            .iter()
+            .find(|mount| {
+                mount.destination() == Path::new("/__mbuild/inputs/source")
+                    && mount.typ().as_deref() == Some("bind")
+            })
+            .expect("source input bind mount exists");
+        assert_eq!(source_bind.source().as_deref(), Some(source.as_path()));
+        assert!(
+            source_bind
+                .options()
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|option| option == "ro")
+        );
+        assert!(!mounts.iter().any(|mount| mount.destination()
+            == Path::new("/__mbuild/inputs/source")
+            && mount.typ().as_deref() == Some("overlay")));
         assert!(
             !mounts
                 .iter()
