@@ -16,13 +16,13 @@ use mbuild_core::{
     compute_result_id, fsutil, import_object, load_result_record, object_path, publish_result_refs,
     store_result_record,
 };
-use serde_json::to_string_pretty;
+use serde_json::{Map, Value, to_string_pretty};
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct BuildRunOptions {
@@ -428,6 +428,7 @@ fn execute_misses(
 
     let (tx, rx) = mpsc::channel::<(BuildKey, Result<ExecutedNode, RuntimeError>)>();
     let mut in_flight = HashMap::<BuildKey, JoinHandle<()>>::new();
+    let mut last_wait_log: Option<Instant> = None;
 
     while !completed.contains_key(&root_key) {
         if first_error.is_none() && cancellation.is_cancelled() {
@@ -505,6 +506,21 @@ fn execute_misses(
                             "build cancelled by signal".to_string(),
                         ));
                     }
+                    if let Some(error) = &first_error
+                        && should_log_scheduler_wait(last_wait_log)
+                    {
+                        let details =
+                            scheduler_wait_details(nodes, completed, &ready, &in_flight, error);
+                        log_scheduler_event(
+                            &logger,
+                            root_key,
+                            BuildLogLevel::Warn,
+                            "scheduler-wait",
+                            "first error recorded; waiting for in-flight jobs to finish",
+                            details,
+                        );
+                        last_wait_log = Some(Instant::now());
+                    }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(RuntimeError::Build(
@@ -522,7 +538,19 @@ fn execute_misses(
             Ok(executed) => executed,
             Err(error) => {
                 if first_error.is_none() {
+                    let details = scheduler_first_error_details(
+                        nodes, completed, &ready, &in_flight, key, &error,
+                    );
+                    log_scheduler_event(
+                        &logger,
+                        root_key,
+                        BuildLogLevel::Error,
+                        "scheduler-error",
+                        "worker returned first error; running jobs remain in flight",
+                        details,
+                    );
                     first_error = Some(error);
+                    last_wait_log = None;
                 }
                 continue;
             }
@@ -578,6 +606,135 @@ fn execute_misses(
             root_key
         ))
     })
+}
+
+fn should_log_scheduler_wait(last_wait_log: Option<Instant>) -> bool {
+    last_wait_log
+        .map(|instant| instant.elapsed() >= Duration::from_secs(5))
+        .unwrap_or(true)
+}
+
+fn log_scheduler_event(
+    logger: &Arc<BuildRunLogger>,
+    root_key: BuildKey,
+    level: BuildLogLevel,
+    phase: &str,
+    message: impl Into<String>,
+    details: Map<String, Value>,
+) {
+    logger
+        .bind_node("Scheduler", "executor", root_key)
+        .log_event(BuildLogEvent {
+            level,
+            phase: phase.to_string(),
+            message: message.into(),
+            object_hash: None,
+            raw_log_path: None,
+            details,
+        });
+}
+
+fn scheduler_first_error_details(
+    nodes: &HashMap<BuildKey, PlannedNode>,
+    completed: &HashMap<BuildKey, RealizedResult>,
+    ready: &VecDeque<BuildKey>,
+    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
+    failed_key: BuildKey,
+    error: &RuntimeError,
+) -> Map<String, Value> {
+    let mut details = scheduler_state_details(nodes, completed, ready, in_flight);
+    details.insert("failed".to_string(), node_summary_value(nodes, failed_key));
+    details.insert(
+        "error_class".to_string(),
+        Value::String(error.class().to_string()),
+    );
+    details.insert(
+        "error_message".to_string(),
+        Value::String(error.message().to_string()),
+    );
+    details
+}
+
+fn scheduler_wait_details(
+    nodes: &HashMap<BuildKey, PlannedNode>,
+    completed: &HashMap<BuildKey, RealizedResult>,
+    ready: &VecDeque<BuildKey>,
+    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
+    error: &RuntimeError,
+) -> Map<String, Value> {
+    let mut details = scheduler_state_details(nodes, completed, ready, in_flight);
+    details.insert(
+        "first_error_class".to_string(),
+        Value::String(error.class().to_string()),
+    );
+    details.insert(
+        "first_error_message".to_string(),
+        Value::String(error.message().to_string()),
+    );
+    details.insert(
+        "wait_reason".to_string(),
+        Value::String("in-flight jobs are allowed to finish after the first error".to_string()),
+    );
+    details
+}
+
+fn scheduler_state_details(
+    nodes: &HashMap<BuildKey, PlannedNode>,
+    completed: &HashMap<BuildKey, RealizedResult>,
+    ready: &VecDeque<BuildKey>,
+    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
+) -> Map<String, Value> {
+    let mut details = Map::new();
+    details.insert(
+        "completed_count".to_string(),
+        Value::Number((completed.len() as u64).into()),
+    );
+    details.insert(
+        "ready_count".to_string(),
+        Value::Number((ready.len() as u64).into()),
+    );
+    details.insert(
+        "in_flight_count".to_string(),
+        Value::Number((in_flight.len() as u64).into()),
+    );
+    details.insert(
+        "in_flight".to_string(),
+        Value::Array(in_flight_summaries(nodes, in_flight)),
+    );
+    details
+}
+
+fn in_flight_summaries(
+    nodes: &HashMap<BuildKey, PlannedNode>,
+    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
+) -> Vec<Value> {
+    let mut entries = in_flight
+        .keys()
+        .map(|key| (key.to_string(), node_summary_value(nodes, *key)))
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.into_iter().map(|(_, value)| value).collect()
+}
+
+fn node_summary_value(nodes: &HashMap<BuildKey, PlannedNode>, key: BuildKey) -> Value {
+    let mut object = Map::new();
+    object.insert("build_key".to_string(), Value::String(key.to_string()));
+    object.insert(
+        "short_build_key".to_string(),
+        Value::String(short_build_key(key)),
+    );
+    if let Some(node) = nodes.get(&key) {
+        object.insert(
+            "tag".to_string(),
+            Value::String(node.recipe.tag().to_string()),
+        );
+        object.insert("name".to_string(), Value::String(node.publish_name.clone()));
+    }
+    Value::Object(object)
+}
+
+fn short_build_key(key: BuildKey) -> String {
+    key.to_string().chars().take(12).collect()
 }
 
 fn build_resolved_inputs(

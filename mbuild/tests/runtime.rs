@@ -183,6 +183,21 @@ fn fake_podman_state_root() -> std::path::PathBuf {
     Path::new(&first_path).join(".fake-podman-state")
 }
 
+fn run_log_events(workspace: &Path) -> Vec<Value> {
+    let runs_dir = store_root(workspace).join("logs").join("runs");
+    let mut events = Vec::new();
+    for entry in fs::read_dir(runs_dir).unwrap() {
+        let entry = entry.unwrap();
+        let contents = fs::read_to_string(entry.path()).unwrap();
+        events.extend(
+            contents
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap()),
+        );
+    }
+    events
+}
+
 fn spawn_http_server(
     body: Vec<u8>,
     content_type: &'static str,
@@ -802,6 +817,18 @@ fn executor_waits_for_in_flight_workers_to_cleanup_after_first_failure() {
 
         let message = error.to_string();
         assert!(message.contains("step 'configure'"), "{message}");
+
+        let events = run_log_events(workspace.path());
+        let scheduler_error = events
+            .iter()
+            .find(|event| event["builder"] == "Scheduler" && event["phase"] == "scheduler-error")
+            .expect("expected scheduler first-error event");
+        assert_eq!(scheduler_error["details"]["failed"]["name"], "binary-fail");
+        assert_eq!(scheduler_error["details"]["in_flight_count"], 1);
+        assert_eq!(
+            scheduler_error["details"]["in_flight"][0]["name"],
+            "binary-slow"
+        );
 
         let state_root = fake_podman_state_root();
         let leaked = fs::read_dir(&state_root)
