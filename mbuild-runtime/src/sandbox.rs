@@ -609,9 +609,9 @@ impl SandboxRunnerStep {
             "command-build:done setgroups_allowed={setgroups_allowed}"
         ));
 
-        self.breadcrumb("command-status:start");
-        let status = command.status().map_err(|error| {
-            self.breadcrumb(&format!("command-status:spawn-error:{error}"));
+        self.breadcrumb("command-spawn:start");
+        let mut child = command.spawn().map_err(|error| {
+            self.breadcrumb(&format!("command-spawn:error:{error}"));
             SandboxRunnerFailureReport::step_runtime(
                 self,
                 format!(
@@ -622,7 +622,28 @@ impl SandboxRunnerStep {
                 elapsed_ms(start),
             )
         })?;
-        self.breadcrumb(&format!("command-status:done:{status:?}"));
+        let child_pid = child.id();
+        self.breadcrumb(&format!("command-spawn:done child_pid={child_pid}"));
+
+        self.breadcrumb(&format!("command-wait:start child_pid={child_pid}"));
+        let status = child.wait().map_err(|error| {
+            self.breadcrumb(&format!(
+                "command-wait:error child_pid={child_pid} error={error}"
+            ));
+            SandboxRunnerFailureReport::step_runtime(
+                self,
+                format!(
+                    "failed to wait for '{}' as {} child pid {}: {error}",
+                    executable,
+                    self.run_as.as_str(),
+                    child_pid
+                ),
+                elapsed_ms(start),
+            )
+        })?;
+        self.breadcrumb(&format!(
+            "command-wait:done child_pid={child_pid} status={status:?}"
+        ));
         self.breadcrumb("reap-children:start");
         reap_finished_children();
         self.breadcrumb("reap-children:done");
