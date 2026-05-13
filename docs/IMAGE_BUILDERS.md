@@ -178,6 +178,21 @@ selected build script:
 - `gnu-make` builds in-tree by default
 - `autotools` builds out-of-tree by default and can opt out via script config
 
+Synthetic recipe helpers (`Autotools`, `AutotoolsContainer`,
+`AutotoolsSandbox`, `Makefile`, `Meson`, and `PerlModule`) treat `source` as
+an immutable input. Their generated first step materializes `source` into a
+writable source tree under `@{build}/source`; later generated steps set
+`MBUILD_SOURCE_DIR` to that prepared tree. If `source` is a directory, its
+contents are copied. If `source` is a file, it is extracted as a tar archive
+and a single top-level wrapper directory is flattened.
+
+Synthetic helpers also apply patch inputs automatically during source
+preparation. Any input whose field name starts with `patch` is selected,
+input field names are sorted lexicographically, file inputs are applied
+directly, and directory inputs contribute only root-level `*.patch` files.
+Patch files are applied from the prepared source tree with `patch -Np1`; all
+other directory entries are ignored.
+
 ### `Binary` With An OCI Image Layout
 
 `Binary` executes against an OCI image layout input in two stages:
