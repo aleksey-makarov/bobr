@@ -174,6 +174,7 @@ fn validate_config(config: &SandboxBuildConfig) -> Result<(), RuntimeError> {
     require_directory(&config.config_dir, "sandbox config directory")?;
     require_directory(&config.workspace, "sandbox workspace")?;
     require_directory(&config.state_dir, "sandbox state directory")?;
+    reject_reserved_rootfs_entry(&config.rootfs, "__mbuild")?;
     for input in &config.inputs {
         if input.mount_path.is_relative() {
             return Err(RuntimeError::InvalidInput(format!(
@@ -203,16 +204,10 @@ struct PreparedSandbox {
 
 impl PreparedSandbox {
     fn create(config: &SandboxBuildConfig, idmap: &MbuildIdmap) -> Result<Self, RuntimeError> {
-        let mut dirs = SandboxDirs::create(&config.workspace)?;
-        let runtime_files = SandboxRuntimeFiles::create(&dirs.host_files)?;
+        let dirs = SandboxDirs::create(&config.workspace)?;
+        let runtime_files = SandboxRuntimeFiles::create(&dirs.runtime_files)?;
         let cgroup = prepare_sandbox_cgroup()?;
-        let spec = build_sandbox_spec(
-            config,
-            idmap,
-            &mut dirs,
-            &runtime_files,
-            Some(cgroup.container_path),
-        )?;
+        let spec = build_sandbox_spec(config, idmap, &dirs, Some(cgroup.container_path))?;
         let bundle = create_bundle(&config.workspace, &spec)?;
         populate_bundle_rootfs_skeleton(bundle.rootfs_dir(), &config.rootfs)?;
         Ok(Self {
@@ -224,14 +219,8 @@ impl PreparedSandbox {
 }
 
 struct SandboxDirs {
-    root: PathBuf,
-    rootfs_overlays: HashMap<String, OverlayDirs>,
-    host_files: PathBuf,
-}
-
-struct OverlayDirs {
-    upper: PathBuf,
-    work: PathBuf,
+    build_dir: PathBuf,
+    runtime_files: PathBuf,
 }
 
 impl SandboxDirs {
@@ -239,56 +228,31 @@ impl SandboxDirs {
         let root = workspace
             .join("sandbox")
             .join(Uuid::new_v4().simple().to_string());
-        let rootfs_overlays = root.join("rootfs-overlays");
-        let host_files = root.join("host-files");
+        let build_dir = root.join("build");
+        let runtime_files = root.join("runtime-files");
 
-        fs::create_dir_all(&rootfs_overlays)?;
-        fs::create_dir_all(&host_files)?;
+        fs::create_dir_all(&build_dir)?;
+        fs::create_dir_all(&runtime_files)?;
 
         Ok(Self {
-            root,
-            rootfs_overlays: HashMap::new(),
-            host_files,
+            build_dir,
+            runtime_files,
         })
-    }
-
-    fn rootfs_overlay(&mut self, name: &str) -> Result<&OverlayDirs, RuntimeError> {
-        if !self.rootfs_overlays.contains_key(name) {
-            let root = self.root.join("rootfs-overlays").join(name);
-            let upper = root.join("upper");
-            let work = root.join("work");
-            fs::create_dir_all(&upper)?;
-            fs::create_dir_all(&work)?;
-            self.rootfs_overlays
-                .insert(name.to_string(), OverlayDirs { upper, work });
-        }
-        Ok(self
-            .rootfs_overlays
-            .get(name)
-            .expect("rootfs overlay exists"))
     }
 }
 
 struct SandboxRuntimeFiles {
-    hosts: PathBuf,
-    resolv_conf: PathBuf,
     success_report: PathBuf,
     failure_report: PathBuf,
 }
 
 impl SandboxRuntimeFiles {
     fn create(root: &Path) -> Result<Self, RuntimeError> {
-        let hosts = root.join("hosts");
-        let resolv_conf = root.join("resolv.conf");
         let success_report = root.join("sandbox-success.json");
         let failure_report = root.join("sandbox-failure.json");
-        fs::write(&hosts, "127.0.0.1 localhost mbuild\n::1 localhost mbuild\n")?;
-        fs::write(&resolv_conf, "")?;
         File::create(&success_report)?;
         File::create(&failure_report)?;
         Ok(Self {
-            hosts,
-            resolv_conf,
             success_report,
             failure_report,
         })
@@ -899,8 +863,7 @@ fn reap_finished_children() {
 fn build_sandbox_spec(
     config: &SandboxBuildConfig,
     idmap: &MbuildIdmap,
-    dirs: &mut SandboxDirs,
-    host_files: &SandboxRuntimeFiles,
+    dirs: &SandboxDirs,
     cgroup_path: Option<PathBuf>,
 ) -> Result<Spec, RuntimeError> {
     let uid_mappings = vec![
@@ -937,15 +900,14 @@ fn build_sandbox_spec(
         linux.set_cgroups_path(Some(cgroup_path));
     }
 
-    let mut mounts = rootfs_top_level_mounts(&config.rootfs, dirs)?;
+    let mut mounts = rootfs_top_level_mounts(&config.rootfs)?;
     mounts.extend([
         proc_mount()?,
         tmpfs_mount(Path::new("/tmp"), &["mode=1777"])?,
         tmpfs_mount(Path::new("/run"), &["mode=755"])?,
+        bind_mount(&dirs.build_dir, Path::new("/__mbuild/build"), false)?,
         bind_mount(&config.config_dir, Path::new("/__mbuild/config"), true)?,
         bind_mount(&config.out_dir, Path::new("/__mbuild/out"), false)?,
-        bind_mount(&host_files.hosts, Path::new("/etc/hosts"), true)?,
-        bind_mount(&host_files.resolv_conf, Path::new("/etc/resolv.conf"), true)?,
     ]);
 
     for input in &config.inputs {
@@ -957,10 +919,7 @@ fn build_sandbox_spec(
             .version("1.0.2")
             .hostname("mbuild")
             .root(build_oci(
-                RootBuilder::default()
-                    .path("rootfs")
-                    .readonly(false)
-                    .build(),
+                RootBuilder::default().path("rootfs").readonly(true).build(),
             )?)
             .process(build_oci(
                 ProcessBuilder::default()
@@ -980,10 +939,7 @@ fn build_sandbox_spec(
     )
 }
 
-fn rootfs_top_level_mounts(
-    rootfs: &Path,
-    dirs: &mut SandboxDirs,
-) -> Result<Vec<Mount>, RuntimeError> {
+fn rootfs_top_level_mounts(rootfs: &Path) -> Result<Vec<Mount>, RuntimeError> {
     let mut entries = rootfs_top_level_entries(rootfs)?;
     entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
 
@@ -1000,16 +956,12 @@ fn rootfs_top_level_mounts(
         let destination = Path::new("/").join(name);
         let file_type = entry.file_type()?;
 
+        if !should_mount_rootfs_entry(name) {
+            continue;
+        }
+
         if file_type.is_dir() {
-            if should_mount_rootfs_directory(name) {
-                let overlay = dirs.rootfs_overlay(name)?;
-                mounts.push(overlay_mount(
-                    &destination,
-                    &source,
-                    &overlay.upper,
-                    &overlay.work,
-                )?);
-            }
+            mounts.push(bind_mount(&source, &destination, true)?);
         } else if file_type.is_file() {
             mounts.push(bind_mount(&source, &destination, true)?);
         }
@@ -1072,8 +1024,8 @@ fn rootfs_top_level_entries(rootfs: &Path) -> Result<Vec<fs::DirEntry>, RuntimeE
         .map_err(RuntimeError::from)
 }
 
-fn should_mount_rootfs_directory(name: &str) -> bool {
-    !matches!(name, "dev" | "proc" | "run" | "tmp")
+fn should_mount_rootfs_entry(name: &str) -> bool {
+    !matches!(name, "__mbuild" | "dev" | "proc" | "run" | "tmp")
 }
 
 fn populate_bundle_rootfs_skeleton(
@@ -1086,9 +1038,13 @@ fn populate_bundle_rootfs_skeleton(
         let file_type = entry.file_type()?;
 
         if file_type.is_symlink() {
-            let target = fs::read_link(entry.path())?;
-            if !destination.exists() && !destination.is_symlink() {
-                symlink(target, destination)?;
+            if let Some(name) = name.to_str()
+                && should_mount_rootfs_entry(name)
+            {
+                let target = fs::read_link(entry.path())?;
+                if !destination.exists() && !destination.is_symlink() {
+                    symlink(target, destination)?;
+                }
             }
         } else if file_type.is_dir() {
             let name = name.to_str().ok_or_else(|| {
@@ -1097,33 +1053,24 @@ fn populate_bundle_rootfs_skeleton(
                     lower_rootfs.display()
                 ))
             })?;
-            if !should_mount_rootfs_directory(name) {
+            if !should_mount_rootfs_entry(name) {
                 fs::create_dir_all(destination)?;
             }
         }
     }
+    for path in [
+        Path::new("__mbuild"),
+        Path::new("__mbuild/build"),
+        Path::new("__mbuild/config"),
+        Path::new("__mbuild/inputs"),
+        Path::new("__mbuild/out"),
+        Path::new("proc"),
+        Path::new("run"),
+        Path::new("tmp"),
+    ] {
+        fs::create_dir_all(bundle_rootfs.join(path))?;
+    }
     Ok(())
-}
-
-fn overlay_mount(
-    destination: &Path,
-    lower: &Path,
-    upper: &Path,
-    work: &Path,
-) -> Result<Mount, RuntimeError> {
-    build_oci(
-        MountBuilder::default()
-            .destination(destination)
-            .typ("overlay")
-            .source(Path::new("overlay"))
-            .options(vec![
-                format!("lowerdir={}", lower.display()),
-                format!("upperdir={}", upper.display()),
-                format!("workdir={}", work.display()),
-                "userxattr".to_string(),
-            ])
-            .build(),
-    )
 }
 
 fn bind_mount(source: &Path, destination: &Path, readonly: bool) -> Result<Mount, RuntimeError> {
@@ -1268,6 +1215,7 @@ fn step_env(step: &SandboxStep) -> HashMap<String, String> {
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
         ),
         ("HOME".to_string(), "/__mbuild/build".to_string()),
+        ("TMPDIR".to_string(), "/tmp".to_string()),
         ("USER".to_string(), "mbuild".to_string()),
         (
             "MBUILD_CONFIG_DIR".to_string(),
@@ -1321,6 +1269,17 @@ fn require_directory(path: &Path, label: &str) -> Result<(), RuntimeError> {
     }
 }
 
+fn reject_reserved_rootfs_entry(rootfs: &Path, name: &str) -> Result<(), RuntimeError> {
+    match fs::symlink_metadata(rootfs.join(name)) {
+        Ok(_) => Err(RuntimeError::InvalidInput(format!(
+            "sandbox rootfs '{}' contains reserved top-level entry '/{name}'",
+            rootfs.display()
+        ))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(RuntimeError::Io(error)),
+    }
+}
+
 fn build_oci<T>(result: Result<T, impl std::fmt::Display>) -> Result<T, RuntimeError> {
     result.map_err(|error| RuntimeError::Libcontainer(error.to_string()))
 }
@@ -1350,7 +1309,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn sandbox_spec_uses_top_level_rootfs_overlays_and_output_bind() {
+    fn sandbox_spec_uses_readonly_rootfs_binds_and_writable_runtime_mounts() {
         let temp = tempdir().unwrap();
         let rootfs = temp.path().join("rootfs");
         let source = temp.path().join("source");
@@ -1362,7 +1321,7 @@ mod tests {
             fs::create_dir_all(path).unwrap();
         }
         fs::write(source.join("main.c"), "int main(void) { return 0; }\n").unwrap();
-        for name in ["dev", "etc", "proc", "run", "tmp", "usr"] {
+        for name in ["dev", "etc", "proc", "run", "tmp", "usr", "var"] {
             fs::create_dir(rootfs.join(name)).unwrap();
         }
         symlink("usr/bin", rootfs.join("bin")).unwrap();
@@ -1379,61 +1338,103 @@ mod tests {
             }],
             steps: Vec::new(),
         };
-        let mut dirs = SandboxDirs::create(&workspace).unwrap();
-        let host_files = SandboxRuntimeFiles::create(&dirs.host_files).unwrap();
+        let dirs = SandboxDirs::create(&workspace).unwrap();
         let idmap = MbuildIdmap::for_tests(1000, 1001, 100000, 65536, 200000, 65536);
 
         let cgroup_path = PathBuf::from("/user.slice/mbuild-test.scope");
-        let spec = build_sandbox_spec(
-            &build_config,
-            &idmap,
-            &mut dirs,
-            &host_files,
-            Some(cgroup_path.clone()),
-        )
-        .unwrap();
+        let spec =
+            build_sandbox_spec(&build_config, &idmap, &dirs, Some(cgroup_path.clone())).unwrap();
         let mounts = spec.mounts().as_ref().unwrap();
         let linux = spec.linux().as_ref().unwrap();
+        let root = spec.root().as_ref().unwrap();
 
         assert_eq!(linux.cgroups_path().as_ref(), Some(&cgroup_path));
         assert!(linux.resources().is_none());
+        assert_eq!(root.readonly(), Some(true));
 
         assert!(
             !mounts
                 .iter()
-                .any(|mount| mount.destination() == Path::new("/")
-                    && mount.typ().as_deref() == Some("overlay"))
+                .any(|mount| mount.typ().as_deref() == Some("overlay"))
         );
+        for name in ["usr", "etc", "var"] {
+            let destination = Path::new("/").join(name);
+            let mount = mounts
+                .iter()
+                .find(|mount| {
+                    mount.destination() == destination.as_path()
+                        && mount.typ().as_deref() == Some("bind")
+                })
+                .unwrap_or_else(|| panic!("/{name} readonly bind mount exists"));
+            assert_eq!(mount.source().as_deref(), Some(rootfs.join(name).as_path()));
+            assert!(
+                mount
+                    .options()
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|option| option == "ro")
+            );
+        }
         assert!(
             !mounts
                 .iter()
                 .any(|mount| mount.destination() == Path::new("/dev")
-                    && mount.typ().as_deref() == Some("overlay"))
+                    && mount.source().as_deref() == Some(rootfs.join("dev").as_path()))
         );
-        let usr_overlay = mounts
+        let build_bind = mounts
             .iter()
             .find(|mount| {
-                mount.destination() == Path::new("/usr")
-                    && mount.typ().as_deref() == Some("overlay")
+                mount.destination() == Path::new("/__mbuild/build")
+                    && mount.typ().as_deref() == Some("bind")
             })
-            .expect("/usr overlay mount exists");
-        let usr_overlay_options = usr_overlay.options().as_ref().unwrap();
-        assert!(
-            usr_overlay_options
-                .iter()
-                .any(|option| option == "userxattr")
+            .expect("/__mbuild/build bind mount exists");
+        assert_eq!(
+            build_bind.source().as_deref(),
+            Some(dirs.build_dir.as_path())
         );
         assert!(
-            !usr_overlay_options
+            build_bind
+                .options()
+                .as_ref()
+                .unwrap()
                 .iter()
-                .any(|option| option == "metacopy=on")
+                .any(|option| option == "rw")
+        );
+        assert!(mounts.iter().any(|mount| {
+            mount.destination() == Path::new("/__mbuild/out")
+                && mount.source().as_deref() == Some(out.as_path())
+                && mount.typ().as_deref() == Some("bind")
+                && mount
+                    .options()
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|option| option == "rw")
+        }));
+        assert!(
+            mounts
+                .iter()
+                .any(|mount| mount.destination() == Path::new("/tmp")
+                    && mount.typ().as_deref() == Some("tmpfs"))
         );
         assert!(
             mounts
                 .iter()
-                .any(|mount| mount.destination() == Path::new("/__mbuild/out")
-                    && mount.source().as_deref() == Some(out.as_path()))
+                .any(|mount| mount.destination() == Path::new("/run")
+                    && mount.typ().as_deref() == Some("tmpfs"))
         );
+        assert!(mounts.iter().any(|mount| {
+            mount.destination() == Path::new("/__mbuild/config")
+                && mount.source().as_deref() == Some(build_config.config_dir.as_path())
+                && mount.typ().as_deref() == Some("bind")
+                && mount
+                    .options()
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|option| option == "ro")
+        }));
         let source_bind = mounts
             .iter()
             .find(|mount| {
@@ -1450,9 +1451,16 @@ mod tests {
                 .iter()
                 .any(|option| option == "ro")
         );
-        assert!(!mounts.iter().any(|mount| mount.destination()
-            == Path::new("/__mbuild/inputs/source")
-            && mount.typ().as_deref() == Some("overlay")));
+        assert!(
+            !mounts
+                .iter()
+                .any(|mount| mount.destination() == Path::new("/etc/hosts"))
+        );
+        assert!(
+            !mounts
+                .iter()
+                .any(|mount| mount.destination() == Path::new("/etc/resolv.conf"))
+        );
         assert!(
             !mounts
                 .iter()
@@ -1472,6 +1480,34 @@ mod tests {
         assert!(capabilities.contains(&Capability::Setuid));
         assert!(capabilities.contains(&Capability::Setgid));
         assert!(capabilities.contains(&Capability::Chown));
+    }
+
+    #[test]
+    fn sandbox_config_rejects_reserved_mbuild_rootfs_entry() {
+        let temp = tempdir().unwrap();
+        let rootfs = temp.path().join("rootfs");
+        let out = temp.path().join("out");
+        let config = temp.path().join("config");
+        let workspace = temp.path().join("workspace");
+        let state = temp.path().join("state");
+        for path in [&rootfs, &out, &config, &workspace, &state] {
+            fs::create_dir_all(path).unwrap();
+        }
+        fs::create_dir(rootfs.join("__mbuild")).unwrap();
+        let build_config = SandboxBuildConfig {
+            rootfs: rootfs.clone(),
+            out_dir: out,
+            config_dir: config,
+            workspace,
+            state_dir: state,
+            inputs: Vec::new(),
+            steps: Vec::new(),
+        };
+
+        let error = validate_config(&build_config).unwrap_err();
+
+        assert!(matches!(error, RuntimeError::InvalidInput(_)));
+        assert!(error.to_string().contains("reserved top-level entry"));
     }
 
     #[test]

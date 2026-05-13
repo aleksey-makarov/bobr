@@ -345,19 +345,24 @@ directory after all steps complete. Install metadata defaults to the same
 `Sandbox` executes the same step contract against a rootfs directory object.
 It accepts:
 
-- required `rootfs`: one directory object exposed as a writable overlay under
-  `/`
+- required `rootfs`: one directory object exposed read-only under `/`
 - any number of extra named file or directory inputs mounted under
   `/__mbuild/inputs/<name>`
 
 `Sandbox` uses `mbuild-runtime` and libcontainer directly. It creates one
 container lifecycle for the whole build, then runs each configured step as a
-separate tenant exec operation inside that lifecycle. The rootfs overlay is
-shared by all steps and discarded after the build.
+separate tenant exec operation inside that lifecycle.
 
-`/__mbuild/build` is created inside the rootfs overlay and is owned by the
-numeric build user `1:1`. `/__mbuild/out` is a host bind mount and is the only
-published output path.
+Top-level rootfs directories are mounted as read-only recursive bind mounts,
+and top-level rootfs files are mounted as read-only bind mounts. Top-level
+rootfs symlinks are materialized in the temporary bundle rootfs before the
+sandbox starts. The source rootfs store object is never mutated, and `Sandbox`
+does not create rootfs overlay state or perform runtime copy-up for rootfs
+paths.
+
+`/__mbuild/build` is a writable host temporary bind mount owned inside the
+sandbox by the numeric build user `1:1`. `/__mbuild/out` is a writable host
+bind mount and is the only published output path.
 
 File and directory inputs are read-only bind mounts. Directory inputs are
 mounted recursively and remain immutable for the whole sandbox lifecycle. The
@@ -373,10 +378,12 @@ The sandbox mount policy is intentionally small:
 
 - no host network connectivity
 - `/proc` is mounted
-- `/sys` is not mounted
+- `/sys` has no special runtime mount
 - `/tmp` and `/run` are tmpfs mounts
-- `/etc/hosts` and `/etc/resolv.conf` are generated readonly files
 - hostname is `mbuild`
+
+`Sandbox` exports the same core environment variables as the other step
+executors, plus `TMPDIR=/tmp`.
 
 `run_as=build-user` runs as numeric uid `1`, gid `1` with an empty capability
 set. `run_as=root` runs as numeric uid `0`, gid `0` with only `CHOWN`,
@@ -409,8 +416,7 @@ In particular:
 - `Binary` still depends on `podman load` and `podman`
 - `Container` depends on `bwrap` support for `--overlay-src` and `--overlay`
 - `Container` does not provide a `fuse-overlayfs` fallback
-- `Sandbox` depends on libcontainer rootless runtime support and kernel
-  overlay support for the configured rootfs overlay
+- `Sandbox` depends on libcontainer rootless runtime support
 - `Image` does not compute or persist canonical flattened `contents`
 - `Image` does not implement additive-only file-composition checks
 - `Image` does not reject path conflicts between incoming filesystem tree
