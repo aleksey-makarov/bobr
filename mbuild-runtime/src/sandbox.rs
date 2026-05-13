@@ -26,6 +26,7 @@ use std::ffi::CString;
 use std::fs;
 use std::fs::File;
 use std::io::{self, Write};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -589,6 +590,11 @@ impl SandboxRunnerStep {
             SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
         })?;
         self.breadcrumb("stderr-clone:done");
+        self.breadcrumb("pre-exec-breadcrumbs-clone:start");
+        let pre_exec_breadcrumbs = self.breadcrumbs.try_clone().map_err(|error| {
+            SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
+        })?;
+        self.breadcrumb("pre-exec-breadcrumbs-clone:done");
 
         self.breadcrumb("command-build:start");
         let mut command = Command::new(executable);
@@ -603,7 +609,9 @@ impl SandboxRunnerStep {
         let run_as = self.run_as;
         let setgroups_allowed = setgroups_allowed();
         unsafe {
-            command.pre_exec(move || apply_step_credentials(run_as, setgroups_allowed));
+            command.pre_exec(move || {
+                apply_step_credentials(run_as, setgroups_allowed, pre_exec_breadcrumbs.as_raw_fd())
+            });
         }
         self.breadcrumb(&format!(
             "command-build:done setgroups_allowed={setgroups_allowed}"
@@ -1300,18 +1308,52 @@ fn setgroups_value_allows_setgroups(value: &str) -> bool {
     value.trim() != "deny"
 }
 
-fn apply_step_credentials(run_as: SandboxRunAs, setgroups_allowed: bool) -> io::Result<()> {
+fn raw_pre_exec_breadcrumb(fd: RawFd, message: &'static [u8]) {
+    // This runs in Command::pre_exec after fork and before exec. Keep it to a
+    // single async-signal-safe syscall so the diagnostic does not introduce
+    // more child-side runtime work than the credential switch already has.
+    unsafe {
+        let _ = libc::write(fd, message.as_ptr().cast(), message.len());
+    }
+}
+
+fn apply_step_credentials(
+    run_as: SandboxRunAs,
+    setgroups_allowed: bool,
+    breadcrumbs_fd: RawFd,
+) -> io::Result<()> {
+    raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:start\n");
     match run_as {
         SandboxRunAs::BuildUser => {
             if setgroups_allowed {
-                setgroups(&[]).map_err(|error| credential_error("setgroups([])", error))?;
+                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgroups:start\n");
+                if let Err(error) = setgroups(&[]) {
+                    raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgroups:error\n");
+                    return Err(credential_error("setgroups([])", error));
+                }
+                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgroups:done\n");
+            } else {
+                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgroups:skipped\n");
             }
-            setgid(Gid::from_raw(BUILD_USER_GID))
-                .map_err(|error| credential_error("setgid(1)", error))?;
-            setuid(Uid::from_raw(BUILD_USER_UID))
-                .map_err(|error| credential_error("setuid(1)", error))
+            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgid:start\n");
+            if let Err(error) = setgid(Gid::from_raw(BUILD_USER_GID)) {
+                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgid:error\n");
+                return Err(credential_error("setgid(1)", error));
+            }
+            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgid:done\n");
+            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setuid:start\n");
+            if let Err(error) = setuid(Uid::from_raw(BUILD_USER_UID)) {
+                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setuid:error\n");
+                return Err(credential_error("setuid(1)", error));
+            }
+            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setuid:done\n");
+            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:done\n");
+            Ok(())
         }
-        SandboxRunAs::Root => Ok(()),
+        SandboxRunAs::Root => {
+            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:root:done\n");
+            Ok(())
+        }
     }
 }
 
