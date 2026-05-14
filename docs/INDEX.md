@@ -7,12 +7,12 @@
    bottom-up execution of missing nodes.
 
 2. [IMAGE_BUILDERS.md](./IMAGE_BUILDERS.md)
-   Current behavior of `Source/oci-registry`, `Image`, `Binary`, `Container`,
-   and `Sandbox` on the image and rootfs-backed execution paths.
+   Current behavior of `Source/oci-registry`, `Image`, `OciExtract`, and
+   `Sandbox` on the image and rootfs-backed execution paths.
 
 3. [ROOTFS_BUILDERS.md](./ROOTFS_BUILDERS.md)
-   Current behavior of `Tree`, `TreeMerge`, `ErofsRootfs`, `Ext4Rootfs`, and
-   the direct filesystem authoring/composition path.
+   Current behavior of `Tree`, `TreeMerge`, `ErofsRootfs`, and the fs-tree
+   filesystem authoring/composition path.
 
 4. [CAS.md](./CAS.md)
    Content-addressed store, build handles, canonical result records, and

@@ -2,7 +2,6 @@
 members = [
   "mbuild",
   "mbuild-core",
-  "mbuild-compose",
   "mbuild-binary",
   "mbuild-origin-http",
   "mbuild-origin-oci-registry",

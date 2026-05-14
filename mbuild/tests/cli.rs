@@ -166,11 +166,11 @@ fn cli_reports_invalid_generic_input_shape() {
             "paths": { "store": store.to_string_lossy() },
             "nodes": {
                 "root": {
-                    "name": "bin",
-                    "tag": "Binary",
+                    "name": "sandbox",
+                    "tag": "Sandbox",
                     "config": {},
                     "inputs": {
-                        "image": []
+                        "rootfs": []
                     }
                 }
             }

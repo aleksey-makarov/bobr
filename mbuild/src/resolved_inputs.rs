@@ -141,8 +141,8 @@ mod tests {
         inputs.insert("source", object.clone());
 
         let spec = BuilderSpec {
-            tag: "Binary",
-            required_inputs: &["image"],
+            tag: "Sandbox",
+            required_inputs: &["rootfs"],
             optional_inputs: &["base"],
             allow_extra_inputs: true,
         };
@@ -179,8 +179,8 @@ mod tests {
         );
 
         let spec = BuilderSpec {
-            tag: "Binary",
-            required_inputs: &["image"],
+            tag: "Sandbox",
+            required_inputs: &["rootfs"],
             optional_inputs: &[],
             allow_extra_inputs: true,
         };

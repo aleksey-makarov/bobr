@@ -7,32 +7,44 @@ use mbuild_core::{
     StoreLayout, compute_meta_hash, compute_result_id, load_build_handle, load_result_record,
 };
 use serde_json::{Value, json};
-use std::env;
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::net::{TcpListener, TcpStream};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+#[cfg(feature = "integration-tests")]
 use std::path::Path;
+#[cfg(feature = "integration-tests")]
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use support::{
-    base_image_recipe, binary_recipe, build_ref_path, default_binary_steps, image_recipe,
-    recipe_node, script_recipe, source_recipe, spawn_test_oci_registry, store_root,
-    tree_file_recipe, write_recipe,
+    base_image_recipe, build_ref_path, image_recipe, recipe_node, source_recipe,
+    spawn_test_oci_registry, store_root, tree_file_recipe, write_recipe,
 };
 #[cfg(feature = "integration-tests")]
 use support::{tree_directory_recipe, tree_symlink_recipe};
 use tempfile::tempdir;
 
 #[test]
-fn registered_builders_include_rootfs() {
-    assert!(mbuild::builders::supported_builder_tags().contains(&"Rootfs"));
-    assert!(mbuild::builders::supported_builder_tags().contains(&"Container"));
-    assert!(mbuild::builders::supported_builder_tags().contains(&"Sandbox"));
-    assert!(mbuild::builders::supported_builder_tags().contains(&"OciExtract"));
+fn registered_builders_include_current_tags_only() {
+    let tags = mbuild::builders::supported_builder_tags();
+    for tag in [
+        "Text",
+        "Tree",
+        "TreeMerge",
+        "ErofsRootfs",
+        "Sandbox",
+        "Image",
+        "OciExtract",
+    ] {
+        assert!(tags.contains(&tag), "missing registered builder tag {tag}");
+    }
+    for tag in ["Binary", "Container", "Rootfs", "Ext4Rootfs"] {
+        assert!(
+            !tags.contains(&tag),
+            "legacy builder tag {tag} is still registered"
+        );
+    }
 }
 
 fn source_recipe_node(name: &str, object_hash: &str, origin_path: &str, mode: &str) -> Value {
@@ -49,153 +61,10 @@ fn source_recipe_node(name: &str, object_hash: &str, origin_path: &str, mode: &s
     })
 }
 
-fn legacy_install_meta() -> Value {
-    json!({
-        "install": {
-            "rules": [{
-                "path": "**",
-                "attrs": {
-                    "uid": 0,
-                    "gid": 0,
-                    "directory_mode": 493,
-                    "regular_file_mode": 420,
-                    "executable_file_mode": 493,
-                    "symlink_mode": 511
-                }
-            }]
-        }
-    })
-}
-
-fn legacy_rootfs_source_recipe(workspace: &Path, name: &str) -> Value {
-    let source_name = format!("{name}-source");
-    let source_dir = workspace.join(&source_name);
-    fs::create_dir_all(source_dir.join("dev")).unwrap();
-    fs::create_dir_all(source_dir.join("etc")).unwrap();
-    fs::write(source_dir.join("etc/hostname"), b"mbuild\n").unwrap();
-
-    let object_hash = fsobj_hash::hash_path(&source_dir).unwrap();
-    json!({
-        "name": name,
-        "tag": "Source",
-        "object_hash": object_hash.to_string(),
-        "origin": {
-            "type": "path",
-            "path": source_name,
-            "mode": "direct"
-        },
-        "meta": legacy_install_meta()
-    })
-}
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
 #[cfg(feature = "integration-tests")]
 fn ownership_runtime_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn install_fake_podman(dir: &Path) {
-    let script_path = dir.join("podman");
-    let script = include_str!("assets/fake_podman_full.sh");
-    fs::write(&script_path, script).unwrap();
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(&script_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).unwrap();
-    }
-}
-
-fn install_fake_bwrap(dir: &Path) {
-    let script_path = dir.join("bwrap");
-    let script = include_str!("assets/fake_bwrap_full.sh");
-    fs::write(&script_path, script).unwrap();
-    #[cfg(unix)]
-    {
-        let mut permissions = fs::metadata(&script_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&script_path, permissions).unwrap();
-    }
-}
-
-fn with_fake_podman<T>(f: impl FnOnce() -> T) -> T {
-    let _guard = env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let temp = tempdir().unwrap();
-    install_fake_podman(temp.path());
-    let previous_path = env::var_os("PATH");
-    let new_path = match &previous_path {
-        Some(existing) => {
-            let mut joined = temp.path().as_os_str().to_os_string();
-            joined.push(":");
-            joined.push(existing);
-            joined
-        }
-        None => temp.path().as_os_str().to_os_string(),
-    };
-    unsafe { env::set_var("PATH", &new_path) };
-    let result = f();
-    match previous_path {
-        Some(path) => unsafe { env::set_var("PATH", path) },
-        None => unsafe { env::remove_var("PATH") },
-    }
-    result
-}
-
-fn with_fake_bwrap<T>(f: impl FnOnce() -> T) -> T {
-    let _guard = env_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let temp = tempdir().unwrap();
-    install_fake_bwrap(temp.path());
-    let previous_path = env::var_os("PATH");
-    let new_path = match &previous_path {
-        Some(existing) => {
-            let mut joined = temp.path().as_os_str().to_os_string();
-            joined.push(":");
-            joined.push(existing);
-            joined
-        }
-        None => temp.path().as_os_str().to_os_string(),
-    };
-    unsafe { env::set_var("PATH", &new_path) };
-    let result = f();
-    match previous_path {
-        Some(path) => unsafe { env::set_var("PATH", path) },
-        None => unsafe { env::remove_var("PATH") },
-    }
-    result
-}
-
-fn fake_podman_state_root() -> std::path::PathBuf {
-    let first_path = env::var("PATH")
-        .unwrap()
-        .split(':')
-        .next()
-        .expect("PATH must have fake podman prefix")
-        .to_string();
-    Path::new(&first_path).join(".fake-podman-state")
-}
-
-fn run_log_events(workspace: &Path) -> Vec<Value> {
-    let runs_dir = store_root(workspace).join("logs").join("runs");
-    let mut events = Vec::new();
-    for entry in fs::read_dir(runs_dir).unwrap() {
-        let entry = entry.unwrap();
-        let contents = fs::read_to_string(entry.path()).unwrap();
-        events.extend(
-            contents
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap()),
-        );
-    }
-    events
 }
 
 fn spawn_http_server(
@@ -346,35 +215,32 @@ fn make_full_recipe(
 ) -> Value {
     image_recipe(
         "final-image",
-        vec![binary_recipe(
-            "binary",
-            url,
-            source_hash,
-            image,
-            digest,
-            image_object_hash,
-        )],
+        vec![
+            named_source_recipe("source", url, source_hash),
+            base_image_recipe(image, digest, image_object_hash),
+        ],
     )
 }
 
-fn binary_with_two_sources_recipe(
-    url_a: &str,
-    url_b: &str,
-    source_hash: &str,
-    image: &str,
-    digest: &str,
-    image_object_hash: &str,
-) -> Value {
-    recipe_node(
-        "binary",
-        "Binary",
-        json!({
-            "steps": default_binary_steps(),
-        }),
-        json!({
-            "image": base_image_recipe(image, digest, image_object_hash),
-            "script": script_recipe(),
-            "source_a": {
+fn named_source_recipe(name: &str, url: &str, source_hash: &str) -> Value {
+    json!({
+        "name": name,
+        "tag": "Source",
+        "object_hash": source_hash,
+        "origin": {
+            "type": "http",
+            "url": url,
+            "unpack": true
+        },
+        "meta": {}
+    })
+}
+
+fn image_with_two_sources_recipe(url_a: &str, url_b: &str, source_hash: &str) -> Value {
+    image_recipe(
+        "final-image",
+        vec![
+            json!({
                 "name": "source-a",
                 "tag": "Source",
                 "object_hash": source_hash,
@@ -384,8 +250,8 @@ fn binary_with_two_sources_recipe(
                     "unpack": true
                 },
                 "meta": { "variant": "a" }
-            },
-            "source_b": {
+            }),
+            json!({
                 "name": "source-b",
                 "tag": "Source",
                 "object_hash": source_hash,
@@ -395,535 +261,300 @@ fn binary_with_two_sources_recipe(
                     "unpack": true
                 },
                 "meta": { "variant": "b" }
-            }
-        }),
-    )
-}
-
-fn binary_recipe_with_behavior(
-    name: &str,
-    url: &str,
-    source_hash: &str,
-    image: &str,
-    digest: &str,
-    image_object_hash: &str,
-    behavior: &str,
-) -> Value {
-    recipe_node(
-        name,
-        "Binary",
-        json!({
-            "steps": default_binary_steps(),
-            "script_config": {
-                "test_behavior": behavior,
-            }
-        }),
-        json!({
-            "image": base_image_recipe(image, digest, image_object_hash),
-            "script": script_recipe(),
-            "source": source_recipe(url, source_hash),
-        }),
+            }),
+        ],
     )
 }
 
 #[test]
 fn json_recipe_executes_all_real_builders() {
-    with_fake_podman(|| {
-        let workspace = tempdir().unwrap();
-        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
-        let source_tar = {
-            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            let mut tar = tar::Builder::new(encoder);
-            let body = b"hello from json runtime\n";
-            let mut header = tar::Header::new_gnu();
-            header.set_path("pkg/README.txt").unwrap();
-            header.set_size(body.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            tar.append(&header, &body[..]).unwrap();
-            tar.into_inner().unwrap().finish().unwrap()
-        };
-        let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
-            Ok(server) => server,
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-            Err(error) => panic!("failed to start test HTTP server: {error}"),
-        };
-        let source_hash = source_tree_hash(&source_tar);
-        let recipe = make_full_recipe(
-            &url,
-            &source_hash,
-            &image_ref,
-            &pinned_digest,
-            &image_object_hash,
+    let workspace = tempdir().unwrap();
+    let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
+    let source_tar = {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        let body = b"hello from json runtime\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("pkg/README.txt").unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, &body[..]).unwrap();
+        tar.into_inner().unwrap().finish().unwrap()
+    };
+    let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
+        Ok(server) => server,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("failed to start test HTTP server: {error}"),
+    };
+    let source_hash = source_tree_hash(&source_tar);
+    let recipe = make_full_recipe(
+        &url,
+        &source_hash,
+        &image_ref,
+        &pinned_digest,
+        &image_object_hash,
+    );
+    let recipe_path = workspace.path().join("recipe.json");
+    write_recipe(&recipe_path, &recipe);
+
+    let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    handle.join().unwrap();
+
+    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let published = load_build_handle(&layout, build.build_key.expect("builder root"))
+        .unwrap()
+        .expect("expected final Build to exist in store");
+
+    assert_eq!(
+        published.build.meta["manifest_digest"]
+            .as_str()
+            .map(|value| value.starts_with("sha256:")),
+        Some(true)
+    );
+    assert!(published.build.meta.get("mode").is_none());
+
+    for name in ["source", "base-image", "final-image"] {
+        assert!(
+            store_root(workspace.path())
+                .join("meta-refs")
+                .join(format!("{name}.json"))
+                .exists()
         );
-        let recipe_path = workspace.path().join("recipe.json");
-        write_recipe(&recipe_path, &recipe);
-
-        let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-        handle.join().unwrap();
-
-        let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
-        let published = load_build_handle(&layout, build.build_key.expect("builder root"))
-            .unwrap()
-            .expect("expected final Build to exist in store");
-
-        assert_eq!(
-            published.build.meta["manifest_digest"]
-                .as_str()
-                .map(|value| value.starts_with("sha256:")),
-            Some(true)
+        assert!(
+            store_root(workspace.path())
+                .join("object-refs")
+                .join(name)
+                .exists()
         );
-        assert!(published.build.meta.get("mode").is_none());
+    }
 
-        for name in ["source", "script", "base-image", "binary", "final-image"] {
-            assert!(
-                store_root(workspace.path())
-                    .join("meta-refs")
-                    .join(format!("{name}.json"))
-                    .exists()
-            );
-            assert!(
-                store_root(workspace.path())
-                    .join("object-refs")
-                    .join(name)
-                    .exists()
-            );
-        }
-
-        let builds_dir = store_root(workspace.path()).join("builds");
-        let objects_dir = store_root(workspace.path()).join("objects");
-        assert_eq!(fs::read_dir(&builds_dir).unwrap().count(), 3);
-        assert_eq!(fs::read_dir(&objects_dir).unwrap().count(), 5);
-        drop(oci_server);
-    });
+    let builds_dir = store_root(workspace.path()).join("builds");
+    let objects_dir = store_root(workspace.path()).join("objects");
+    assert_eq!(fs::read_dir(&builds_dir).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&objects_dir).unwrap().count(), 3);
+    drop(oci_server);
 }
 
 #[test]
 fn repeated_build_keys_are_built_once_with_one_publish_name() {
-    with_fake_podman(|| {
-        let workspace = tempdir().unwrap();
-        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
-        let source_tar = {
-            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            let mut tar = tar::Builder::new(encoder);
-            let body = b"hello from duplicate test\n";
-            let mut header = tar::Header::new_gnu();
-            header.set_path("pkg/README.txt").unwrap();
-            header.set_size(body.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            tar.append(&header, &body[..]).unwrap();
-            tar.into_inner().unwrap().finish().unwrap()
-        };
-        let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
-            Ok(server) => server,
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-            Err(error) => panic!("failed to start test HTTP server: {error}"),
-        };
-        let source_hash = source_tree_hash(&source_tar);
-        let recipe = recipe_node(
-            "final-image",
-            "Image",
-            json!({ "mode": "bootstrap" }),
-            json!({
-                "in000": binary_recipe("binary-a", &url, &source_hash, &image_ref, &pinned_digest, &image_object_hash),
-                "in001": binary_recipe("binary-b", &url, &source_hash, &image_ref, &pinned_digest, &image_object_hash)
-            }),
-        );
-        let recipe_path = workspace.path().join("dedup.json");
-        write_recipe(&recipe_path, &recipe);
+    let workspace = tempdir().unwrap();
+    let source_tar = {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        let body = b"hello from duplicate test\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("pkg/README.txt").unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, &body[..]).unwrap();
+        tar.into_inner().unwrap().finish().unwrap()
+    };
+    let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
+        Ok(server) => server,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("failed to start test HTTP server: {error}"),
+    };
+    let source_hash = source_tree_hash(&source_tar);
+    let recipe = recipe_node(
+        "final-image",
+        "Image",
+        json!({ "mode": "bootstrap" }),
+        json!({
+            "in000": named_source_recipe("source-a", &url, &source_hash),
+            "in001": named_source_recipe("source-b", &url, &source_hash)
+        }),
+    );
+    let recipe_path = workspace.path().join("dedup.json");
+    write_recipe(&recipe_path, &recipe);
 
-        let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-        handle.join().unwrap();
+    let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    handle.join().unwrap();
 
-        let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
-        assert!(
-            load_build_handle(&layout, build.build_key.expect("builder root"))
-                .unwrap()
-                .is_some()
-        );
-        assert_eq!(
-            fs::read_dir(store_root(workspace.path()).join("builds"))
-                .unwrap()
-                .count(),
-            3
-        );
-        assert!(
-            store_root(workspace.path())
-                .join("meta-refs")
-                .join("binary-a.json")
-                .exists()
-        );
-        assert!(
-            !store_root(workspace.path())
-                .join("meta-refs")
-                .join("binary-b.json")
-                .exists()
-        );
-        assert!(build_ref_path(workspace.path(), build.build_key.expect("builder root")).exists());
-        drop(oci_server);
-    });
+    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    assert!(
+        load_build_handle(&layout, build.build_key.expect("builder root"))
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        fs::read_dir(store_root(workspace.path()).join("builds"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert!(
+        store_root(workspace.path())
+            .join("meta-refs")
+            .join("source-a.json")
+            .exists()
+    );
+    assert!(
+        !store_root(workspace.path())
+            .join("meta-refs")
+            .join("source-b.json")
+            .exists()
+    );
+    assert!(build_ref_path(workspace.path(), build.build_key.expect("builder root")).exists());
 }
 
 #[test]
 fn second_run_reuses_root_without_republishing_dependency_refs() {
-    with_fake_podman(|| {
-        let workspace = tempdir().unwrap();
-        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
-        let source_tar = {
-            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            let mut tar = tar::Builder::new(encoder);
-            let body = b"hello from root reuse test\n";
-            let mut header = tar::Header::new_gnu();
-            header.set_path("pkg/README.txt").unwrap();
-            header.set_size(body.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            tar.append(&header, &body[..]).unwrap();
-            tar.into_inner().unwrap().finish().unwrap()
-        };
-        let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
-            Ok(server) => server,
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-            Err(error) => panic!("failed to start test HTTP server: {error}"),
-        };
-        let source_hash = source_tree_hash(&source_tar);
-        let recipe = image_recipe(
-            "final-image",
-            vec![binary_recipe(
-                "binary",
-                &url,
-                &source_hash,
-                &image_ref,
-                &pinned_digest,
-                &image_object_hash,
-            )],
-        );
-        let recipe_path = workspace.path().join("root-reuse.json");
-        write_recipe(&recipe_path, &recipe);
+    let workspace = tempdir().unwrap();
+    let source_tar = {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        let body = b"hello from root reuse test\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("pkg/README.txt").unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, &body[..]).unwrap();
+        tar.into_inner().unwrap().finish().unwrap()
+    };
+    let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
+        Ok(server) => server,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("failed to start test HTTP server: {error}"),
+    };
+    let source_hash = source_tree_hash(&source_tar);
+    let recipe = image_recipe(
+        "final-image",
+        vec![named_source_recipe("source", &url, &source_hash)],
+    );
+    let recipe_path = workspace.path().join("root-reuse.json");
+    write_recipe(&recipe_path, &recipe);
 
-        let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-        handle.join().unwrap();
+    let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    handle.join().unwrap();
 
-        assert!(
-            load_build_handle(
-                &StoreLayout::discover(&store_root(workspace.path())).unwrap(),
-                first.build_key.expect("builder root"),
-            )
-            .unwrap()
-            .is_some()
-        );
+    assert!(
+        load_build_handle(
+            &StoreLayout::discover(&store_root(workspace.path())).unwrap(),
+            first.build_key.expect("builder root"),
+        )
+        .unwrap()
+        .is_some()
+    );
 
-        let meta_refs = store_root(workspace.path()).join("meta-refs");
-        let object_refs = store_root(workspace.path()).join("object-refs");
-        for name in ["source", "script", "base-image", "binary", "final-image"] {
-            let meta_ref = meta_refs.join(format!("{name}.json"));
-            let object_ref = object_refs.join(name);
-            if meta_ref.exists() {
-                fs::remove_file(&meta_ref).unwrap();
-            }
-            if object_ref.exists() {
-                fs::remove_file(&object_ref).unwrap();
-            }
+    let meta_refs = store_root(workspace.path()).join("meta-refs");
+    let object_refs = store_root(workspace.path()).join("object-refs");
+    for name in ["source", "final-image"] {
+        let meta_ref = meta_refs.join(format!("{name}.json"));
+        let object_ref = object_refs.join(name);
+        if meta_ref.exists() {
+            fs::remove_file(&meta_ref).unwrap();
         }
-
-        let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-
-        assert_eq!(first.build_key, second.build_key);
-        assert!(meta_refs.join("final-image.json").exists());
-        assert!(object_refs.join("final-image").exists());
-        for name in ["source", "script", "base-image", "binary"] {
-            assert!(!meta_refs.join(format!("{name}.json")).exists());
-            assert!(!object_refs.join(name).exists());
+        if object_ref.exists() {
+            fs::remove_file(&object_ref).unwrap();
         }
-        drop(oci_server);
-    });
+    }
+
+    let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+
+    assert_eq!(first.build_key, second.build_key);
+    assert!(meta_refs.join("final-image.json").exists());
+    assert!(object_refs.join("final-image").exists());
+    for name in ["source"] {
+        assert!(!meta_refs.join(format!("{name}.json")).exists());
+        assert!(!object_refs.join(name).exists());
+    }
 }
 
 #[test]
 fn second_run_reuses_root_without_local_path_when_no_source_materialization_is_needed() {
-    with_fake_podman(|| {
-        let workspace = tempdir().unwrap();
-        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
-        let source_tar = {
-            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            let mut tar = tar::Builder::new(encoder);
-            let body = b"hello from lazy local path test\n";
-            let mut header = tar::Header::new_gnu();
-            header.set_path("pkg/README.txt").unwrap();
-            header.set_size(body.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            tar.append(&header, &body[..]).unwrap();
-            tar.into_inner().unwrap().finish().unwrap()
-        };
-        let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
-            Ok(server) => server,
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-            Err(error) => panic!("failed to start test HTTP server: {error}"),
-        };
-        let source_hash = source_tree_hash(&source_tar);
-        let recipe = image_recipe(
-            "final-image",
-            vec![binary_recipe(
-                "binary",
-                &url,
-                &source_hash,
-                &image_ref,
-                &pinned_digest,
-                &image_object_hash,
-            )],
-        );
-        let recipe_path = workspace.path().join("root-reuse-no-local.json");
-        write_recipe(&recipe_path, &recipe);
+    let workspace = tempdir().unwrap();
+    let source_tar = {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        let body = b"hello from lazy local path test\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("pkg/README.txt").unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, &body[..]).unwrap();
+        tar.into_inner().unwrap().finish().unwrap()
+    };
+    let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
+        Ok(server) => server,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("failed to start test HTTP server: {error}"),
+    };
+    let source_hash = source_tree_hash(&source_tar);
+    let recipe = image_recipe(
+        "final-image",
+        vec![named_source_recipe("source", &url, &source_hash)],
+    );
+    let recipe_path = workspace.path().join("root-reuse-no-local.json");
+    write_recipe(&recipe_path, &recipe);
 
-        let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-        handle.join().unwrap();
+    let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    handle.join().unwrap();
 
-        let mut envelope: Value = serde_json::from_slice(&fs::read(&recipe_path).unwrap()).unwrap();
-        envelope
-            .get_mut("paths")
-            .and_then(Value::as_object_mut)
-            .expect("recipe envelope must have paths")
-            .remove("local");
-        fs::write(&recipe_path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
+    let mut envelope: Value = serde_json::from_slice(&fs::read(&recipe_path).unwrap()).unwrap();
+    envelope
+        .get_mut("paths")
+        .and_then(Value::as_object_mut)
+        .expect("recipe envelope must have paths")
+        .remove("local");
+    fs::write(&recipe_path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
 
-        let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
-        assert_eq!(first.build_key, second.build_key);
-        drop(oci_server);
-    });
+    assert_eq!(first.build_key, second.build_key);
 }
 
 #[test]
 fn independent_fetch_sources_run_in_parallel() {
-    with_fake_podman(|| {
-        let workspace = tempdir().unwrap();
-        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
-        let source_tar = {
-            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            let mut tar = tar::Builder::new(encoder);
-            let body = b"hello from parallel test\n";
-            let mut header = tar::Header::new_gnu();
-            header.set_path("pkg/README.txt").unwrap();
-            header.set_size(body.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            tar.append(&header, &body[..]).unwrap();
-            tar.into_inner().unwrap().finish().unwrap()
-        };
-        let (base_url, handle) = spawn_barrier_http_server(
-            source_tar.clone(),
-            "application/gzip",
-            2,
-            Duration::from_secs(2),
-        )
-        .unwrap();
-        let source_hash = source_tree_hash(&source_tar);
-        let recipe = binary_with_two_sources_recipe(
-            &format!("{base_url}?a=1"),
-            &format!("{base_url}?a=2"),
-            &source_hash,
-            &image_ref,
-            &pinned_digest,
-            &image_object_hash,
-        );
-        let recipe_path = workspace.path().join("parallel.json");
-        write_recipe(&recipe_path, &recipe);
+    let workspace = tempdir().unwrap();
+    let source_tar = {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        let body = b"hello from parallel test\n";
+        let mut header = tar::Header::new_gnu();
+        header.set_path("pkg/README.txt").unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, &body[..]).unwrap();
+        tar.into_inner().unwrap().finish().unwrap()
+    };
+    let (base_url, handle) = spawn_barrier_http_server(
+        source_tar.clone(),
+        "application/gzip",
+        2,
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let source_hash = source_tree_hash(&source_tar);
+    let recipe = image_with_two_sources_recipe(
+        &format!("{base_url}?a=1"),
+        &format!("{base_url}?a=2"),
+        &source_hash,
+    );
+    let recipe_path = workspace.path().join("parallel.json");
+    write_recipe(&recipe_path, &recipe);
 
-        let build = run_recipe_json_in_workspace_with_options(
-            workspace.path(),
-            &recipe_path,
-            BuildRunOptions {
-                emit_progress: false,
-                jobs: 4,
-                ..BuildRunOptions::default()
-            },
-        )
-        .unwrap();
-        handle.join().unwrap();
+    let build = run_recipe_json_in_workspace_with_options(
+        workspace.path(),
+        &recipe_path,
+        BuildRunOptions {
+            emit_progress: false,
+            jobs: 4,
+            ..BuildRunOptions::default()
+        },
+    )
+    .unwrap();
+    handle.join().unwrap();
 
-        let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
-        let published = load_build_handle(&layout, build.build_key.expect("builder root"))
-            .unwrap()
-            .expect("expected binary Build to exist in store");
-        assert!(published.build.meta.get("install").is_some());
-        drop(oci_server);
-    });
-}
-
-#[test]
-fn executor_waits_for_in_flight_workers_to_cleanup_after_first_failure() {
-    with_fake_podman(|| {
-        let workspace = tempdir().unwrap();
-        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
-        let source_tar = {
-            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            let mut tar = tar::Builder::new(encoder);
-            let body = b"hello from cleanup wait test\n";
-            let mut header = tar::Header::new_gnu();
-            header.set_path("pkg/README.txt").unwrap();
-            header.set_size(body.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            tar.append(&header, &body[..]).unwrap();
-            tar.into_inner().unwrap().finish().unwrap()
-        };
-        let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
-            Ok(server) => server,
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-            Err(error) => panic!("failed to start test HTTP server: {error}"),
-        };
-        let source_hash = source_tree_hash(&source_tar);
-        let recipe = recipe_node(
-            "final-image",
-            "Image",
-            json!({ "mode": "bootstrap" }),
-            json!({
-                "in000": binary_recipe_with_behavior(
-                    "binary-fail",
-                    &url,
-                    &source_hash,
-                    &image_ref,
-                    &pinned_digest,
-                    &image_object_hash,
-                    "fail-fast"
-                ),
-                "in001": binary_recipe_with_behavior(
-                    "binary-slow",
-                    &url,
-                    &source_hash,
-                    &image_ref,
-                    &pinned_digest,
-                    &image_object_hash,
-                    "slow-success"
-                )
-            }),
-        );
-        let recipe_path = workspace.path().join("cleanup-wait.json");
-        write_recipe(&recipe_path, &recipe);
-
-        let error = run_recipe_json_in_workspace_with_options(
-            workspace.path(),
-            &recipe_path,
-            BuildRunOptions {
-                emit_progress: false,
-                jobs: 2,
-                ..BuildRunOptions::default()
-            },
-        )
-        .unwrap_err();
-        handle.join().unwrap();
-
-        let message = error.to_string();
-        assert!(message.contains("step 'configure'"), "{message}");
-
-        let events = run_log_events(workspace.path());
-        let scheduler_error = events
-            .iter()
-            .find(|event| event["builder"] == "Scheduler" && event["phase"] == "scheduler-error")
-            .expect("expected scheduler first-error event");
-        assert_eq!(scheduler_error["details"]["failed"]["name"], "binary-fail");
-        assert_eq!(scheduler_error["details"]["in_flight_count"], 1);
-        assert_eq!(
-            scheduler_error["details"]["in_flight"][0]["name"],
-            "binary-slow"
-        );
-
-        let state_root = fake_podman_state_root();
-        let leaked = fs::read_dir(&state_root)
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("fake-container-")
-            })
-            .count();
-        assert_eq!(leaked, 0, "expected no leaked fake podman containers");
-        drop(oci_server);
-    });
-}
-
-#[test]
-fn failed_run_publishes_successful_in_flight_node_refs_without_downstream() {
-    with_fake_podman(|| {
-        let workspace = tempdir().unwrap();
-        let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
-        let source_tar = {
-            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-            let mut tar = tar::Builder::new(encoder);
-            let body = b"hello from in-flight publish test\n";
-            let mut header = tar::Header::new_gnu();
-            header.set_path("pkg/README.txt").unwrap();
-            header.set_size(body.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            tar.append(&header, &body[..]).unwrap();
-            tar.into_inner().unwrap().finish().unwrap()
-        };
-        let (url, handle) = match spawn_http_server(source_tar.clone(), "application/gzip") {
-            Ok(server) => server,
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-            Err(error) => panic!("failed to start test HTTP server: {error}"),
-        };
-        let source_hash = source_tree_hash(&source_tar);
-        let recipe = recipe_node(
-            "final-image",
-            "Image",
-            json!({ "mode": "bootstrap" }),
-            json!({
-                "in000": binary_recipe_with_behavior(
-                    "binary-fail",
-                    &url,
-                    &source_hash,
-                    &image_ref,
-                    &pinned_digest,
-                    &image_object_hash,
-                    "fail-fast"
-                ),
-                "in001": binary_recipe_with_behavior(
-                    "binary-slow",
-                    &url,
-                    &source_hash,
-                    &image_ref,
-                    &pinned_digest,
-                    &image_object_hash,
-                    "slow-success"
-                )
-            }),
-        );
-        let recipe_path = workspace
-            .path()
-            .join("in-flight-publish-after-failure.json");
-        write_recipe(&recipe_path, &recipe);
-
-        let error = run_recipe_json_in_workspace_with_options(
-            workspace.path(),
-            &recipe_path,
-            BuildRunOptions {
-                emit_progress: false,
-                jobs: 2,
-                ..BuildRunOptions::default()
-            },
-        )
-        .unwrap_err();
-        handle.join().unwrap();
-
-        let message = error.to_string();
-        assert!(message.contains("step 'configure'"), "{message}");
-
-        let meta_refs = store_root(workspace.path()).join("meta-refs");
-        let object_refs = store_root(workspace.path()).join("object-refs");
-        assert!(meta_refs.join("binary-slow.json").exists());
-        assert!(object_refs.join("binary-slow").exists());
-        assert!(!meta_refs.join("binary-fail.json").exists());
-        assert!(!object_refs.join("binary-fail").exists());
-        assert!(!meta_refs.join("final-image.json").exists());
-        assert!(!object_refs.join("final-image").exists());
-        drop(oci_server);
-    });
+    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let published = load_build_handle(&layout, build.build_key.expect("builder root"))
+        .unwrap()
+        .expect("expected Image Build to exist in store");
+    assert!(published.build.meta.get("manifest_digest").is_some());
 }
 
 #[test]
@@ -1014,87 +645,6 @@ fn tree_symlink_recipe_builds_successfully_via_runtime() {
         fs::read_link(root.join("etc/mtab")).unwrap(),
         Path::new("/proc/self/mounts")
     );
-}
-
-#[test]
-fn rootfs_recipe_builds_directory_with_empty_metadata_and_reuses_result() {
-    let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("rootfs.json");
-    let recipe = recipe_node(
-        "rootfs",
-        "Rootfs",
-        json!({}),
-        json!({
-            "tree": legacy_rootfs_source_recipe(workspace.path(), "runtime-tree"),
-        }),
-    );
-    write_recipe(&recipe_path, &recipe);
-
-    let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-    let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-
-    assert_eq!(first.build_key, second.build_key);
-    assert_eq!(first.result_id, second.result_id);
-    assert_eq!(first.object_hash, second.object_hash);
-
-    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
-    let published = load_build_handle(&layout, first.build_key.expect("builder root"))
-        .unwrap()
-        .expect("expected Rootfs Build to exist in store");
-
-    assert!(published.object_path.is_dir());
-    assert!(published.build.meta.is_empty());
-    assert_eq!(
-        fs::read_to_string(published.object_path.join("etc/hostname")).unwrap(),
-        "mbuild\n"
-    );
-    assert!(published.object_path.join("dev").is_dir());
-}
-
-#[test]
-fn container_recipe_uses_rootfs_result_with_fake_bwrap() {
-    with_fake_bwrap(|| {
-        let workspace = tempdir().unwrap();
-        let rootfs = recipe_node(
-            "rootfs",
-            "Rootfs",
-            json!({}),
-            json!({
-                "tree": legacy_rootfs_source_recipe(workspace.path(), "runtime-tree"),
-            }),
-        );
-        let recipe = recipe_node(
-            "container",
-            "Container",
-            json!({
-                "steps": [{
-                    "name": "install",
-                    "run_as": "root",
-                    "cwd": "@{build}",
-                    "argv": ["@{script}", "install"]
-                }]
-            }),
-            json!({
-                "rootfs": rootfs,
-                "script": script_recipe(),
-            }),
-        );
-        let recipe_path = workspace.path().join("container.json");
-        write_recipe(&recipe_path, &recipe);
-
-        let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-        let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
-        let published = load_build_handle(&layout, build.build_key.expect("builder root"))
-            .unwrap()
-            .expect("expected Container Build to exist in store");
-
-        assert!(published.object_path.is_dir());
-        assert!(published.build.meta.get("install").is_some());
-        assert_eq!(
-            fs::read_to_string(published.object_path.join("container-steps.txt")).unwrap(),
-            "install\n"
-        );
-    });
 }
 
 #[test]

@@ -1191,7 +1191,6 @@ dependencies = [
  "fsobj-hash",
  "libc",
  "mbuild-binary",
- "mbuild-compose",
  "mbuild-core",
  "mbuild-image",
  "mbuild-origin-http",
@@ -1212,25 +1211,10 @@ dependencies = [
 name = "mbuild-binary"
 version = "0.1.0"
 dependencies = [
- "libc",
  "mbuild-core",
  "mbuild-runtime",
  "serde",
  "serde_json",
- "tar",
- "tempfile",
-]
-
-[[package]]
-name = "mbuild-compose"
-version = "0.1.0"
-dependencies = [
- "globset",
- "libc",
- "mbuild-core",
- "serde",
- "serde_json",
- "tar",
  "tempfile",
 ]
 

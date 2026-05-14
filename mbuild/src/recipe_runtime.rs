@@ -1085,24 +1085,22 @@ mod tests {
                 },
                 "nodes": {
                     "root": {
-                        "name": "bin",
-                        "tag": "Binary",
+                        "name": "sandbox",
+                        "tag": "Sandbox",
                         "config": {},
                         "inputs": {
-                            "image": "image",
+                            "rootfs": "rootfs",
                             "script": "script"
                         }
                     },
-                    "image": {
-                        "name": "image",
-                        "tag": "Source",
-                        "object_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                        "origin": {
-                            "type": "oci-registry",
-                            "image": "docker.io/library/buildpack-deps:bookworm",
-                            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    "rootfs": {
+                        "name": "rootfs",
+                        "tag": "Text",
+                        "config": {
+                            "source": "rootfs",
+                            "executable": false
                         },
-                        "meta": {}
+                        "inputs": {}
                     },
                     "script": {
                         "name": "script",
@@ -1137,7 +1135,7 @@ mod tests {
         };
         assert_eq!(dep_keys.len(), 2);
 
-        let image_realized = sample_realized(
+        let rootfs_realized = sample_realized(
             Some(dep_keys[0]),
             "1111111111111111111111111111111111111111111111111111111111111111",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1150,7 +1148,7 @@ mod tests {
             Map::new(),
         );
         nodes.get_mut(&dep_keys[0]).unwrap().state = PlanningState::Reused {
-            realized: image_realized.clone(),
+            realized: rootfs_realized.clone(),
             origin: ReuseOrigin::CanonicalResult,
         };
         nodes.get_mut(&dep_keys[1]).unwrap().state = PlanningState::Reused {
@@ -1160,15 +1158,15 @@ mod tests {
 
         let root_inputs = vec![
             ResultInputIdentity {
-                object_hash: image_realized.object_hash,
-                meta_hash: image_realized.meta_hash,
+                object_hash: rootfs_realized.object_hash,
+                meta_hash: rootfs_realized.meta_hash,
             },
             ResultInputIdentity {
                 object_hash: script_realized.object_hash,
                 meta_hash: script_realized.meta_hash,
             },
         ];
-        let reuse_key = compute_reuse_key("Binary", &json!({}), &root_inputs).unwrap();
+        let reuse_key = compute_reuse_key("Sandbox", &json!({}), &root_inputs).unwrap();
         let stage_dir = temp.path().join("root-out");
         fs::create_dir_all(&stage_dir).unwrap();
         fs::write(stage_dir.join("payload"), b"ok\n").unwrap();

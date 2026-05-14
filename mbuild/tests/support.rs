@@ -347,57 +347,6 @@ pub fn source_recipe(url: &str, source_hash: &str) -> Value {
     })
 }
 
-pub fn default_binary_steps() -> Value {
-    json!([
-        {
-            "name": "configure",
-            "run_as": "build-user",
-            "cwd": "@{build}",
-            "argv": ["@{script}", "configure"]
-        },
-        {
-            "name": "build",
-            "run_as": "build-user",
-            "cwd": "@{build}",
-            "argv": ["@{script}", "build"]
-        },
-        {
-            "name": "install",
-            "run_as": "root",
-            "cwd": "@{build}",
-            "argv": ["@{script}", "install"]
-        },
-        {
-            "name": "post_install",
-            "run_as": "root",
-            "cwd": "@{build}",
-            "argv": ["@{script}", "post_install"]
-        }
-    ])
-}
-
-pub fn binary_recipe(
-    name: &str,
-    url: &str,
-    source_hash: &str,
-    image: &str,
-    digest: &str,
-    image_object_hash: &str,
-) -> Value {
-    recipe_node(
-        name,
-        "Binary",
-        json!({
-            "steps": default_binary_steps(),
-        }),
-        json!({
-            "image": base_image_recipe(image, digest, image_object_hash),
-            "script": script_recipe(),
-            "source": source_recipe(url, source_hash),
-        }),
-    )
-}
-
 pub fn image_recipe(name: &str, inputs: Vec<Value>) -> Value {
     let mut named_inputs = serde_json::Map::new();
     for (index, input) in inputs.into_iter().enumerate() {

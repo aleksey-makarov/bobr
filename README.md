@@ -35,10 +35,19 @@ Builder nodes use the generic builder shape:
   "nodes": {
     "root": {
       "name": "tar-1.35",
-      "tag": "Binary",
-      "config": {},
+      "tag": "Sandbox",
+      "config": {
+        "steps": [
+          {
+            "name": "build",
+            "run_as": "build-user",
+            "cwd": "@{build}",
+            "argv": ["@{script}", "build"]
+          }
+        ]
+      },
       "inputs": {
-        "image": "image_1",
+        "rootfs": "rootfs_1",
         "script": "script_1",
         "source": "src_0"
       }

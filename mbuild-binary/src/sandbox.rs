@@ -1,5 +1,5 @@
 use crate::{
-    BResult, BinaryError, BuildStep, CONFIG_DIR_NAME, OUTPUT_DIR_NAME, StepUser,
+    BResult, BuildStep, CONFIG_DIR_NAME, OUTPUT_DIR_NAME, SandboxError, StepUser,
     collect_named_inputs, input_mount_path, map_error, map_fsutil_error, resolve_step_argv,
     resolve_step_cwd, resolve_step_env, validate_script_config, validate_step_interpolations,
     validate_steps, write_script_config,
@@ -112,7 +112,7 @@ fn validate_sandbox_config(config: &SandboxConfig) -> BResult<()> {
 fn validate_rootfs(rootfs: &BuilderInputObject) -> BResult<()> {
     let rootfs_path = object_payload_path(&rootfs.object_path);
     if !rootfs_path.is_dir() {
-        return Err(BinaryError::InputResolutionFailed(format!(
+        return Err(SandboxError::InputResolutionFailed(format!(
             "rootfs input must resolve to a directory: {}",
             rootfs_path.display()
         )));
@@ -133,7 +133,7 @@ fn resolve_sandbox_config(
         .map(|(name, input)| {
             let host_path = object_payload_path(&input.object_path);
             if !host_path.is_dir() && !host_path.is_file() {
-                return Err(BinaryError::InputResolutionFailed(format!(
+                return Err(SandboxError::InputResolutionFailed(format!(
                     "sandbox input must resolve to a file or directory: {}",
                     host_path.display()
                 )));
@@ -154,13 +154,13 @@ fn resolve_sandbox_config(
     let workspace = cx.temp_dir.join("runtime");
     let state_dir = cx.state_dir.join("runtime");
     std::fs::create_dir_all(&workspace).map_err(|error| {
-        BinaryError::FsFailed(format!(
+        SandboxError::FsFailed(format!(
             "failed to create sandbox runtime workspace '{}': {error}",
             workspace.display()
         ))
     })?;
     std::fs::create_dir_all(&state_dir).map_err(|error| {
-        BinaryError::FsFailed(format!(
+        SandboxError::FsFailed(format!(
             "failed to create sandbox runtime state dir '{}': {error}",
             state_dir.display()
         ))
@@ -195,14 +195,14 @@ fn stage_fs_tree_output(
     fsutil::recreate_empty_dir_force(&staged_path).map_err(map_fsutil_error)?;
     let manifest_path = staged_path.join("manifest.jsonl");
     manifest.write_canonical(&manifest_path).map_err(|error| {
-        BinaryError::BuildFailed(format!(
+        SandboxError::BuildFailed(format!(
             "failed to write sandbox fs-tree manifest '{}': {error}",
             manifest_path.display()
         ))
     })?;
     let root_path = staged_path.join("root");
     std::fs::rename(output_path, &root_path).map_err(|error| {
-        BinaryError::FsFailed(format!(
+        SandboxError::FsFailed(format!(
             "failed to stage sandbox output '{}' -> '{}': {error}",
             output_path.display(),
             root_path.display()
@@ -223,7 +223,7 @@ fn resolve_sandbox_step(
         .collect::<HashMap<_, _>>();
     let logs = cx.temp_dir.join("step-logs");
     std::fs::create_dir_all(&logs).map_err(|error| {
-        BinaryError::FsFailed(format!(
+        SandboxError::FsFailed(format!(
             "failed to create sandbox step log directory '{}': {error}",
             logs.display()
         ))
@@ -261,7 +261,7 @@ fn allocate_step_log_path(cx: &BuildContext, label: &str, fallback: PathBuf) -> 
     };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
-            BinaryError::FsFailed(format!(
+            SandboxError::FsFailed(format!(
                 "failed to create sandbox log directory '{}': {error}",
                 parent.display()
             ))

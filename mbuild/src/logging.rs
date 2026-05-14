@@ -400,7 +400,7 @@ mod tests {
         let build_key =
             BuildKey::from_str("1111111111111111111111111111111111111111111111111111111111111111")
                 .unwrap();
-        let node_logger = logger.bind_node("Binary", "bash", build_key);
+        let node_logger = logger.bind_node("Sandbox", "bash", build_key);
 
         node_logger.log_event(BuildLogEvent {
             level: mbuild_core::BuildLogLevel::Info,
@@ -414,7 +414,7 @@ mod tests {
         let contents = fs::read_to_string(&logger.event_log_path).unwrap();
         let line = contents.lines().last().unwrap();
         let event: Value = serde_json::from_str(line).unwrap();
-        assert_eq!(event["builder"], Value::String("Binary".to_string()));
+        assert_eq!(event["builder"], Value::String("Sandbox".to_string()));
         assert_eq!(event["name"], Value::String("bash".to_string()));
         assert_eq!(
             event["build_key"],
@@ -433,13 +433,13 @@ mod tests {
         let build_key =
             BuildKey::from_str("2222222222222222222222222222222222222222222222222222222222222222")
                 .unwrap();
-        let node_logger = logger.bind_node("Binary", "bash debug/test", build_key);
+        let node_logger = logger.bind_node("Sandbox", "bash debug/test", build_key);
 
         let path = node_logger.allocate_raw_log_path("podman/run").unwrap();
         let expected_dir = temp
             .path()
             .join("builder-state")
-            .join("binary")
+            .join("sandbox")
             .join("logs")
             .join("bash_debug_test");
         assert!(path.starts_with(&expected_dir));

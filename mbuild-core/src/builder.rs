@@ -448,7 +448,7 @@ mod tests {
         inputs.insert("patch", object.clone());
 
         let spec = BuilderSpec {
-            tag: "Binary",
+            tag: "Sandbox",
             required_inputs: &["image"],
             optional_inputs: &["base"],
             allow_extra_inputs: true,

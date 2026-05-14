@@ -1538,7 +1538,7 @@ mod tests {
 
     #[test]
     fn reuse_key_changes_when_input_meta_hash_changes() {
-        let payload = json!({ "kind": "build-script" });
+        let payload = json!({ "kind": "sandbox-script" });
         let object_hash =
             parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
         let left = [ResultInputIdentity {
@@ -1562,7 +1562,7 @@ mod tests {
 
     #[test]
     fn reuse_key_is_stable_for_identical_inputs() {
-        let payload = json!({ "kind": "build-script" });
+        let payload = json!({ "kind": "sandbox-script" });
         let inputs = vec![
             ResultInputIdentity {
                 object_hash: parse_object_hash(
@@ -1634,7 +1634,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
-        let reuse_key = compute_reuse_key("Text", &json!({ "kind": "build-script" }), &[]).unwrap();
+        let reuse_key =
+            compute_reuse_key("Text", &json!({ "kind": "sandbox-script" }), &[]).unwrap();
         let first_stage = temp.path().join("first.txt");
         fs::write(&first_stage, b"hello").unwrap();
         let first = publish_output(
@@ -1643,7 +1644,7 @@ mod tests {
                 output_name: "hello".to_string(),
                 build_key: build_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "hello-1" }),
+                    json!({ "kind": "sandbox-script", "source": "hello-1" }),
                     &[],
                 ),
                 reuse_key,
@@ -1651,7 +1652,7 @@ mod tests {
                 staged_path: first_stage,
                 inputs: vec![],
                 meta: with_kind(
-                    "build-script",
+                    "sandbox-script",
                     Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
                 ),
             },
@@ -1666,7 +1667,7 @@ mod tests {
                 output_name: "hello-copy".to_string(),
                 build_key: build_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "hello-2" }),
+                    json!({ "kind": "sandbox-script", "source": "hello-2" }),
                     &[],
                 ),
                 reuse_key,
@@ -1674,7 +1675,7 @@ mod tests {
                 staged_path: second_stage,
                 inputs: vec![],
                 meta: with_kind(
-                    "build-script",
+                    "sandbox-script",
                     Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
                 ),
             },
@@ -1719,14 +1720,14 @@ mod tests {
                 output_name: "script".to_string(),
                 build_key: build_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "echo hi\n" }),
+                    json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
                     &[parse_build_key(
                         "1111111111111111111111111111111111111111111111111111111111111111",
                     )],
                 ),
                 reuse_key: compute_reuse_key(
                     "Text",
-                    &json!({ "kind": "build-script", "source": "echo hi\n" }),
+                    &json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
                     &[],
                 )
                 .unwrap(),
@@ -1734,7 +1735,7 @@ mod tests {
                 staged_path: stage,
                 inputs: vec![],
                 meta: with_kind(
-                    "build-script",
+                    "sandbox-script",
                     Map::from_iter([
                         ("source_bytes".to_string(), Value::from(8)),
                         ("generated".to_string(), Value::from(false)),
@@ -1809,7 +1810,7 @@ mod tests {
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
         let meta = with_kind(
-            "build-script",
+            "sandbox-script",
             Map::from_iter([
                 ("source_bytes".to_string(), Value::from(8)),
                 ("generated".to_string(), Value::from(false)),
@@ -1836,7 +1837,7 @@ mod tests {
         let expected_meta_hash = compute_meta_hash(&meta).unwrap();
         let reuse_key = compute_reuse_key(
             "Text",
-            &json!({ "kind": "build-script", "source": "echo hi\n" }),
+            &json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
             &inputs,
         )
         .unwrap();
@@ -1849,7 +1850,7 @@ mod tests {
                 output_name: "script".to_string(),
                 build_key: build_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "echo hi\n" }),
+                    json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
                     &[],
                 ),
                 reuse_key,
@@ -1883,19 +1884,19 @@ mod tests {
                 output_name: "first".to_string(),
                 build_key: build_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "hello" }),
+                    json!({ "kind": "sandbox-script", "source": "hello" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "hello" }),
+                    json!({ "kind": "sandbox-script", "source": "hello" }),
                     &[],
                 ),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
                 meta: with_kind(
-                    "build-script",
+                    "sandbox-script",
                     Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
                 ),
             },
@@ -1944,12 +1945,12 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "kind-a".to_string(),
-                build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
-                reuse_key: reuse_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                build_key: build_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
+                reuse_key: reuse_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -1985,12 +1986,12 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "producer-a".to_string(),
-                build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
-                reuse_key: reuse_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                build_key: build_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
+                reuse_key: reuse_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2001,12 +2002,12 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "producer-b".to_string(),
-                build_key: build_key_for("Binary", json!({ "kind": "build-script" }), &[]),
-                reuse_key: reuse_key_for("Binary", json!({ "kind": "build-script" }), &[]),
+                build_key: build_key_for("Sandbox", json!({ "kind": "sandbox-script" }), &[]),
+                reuse_key: reuse_key_for("Sandbox", json!({ "kind": "sandbox-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2028,18 +2029,18 @@ mod tests {
                 output_name: "shared".to_string(),
                 build_key: build_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "hello" }),
+                    json!({ "kind": "sandbox-script", "source": "hello" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "hello" }),
+                    json!({ "kind": "sandbox-script", "source": "hello" }),
                     &[],
                 ),
                 created_at: "2026-03-24T12:34:56.123456789Z".to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2052,18 +2053,18 @@ mod tests {
                 output_name: "shared".to_string(),
                 build_key: build_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "hello world" }),
+                    json!({ "kind": "sandbox-script", "source": "hello world" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "hello world" }),
+                    json!({ "kind": "sandbox-script", "source": "hello world" }),
                     &[],
                 ),
                 created_at: "2026-03-24T12:35:30.123456789Z".to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2106,12 +2107,12 @@ mod tests {
         fs::write(&first_stage, b"hello").unwrap();
         let build_key = build_key_for(
             "Text",
-            json!({ "kind": "build-script", "source": "hello" }),
+            json!({ "kind": "sandbox-script", "source": "hello" }),
             &[],
         );
         let reuse_key = reuse_key_for(
             "Text",
-            json!({ "kind": "build-script", "source": "hello" }),
+            json!({ "kind": "sandbox-script", "source": "hello" }),
             &[],
         );
         let first = publish_output(
@@ -2123,7 +2124,7 @@ mod tests {
                 created_at: "2026-03-24T12:34:56.123456789Z".to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2139,7 +2140,7 @@ mod tests {
                 created_at: "2026-03-24T12:35:30.123456789Z".to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2169,18 +2170,18 @@ mod tests {
                 output_name: "shared".to_string(),
                 build_key: build_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "one" }),
+                    json!({ "kind": "sandbox-script", "source": "one" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "one" }),
+                    json!({ "kind": "sandbox-script", "source": "one" }),
                     &[],
                 ),
                 created_at: "2026-03-24T12:34:56.100000000Z".to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2193,18 +2194,18 @@ mod tests {
                 output_name: "shared".to_string(),
                 build_key: build_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "two" }),
+                    json!({ "kind": "sandbox-script", "source": "two" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "two" }),
+                    json!({ "kind": "sandbox-script", "source": "two" }),
                     &[],
                 ),
                 created_at: "2026-03-24T12:34:56.200000000Z".to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2217,18 +2218,18 @@ mod tests {
                 output_name: "shared".to_string(),
                 build_key: build_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "three" }),
+                    json!({ "kind": "sandbox-script", "source": "three" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "three" }),
+                    json!({ "kind": "sandbox-script", "source": "three" }),
                     &[],
                 ),
                 created_at: "2026-03-24T12:34:56.300000000Z".to_string(),
                 staged_path: third_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2305,12 +2306,12 @@ mod tests {
                 &layout,
                 PublishOutputRequest {
                     output_name: invalid_name.to_string(),
-                    build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
-                    reuse_key: reuse_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                    build_key: build_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
+                    reuse_key: reuse_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
                     created_at: sample_created_at().to_string(),
                     staged_path: stage,
                     inputs: vec![],
-                    meta: with_kind("build-script", Map::new()),
+                    meta: with_kind("sandbox-script", Map::new()),
                 },
             )
             .unwrap_err();
@@ -2431,12 +2432,12 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "first".to_string(),
-                build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
-                reuse_key: reuse_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                build_key: build_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
+                reuse_key: reuse_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2448,12 +2449,12 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "second".to_string(),
-                build_key: build_key_for("Text", json!({ "kind": "build-script" }), &[]),
-                reuse_key: reuse_key_for("Text", json!({ "kind": "build-script" }), &[]),
+                build_key: build_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
+                reuse_key: reuse_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2519,15 +2520,15 @@ mod tests {
             PublishOutputRequest {
                 output_name: "ordered-ab".to_string(),
                 build_key: build_key_for(
-                    "Binary",
-                    json!({ "kind": "binary-output" }),
+                    "Sandbox",
+                    json!({ "kind": "sandbox-output" }),
                     &[key_a, key_b],
                 ),
-                reuse_key: reuse_key_for("Binary", json!({ "kind": "binary-output" }), &[]),
+                reuse_key: reuse_key_for("Sandbox", json!({ "kind": "sandbox-output" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("binary-output", Map::new()),
+                meta: with_kind("sandbox-output", Map::new()),
             },
         )
         .unwrap();
@@ -2539,15 +2540,15 @@ mod tests {
             PublishOutputRequest {
                 output_name: "ordered-ba".to_string(),
                 build_key: build_key_for(
-                    "Binary",
-                    json!({ "kind": "binary-output" }),
+                    "Sandbox",
+                    json!({ "kind": "sandbox-output" }),
                     &[key_b, key_a],
                 ),
-                reuse_key: reuse_key_for("Binary", json!({ "kind": "binary-output" }), &[]),
+                reuse_key: reuse_key_for("Sandbox", json!({ "kind": "sandbox-output" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind("binary-output", Map::new()),
+                meta: with_kind("sandbox-output", Map::new()),
             },
         )
         .unwrap();
@@ -2602,18 +2603,18 @@ mod tests {
                 output_name: "plain".to_string(),
                 build_key: build_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "hello", "variant": "plain" }),
+                    json!({ "kind": "sandbox-script", "source": "hello", "variant": "plain" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "hello", "variant": "plain" }),
+                    json!({ "kind": "sandbox-script", "source": "hello", "variant": "plain" }),
                     &[],
                 ),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2628,18 +2629,18 @@ mod tests {
                 output_name: "exec".to_string(),
                 build_key: build_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "hello", "variant": "exec" }),
+                    json!({ "kind": "sandbox-script", "source": "hello", "variant": "exec" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
                     "Text",
-                    json!({ "kind": "build-script", "source": "hello", "variant": "exec" }),
+                    json!({ "kind": "sandbox-script", "source": "hello", "variant": "exec" }),
                     &[],
                 ),
                 created_at: sample_created_at().to_string(),
                 staged_path: exec_stage,
                 inputs: vec![],
-                meta: with_kind("build-script", Map::new()),
+                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();

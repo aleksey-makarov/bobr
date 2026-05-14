@@ -836,8 +836,8 @@ mod tests {
     fn missing_required_input_slot_is_rejected() {
         let request = json!({
             "root": {
-                "name": "bin",
-                "tag": "Binary",
+                "name": "sandbox",
+                "tag": "Sandbox",
                 "config": {},
                 "inputs": { "script": "script" }
             },
@@ -852,7 +852,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("builder 'Binary' is missing required input 'image'"),
+                .contains("builder 'Sandbox' is missing required input 'rootfs'"),
             "{error}"
         );
     }
@@ -861,11 +861,11 @@ mod tests {
     fn non_string_input_is_rejected() {
         let request = json!({
             "root": {
-                "name": "bin",
-                "tag": "Binary",
+                "name": "sandbox",
+                "tag": "Sandbox",
                 "config": {},
                 "inputs": {
-                    "image": []
+                    "rootfs": []
                 }
             }
         });
@@ -880,16 +880,11 @@ mod tests {
 
     #[test]
     fn build_key_order_follows_builder_spec_not_json_field_order() {
-        let image = json!({
-            "name": "base-image",
-            "tag": "Source",
-            "object_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            "origin": {
-                "image": "docker.io/library/buildpack-deps:bookworm",
-                "type": "oci-registry",
-                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            },
-            "meta": {}
+        let rootfs = json!({
+            "name": "rootfs",
+            "tag": "Text",
+            "config": { "source": "rootfs", "executable": false },
+            "inputs": {}
         });
         let script = json!({
             "name": "script",
@@ -913,31 +908,22 @@ mod tests {
         });
         let request = json!({
             "root": {
-                "name": "bin",
-                "tag": "Binary",
+                "name": "sandbox",
+                "tag": "Sandbox",
                 "config": {},
                 "inputs": {
                     "source": "source",
-                    "image": "image",
+                    "rootfs": "rootfs",
                     "script": "script"
                 }
             },
-            "image": image.clone(),
+            "rootfs": rootfs.clone(),
             "script": script.clone(),
             "source": source.clone()
         });
 
         let (graph, _) = collect_one(&request).unwrap();
-        let image_key = source_planning_key(
-            compute_result_id(
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                    .parse()
-                    .unwrap(),
-                compute_meta_hash(image["meta"].as_object().unwrap()).unwrap(),
-            )
-            .unwrap(),
-        )
-        .unwrap();
+        let rootfs_key = compute_build_key("Text", &rootfs["config"], &[]).unwrap();
         let script_key = compute_build_key("Text", &script["config"], &[]).unwrap();
         let source_key = source_planning_key(
             compute_result_id(
@@ -950,9 +936,9 @@ mod tests {
         )
         .unwrap();
         let expected = compute_build_key(
-            "Binary",
+            "Sandbox",
             &request["root"]["config"],
-            &[image_key, script_key, source_key],
+            &[rootfs_key, script_key, source_key],
         )
         .unwrap();
 
@@ -999,10 +985,10 @@ mod tests {
         let request = json!({
             "root": {
                 "name": "a",
-                "tag": "Binary",
+                "tag": "Sandbox",
                 "config": {},
                 "inputs": {
-                    "image": "root",
+                    "rootfs": "root",
                     "script": "script"
                 }
             },
@@ -1022,11 +1008,11 @@ mod tests {
     fn dangling_references_are_rejected() {
         let request = json!({
             "root": {
-                "name": "bin",
-                "tag": "Binary",
+                "name": "sandbox",
+                "tag": "Sandbox",
                 "config": {},
                 "inputs": {
-                    "image": "missing-image",
+                    "rootfs": "missing-rootfs",
                     "script": "script"
                 }
             },
@@ -1042,7 +1028,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unknown node id 'missing-image'"),
+                .contains("unknown node id 'missing-rootfs'"),
             "{error}"
         );
     }
