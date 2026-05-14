@@ -41,6 +41,7 @@ pub struct RunnerConfig {
     pub protocol_version: u32,
     pub prepare_paths: Vec<PathBuf>,
     pub steps: Vec<RunnerStepConfig>,
+    pub output_dir: PathBuf,
     pub success_report: PathBuf,
     pub failure_report: PathBuf,
     pub breadcrumbs: PathBuf,
@@ -225,6 +226,7 @@ pub fn run_config(config: RunnerConfig) -> i32 {
 struct SandboxRunner {
     prepare_paths: Vec<PathBuf>,
     steps: Vec<SandboxRunnerStep>,
+    output_dir: PathBuf,
     success_report: Arc<File>,
     failure_report: Arc<File>,
     breadcrumbs: Arc<File>,
@@ -243,6 +245,7 @@ impl SandboxRunner {
         Ok(Self {
             prepare_paths: config.prepare_paths,
             steps,
+            output_dir: config.output_dir,
             success_report,
             failure_report,
             breadcrumbs,
@@ -289,8 +292,7 @@ impl SandboxRunner {
         }
 
         self.breadcrumb("manifest:scan:start");
-        let out_dir = Path::new("/__mbuild/out");
-        let manifest = scan_output_manifest(out_dir)?;
+        let manifest = scan_output_manifest(&self.output_dir)?;
         self.breadcrumb("manifest:scan:done");
         self.breadcrumb("manifest:canonical:start");
         let manifest_bytes = manifest.to_canonical_bytes().map_err(|error| {
@@ -298,9 +300,10 @@ impl SandboxRunner {
         })?;
         self.breadcrumb("manifest:canonical:done");
         self.breadcrumb("hash-output:start");
-        let object_hash = hash_fs_tree_object(&manifest_bytes, out_dir).map_err(|error| {
-            SandboxRunnerFailureReport::runtime("sandbox-hash-output", error.to_string())
-        })?;
+        let object_hash =
+            hash_fs_tree_object(&manifest_bytes, &self.output_dir).map_err(|error| {
+                SandboxRunnerFailureReport::runtime("sandbox-hash-output", error.to_string())
+            })?;
         self.breadcrumb("hash-output:done");
         Ok(SandboxRunnerOutcome {
             object_hash,
@@ -625,14 +628,21 @@ fn prepare_error(operation: &str, path: &Path, error: io::Error) -> SandboxRunne
 }
 
 fn terminate_remaining_children() {
-    unsafe {
-        libc::kill(-1, libc::SIGTERM);
+    #[cfg(test)]
+    {
+        reap_finished_children();
     }
-    reap_finished_children();
-    unsafe {
-        libc::kill(-1, libc::SIGKILL);
+    #[cfg(not(test))]
+    {
+        unsafe {
+            libc::kill(-1, libc::SIGTERM);
+        }
+        reap_finished_children();
+        unsafe {
+            libc::kill(-1, libc::SIGKILL);
+        }
+        reap_finished_children();
     }
-    reap_finished_children();
 }
 
 fn reap_finished_children() {
@@ -726,5 +736,226 @@ fn lchown(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn protocol_info_reports_current_runner_protocol() {
+        let info = protocol_info();
+
+        assert_eq!(info.name, RUNNER_BINARY_NAME);
+        assert_eq!(info.protocol_version, RUNNER_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn run_config_rejects_protocol_mismatch_with_failure_report() {
+        let temp = tempdir().unwrap();
+        let config = test_config(temp.path()).with_protocol(RUNNER_PROTOCOL_VERSION + 1);
+
+        let exit_code = run_config(config.clone());
+
+        assert_eq!(exit_code, 1);
+        let report = read_failure_report(&config.failure_report);
+        assert_eq!(report.label, "runner-protocol");
+        assert!(
+            report.message.contains("unsupported runner protocol"),
+            "{}",
+            report.message
+        );
+    }
+
+    #[test]
+    fn run_config_executes_root_step_and_writes_success_report() {
+        let temp = tempdir().unwrap();
+        let output = temp.path().join("out");
+        fs::create_dir(&output).unwrap();
+        let stdout = temp.path().join("stdout.log");
+        let stderr = temp.path().join("stderr.log");
+        let config = test_config(temp.path())
+            .with_output(output.clone())
+            .with_step(
+                "write-output",
+                vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "printf payload > \"$OUT/file\"; printf hello".to_string(),
+                ],
+                HashMap::from([("OUT".to_string(), output.display().to_string())]),
+                stdout.clone(),
+                stderr.clone(),
+            );
+
+        let exit_code = run_config(config.clone());
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(fs::read_to_string(output.join("file")).unwrap(), "payload");
+        assert_eq!(fs::read_to_string(stdout).unwrap(), "hello");
+        let report = read_success_report(&config.success_report);
+        assert_eq!(report.steps.len(), 1);
+        assert_eq!(report.steps[0].name, "write-output");
+        let manifest =
+            FsTreeManifest::parse_canonical_bytes(report.manifest_jsonl.as_bytes()).unwrap();
+        assert!(
+            manifest
+                .entries()
+                .iter()
+                .any(|entry| matches!(entry, FsTreeEntry::File { path, .. } if path == "file"))
+        );
+    }
+
+    #[test]
+    fn run_config_writes_failure_report_for_failed_step() {
+        let temp = tempdir().unwrap();
+        let output = temp.path().join("out");
+        fs::create_dir(&output).unwrap();
+        let stdout = temp.path().join("stdout.log");
+        let stderr = temp.path().join("stderr.log");
+        let config = test_config(temp.path()).with_output(output).with_step(
+            "fail-step",
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf nope >&2; exit 7".to_string(),
+            ],
+            HashMap::new(),
+            stdout.clone(),
+            stderr.clone(),
+        );
+
+        let exit_code = run_config(config.clone());
+
+        assert_eq!(exit_code, 1);
+        assert_eq!(fs::read_to_string(&stderr).unwrap(), "nope");
+        let report = read_failure_report(&config.failure_report);
+        assert_eq!(report.label, "fail-step");
+        assert_eq!(report.exit_code, Some(7));
+        assert_eq!(report.stdout_path.as_ref(), Some(&stdout));
+        assert_eq!(report.stderr_path.as_ref(), Some(&stderr));
+    }
+
+    #[test]
+    fn run_config_path_rejects_malformed_json() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("runner-config.json");
+        fs::write(&path, "not json").unwrap();
+
+        let exit_code = run_config_path(&path);
+
+        assert_eq!(exit_code, 2);
+    }
+
+    #[test]
+    fn scan_output_manifest_records_kinds_modes_owners_and_symlink_targets() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("out");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("dir")).unwrap();
+        fs::write(root.join("file"), "contents").unwrap();
+        fs::write(root.join("exe"), "contents").unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(root.join("dir"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(root.join("file"), fs::Permissions::from_mode(0o640)).unwrap();
+        fs::set_permissions(root.join("exe"), fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("file", root.join("link")).unwrap();
+        let owner = fs::symlink_metadata(&root).unwrap();
+
+        let manifest = scan_output_manifest(&root).unwrap();
+
+        assert!(manifest.entries().contains(&FsTreeEntry::directory(
+            "",
+            owner.uid(),
+            owner.gid(),
+            0o755
+        )));
+        assert!(manifest.entries().contains(&FsTreeEntry::directory(
+            "dir",
+            owner.uid(),
+            owner.gid(),
+            0o700
+        )));
+        assert!(manifest.entries().contains(&FsTreeEntry::file(
+            "file",
+            owner.uid(),
+            owner.gid(),
+            0o640
+        )));
+        assert!(manifest.entries().contains(&FsTreeEntry::file(
+            "exe",
+            owner.uid(),
+            owner.gid(),
+            0o755
+        )));
+        assert!(manifest.entries().contains(&FsTreeEntry::symlink(
+            "link",
+            owner.uid(),
+            owner.gid(),
+            "file"
+        )));
+    }
+
+    #[derive(Clone)]
+    struct TestConfig {
+        config: RunnerConfig,
+    }
+
+    impl TestConfig {
+        fn with_protocol(mut self, protocol_version: u32) -> RunnerConfig {
+            self.config.protocol_version = protocol_version;
+            self.config
+        }
+
+        fn with_output(mut self, output_dir: PathBuf) -> Self {
+            self.config.output_dir = output_dir;
+            self
+        }
+
+        fn with_step(
+            mut self,
+            name: &str,
+            argv: Vec<String>,
+            env: HashMap<String, String>,
+            stdout_path: PathBuf,
+            stderr_path: PathBuf,
+        ) -> RunnerConfig {
+            self.config.steps.push(RunnerStepConfig {
+                name: name.to_string(),
+                run_as: RunnerRunAs::Root,
+                cwd: PathBuf::from("/"),
+                argv,
+                env,
+                stdout_path: stdout_path.clone(),
+                stderr_path: stderr_path.clone(),
+                report_stdout_path: stdout_path,
+                report_stderr_path: stderr_path,
+            });
+            self.config
+        }
+    }
+
+    fn test_config(root: &Path) -> TestConfig {
+        TestConfig {
+            config: RunnerConfig {
+                protocol_version: RUNNER_PROTOCOL_VERSION,
+                prepare_paths: Vec::new(),
+                steps: Vec::new(),
+                output_dir: root.join("out"),
+                success_report: root.join("success.json"),
+                failure_report: root.join("failure.json"),
+                breadcrumbs: root.join("breadcrumbs.log"),
+            },
+        }
+    }
+
+    fn read_success_report(path: &Path) -> SandboxRunnerSuccessReport {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    fn read_failure_report(path: &Path) -> SandboxRunnerFailureReport {
+        serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
     }
 }

@@ -287,6 +287,7 @@ fn write_runner_config(
         protocol_version: RUNNER_PROTOCOL_VERSION,
         prepare_paths: vec![PathBuf::from("/__mbuild/build")],
         steps,
+        output_dir: PathBuf::from("/__mbuild/out"),
         success_report: PathBuf::from(CONTAINER_SUCCESS_REPORT),
         failure_report: PathBuf::from(CONTAINER_FAILURE_REPORT),
         breadcrumbs: PathBuf::from(CONTAINER_BREADCRUMBS),
