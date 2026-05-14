@@ -11,6 +11,8 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use time::macros::format_description;
+use time::{OffsetDateTime, UtcOffset};
 
 #[derive(Debug)]
 pub enum RuntimeError {
@@ -444,12 +446,13 @@ fn quarantine_temp_path(
         )
     })?;
     let stamp = fsutil::current_epoch_nanos().map_err(|error| error.to_string())?;
+    let timestamp = human_quarantine_timestamp(stamp)?;
 
-    for attempt in 0..100 {
-        let suffix = if attempt == 0 {
-            stamp.to_string()
+    for counter in 1..1000 {
+        let suffix = if counter == 1 {
+            timestamp.clone()
         } else {
-            format!("{stamp}-{attempt}")
+            format!("{timestamp}.{counter}")
         };
         let target = quarantine_dir.join(format!(
             "{}-{}-{}-{name}",
@@ -494,6 +497,19 @@ fn quarantine_temp_path(
         temp_dir.display(),
         quarantine_dir.display()
     ))
+}
+
+fn human_quarantine_timestamp(stamp: u128) -> Result<String, String> {
+    let nanos = i128::try_from(stamp)
+        .map_err(|_| format!("quarantine timestamp is out of range: {stamp}"))?;
+    let parsed = OffsetDateTime::from_unix_timestamp_nanos(nanos)
+        .map_err(|error| format!("failed to parse quarantine timestamp {stamp}: {error}"))?;
+    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    let local = parsed.to_offset(offset);
+    let format = format_description!("[year repr:last_two][month][day][hour][minute][second]");
+    local
+        .format(&format)
+        .map_err(|error| format!("failed to format quarantine timestamp: {error}"))
 }
 
 fn safe_quarantine_component(value: &str) -> String {
@@ -1086,5 +1102,27 @@ mod tests {
         assert_eq!(metadata["builder_tag"], builder_tag);
         assert_eq!(metadata["build_key"], build_key.to_hex());
         assert_eq!(metadata["quarantine_path"], path.display().to_string());
+
+        let name_timestamp = file_name.split_once('-').unwrap().0;
+        let (name_timestamp, collision_counter) = name_timestamp
+            .split_once('.')
+            .map_or((name_timestamp, None), |(timestamp, counter)| {
+                (timestamp, Some(counter))
+            });
+        assert_eq!(name_timestamp.len(), 12);
+        assert!(name_timestamp.chars().all(|ch| ch.is_ascii_digit()));
+        if let Some(counter) = collision_counter {
+            assert!(counter.parse::<u16>().unwrap() >= 2);
+        }
+
+        let created_at = metadata["created_at_unix_nanos"]
+            .as_str()
+            .unwrap()
+            .parse::<u128>()
+            .unwrap();
+        assert_eq!(
+            name_timestamp,
+            human_quarantine_timestamp(created_at).unwrap()
+        );
     }
 }
