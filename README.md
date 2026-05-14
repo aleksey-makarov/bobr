@@ -1,5 +1,7 @@
 # mbuild
 
+<img src="bobr.svg" alt="bobr" width="200">
+
 `mbuild` executes one JSON DAG request.
 
 The input document is a JSON envelope with:
