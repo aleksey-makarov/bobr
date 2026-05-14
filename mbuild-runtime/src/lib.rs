@@ -5,11 +5,11 @@
 //! functions exported from this crate root. OCI bundle construction, executor
 //! lifecycle handling, and child-side error reporting are internal details.
 //!
-//! The current public capability is fs-tree ownership materialization through
+//! The current public capabilities are fs-tree ownership materialization through
 //! [`apply_ownership_batch`], [`apply_ownership_batch_and_hash`], and
-//! [`apply_selected_ownership_batch_and_hash_fs_tree_object`]. It applies logical
-//! fs-tree owners and modes in a user namespace described by
-//! [`MbuildIdmap`].
+//! [`apply_selected_ownership_batch_and_hash_fs_tree_object`], plus deterministic
+//! fs-tree tar generation through [`write_fs_tree_tar_in_ownership_namespace`].
+//! These helpers operate in a user namespace described by [`MbuildIdmap`].
 //!
 //! Runtime ownership materialization currently targets Linux hosts with
 //! configured `/etc/subuid` and `/etc/subgid` ranges, unprivileged user
@@ -25,6 +25,7 @@ mod preflight;
 mod run;
 mod sandbox;
 mod spec;
+mod tar_writer;
 
 mod executor;
 
@@ -38,4 +39,7 @@ pub use ownership::{
 pub use sandbox::{
     SandboxBuildConfig, SandboxBuildOutcome, SandboxInput, SandboxRunAs, SandboxStep,
     SandboxStepReport, run_sandbox_build,
+};
+pub use tar_writer::{
+    FsTreeTarEntrySource, FsTreeTarInput, write_fs_tree_tar_in_ownership_namespace,
 };

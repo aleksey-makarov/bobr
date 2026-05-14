@@ -6,14 +6,19 @@ use mbuild_core::{
     FsTreeOwnerMap, StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir,
     fsutil,
 };
+use mbuild_runtime::{FsTreeTarEntrySource, FsTreeTarInput};
 use serde::{Deserialize, Serialize};
 use serde_json::Map;
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::io;
+#[cfg(test)]
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -214,6 +219,7 @@ impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
 
 pub struct TreeBuilder;
 pub struct TreeMergeBuilder;
+pub struct ErofsRootfsBuilder;
 
 static TREE_SPEC: BuilderSpec = BuilderSpec {
     tag: "Tree",
@@ -228,6 +234,22 @@ pub struct TreeMergeConfig {}
 
 static TREE_MERGE_SPEC: BuilderSpec = BuilderSpec {
     tag: "TreeMerge",
+    required_inputs: &[],
+    optional_inputs: &[],
+    allow_extra_inputs: true,
+};
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErofsRootfsConfig {
+    #[serde(default)]
+    compression: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+static EROFS_ROOTFS_SPEC: BuilderSpec = BuilderSpec {
+    tag: "ErofsRootfs",
     required_inputs: &[],
     optional_inputs: &[],
     allow_extra_inputs: true,
@@ -264,6 +286,29 @@ impl TypedBuilder for TreeMergeBuilder {
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         build_tree_merge(config, inputs, cx, &RuntimeOwnershipMaterializer)
+    }
+}
+
+impl TypedBuilder for ErofsRootfsBuilder {
+    type Config = ErofsRootfsConfig;
+
+    fn spec(&self) -> &'static BuilderSpec {
+        &EROFS_ROOTFS_SPEC
+    }
+
+    fn build_typed(
+        &self,
+        config: Self::Config,
+        inputs: BuilderInputs,
+        cx: &mut BuildContext,
+    ) -> Result<StagedBuildResult, BuilderError> {
+        build_erofs_rootfs(
+            config,
+            inputs,
+            cx,
+            &RuntimeErofsTarWriter,
+            &PathProgramResolver,
+        )
     }
 }
 
@@ -363,6 +408,463 @@ fn build_tree_merge(
         staged_path: output_path,
         object_hash: Some(object_hash),
     })
+}
+
+fn build_erofs_rootfs(
+    config: ErofsRootfsConfig,
+    inputs: BuilderInputs,
+    cx: &mut BuildContext,
+    tar_writer: &impl ErofsTarWriter,
+    program_resolver: &impl ProgramResolver,
+) -> Result<StagedBuildResult, BuilderError> {
+    validate_erofs_config(&config)?;
+    let inputs = inputs.extras(&EROFS_ROOTFS_SPEC).collect::<Vec<_>>();
+    if inputs.is_empty() {
+        return Err(BuilderError::ExecutionFailed(
+            "ErofsRootfs builder requires at least one fs-tree input".to_string(),
+        ));
+    }
+
+    let mkfs_erofs = program_resolver.resolve("mkfs.erofs")?;
+
+    cx.log_event(
+        BuildLogLevel::Info,
+        "prepare",
+        format!("composing {} fs-tree input(s) for EROFS", inputs.len()),
+    );
+
+    let compose_inputs = inputs
+        .iter()
+        .map(|(name, object)| erofs_rootfs_input(name, object))
+        .collect::<Result<Vec<_>, _>>()?;
+    let composed = compose_fs_trees(&compose_inputs).map_err(map_fs_tree_error)?;
+
+    let now_nanos = fsutil::current_epoch_nanos()
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+    let tar_path = cx.temp_dir.join(format!("erofs-rootfs-{now_nanos}.tar"));
+    let output_path = cx.temp_dir.join(format!("erofs-rootfs-{now_nanos}.erofs"));
+
+    cx.log_event(
+        BuildLogLevel::Info,
+        "tar",
+        format!(
+            "writing deterministic EROFS source tar '{}'",
+            tar_path.display()
+        ),
+    );
+    tar_writer.write_tar(&compose_inputs, &composed, &tar_path, &cx.temp_dir)?;
+
+    cx.log_event(
+        BuildLogLevel::Info,
+        "mkfs",
+        format!("creating EROFS image '{}'", output_path.display()),
+    );
+    run_mkfs_erofs(&mkfs_erofs, &config, &output_path, &tar_path)?;
+
+    Ok(StagedBuildResult {
+        meta: Map::new(),
+        staged_path: output_path,
+        object_hash: None,
+    })
+}
+
+fn validate_erofs_config(config: &ErofsRootfsConfig) -> Result<(), BuilderError> {
+    if matches!(config.compression.as_deref(), Some("")) {
+        return Err(BuilderError::InvalidRecipe(
+            "invalid builder config: compression must be null or a non-empty string".to_string(),
+        ));
+    }
+    if matches!(config.label.as_deref(), Some("")) {
+        return Err(BuilderError::InvalidRecipe(
+            "invalid builder config: label must be null or a non-empty string".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn erofs_rootfs_input(
+    name: &str,
+    object: &BuilderInputObject,
+) -> Result<FsTreeComposeInput, BuilderError> {
+    let input = load_fs_tree_compose_input(&object.object_path).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "ErofsRootfs input '{name}' is not a valid fs-tree object: {error}"
+        ))
+    })?;
+    Ok(input)
+}
+
+trait ErofsTarWriter {
+    fn write_tar(
+        &self,
+        inputs: &[FsTreeComposeInput],
+        composed: &ComposedFsTree,
+        output_tar: &Path,
+        workspace: &Path,
+    ) -> Result<(), BuilderError>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimeErofsTarWriter;
+
+impl ErofsTarWriter for RuntimeErofsTarWriter {
+    fn write_tar(
+        &self,
+        inputs: &[FsTreeComposeInput],
+        composed: &ComposedFsTree,
+        output_tar: &Path,
+        workspace: &Path,
+    ) -> Result<(), BuilderError> {
+        let idmap = mbuild_runtime::cached_host_idmap()
+            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+        let tar_inputs = inputs
+            .iter()
+            .map(|input| FsTreeTarInput {
+                root_dir: input.root_dir.clone(),
+            })
+            .collect::<Vec<_>>();
+        let sources = erofs_tar_sources(inputs, composed)?;
+        mbuild_runtime::write_fs_tree_tar_in_ownership_namespace(
+            &tar_inputs,
+            composed.manifest(),
+            &sources,
+            output_tar,
+            idmap.as_ref(),
+            workspace,
+        )
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))
+    }
+}
+
+fn erofs_tar_sources(
+    inputs: &[FsTreeComposeInput],
+    composed: &ComposedFsTree,
+) -> Result<Vec<FsTreeTarEntrySource>, BuilderError> {
+    composed
+        .manifest()
+        .entries()
+        .iter()
+        .zip(composed.entries())
+        .map(
+            |(manifest_entry, composed_entry)| match (manifest_entry, composed_entry) {
+                (FsTreeEntry::Directory { .. }, ComposedFsTreeEntry::Directory) => {
+                    Ok(FsTreeTarEntrySource::Directory)
+                }
+                (FsTreeEntry::File { .. }, ComposedFsTreeEntry::File { source_path }) => {
+                    let (input_index, rel_path) = locate_erofs_source(inputs, source_path)?;
+                    Ok(FsTreeTarEntrySource::File {
+                        input_index,
+                        path: rel_path,
+                    })
+                }
+                (FsTreeEntry::Symlink { .. }, ComposedFsTreeEntry::Symlink { .. }) => {
+                    Ok(FsTreeTarEntrySource::Symlink)
+                }
+                _ => Err(BuilderError::ExecutionFailed(format!(
+                    "merged fs-tree entry for '{}' does not match manifest kind",
+                    manifest_entry.path()
+                ))),
+            },
+        )
+        .collect()
+}
+
+fn locate_erofs_source(
+    inputs: &[FsTreeComposeInput],
+    source_path: &Path,
+) -> Result<(usize, String), BuilderError> {
+    for (index, input) in inputs.iter().enumerate() {
+        if let Ok(rel_path) = source_path.strip_prefix(&input.root_dir) {
+            let rel_path = rel_path_to_manifest_string(rel_path).ok_or_else(|| {
+                BuilderError::ExecutionFailed(format!(
+                    "fs-tree source path '{}' is not representable as a manifest path",
+                    source_path.display()
+                ))
+            })?;
+            if rel_path.is_empty() {
+                return Err(BuilderError::ExecutionFailed(format!(
+                    "fs-tree source path '{}' points at an input root, expected a file",
+                    source_path.display()
+                )));
+            }
+            return Ok((index, rel_path));
+        }
+    }
+    Err(BuilderError::ExecutionFailed(format!(
+        "fs-tree source path '{}' is not under any ErofsRootfs input root",
+        source_path.display()
+    )))
+}
+
+fn rel_path_to_manifest_string(path: &Path) -> Option<String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_str()?.to_string()),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(parts.join("/"))
+}
+
+#[cfg(test)]
+fn write_composed_fs_tree_tar_host(
+    composed: &ComposedFsTree,
+    output_tar: &Path,
+) -> Result<(), BuilderError> {
+    let file = fs::File::create(output_tar).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to create EROFS source tar '{}': {error}",
+            output_tar.display()
+        ))
+    })?;
+    write_composed_fs_tree_tar_stream(file, composed)
+}
+
+#[cfg(test)]
+fn write_composed_fs_tree_tar_stream<W: Write>(
+    writer: W,
+    composed: &ComposedFsTree,
+) -> Result<(), BuilderError> {
+    let mut tar = tar::Builder::new(io::BufWriter::new(writer));
+    tar.mode(tar::HeaderMode::Deterministic);
+
+    for (manifest_entry, composed_entry) in
+        composed.manifest().entries().iter().zip(composed.entries())
+    {
+        if manifest_entry.path().is_empty() {
+            continue;
+        }
+        match (manifest_entry, composed_entry) {
+            (FsTreeEntry::Directory { .. }, ComposedFsTreeEntry::Directory) => {
+                append_erofs_tar_directory(&mut tar, manifest_entry)?
+            }
+            (FsTreeEntry::File { .. }, ComposedFsTreeEntry::File { source_path }) => {
+                append_erofs_tar_file(&mut tar, manifest_entry, source_path)?
+            }
+            (FsTreeEntry::Symlink { .. }, ComposedFsTreeEntry::Symlink { .. }) => {
+                append_erofs_tar_symlink(&mut tar, manifest_entry)?
+            }
+            _ => {
+                return Err(BuilderError::ExecutionFailed(format!(
+                    "merged fs-tree entry for '{}' does not match manifest kind",
+                    manifest_entry.path()
+                )));
+            }
+        }
+    }
+
+    let mut writer = tar.into_inner().map_err(|error| {
+        BuilderError::ExecutionFailed(format!("failed to finalize EROFS source tar: {error}"))
+    })?;
+    writer.flush().map_err(|error| {
+        BuilderError::ExecutionFailed(format!("failed to flush EROFS source tar: {error}"))
+    })?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn append_erofs_tar_directory<W: Write>(
+    tar: &mut tar::Builder<W>,
+    entry: &FsTreeEntry,
+) -> Result<(), BuilderError> {
+    let FsTreeEntry::Directory {
+        path,
+        uid,
+        gid,
+        mode,
+    } = entry
+    else {
+        return Err(BuilderError::ExecutionFailed(
+            "internal error: expected directory manifest entry".to_string(),
+        ));
+    };
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Directory);
+    header.set_uid(*uid as u64);
+    header.set_gid(*gid as u64);
+    header.set_mode(*mode);
+    header.set_mtime(0);
+    header.set_size(0);
+    header.set_cksum();
+    tar.append_data(&mut header, format!("{path}/"), io::empty())
+        .map_err(|error| {
+            BuilderError::ExecutionFailed(format!(
+                "failed to append EROFS source tar directory '{path}': {error}"
+            ))
+        })
+}
+
+#[cfg(test)]
+fn append_erofs_tar_file<W: Write>(
+    tar: &mut tar::Builder<W>,
+    entry: &FsTreeEntry,
+    source_path: &Path,
+) -> Result<(), BuilderError> {
+    let FsTreeEntry::File {
+        path,
+        uid,
+        gid,
+        mode,
+    } = entry
+    else {
+        return Err(BuilderError::ExecutionFailed(
+            "internal error: expected file manifest entry".to_string(),
+        ));
+    };
+    let metadata = fs::metadata(source_path).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to stat EROFS source file '{}': {error}",
+            source_path.display()
+        ))
+    })?;
+    let mut file = fs::File::open(source_path).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to open EROFS source file '{}': {error}",
+            source_path.display()
+        ))
+    })?;
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_uid(*uid as u64);
+    header.set_gid(*gid as u64);
+    header.set_mode(*mode);
+    header.set_mtime(0);
+    header.set_size(metadata.len());
+    header.set_cksum();
+    tar.append_data(&mut header, path, &mut file)
+        .map_err(|error| {
+            BuilderError::ExecutionFailed(format!(
+                "failed to append EROFS source tar file '{path}': {error}"
+            ))
+        })
+}
+
+#[cfg(test)]
+fn append_erofs_tar_symlink<W: Write>(
+    tar: &mut tar::Builder<W>,
+    entry: &FsTreeEntry,
+) -> Result<(), BuilderError> {
+    let FsTreeEntry::Symlink {
+        path,
+        uid,
+        gid,
+        target,
+    } = entry
+    else {
+        return Err(BuilderError::ExecutionFailed(
+            "internal error: expected symlink manifest entry".to_string(),
+        ));
+    };
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_uid(*uid as u64);
+    header.set_gid(*gid as u64);
+    header.set_mode(0o777);
+    header.set_mtime(0);
+    header.set_size(0);
+    header.set_link_name(target).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to encode EROFS source tar symlink target '{target}' for '{path}': {error}"
+        ))
+    })?;
+    header.set_cksum();
+    tar.append_data(&mut header, path, io::empty())
+        .map_err(|error| {
+            BuilderError::ExecutionFailed(format!(
+                "failed to append EROFS source tar symlink '{path}': {error}"
+            ))
+        })
+}
+
+trait ProgramResolver {
+    fn resolve(&self, program: &str) -> Result<PathBuf, BuilderError>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PathProgramResolver;
+
+impl ProgramResolver for PathProgramResolver {
+    fn resolve(&self, program: &str) -> Result<PathBuf, BuilderError> {
+        find_program_in_path(program).ok_or_else(|| {
+            BuilderError::ExecutionFailed(format!(
+                "required tool '{program}' was not found in PATH; install erofs-utils"
+            ))
+        })
+    }
+}
+
+fn find_program_in_path(program: &str) -> Option<PathBuf> {
+    if program.contains('/') {
+        let path = PathBuf::from(program);
+        return is_executable_file(&path).then_some(path);
+    }
+    let path_var = env::var_os("PATH")?;
+    for dir in env::split_paths(&path_var) {
+        let candidate = dir.join(program);
+        if is_executable_file(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn run_mkfs_erofs(
+    mkfs_erofs: &Path,
+    config: &ErofsRootfsConfig,
+    output_path: &Path,
+    tar_path: &Path,
+) -> Result<(), BuilderError> {
+    let mut command = Command::new(mkfs_erofs);
+    command
+        .arg("--tar=f")
+        .arg("--sort=path")
+        .arg("-T")
+        .arg("0")
+        .arg("-U")
+        .arg("clear");
+    if let Some(label) = config.label.as_ref() {
+        command.arg("-L").arg(label);
+    }
+    if let Some(compression) = config.compression.as_ref() {
+        command.arg("-z").arg(compression);
+    }
+    command.arg(output_path).arg(tar_path);
+
+    let output = command.output().map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to execute '{}': {error}",
+            mkfs_erofs.display()
+        ))
+    })?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(BuilderError::ExecutionFailed(format!(
+        "mkfs.erofs failed with status {}: {}",
+        output.status,
+        stderr.trim_end()
+    )))
 }
 
 fn tree_merge_input(
@@ -1353,6 +1855,61 @@ mod tests {
         }
     }
 
+    impl ErofsRootfsBuilder {
+        fn build_typed_for_tests(
+            &self,
+            config: ErofsRootfsConfig,
+            inputs: BuilderInputs,
+            cx: &mut BuildContext,
+            mkfs_erofs: PathBuf,
+        ) -> Result<StagedBuildResult, BuilderError> {
+            build_erofs_rootfs(
+                config,
+                inputs,
+                cx,
+                &HostErofsTarWriter,
+                &FixedProgramResolver { path: mkfs_erofs },
+            )
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct HostErofsTarWriter;
+
+    impl ErofsTarWriter for HostErofsTarWriter {
+        fn write_tar(
+            &self,
+            _inputs: &[FsTreeComposeInput],
+            composed: &ComposedFsTree,
+            output_tar: &Path,
+            _workspace: &Path,
+        ) -> Result<(), BuilderError> {
+            write_composed_fs_tree_tar_host(composed, output_tar)
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct FixedProgramResolver {
+        path: PathBuf,
+    }
+
+    impl ProgramResolver for FixedProgramResolver {
+        fn resolve(&self, _program: &str) -> Result<PathBuf, BuilderError> {
+            Ok(self.path.clone())
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct MissingProgramResolver;
+
+    impl ProgramResolver for MissingProgramResolver {
+        fn resolve(&self, program: &str) -> Result<PathBuf, BuilderError> {
+            Err(BuilderError::ExecutionFailed(format!(
+                "required tool '{program}' was not found in PATH; install erofs-utils"
+            )))
+        }
+    }
+
     fn build_context(root: &std::path::Path) -> BuildContext {
         let state_dir = root.join("tree");
         let temp_dir = state_dir.join("tmp");
@@ -1449,6 +2006,38 @@ mod tests {
         builder_inputs
     }
 
+    fn install_fake_mkfs_erofs(dir: &Path, log_path: &Path, fail: bool) -> PathBuf {
+        let script_path = dir.join("mkfs.erofs");
+        let failure = if fail {
+            "echo simulated mkfs failure >&2\nexit 17\n"
+        } else {
+            ""
+        };
+        fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > {}\n{failure}last=''\nprev=''\nfor arg in \"$@\"; do\n  prev=\"$last\"\n  last=\"$arg\"\ndone\nprintf 'fake erofs image\\n' > \"$prev\"\n",
+                shell_quote(log_path)
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+        script_path
+    }
+
+    fn shell_quote(path: &Path) -> String {
+        format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+    }
+
+    fn read_fake_mkfs_args(log_path: &Path) -> Vec<String> {
+        fs::read_to_string(log_path)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
     fn fixed_object_hash() -> ObjectHash {
         "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
@@ -1481,6 +2070,298 @@ mod tests {
     #[cfg(not(unix))]
     fn current_owner_map(_path: &Path) -> Result<CurrentOwnerMap, BuilderError> {
         Ok(CurrentOwnerMap { uid: 0, gid: 0 })
+    }
+
+    #[test]
+    fn erofs_rootfs_invokes_mkfs_without_optional_flags_and_publishes_file() {
+        let builder = ErofsRootfsBuilder;
+        let temp = tempdir().unwrap();
+        let tree = build_fs_tree_for_tests(
+            temp.path(),
+            "tree",
+            vec![TreeEntry::File {
+                path: "etc/hostname".to_string(),
+                text: "mbuild\n".to_string(),
+                executable: false,
+            }],
+            sample_install(),
+        );
+        let log_path = temp.path().join("mkfs-args.txt");
+        let mkfs = install_fake_mkfs_erofs(temp.path(), &log_path, false);
+        let mut cx = build_context(&temp.path().join("erofs"));
+
+        let result = builder
+            .build_typed_for_tests(
+                ErofsRootfsConfig {
+                    compression: None,
+                    label: None,
+                },
+                tree_merge_inputs(&[("tree", &tree)]),
+                &mut cx,
+                mkfs,
+            )
+            .unwrap();
+
+        assert!(result.staged_path.is_file());
+        assert_eq!(
+            fs::read_to_string(&result.staged_path).unwrap(),
+            "fake erofs image\n"
+        );
+        assert_eq!(result.object_hash, None);
+        let args = read_fake_mkfs_args(&log_path);
+        assert_eq!(
+            &args[..6],
+            ["--tar=f", "--sort=path", "-T", "0", "-U", "clear"]
+        );
+        assert!(!args.iter().any(|arg| arg == "-z"));
+        assert!(!args.iter().any(|arg| arg == "-L"));
+        assert!(args[args.len() - 2].ends_with(".erofs"));
+        assert!(args[args.len() - 1].ends_with(".tar"));
+    }
+
+    #[test]
+    fn erofs_rootfs_passes_compression_and_label_to_mkfs() {
+        let builder = ErofsRootfsBuilder;
+        let temp = tempdir().unwrap();
+        let tree = build_fs_tree_for_tests(
+            temp.path(),
+            "tree",
+            vec![TreeEntry::Dir {
+                path: "var".to_string(),
+            }],
+            sample_install(),
+        );
+        let log_path = temp.path().join("mkfs-args.txt");
+        let mkfs = install_fake_mkfs_erofs(temp.path(), &log_path, false);
+        let mut cx = build_context(&temp.path().join("erofs"));
+
+        builder
+            .build_typed_for_tests(
+                ErofsRootfsConfig {
+                    compression: Some("lz4hc,12".to_string()),
+                    label: Some("rootfs".to_string()),
+                },
+                tree_merge_inputs(&[("tree", &tree)]),
+                &mut cx,
+                mkfs,
+            )
+            .unwrap();
+
+        let args = read_fake_mkfs_args(&log_path);
+        assert!(args.windows(2).any(|window| window == ["-L", "rootfs"]));
+        assert!(args.windows(2).any(|window| window == ["-z", "lz4hc,12"]));
+    }
+
+    #[test]
+    fn erofs_rootfs_rejects_zero_inputs() {
+        let temp = tempdir().unwrap();
+        let mkfs = install_fake_mkfs_erofs(temp.path(), &temp.path().join("mkfs-args.txt"), false);
+        let mut cx = build_context(&temp.path().join("erofs"));
+
+        let error = ErofsRootfsBuilder
+            .build_typed_for_tests(
+                ErofsRootfsConfig {
+                    compression: None,
+                    label: None,
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+                mkfs,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("requires at least one"));
+    }
+
+    #[test]
+    fn erofs_rootfs_rejects_empty_compression_and_label() {
+        let temp = tempdir().unwrap();
+        let mkfs = install_fake_mkfs_erofs(temp.path(), &temp.path().join("mkfs-args.txt"), false);
+        let mut cx = build_context(&temp.path().join("compression"));
+
+        let error = ErofsRootfsBuilder
+            .build_typed_for_tests(
+                ErofsRootfsConfig {
+                    compression: Some(String::new()),
+                    label: None,
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+                mkfs.clone(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("compression"));
+
+        let mut cx = build_context(&temp.path().join("label"));
+        let error = ErofsRootfsBuilder
+            .build_typed_for_tests(
+                ErofsRootfsConfig {
+                    compression: None,
+                    label: Some(String::new()),
+                },
+                BuilderInputs::empty(),
+                &mut cx,
+                mkfs,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("label"));
+    }
+
+    #[test]
+    fn erofs_rootfs_reports_missing_mkfs_erofs() {
+        let temp = tempdir().unwrap();
+        let tree = build_fs_tree_for_tests(
+            temp.path(),
+            "tree",
+            vec![TreeEntry::Dir {
+                path: "var".to_string(),
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("erofs"));
+
+        let error = build_erofs_rootfs(
+            ErofsRootfsConfig {
+                compression: None,
+                label: None,
+            },
+            tree_merge_inputs(&[("tree", &tree)]),
+            &mut cx,
+            &HostErofsTarWriter,
+            &MissingProgramResolver,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("mkfs.erofs"));
+        assert!(error.to_string().contains("erofs-utils"));
+    }
+
+    #[test]
+    fn erofs_rootfs_reports_mkfs_stderr_on_failure() {
+        let temp = tempdir().unwrap();
+        let tree = build_fs_tree_for_tests(
+            temp.path(),
+            "tree",
+            vec![TreeEntry::Dir {
+                path: "var".to_string(),
+            }],
+            sample_install(),
+        );
+        let log_path = temp.path().join("mkfs-args.txt");
+        let mkfs = install_fake_mkfs_erofs(temp.path(), &log_path, true);
+        let mut cx = build_context(&temp.path().join("erofs"));
+
+        let error = ErofsRootfsBuilder
+            .build_typed_for_tests(
+                ErofsRootfsConfig {
+                    compression: None,
+                    label: None,
+                },
+                tree_merge_inputs(&[("tree", &tree)]),
+                &mut cx,
+                mkfs,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("mkfs.erofs failed"));
+        assert!(error.to_string().contains("simulated mkfs failure"));
+    }
+
+    #[test]
+    fn erofs_tar_generation_uses_manifest_metadata_order_and_sources() {
+        let temp = tempdir().unwrap();
+        let left_manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::directory("usr", 11, 12, 0o755),
+            FsTreeEntry::directory("usr/bin", 11, 12, 0o755),
+            FsTreeEntry::file("usr/bin/tool", 11, 12, 0o755),
+        ])
+        .unwrap();
+        let left_paths =
+            create_fs_tree_staging_dir(&temp.path().join("left"), &left_manifest).unwrap();
+        fs::create_dir(left_paths.root_dir.join("usr")).unwrap();
+        fs::create_dir(left_paths.root_dir.join("usr/bin")).unwrap();
+        fs::write(left_paths.root_dir.join("usr/bin/tool"), b"tool\n").unwrap();
+
+        let right_manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::directory("etc", 21, 22, 0o750),
+            FsTreeEntry::file("etc/config", 21, 22, 0o640),
+            FsTreeEntry::symlink("etc/tool-link", 21, 22, "../usr/bin/tool"),
+        ])
+        .unwrap();
+        let right_paths =
+            create_fs_tree_staging_dir(&temp.path().join("right"), &right_manifest).unwrap();
+        fs::create_dir(right_paths.root_dir.join("etc")).unwrap();
+        fs::write(right_paths.root_dir.join("etc/config"), b"config\n").unwrap();
+        create_symlink(
+            "../usr/bin/tool",
+            &right_paths.root_dir.join("etc/tool-link"),
+        )
+        .unwrap();
+        let compose_inputs = vec![
+            load_fs_tree_compose_input(&right_paths.object_dir).unwrap(),
+            load_fs_tree_compose_input(&left_paths.object_dir).unwrap(),
+        ];
+        let composed = compose_fs_trees(&compose_inputs).unwrap();
+        let mut bytes = Vec::new();
+
+        write_composed_fs_tree_tar_stream(&mut bytes, &composed).unwrap();
+
+        let mut archive = tar::Archive::new(bytes.as_slice());
+        let mut seen = Vec::new();
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let header = entry.header().clone();
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            let mut contents = Vec::new();
+            io::copy(&mut entry, &mut contents).unwrap();
+            seen.push((
+                path,
+                header.entry_type(),
+                header.uid().unwrap(),
+                header.gid().unwrap(),
+                header.mode().unwrap(),
+                header.mtime().unwrap(),
+                contents,
+                header.link_name().unwrap().map(|path| path.into_owned()),
+            ));
+        }
+
+        assert_eq!(
+            seen.iter()
+                .map(|entry| entry.0.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "etc/",
+                "etc/config",
+                "etc/tool-link",
+                "usr/",
+                "usr/bin/",
+                "usr/bin/tool"
+            ]
+        );
+        assert_eq!(
+            (seen[0].2, seen[0].3, seen[0].4, seen[0].5),
+            (21, 22, 0o750, 0)
+        );
+        assert_eq!(seen[1].1, tar::EntryType::Regular);
+        assert_eq!(
+            (seen[1].2, seen[1].3, seen[1].4, seen[1].5),
+            (21, 22, 0o640, 0)
+        );
+        assert_eq!(seen[1].6, b"config\n");
+        assert_eq!(seen[2].1, tar::EntryType::Symlink);
+        assert_eq!(
+            (seen[2].2, seen[2].3, seen[2].4, seen[2].5),
+            (21, 22, 0o777, 0)
+        );
+        assert_eq!(seen[2].7.as_deref(), Some(Path::new("../usr/bin/tool")));
+        assert_eq!(
+            (seen[5].2, seen[5].3, seen[5].4, seen[5].5),
+            (11, 12, 0o755, 0)
+        );
+        assert_eq!(seen[5].6, b"tool\n");
     }
 
     #[test]

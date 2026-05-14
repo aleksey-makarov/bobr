@@ -2,11 +2,12 @@
 
 ## Summary
 
-`mbuild` currently implements four filesystem-related builders:
+`mbuild` currently implements five filesystem-related builders:
 
 - `Tree`: realize text files, symlinks, and explicit directories as one file object or
   one fs-tree directory object
 - `TreeMerge`: compose fs-tree directory objects into one fs-tree directory object
+- `ErofsRootfs`: compose fs-tree directory objects into one EROFS rootfs image
 - `Rootfs`: compose installable legacy directory objects into one rootfs directory object
 - `Ext4Rootfs`: compose installable legacy directory objects into one ext4 rootfs image
 
@@ -38,6 +39,17 @@
 - regular files are hardlinked from input fs-trees when possible, with copy
   fallback for filesystems that do not support the hardlink
 - symlinks are recreated with the same target
+
+`ErofsRootfs` is the image-producing counterpart to `TreeMerge`:
+
+- the builder reads canonical `manifest.jsonl` files from fs-tree inputs
+- it merges manifest entries with the same conflict semantics as `TreeMerge`
+- it writes a deterministic tar stream from the merged manifest
+- regular file bytes are read from the selected input fs-tree roots inside the
+  ownership user namespace
+- tar headers use logical `uid`, `gid`, mode, symlink targets, and `mtime=0`
+  from the merged manifest
+- it runs `mkfs.erofs --tar=f` on the host to produce one EROFS image file
 
 ## `Tree`
 
@@ -156,6 +168,62 @@ Physical materialization:
 
 The realized result payload is one fs-tree directory object. The current realized
 result metadata is empty:
+
+- `{}`
+
+## `ErofsRootfs`
+
+`ErofsRootfs` accepts this config:
+
+```json
+{
+  "compression": null,
+  "label": null
+}
+```
+
+Inputs:
+
+- one or more named fs-tree directory inputs
+- input order follows the standard builder input order: required inputs,
+  optional inputs, then extra inputs in lexical input-name order
+
+Current behavior:
+
+- requires every input to have fs-tree object shape:
+  ```text
+  manifest.jsonl
+  root/
+  ```
+- reads canonical manifests and treats them as the source of truth
+- allows overlapping directory paths only when `uid`, `gid`, and `mode` match
+- rejects duplicate file or symlink paths
+- rejects file-vs-directory, symlink-vs-directory, and parent/child leaf conflicts
+- writes a deterministic tar stream in canonical manifest order, excluding the
+  implicit root entry
+- sets tar directory and file `uid`, `gid`, `mode`, and `mtime=0` from the
+  merged manifest
+- sets tar symlink `uid`, `gid`, target, and `mtime=0` from the merged manifest;
+  symlink mode is encoded as `0777` because fs-tree manifests do not carry
+  symlink mode
+- reads file bytes from input `root/` directories inside the ownership user
+  namespace, so files owned through the configured idmap remain readable
+- runs `mkfs.erofs` from `PATH` on the host:
+  ```sh
+  mkfs.erofs --tar=f --sort=path -T 0 -U clear \
+    [ -L label ] [ -z compression ] \
+    rootfs.erofs rootfs.tar
+  ```
+
+Config fields:
+
+- `compression = null` creates a plain EROFS image and does not pass `-z`
+- non-null `compression` must be a non-empty string and is passed as
+  `-z <compression>`
+- non-null `label` must be a non-empty string and is passed as `-L <label>`
+
+The realized result payload is one regular file containing an EROFS filesystem
+image. The current realized result metadata is empty:
 
 - `{}`
 

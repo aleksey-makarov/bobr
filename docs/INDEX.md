@@ -11,8 +11,8 @@
    and `Sandbox` on the image and rootfs-backed execution paths.
 
 3. [ROOTFS_BUILDERS.md](./ROOTFS_BUILDERS.md)
-   Current behavior of `Tree`, `Ext4Rootfs`, and the direct filesystem
-   authoring/composition path.
+   Current behavior of `Tree`, `TreeMerge`, `ErofsRootfs`, `Ext4Rootfs`, and
+   the direct filesystem authoring/composition path.
 
 4. [CAS.md](./CAS.md)
    Content-addressed store, build handles, canonical result records, and
