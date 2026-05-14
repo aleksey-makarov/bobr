@@ -5,7 +5,7 @@ use crate::error::RuntimeError;
 use crate::idmap::MbuildIdmap;
 use crate::preflight::preflight_ownership_runtime;
 use crate::run::libcontainer_start_lock;
-use fsobj_hash::{ObjectHash, hash_fs_tree_object};
+use fsobj_hash::ObjectHash;
 use libcontainer::container::builder::ContainerBuilder;
 use libcontainer::oci_spec::runtime::{
     Capabilities, Capability, LinuxBuilder, LinuxCapabilities, LinuxCapabilitiesBuilder,
@@ -16,31 +16,37 @@ use libcontainer::syscall::syscall::SyscallType;
 use libcontainer::workload::{
     Executor, ExecutorError, ExecutorSetEnvsError, ExecutorValidationError,
 };
-use mbuild_core::{FsTreeEntry, FsTreeManifest};
-use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-use nix::unistd::{Gid, Pid, Uid, chown, setgid, setgroups, setuid};
+use mbuild_core::FsTreeManifest;
+use mbuild_sandbox_runner_core::{
+    RUNNER_BINARY_NAME, RUNNER_PROTOCOL_VERSION, RunnerConfig, RunnerProtocolInfo, RunnerRunAs,
+    RunnerStepConfig,
+};
+use nix::sys::wait::{WaitStatus, waitpid};
+use nix::unistd::{Pid, execvp};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::env;
 use std::error::Error;
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::fs;
 use std::fs::File;
-use std::io::{self, Write};
-use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::io;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::Command;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, OnceLock};
 use tracing::warn;
 use uuid::Uuid;
 
-const BUILD_USER_UID: u32 = 1;
-const BUILD_USER_GID: u32 = 1;
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+const CONTAINER_RUNTIME_DIR: &str = "/__mbuild/runtime";
+const CONTAINER_RUNNER_DIR: &str = "/__mbuild/runner";
+const CONTAINER_LOG_DIR: &str = "/__mbuild/logs";
+const CONTAINER_RUNNER_CONFIG: &str = "/__mbuild/runtime/runner-config.json";
+const CONTAINER_SUCCESS_REPORT: &str = "/__mbuild/runtime/sandbox-success.json";
+const CONTAINER_FAILURE_REPORT: &str = "/__mbuild/runtime/sandbox-failure.json";
+const CONTAINER_BREADCRUMBS: &str = "/__mbuild/runtime/sandbox-breadcrumbs.log";
 const ROOT_STEP_CAPABILITIES: &[&str] = &[
     "CAP_CHOWN",
     "CAP_DAC_OVERRIDE",
@@ -143,12 +149,12 @@ pub fn run_sandbox_build(
 ) -> Result<SandboxBuildOutcome, RuntimeError> {
     validate_config(&config)?;
     preflight_ownership_runtime(idmap)?;
+    let runner = cached_sandbox_runner()?;
 
-    let prepared = PreparedSandbox::create(&config, idmap)?;
-    let runner = SandboxRunnerExecutor::new(&config, &prepared.runtime_files)?;
+    let prepared = PreparedSandbox::create(&config, idmap, &runner.host_path)?;
+    write_runner_config(&config, &prepared.runtime_files)?;
     let mut lifecycle = SandboxLifecycle::start(
         prepared.bundle,
-        runner,
         prepared.runtime_files,
         prepared.host_cgroup_path,
         &config.state_dir,
@@ -205,13 +211,24 @@ struct PreparedSandbox {
 }
 
 impl PreparedSandbox {
-    fn create(config: &SandboxBuildConfig, idmap: &MbuildIdmap) -> Result<Self, RuntimeError> {
+    fn create(
+        config: &SandboxBuildConfig,
+        idmap: &MbuildIdmap,
+        runner_path: &Path,
+    ) -> Result<Self, RuntimeError> {
         let dirs = SandboxDirs::create(&config.workspace)?;
-        let runtime_files = SandboxRuntimeFiles::create(&dirs.runtime_files)?;
+        let runtime_files = SandboxRuntimeFiles::create(&dirs.runtime_files, config)?;
         let cgroup = prepare_sandbox_cgroup()?;
-        let spec = build_sandbox_spec(config, idmap, &dirs, Some(cgroup.container_path))?;
+        let spec = build_sandbox_spec(
+            config,
+            idmap,
+            &dirs,
+            &runtime_files,
+            runner_path,
+            Some(cgroup.container_path),
+        )?;
         let bundle = create_bundle(&config.workspace, &spec)?;
-        populate_bundle_rootfs_skeleton(bundle.rootfs_dir(), &config.rootfs)?;
+        populate_bundle_rootfs_skeleton(bundle.rootfs_dir(), &config.rootfs, &runtime_files)?;
         Ok(Self {
             bundle,
             runtime_files,
@@ -243,26 +260,339 @@ impl SandboxDirs {
     }
 }
 
+fn write_runner_config(
+    config: &SandboxBuildConfig,
+    runtime_files: &SandboxRuntimeFiles,
+) -> Result<(), RuntimeError> {
+    let steps = config
+        .steps
+        .iter()
+        .zip(runtime_files.step_logs.iter())
+        .map(|(step, logs)| RunnerStepConfig {
+            name: step.name.clone(),
+            run_as: match step.run_as {
+                SandboxRunAs::BuildUser => RunnerRunAs::BuildUser,
+                SandboxRunAs::Root => RunnerRunAs::Root,
+            },
+            cwd: step.cwd.clone(),
+            argv: step.argv.clone(),
+            env: step_env(step),
+            stdout_path: logs.container_stdout.clone(),
+            stderr_path: logs.container_stderr.clone(),
+            report_stdout_path: step.stdout_path.clone(),
+            report_stderr_path: step.stderr_path.clone(),
+        })
+        .collect::<Vec<_>>();
+    let runner_config = RunnerConfig {
+        protocol_version: RUNNER_PROTOCOL_VERSION,
+        prepare_paths: vec![PathBuf::from("/__mbuild/build")],
+        steps,
+        success_report: PathBuf::from(CONTAINER_SUCCESS_REPORT),
+        failure_report: PathBuf::from(CONTAINER_FAILURE_REPORT),
+        breadcrumbs: PathBuf::from(CONTAINER_BREADCRUMBS),
+    };
+    serde_json::to_writer(File::create(&runtime_files.runner_config)?, &runner_config)
+        .map_err(|error| RuntimeError::Executor(error.to_string()))
+}
+
 struct SandboxRuntimeFiles {
+    root: PathBuf,
     success_report: PathBuf,
     failure_report: PathBuf,
-    breadcrumbs: PathBuf,
+    runner_config: PathBuf,
+    step_logs: Vec<SandboxStepLogMounts>,
 }
 
 impl SandboxRuntimeFiles {
-    fn create(root: &Path) -> Result<Self, RuntimeError> {
+    fn create(root: &Path, config: &SandboxBuildConfig) -> Result<Self, RuntimeError> {
+        fs::create_dir_all(root)?;
         let success_report = root.join("sandbox-success.json");
         let failure_report = root.join("sandbox-failure.json");
         let breadcrumbs = root.join("sandbox-breadcrumbs.log");
+        let runner_config = root.join("runner-config.json");
         File::create(&success_report)?;
         File::create(&failure_report)?;
         File::create(&breadcrumbs)?;
+        File::create(&runner_config)?;
+        let logs = root.join("logs");
+        fs::create_dir_all(&logs)?;
+        let mut step_logs = Vec::new();
+        for (index, step) in config.steps.iter().enumerate() {
+            File::create(&step.stdout_path)?;
+            File::create(&step.stderr_path)?;
+            step_logs.push(SandboxStepLogMounts {
+                host_stdout: step.stdout_path.clone(),
+                host_stderr: step.stderr_path.clone(),
+                container_stdout: Path::new(CONTAINER_LOG_DIR).join(format!("{index}.stdout")),
+                container_stderr: Path::new(CONTAINER_LOG_DIR).join(format!("{index}.stderr")),
+            });
+        }
         Ok(Self {
+            root: root.to_path_buf(),
             success_report,
             failure_report,
-            breadcrumbs,
+            runner_config,
+            step_logs,
         })
     }
+}
+
+struct SandboxStepLogMounts {
+    host_stdout: PathBuf,
+    host_stderr: PathBuf,
+    container_stdout: PathBuf,
+    container_stderr: PathBuf,
+}
+
+struct SandboxRunnerBinary {
+    host_path: PathBuf,
+}
+
+fn cached_sandbox_runner() -> Result<Arc<SandboxRunnerBinary>, RuntimeError> {
+    static RUNNER: OnceLock<Result<Arc<SandboxRunnerBinary>, String>> = OnceLock::new();
+    RUNNER
+        .get_or_init(|| {
+            resolve_and_preflight_sandbox_runner()
+                .map(Arc::new)
+                .map_err(|e| e.to_string())
+        })
+        .as_ref()
+        .map(Arc::clone)
+        .map_err(|message| RuntimeError::Preflight(message.clone()))
+}
+
+fn resolve_and_preflight_sandbox_runner() -> Result<SandboxRunnerBinary, RuntimeError> {
+    let host_path = resolve_sandbox_runner_path()?;
+    require_executable_file(&host_path, "sandbox runner")?;
+    require_static_elf(&host_path)?;
+    let output = Command::new(&host_path)
+        .arg("--protocol-info")
+        .output()
+        .map_err(|error| {
+            RuntimeError::Preflight(format!(
+                "failed to run sandbox runner preflight '{} --protocol-info': {error}",
+                host_path.display()
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(RuntimeError::Preflight(format!(
+            "sandbox runner preflight '{} --protocol-info' failed with status {}: {}",
+            host_path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let info = serde_json::from_slice::<RunnerProtocolInfo>(&output.stdout).map_err(|error| {
+        RuntimeError::Preflight(format!(
+            "failed to parse sandbox runner protocol info from '{}': {error}",
+            host_path.display()
+        ))
+    })?;
+    if info.name != RUNNER_BINARY_NAME || info.protocol_version != RUNNER_PROTOCOL_VERSION {
+        return Err(RuntimeError::Preflight(format!(
+            "sandbox runner '{}' has incompatible protocol {:?}; expected name '{}' protocol {}",
+            host_path.display(),
+            info,
+            RUNNER_BINARY_NAME,
+            RUNNER_PROTOCOL_VERSION
+        )));
+    }
+    Ok(SandboxRunnerBinary { host_path })
+}
+
+fn resolve_sandbox_runner_path() -> Result<PathBuf, RuntimeError> {
+    resolve_sandbox_runner_path_from(
+        env::var_os("MBUILD_SANDBOX_RUNNER").map(PathBuf::from),
+        env::current_exe().ok().as_deref(),
+        env::var_os("PATH"),
+    )
+}
+
+fn resolve_sandbox_runner_path_from(
+    env_override: Option<PathBuf>,
+    current_exe: Option<&Path>,
+    path_env: Option<OsString>,
+) -> Result<PathBuf, RuntimeError> {
+    let mut checked = Vec::new();
+    if let Some(path) = env_override {
+        checked.push(path.clone());
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    if let Some(current_exe) = current_exe {
+        if let Some((target_dir, profile)) = cargo_target_dir_and_profile(current_exe) {
+            let candidate = target_dir
+                .join("x86_64-unknown-linux-musl")
+                .join(profile)
+                .join(RUNNER_BINARY_NAME);
+            checked.push(candidate.clone());
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+        if let Some(parent) = current_exe.parent() {
+            let sibling = parent.join(RUNNER_BINARY_NAME);
+            checked.push(sibling.clone());
+            if sibling.exists() {
+                return Ok(sibling);
+            }
+        }
+        for ancestor in current_exe.ancestors() {
+            let target_dir = ancestor.join("target");
+            for profile in ["debug", "release"] {
+                let candidate = target_dir
+                    .join("x86_64-unknown-linux-musl")
+                    .join(profile)
+                    .join(RUNNER_BINARY_NAME);
+                checked.push(candidate.clone());
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+
+    if let Some(path) = path_env {
+        for dir in env::split_paths(&path) {
+            let candidate = dir.join(RUNNER_BINARY_NAME);
+            checked.push(candidate.clone());
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(RuntimeError::Preflight(format!(
+        "failed to find sandbox runner '{}'; checked {}",
+        RUNNER_BINARY_NAME,
+        checked
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
+}
+
+fn cargo_target_dir_and_profile(current_exe: &Path) -> Option<(&Path, &str)> {
+    let profile_dir = current_exe.parent()?;
+    let profile = profile_dir.file_name()?.to_str()?;
+    if !matches!(profile, "debug" | "release") {
+        return None;
+    }
+    let parent = profile_dir.parent()?;
+    if parent.file_name().and_then(|name| name.to_str()) == Some("target") {
+        return Some((parent, profile));
+    }
+    let target_dir = parent.parent()?;
+    if target_dir.file_name().and_then(|name| name.to_str()) == Some("target") {
+        return Some((target_dir, profile));
+    }
+    None
+}
+
+fn require_executable_file(path: &Path, label: &str) -> Result<(), RuntimeError> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        RuntimeError::Preflight(format!(
+            "{label} '{}' cannot be inspected: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(RuntimeError::Preflight(format!(
+            "{label} '{}' is not a file",
+            path.display()
+        )));
+    }
+    if metadata.permissions().mode() & 0o111 == 0 {
+        return Err(RuntimeError::Preflight(format!(
+            "{label} '{}' is not executable",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn require_static_elf(path: &Path) -> Result<(), RuntimeError> {
+    let bytes = fs::read(path).map_err(|error| {
+        RuntimeError::Preflight(format!(
+            "failed to read sandbox runner '{}': {error}",
+            path.display()
+        ))
+    })?;
+    match elf_has_interpreter(&bytes) {
+        Ok(true) => Err(RuntimeError::Preflight(format!(
+            "sandbox runner '{}' is dynamically linked; build a static musl runner",
+            path.display()
+        ))),
+        Ok(false) => Ok(()),
+        Err(message) => Err(RuntimeError::Preflight(format!(
+            "failed to inspect sandbox runner ELF '{}': {message}",
+            path.display()
+        ))),
+    }
+}
+
+fn elf_has_interpreter(bytes: &[u8]) -> Result<bool, String> {
+    const PT_INTERP: u32 = 3;
+    if bytes.len() < 64 || &bytes[0..4] != b"\x7fELF" {
+        return Err("not an ELF file".to_string());
+    }
+    if bytes[4] != 2 {
+        return Err("unsupported non-64-bit ELF".to_string());
+    }
+    if bytes[5] != 1 {
+        return Err("unsupported non-little-endian ELF".to_string());
+    }
+    let phoff = read_u64_le(bytes, 32)? as usize;
+    let phentsize = read_u16_le(bytes, 54)? as usize;
+    let phnum = read_u16_le(bytes, 56)? as usize;
+    if phentsize < 4 {
+        return Err("invalid ELF program header size".to_string());
+    }
+    for index in 0..phnum {
+        let offset = phoff
+            .checked_add(
+                index
+                    .checked_mul(phentsize)
+                    .ok_or("ELF program headers overflow")?,
+            )
+            .ok_or("ELF program headers overflow")?;
+        let end = offset
+            .checked_add(phentsize)
+            .ok_or("ELF program header overflow")?;
+        if end > bytes.len() {
+            return Err("ELF program header outside file".to_string());
+        }
+        if read_u32_le(bytes, offset)? == PT_INTERP {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn read_u16_le(bytes: &[u8], offset: usize) -> Result<u16, String> {
+    let raw = bytes
+        .get(offset..offset + 2)
+        .ok_or("unexpected end of ELF file")?;
+    Ok(u16::from_le_bytes([raw[0], raw[1]]))
+}
+
+fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, String> {
+    let raw = bytes
+        .get(offset..offset + 4)
+        .ok_or("unexpected end of ELF file")?;
+    Ok(u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+}
+
+fn read_u64_le(bytes: &[u8], offset: usize) -> Result<u64, String> {
+    let raw = bytes
+        .get(offset..offset + 8)
+        .ok_or("unexpected end of ELF file")?;
+    Ok(u64::from_le_bytes([
+        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+    ]))
 }
 
 struct SandboxLifecycle {
@@ -283,7 +613,6 @@ struct SandboxLifecycle {
 impl SandboxLifecycle {
     fn start(
         bundle: Bundle,
-        runner: SandboxRunnerExecutor,
         runtime_files: SandboxRuntimeFiles,
         host_cgroup_path: PathBuf,
         state_dir: &Path,
@@ -298,7 +627,7 @@ impl SandboxLifecycle {
         // libcontainer would fall back to the systemd cgroup manager.
         let _start_guard = libcontainer_start_lock()?;
         let mut container = ContainerBuilder::new(container_id.clone(), SyscallType::Linux)
-            .with_executor(runner)
+            .with_executor(SandboxInitExec)
             .with_root_path(state_dir)
             .map_err(libcontainer_error)?
             .as_init(bundle.dir())
@@ -392,313 +721,49 @@ impl Drop for SandboxLifecycle {
 }
 
 #[derive(Clone)]
-struct SandboxRunnerExecutor {
-    prepare_paths: Vec<PathBuf>,
-    steps: Vec<SandboxRunnerStep>,
-    success_report: Arc<File>,
-    failure_report: Arc<File>,
-    breadcrumbs: Arc<File>,
-}
+struct SandboxInitExec;
 
-impl SandboxRunnerExecutor {
-    fn new(
-        config: &SandboxBuildConfig,
-        runtime_files: &SandboxRuntimeFiles,
-    ) -> Result<Self, RuntimeError> {
-        let breadcrumbs = Arc::new(File::create(&runtime_files.breadcrumbs)?);
-        let steps = config
-            .steps
-            .iter()
-            .map(|step| SandboxRunnerStep::new(step, Arc::clone(&breadcrumbs)))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
-            prepare_paths: vec![PathBuf::from("/__mbuild/build")],
-            steps,
-            success_report: Arc::new(File::create(&runtime_files.success_report)?),
-            failure_report: Arc::new(File::create(&runtime_files.failure_report)?),
-            breadcrumbs,
-        })
-    }
-
-    fn run(&self) -> Result<SandboxBuildOutcome, SandboxRunnerFailureReport> {
-        self.breadcrumb("run:start");
-        self.breadcrumb("prepare:start");
-        self.prepare()?;
-        self.breadcrumb("prepare:done");
-
-        let mut reports = Vec::new();
-        for step in &self.steps {
-            self.breadcrumb(&format!("step:{}:run:start", step.name));
-            reports.push(step.run()?);
-            self.breadcrumb(&format!("step:{}:run:done", step.name));
-        }
-
-        self.breadcrumb("manifest:scan:start");
-        let out_dir = Path::new("/__mbuild/out");
-        let manifest = scan_output_manifest(out_dir)?;
-        self.breadcrumb("manifest:scan:done");
-        self.breadcrumb("manifest:canonical:start");
-        let manifest_bytes = manifest.to_canonical_bytes().map_err(|error| {
-            SandboxRunnerFailureReport::runtime("sandbox-manifest-output", error.to_string())
-        })?;
-        self.breadcrumb("manifest:canonical:done");
-        self.breadcrumb("hash-output:start");
-        let object_hash = hash_fs_tree_object(&manifest_bytes, out_dir).map_err(|error| {
-            SandboxRunnerFailureReport::runtime("sandbox-hash-output", error.to_string())
-        })?;
-        self.breadcrumb("hash-output:done");
-        Ok(SandboxBuildOutcome {
-            object_hash,
-            manifest,
-            steps: reports,
-        })
-    }
-
-    fn prepare(&self) -> Result<(), SandboxRunnerFailureReport> {
-        for path in &self.prepare_paths {
-            self.breadcrumb(&format!("prepare:create-dir:start:{}", path.display()));
-            fs::create_dir_all(path).map_err(|error| prepare_error("create dir", path, error))?;
-            self.breadcrumb(&format!("prepare:create-dir:done:{}", path.display()));
-            self.breadcrumb(&format!("prepare:chown:start:{}", path.display()));
-            chown_tree(path, BUILD_USER_UID, BUILD_USER_GID)
-                .map_err(|error| prepare_error("chown", path, error))?;
-            self.breadcrumb(&format!("prepare:chown:done:{}", path.display()));
-        }
-        Ok(())
-    }
-
-    fn write_success(&self, outcome: &SandboxBuildOutcome) -> Result<(), ExecutorError> {
-        self.breadcrumb("write-success:start");
-        let manifest_jsonl = String::from_utf8(
-            outcome
-                .manifest
-                .to_canonical_bytes()
-                .map_err(executor_error)?,
-        )
-        .map_err(executor_error)?;
-        let report = SandboxRunnerSuccessReport {
-            object_hash: outcome.object_hash.to_string(),
-            manifest_jsonl,
-            steps: outcome.steps.clone(),
-        };
-        serde_json::to_writer(&*self.success_report, &report).map_err(executor_error)?;
-        self.breadcrumb("write-success:done");
-        Ok(())
-    }
-
-    fn write_failure(&self, report: &SandboxRunnerFailureReport) -> Result<(), ExecutorError> {
-        self.breadcrumb(&format!(
-            "write-failure:start:{}",
-            report.to_error_message()
-        ));
-        serde_json::to_writer(&*self.failure_report, report).map_err(executor_error)?;
-        self.breadcrumb("write-failure:done");
-        Ok(())
-    }
-
-    fn breadcrumb(&self, message: &str) {
-        write_breadcrumb(&self.breadcrumbs, message);
-    }
-}
-
-impl Executor for SandboxRunnerExecutor {
+impl Executor for SandboxInitExec {
     fn setup_envs(&self, _: HashMap<String, String>) -> Result<(), ExecutorSetEnvsError> {
-        self.breadcrumb("executor:setup-envs");
         Ok(())
     }
 
-    fn validate(&self, _: &Spec) -> Result<(), ExecutorValidationError> {
-        self.breadcrumb("executor:validate");
+    fn validate(&self, spec: &Spec) -> Result<(), ExecutorValidationError> {
+        let args = spec
+            .process()
+            .as_ref()
+            .and_then(|process| process.args().as_ref())
+            .ok_or_else(|| {
+                ExecutorValidationError::ArgValidationError(
+                    "sandbox runner process args are missing".to_string(),
+                )
+            })?;
+        if args.is_empty() {
+            return Err(ExecutorValidationError::ArgValidationError(
+                "sandbox runner process args are empty".to_string(),
+            ));
+        }
         Ok(())
     }
 
-    fn exec(&self, _: &Spec) -> Result<(), ExecutorError> {
-        self.breadcrumb("executor:exec:start");
-        let exit_code = match self.run() {
-            Ok(outcome) => {
-                self.breadcrumb("executor:run:ok");
-                self.write_success(&outcome)?;
-                0
-            }
-            Err(report) => {
-                self.breadcrumb(&format!("executor:run:error:{}", report.to_error_message()));
-                self.write_failure(&report)?;
-                1
-            }
-        };
-        self.breadcrumb("terminate-remaining-children:start");
-        terminate_remaining_children();
-        self.breadcrumb(&format!("process-exit:{exit_code}"));
-        std::process::exit(exit_code);
-    }
-}
-
-#[derive(Clone)]
-struct SandboxRunnerStep {
-    name: String,
-    run_as: SandboxRunAs,
-    cwd: PathBuf,
-    argv: Vec<String>,
-    env: HashMap<String, String>,
-    stdout_path: PathBuf,
-    stderr_path: PathBuf,
-    stdout: Arc<File>,
-    stderr: Arc<File>,
-    breadcrumbs: Arc<File>,
-}
-
-impl SandboxRunnerStep {
-    fn new(step: &SandboxStep, breadcrumbs: Arc<File>) -> Result<Self, RuntimeError> {
-        Ok(Self {
-            name: step.name.clone(),
-            run_as: step.run_as,
-            cwd: step.cwd.clone(),
-            argv: step.argv.clone(),
-            env: step_env(step),
-            stdout_path: step.stdout_path.clone(),
-            stderr_path: step.stderr_path.clone(),
-            stdout: Arc::new(File::create(&step.stdout_path)?),
-            stderr: Arc::new(File::create(&step.stderr_path)?),
-            breadcrumbs,
-        })
-    }
-
-    fn run(&self) -> Result<SandboxStepReport, SandboxRunnerFailureReport> {
-        self.breadcrumb("start");
-        let executable = self.argv.first().ok_or_else(|| {
-            SandboxRunnerFailureReport::step_runtime(
-                self,
-                "step argument vector must contain at least one element".to_string(),
-                0,
+    fn exec(&self, spec: &Spec) -> Result<(), ExecutorError> {
+        let args = spec
+            .process()
+            .as_ref()
+            .and_then(|process| process.args().as_ref())
+            .ok_or(ExecutorError::InvalidArg)?;
+        let executable = args.first().ok_or(ExecutorError::InvalidArg)?;
+        let c_executable = CString::new(executable.as_bytes()).map_err(executor_error)?;
+        let c_args = args
+            .iter()
+            .map(|arg| CString::new(arg.as_bytes()).map_err(executor_error))
+            .collect::<Result<Vec<_>, _>>()?;
+        execvp(&c_executable, &c_args).map_err(|error| {
+            ExecutorError::Execution(
+                format!("failed to exec sandbox runner '{executable}': {error}").into(),
             )
         })?;
-        self.breadcrumb(&format!(
-            "argv-ready: executable={} argc={} cwd={} run_as={}",
-            executable,
-            self.argv.len(),
-            self.cwd.display(),
-            self.run_as.as_str()
-        ));
-        let start = Instant::now();
-        self.breadcrumb("stdout-clone:start");
-        let stdout = self.stdout.try_clone().map_err(|error| {
-            SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
-        })?;
-        self.breadcrumb("stdout-clone:done");
-        self.breadcrumb("stderr-clone:start");
-        let stderr = self.stderr.try_clone().map_err(|error| {
-            SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
-        })?;
-        self.breadcrumb("stderr-clone:done");
-        self.breadcrumb("pre-exec-breadcrumbs-clone:start");
-        let pre_exec_breadcrumbs = self.breadcrumbs.try_clone().map_err(|error| {
-            SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
-        })?;
-        self.breadcrumb("pre-exec-breadcrumbs-clone:done");
-
-        self.breadcrumb("command-build:start");
-        let mut command = Command::new(executable);
-        command
-            .args(&self.argv[1..])
-            .current_dir(&self.cwd)
-            .env_clear()
-            .envs(&self.env)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
-        let run_as = self.run_as;
-        let setgroups_allowed = setgroups_allowed();
-        unsafe {
-            command.pre_exec(move || {
-                apply_step_credentials(run_as, setgroups_allowed, pre_exec_breadcrumbs.as_raw_fd())
-            });
-        }
-        self.breadcrumb(&format!(
-            "command-build:done setgroups_allowed={setgroups_allowed}"
-        ));
-
-        self.breadcrumb("command-spawn:start");
-        let mut child = command.spawn().map_err(|error| {
-            self.breadcrumb(&format!("command-spawn:error:{error}"));
-            SandboxRunnerFailureReport::step_runtime(
-                self,
-                format!(
-                    "failed to spawn '{}' as {}: {error}",
-                    executable,
-                    self.run_as.as_str()
-                ),
-                elapsed_ms(start),
-            )
-        })?;
-        let child_pid = child.id();
-        self.breadcrumb(&format!("command-spawn:done child_pid={child_pid}"));
-
-        self.breadcrumb(&format!("command-wait:start child_pid={child_pid}"));
-        let status = child.wait().map_err(|error| {
-            self.breadcrumb(&format!(
-                "command-wait:error child_pid={child_pid} error={error}"
-            ));
-            SandboxRunnerFailureReport::step_runtime(
-                self,
-                format!(
-                    "failed to wait for '{}' as {} child pid {}: {error}",
-                    executable,
-                    self.run_as.as_str(),
-                    child_pid
-                ),
-                elapsed_ms(start),
-            )
-        })?;
-        self.breadcrumb(&format!(
-            "command-wait:done child_pid={child_pid} status={status:?}"
-        ));
-        self.breadcrumb("reap-children:start");
-        reap_finished_children();
-        self.breadcrumb("reap-children:done");
-        let duration_ms = elapsed_ms(start);
-        if status.success() {
-            self.breadcrumb(&format!("success:duration_ms={duration_ms}"));
-            Ok(SandboxStepReport {
-                name: self.name.clone(),
-                run_as: self.run_as.as_str().to_string(),
-                exit_code: status.code().unwrap_or(0),
-                duration_ms,
-                stdout_path: self.stdout_path.clone(),
-                stderr_path: self.stderr_path.clone(),
-            })
-        } else {
-            self.breadcrumb(&format!(
-                "failed:duration_ms={duration_ms} status={status:?}"
-            ));
-            Err(SandboxRunnerFailureReport::failed_step(
-                self,
-                &status,
-                duration_ms,
-            ))
-        }
-    }
-
-    fn breadcrumb(&self, message: &str) {
-        write_breadcrumb(&self.breadcrumbs, &format!("step:{}:{message}", self.name));
-    }
-}
-
-fn write_breadcrumb(file: &File, message: &str) {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| format!("{}.{:09}", duration.as_secs(), duration.subsec_nanos()))
-        .unwrap_or_else(|_| "time-error".to_string());
-    let mut file = file;
-    let _ = writeln!(file, "{elapsed} pid={} {message}", std::process::id());
-    let _ = file.flush();
-}
-
-impl SandboxRunAs {
-    fn as_str(self) -> &'static str {
-        match self {
-            SandboxRunAs::BuildUser => "build-user",
-            SandboxRunAs::Root => "root",
-        }
+        unreachable!();
     }
 }
 
@@ -721,64 +786,6 @@ struct SandboxRunnerFailureReport {
 }
 
 impl SandboxRunnerFailureReport {
-    fn runtime(label: &str, message: String) -> Self {
-        Self {
-            label: label.to_string(),
-            message,
-            exit_code: None,
-            signal: None,
-            duration_ms: None,
-            stdout_path: None,
-            stderr_path: None,
-        }
-    }
-
-    fn step_runtime(step: &SandboxRunnerStep, message: String, duration_ms: u128) -> Self {
-        Self {
-            label: step.name.clone(),
-            message,
-            exit_code: None,
-            signal: None,
-            duration_ms: Some(duration_ms),
-            stdout_path: Some(step.stdout_path.clone()),
-            stderr_path: Some(step.stderr_path.clone()),
-        }
-    }
-
-    fn failed_step(step: &SandboxRunnerStep, status: &ExitStatus, duration_ms: u128) -> Self {
-        let (message, exit_code, signal) = if let Some(code) = status.code() {
-            (
-                format!(
-                    "sandbox step '{}' failed with exit status {code}",
-                    step.name
-                ),
-                Some(code),
-                None,
-            )
-        } else if let Some(signal) = status.signal() {
-            (
-                format!("sandbox step '{}' was killed by signal {signal}", step.name),
-                None,
-                Some(signal),
-            )
-        } else {
-            (
-                format!("sandbox step '{}' ended with status {status:?}", step.name),
-                None,
-                None,
-            )
-        };
-        Self {
-            label: step.name.clone(),
-            message,
-            exit_code,
-            signal,
-            duration_ms: Some(duration_ms),
-            stdout_path: Some(step.stdout_path.clone()),
-            stderr_path: Some(step.stderr_path.clone()),
-        }
-    }
-
     fn to_error_message(&self) -> String {
         let mut message = format!("{}: {}", self.label, self.message);
         if let Some(code) = self.exit_code {
@@ -851,134 +858,12 @@ fn read_sandbox_failure_report(path: &Path, fallback: String) -> RuntimeError {
     }
 }
 
-fn scan_output_manifest(root: &Path) -> Result<FsTreeManifest, SandboxRunnerFailureReport> {
-    let mut entries = Vec::new();
-    scan_output_entry(root, "", &mut entries)?;
-    FsTreeManifest::from_entries(entries).map_err(|error| {
-        SandboxRunnerFailureReport::runtime("sandbox-manifest-output", error.to_string())
-    })
-}
-
-fn scan_output_entry(
-    path: &Path,
-    rel_path: &str,
-    entries: &mut Vec<FsTreeEntry>,
-) -> Result<(), SandboxRunnerFailureReport> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        SandboxRunnerFailureReport::runtime(
-            "sandbox-manifest-output",
-            format!("failed to inspect '{}': {error}", path.display()),
-        )
-    })?;
-    let file_type = metadata.file_type();
-    let uid = metadata.uid();
-    let gid = metadata.gid();
-
-    if file_type.is_dir() {
-        entries.push(FsTreeEntry::directory(
-            rel_path,
-            uid,
-            gid,
-            metadata.permissions().mode() & 0o7777,
-        ));
-        let children = fs::read_dir(path).map_err(|error| {
-            SandboxRunnerFailureReport::runtime(
-                "sandbox-manifest-output",
-                format!("failed to read directory '{}': {error}", path.display()),
-            )
-        })?;
-        for child in children {
-            let child = child.map_err(|error| {
-                SandboxRunnerFailureReport::runtime(
-                    "sandbox-manifest-output",
-                    format!(
-                        "failed to read directory entry in '{}': {error}",
-                        path.display()
-                    ),
-                )
-            })?;
-            let name = child.file_name();
-            let name = name.to_str().ok_or_else(|| {
-                SandboxRunnerFailureReport::runtime(
-                    "sandbox-manifest-output",
-                    format!("output path under '{}' is not UTF-8", path.display()),
-                )
-            })?;
-            let child_rel_path = if rel_path.is_empty() {
-                name.to_string()
-            } else {
-                format!("{rel_path}/{name}")
-            };
-            scan_output_entry(&child.path(), &child_rel_path, entries)?;
-        }
-    } else if file_type.is_file() {
-        entries.push(FsTreeEntry::file(
-            rel_path,
-            uid,
-            gid,
-            metadata.permissions().mode() & 0o7777,
-        ));
-    } else if file_type.is_symlink() {
-        let target = fs::read_link(path).map_err(|error| {
-            SandboxRunnerFailureReport::runtime(
-                "sandbox-manifest-output",
-                format!("failed to read symlink '{}': {error}", path.display()),
-            )
-        })?;
-        let target = target.to_str().ok_or_else(|| {
-            SandboxRunnerFailureReport::runtime(
-                "sandbox-manifest-output",
-                format!("symlink target for '{}' is not UTF-8", path.display()),
-            )
-        })?;
-        entries.push(FsTreeEntry::symlink(rel_path, uid, gid, target));
-    } else {
-        return Err(SandboxRunnerFailureReport::runtime(
-            "sandbox-manifest-output",
-            format!("unsupported output file type '{}'", path.display()),
-        ));
-    }
-
-    Ok(())
-}
-
-fn elapsed_ms(start: Instant) -> u128 {
-    start.elapsed().as_millis()
-}
-
-fn prepare_error(operation: &str, path: &Path, error: io::Error) -> SandboxRunnerFailureReport {
-    SandboxRunnerFailureReport::runtime(
-        "sandbox-prepare",
-        format!("{operation} '{}': {error}", path.display()),
-    )
-}
-
-fn terminate_remaining_children() {
-    unsafe {
-        libc::kill(-1, libc::SIGTERM);
-    }
-    reap_finished_children();
-    unsafe {
-        libc::kill(-1, libc::SIGKILL);
-    }
-    reap_finished_children();
-}
-
-fn reap_finished_children() {
-    loop {
-        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => break,
-            Ok(_) => continue,
-            Err(nix::errno::Errno::ECHILD) => break,
-            Err(_) => break,
-        }
-    }
-}
-
 fn build_sandbox_spec(
     config: &SandboxBuildConfig,
     idmap: &MbuildIdmap,
     dirs: &SandboxDirs,
+    runtime_files: &SandboxRuntimeFiles,
+    runner_path: &Path,
     cgroup_path: Option<PathBuf>,
 ) -> Result<Spec, RuntimeError> {
     let uid_mappings = vec![
@@ -1023,7 +908,18 @@ fn build_sandbox_spec(
         bind_mount(&dirs.build_dir, Path::new("/__mbuild/build"), false)?,
         bind_mount(&config.config_dir, Path::new("/__mbuild/config"), true)?,
         bind_mount(&config.out_dir, Path::new("/__mbuild/out"), false)?,
+        bind_mount(
+            runner_path,
+            &Path::new(CONTAINER_RUNNER_DIR).join(RUNNER_BINARY_NAME),
+            true,
+        )?,
+        bind_mount(&runtime_files.root, Path::new(CONTAINER_RUNTIME_DIR), false)?,
     ]);
+
+    for log in &runtime_files.step_logs {
+        mounts.push(bind_mount(&log.host_stdout, &log.container_stdout, false)?);
+        mounts.push(bind_mount(&log.host_stderr, &log.container_stderr, false)?);
+    }
 
     for input in &config.inputs {
         mounts.push(bind_mount(&input.host_path, &input.mount_path, true)?);
@@ -1042,7 +938,13 @@ fn build_sandbox_spec(
                     .user(build_oci(
                         UserBuilder::default().uid(0_u32).gid(0_u32).build(),
                     )?)
-                    .args(vec!["mbuild-sandbox-init".to_string()])
+                    .args(vec![
+                        Path::new(CONTAINER_RUNNER_DIR)
+                            .join(RUNNER_BINARY_NAME)
+                            .display()
+                            .to_string(),
+                        CONTAINER_RUNNER_CONFIG.to_string(),
+                    ])
                     .cwd("/")
                     .capabilities(runner_linux_capabilities()?)
                     .no_new_privileges(true)
@@ -1146,6 +1048,7 @@ fn should_mount_rootfs_entry(name: &str) -> bool {
 fn populate_bundle_rootfs_skeleton(
     bundle_rootfs: &Path,
     lower_rootfs: &Path,
+    runtime_files: &SandboxRuntimeFiles,
 ) -> Result<(), RuntimeError> {
     for entry in rootfs_top_level_entries(lower_rootfs)? {
         let name = entry.file_name();
@@ -1178,13 +1081,43 @@ fn populate_bundle_rootfs_skeleton(
         Path::new("__mbuild/build"),
         Path::new("__mbuild/config"),
         Path::new("__mbuild/inputs"),
+        Path::new("__mbuild/logs"),
         Path::new("__mbuild/out"),
+        Path::new("__mbuild/runner"),
+        Path::new("__mbuild/runtime"),
         Path::new("proc"),
         Path::new("run"),
         Path::new("tmp"),
     ] {
         fs::create_dir_all(bundle_rootfs.join(path))?;
     }
+    File::create(
+        bundle_rootfs
+            .join("__mbuild/runner")
+            .join(RUNNER_BINARY_NAME),
+    )?;
+    for log in &runtime_files.step_logs {
+        create_bundle_mount_target(bundle_rootfs, &log.container_stdout)?;
+        create_bundle_mount_target(bundle_rootfs, &log.container_stderr)?;
+    }
+    Ok(())
+}
+
+fn create_bundle_mount_target(
+    bundle_rootfs: &Path,
+    container_path: &Path,
+) -> Result<(), RuntimeError> {
+    let relative = container_path.strip_prefix("/").map_err(|_| {
+        RuntimeError::InvalidInput(format!(
+            "container mount target '{}' must be absolute",
+            container_path.display()
+        ))
+    })?;
+    let target = bundle_rootfs.join(relative);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    File::create(target)?;
     Ok(())
 }
 
@@ -1293,70 +1226,6 @@ fn oci_capability_from_name(name: &str) -> Result<Capability, RuntimeError> {
     }
 }
 
-fn credential_error(operation: &str, error: impl std::fmt::Display) -> io::Error {
-    io::Error::other(format!("{operation}: {error}"))
-}
-
-fn setgroups_allowed() -> bool {
-    match fs::read_to_string("/proc/self/setgroups") {
-        Ok(value) => setgroups_value_allows_setgroups(&value),
-        Err(_) => true,
-    }
-}
-
-fn setgroups_value_allows_setgroups(value: &str) -> bool {
-    value.trim() != "deny"
-}
-
-fn raw_pre_exec_breadcrumb(fd: RawFd, message: &'static [u8]) {
-    // This runs in Command::pre_exec after fork and before exec. Keep it to a
-    // single async-signal-safe syscall so the diagnostic does not introduce
-    // more child-side runtime work than the credential switch already has.
-    unsafe {
-        let _ = libc::write(fd, message.as_ptr().cast(), message.len());
-    }
-}
-
-fn apply_step_credentials(
-    run_as: SandboxRunAs,
-    setgroups_allowed: bool,
-    breadcrumbs_fd: RawFd,
-) -> io::Result<()> {
-    raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:start\n");
-    match run_as {
-        SandboxRunAs::BuildUser => {
-            if setgroups_allowed {
-                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgroups:start\n");
-                if let Err(error) = setgroups(&[]) {
-                    raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgroups:error\n");
-                    return Err(credential_error("setgroups([])", error));
-                }
-                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgroups:done\n");
-            } else {
-                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgroups:skipped\n");
-            }
-            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgid:start\n");
-            if let Err(error) = setgid(Gid::from_raw(BUILD_USER_GID)) {
-                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgid:error\n");
-                return Err(credential_error("setgid(1)", error));
-            }
-            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgid:done\n");
-            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setuid:start\n");
-            if let Err(error) = setuid(Uid::from_raw(BUILD_USER_UID)) {
-                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setuid:error\n");
-                return Err(credential_error("setuid(1)", error));
-            }
-            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setuid:done\n");
-            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:done\n");
-            Ok(())
-        }
-        SandboxRunAs::Root => {
-            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:root:done\n");
-            Ok(())
-        }
-    }
-}
-
 fn step_env(step: &SandboxStep) -> HashMap<String, String> {
     let mut env = HashMap::from([
         (
@@ -1379,32 +1248,6 @@ fn step_env(step: &SandboxStep) -> HashMap<String, String> {
     ]);
     env.extend(step.env.clone());
     env
-}
-
-fn chown_tree(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        lchown(path, uid, gid)?;
-        return Ok(());
-    }
-
-    chown(path, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid))).map_err(io::Error::other)?;
-    if metadata.is_dir() {
-        for entry in fs::read_dir(path)? {
-            chown_tree(&entry?.path(), uid, gid)?;
-        }
-    }
-    Ok(())
-}
-
-fn lchown(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
-    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)?;
-    let result = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
 }
 
 fn require_directory(path: &Path, label: &str) -> Result<(), RuntimeError> {
@@ -1455,6 +1298,8 @@ fn executor_error(error: impl std::fmt::Display) -> ExecutorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fsobj_hash::hash_fs_tree_object;
+    use mbuild_core::FsTreeEntry;
     use tempfile::tempdir;
 
     #[test]
@@ -1488,11 +1333,22 @@ mod tests {
             steps: Vec::new(),
         };
         let dirs = SandboxDirs::create(&workspace).unwrap();
+        let runtime_files =
+            SandboxRuntimeFiles::create(&dirs.runtime_files, &build_config).unwrap();
+        let runner_path = temp.path().join(RUNNER_BINARY_NAME);
+        fs::write(&runner_path, "#!/bin/sh\n").unwrap();
         let idmap = MbuildIdmap::for_tests(1000, 1001, 100000, 65536, 200000, 65536);
 
         let cgroup_path = PathBuf::from("/user.slice/mbuild-test.scope");
-        let spec =
-            build_sandbox_spec(&build_config, &idmap, &dirs, Some(cgroup_path.clone())).unwrap();
+        let spec = build_sandbox_spec(
+            &build_config,
+            &idmap,
+            &dirs,
+            &runtime_files,
+            &runner_path,
+            Some(cgroup_path.clone()),
+        )
+        .unwrap();
         let mounts = spec.mounts().as_ref().unwrap();
         let linux = spec.linux().as_ref().unwrap();
         let root = spec.root().as_ref().unwrap();
@@ -1616,6 +1472,13 @@ mod tests {
                 .any(|mount| mount.destination()
                     == Path::new("/__mbuild/runtime/output-hash.json"))
         );
+        assert!(mounts.iter().any(|mount| {
+            mount.destination()
+                == Path::new(CONTAINER_RUNNER_DIR)
+                    .join(RUNNER_BINARY_NAME)
+                    .as_path()
+                && mount.source().as_deref() == Some(runner_path.as_path())
+        }));
         let capabilities = spec
             .process()
             .as_ref()
@@ -1670,7 +1533,27 @@ mod tests {
         fs::create_dir(lower.join("usr")).unwrap();
         symlink("usr/bin", lower.join("bin")).unwrap();
 
-        populate_bundle_rootfs_skeleton(&bundle, &lower).unwrap();
+        let config = SandboxBuildConfig {
+            rootfs: lower.clone(),
+            out_dir: temp.path().join("out"),
+            config_dir: temp.path().join("config"),
+            workspace: temp.path().join("workspace"),
+            state_dir: temp.path().join("state"),
+            inputs: Vec::new(),
+            steps: Vec::new(),
+        };
+        for path in [
+            &config.out_dir,
+            &config.config_dir,
+            &config.workspace,
+            &config.state_dir,
+        ] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let runtime_files =
+            SandboxRuntimeFiles::create(&config.workspace.join("runtime-files"), &config).unwrap();
+
+        populate_bundle_rootfs_skeleton(&bundle, &lower, &runtime_files).unwrap();
 
         assert_eq!(
             fs::read_link(bundle.join("bin")).unwrap(),
@@ -1678,6 +1561,59 @@ mod tests {
         );
         assert!(bundle.join("run").is_dir());
         assert!(!bundle.join("usr").exists());
+    }
+
+    #[test]
+    fn sandbox_runner_resolution_prefers_musl_runner_in_cargo_dev_tree() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("target");
+        let debug = target.join("debug");
+        let musl_debug = target.join("x86_64-unknown-linux-musl").join("debug");
+        fs::create_dir_all(&debug).unwrap();
+        fs::create_dir_all(&musl_debug).unwrap();
+        let current_exe = debug.join("mbuild");
+        let dynamic_sibling = debug.join(RUNNER_BINARY_NAME);
+        let static_runner = musl_debug.join(RUNNER_BINARY_NAME);
+        fs::write(&current_exe, "").unwrap();
+        fs::write(&dynamic_sibling, "").unwrap();
+        fs::write(&static_runner, "").unwrap();
+
+        let resolved = resolve_sandbox_runner_path_from(None, Some(&current_exe), None).unwrap();
+
+        assert_eq!(resolved, static_runner);
+    }
+
+    #[test]
+    fn sandbox_runner_resolution_uses_installed_sibling_outside_cargo_tree() {
+        let temp = tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let current_exe = bin.join("mbuild");
+        let sibling = bin.join(RUNNER_BINARY_NAME);
+        fs::write(&current_exe, "").unwrap();
+        fs::write(&sibling, "").unwrap();
+
+        let resolved = resolve_sandbox_runner_path_from(None, Some(&current_exe), None).unwrap();
+
+        assert_eq!(resolved, sibling);
+    }
+
+    #[test]
+    fn elf_interpreter_detection_finds_dynamic_runner_shape() {
+        assert!(elf_has_interpreter(&minimal_elf64_with_program_header(3)).unwrap());
+        assert!(!elf_has_interpreter(&minimal_elf64_with_program_header(1)).unwrap());
+    }
+
+    fn minimal_elf64_with_program_header(program_type: u32) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 64 + 56];
+        bytes[0..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[32..40].copy_from_slice(&(64_u64).to_le_bytes());
+        bytes[54..56].copy_from_slice(&(56_u16).to_le_bytes());
+        bytes[56..58].copy_from_slice(&(1_u16).to_le_bytes());
+        bytes[64..68].copy_from_slice(&program_type.to_le_bytes());
+        bytes
     }
 
     #[test]
@@ -1735,61 +1671,5 @@ mod tests {
         assert_eq!(outcome.manifest, manifest);
         assert_eq!(outcome.steps.len(), 1);
         assert_eq!(outcome.steps[0].name, "install");
-    }
-
-    #[test]
-    fn scan_output_manifest_records_kinds_modes_owners_and_symlink_targets() {
-        let temp = tempdir().unwrap();
-        let root = temp.path().join("out");
-        fs::create_dir(&root).unwrap();
-        fs::create_dir(root.join("dir")).unwrap();
-        fs::write(root.join("file"), "contents").unwrap();
-        fs::write(root.join("exe"), "contents").unwrap();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::set_permissions(root.join("dir"), fs::Permissions::from_mode(0o700)).unwrap();
-        fs::set_permissions(root.join("file"), fs::Permissions::from_mode(0o640)).unwrap();
-        fs::set_permissions(root.join("exe"), fs::Permissions::from_mode(0o755)).unwrap();
-        symlink("file", root.join("link")).unwrap();
-        let owner = fs::symlink_metadata(&root).unwrap();
-
-        let manifest = scan_output_manifest(&root).unwrap();
-
-        assert!(manifest.entries().contains(&FsTreeEntry::directory(
-            "",
-            owner.uid(),
-            owner.gid(),
-            0o755
-        )));
-        assert!(manifest.entries().contains(&FsTreeEntry::directory(
-            "dir",
-            owner.uid(),
-            owner.gid(),
-            0o700
-        )));
-        assert!(manifest.entries().contains(&FsTreeEntry::file(
-            "file",
-            owner.uid(),
-            owner.gid(),
-            0o640
-        )));
-        assert!(manifest.entries().contains(&FsTreeEntry::file(
-            "exe",
-            owner.uid(),
-            owner.gid(),
-            0o755
-        )));
-        assert!(manifest.entries().contains(&FsTreeEntry::symlink(
-            "link",
-            owner.uid(),
-            owner.gid(),
-            "file"
-        )));
-    }
-
-    #[test]
-    fn setgroups_value_detects_rootless_deny() {
-        assert!(!setgroups_value_allows_setgroups("deny\n"));
-        assert!(setgroups_value_allows_setgroups("allow\n"));
-        assert!(setgroups_value_allows_setgroups(""));
     }
 }

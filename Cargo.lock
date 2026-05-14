@@ -1302,6 +1302,7 @@ dependencies = [
  "libc",
  "libcontainer",
  "mbuild-core",
+ "mbuild-sandbox-runner-core",
  "nix 0.29.0",
  "serde",
  "serde_json",
@@ -1310,6 +1311,26 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "mbuild-sandbox-runner"
+version = "0.1.0"
+dependencies = [
+ "mbuild-sandbox-runner-core",
+ "serde_json",
+]
+
+[[package]]
+name = "mbuild-sandbox-runner-core"
+version = "0.1.0"
+dependencies = [
+ "fsobj-hash",
+ "libc",
+ "mbuild-core",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,8 @@
+[package]
+name = "mbuild-sandbox-runner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mbuild-sandbox-runner-core = { path = "../mbuild-sandbox-runner-core" }
+serde_json = "1.0"

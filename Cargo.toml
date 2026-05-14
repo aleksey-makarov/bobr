@@ -8,6 +8,8 @@ members = [
   "mbuild-origin-oci-registry",
   "mbuild-image",
   "mbuild-runtime",
+  "mbuild-sandbox-runner",
+  "mbuild-sandbox-runner-core",
   "mbuild-text",
   "mbuild-tree",
   "fsobj-hash",
