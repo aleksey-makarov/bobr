@@ -7,7 +7,6 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
@@ -644,7 +643,7 @@ pub fn publish_result_refs(
         }
     }
 
-    let object_ref_target = object_ref_target_for_result(layout, result)?;
+    let object_ref_target = object_ref_target_for_result(result)?;
     replace_symlink(&object_ref_target, &current_object_ref_path)?;
 
     let meta_ref_target = PathBuf::from("..")
@@ -654,58 +653,9 @@ pub fn publish_result_refs(
     Ok(())
 }
 
-fn object_ref_target_for_result(
-    layout: &StoreLayout,
-    result: &ResultRecord,
-) -> Result<PathBuf, CasError> {
+fn object_ref_target_for_result(result: &ResultRecord) -> Result<PathBuf, CasError> {
     let object_hash = result.object_hash.to_hex();
-    let object_path = layout.objects.join(&object_hash);
-    let mut target = PathBuf::from("..").join(OBJECTS_DIR).join(&object_hash);
-    if is_fs_tree_object_shape(&object_path)? {
-        target.push("root");
-    }
-    Ok(target)
-}
-
-fn is_fs_tree_object_shape(object_path: &Path) -> Result<bool, CasError> {
-    let metadata = match fs::symlink_metadata(object_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(CasError::Io(format!(
-                "failed to inspect object '{}': {error}",
-                object_path.display()
-            )));
-        }
-    };
-    if !metadata.file_type().is_dir() {
-        return Ok(false);
-    }
-
-    let manifest_path = object_path.join("manifest.jsonl");
-    let root_path = object_path.join("root");
-    let manifest = match fs::symlink_metadata(&manifest_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(CasError::Io(format!(
-                "failed to inspect fs-tree manifest '{}': {error}",
-                manifest_path.display()
-            )));
-        }
-    };
-    let root = match fs::symlink_metadata(&root_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(CasError::Io(format!(
-                "failed to inspect fs-tree root '{}': {error}",
-                root_path.display()
-            )));
-        }
-    };
-
-    Ok(manifest.file_type().is_file() && root.file_type().is_dir())
+    Ok(PathBuf::from("..").join(OBJECTS_DIR).join(&object_hash))
 }
 
 pub fn publish_refs(
@@ -2389,7 +2339,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_output_points_fs_tree_object_ref_at_root_payload() {
+    fn publish_output_points_fs_tree_object_ref_at_object_root() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
@@ -2417,8 +2367,10 @@ mod tests {
             PathBuf::from("..")
                 .join(OBJECTS_DIR)
                 .join(published.object_hash.to_hex())
-                .join("root")
         );
+        let object_path = layout.objects.join(published.object_hash.to_hex());
+        assert!(object_path.join("manifest.jsonl").is_file());
+        assert!(object_path.join("root").is_dir());
     }
 
     #[test]

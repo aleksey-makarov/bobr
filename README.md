@@ -165,9 +165,10 @@ The store layout is content-addressed:
 - `<store>/builds/` stores builder-only public build handles by `build_key`
 - `<store>/meta-refs/` and `<store>/object-refs/` store published current refs
 
-For filesystem tree objects, `<store>/object-refs/<name>` points at the
-user-facing payload directory under `../objects/<object_hash>/root`. The
-canonical identity path remains `../objects/<object_hash>`.
+`<store>/object-refs/<name>` always points at
+`../objects/<object_hash>`, regardless of object kind. Filesystem tree objects
+still store their payload as `manifest.jsonl` plus `root/` inside that object
+directory.
 
 `build_key` is computed from:
 

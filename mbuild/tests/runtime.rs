@@ -606,9 +606,9 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
         Path::new("..")
             .join("objects")
             .join(published.build.object_hash.to_string())
-            .join("root")
     );
     let root = published.object_path.join("root");
+    assert!(root.is_dir());
     assert!(root.join("dev").is_dir());
     assert_eq!(
         fs::read_to_string(root.join("etc/hostname")).unwrap(),
