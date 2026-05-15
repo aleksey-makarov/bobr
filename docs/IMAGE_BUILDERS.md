@@ -132,10 +132,10 @@ the output manifest produced by the runtime.
 
 Synthetic recipe helpers lower to `Sandbox`:
 
-- `AutotoolsSandbox`
-- `MakefileSandbox`
-- `MesonSandbox`
-- `PerlModuleSandbox`
+- `Autotools`
+- `Makefile`
+- `Meson`
+- `PerlModule`
 
 ## Current Limitations
 
