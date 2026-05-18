@@ -155,23 +155,18 @@ fn make_tree_writable(path: &Path) -> Result<(), FsUtilError> {
         return Ok(());
     }
 
-    let mode = metadata.permissions().mode();
-    let desired = if metadata.is_dir() {
-        mode | 0o700
-    } else {
-        mode | 0o600
-    };
-
-    if desired != mode {
-        fs::set_permissions(path, fs::Permissions::from_mode(desired)).map_err(|error| {
-            FsUtilError::Io(format!(
-                "failed to adjust permissions for '{}': {error}",
-                path.display()
-            ))
-        })?;
-    }
-
     if metadata.is_dir() {
+        let mode = metadata.permissions().mode();
+        let desired = mode | 0o700;
+        if desired != mode {
+            fs::set_permissions(path, fs::Permissions::from_mode(desired)).map_err(|error| {
+                FsUtilError::Io(format!(
+                    "failed to adjust permissions for '{}': {error}",
+                    path.display()
+                ))
+            })?;
+        }
+
         for entry in fs::read_dir(path).map_err(|error| {
             FsUtilError::Io(format!(
                 "failed to read directory '{}': {error}",
@@ -195,4 +190,33 @@ fn make_tree_writable(path: &Path) -> Result<(), FsUtilError> {
 fn make_tree_writable(path: &Path) -> Result<(), FsUtilError> {
     let _ = path;
     Ok(())
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
+
+    #[test]
+    fn remove_dir_force_does_not_chmod_hardlinked_files() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::write(&source, b"data").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let tree = temp.path().join("tree");
+        fs::create_dir(&tree).unwrap();
+        fs::hard_link(&source, tree.join("hardlink")).unwrap();
+        fs::set_permissions(&tree, fs::Permissions::from_mode(0o500)).unwrap();
+
+        remove_dir_force(&tree).unwrap();
+
+        assert!(!tree.exists());
+        assert_eq!(
+            fs::metadata(&source).unwrap().permissions().mode() & 0o7777,
+            0o555
+        );
+    }
 }
