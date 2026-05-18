@@ -415,12 +415,18 @@ mod tests {
                 "script".to_string(),
                 BuilderInputObject {
                     object_path: temp.path().join("script"),
+                    object_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+                        .parse()
+                        .unwrap(),
                 },
             ),
             (
                 "source".to_string(),
                 BuilderInputObject {
                     object_path: temp.path().join("source"),
+                    object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                        .parse()
+                        .unwrap(),
                 },
             ),
         ];

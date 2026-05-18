@@ -1,4 +1,7 @@
-use fsobj_hash::{Error, hash_fs_tree_object, hash_path};
+use fsobj_hash::{
+    DirectoryEntryHash, EntryKind, Error, hash_directory_node, hash_file_bytes,
+    hash_fs_tree_object, hash_fs_tree_object_from_hashes, hash_path, hash_path_with_leaf_index,
+};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -104,5 +107,75 @@ fn synthetic_fs_tree_hash_matches_materialized_object_shape() {
     assert_eq!(
         hash_fs_tree_object(manifest, &root).unwrap(),
         hash_path(&object).unwrap()
+    );
+}
+
+#[test]
+fn path_hash_with_leaf_index_matches_hash_path() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("tree");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(root.join("empty")).unwrap();
+    fs::create_dir(root.join("bin")).unwrap();
+    fs::write(root.join("bin").join("tool"), b"tool\n").unwrap();
+    #[cfg(unix)]
+    symlink("bin/tool", root.join("tool-link")).unwrap();
+
+    let indexed = hash_path_with_leaf_index(&root).unwrap();
+    assert_eq!(indexed.object_hash, hash_path(&root).unwrap());
+    assert!(
+        indexed
+            .leaf_index
+            .entries()
+            .iter()
+            .any(|entry| entry.path == b"bin/tool" && entry.kind == EntryKind::File)
+    );
+    assert!(
+        indexed
+            .leaf_index
+            .entries()
+            .iter()
+            .all(|entry| entry.path != b"empty")
+    );
+}
+
+#[test]
+fn directory_hash_from_parts_accounts_for_empty_directories() {
+    let empty_dir = hash_directory_node(&[]);
+    let file = hash_file_bytes(false, b"payload\n");
+    let with_empty_dir = hash_directory_node(&[
+        DirectoryEntryHash {
+            name: b"empty",
+            kind: EntryKind::Directory,
+            node_hash: empty_dir,
+        },
+        DirectoryEntryHash {
+            name: b"payload",
+            kind: EntryKind::File,
+            node_hash: file,
+        },
+    ]);
+    let without_empty_dir = hash_directory_node(&[DirectoryEntryHash {
+        name: b"payload",
+        kind: EntryKind::File,
+        node_hash: file,
+    }]);
+    assert_ne!(with_empty_dir, without_empty_dir);
+}
+
+#[test]
+fn fs_tree_object_hash_from_hashes_matches_directory_hash() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("payload"), b"payload\n").unwrap();
+    let manifest = br#"{"p":"","t":"d","u":0,"g":0,"m":493}
+{"p":"payload","t":"f","u":0,"g":0,"m":420}
+"#;
+    let root_hash = hash_path(&root).unwrap();
+    let manifest_hash = hash_file_bytes(false, manifest);
+    assert_eq!(
+        hash_fs_tree_object_from_hashes(manifest_hash, root_hash),
+        hash_fs_tree_object(manifest, &root).unwrap()
     );
 }

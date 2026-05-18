@@ -1,3 +1,4 @@
+use crate::error::EntryKind;
 use crate::node::{DirectoryEntry, DirectoryNode, FileNode, Node, SymlinkNode};
 use crate::object_hash::ObjectHash;
 use sha2::{Digest, Sha256};
@@ -14,7 +15,7 @@ pub(crate) fn hash_node(node: &Node) -> ObjectHash {
     }
 }
 
-fn hash_file(file: &FileNode) -> ObjectHash {
+pub(crate) fn hash_file(file: &FileNode) -> ObjectHash {
     let mut hasher = Sha256::new();
     hasher.update(FILE_TAG);
     hasher.update([u8::from(file.executable)]);
@@ -23,7 +24,7 @@ fn hash_file(file: &FileNode) -> ObjectHash {
     ObjectHash(hasher.finalize().into())
 }
 
-fn hash_symlink(symlink: &SymlinkNode) -> ObjectHash {
+pub(crate) fn hash_symlink(symlink: &SymlinkNode) -> ObjectHash {
     let mut hasher = Sha256::new();
     hasher.update(SYMLINK_TAG);
     hasher.update((symlink.target.len() as u64).to_be_bytes());
@@ -31,7 +32,7 @@ fn hash_symlink(symlink: &SymlinkNode) -> ObjectHash {
     ObjectHash(hasher.finalize().into())
 }
 
-fn hash_directory(directory: &DirectoryNode) -> ObjectHash {
+pub(crate) fn hash_directory(directory: &DirectoryNode) -> ObjectHash {
     let mut hasher = Sha256::new();
     hasher.update(DIR_TAG);
     for entry in &directory.entries {
@@ -40,11 +41,34 @@ fn hash_directory(directory: &DirectoryNode) -> ObjectHash {
     ObjectHash(hasher.finalize().into())
 }
 
+pub(crate) fn hash_directory_entries(entries: &[DirectoryHashEntry<'_>]) -> ObjectHash {
+    let mut hasher = Sha256::new();
+    hasher.update(DIR_TAG);
+    for entry in entries {
+        let kind = match entry.kind {
+            EntryKind::File => b'f',
+            EntryKind::Directory => b'd',
+            EntryKind::Symlink => b'l',
+        };
+        hasher.update([kind]);
+        hasher.update((entry.name.len() as u64).to_be_bytes());
+        hasher.update(entry.name);
+        hasher.update(entry.hash.as_bytes());
+    }
+    ObjectHash(hasher.finalize().into())
+}
+
+pub(crate) struct DirectoryHashEntry<'a> {
+    pub kind: EntryKind,
+    pub name: &'a [u8],
+    pub hash: ObjectHash,
+}
+
 fn hash_directory_entry(hasher: &mut Sha256, entry: &DirectoryEntry) {
     let kind = match entry.node.kind() {
-        crate::error::EntryKind::File => b'f',
-        crate::error::EntryKind::Directory => b'd',
-        crate::error::EntryKind::Symlink => b'l',
+        EntryKind::File => b'f',
+        EntryKind::Directory => b'd',
+        EntryKind::Symlink => b'l',
     };
     hasher.update([kind]);
     hasher.update((entry.name.len() as u64).to_be_bytes());

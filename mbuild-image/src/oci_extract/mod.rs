@@ -115,6 +115,7 @@ impl OciExtractBuilder {
         Ok(StagedBuildResult {
             staged_path: staged,
             object_hash: Some(object_hash),
+            object_index: None,
         })
     }
 }
@@ -1172,7 +1173,13 @@ mod tests {
         let tar = make_tar(|builder| append_file(builder, "bin/tool", b"tool", 0, 0, 0o755));
         let oci = create_oci_layout(temp.path(), vec![(oci::MEDIA_TYPE_OCI_LAYER, gzip(&tar))]);
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("image", BuilderInputObject { object_path: oci });
+        inputs.insert(
+            "image",
+            BuilderInputObject {
+                object_hash: fsobj_hash::hash_path(&oci).unwrap(),
+                object_path: oci,
+            },
+        );
 
         let result = OciExtractBuilder
             .build_with_materializer(
@@ -1195,7 +1202,13 @@ mod tests {
         let tar = make_tar(|builder| append_dir(builder, "private", 0, 0, 0o000));
         let oci = create_oci_layout(temp.path(), vec![(oci::MEDIA_TYPE_OCI_LAYER, gzip(&tar))]);
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("image", BuilderInputObject { object_path: oci });
+        inputs.insert(
+            "image",
+            BuilderInputObject {
+                object_hash: fsobj_hash::hash_path(&oci).unwrap(),
+                object_path: oci,
+            },
+        );
 
         let result = OciExtractBuilder
             .build_with_materializer(
@@ -1215,10 +1228,12 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
         let mut inputs = BuilderInputs::empty();
+        let image = create_oci_layout(temp.path(), vec![]);
         inputs.insert(
             "image",
             BuilderInputObject {
-                object_path: create_oci_layout(temp.path(), vec![]),
+                object_hash: fsobj_hash::hash_path(&image).unwrap(),
+                object_path: image,
             },
         );
 

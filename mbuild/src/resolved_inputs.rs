@@ -99,6 +99,7 @@ impl ResolvedInputs {
             .map(|(name, value)| {
                 let value = BuilderInputObject {
                     object_path: value.object_path,
+                    object_hash: value.object_hash,
                 };
                 (name, value)
             })

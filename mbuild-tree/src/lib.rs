@@ -1,10 +1,14 @@
-use fsobj_hash::{ObjectHash, hash_path};
+use fsobj_hash::{
+    DirectoryEntryHash, EntryKind, ObjectHash, hash_directory_node, hash_file_bytes,
+    hash_fs_tree_object_from_hashes, hash_path, hash_path_with_leaf_index,
+};
 use globset::{Glob, GlobMatcher};
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     ComposedFsTree, ComposedFsTreeEntry, FsTreeComposeInput, FsTreeEntry, FsTreeManifest,
-    FsTreeOwnerMap, StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir,
-    fsutil,
+    FsTreeOwnerMap, ObjectLeafIndex, ObjectLeafKind, StagedBuildResult, TypedBuilder,
+    compose_fs_trees, create_fs_tree_staging_dir, fsutil, object_index_path_for_object_path,
+    read_object_leaf_index, rebuild_object_index,
 };
 use mbuild_runtime::{FsTreeTarEntrySource, FsTreeTarInput};
 use serde::{Deserialize, Serialize};
@@ -136,10 +140,10 @@ enum MaterializedKind {
     Symlink { target: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OwnershipHashResult {
-    object_hash: ObjectHash,
-    timings: Option<mbuild_runtime::OwnershipTimings>,
+#[derive(Debug, Clone)]
+struct IndexedTreeMergeInput {
+    compose: FsTreeComposeInput,
+    object: BuilderInputObject,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -165,27 +169,6 @@ trait OwnershipMaterializer {
         temp_dir: &Path,
     ) -> Result<(), BuilderError>;
 
-    fn materialize_selected_and_hash(
-        &self,
-        root_dir: &Path,
-        object_dir: &Path,
-        materialize_manifest: &FsTreeManifest,
-        _object_manifest: &FsTreeManifest,
-        temp_dir: &Path,
-    ) -> Result<OwnershipHashResult, BuilderError> {
-        self.materialize_and_validate(root_dir, object_dir, materialize_manifest, temp_dir)?;
-        let object_hash = hash_path(object_dir).map_err(|error| {
-            BuilderError::ExecutionFailed(format!(
-                "failed to hash staged tree object '{}': {error}",
-                object_dir.display()
-            ))
-        })?;
-        Ok(OwnershipHashResult {
-            object_hash,
-            timings: None,
-        })
-    }
-
     fn validate_hardlinked_file(
         &self,
         source: &Path,
@@ -209,31 +192,6 @@ impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
         mbuild_runtime::apply_ownership_batch(root_dir, manifest, idmap.as_ref(), temp_dir)
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
         Ok(())
-    }
-
-    fn materialize_selected_and_hash(
-        &self,
-        root_dir: &Path,
-        _object_dir: &Path,
-        materialize_manifest: &FsTreeManifest,
-        object_manifest: &FsTreeManifest,
-        temp_dir: &Path,
-    ) -> Result<OwnershipHashResult, BuilderError> {
-        let idmap = mbuild_runtime::cached_host_idmap()
-            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-        let result =
-            mbuild_runtime::apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
-                root_dir,
-                materialize_manifest,
-                object_manifest,
-                idmap.as_ref(),
-                temp_dir,
-            )
-            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-        Ok(OwnershipHashResult {
-            object_hash: result.object_hash,
-            timings: Some(result.timings),
-        })
     }
 
     fn validate_hardlinked_file(
@@ -391,6 +349,7 @@ fn build_tree(
     Ok(StagedBuildResult {
         staged_path: output_path,
         object_hash,
+        object_index: None,
     })
 }
 
@@ -414,10 +373,14 @@ fn build_tree_merge(
     );
 
     let compose_start = Instant::now();
-    let compose_inputs = inputs
+    let merge_inputs = inputs
         .iter()
         .map(|(name, object)| tree_merge_input(name, object))
         .collect::<Result<Vec<_>, _>>()?;
+    let compose_inputs = merge_inputs
+        .iter()
+        .map(|input| input.compose.clone())
+        .collect::<Vec<_>>();
     let composed = compose_fs_trees(&compose_inputs).map_err(map_fs_tree_error)?;
     let entry_count = composed.manifest().entries().len();
     cx.log_event_with_details(
@@ -444,12 +407,19 @@ fn build_tree_merge(
     );
 
     let temp_dir = cx.temp_dir.clone();
-    let object_hash =
-        materialize_tree_merge_output(&output_path, &composed, &temp_dir, materializer, cx)?;
+    let (object_hash, object_index) = materialize_tree_merge_output(
+        &output_path,
+        &composed,
+        &merge_inputs,
+        &temp_dir,
+        materializer,
+        cx,
+    )?;
 
     Ok(StagedBuildResult {
         staged_path: output_path,
         object_hash: Some(object_hash),
+        object_index: Some(object_index),
     })
 }
 
@@ -507,6 +477,7 @@ fn build_erofs_rootfs(
     Ok(StagedBuildResult {
         staged_path: output_path,
         object_hash: None,
+        object_index: None,
     })
 }
 
@@ -912,13 +883,48 @@ fn run_mkfs_erofs(
 fn tree_merge_input(
     name: &str,
     object: &BuilderInputObject,
-) -> Result<FsTreeComposeInput, BuilderError> {
-    let input = load_fs_tree_compose_input(&object.object_path).map_err(|error| {
+) -> Result<IndexedTreeMergeInput, BuilderError> {
+    let compose = load_fs_tree_compose_input(&object.object_path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
             "TreeMerge input '{name}' is not a valid fs-tree object: {error}"
         ))
     })?;
-    Ok(input)
+    Ok(IndexedTreeMergeInput {
+        compose,
+        object: object.clone(),
+    })
+}
+
+fn load_tree_merge_input_index(
+    object: &BuilderInputObject,
+) -> Result<Option<ObjectLeafIndex>, BuilderError> {
+    if let Some(index_path) =
+        object_index_path_for_object_path(&object.object_path, object.object_hash)
+    {
+        match read_object_leaf_index(&index_path) {
+            Ok(Some(index)) => return Ok(Some(index)),
+            Ok(None) | Err(_) => {
+                return rebuild_object_index(&index_path, &object.object_path, object.object_hash)
+                    .map_err(|error| BuilderError::ExecutionFailed(error.to_string()));
+            }
+        }
+    }
+
+    let indexed = hash_path_with_leaf_index(&object.object_path).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to build transient input index for '{}': {error}",
+            object.object_path.display()
+        ))
+    })?;
+    if indexed.object_hash != object.object_hash {
+        return Err(BuilderError::ExecutionFailed(format!(
+            "TreeMerge input '{}' hash changed while indexing: expected {}, got {}",
+            object.object_path.display(),
+            object.object_hash,
+            indexed.object_hash
+        )));
+    }
+    Ok(ObjectLeafIndex::from_fsobj_index(&indexed.leaf_index))
 }
 
 fn load_fs_tree_compose_input(object_path: &Path) -> Result<FsTreeComposeInput, BuilderError> {
@@ -975,10 +981,11 @@ fn require_regular_non_executable_file(path: &Path, label: &str) -> Result<(), B
 fn materialize_tree_merge_output(
     output_path: &Path,
     composed: &ComposedFsTree,
+    merge_inputs: &[IndexedTreeMergeInput],
     temp_dir: &Path,
     materializer: &impl OwnershipMaterializer,
     cx: &mut BuildContext,
-) -> Result<ObjectHash, BuilderError> {
+) -> Result<(ObjectHash, ObjectLeafIndex), BuilderError> {
     let paths =
         create_fs_tree_staging_dir(output_path, composed.manifest()).map_err(map_fs_tree_error)?;
     let mut materialize_entries = Vec::new();
@@ -1057,16 +1064,19 @@ fn materialize_tree_merge_output(
     let materialize_manifest =
         FsTreeManifest::from_entries(materialize_entries).map_err(map_fs_tree_error)?;
     let ownership_start = Instant::now();
-    let hash_result = materializer.materialize_selected_and_hash(
+    materializer.materialize_and_validate(
         &paths.root_dir,
         &paths.object_dir,
         &materialize_manifest,
-        composed.manifest(),
         temp_dir,
     )?;
     let ownership_host_ms = elapsed_ms(ownership_start);
-    log_tree_merge_ownership_events(cx, &hash_result, ownership_host_ms);
-    Ok(hash_result.object_hash)
+    log_tree_merge_ownership_events(cx, None, ownership_host_ms);
+
+    let hash_start = Instant::now();
+    let (object_hash, object_index) = hash_tree_merge_output_from_indexes(composed, merge_inputs)?;
+    log_tree_merge_hash_event(cx, object_hash, elapsed_ms(hash_start), 0);
+    Ok((object_hash, object_index))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1135,12 +1145,217 @@ fn should_copy_after_link_error(kind: io::ErrorKind) -> bool {
     )
 }
 
+#[derive(Debug, Clone)]
+struct PendingDirectoryHashEntry {
+    name: Vec<u8>,
+    kind: EntryKind,
+    node_hash: ObjectHash,
+}
+
+fn hash_tree_merge_output_from_indexes(
+    composed: &ComposedFsTree,
+    merge_inputs: &[IndexedTreeMergeInput],
+) -> Result<(ObjectHash, ObjectLeafIndex), BuilderError> {
+    let manifest_bytes = composed
+        .manifest()
+        .to_canonical_bytes()
+        .map_err(map_fs_tree_error)?;
+    let manifest_hash = hash_file_bytes(false, &manifest_bytes);
+    let mut output_index = ObjectLeafIndex::empty();
+    output_index.insert("manifest.jsonl", ObjectLeafKind::File, manifest_hash);
+
+    let source_leaf_hashes = collect_source_leaf_hashes(composed, merge_inputs)?;
+    let mut directories = BTreeMap::<String, BTreeMap<Vec<u8>, PendingDirectoryHashEntry>>::new();
+    directories.entry(String::new()).or_default();
+
+    for (manifest_entry, composed_entry) in
+        composed.manifest().entries().iter().zip(composed.entries())
+    {
+        match (manifest_entry, composed_entry) {
+            (FsTreeEntry::Directory { path, .. }, ComposedFsTreeEntry::Directory) => {
+                directories.entry(path.clone()).or_default();
+                if !path.is_empty() {
+                    insert_directory_entry(&mut directories, path);
+                }
+            }
+            (FsTreeEntry::File { path, .. }, ComposedFsTreeEntry::File { source_path }) => {
+                let node_hash = *source_leaf_hashes.get(source_path).ok_or_else(|| {
+                    BuilderError::ExecutionFailed(format!(
+                        "missing input leaf hash for '{}'",
+                        source_path.display()
+                    ))
+                })?;
+                output_index.insert(format!("root/{path}"), ObjectLeafKind::File, node_hash);
+                insert_leaf_directory_entry(&mut directories, path, EntryKind::File, node_hash);
+            }
+            (FsTreeEntry::Symlink { path, .. }, ComposedFsTreeEntry::Symlink { source_path }) => {
+                let node_hash = *source_leaf_hashes.get(source_path).ok_or_else(|| {
+                    BuilderError::ExecutionFailed(format!(
+                        "missing input leaf hash for '{}'",
+                        source_path.display()
+                    ))
+                })?;
+                output_index.insert(format!("root/{path}"), ObjectLeafKind::Symlink, node_hash);
+                insert_leaf_directory_entry(&mut directories, path, EntryKind::Symlink, node_hash);
+            }
+            _ => {
+                return Err(BuilderError::ExecutionFailed(
+                    "composed fs-tree entry kind does not match manifest entry".to_string(),
+                ));
+            }
+        }
+    }
+
+    let root_hash = hash_directory_from_map("", &directories)?;
+    let object_hash = hash_fs_tree_object_from_hashes(manifest_hash, root_hash);
+    Ok((object_hash, output_index))
+}
+
+fn collect_source_leaf_hashes(
+    composed: &ComposedFsTree,
+    merge_inputs: &[IndexedTreeMergeInput],
+) -> Result<BTreeMap<PathBuf, ObjectHash>, BuilderError> {
+    let mut hashes = BTreeMap::new();
+    for input in merge_inputs {
+        let needed = hashes_needed_from_input(&input.compose.root_dir, composed)?;
+        if needed.is_empty() {
+            continue;
+        }
+        let Some(index) = load_tree_merge_input_index(&input.object)? else {
+            return Err(BuilderError::ExecutionFailed(format!(
+                "TreeMerge input '{}' is not indexable",
+                input.object.object_path.display()
+            )));
+        };
+        for root_relative_path in needed {
+            let index_path = format!("root/{root_relative_path}");
+            let entry = index.get(&index_path).ok_or_else(|| {
+                BuilderError::ExecutionFailed(format!(
+                    "missing input leaf hash for '{}' in '{}'",
+                    index_path,
+                    input.object.object_path.display()
+                ))
+            })?;
+            hashes.insert(
+                input.compose.root_dir.join(root_relative_path),
+                entry.node_hash,
+            );
+        }
+    }
+    Ok(hashes)
+}
+
+fn hashes_needed_from_input(
+    root_dir: &Path,
+    composed: &ComposedFsTree,
+) -> Result<Vec<String>, BuilderError> {
+    let mut needed = Vec::new();
+    for composed_entry in composed.entries() {
+        if let ComposedFsTreeEntry::File { source_path }
+        | ComposedFsTreeEntry::Symlink { source_path } = composed_entry
+        {
+            if let Ok(relative) = source_path.strip_prefix(root_dir) {
+                let relative = relative.to_str().ok_or_else(|| {
+                    BuilderError::ExecutionFailed(format!(
+                        "TreeMerge input path '{}' is not UTF-8",
+                        relative.display()
+                    ))
+                })?;
+                needed.push(relative.to_string());
+            }
+        }
+    }
+    needed.sort();
+    needed.dedup();
+    Ok(needed)
+}
+
+fn insert_directory_entry(
+    directories: &mut BTreeMap<String, BTreeMap<Vec<u8>, PendingDirectoryHashEntry>>,
+    path: &str,
+) {
+    let parent = parent_path(path).to_string();
+    let name = path_name(path).to_vec();
+    directories
+        .entry(parent)
+        .or_default()
+        .entry(name.clone())
+        .or_insert(PendingDirectoryHashEntry {
+            name,
+            kind: EntryKind::Directory,
+            node_hash: hash_directory_node(&[]),
+        });
+}
+
+fn insert_leaf_directory_entry(
+    directories: &mut BTreeMap<String, BTreeMap<Vec<u8>, PendingDirectoryHashEntry>>,
+    path: &str,
+    kind: EntryKind,
+    node_hash: ObjectHash,
+) {
+    let parent = parent_path(path).to_string();
+    let name = path_name(path).to_vec();
+    directories.entry(parent).or_default().insert(
+        name.clone(),
+        PendingDirectoryHashEntry {
+            name,
+            kind,
+            node_hash,
+        },
+    );
+}
+
+fn hash_directory_from_map(
+    path: &str,
+    directories: &BTreeMap<String, BTreeMap<Vec<u8>, PendingDirectoryHashEntry>>,
+) -> Result<ObjectHash, BuilderError> {
+    let mut entries = Vec::new();
+    if let Some(children) = directories.get(path) {
+        for entry in children.values() {
+            let node_hash = if entry.kind == EntryKind::Directory {
+                let child_path = join_manifest_path(path, &entry.name)?;
+                hash_directory_from_map(&child_path, directories)?
+            } else {
+                entry.node_hash
+            };
+            entries.push(DirectoryEntryHash {
+                name: &entry.name,
+                kind: entry.kind,
+                node_hash,
+            });
+        }
+    }
+    Ok(hash_directory_node(&entries))
+}
+
+fn parent_path(path: &str) -> &str {
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("")
+}
+
+fn path_name(path: &str) -> &[u8] {
+    path.rsplit_once('/')
+        .map(|(_, name)| name.as_bytes())
+        .unwrap_or_else(|| path.as_bytes())
+}
+
+fn join_manifest_path(parent: &str, name: &[u8]) -> Result<String, BuilderError> {
+    let name = std::str::from_utf8(name).map_err(|error| {
+        BuilderError::ExecutionFailed(format!("invalid UTF-8 directory name in manifest: {error}"))
+    })?;
+    if parent.is_empty() {
+        Ok(name.to_string())
+    } else {
+        Ok(format!("{parent}/{name}"))
+    }
+}
+
 fn log_tree_merge_ownership_events(
     cx: &mut BuildContext,
-    result: &OwnershipHashResult,
+    timings: Option<&mbuild_runtime::OwnershipTimings>,
     host_duration_ms: u128,
 ) {
-    let timings = result.timings.as_ref();
     let ownership_ms = timings
         .map(tree_merge_ownership_ms)
         .unwrap_or(host_duration_ms);
@@ -1158,11 +1373,14 @@ fn log_tree_merge_ownership_events(
         None,
         ownership_details,
     );
+}
 
-    let hash_ms = timings.map(|timings| timings.hash_ms).unwrap_or(0);
-    let manifest_serialize_ms = timings
-        .map(|timings| timings.manifest_serialize_ms)
-        .unwrap_or(0);
+fn log_tree_merge_hash_event(
+    cx: &mut BuildContext,
+    object_hash: ObjectHash,
+    hash_ms: u128,
+    manifest_serialize_ms: u128,
+) {
     let mut hash_details = Map::new();
     hash_details.insert("duration_ms".to_string(), json_u128(hash_ms));
     hash_details.insert(
@@ -1173,7 +1391,7 @@ fn log_tree_merge_ownership_events(
         BuildLogLevel::Info,
         "hash-done",
         format!("hashed merged fs-tree object in {hash_ms} ms"),
-        Some(result.object_hash),
+        Some(object_hash),
         None,
         hash_details,
     );
@@ -1973,29 +2191,6 @@ mod tests {
             Ok(())
         }
 
-        fn materialize_selected_and_hash(
-            &self,
-            root_dir: &Path,
-            object_dir: &Path,
-            materialize_manifest: &FsTreeManifest,
-            _object_manifest: &FsTreeManifest,
-            _temp_dir: &Path,
-        ) -> Result<OwnershipHashResult, BuilderError> {
-            apply_test_modes(materialize_manifest, root_dir)?;
-            let owner_map = current_owner_map(root_dir)?;
-            validate_fs_tree_object(object_dir, &owner_map).map_err(map_fs_tree_error)?;
-            let object_hash = hash_path(object_dir).map_err(|error| {
-                BuilderError::ExecutionFailed(format!(
-                    "failed to hash staged tree object '{}': {error}",
-                    object_dir.display()
-                ))
-            })?;
-            Ok(OwnershipHashResult {
-                object_hash,
-                timings: None,
-            })
-        }
-
         fn validate_hardlinked_file(
             &self,
             source: &Path,
@@ -2009,27 +2204,13 @@ mod tests {
     impl OwnershipMaterializer for FixedHashMaterializer {
         fn materialize_and_validate(
             &self,
-            _root_dir: &Path,
-            _object_dir: &Path,
-            _manifest: &FsTreeManifest,
-            _temp_dir: &Path,
-        ) -> Result<(), BuilderError> {
-            Ok(())
-        }
-
-        fn materialize_selected_and_hash(
-            &self,
             root_dir: &Path,
             _object_dir: &Path,
-            materialize_manifest: &FsTreeManifest,
-            _object_manifest: &FsTreeManifest,
+            manifest: &FsTreeManifest,
             _temp_dir: &Path,
-        ) -> Result<OwnershipHashResult, BuilderError> {
-            apply_test_modes(materialize_manifest, root_dir)?;
-            Ok(OwnershipHashResult {
-                object_hash: fixed_object_hash(),
-                timings: None,
-            })
+        ) -> Result<(), BuilderError> {
+            apply_test_modes(manifest, root_dir)?;
+            Ok(())
         }
 
         fn validate_hardlinked_file(
@@ -2046,31 +2227,17 @@ mod tests {
             &self,
             _root_dir: &Path,
             _object_dir: &Path,
-            _manifest: &FsTreeManifest,
+            manifest: &FsTreeManifest,
             _temp_dir: &Path,
         ) -> Result<(), BuilderError> {
-            Ok(())
-        }
-
-        fn materialize_selected_and_hash(
-            &self,
-            _root_dir: &Path,
-            _object_dir: &Path,
-            materialize_manifest: &FsTreeManifest,
-            _object_manifest: &FsTreeManifest,
-            _temp_dir: &Path,
-        ) -> Result<OwnershipHashResult, BuilderError> {
             self.materialized_paths.replace(
-                materialize_manifest
+                manifest
                     .entries()
                     .iter()
                     .map(|entry| entry.path().to_string())
                     .collect(),
             );
-            Ok(OwnershipHashResult {
-                object_hash: fixed_object_hash(),
-                timings: None,
-            })
+            Ok(())
         }
 
         fn validate_hardlinked_file(
@@ -2264,6 +2431,9 @@ mod tests {
     fn assert_valid_fs_tree(result: &StagedBuildResult) {
         let owner_map = current_owner_map(&result.staged_path.join("root")).unwrap();
         validate_fs_tree_object(&result.staged_path, &owner_map).unwrap();
+        if let Some(object_hash) = result.object_hash {
+            assert_eq!(object_hash, hash_path(&result.staged_path).unwrap());
+        }
     }
 
     fn build_fs_tree_for_tests(
@@ -2293,6 +2463,9 @@ mod tests {
                 *name,
                 BuilderInputObject {
                     object_path: result.staged_path.clone(),
+                    object_hash: result
+                        .object_hash
+                        .unwrap_or_else(|| hash_path(&result.staged_path).unwrap()),
                 },
             );
         }
@@ -2692,6 +2865,7 @@ mod tests {
         inputs.insert(
             "bad",
             BuilderInputObject {
+                object_hash: hash_path(&not_tree).unwrap(),
                 object_path: not_tree,
             },
         );
@@ -2781,13 +2955,19 @@ mod tests {
         );
         let (mut cx, logger) = build_context_with_recording_logger(&temp.path().join("merge"));
 
-        builder
+        let result = builder
             .build_typed_for_tests(
                 TreeMergeConfig {},
                 tree_merge_inputs(&[("right", &right), ("left", &left)]),
                 &mut cx,
             )
             .unwrap();
+        assert_valid_fs_tree(&result);
+        let object_index = result.object_index.as_ref().unwrap();
+        assert!(object_index.get("manifest.jsonl").is_some());
+        assert!(object_index.get("root/bin/left").is_some());
+        assert!(object_index.get("root/etc/right.conf").is_some());
+        assert!(object_index.get("root/bin").is_none());
 
         let events = logger.events();
         let phases = events
@@ -2849,6 +3029,7 @@ mod tests {
         inputs.insert(
             "base",
             BuilderInputObject {
+                object_hash: fixed_object_hash(),
                 object_path: base_object,
             },
         );
@@ -2857,7 +3038,7 @@ mod tests {
         let result =
             build_tree_merge(TreeMergeConfig {}, inputs, &mut cx, &FixedHashMaterializer).unwrap();
 
-        assert_eq!(result.object_hash, Some(fixed_object_hash()));
+        assert!(result.object_hash.is_some());
         assert!(fs_tree_root(&result).join("locked").is_dir());
         assert_eq!(
             fs::metadata(fs_tree_root(&result).join("locked"))
@@ -2914,6 +3095,7 @@ mod tests {
         inputs.insert(
             "base",
             BuilderInputObject {
+                object_hash: hash_path(&base_object).unwrap(),
                 object_path: base_object,
             },
         );
@@ -2975,7 +3157,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(result.object_hash, Some(fixed_object_hash()));
+        assert_eq!(
+            result.object_hash,
+            Some(hash_path(&result.staged_path).unwrap())
+        );
         let materialized_paths = materializer.materialized_paths.borrow();
         assert!(materialized_paths.iter().any(|path| path == ""));
         assert!(materialized_paths.iter().any(|path| path == "bin"));
@@ -3879,6 +4064,7 @@ mod tests {
             "unexpected",
             BuilderInputObject {
                 object_path: std::path::PathBuf::from("/tmp/unexpected"),
+                object_hash: fixed_object_hash(),
             },
         );
 

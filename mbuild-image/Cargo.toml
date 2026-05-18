@@ -15,6 +15,7 @@ tar = "0.4"
 tracing = "0.1"
 
 [dev-dependencies]
+fsobj-hash = { path = "../fsobj-hash" }
 libc = "0.2"
 tempfile = "3.14"
 

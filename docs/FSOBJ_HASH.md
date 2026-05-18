@@ -72,6 +72,32 @@ A directory hash depends on:
 
 Child entries are sorted by raw name bytes.
 
+## Leaf Indexes
+
+`fsobj-hash` can compute a leaf index while hashing a filesystem path.
+The index records only regular file and symlink node hashes, keyed by
+object-relative path. Directory entries are intentionally not persisted in the
+index.
+
+Directory hashes are cheap to recompute from structure:
+
+- regular file and symlink hashes come from the leaf index
+- directory entries come from the caller's tree description
+- empty directories are represented by hashing a directory with no children
+
+This keeps the index as a cache for expensive payload-byte hashing, not as a
+second persisted Merkle tree format.
+
+Synthetic fs-tree objects use the same fsobj hash algorithm. Their object hash
+is the directory hash of two entries:
+
+- `manifest.jsonl`
+- `root`
+
+The manifest file node hash can be computed directly from canonical manifest
+bytes. The `root` directory hash can be recomputed bottom-up from the
+fs-tree manifest plus leaf hashes.
+
 ## Ignored Metadata
 
 The hash ignores:
@@ -140,3 +166,13 @@ fsobj-hash - --mode=tar
 ```
 
 `-` is not accepted in `auto` or `direct` mode.
+
+## Path Encoding Boundary
+
+The generic `fsobj-hash` algorithm treats directory entry names and symlink
+targets as raw Unix bytes. It can hash paths that are not valid UTF-8.
+
+`mbuild` fs-tree objects are stricter: `manifest.jsonl` stores paths and
+symlink targets as JSON strings, so fs-tree manifests are UTF-8-only. This is a
+property of the mbuild fs-tree object format, not of the generic fsobj hash
+algorithm.

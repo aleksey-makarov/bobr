@@ -99,6 +99,7 @@ impl TypedBuilder for SandboxBuilder {
         Ok(StagedBuildResult {
             staged_path,
             object_hash: Some(outcome.object_hash),
+            object_index: None,
         })
     }
 }
@@ -446,11 +447,17 @@ mod tests {
         std::fs::create_dir_all(&cx.temp_dir).unwrap();
         let rootfs_input = BuilderInputObject {
             object_path: rootfs,
+            object_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+                .parse()
+                .unwrap(),
         };
         let inputs = vec![(
             "source".to_string(),
             BuilderInputObject {
                 object_path: source.clone(),
+                object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                    .parse()
+                    .unwrap(),
             },
         )];
         let step = BuildStep {
@@ -493,11 +500,17 @@ mod tests {
         std::fs::create_dir_all(&cx.temp_dir).unwrap();
         let rootfs_input = BuilderInputObject {
             object_path: rootfs,
+            object_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+                .parse()
+                .unwrap(),
         };
         let inputs = vec![(
             "source".to_string(),
             BuilderInputObject {
                 object_path: source,
+                object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                    .parse()
+                    .unwrap(),
             },
         )];
         let step = BuildStep {

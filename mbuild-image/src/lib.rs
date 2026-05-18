@@ -108,6 +108,7 @@ impl TypedBuilder for ImageBuilder {
         Ok(StagedBuildResult {
             staged_path,
             object_hash: None,
+            object_index: None,
         })
     }
 }
@@ -296,6 +297,7 @@ fn map_image_error(error: ImageError) -> BuilderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fsobj_hash::hash_path;
     use mbuild_core::{Builder, BuilderInputObject, BuilderInputs};
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -381,12 +383,16 @@ mod tests {
         let object_path = root.join(name);
         fs::create_dir_all(&object_path).unwrap();
         fs::write(object_path.join("README.txt"), b"hello image\n").unwrap();
-        BuilderInputObject { object_path }
+        BuilderInputObject {
+            object_hash: hash_path(&object_path).unwrap(),
+            object_path,
+        }
     }
 
     fn resolved_base_image(root: &Path) -> BuilderInputObject {
         let oci_dir = create_test_oci_layout(root, "base-image");
         BuilderInputObject {
+            object_hash: hash_path(&oci_dir).unwrap(),
             object_path: oci_dir,
         }
     }
@@ -456,6 +462,7 @@ mod tests {
             .count();
 
         let base = BuilderInputObject {
+            object_hash: hash_path(&base_oci).unwrap(),
             object_path: base_oci,
         };
         let mut inputs = BuilderInputs::empty();
@@ -486,6 +493,7 @@ mod tests {
         let bad_base = temp.path().join("bad-base");
         fs::create_dir(&bad_base).unwrap();
         let base = BuilderInputObject {
+            object_hash: hash_path(&bad_base).unwrap(),
             object_path: bad_base,
         };
         let mut inputs = BuilderInputs::empty();

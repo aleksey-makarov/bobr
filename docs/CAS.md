@@ -7,6 +7,7 @@ results as result records, and public build handles as symlink refs to those
 results.
 
 - `objects/` holds payloads addressed by `object_hash`
+- `object-indexes/` holds derived leaf-hash indexes addressed by `object_hash`
 - `results/` holds canonical result records addressed by `result_id`
 - `reuses/` holds builder-only canonical reuse refs addressed by `reuse_key`
 - `builds/` holds builder-only public build-handle refs addressed by `build_key`
@@ -24,6 +25,8 @@ envelope. `mbuild` does not add an implicit `.mbuild/` directory.
 <store>/
   objects/
     <object_hash>
+  object-indexes/
+    <object_hash>.jsonl
   reuses/
     <reuse_key> -> ../results/<result_id>.json
   builds/
@@ -46,6 +49,25 @@ envelope. `mbuild` does not add an implicit `.mbuild/` directory.
 Concrete directory payload formats are builder-specific. For example, the
 current image builders may realize image-related objects as OCI image layout
 directories.
+
+`object-indexes/<object_hash>.jsonl` is a derived cache. It is safe to delete:
+mbuild can rebuild it from `objects/<object_hash>` when needed. The file has no
+header or version line. Each line is one JSON object with:
+
+- `path`: object-relative UTF-8 path
+- `type`: `file` or `symlink`
+- `hash`: fsobj node hash for that leaf
+
+Directory entries are not stored in this index. Callers that need directory
+hashes recompute them from their own tree structure and leaf hashes. For
+fs-tree objects this structure is `manifest.jsonl`, which also accounts for
+empty directories.
+
+Generic CAS objects may contain non-UTF-8 filesystem names. Such objects can
+still be imported and addressed by `object_hash`; mbuild simply skips the
+human-readable JSONL index if a path cannot be represented as UTF-8. Fs-tree
+objects are already UTF-8-only because their manifest paths and symlink targets
+are JSON strings.
 
 `results/<result_id>.json` stores one canonical realized result record.
 

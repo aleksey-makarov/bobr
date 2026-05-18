@@ -7,6 +7,7 @@ pub mod fs_tree_compose;
 pub mod fs_tree_manifest;
 pub mod fs_tree_object;
 pub mod fsutil;
+pub mod object_index;
 pub mod origin;
 
 pub use builder::*;
@@ -16,6 +17,7 @@ pub use fs_tree_compose::*;
 pub use fs_tree_manifest::*;
 pub use fs_tree_object::*;
 pub use fsobj_hash::ObjectHash;
+pub use object_index::*;
 pub use origin::*;
 
 #[derive(Debug)]

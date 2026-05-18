@@ -1,6 +1,6 @@
-use crate::BuilderError;
 use crate::cancellation::CancellationToken;
 use crate::cas::{BuildKey, ResultId, ReuseKey};
+use crate::{BuilderError, ObjectLeafIndex};
 use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -65,6 +65,7 @@ impl BuilderSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderInputObject {
     pub object_path: PathBuf,
+    pub object_hash: ObjectHash,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -296,6 +297,7 @@ impl BuildContext {
 pub struct StagedBuildResult {
     pub staged_path: PathBuf,
     pub object_hash: Option<ObjectHash>,
+    pub object_index: Option<ObjectLeafIndex>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -409,10 +411,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     fn sample_builder_object() -> BuilderInputObject {
         BuilderInputObject {
             object_path: PathBuf::from("/tmp/object"),
+            object_hash: ObjectHash::from_str(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            )
+            .unwrap(),
         }
     }
 
@@ -481,6 +488,7 @@ mod tests {
             Ok(StagedBuildResult {
                 staged_path: PathBuf::from("/tmp/out"),
                 object_hash: None,
+                object_index: None,
             })
         }
     }

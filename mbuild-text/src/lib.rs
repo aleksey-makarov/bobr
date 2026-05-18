@@ -83,6 +83,7 @@ impl TypedBuilder for TextBuilder {
         Ok(StagedBuildResult {
             staged_path: tmp_path,
             object_hash: None,
+            object_index: None,
         })
     }
 }
@@ -184,6 +185,9 @@ mod tests {
             "script",
             mbuild_core::BuilderInputObject {
                 object_path: temp.path().join("dummy"),
+                object_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+                    .parse()
+                    .unwrap(),
             },
         );
 
