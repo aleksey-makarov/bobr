@@ -8,6 +8,7 @@ use mbuild_core::{
 };
 use mbuild_runtime::{FsTreeTarEntrySource, FsTreeTarInput};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -18,6 +19,7 @@ use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -134,6 +136,26 @@ enum MaterializedKind {
     Symlink { target: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnershipHashResult {
+    object_hash: ObjectHash,
+    timings: Option<mbuild_runtime::OwnershipTimings>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TreeMergeStageStats {
+    directory_count: usize,
+    file_count: usize,
+    hardlinked_file_count: usize,
+    copied_file_count: usize,
+    symlink_count: usize,
+    directory_ms: u128,
+    file_validate_ms: u128,
+    hardlink_ms: u128,
+    copy_ms: u128,
+    symlink_ms: u128,
+}
+
 trait OwnershipMaterializer {
     fn materialize_and_validate(
         &self,
@@ -150,13 +172,17 @@ trait OwnershipMaterializer {
         materialize_manifest: &FsTreeManifest,
         _object_manifest: &FsTreeManifest,
         temp_dir: &Path,
-    ) -> Result<ObjectHash, BuilderError> {
+    ) -> Result<OwnershipHashResult, BuilderError> {
         self.materialize_and_validate(root_dir, object_dir, materialize_manifest, temp_dir)?;
-        hash_path(object_dir).map_err(|error| {
+        let object_hash = hash_path(object_dir).map_err(|error| {
             BuilderError::ExecutionFailed(format!(
                 "failed to hash staged tree object '{}': {error}",
                 object_dir.display()
             ))
+        })?;
+        Ok(OwnershipHashResult {
+            object_hash,
+            timings: None,
         })
     }
 
@@ -192,17 +218,22 @@ impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
         materialize_manifest: &FsTreeManifest,
         object_manifest: &FsTreeManifest,
         temp_dir: &Path,
-    ) -> Result<ObjectHash, BuilderError> {
+    ) -> Result<OwnershipHashResult, BuilderError> {
         let idmap = mbuild_runtime::cached_host_idmap()
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-        mbuild_runtime::apply_selected_ownership_batch_and_hash_fs_tree_object(
-            root_dir,
-            materialize_manifest,
-            object_manifest,
-            idmap.as_ref(),
-            temp_dir,
-        )
-        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))
+        let result =
+            mbuild_runtime::apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
+                root_dir,
+                materialize_manifest,
+                object_manifest,
+                idmap.as_ref(),
+                temp_dir,
+            )
+            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+        Ok(OwnershipHashResult {
+            object_hash: result.object_hash,
+            timings: Some(result.timings),
+        })
     }
 
     fn validate_hardlinked_file(
@@ -382,11 +413,25 @@ fn build_tree_merge(
         format!("merging {} fs-tree input(s)", inputs.len()),
     );
 
+    let compose_start = Instant::now();
     let compose_inputs = inputs
         .iter()
         .map(|(name, object)| tree_merge_input(name, object))
         .collect::<Result<Vec<_>, _>>()?;
     let composed = compose_fs_trees(&compose_inputs).map_err(map_fs_tree_error)?;
+    let entry_count = composed.manifest().entries().len();
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        "compose-done",
+        format!(
+            "composed {} fs-tree input(s) into {} entries",
+            inputs.len(),
+            entry_count
+        ),
+        None,
+        None,
+        tree_merge_compose_details(inputs.len(), entry_count, elapsed_ms(compose_start)),
+    );
 
     let now_nanos = fsutil::current_epoch_nanos()
         .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
@@ -398,8 +443,9 @@ fn build_tree_merge(
         format!("materializing merged fs-tree '{}'", output_path.display()),
     );
 
+    let temp_dir = cx.temp_dir.clone();
     let object_hash =
-        materialize_tree_merge_output(&output_path, &composed, &cx.temp_dir, materializer)?;
+        materialize_tree_merge_output(&output_path, &composed, &temp_dir, materializer, cx)?;
 
     Ok(StagedBuildResult {
         staged_path: output_path,
@@ -931,16 +977,19 @@ fn materialize_tree_merge_output(
     composed: &ComposedFsTree,
     temp_dir: &Path,
     materializer: &impl OwnershipMaterializer,
+    cx: &mut BuildContext,
 ) -> Result<ObjectHash, BuilderError> {
     let paths =
         create_fs_tree_staging_dir(output_path, composed.manifest()).map_err(map_fs_tree_error)?;
     let mut materialize_entries = Vec::new();
+    let mut stats = TreeMergeStageStats::default();
 
     for (manifest_entry, composed_entry) in
         composed.manifest().entries().iter().zip(composed.entries())
     {
         match (manifest_entry, composed_entry) {
             (FsTreeEntry::Directory { path, .. }, ComposedFsTreeEntry::Directory) => {
+                let step_start = Instant::now();
                 if !path.is_empty() {
                     fs::create_dir(paths.root_dir.join(path)).map_err(|error| {
                         BuilderError::ExecutionFailed(format!(
@@ -949,13 +998,27 @@ fn materialize_tree_merge_output(
                         ))
                     })?;
                 }
+                stats.directory_ms += elapsed_ms(step_start);
+                stats.directory_count += 1;
                 materialize_entries.push(manifest_entry.clone());
             }
             (FsTreeEntry::File { path, .. }, ComposedFsTreeEntry::File { source_path }) => {
                 let dst = paths.root_dir.join(path);
-                if link_or_copy_tree_merge_file(source_path, &dst, manifest_entry, materializer)?
-                    == TreeMergeFileMaterialization::Copied
-                {
+                let result =
+                    link_or_copy_tree_merge_file(source_path, &dst, manifest_entry, materializer)?;
+                stats.file_count += 1;
+                stats.file_validate_ms += result.validate_ms;
+                stats.hardlink_ms += result.hardlink_ms;
+                stats.copy_ms += result.copy_ms;
+                match result.kind {
+                    TreeMergeFileMaterialization::Hardlinked => {
+                        stats.hardlinked_file_count += 1;
+                    }
+                    TreeMergeFileMaterialization::Copied => {
+                        stats.copied_file_count += 1;
+                    }
+                }
+                if result.kind == TreeMergeFileMaterialization::Copied {
                     materialize_entries.push(manifest_entry.clone());
                 }
             }
@@ -964,7 +1027,10 @@ fn materialize_tree_merge_output(
                 ComposedFsTreeEntry::Symlink { source_path },
             ) => {
                 let dst = paths.root_dir.join(path);
+                let step_start = Instant::now();
                 create_tree_merge_symlink(source_path, &dst, target)?;
+                stats.symlink_ms += elapsed_ms(step_start);
+                stats.symlink_count += 1;
                 materialize_entries.push(manifest_entry.clone());
             }
             _ => {
@@ -976,15 +1042,31 @@ fn materialize_tree_merge_output(
         }
     }
 
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        "stage-done",
+        format!(
+            "staged merged fs-tree with {} entries",
+            composed.manifest().entries().len()
+        ),
+        None,
+        None,
+        tree_merge_stage_details(composed.manifest().entries().len(), &stats),
+    );
+
     let materialize_manifest =
         FsTreeManifest::from_entries(materialize_entries).map_err(map_fs_tree_error)?;
-    materializer.materialize_selected_and_hash(
+    let ownership_start = Instant::now();
+    let hash_result = materializer.materialize_selected_and_hash(
         &paths.root_dir,
         &paths.object_dir,
         &materialize_manifest,
         composed.manifest(),
         temp_dir,
-    )
+    )?;
+    let ownership_host_ms = elapsed_ms(ownership_start);
+    log_tree_merge_ownership_events(cx, &hash_result, ownership_host_ms);
+    Ok(hash_result.object_hash)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -993,16 +1075,34 @@ enum TreeMergeFileMaterialization {
     Copied,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TreeMergeFileMaterializationResult {
+    kind: TreeMergeFileMaterialization,
+    validate_ms: u128,
+    hardlink_ms: u128,
+    copy_ms: u128,
+}
+
 fn link_or_copy_tree_merge_file(
     source: &Path,
     dst: &Path,
     manifest_entry: &FsTreeEntry,
     materializer: &impl OwnershipMaterializer,
-) -> Result<TreeMergeFileMaterialization, BuilderError> {
+) -> Result<TreeMergeFileMaterializationResult, BuilderError> {
+    let validate_start = Instant::now();
     materializer.validate_hardlinked_file(source, manifest_entry)?;
+    let validate_ms = elapsed_ms(validate_start);
+    let hardlink_start = Instant::now();
     match fs::hard_link(source, dst) {
-        Ok(()) => Ok(TreeMergeFileMaterialization::Hardlinked),
+        Ok(()) => Ok(TreeMergeFileMaterializationResult {
+            kind: TreeMergeFileMaterialization::Hardlinked,
+            validate_ms,
+            hardlink_ms: elapsed_ms(hardlink_start),
+            copy_ms: 0,
+        }),
         Err(error) if should_copy_after_link_error(error.kind()) => {
+            let hardlink_ms = elapsed_ms(hardlink_start);
+            let copy_start = Instant::now();
             fs::copy(source, dst).map_err(|copy_error| {
                 BuilderError::ExecutionFailed(format!(
                     "failed to copy merged fs-tree file '{}' to '{}': {copy_error}",
@@ -1010,7 +1110,12 @@ fn link_or_copy_tree_merge_file(
                     dst.display()
                 ))
             })?;
-            Ok(TreeMergeFileMaterialization::Copied)
+            Ok(TreeMergeFileMaterializationResult {
+                kind: TreeMergeFileMaterialization::Copied,
+                validate_ms,
+                hardlink_ms,
+                copy_ms: elapsed_ms(copy_start),
+            })
         }
         Err(error) => Err(BuilderError::ExecutionFailed(format!(
             "failed to hardlink merged fs-tree file '{}' to '{}': {error}",
@@ -1028,6 +1133,151 @@ fn should_copy_after_link_error(kind: io::ErrorKind) -> bool {
             | io::ErrorKind::Unsupported
             | io::ErrorKind::TooManyLinks
     )
+}
+
+fn log_tree_merge_ownership_events(
+    cx: &mut BuildContext,
+    result: &OwnershipHashResult,
+    host_duration_ms: u128,
+) {
+    let timings = result.timings.as_ref();
+    let ownership_ms = timings
+        .map(tree_merge_ownership_ms)
+        .unwrap_or(host_duration_ms);
+    let mut ownership_details = Map::new();
+    ownership_details.insert("duration_ms".to_string(), json_u128(ownership_ms));
+    ownership_details.insert("host_duration_ms".to_string(), json_u128(host_duration_ms));
+    if let Some(timings) = timings {
+        add_timing_details(&mut ownership_details, timings);
+    }
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        "ownership-done",
+        format!("materialized ownership in {ownership_ms} ms"),
+        None,
+        None,
+        ownership_details,
+    );
+
+    let hash_ms = timings.map(|timings| timings.hash_ms).unwrap_or(0);
+    let manifest_serialize_ms = timings
+        .map(|timings| timings.manifest_serialize_ms)
+        .unwrap_or(0);
+    let mut hash_details = Map::new();
+    hash_details.insert("duration_ms".to_string(), json_u128(hash_ms));
+    hash_details.insert(
+        "manifest_serialize_ms".to_string(),
+        json_u128(manifest_serialize_ms),
+    );
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        "hash-done",
+        format!("hashed merged fs-tree object in {hash_ms} ms"),
+        Some(result.object_hash),
+        None,
+        hash_details,
+    );
+}
+
+fn tree_merge_ownership_ms(timings: &mbuild_runtime::OwnershipTimings) -> u128 {
+    timings.validate_entries_ms
+        + timings.chown_ms
+        + timings.lchown_ms
+        + timings.chmod_files_ms
+        + timings.chmod_dirs_ms
+        + timings.validate_applied_ms
+}
+
+fn add_timing_details(
+    details: &mut Map<String, Value>,
+    timings: &mbuild_runtime::OwnershipTimings,
+) {
+    details.insert("total_ms".to_string(), json_u128(timings.total_ms));
+    details.insert(
+        "validate_entries_ms".to_string(),
+        json_u128(timings.validate_entries_ms),
+    );
+    details.insert("chown_ms".to_string(), json_u128(timings.chown_ms));
+    details.insert("lchown_ms".to_string(), json_u128(timings.lchown_ms));
+    details.insert(
+        "chmod_files_ms".to_string(),
+        json_u128(timings.chmod_files_ms),
+    );
+    details.insert(
+        "chmod_dirs_ms".to_string(),
+        json_u128(timings.chmod_dirs_ms),
+    );
+    details.insert(
+        "validate_applied_ms".to_string(),
+        json_u128(timings.validate_applied_ms),
+    );
+    details.insert(
+        "manifest_serialize_ms".to_string(),
+        json_u128(timings.manifest_serialize_ms),
+    );
+    details.insert("hash_ms".to_string(), json_u128(timings.hash_ms));
+}
+
+fn tree_merge_compose_details(
+    input_count: usize,
+    entry_count: usize,
+    duration_ms: u128,
+) -> Map<String, Value> {
+    let mut details = Map::new();
+    details.insert("duration_ms".to_string(), json_u128(duration_ms));
+    details.insert("input_count".to_string(), json_usize(input_count));
+    details.insert("entry_count".to_string(), json_usize(entry_count));
+    details
+}
+
+fn tree_merge_stage_details(entry_count: usize, stats: &TreeMergeStageStats) -> Map<String, Value> {
+    let mut details = Map::new();
+    details.insert(
+        "duration_ms".to_string(),
+        json_u128(
+            stats.directory_ms
+                + stats.file_validate_ms
+                + stats.hardlink_ms
+                + stats.copy_ms
+                + stats.symlink_ms,
+        ),
+    );
+    details.insert("entry_count".to_string(), json_usize(entry_count));
+    details.insert(
+        "directory_count".to_string(),
+        json_usize(stats.directory_count),
+    );
+    details.insert("file_count".to_string(), json_usize(stats.file_count));
+    details.insert(
+        "hardlinked_file_count".to_string(),
+        json_usize(stats.hardlinked_file_count),
+    );
+    details.insert(
+        "copied_file_count".to_string(),
+        json_usize(stats.copied_file_count),
+    );
+    details.insert("symlink_count".to_string(), json_usize(stats.symlink_count));
+    details.insert("directory_ms".to_string(), json_u128(stats.directory_ms));
+    details.insert(
+        "file_validate_ms".to_string(),
+        json_u128(stats.file_validate_ms),
+    );
+    details.insert("hardlink_ms".to_string(), json_u128(stats.hardlink_ms));
+    details.insert("copy_ms".to_string(), json_u128(stats.copy_ms));
+    details.insert("symlink_ms".to_string(), json_u128(stats.symlink_ms));
+    details
+}
+
+fn elapsed_ms(start: Instant) -> u128 {
+    start.elapsed().as_millis()
+}
+
+fn json_usize(value: usize) -> Value {
+    Value::from(value as u64)
+}
+
+fn json_u128(value: u128) -> Value {
+    Value::from(value.min(u64::MAX as u128) as u64)
 }
 
 #[cfg(unix)]
@@ -1656,12 +1906,13 @@ fn map_fs_tree_error(error: impl std::fmt::Display) -> BuilderError {
 mod tests {
     use super::*;
     use mbuild_core::{
-        Builder, BuilderInputObject, BuilderInputs, FsTreeObjectError, FsTreeOwnerMap,
-        validate_fs_tree_object,
+        BuildLogEvent, BuildLogger, Builder, BuilderInputObject, BuilderInputs, FsTreeObjectError,
+        FsTreeOwnerMap, validate_fs_tree_object,
     };
     use std::cell::RefCell;
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
     #[derive(Debug, Clone, Copy)]
@@ -1673,6 +1924,27 @@ mod tests {
     #[derive(Debug)]
     struct RecordingMaterializer {
         materialized_paths: RefCell<Vec<String>>,
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingBuildLogger {
+        events: Mutex<Vec<BuildLogEvent>>,
+    }
+
+    impl RecordingBuildLogger {
+        fn events(&self) -> Vec<BuildLogEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl BuildLogger for RecordingBuildLogger {
+        fn log_event(&self, event: BuildLogEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+
+        fn allocate_raw_log_path(&self, _label: &str) -> Result<PathBuf, String> {
+            Err("recording logger does not allocate raw logs".to_string())
+        }
     }
 
     impl OwnershipMaterializer for CurrentOwnerMaterializer {
@@ -1708,15 +1980,19 @@ mod tests {
             materialize_manifest: &FsTreeManifest,
             _object_manifest: &FsTreeManifest,
             _temp_dir: &Path,
-        ) -> Result<ObjectHash, BuilderError> {
+        ) -> Result<OwnershipHashResult, BuilderError> {
             apply_test_modes(materialize_manifest, root_dir)?;
             let owner_map = current_owner_map(root_dir)?;
             validate_fs_tree_object(object_dir, &owner_map).map_err(map_fs_tree_error)?;
-            hash_path(object_dir).map_err(|error| {
+            let object_hash = hash_path(object_dir).map_err(|error| {
                 BuilderError::ExecutionFailed(format!(
                     "failed to hash staged tree object '{}': {error}",
                     object_dir.display()
                 ))
+            })?;
+            Ok(OwnershipHashResult {
+                object_hash,
+                timings: None,
             })
         }
 
@@ -1748,9 +2024,12 @@ mod tests {
             materialize_manifest: &FsTreeManifest,
             _object_manifest: &FsTreeManifest,
             _temp_dir: &Path,
-        ) -> Result<ObjectHash, BuilderError> {
+        ) -> Result<OwnershipHashResult, BuilderError> {
             apply_test_modes(materialize_manifest, root_dir)?;
-            Ok(fixed_object_hash())
+            Ok(OwnershipHashResult {
+                object_hash: fixed_object_hash(),
+                timings: None,
+            })
         }
 
         fn validate_hardlinked_file(
@@ -1780,7 +2059,7 @@ mod tests {
             materialize_manifest: &FsTreeManifest,
             _object_manifest: &FsTreeManifest,
             _temp_dir: &Path,
-        ) -> Result<ObjectHash, BuilderError> {
+        ) -> Result<OwnershipHashResult, BuilderError> {
             self.materialized_paths.replace(
                 materialize_manifest
                     .entries()
@@ -1788,7 +2067,10 @@ mod tests {
                     .map(|entry| entry.path().to_string())
                     .collect(),
             );
-            Ok(fixed_object_hash())
+            Ok(OwnershipHashResult {
+                object_hash: fixed_object_hash(),
+                timings: None,
+            })
         }
 
         fn validate_hardlinked_file(
@@ -1912,6 +2194,22 @@ mod tests {
         std::fs::create_dir_all(&state_dir).unwrap();
         mbuild_core::fsutil::recreate_empty_dir_force(&temp_dir).unwrap();
         BuildContext::with_noop_logger(state_dir, temp_dir)
+    }
+
+    fn build_context_with_recording_logger(
+        root: &std::path::Path,
+    ) -> (BuildContext, Arc<RecordingBuildLogger>) {
+        let logger = Arc::new(RecordingBuildLogger::default());
+        let cx = build_context(root).with_logger(logger.clone());
+        (cx, logger)
+    }
+
+    fn detail_u64(event: &BuildLogEvent, key: &str) -> u64 {
+        event
+            .details
+            .get(key)
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| panic!("missing numeric detail '{key}' in {event:?}"))
     }
 
     fn sample_install() -> InstallMeta {
@@ -2455,6 +2753,68 @@ mod tests {
                 .any(|entry| entry.path() == "bin")
         );
         assert_valid_fs_tree(&result);
+    }
+
+    #[test]
+    fn tree_merge_logs_phase_timings_and_stage_counts() {
+        let builder = TreeMergeBuilder;
+        let temp = tempdir().unwrap();
+        let left = build_fs_tree_for_tests(
+            temp.path(),
+            "left",
+            vec![TreeEntry::File {
+                path: "bin/left".to_string(),
+                text: "left\n".to_string(),
+                executable: true,
+            }],
+            sample_install(),
+        );
+        let right = build_fs_tree_for_tests(
+            temp.path(),
+            "right",
+            vec![TreeEntry::File {
+                path: "etc/right.conf".to_string(),
+                text: "right\n".to_string(),
+                executable: false,
+            }],
+            sample_install(),
+        );
+        let (mut cx, logger) = build_context_with_recording_logger(&temp.path().join("merge"));
+
+        builder
+            .build_typed_for_tests(
+                TreeMergeConfig {},
+                tree_merge_inputs(&[("right", &right), ("left", &left)]),
+                &mut cx,
+            )
+            .unwrap();
+
+        let events = logger.events();
+        let phases = events
+            .iter()
+            .map(|event| event.phase.as_str())
+            .collect::<Vec<_>>();
+        assert!(phases.contains(&"compose-done"));
+        assert!(phases.contains(&"stage-done"));
+        assert!(phases.contains(&"ownership-done"));
+        assert!(phases.contains(&"hash-done"));
+
+        let stage = events
+            .iter()
+            .find(|event| event.phase == "stage-done")
+            .unwrap();
+        assert_eq!(detail_u64(stage, "file_count"), 2);
+        assert_eq!(detail_u64(stage, "hardlinked_file_count"), 2);
+        assert_eq!(detail_u64(stage, "copied_file_count"), 0);
+        assert_eq!(detail_u64(stage, "symlink_count"), 0);
+        assert!(detail_u64(stage, "directory_count") >= 3);
+
+        let hash = events
+            .iter()
+            .find(|event| event.phase == "hash-done")
+            .unwrap();
+        assert!(hash.object_hash.is_some());
+        assert!(hash.details.contains_key("duration_ms"));
     }
 
     #[cfg(unix)]

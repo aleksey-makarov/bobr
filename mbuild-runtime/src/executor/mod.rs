@@ -20,6 +20,27 @@ pub(crate) struct ExecutorErrorReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ExecutorResultReport {
     pub(crate) object_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) timings: Option<ExecutorResultTimings>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ExecutorResultTimings {
+    pub(crate) total_ms: u128,
+    pub(crate) validate_entries_ms: u128,
+    pub(crate) chown_ms: u128,
+    pub(crate) lchown_ms: u128,
+    pub(crate) chmod_files_ms: u128,
+    pub(crate) chmod_dirs_ms: u128,
+    pub(crate) validate_applied_ms: u128,
+    pub(crate) manifest_serialize_ms: u128,
+    pub(crate) hash_ms: u128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExecutorResult {
+    pub(crate) object_hash: ObjectHash,
+    pub(crate) timings: Option<ExecutorResultTimings>,
 }
 
 impl fmt::Display for ExecutorErrorReport {
@@ -60,18 +81,35 @@ pub(crate) fn read_executor_error_report(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn write_executor_result_report(
     path: &Path,
     object_hash: ObjectHash,
 ) -> Result<(), ExecutorError> {
+    write_executor_result_report_with_timings(path, object_hash, None)
+}
+
+pub(crate) fn write_executor_result_report_with_timings(
+    path: &Path,
+    object_hash: ObjectHash,
+    timings: Option<ExecutorResultTimings>,
+) -> Result<(), ExecutorError> {
     let report = ExecutorResultReport {
         object_hash: object_hash.to_string(),
+        timings,
     };
     let bytes = serde_json::to_vec(&report).map_err(executor_error)?;
     fs::write(path, bytes).map_err(executor_error)
 }
 
+#[cfg(test)]
 pub(crate) fn read_executor_result_report(path: &Path) -> Result<Option<ObjectHash>, RuntimeError> {
+    Ok(read_executor_result_report_with_timings(path)?.map(|report| report.object_hash))
+}
+
+pub(crate) fn read_executor_result_report_with_timings(
+    path: &Path,
+) -> Result<Option<ExecutorResult>, RuntimeError> {
     let bytes = fs::read(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             RuntimeError::Executor(format!(
@@ -92,14 +130,16 @@ pub(crate) fn read_executor_result_report(path: &Path) -> Result<Option<ObjectHa
             path.display()
         ))
     })?;
-    ObjectHash::from_str(&report.object_hash)
-        .map(Some)
-        .map_err(|error| {
-            RuntimeError::Executor(format!(
-                "failed to parse executor result hash '{}': {error}",
-                path.display()
-            ))
-        })
+    let object_hash = ObjectHash::from_str(&report.object_hash).map_err(|error| {
+        RuntimeError::Executor(format!(
+            "failed to parse executor result hash '{}': {error}",
+            path.display()
+        ))
+    })?;
+    Ok(Some(ExecutorResult {
+        object_hash,
+        timings: report.timings,
+    }))
 }
 
 fn executor_error(error: impl std::fmt::Display) -> ExecutorError {
@@ -185,6 +225,50 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(value["object_hash"], object_hash.to_string());
+    }
+
+    #[test]
+    fn executor_result_report_serializes_optional_timings() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("result.json");
+        let object_hash = test_object_hash();
+        let timings = ExecutorResultTimings {
+            total_ms: 10,
+            validate_entries_ms: 1,
+            chown_ms: 2,
+            lchown_ms: 3,
+            chmod_files_ms: 4,
+            chmod_dirs_ms: 5,
+            validate_applied_ms: 6,
+            manifest_serialize_ms: 7,
+            hash_ms: 8,
+        };
+
+        write_executor_result_report_with_timings(&path, object_hash, Some(timings.clone()))
+            .unwrap();
+
+        let report = read_executor_result_report_with_timings(&path)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.object_hash, object_hash);
+        assert_eq!(report.timings, Some(timings));
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["timings"]["hash_ms"], 8);
+    }
+
+    #[test]
+    fn executor_result_report_accepts_missing_timings() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("result.json");
+        let object_hash = test_object_hash();
+        fs::write(&path, format!(r#"{{"object_hash":"{}"}}"#, object_hash)).unwrap();
+
+        let report = read_executor_result_report_with_timings(&path)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(report.object_hash, object_hash);
+        assert_eq!(report.timings, None);
     }
 
     #[test]

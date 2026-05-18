@@ -4,8 +4,8 @@ use crate::bundle::create_bundle;
 use crate::{
     error::RuntimeError,
     executor::{
-        ExecutorErrorReport, read_executor_result_report, write_executor_error_report,
-        write_executor_result_report,
+        ExecutorErrorReport, ExecutorResultTimings, read_executor_result_report_with_timings,
+        write_executor_error_report, write_executor_result_report_with_timings,
     },
     idmap::MbuildIdmap,
     preflight::preflight_ownership_runtime,
@@ -26,6 +26,71 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
+
+/// Result of ownership materialization plus object hashing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnershipHashResult {
+    /// Hash of the materialized object.
+    pub object_hash: ObjectHash,
+    /// Timings reported by the ownership helper.
+    pub timings: OwnershipTimings,
+}
+
+/// Phase timings reported by the ownership helper.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OwnershipTimings {
+    /// Total helper-side time.
+    pub total_ms: u128,
+    /// Time spent resolving and validating manifest entries.
+    pub validate_entries_ms: u128,
+    /// Time spent applying file and directory ownership.
+    pub chown_ms: u128,
+    /// Time spent applying symlink ownership.
+    pub lchown_ms: u128,
+    /// Time spent applying file modes.
+    pub chmod_files_ms: u128,
+    /// Time spent applying directory modes.
+    pub chmod_dirs_ms: u128,
+    /// Time spent validating the materialized entries after mutation.
+    pub validate_applied_ms: u128,
+    /// Time spent serializing the fs-tree manifest for hashing.
+    pub manifest_serialize_ms: u128,
+    /// Time spent hashing the target tree or fs-tree object.
+    pub hash_ms: u128,
+}
+
+impl From<ExecutorResultTimings> for OwnershipTimings {
+    fn from(timings: ExecutorResultTimings) -> Self {
+        Self {
+            total_ms: timings.total_ms,
+            validate_entries_ms: timings.validate_entries_ms,
+            chown_ms: timings.chown_ms,
+            lchown_ms: timings.lchown_ms,
+            chmod_files_ms: timings.chmod_files_ms,
+            chmod_dirs_ms: timings.chmod_dirs_ms,
+            validate_applied_ms: timings.validate_applied_ms,
+            manifest_serialize_ms: timings.manifest_serialize_ms,
+            hash_ms: timings.hash_ms,
+        }
+    }
+}
+
+impl From<OwnershipTimings> for ExecutorResultTimings {
+    fn from(timings: OwnershipTimings) -> Self {
+        Self {
+            total_ms: timings.total_ms,
+            validate_entries_ms: timings.validate_entries_ms,
+            chown_ms: timings.chown_ms,
+            lchown_ms: timings.lchown_ms,
+            chmod_files_ms: timings.chmod_files_ms,
+            chmod_dirs_ms: timings.chmod_dirs_ms,
+            validate_applied_ms: timings.validate_applied_ms,
+            manifest_serialize_ms: timings.manifest_serialize_ms,
+            hash_ms: timings.hash_ms,
+        }
+    }
+}
 
 /// Apply fs-tree owners and modes to an existing directory tree.
 ///
@@ -60,6 +125,20 @@ pub fn apply_ownership_batch_and_hash(
     idmap: &MbuildIdmap,
     workspace: &Path,
 ) -> Result<ObjectHash, RuntimeError> {
+    Ok(
+        apply_ownership_batch_and_hash_with_timings(target_root, manifest, idmap, workspace)?
+            .object_hash,
+    )
+}
+
+/// Apply fs-tree owners and modes, compute the fs object hash, and return
+/// helper-side phase timings.
+pub fn apply_ownership_batch_and_hash_with_timings(
+    target_root: &Path,
+    manifest: &FsTreeManifest,
+    idmap: &MbuildIdmap,
+    workspace: &Path,
+) -> Result<OwnershipHashResult, RuntimeError> {
     let bundle = run_ownership_batch(
         target_root,
         manifest,
@@ -67,12 +146,7 @@ pub fn apply_ownership_batch_and_hash(
         workspace,
         Some(HashReport::TargetRoot),
     )?;
-    read_executor_result_report(bundle.result_log_path())?.ok_or_else(|| {
-        RuntimeError::Executor(format!(
-            "executor result report '{}' is empty",
-            bundle.result_log_path().display()
-        ))
-    })
+    read_ownership_hash_result(bundle.result_log_path())
 }
 
 /// Apply fs-tree owners and modes, then compute the hash of a synthetic
@@ -88,7 +162,24 @@ pub fn apply_ownership_batch_and_hash_fs_tree_object(
     idmap: &MbuildIdmap,
     workspace: &Path,
 ) -> Result<ObjectHash, RuntimeError> {
-    apply_selected_ownership_batch_and_hash_fs_tree_object(
+    Ok(apply_ownership_batch_and_hash_fs_tree_object_with_timings(
+        target_root,
+        manifest,
+        idmap,
+        workspace,
+    )?
+    .object_hash)
+}
+
+/// Apply fs-tree owners and modes, compute the synthetic fs-tree object hash,
+/// and return helper-side phase timings.
+pub fn apply_ownership_batch_and_hash_fs_tree_object_with_timings(
+    target_root: &Path,
+    manifest: &FsTreeManifest,
+    idmap: &MbuildIdmap,
+    workspace: &Path,
+) -> Result<OwnershipHashResult, RuntimeError> {
+    apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
         target_root,
         manifest,
         manifest,
@@ -111,6 +202,27 @@ pub fn apply_selected_ownership_batch_and_hash_fs_tree_object(
     idmap: &MbuildIdmap,
     workspace: &Path,
 ) -> Result<ObjectHash, RuntimeError> {
+    Ok(
+        apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
+            target_root,
+            materialize_manifest,
+            object_manifest,
+            idmap,
+            workspace,
+        )?
+        .object_hash,
+    )
+}
+
+/// Apply selected fs-tree owners and modes, compute the synthetic fs-tree
+/// object hash, and return helper-side phase timings.
+pub fn apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
+    target_root: &Path,
+    materialize_manifest: &FsTreeManifest,
+    object_manifest: &FsTreeManifest,
+    idmap: &MbuildIdmap,
+    workspace: &Path,
+) -> Result<OwnershipHashResult, RuntimeError> {
     let bundle = run_ownership_batch(
         target_root,
         materialize_manifest,
@@ -120,11 +232,19 @@ pub fn apply_selected_ownership_batch_and_hash_fs_tree_object(
             manifest: object_manifest.clone(),
         }),
     )?;
-    read_executor_result_report(bundle.result_log_path())?.ok_or_else(|| {
+    read_ownership_hash_result(bundle.result_log_path())
+}
+
+fn read_ownership_hash_result(path: &Path) -> Result<OwnershipHashResult, RuntimeError> {
+    let result = read_executor_result_report_with_timings(path)?.ok_or_else(|| {
         RuntimeError::Executor(format!(
             "executor result report '{}' is empty",
-            bundle.result_log_path().display()
+            path.display()
         ))
+    })?;
+    Ok(OwnershipHashResult {
+        object_hash: result.object_hash,
+        timings: result.timings.map(Into::into).unwrap_or_default(),
     })
 }
 
@@ -165,6 +285,13 @@ pub(crate) struct OwnershipExecutor {
     error_log_inside: PathBuf,
     result_log_inside: Option<PathBuf>,
     hash_report: Option<HashReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HashComputation {
+    object_hash: ObjectHash,
+    manifest_serialize_ms: u128,
+    hash_ms: u128,
 }
 
 impl OwnershipExecutor {
@@ -210,9 +337,15 @@ impl OwnershipExecutor {
         }
     }
 
-    pub(crate) fn apply(&self) -> Result<Option<ObjectHash>, ExecutorErrorReport> {
-        let entries = self.validate_entries()?;
+    pub(crate) fn apply(&self) -> Result<Option<OwnershipHashResult>, ExecutorErrorReport> {
+        let total_start = Instant::now();
+        let mut timings = OwnershipTimings::default();
 
+        let step_start = Instant::now();
+        let entries = self.validate_entries()?;
+        timings.validate_entries_ms = elapsed_ms(step_start);
+
+        let step_start = Instant::now();
         for entry in &entries {
             match entry.kind {
                 EntryKind::File | EntryKind::Directory => {
@@ -221,19 +354,25 @@ impl OwnershipExecutor {
                 EntryKind::Symlink => {}
             }
         }
+        timings.chown_ms = elapsed_ms(step_start);
 
+        let step_start = Instant::now();
         for entry in &entries {
             if entry.kind == EntryKind::Symlink {
                 lchown_if_needed(&entry.path, entry.uid, entry.gid)?;
             }
         }
+        timings.lchown_ms = elapsed_ms(step_start);
 
+        let step_start = Instant::now();
         for entry in &entries {
             if entry.kind == EntryKind::File {
                 chmod(&entry.path, entry.mode.expect("file entry has mode"))?;
             }
         }
+        timings.chmod_files_ms = elapsed_ms(step_start);
 
+        let step_start = Instant::now();
         let mut directories = entries
             .iter()
             .filter(|entry| entry.kind == EntryKind::Directory)
@@ -244,29 +383,51 @@ impl OwnershipExecutor {
         for entry in directories {
             chmod(&entry.path, entry.mode.expect("directory entry has mode"))?;
         }
+        timings.chmod_dirs_ms = elapsed_ms(step_start);
 
+        let step_start = Instant::now();
         Self::validate_applied_entries(&entries)?;
+        timings.validate_applied_ms = elapsed_ms(step_start);
         if let Some(report) = self.hash_report.as_ref() {
-            self.hash_result(report).map(Some)
+            let hash_result = self.hash_result(report)?;
+            timings.manifest_serialize_ms = hash_result.manifest_serialize_ms;
+            timings.hash_ms = hash_result.hash_ms;
+            timings.total_ms = elapsed_ms(total_start);
+            Ok(Some(OwnershipHashResult {
+                object_hash: hash_result.object_hash,
+                timings,
+            }))
         } else {
             Ok(None)
         }
     }
 
-    fn hash_result(&self, report_kind: &HashReport) -> Result<ObjectHash, ExecutorErrorReport> {
+    fn hash_result(
+        &self,
+        report_kind: &HashReport,
+    ) -> Result<HashComputation, ExecutorErrorReport> {
         match report_kind {
-            HashReport::TargetRoot => hash_path(&self.target_inside).map_err(|error| {
-                report(
-                    "hash",
-                    &self.target_inside,
-                    format!(
-                        "failed to hash fs-tree target '{}': {error}",
-                        self.target_inside.display()
-                    ),
-                    None,
-                )
-            }),
+            HashReport::TargetRoot => {
+                let hash_start = Instant::now();
+                let object_hash = hash_path(&self.target_inside).map_err(|error| {
+                    report(
+                        "hash",
+                        &self.target_inside,
+                        format!(
+                            "failed to hash fs-tree target '{}': {error}",
+                            self.target_inside.display()
+                        ),
+                        None,
+                    )
+                })?;
+                Ok(HashComputation {
+                    object_hash,
+                    manifest_serialize_ms: 0,
+                    hash_ms: elapsed_ms(hash_start),
+                })
+            }
             HashReport::FsTreeObject { manifest } => {
+                let manifest_start = Instant::now();
                 let manifest_bytes = manifest.to_canonical_bytes().map_err(|error| {
                     report(
                         "hash",
@@ -275,16 +436,24 @@ impl OwnershipExecutor {
                         None,
                     )
                 })?;
-                hash_fs_tree_object(&manifest_bytes, &self.target_inside).map_err(|error| {
-                    report(
-                        "hash",
-                        &self.target_inside,
-                        format!(
-                            "failed to hash fs-tree object rooted at '{}': {error}",
-                            self.target_inside.display()
-                        ),
-                        None,
-                    )
+                let manifest_serialize_ms = elapsed_ms(manifest_start);
+                let hash_start = Instant::now();
+                let object_hash = hash_fs_tree_object(&manifest_bytes, &self.target_inside)
+                    .map_err(|error| {
+                        report(
+                            "hash",
+                            &self.target_inside,
+                            format!(
+                                "failed to hash fs-tree object rooted at '{}': {error}",
+                                self.target_inside.display()
+                            ),
+                            None,
+                        )
+                    })?;
+                Ok(HashComputation {
+                    object_hash,
+                    manifest_serialize_ms,
+                    hash_ms: elapsed_ms(hash_start),
                 })
             }
         }
@@ -419,9 +588,13 @@ impl Executor for OwnershipExecutor {
 
     fn exec(&self, _: &Spec) -> Result<(), ExecutorError> {
         match self.apply() {
-            Ok(object_hash) => {
-                if let (Some(path), Some(object_hash)) = (&self.result_log_inside, object_hash) {
-                    write_executor_result_report(path, object_hash)?;
+            Ok(result) => {
+                if let (Some(path), Some(result)) = (&self.result_log_inside, result) {
+                    write_executor_result_report_with_timings(
+                        path,
+                        result.object_hash,
+                        Some(result.timings.into()),
+                    )?;
                 }
                 std::process::exit(0)
             }
@@ -431,6 +604,10 @@ impl Executor for OwnershipExecutor {
             }
         }
     }
+}
+
+fn elapsed_ms(start: Instant) -> u128 {
+    start.elapsed().as_millis()
 }
 
 #[derive(Debug)]
@@ -792,7 +969,9 @@ mod tests {
         .apply()
         .unwrap();
 
-        assert_eq!(got, Some(hash_path(&target).unwrap()));
+        let got = got.unwrap();
+        assert_eq!(got.object_hash, hash_path(&target).unwrap());
+        assert!(got.timings.total_ms >= got.timings.hash_ms);
         assert_mode(target.join("tool"), 0o755);
     }
 
@@ -823,11 +1002,13 @@ mod tests {
         .unwrap();
         let manifest_bytes = manifest.to_canonical_bytes().unwrap();
 
+        let got = got.unwrap();
         assert_eq!(
-            got,
-            Some(hash_fs_tree_object(&manifest_bytes, &target).unwrap())
+            got.object_hash,
+            hash_fs_tree_object(&manifest_bytes, &target).unwrap()
         );
-        assert_ne!(got, Some(hash_path(&target).unwrap()));
+        assert_ne!(got.object_hash, hash_path(&target).unwrap());
+        assert!(got.timings.total_ms >= got.timings.hash_ms);
         assert_mode(target.join("tool"), 0o755);
     }
 

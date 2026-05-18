@@ -32,9 +32,12 @@ mod executor;
 pub use error::{IdmapError, RuntimeError};
 pub use idmap::{MbuildIdmap, cached_host_idmap};
 pub use ownership::{
-    apply_ownership_batch, apply_ownership_batch_and_hash,
+    OwnershipHashResult, OwnershipTimings, apply_ownership_batch, apply_ownership_batch_and_hash,
     apply_ownership_batch_and_hash_fs_tree_object,
+    apply_ownership_batch_and_hash_fs_tree_object_with_timings,
+    apply_ownership_batch_and_hash_with_timings,
     apply_selected_ownership_batch_and_hash_fs_tree_object,
+    apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings,
 };
 pub use sandbox::{
     SandboxBuildConfig, SandboxBuildOutcome, SandboxInput, SandboxRunAs, SandboxStep,
