@@ -104,7 +104,6 @@ Current behavior:
 - directory output currently supports only logical `uid=0,gid=0`; any
   non-root `uid` or `gid` in `install.rules` is rejected until fs-tree owner
   materialization is implemented
-- directory output publishes empty result metadata: `{}`
 - `symlink_mode` is accepted in `install.rules` for config compatibility, but
   symlink modes are not represented in the fs-tree manifest
 - authoring usually starts with one broad `**` rule carrying full defaults, then
@@ -154,10 +153,7 @@ Physical materialization:
 - symlinks are recreated with the same target
 - ownership and modes are materialized and validated against the merged manifest
 
-The realized result payload is one fs-tree directory object. The current realized
-result metadata is empty:
-
-- `{}`
+The realized result payload is one fs-tree directory object.
 
 ## `ErofsRootfs`
 
@@ -211,9 +207,7 @@ Config fields:
 - non-null `label` must be a non-empty string and is passed as `-L <label>`
 
 The realized result payload is one regular file containing an EROFS filesystem
-image. The current realized result metadata is empty:
-
-- `{}`
+image.
 
 ## Current Limitations
 

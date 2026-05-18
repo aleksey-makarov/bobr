@@ -2,8 +2,7 @@ use crate::builders;
 use crate::origins;
 use crate::runtime::{RuntimeError, map_store_error};
 use mbuild_core::{
-    BuildKey, BuilderSpec, ObjectHash, ParsedOrigin, ResultId, compute_build_key,
-    compute_meta_hash, compute_result_id,
+    BuildKey, BuilderSpec, ObjectHash, ParsedOrigin, ResultId, compute_build_key, compute_result_id,
 };
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -68,7 +67,6 @@ pub struct SourceRecipe {
     name: String,
     object_hash: ObjectHash,
     origin: Option<Box<dyn ParsedOrigin>>,
-    meta: Map<String, Value>,
 }
 
 impl RecipeEnvelope {
@@ -107,7 +105,6 @@ pub(crate) struct PlannedSourceRecipe {
     pub(crate) name: String,
     pub(crate) object_hash: ObjectHash,
     pub(crate) origin: Option<Box<dyn ParsedOrigin>>,
-    pub(crate) meta: Map<String, Value>,
     pub(crate) result_id: ResultId,
 }
 
@@ -233,15 +230,12 @@ fn collect_graph_inner(
             collect_builder_recipe(request, recipe, nodes, stack, node_keys, topo_order)?
         }
         Recipe::Source(recipe) => {
-            let meta_hash = compute_meta_hash(&recipe.meta).map_err(map_store_error)?;
-            let result_id =
-                compute_result_id(recipe.object_hash, meta_hash).map_err(map_store_error)?;
+            let result_id = compute_result_id(recipe.object_hash).map_err(map_store_error)?;
             let key = source_planning_key(result_id)?;
             let planned = PlannedRecipe::Source(PlannedSourceRecipe {
                 name: recipe.name.clone(),
                 object_hash: recipe.object_hash,
                 origin: recipe.origin.clone(),
-                meta: recipe.meta.clone(),
                 result_id,
             });
             (key, planned)
@@ -546,12 +540,6 @@ fn parse_source_recipe(mut object: Map<String, Value>, path: &str) -> Result<Rec
         )?),
         None => None,
     };
-    let meta = object
-        .remove("meta")
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: missing required field 'meta'")))?
-        .as_object()
-        .cloned()
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}.meta: expected object")))?;
     if !object.is_empty() {
         return Err(RuntimeError::RecipeLoad(format!(
             "{path}: unexpected fields: {}",
@@ -563,7 +551,6 @@ fn parse_source_recipe(mut object: Map<String, Value>, path: &str) -> Result<Rec
         name,
         object_hash,
         origin,
-        meta,
     }))
 }
 
@@ -671,8 +658,7 @@ mod tests {
                     "type": "path",
                     "path": "source.tar",
                     "mode": "tar"
-                },
-                "meta": {}
+                }
             }
         });
         let (graph, nodes) = collect_one(&request).unwrap();
@@ -681,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn source_missing_meta_is_rejected() {
+    fn source_with_origin_is_accepted() {
         let request = json!({
             "root": {
                 "name": "local-source",
@@ -694,11 +680,9 @@ mod tests {
                 }
             }
         });
-        let error = collect_one(&request).unwrap_err();
-        assert!(
-            error.to_string().contains("missing required field 'meta'"),
-            "{error}"
-        );
+        let (graph, nodes) = collect_one(&request).unwrap();
+        let node = nodes.get(&graph.root_key).unwrap();
+        assert!(matches!(node.recipe, PlannedRecipe::Source(_)));
     }
 
     #[test]
@@ -707,8 +691,7 @@ mod tests {
             "root": {
                 "name": "local-source",
                 "tag": "Source",
-                "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
-                "meta": {}
+                "object_hash": "1111111111111111111111111111111111111111111111111111111111111111"
             }
         });
         let (graph, nodes) = collect_one(&request).unwrap();
@@ -730,8 +713,7 @@ mod tests {
                     "type": "oci-registry",
                     "image": "docker.io/library/alpine:3.20",
                     "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                },
-                "meta": {}
+                }
             }
         });
         let (graph, nodes) = collect_one(&request).unwrap();
@@ -753,8 +735,7 @@ mod tests {
                     "type": "path",
                     "path": "/tmp/source.tar",
                     "mode": "tar"
-                },
-                "meta": {}
+                }
             }
         });
         let error = collect_one(&request).unwrap_err();
@@ -775,8 +756,7 @@ mod tests {
                     "type": "path",
                     "path": "../source.tar",
                     "mode": "tar"
-                },
-                "meta": {}
+                }
             }
         });
         let error = collect_one(&request).unwrap_err();
@@ -792,8 +772,7 @@ mod tests {
             "root": {
                 "name": "local-source",
                 "tag": "Source",
-                "object_hash": "1111111111111111111111111111111111111111111111111111111111111111\n",
-                "meta": {}
+                "object_hash": "1111111111111111111111111111111111111111111111111111111111111111\n"
             }
         });
         let (graph, nodes) = collect_one(&request).unwrap();
@@ -903,8 +882,7 @@ mod tests {
                 "type": "http",
                 "url": "https://example.invalid/source.tar.gz",
                 "unpack": true
-            },
-            "meta": {}
+            }
         });
         let request = json!({
             "root": {
@@ -930,7 +908,6 @@ mod tests {
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                     .parse()
                     .unwrap(),
-                compute_meta_hash(source["meta"].as_object().unwrap()).unwrap(),
             )
             .unwrap(),
         )

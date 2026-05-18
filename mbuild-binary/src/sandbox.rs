@@ -97,7 +97,6 @@ impl TypedBuilder for SandboxBuilder {
             stage_fs_tree_output(cx, &output_path, &outcome.manifest).map_err(map_error)?;
 
         Ok(StagedBuildResult {
-            meta: Map::new(),
             staged_path,
             object_hash: Some(outcome.object_hash),
         })
@@ -447,13 +446,11 @@ mod tests {
         std::fs::create_dir_all(&cx.temp_dir).unwrap();
         let rootfs_input = BuilderInputObject {
             object_path: rootfs,
-            meta: Map::new(),
         };
         let inputs = vec![(
             "source".to_string(),
             BuilderInputObject {
                 object_path: source.clone(),
-                meta: Map::new(),
             },
         )];
         let step = BuildStep {
@@ -496,13 +493,11 @@ mod tests {
         std::fs::create_dir_all(&cx.temp_dir).unwrap();
         let rootfs_input = BuilderInputObject {
             object_path: rootfs,
-            meta: Map::new(),
         };
         let inputs = vec![(
             "source".to_string(),
             BuilderInputObject {
                 object_path: source,
-                meta: Map::new(),
             },
         )];
         let step = BuildStep {

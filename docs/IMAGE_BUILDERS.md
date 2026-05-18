@@ -30,8 +30,7 @@ Imported registry images use a `Source` node like this:
     "type": "oci-registry",
     "image": "docker.io/library/buildpack-deps:bookworm",
     "digest": "sha256:<pinned manifest-or-index digest>"
-  },
-  "meta": {}
+  }
 }
 ```
 
@@ -46,7 +45,6 @@ Current behavior:
 - writes the result to the staged object path as an OCI image layout directory
 - writes `index.json` without image-ref annotations, so the canonical object is
   independent of the registry mirror named by `origin.image`
-- stores no image-specific metadata in the canonical `Source` result record
 
 `Source/oci-registry` currently targets `linux/amd64` only.
 
@@ -75,7 +73,7 @@ Current behavior:
   and `bootstrap` otherwise
 - extra inputs are consumed in lexical input name order
 - the realized payload is an OCI layout directory
-- result metadata contains `manifest_digest`
+- the image manifest digest is recorded inside the OCI layout `index.json`
 
 ## `OciExtract`
 

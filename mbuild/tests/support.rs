@@ -61,7 +61,6 @@ fn normalize_request(recipe: &Value) -> Value {
                 .get("object_hash")
                 .cloned()
                 .expect("source recipe node must have object_hash");
-            let meta = object.get("meta").cloned().unwrap_or_else(|| json!({}));
             let mut source_node = serde_json::Map::new();
             source_node.insert("name".to_string(), name);
             source_node.insert("tag".to_string(), tag);
@@ -69,7 +68,6 @@ fn normalize_request(recipe: &Value) -> Value {
             if let Some(origin) = object.get("origin").cloned() {
                 source_node.insert("origin".to_string(), origin);
             }
-            source_node.insert("meta".to_string(), meta);
             nodes.insert(id.clone(), Value::Object(source_node));
             return id;
         }
@@ -324,8 +322,7 @@ pub fn base_image_recipe(image: &str, digest: &str, object_hash: &str) -> Value 
             "type": "oci-registry",
             "image": image,
             "digest": digest,
-        },
-        "meta": {}
+        }
     })
 }
 
@@ -342,8 +339,7 @@ pub fn source_recipe(url: &str, source_hash: &str) -> Value {
             "type": "http",
             "url": url,
             "unpack": true,
-        },
-        "meta": {}
+        }
     })
 }
 

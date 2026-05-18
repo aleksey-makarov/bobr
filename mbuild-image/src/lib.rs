@@ -8,7 +8,7 @@ use mbuild_core::{
 use mbuild_origin_oci_registry::oci;
 pub use oci_extract::{OciExtractBuilder, OciExtractConfig};
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::fmt;
 use std::fs;
 use std::path::Path;
@@ -93,7 +93,7 @@ impl TypedBuilder for ImageBuilder {
             .map_err(map_image_error)?;
 
         let ref_name = config.ref_name.as_deref();
-        let manifest_digest = match mode {
+        match mode {
             "bootstrap" => {
                 run_bootstrap_mode(&staged_path, &binaries, ref_name).map_err(map_image_error)?
             }
@@ -105,14 +105,7 @@ impl TypedBuilder for ImageBuilder {
             _ => unreachable!(),
         };
 
-        let mut meta = Map::new();
-        meta.insert(
-            "manifest_digest".to_string(),
-            Value::String(manifest_digest),
-        );
-
         Ok(StagedBuildResult {
-            meta,
             staged_path,
             object_hash: None,
         })
@@ -388,17 +381,13 @@ mod tests {
         let object_path = root.join(name);
         fs::create_dir_all(&object_path).unwrap();
         fs::write(object_path.join("README.txt"), b"hello image\n").unwrap();
-        BuilderInputObject {
-            object_path,
-            meta: Map::new(),
-        }
+        BuilderInputObject { object_path }
     }
 
     fn resolved_base_image(root: &Path) -> BuilderInputObject {
         let oci_dir = create_test_oci_layout(root, "base-image");
         BuilderInputObject {
             object_path: oci_dir,
-            meta: Map::new(),
         }
     }
 
@@ -420,15 +409,9 @@ mod tests {
             )
             .unwrap();
 
-        assert!(
-            result.meta.contains_key("manifest_digest"),
-            "{:?}",
-            result.meta
-        );
-        let digest = result.meta["manifest_digest"].as_str().unwrap();
-        assert!(digest.starts_with("sha256:"));
         assert!(result.staged_path.join("oci-layout").exists());
         assert!(result.staged_path.join("index.json").exists());
+        assert_index_manifest_digest(&result.staged_path);
     }
 
     #[test]
@@ -451,10 +434,16 @@ mod tests {
             )
             .unwrap();
 
-        let digest = result.meta["manifest_digest"].as_str().unwrap();
-        assert!(digest.starts_with("sha256:"));
         assert!(result.staged_path.join("oci-layout").exists());
         assert!(result.staged_path.join("index.json").exists());
+        assert_index_manifest_digest(&result.staged_path);
+    }
+
+    fn assert_index_manifest_digest(staged_path: &Path) {
+        let index: Value =
+            serde_json::from_slice(&fs::read(staged_path.join("index.json")).unwrap()).unwrap();
+        let digest = index["manifests"][0]["digest"].as_str().unwrap();
+        assert!(digest.starts_with("sha256:"));
     }
 
     #[test]
@@ -468,7 +457,6 @@ mod tests {
 
         let base = BuilderInputObject {
             object_path: base_oci,
-            meta: Map::new(),
         };
         let mut inputs = BuilderInputs::empty();
         inputs.insert("base", base);
@@ -499,7 +487,6 @@ mod tests {
         fs::create_dir(&bad_base).unwrap();
         let base = BuilderInputObject {
             object_path: bad_base,
-            meta: Map::new(),
         };
         let mut inputs = BuilderInputs::empty();
         inputs.insert("base", base);

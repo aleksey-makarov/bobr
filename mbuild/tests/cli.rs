@@ -33,8 +33,7 @@ fn cli_reads_recipe_from_stdin_when_path_is_omitted() {
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let build: RealizedResult = serde_json::from_str(&stdout).unwrap();
-    assert!(build.meta.is_empty());
+    let _build: RealizedResult = serde_json::from_str(&stdout).unwrap();
     assert!(stderr.contains("[start] Text stdin-recipe"), "{stderr}");
     assert!(stderr.contains("[done] Text stdin-recipe"), "{stderr}");
 }
@@ -57,8 +56,7 @@ fn cli_accepts_explicit_recipe_path() {
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let build: RealizedResult = serde_json::from_str(&stdout).unwrap();
-    assert!(build.meta.is_empty());
+    let _build: RealizedResult = serde_json::from_str(&stdout).unwrap();
     assert!(stderr.contains("[start] Text custom-recipe"), "{stderr}");
 }
 
@@ -81,8 +79,7 @@ fn cli_quiet_suppresses_live_progress() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let build: RealizedResult = serde_json::from_str(&stdout).unwrap();
-    assert!(build.meta.is_empty());
+    let _build: RealizedResult = serde_json::from_str(&stdout).unwrap();
 }
 
 #[test]
@@ -252,7 +249,6 @@ fn cli_reports_relative_local_path() {
                         "path": "payload.txt",
                         "mode": "direct"
                     },
-                    "meta": {}
                 }
             }
         }))
@@ -294,7 +290,6 @@ fn cli_reports_missing_local_only_when_source_path_materializes() {
                         "path": "payload.txt",
                         "mode": "direct"
                     },
-                    "meta": {}
                 }
             }
         }))

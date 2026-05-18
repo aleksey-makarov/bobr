@@ -7,7 +7,7 @@ use mbuild_core::{
 };
 use mbuild_origin_oci_registry::oci::{self, OciDescriptor, OciManifest};
 use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -114,7 +114,6 @@ impl OciExtractBuilder {
 
         Ok(StagedBuildResult {
             staged_path: staged,
-            meta: Map::new(),
             object_hash: Some(object_hash),
         })
     }
@@ -1173,13 +1172,7 @@ mod tests {
         let tar = make_tar(|builder| append_file(builder, "bin/tool", b"tool", 0, 0, 0o755));
         let oci = create_oci_layout(temp.path(), vec![(oci::MEDIA_TYPE_OCI_LAYER, gzip(&tar))]);
         let mut inputs = BuilderInputs::empty();
-        inputs.insert(
-            "image",
-            BuilderInputObject {
-                object_path: oci,
-                meta: Map::new(),
-            },
-        );
+        inputs.insert("image", BuilderInputObject { object_path: oci });
 
         let result = OciExtractBuilder
             .build_with_materializer(
@@ -1189,8 +1182,6 @@ mod tests {
                 &CurrentOwnerMaterializer,
             )
             .unwrap();
-
-        assert!(result.meta.is_empty());
         assert!(result.staged_path.join("manifest.jsonl").is_file());
         assert!(result.staged_path.join("root/bin/tool").is_file());
         assert!(result.staged_path.join("oci-config.json").is_file());
@@ -1204,13 +1195,7 @@ mod tests {
         let tar = make_tar(|builder| append_dir(builder, "private", 0, 0, 0o000));
         let oci = create_oci_layout(temp.path(), vec![(oci::MEDIA_TYPE_OCI_LAYER, gzip(&tar))]);
         let mut inputs = BuilderInputs::empty();
-        inputs.insert(
-            "image",
-            BuilderInputObject {
-                object_path: oci,
-                meta: Map::new(),
-            },
-        );
+        inputs.insert("image", BuilderInputObject { object_path: oci });
 
         let result = OciExtractBuilder
             .build_with_materializer(
@@ -1234,7 +1219,6 @@ mod tests {
             "image",
             BuilderInputObject {
                 object_path: create_oci_layout(temp.path(), vec![]),
-                meta: Map::new(),
             },
         );
 

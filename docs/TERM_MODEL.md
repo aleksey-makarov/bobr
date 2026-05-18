@@ -71,7 +71,6 @@ Children are always referenced by node id.
 - `tag = "Source"`
 - `object_hash`
 - optional `origin`
-- `meta`
 
 `Source` does not have `config` or `inputs`.
 
@@ -89,12 +88,9 @@ In v1, `Source` supports:
 - `origin.digest` as the pinned manifest or index digest
 - manifest lists and OCI indexes resolve to the `linux/amd64` manifest only
 
-`Source.meta.install` is ordinary source metadata used for installable
-directory outputs.
-
 If `origin` is omitted, the payload object must already exist in the store.
 If the canonical result record is missing, Rust reconstructs it from the
-recipe metadata.
+declared object hash.
 
 ## Build Identity
 
@@ -120,12 +116,10 @@ It does not follow the order of fields in JSON.
 Each direct input identity contains:
 
 - `object_hash`
-- `meta_hash`
 
 `result_id` is computed from:
 
 - `object_hash`
-- `meta_hash`
 
 `build_key` is the builder invocation identity.
 `reuse_key` is the builder-only canonical reuse identity that can be computed
@@ -149,21 +143,20 @@ to realize the root.
 
 For each `Source` node, Rust:
 
-1. computes `meta_hash`
-2. computes `result_id` from `object_hash + meta_hash`
-3. checks `<store>/results/<result_id>.json`
-4. if `origin` is missing and the result record is absent, checks whether
+1. computes `result_id` from `object_hash`
+2. checks `<store>/results/<result_id>.json`
+3. if `origin` is missing and the result record is absent, checks whether
    `<store>/objects/<object_hash>` already exists
-5. if the object exists, reconstructs the missing canonical result record from
-   `object_hash + meta`
-6. if `origin.type = "path"` is present, resolves `origin.path` against
+4. if the object exists, reconstructs the missing canonical result record from
+   `object_hash`
+5. if `origin.type = "path"` is present, resolves `origin.path` against
    `paths.local`
-7. if `origin.type = "http"` is present, downloads from `origin.url` in order
+6. if `origin.type = "http"` is present, downloads from `origin.url` in order
    and either stages one file object or unpacks one directory object
-8. imports the staged object into `objects/<actual_hash>`
-9. if `actual_hash != object_hash`, fails without writing the canonical
+7. imports the staged object into `objects/<actual_hash>`
+8. if `actual_hash != object_hash`, fails without writing the canonical
    result record and reports the actual hash
-10. otherwise writes the canonical result record for `object_hash + meta`
+9. otherwise writes the canonical result record for `object_hash`
 
 Execution then proceeds bottom-up:
 
@@ -185,7 +178,6 @@ Rust builders still receive:
 
 - builder config payload
 - resolved input payload paths
-- resolved input metadata records
 
 They do not receive unresolved recipe nodes.
 
@@ -194,19 +186,15 @@ contracts are described in [`IMAGE_BUILDERS.md`](./IMAGE_BUILDERS.md). The
 current filesystem composition builder contract is described in
 [`ROOTFS_BUILDERS.md`](./ROOTFS_BUILDERS.md).
 
-Builders may use both the realized payload content and the resolved input
-metadata they receive. Input validation is builder-specific and is based on
-named input semantics plus payload inspection.
+Builders may use the realized payload content of resolved inputs. Input
+validation is builder-specific and is based on named input semantics plus
+payload inspection.
 
 Builder semantics depend only on:
 
 - builder tag
 - builder config
 - realized payload content of direct inputs
-- resolved metadata of direct inputs
-
-Direct input metadata participates in builder reuse identity through direct
-input `meta_hash` values.
 
 ## CLI Contract
 

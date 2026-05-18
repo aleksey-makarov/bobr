@@ -16,17 +16,17 @@ use time::UtcOffset;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 
-const RESULT_SCHEMA: &str = "mbuild-result-v3";
+const RESULT_SCHEMA: &str = "mbuild-result-v4";
 #[cfg(test)]
 const BUILD_SCHEMA: &str = RESULT_SCHEMA;
 const INVOCATION_SCHEMA: &str = "mbuild-build-invocation-v1";
-const RESULT_INVOCATION_SCHEMA: &str = "mbuild-build-result-invocation-v2";
+const RESULT_INVOCATION_SCHEMA: &str = "mbuild-build-result-invocation-v3";
 const OBJECTS_DIR: &str = "objects";
 const BUILDS_DIR: &str = "builds";
 const RESULTS_DIR: &str = "results";
 const REUSES_DIR: &str = "reuses";
 const OBJECT_REFS_DIR: &str = "object-refs";
-const META_REFS_DIR: &str = "meta-refs";
+const RESULT_REFS_DIR: &str = "result-refs";
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BuildKey([u8; 32]);
@@ -184,58 +184,6 @@ impl<'de> Deserialize<'de> for BuildKey {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct MetaHash([u8; 32]);
-
-impl MetaHash {
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    pub fn to_hex(&self) -> String {
-        let mut out = String::with_capacity(64);
-        for byte in self.0 {
-            use fmt::Write as _;
-            let _ = write!(&mut out, "{byte:02x}");
-        }
-        out
-    }
-}
-
-impl fmt::Display for MetaHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Debug for MetaHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("MetaHash").field(&self.to_hex()).finish()
-    }
-}
-
-impl Serialize for MetaHash {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for MetaHash {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        value.parse().map_err(serde::de::Error::custom)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseBuildKeyError {
     InvalidLength,
@@ -248,47 +196,6 @@ impl fmt::Display for ParseBuildKeyError {
             Self::InvalidLength => f.write_str("hash must contain 64 lowercase hex digits"),
             Self::InvalidHex => f.write_str("hash must contain only lowercase hex digits"),
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ParseMetaHashError {
-    InvalidLength,
-    InvalidHex,
-}
-
-impl fmt::Display for ParseMetaHashError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidLength => f.write_str("hash must contain 64 lowercase hex digits"),
-            Self::InvalidHex => f.write_str("hash must contain only lowercase hex digits"),
-        }
-    }
-}
-
-impl std::error::Error for ParseMetaHashError {}
-
-impl FromStr for MetaHash {
-    type Err = ParseMetaHashError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.len() != 64 {
-            return Err(ParseMetaHashError::InvalidLength);
-        }
-        if !s
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err(ParseMetaHashError::InvalidHex);
-        }
-
-        let mut bytes = [0u8; 32];
-        for (idx, chunk) in s.as_bytes().chunks_exact(2).enumerate() {
-            let hi = decode_nibble(chunk[0]).ok_or(ParseMetaHashError::InvalidHex)?;
-            let lo = decode_nibble(chunk[1]).ok_or(ParseMetaHashError::InvalidHex)?;
-            bytes[idx] = (hi << 4) | lo;
-        }
-        Ok(Self(bytes))
     }
 }
 
@@ -373,7 +280,7 @@ pub struct StoreLayout {
     pub reuses: PathBuf,
     pub results: PathBuf,
     pub object_refs: PathBuf,
-    pub meta_refs: PathBuf,
+    pub result_refs: PathBuf,
 }
 
 impl StoreLayout {
@@ -385,7 +292,7 @@ impl StoreLayout {
             reuses: root.join(REUSES_DIR),
             results: root.join(RESULTS_DIR),
             object_refs: root.join(OBJECT_REFS_DIR),
-            meta_refs: root.join(META_REFS_DIR),
+            result_refs: root.join(RESULT_REFS_DIR),
         };
         layout.ensure()?;
         Ok(layout)
@@ -404,7 +311,7 @@ impl StoreLayout {
         ensure_dir(&self.reuses, "reuses")?;
         ensure_dir(&self.results, "results")?;
         ensure_dir(&self.object_refs, "object-refs")?;
-        ensure_dir(&self.meta_refs, "meta-refs")?;
+        ensure_dir(&self.result_refs, "result-refs")?;
         Ok(())
     }
 }
@@ -417,7 +324,6 @@ pub struct PublishOutputRequest {
     pub created_at: String,
     pub staged_path: PathBuf,
     pub inputs: Vec<ResultInputIdentity>,
-    pub meta: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -467,7 +373,6 @@ pub fn publish_output(
     }
 
     let staged = StagedBuildResult {
-        meta: request.meta,
         staged_path: request.staged_path,
         object_hash: None,
     };
@@ -527,10 +432,6 @@ pub fn compute_reuse_key(
                 "object_hash".to_string(),
                 Value::String(input.object_hash.to_string()),
             );
-            object.insert(
-                "meta_hash".to_string(),
-                Value::String(input.meta_hash.to_string()),
-            );
             Value::Object(object)
         })
         .collect::<Vec<_>>();
@@ -551,31 +452,19 @@ pub fn compute_reuse_key(
     Ok(ReuseKey(Sha256::digest(&canonical).into()))
 }
 
-pub fn compute_result_id(
-    object_hash: ObjectHash,
-    meta_hash: MetaHash,
-) -> Result<ResultId, CasError> {
+pub fn compute_result_id(object_hash: ObjectHash) -> Result<ResultId, CasError> {
     let mut root = Map::new();
     root.insert(
         "schema".to_string(),
-        Value::String("mbuild-result-id-v1".to_string()),
+        Value::String("mbuild-result-id-v2".to_string()),
     );
     root.insert(
         "object_hash".to_string(),
         Value::String(object_hash.to_string()),
     );
-    root.insert(
-        "meta_hash".to_string(),
-        Value::String(meta_hash.to_string()),
-    );
 
     let canonical = canonical_json_bytes(&Value::Object(root))?;
     Ok(ResultId(Sha256::digest(&canonical).into()))
-}
-
-pub fn compute_meta_hash(meta: &Map<String, Value>) -> Result<MetaHash, CasError> {
-    let canonical = canonical_json_bytes(&Value::Object(meta.clone()))?;
-    Ok(MetaHash(Sha256::digest(&canonical).into()))
 }
 
 pub fn load_public_build(
@@ -594,15 +483,12 @@ pub fn materialize_build(
     staged: StagedBuildResult,
 ) -> Result<PublishedBuild, CasError> {
     let object_hash = import_object_with_hash(layout, &staged.staged_path, staged.object_hash)?;
-    let meta_hash = compute_meta_hash(&staged.meta)?;
-    let result_id = compute_result_id(object_hash, meta_hash)?;
+    let result_id = compute_result_id(object_hash)?;
     let result = ResultRecord {
         result_id,
         object_hash,
-        meta_hash,
         created_at: Some(created_at.to_string()),
         inputs,
-        meta: staged.meta,
     };
     store_result_record(layout, &result)?;
     store_reuse_ref(layout, reuse_key, result_id)?;
@@ -623,7 +509,7 @@ pub fn publish_result_refs(
 ) -> Result<(), CasError> {
     validate_output_name(output_name)?;
 
-    let current_meta_ref_path = layout.meta_refs.join(format!("{output_name}.json"));
+    let current_result_ref_path = layout.result_refs.join(format!("{output_name}.json"));
     let current_object_ref_path = layout.object_refs.join(output_name);
 
     if let Some(current) = load_current_publication(layout, output_name)? {
@@ -631,10 +517,10 @@ pub fn publish_result_refs(
             let generation_name =
                 allocate_generation_name(layout, output_name, &generation_suffix(&current)?)?;
 
-            if let Some(target) = current.meta_target {
+            if let Some(target) = current.result_target {
                 create_generation_ref(
                     &target,
-                    &layout.meta_refs.join(format!("{generation_name}.json")),
+                    &layout.result_refs.join(format!("{generation_name}.json")),
                 )?;
             }
             if let Some(target) = current.object_target {
@@ -646,10 +532,10 @@ pub fn publish_result_refs(
     let object_ref_target = object_ref_target_for_result(result)?;
     replace_symlink(&object_ref_target, &current_object_ref_path)?;
 
-    let meta_ref_target = PathBuf::from("..")
+    let result_ref_target = PathBuf::from("..")
         .join(RESULTS_DIR)
         .join(format!("{}.json", result.result_id.to_hex()));
-    replace_symlink(&meta_ref_target, &current_meta_ref_path)?;
+    replace_symlink(&result_ref_target, &current_result_ref_path)?;
     Ok(())
 }
 
@@ -825,9 +711,7 @@ fn build_from_result(build_key: BuildKey, result: &ResultRecord) -> Build {
         build_key,
         result_id: result.result_id,
         object_hash: result.object_hash,
-        meta_hash: result.meta_hash,
         created_at: result.created_at.clone(),
-        meta: result.meta.clone(),
     }
 }
 
@@ -897,9 +781,7 @@ fn result_json_value(
     result_id: ResultId,
     created_at: Option<&str>,
     object_hash: ObjectHash,
-    meta_hash: MetaHash,
     inputs: &[ResultInputIdentity],
-    meta: Map<String, Value>,
 ) -> Value {
     let input_values = inputs
         .iter()
@@ -908,10 +790,6 @@ fn result_json_value(
             object.insert(
                 "object_hash".to_string(),
                 Value::String(input.object_hash.to_string()),
-            );
-            object.insert(
-                "meta_hash".to_string(),
-                Value::String(input.meta_hash.to_string()),
             );
             Value::Object(object)
         })
@@ -936,12 +814,7 @@ fn result_json_value(
         "object_hash".to_string(),
         Value::String(object_hash.to_string()),
     );
-    root.insert(
-        "meta_hash".to_string(),
-        Value::String(meta_hash.to_string()),
-    );
     root.insert("inputs".to_string(), Value::Array(input_values));
-    root.insert("meta".to_string(), Value::Object(meta));
     Value::Object(root)
 }
 
@@ -950,9 +823,7 @@ fn result_record_json_value(record: &ResultRecord) -> Value {
         record.result_id,
         record.created_at.as_deref(),
         record.object_hash,
-        record.meta_hash,
         &record.inputs,
-        record.meta.clone(),
     )
 }
 
@@ -961,11 +832,9 @@ fn build_json_value(
     result_id: ResultId,
     created_at: Option<&str>,
     object_hash: ObjectHash,
-    meta_hash: MetaHash,
     inputs: &[ResultInputIdentity],
-    meta: Map<String, Value>,
 ) -> Value {
-    result_json_value(result_id, created_at, object_hash, meta_hash, inputs, meta)
+    result_json_value(result_id, created_at, object_hash, inputs)
 }
 
 fn parse_result_record_value(result_id: ResultId, value: &Value) -> Result<ResultRecord, CasError> {
@@ -1013,12 +882,6 @@ fn parse_result_record_value(result_id: ResultId, value: &Value) -> Result<Resul
         })
         .and_then(parse_object_hash_result)?;
 
-    let meta_hash = object
-        .get("meta_hash")
-        .and_then(Value::as_str)
-        .ok_or_else(|| CasError::Serialization("result record is missing 'meta_hash'".to_string()))
-        .and_then(parse_meta_hash_result)?;
-
     let inputs = object
         .get("inputs")
         .and_then(Value::as_array)
@@ -1037,35 +900,15 @@ fn parse_result_record_value(result_id: ResultId, value: &Value) -> Result<Resul
                     )
                 })
                 .and_then(parse_object_hash_result)?;
-            let meta_hash = object
-                .get("meta_hash")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    CasError::Serialization(
-                        "result record input is missing 'meta_hash'".to_string(),
-                    )
-                })
-                .and_then(parse_meta_hash_result)?;
-            Ok(ResultInputIdentity {
-                object_hash,
-                meta_hash,
-            })
+            Ok(ResultInputIdentity { object_hash })
         })
         .collect::<Result<Vec<_>, _>>()?;
-
-    let meta = object
-        .get("meta")
-        .and_then(Value::as_object)
-        .ok_or_else(|| CasError::Serialization("result record is missing 'meta'".to_string()))?
-        .clone();
 
     Ok(ResultRecord {
         result_id,
         object_hash,
-        meta_hash,
         created_at,
         inputs,
-        meta,
     })
 }
 
@@ -1073,14 +916,6 @@ fn parse_object_hash_result(value: &str) -> Result<ObjectHash, CasError> {
     value.parse::<ObjectHash>().map_err(|error| {
         CasError::Serialization(format!(
             "invalid object hash '{value}' in build record: {error}"
-        ))
-    })
-}
-
-fn parse_meta_hash_result(value: &str) -> Result<MetaHash, CasError> {
-    value.parse::<MetaHash>().map_err(|error| {
-        CasError::Serialization(format!(
-            "invalid meta hash '{value}' in build record: {error}"
         ))
     })
 }
@@ -1173,7 +1008,7 @@ fn validate_output_name(name: &str) -> Result<(), CasError> {
 struct CurrentPublication {
     result: ResultRecord,
     result_path: PathBuf,
-    meta_target: Option<PathBuf>,
+    result_target: Option<PathBuf>,
     object_target: Option<PathBuf>,
 }
 
@@ -1181,39 +1016,39 @@ fn load_current_publication(
     layout: &StoreLayout,
     output_name: &str,
 ) -> Result<Option<CurrentPublication>, CasError> {
-    let meta_ref_path = layout.meta_refs.join(format!("{output_name}.json"));
-    if !meta_ref_path.exists() && !meta_ref_path.is_symlink() {
+    let result_ref_path = layout.result_refs.join(format!("{output_name}.json"));
+    if !result_ref_path.exists() && !result_ref_path.is_symlink() {
         return Ok(None);
     }
 
-    let meta_target = fs::read_link(&meta_ref_path).map_err(|error| {
+    let result_target = fs::read_link(&result_ref_path).map_err(|error| {
         CasError::Io(format!(
-            "failed to read current meta ref '{}': {error}",
-            meta_ref_path.display()
+            "failed to read current result ref '{}': {error}",
+            result_ref_path.display()
         ))
     })?;
-    let meta_file_name = meta_target
+    let result_file_name = result_target
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
             CasError::Serialization(format!(
-                "current meta ref '{}' points to invalid target '{}'",
-                meta_ref_path.display(),
-                meta_target.display()
+                "current result ref '{}' points to invalid target '{}'",
+                result_ref_path.display(),
+                result_target.display()
             ))
         })?;
-    let result_id_str = meta_file_name.strip_suffix(".json").ok_or_else(|| {
+    let result_id_str = result_file_name.strip_suffix(".json").ok_or_else(|| {
         CasError::Serialization(format!(
-            "current meta ref '{}' points to invalid result target '{}'",
-            meta_ref_path.display(),
-            meta_target.display()
+            "current result ref '{}' points to invalid result target '{}'",
+            result_ref_path.display(),
+            result_target.display()
         ))
     })?;
     let result_id = parse_result_id_result(result_id_str)?;
     let result = load_result_record(layout, result_id)?.ok_or_else(|| {
         CasError::Serialization(format!(
-            "current meta ref '{}' points to missing result '{}'",
-            meta_ref_path.display(),
+            "current result ref '{}' points to missing result '{}'",
+            result_ref_path.display(),
             result_id
         ))
     })?;
@@ -1233,7 +1068,7 @@ fn load_current_publication(
     Ok(Some(CurrentPublication {
         result_path: result_path(layout, result.result_id),
         result,
-        meta_target: Some(meta_target),
+        result_target: Some(result_target),
         object_target,
     }))
 }
@@ -1290,10 +1125,10 @@ fn allocate_generation_name(
         } else {
             format!("{output_name}.{suffix}.{counter}")
         };
-        let meta_path = layout.meta_refs.join(format!("{candidate}.json"));
+        let result_path = layout.result_refs.join(format!("{candidate}.json"));
         let object_path = layout.object_refs.join(&candidate);
-        if !(meta_path.exists()
-            || meta_path.is_symlink()
+        if !(result_path.exists()
+            || result_path.is_symlink()
             || object_path.exists()
             || object_path.is_symlink())
         {
@@ -1428,85 +1263,25 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
-    fn with_kind(_kind: &str, meta: Map<String, Value>) -> Map<String, Value> {
-        meta
-    }
-
     #[test]
     fn canonical_json_hash_is_stable_across_key_order() {
         let object_hash =
             parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
-        let mut meta_a = Map::new();
-        meta_a.insert("z".to_string(), Value::from(1));
-        meta_a.insert("a".to_string(), Value::from(true));
-        let meta_hash_a = compute_meta_hash(&meta_a).unwrap();
-        let result_id_a = compute_result_id(object_hash, meta_hash_a).unwrap();
-        let left = build_json_value(
-            result_id_a,
-            Some(sample_created_at()),
-            object_hash,
-            meta_hash_a,
-            &[],
-            meta_a,
-        );
-
-        let mut meta_b = Map::new();
-        meta_b.insert("a".to_string(), Value::from(true));
-        meta_b.insert("z".to_string(), Value::from(1));
-        let meta_hash_b = compute_meta_hash(&meta_b).unwrap();
-        let result_id_b = compute_result_id(object_hash, meta_hash_b).unwrap();
-        let right = build_json_value(
-            result_id_b,
-            Some(sample_created_at()),
-            object_hash,
-            meta_hash_b,
-            &[],
-            meta_b,
-        );
+        let result_id = compute_result_id(object_hash).unwrap();
+        let left = json!({
+            "z": 1,
+            "a": true,
+            "result": build_json_value(result_id, Some(sample_created_at()), object_hash, &[]),
+        });
+        let right = json!({
+            "result": build_json_value(result_id, Some(sample_created_at()), object_hash, &[]),
+            "a": true,
+            "z": 1,
+        });
 
         assert_eq!(
             canonical_json_bytes(&left).unwrap(),
             canonical_json_bytes(&right).unwrap()
-        );
-    }
-
-    #[test]
-    fn meta_hash_is_stable_across_key_order() {
-        let mut left = Map::new();
-        left.insert("z".to_string(), Value::from(1));
-        left.insert("a".to_string(), Value::from(true));
-
-        let mut right = Map::new();
-        right.insert("a".to_string(), Value::from(true));
-        right.insert("z".to_string(), Value::from(1));
-
-        assert_eq!(
-            compute_meta_hash(&left).unwrap(),
-            compute_meta_hash(&right).unwrap()
-        );
-    }
-
-    #[test]
-    fn reuse_key_changes_when_input_meta_hash_changes() {
-        let payload = json!({ "kind": "sandbox-script" });
-        let object_hash =
-            parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
-        let left = [ResultInputIdentity {
-            object_hash,
-            meta_hash: parse_meta_hash(
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            ),
-        }];
-        let right = [ResultInputIdentity {
-            object_hash,
-            meta_hash: parse_meta_hash(
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            ),
-        }];
-
-        assert_ne!(
-            compute_reuse_key("Text", &payload, &left).unwrap(),
-            compute_reuse_key("Text", &payload, &right).unwrap()
         );
     }
 
@@ -1518,16 +1293,10 @@ mod tests {
                 object_hash: parse_object_hash(
                     "1111111111111111111111111111111111111111111111111111111111111111",
                 ),
-                meta_hash: parse_meta_hash(
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                ),
             },
             ResultInputIdentity {
                 object_hash: parse_object_hash(
                     "2222222222222222222222222222222222222222222222222222222222222222",
-                ),
-                meta_hash: parse_meta_hash(
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 ),
             },
         ];
@@ -1539,43 +1308,21 @@ mod tests {
     }
 
     #[test]
-    fn meta_hash_changes_when_meta_changes() {
-        let left = Map::from_iter([
-            ("source_bytes".to_string(), Value::from(5)),
-            ("generated".to_string(), Value::from(false)),
-        ]);
-        let right = Map::from_iter([
-            ("source_bytes".to_string(), Value::from(6)),
-            ("generated".to_string(), Value::from(false)),
-        ]);
-
-        assert_ne!(
-            compute_meta_hash(&left).unwrap(),
-            compute_meta_hash(&right).unwrap()
-        );
-    }
-
-    #[test]
     fn parse_result_record_rejects_old_schema() {
         let object_hash =
             parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
-        let meta_hash =
-            parse_meta_hash("2222222222222222222222222222222222222222222222222222222222222222");
-        let result_id = compute_result_id(object_hash, meta_hash).unwrap();
+        let result_id = compute_result_id(object_hash).unwrap();
         let value = json!({
-            "schema": "mbuild-result-v1",
+            "schema": "mbuild-result-v3",
             "result_id": result_id.to_string(),
             "object_hash": object_hash.to_string(),
-            "meta_hash": meta_hash.to_string(),
-            "producer": { "builder": "text" },
             "inputs": [],
-            "meta": {},
         });
 
         assert!(matches!(
             parse_result_record_value(result_id, &value),
             Err(CasError::Serialization(message))
-                if message == "unsupported result record schema 'mbuild-result-v1'"
+                if message == "unsupported result record schema 'mbuild-result-v3'"
         ));
     }
 
@@ -1601,10 +1348,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind(
-                    "sandbox-script",
-                    Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
-                ),
             },
         )
         .unwrap();
@@ -1624,10 +1367,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind(
-                    "sandbox-script",
-                    Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
-                ),
             },
         )
         .unwrap();
@@ -1650,7 +1389,7 @@ mod tests {
                 .join(format!("{}.json", second.result_id.to_hex()))
         );
         assert_eq!(
-            fs::read_link(layout.meta_refs.join("hello-copy.json")).unwrap(),
+            fs::read_link(layout.result_refs.join("hello-copy.json")).unwrap(),
             PathBuf::from("..")
                 .join(RESULTS_DIR)
                 .join(format!("{}.json", second.result_id.to_hex()))
@@ -1684,13 +1423,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: stage,
                 inputs: vec![],
-                meta: with_kind(
-                    "sandbox-script",
-                    Map::from_iter([
-                        ("source_bytes".to_string(), Value::from(8)),
-                        ("generated".to_string(), Value::from(false)),
-                    ]),
-                ),
             },
         )
         .unwrap();
@@ -1725,23 +1457,10 @@ mod tests {
             build_json["object_hash"],
             Value::String(published.object_hash.to_string())
         );
-        assert_eq!(
-            build_json["meta_hash"],
-            Value::String(
-                compute_meta_hash(&Map::from_iter([
-                    ("source_bytes".to_string(), Value::from(8)),
-                    ("generated".to_string(), Value::from(false)),
-                ]))
-                .unwrap()
-                .to_string()
-            )
-        );
         assert_eq!(build_json["inputs"], Value::Array(vec![]));
-        assert_eq!(build_json["meta"]["source_bytes"], Value::from(8));
-        assert_eq!(build_json["meta"]["generated"], Value::from(false));
 
         assert_eq!(
-            fs::read_link(layout.meta_refs.join("script.json")).unwrap(),
+            fs::read_link(layout.result_refs.join("script.json")).unwrap(),
             PathBuf::from("..")
                 .join(RESULTS_DIR)
                 .join(format!("{}.json", published.result_id.to_hex()))
@@ -1755,36 +1474,22 @@ mod tests {
     }
 
     #[test]
-    fn result_record_round_trips_inputs_meta_hash_and_meta() {
+    fn result_record_round_trips_inputs() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
-        let meta = with_kind(
-            "sandbox-script",
-            Map::from_iter([
-                ("source_bytes".to_string(), Value::from(8)),
-                ("generated".to_string(), Value::from(false)),
-            ]),
-        );
         let inputs = vec![
             ResultInputIdentity {
                 object_hash: parse_object_hash(
                     "1111111111111111111111111111111111111111111111111111111111111111",
-                ),
-                meta_hash: parse_meta_hash(
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 ),
             },
             ResultInputIdentity {
                 object_hash: parse_object_hash(
                     "2222222222222222222222222222222222222222222222222222222222222222",
                 ),
-                meta_hash: parse_meta_hash(
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                ),
             },
         ];
-        let expected_meta_hash = compute_meta_hash(&meta).unwrap();
         let reuse_key = compute_reuse_key(
             "Text",
             &json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
@@ -1807,7 +1512,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: stage,
                 inputs: inputs.clone(),
-                meta: meta.clone(),
             },
         )
         .unwrap();
@@ -1817,8 +1521,6 @@ mod tests {
             .expect("expected result record to exist");
 
         assert_eq!(loaded.inputs, inputs);
-        assert_eq!(loaded.meta_hash, expected_meta_hash);
-        assert_eq!(loaded.meta, meta);
     }
 
     #[test]
@@ -1845,10 +1547,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind(
-                    "sandbox-script",
-                    Map::from_iter([(String::from("source_bytes"), Value::from(5))]),
-                ),
             },
         )
         .unwrap();
@@ -1872,10 +1570,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind(
-                    "source-tree",
-                    Map::from_iter([(String::from("source_bytes"), Value::from(6))]),
-                ),
             },
         )
         .unwrap();
@@ -1900,7 +1594,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -1916,7 +1609,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind("source-tree", Map::new()),
             },
         )
         .unwrap();
@@ -1941,7 +1633,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -1957,7 +1648,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -1990,7 +1680,6 @@ mod tests {
                 created_at: "2026-03-24T12:34:56.123456789Z".to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2014,7 +1703,6 @@ mod tests {
                 created_at: "2026-03-24T12:35:30.123456789Z".to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2029,7 +1717,7 @@ mod tests {
                 .join(second.object_hash.to_hex())
         );
         assert_eq!(
-            fs::read_link(layout.meta_refs.join("shared.json")).unwrap(),
+            fs::read_link(layout.result_refs.join("shared.json")).unwrap(),
             PathBuf::from("..")
                 .join(RESULTS_DIR)
                 .join(format!("{}.json", second.result_id.to_hex()))
@@ -2041,7 +1729,7 @@ mod tests {
                 .join(first.object_hash.to_hex())
         );
         assert_eq!(
-            fs::read_link(layout.meta_refs.join(format!("shared.{suffix}.json"))).unwrap(),
+            fs::read_link(layout.result_refs.join(format!("shared.{suffix}.json"))).unwrap(),
             PathBuf::from("..")
                 .join(RESULTS_DIR)
                 .join(format!("{}.json", first.result_id.to_hex()))
@@ -2074,7 +1762,6 @@ mod tests {
                 created_at: "2026-03-24T12:34:56.123456789Z".to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2090,7 +1777,6 @@ mod tests {
                 created_at: "2026-03-24T12:35:30.123456789Z".to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2101,7 +1787,7 @@ mod tests {
         assert!(!layout.object_refs.join(format!("shared.{suffix}")).exists());
         assert!(
             !layout
-                .meta_refs
+                .result_refs
                 .join(format!("shared.{suffix}.json"))
                 .exists()
         );
@@ -2131,7 +1817,6 @@ mod tests {
                 created_at: "2026-03-24T12:34:56.100000000Z".to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2155,7 +1840,6 @@ mod tests {
                 created_at: "2026-03-24T12:34:56.200000000Z".to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2179,7 +1863,6 @@ mod tests {
                 created_at: "2026-03-24T12:34:56.300000000Z".to_string(),
                 staged_path: third_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2261,7 +1944,6 @@ mod tests {
                     created_at: sample_created_at().to_string(),
                     staged_path: stage,
                     inputs: vec![],
-                    meta: with_kind("sandbox-script", Map::new()),
                 },
             )
             .unwrap_err();
@@ -2288,7 +1970,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: stage_dir,
                 inputs: vec![],
-                meta: with_kind("source-tree", Map::new()),
             },
         )
         .unwrap();
@@ -2320,7 +2001,6 @@ mod tests {
             sample_created_at(),
             vec![],
             StagedBuildResult {
-                meta: Map::new(),
                 staged_path: stage_dir,
                 object_hash: Some(object_hash),
             },
@@ -2357,7 +2037,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: stage_dir,
                 inputs: vec![],
-                meta: Map::new(),
             },
         )
         .unwrap();
@@ -2389,7 +2068,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2406,7 +2084,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2429,7 +2106,6 @@ mod tests {
             sample_created_at(),
             vec![],
             StagedBuildResult {
-                meta: Map::new(),
                 staged_path: first_stage,
                 object_hash: Some(object_hash),
             },
@@ -2446,7 +2122,6 @@ mod tests {
             sample_created_at(),
             vec![],
             StagedBuildResult {
-                meta: Map::new(),
                 staged_path: second_stage,
                 object_hash: Some(object_hash),
             },
@@ -2480,7 +2155,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-output", Map::new()),
             },
         )
         .unwrap();
@@ -2500,7 +2174,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-output", Map::new()),
             },
         )
         .unwrap();
@@ -2522,7 +2195,7 @@ mod tests {
         assert_eq!(layout.root, temp.path());
         assert!(layout.objects.is_dir());
         assert!(layout.builds.is_dir());
-        assert!(layout.meta_refs.is_dir());
+        assert!(layout.result_refs.is_dir());
         assert!(layout.object_refs.is_dir());
     }
 
@@ -2566,7 +2239,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2592,7 +2264,6 @@ mod tests {
                 created_at: sample_created_at().to_string(),
                 staged_path: exec_stage,
                 inputs: vec![],
-                meta: with_kind("sandbox-script", Map::new()),
             },
         )
         .unwrap();
@@ -2607,10 +2278,6 @@ mod tests {
 
     fn parse_build_key(value: &str) -> BuildKey {
         BuildKey::from_str(value).unwrap()
-    }
-
-    fn parse_meta_hash(value: &str) -> MetaHash {
-        MetaHash::from_str(value).unwrap()
     }
 
     fn sample_created_at() -> &'static str {

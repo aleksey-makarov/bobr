@@ -9,7 +9,6 @@ use mbuild_image::oci_extract::validate_oci_fs_tree_object;
 use mbuild_image::{OciExtractBuilder, OciExtractConfig};
 use mbuild_origin_oci_registry::oci::{self, OciDescriptor};
 use mbuild_runtime::MbuildIdmap;
-use serde_json::Map;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Cursor, Write};
@@ -26,17 +25,9 @@ fn oci_extract_materializes_runtime_ownership() -> TestResult<()> {
     let oci = create_oci_layout(temp.path())?;
     let mut cx = build_context(temp.path())?;
     let mut inputs = BuilderInputs::empty();
-    inputs.insert(
-        "image",
-        BuilderInputObject {
-            object_path: oci,
-            meta: Map::new(),
-        },
-    );
+    inputs.insert("image", BuilderInputObject { object_path: oci });
 
     let result = OciExtractBuilder.build_typed(OciExtractConfig {}, inputs, &mut cx)?;
-
-    assert!(result.meta.is_empty());
     assert!(result.staged_path.join("manifest.jsonl").is_file());
     assert!(result.staged_path.join("oci-config.json").is_file());
     assert_eq!(

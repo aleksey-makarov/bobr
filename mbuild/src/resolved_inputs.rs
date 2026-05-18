@@ -1,17 +1,13 @@
 use mbuild_core::{
-    BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec, MetaHash, ObjectHash,
-    ResultInputIdentity,
+    BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec, ObjectHash, ResultInputIdentity,
 };
-use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedDependency {
     pub(crate) object_hash: ObjectHash,
-    pub(crate) meta_hash: MetaHash,
     pub(crate) object_path: PathBuf,
-    pub(crate) meta: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -90,7 +86,6 @@ impl ResolvedInputs {
             if let Some(object) = self.get(name) {
                 ordered.push(ResultInputIdentity {
                     object_hash: object.object_hash,
-                    meta_hash: object.meta_hash,
                 });
             }
         }
@@ -104,7 +99,6 @@ impl ResolvedInputs {
             .map(|(name, value)| {
                 let value = BuilderInputObject {
                     object_path: value.object_path,
-                    meta: value.meta,
                 };
                 (name, value)
             })
@@ -124,12 +118,7 @@ mod tests {
                 "1111111111111111111111111111111111111111111111111111111111111111",
             )
             .unwrap(),
-            meta_hash: MetaHash::from_str(
-                "3333333333333333333333333333333333333333333333333333333333333333",
-            )
-            .unwrap(),
             object_path: PathBuf::from("/tmp/object"),
-            meta: Map::new(),
         }
     }
 
@@ -172,11 +161,7 @@ mod tests {
     #[test]
     fn resolved_inputs_extras_follow_lexical_order() {
         let first = sample_object();
-        let mut second = sample_object();
-        second.meta.insert(
-            "install".to_string(),
-            serde_json::json!({"rules":[{"path":"**","attrs":{"uid":0,"gid":0,"directory_mode":493,"regular_file_mode":420,"executable_file_mode":493,"symlink_mode":511}}]}),
-        );
+        let second = sample_object();
 
         let spec = BuilderSpec {
             tag: "Sandbox",
@@ -191,9 +176,9 @@ mod tests {
 
         let extras = inputs.extras(&spec).collect::<Vec<_>>();
         assert_eq!(extras[0].0, "source_a");
-        assert_eq!(extras[0].1.meta, first.meta);
+        assert_eq!(extras[0].1.object_path, first.object_path);
         assert_eq!(extras[1].0, "source_b");
-        assert_eq!(extras[1].1.meta, second.meta);
+        assert_eq!(extras[1].1.object_path, second.object_path);
     }
 
     #[test]
@@ -221,7 +206,6 @@ mod tests {
         let builder_inputs = inputs.into_builder_inputs();
         let resolved = builder_inputs.required("script").unwrap();
         assert_eq!(resolved.object_path, object.object_path);
-        assert_eq!(resolved.meta, object.meta);
     }
 
     static ORDERED_SPEC: BuilderSpec = BuilderSpec {
@@ -238,33 +222,21 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .unwrap();
-        first.meta_hash =
-            MetaHash::from_str("1111111111111111111111111111111111111111111111111111111111111111")
-                .unwrap();
         let mut optional = sample_object();
         optional.object_hash = ObjectHash::from_str(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         )
         .unwrap();
-        optional.meta_hash =
-            MetaHash::from_str("2222222222222222222222222222222222222222222222222222222222222222")
-                .unwrap();
         let mut extra_a = sample_object();
         extra_a.object_hash = ObjectHash::from_str(
             "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         )
         .unwrap();
-        extra_a.meta_hash =
-            MetaHash::from_str("3333333333333333333333333333333333333333333333333333333333333333")
-                .unwrap();
         let mut extra_b = sample_object();
         extra_b.object_hash = ObjectHash::from_str(
             "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         )
         .unwrap();
-        extra_b.meta_hash =
-            MetaHash::from_str("4444444444444444444444444444444444444444444444444444444444444444")
-                .unwrap();
 
         let inputs = ResolvedInputs::new(BTreeMap::from([
             ("first".to_string(), first),
@@ -282,18 +254,10 @@ mod tests {
                         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     )
                     .unwrap(),
-                    meta_hash: MetaHash::from_str(
-                        "1111111111111111111111111111111111111111111111111111111111111111",
-                    )
-                    .unwrap(),
                 },
                 ResultInputIdentity {
                     object_hash: ObjectHash::from_str(
                         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    )
-                    .unwrap(),
-                    meta_hash: MetaHash::from_str(
-                        "2222222222222222222222222222222222222222222222222222222222222222",
                     )
                     .unwrap(),
                 },
@@ -302,18 +266,10 @@ mod tests {
                         "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                     )
                     .unwrap(),
-                    meta_hash: MetaHash::from_str(
-                        "3333333333333333333333333333333333333333333333333333333333333333",
-                    )
-                    .unwrap(),
                 },
                 ResultInputIdentity {
                     object_hash: ObjectHash::from_str(
                         "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                    )
-                    .unwrap(),
-                    meta_hash: MetaHash::from_str(
-                        "4444444444444444444444444444444444444444444444444444444444444444",
                     )
                     .unwrap(),
                 },

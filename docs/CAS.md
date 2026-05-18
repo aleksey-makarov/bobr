@@ -10,11 +10,11 @@ results.
 - `results/` holds canonical result records addressed by `result_id`
 - `reuses/` holds builder-only canonical reuse refs addressed by `reuse_key`
 - `builds/` holds builder-only public build-handle refs addressed by `build_key`
-- `meta-refs/` holds human-facing refs from publication name to result record
+- `result-refs/` holds human-facing refs from publication name to result record
 - `object-refs/` holds human-facing refs from publication name to payload
 
 Publication names do not participate in object identity, `build_key`, or
-`reuse_key`. `result_id` is derived only from payload and metadata identity.
+`reuse_key`. `result_id` is derived only from payload identity.
 The store root is provided explicitly by `paths.store` in the JSON request
 envelope. `mbuild` does not add an implicit `.mbuild/` directory.
 
@@ -30,7 +30,7 @@ envelope. `mbuild` does not add an implicit `.mbuild/` directory.
     <build_key> -> ../results/<result_id>.json
   results/
     <result_id>.json
-  meta-refs/
+  result-refs/
     <name>.json -> ../results/<result_id>.json
   object-refs/
     <name> -> ../objects/<object_hash>
@@ -53,11 +53,8 @@ Each result record contains:
 
 - realized result identity: `result_id`
 - payload identity: `object_hash`
-- metadata identity: `meta_hash`
-- result metadata under `meta`
 - direct input identities under `inputs`, where each entry contains:
   - `object_hash`
-  - `meta_hash`
 
 `builds/<build_key>` stores the corresponding public build handle as a symlink
 to the canonical result record. `reuses/<reuse_key>` stores the canonical
@@ -95,7 +92,7 @@ Every recipe node carries a publication name.
 
 After the runtime reuses or builds a node, it updates:
 
-- `meta-refs/<name>.json -> ../results/<result_id>.json`
+- `result-refs/<name>.json -> ../results/<result_id>.json`
 - `object-refs/<name> -> ../objects/<object_hash>`
 
 This `object-refs/` rule is the same for every object kind. Filesystem tree

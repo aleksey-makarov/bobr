@@ -3,9 +3,7 @@ mod support;
 use mbuild::recipe_runtime::{
     BuildRunOptions, run_recipe_json_in_workspace, run_recipe_json_in_workspace_with_options,
 };
-use mbuild_core::{
-    StoreLayout, compute_meta_hash, compute_result_id, load_build_handle, load_result_record,
-};
+use mbuild_core::{StoreLayout, compute_result_id, load_build_handle, load_result_record};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -57,7 +55,6 @@ fn source_recipe_node(name: &str, object_hash: &str, origin_path: &str, mode: &s
             "path": origin_path,
             "mode": mode
         },
-        "meta": {}
     })
 }
 
@@ -232,7 +229,6 @@ fn named_source_recipe(name: &str, url: &str, source_hash: &str) -> Value {
             "url": url,
             "unpack": true
         },
-        "meta": {}
     })
 }
 
@@ -249,7 +245,6 @@ fn image_with_two_sources_recipe(url_a: &str, url_b: &str, source_hash: &str) ->
                     "url": url_a,
                     "unpack": true
                 },
-                "meta": { "variant": "a" }
             }),
             json!({
                 "name": "source-b",
@@ -260,7 +255,6 @@ fn image_with_two_sources_recipe(url_a: &str, url_b: &str, source_hash: &str) ->
                     "url": url_b,
                     "unpack": true
                 },
-                "meta": { "variant": "b" }
             }),
         ],
     )
@@ -306,18 +300,12 @@ fn json_recipe_executes_all_real_builders() {
         .unwrap()
         .expect("expected final Build to exist in store");
 
-    assert_eq!(
-        published.build.meta["manifest_digest"]
-            .as_str()
-            .map(|value| value.starts_with("sha256:")),
-        Some(true)
-    );
-    assert!(published.build.meta.get("mode").is_none());
+    assert_oci_index_manifest_digest(&published.object_path);
 
     for name in ["source", "base-image", "final-image"] {
         assert!(
             store_root(workspace.path())
-                .join("meta-refs")
+                .join("result-refs")
                 .join(format!("{name}.json"))
                 .exists()
         );
@@ -386,13 +374,13 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
     );
     assert!(
         store_root(workspace.path())
-            .join("meta-refs")
+            .join("result-refs")
             .join("source-a.json")
             .exists()
     );
     assert!(
         !store_root(workspace.path())
-            .join("meta-refs")
+            .join("result-refs")
             .join("source-b.json")
             .exists()
     );
@@ -439,13 +427,13 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
         .is_some()
     );
 
-    let meta_refs = store_root(workspace.path()).join("meta-refs");
+    let result_refs = store_root(workspace.path()).join("result-refs");
     let object_refs = store_root(workspace.path()).join("object-refs");
     for name in ["source", "final-image"] {
-        let meta_ref = meta_refs.join(format!("{name}.json"));
+        let result_ref = result_refs.join(format!("{name}.json"));
         let object_ref = object_refs.join(name);
-        if meta_ref.exists() {
-            fs::remove_file(&meta_ref).unwrap();
+        if result_ref.exists() {
+            fs::remove_file(&result_ref).unwrap();
         }
         if object_ref.exists() {
             fs::remove_file(&object_ref).unwrap();
@@ -455,10 +443,10 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
     assert_eq!(first.build_key, second.build_key);
-    assert!(meta_refs.join("final-image.json").exists());
+    assert!(result_refs.join("final-image.json").exists());
     assert!(object_refs.join("final-image").exists());
     for name in ["source"] {
-        assert!(!meta_refs.join(format!("{name}.json")).exists());
+        assert!(!result_refs.join(format!("{name}.json")).exists());
         assert!(!object_refs.join(name).exists());
     }
 }
@@ -508,7 +496,7 @@ fn second_run_reuses_root_without_local_path_when_no_source_materialization_is_n
 }
 
 #[test]
-fn independent_fetch_sources_run_in_parallel() {
+fn identical_fetch_sources_are_deduped_by_result_id() {
     let workspace = tempdir().unwrap();
     let source_tar = {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -525,7 +513,7 @@ fn independent_fetch_sources_run_in_parallel() {
     let (base_url, handle) = spawn_barrier_http_server(
         source_tar.clone(),
         "application/gzip",
-        2,
+        1,
         Duration::from_secs(2),
     )
     .unwrap();
@@ -554,7 +542,7 @@ fn independent_fetch_sources_run_in_parallel() {
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Image Build to exist in store");
-    assert!(published.build.meta.get("manifest_digest").is_some());
+    assert_oci_index_manifest_digest(&published.object_path);
 }
 
 #[test]
@@ -572,8 +560,6 @@ fn tree_file_recipe_builds_successfully_via_runtime() {
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Tree Build to exist in store");
-
-    assert!(published.build.meta.is_empty());
     assert!(published.object_path.is_file());
     assert_eq!(
         fs::read_to_string(&published.object_path).unwrap(),
@@ -599,7 +585,6 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
         .expect("expected Tree Build to exist in store");
 
     assert!(published.object_path.is_dir());
-    assert!(published.build.meta.is_empty());
     assert!(published.object_path.join("manifest.jsonl").is_file());
     assert_eq!(
         fs::read_link(layout.object_refs.join("runtime-tree")).unwrap(),
@@ -634,7 +619,6 @@ fn tree_symlink_recipe_builds_successfully_via_runtime() {
         .expect("expected Tree Build to exist in store");
 
     assert!(published.object_path.is_dir());
-    assert!(published.build.meta.is_empty());
     assert!(published.object_path.join("manifest.jsonl").is_file());
     let root = published.object_path.join("root");
     assert_eq!(
@@ -758,11 +742,7 @@ fn source_http_mismatch_imports_actual_object_without_canonical_result() {
 
     let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
     assert!(object_path_exists(&layout, actual_hash.parse().unwrap()));
-    let wrong_result_id = compute_result_id(
-        wrong_hash.parse().unwrap(),
-        compute_meta_hash(&serde_json::Map::new()).unwrap(),
-    )
-    .unwrap();
+    let wrong_result_id = compute_result_id(wrong_hash.parse().unwrap()).unwrap();
     assert!(
         load_result_record(&layout, wrong_result_id)
             .unwrap()
@@ -787,11 +767,7 @@ fn source_oci_registry_mismatch_imports_actual_object_without_canonical_result()
 
     let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
     assert!(object_path_exists(&layout, actual_hash.parse().unwrap()));
-    let wrong_result_id = compute_result_id(
-        wrong_hash.parse().unwrap(),
-        compute_meta_hash(&serde_json::Map::new()).unwrap(),
-    )
-    .unwrap();
+    let wrong_result_id = compute_result_id(wrong_hash.parse().unwrap()).unwrap();
     assert!(
         load_result_record(&layout, wrong_result_id)
             .unwrap()
@@ -892,11 +868,7 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
 
     let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
     assert!(object_path_exists(&layout, actual_hash));
-    let wrong_result_id = compute_result_id(
-        wrong_hash.parse().unwrap(),
-        compute_meta_hash(&serde_json::Map::new()).unwrap(),
-    )
-    .unwrap();
+    let wrong_result_id = compute_result_id(wrong_hash.parse().unwrap()).unwrap();
     assert!(
         load_result_record(&layout, wrong_result_id)
             .unwrap()
@@ -909,7 +881,6 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
             "name": "source-file",
             "tag": "Source",
             "object_hash": actual_hash.to_string(),
-            "meta": {}
         }),
     );
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
@@ -941,7 +912,6 @@ fn source_without_origin_reuses_existing_canonical_result() {
             "name": "source-file",
             "tag": "Source",
             "object_hash": object_hash.to_string(),
-            "meta": {}
         }),
     );
 
@@ -952,7 +922,7 @@ fn source_without_origin_reuses_existing_canonical_result() {
 }
 
 #[test]
-fn source_without_origin_reuses_existing_oci_layout_object_with_empty_meta() {
+fn source_without_origin_reuses_existing_oci_layout_object() {
     let workspace = tempdir().unwrap();
     let (_oci_server, image_ref, pinned_digest, object_hash) = spawn_test_oci_registry();
     let materialized_recipe_path = workspace.path().join("source-oci-registry.json");
@@ -969,7 +939,6 @@ fn source_without_origin_reuses_existing_oci_layout_object_with_empty_meta() {
             "name": "base-image",
             "tag": "Source",
             "object_hash": object_hash,
-            "meta": {}
         }),
     );
 
@@ -1008,7 +977,6 @@ fn source_without_origin_republishes_existing_object() {
             "name": "source-cutoff",
             "tag": "Source",
             "object_hash": object_hash.to_string(),
-            "meta": {}
         }),
     );
 
@@ -1029,7 +997,6 @@ fn source_without_origin_requires_existing_object_or_result() {
             "name": "source-cutoff",
             "tag": "Source",
             "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
-            "meta": {}
         }),
     );
 
@@ -1042,4 +1009,11 @@ fn source_without_origin_requires_existing_object_or_result() {
 
 fn object_path_exists(layout: &StoreLayout, object_hash: fsobj_hash::ObjectHash) -> bool {
     layout.objects.join(object_hash.to_hex()).exists()
+}
+
+fn assert_oci_index_manifest_digest(object_path: &std::path::Path) {
+    let index: Value =
+        serde_json::from_slice(&fs::read(object_path.join("index.json")).unwrap()).unwrap();
+    let digest = index["manifests"][0]["digest"].as_str().unwrap();
+    assert!(digest.starts_with("sha256:"));
 }

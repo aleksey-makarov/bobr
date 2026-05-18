@@ -12,9 +12,8 @@ use crate::runtime::{
 use fsobj_hash::hash_path;
 use mbuild_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, CancellationToken, OriginContext,
-    RealizedResult, ResultInputIdentity, ResultRecord, StoreLayout, compute_meta_hash,
-    compute_result_id, fsutil, import_object, load_result_record, object_path, publish_result_refs,
-    store_result_record,
+    RealizedResult, ResultInputIdentity, ResultRecord, StoreLayout, compute_result_id, fsutil,
+    import_object, load_result_record, object_path, publish_result_refs, store_result_record,
 };
 use serde_json::{Map, Value, to_string_pretty};
 use std::collections::{HashMap, VecDeque};
@@ -374,7 +373,6 @@ fn lookup_canonical_for_planned_node(
         match &dep_node.state {
             PlanningState::Reused { realized, .. } => input_identities.push(ResultInputIdentity {
                 object_hash: realized.object_hash,
-                meta_hash: realized.meta_hash,
             }),
             PlanningState::Unknown | PlanningState::NeedsBuild => all_reused = false,
         }
@@ -769,9 +767,7 @@ fn resolved_dependency_from_completed(
     })?;
     Ok(ResolvedDependency {
         object_hash: realized.object_hash,
-        meta_hash: realized.meta_hash,
         object_path: object_path(layout, realized.object_hash),
-        meta: realized.meta,
     })
 }
 
@@ -859,11 +855,7 @@ fn execute_source_recipe(
             "run",
             "reusing existing object and publishing source result",
         );
-        let result = make_source_result_record(
-            recipe.object_hash,
-            run_logger.created_at(),
-            recipe.meta.clone(),
-        )?;
+        let result = make_source_result_record(recipe.object_hash, run_logger.created_at())?;
         store_result_record(layout, &result).map_err(map_store_error)?;
         return Ok(ExecutedNode {
             realized: realized_result_from_record(None, &result),
@@ -957,11 +949,7 @@ fn execute_source_recipe(
         return Err(RuntimeError::Build(message));
     }
 
-    let result = make_source_result_record(
-        recipe.object_hash,
-        run_logger.created_at(),
-        recipe.meta.clone(),
-    )?;
+    let result = make_source_result_record(recipe.object_hash, run_logger.created_at())?;
     store_result_record(layout, &result).map_err(map_store_error)?;
     Ok(ExecutedNode {
         realized: realized_result_from_record(None, &result),
@@ -986,17 +974,13 @@ fn cleanup_source_temp_dir(temp_dir: &Path, logger: &dyn BuildLogger) {
 fn make_source_result_record(
     object_hash: fsobj_hash::ObjectHash,
     created_at: &str,
-    meta: serde_json::Map<String, serde_json::Value>,
 ) -> Result<ResultRecord, RuntimeError> {
-    let meta_hash = compute_meta_hash(&meta).map_err(map_store_error)?;
-    let result_id = compute_result_id(object_hash, meta_hash).map_err(map_store_error)?;
+    let result_id = compute_result_id(object_hash).map_err(map_store_error)?;
     Ok(ResultRecord {
         result_id,
         object_hash,
-        meta_hash,
         created_at: Some(created_at.to_string()),
         inputs: Vec::new(),
-        meta,
     })
 }
 
@@ -1008,9 +992,7 @@ fn realized_result_from_record(
         result_id: result.result_id,
         build_key,
         object_hash: result.object_hash,
-        meta_hash: result.meta_hash,
         created_at: result.created_at.clone(),
-        meta: result.meta.clone(),
     }
 }
 
@@ -1019,10 +1001,10 @@ mod tests {
     use super::*;
     use crate::recipe::{ReuseOrigin, collect_graph};
     use mbuild_core::{
-        CancellationToken, MetaHash, OriginContext, OriginSpec, ParsedOrigin, PublishOutputRequest,
+        CancellationToken, OriginContext, OriginSpec, ParsedOrigin, PublishOutputRequest,
         compute_reuse_key, publish_output,
     };
-    use serde_json::{Map, json};
+    use serde_json::json;
     use std::collections::HashMap;
     use std::str::FromStr;
     use std::sync::Arc;
@@ -1054,28 +1036,18 @@ mod tests {
         }
     }
 
-    fn sample_realized(
-        build_key: Option<BuildKey>,
-        object_hash: &str,
-        meta_hash: &str,
-        meta: Map<String, serde_json::Value>,
-    ) -> RealizedResult {
+    fn sample_realized(build_key: Option<BuildKey>, object_hash: &str) -> RealizedResult {
+        let object_hash = object_hash.parse().unwrap();
         RealizedResult {
-            result_id: compute_result_id(
-                object_hash.parse().unwrap(),
-                MetaHash::from_str(meta_hash).unwrap(),
-            )
-            .unwrap(),
+            result_id: compute_result_id(object_hash).unwrap(),
             build_key,
-            object_hash: object_hash.parse().unwrap(),
-            meta_hash: MetaHash::from_str(meta_hash).unwrap(),
+            object_hash,
             created_at: None,
-            meta,
         }
     }
 
     #[test]
-    fn lookup_canonical_for_planned_node_uses_dependency_meta_hashes() {
+    fn lookup_canonical_for_planned_node_uses_dependency_object_hashes() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
         let request = RecipeEnvelope::parse_json(
@@ -1138,14 +1110,10 @@ mod tests {
         let rootfs_realized = sample_realized(
             Some(dep_keys[0]),
             "1111111111111111111111111111111111111111111111111111111111111111",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            Map::new(),
         );
         let script_realized = sample_realized(
             Some(dep_keys[1]),
             "2222222222222222222222222222222222222222222222222222222222222222",
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-            Map::new(),
         );
         nodes.get_mut(&dep_keys[0]).unwrap().state = PlanningState::Reused {
             realized: rootfs_realized.clone(),
@@ -1159,11 +1127,9 @@ mod tests {
         let root_inputs = vec![
             ResultInputIdentity {
                 object_hash: rootfs_realized.object_hash,
-                meta_hash: rootfs_realized.meta_hash,
             },
             ResultInputIdentity {
                 object_hash: script_realized.object_hash,
-                meta_hash: script_realized.meta_hash,
             },
         ];
         let reuse_key = compute_reuse_key("Sandbox", &json!({}), &root_inputs).unwrap();
@@ -1179,7 +1145,6 @@ mod tests {
                 created_at: "2026-04-05T12:00:00.000000000Z".to_string(),
                 staged_path: stage_dir,
                 inputs: root_inputs,
-                meta: Map::new(),
             },
         )
         .unwrap();
@@ -1199,8 +1164,7 @@ mod tests {
         let object_hash = "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
             .unwrap();
-        let meta = Map::new();
-        let result_id = compute_result_id(object_hash, compute_meta_hash(&meta).unwrap()).unwrap();
+        let result_id = compute_result_id(object_hash).unwrap();
         let key =
             BuildKey::from_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                 .unwrap();
@@ -1210,7 +1174,6 @@ mod tests {
             origin: Some(Box::new(CancellingOrigin {
                 cancellation: cancellation.clone(),
             })),
-            meta,
             result_id,
         };
 

@@ -3,7 +3,6 @@ use mbuild_core::{
     TypedBuilder, fsutil,
 };
 use serde::Deserialize;
-use serde_json::Map;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -82,7 +81,6 @@ impl TypedBuilder for TextBuilder {
         }
 
         Ok(StagedBuildResult {
-            meta: Map::new(),
             staged_path: tmp_path,
             object_hash: None,
         })
@@ -104,7 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn build_typed_creates_staged_file_and_meta() {
+    fn build_typed_creates_staged_file() {
         let builder = TextBuilder;
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
@@ -119,8 +117,6 @@ mod tests {
                 &mut cx,
             )
             .unwrap();
-
-        assert!(result.meta.is_empty());
         assert_eq!(fs::read_to_string(&result.staged_path).unwrap(), "hello");
     }
 
@@ -188,7 +184,6 @@ mod tests {
             "script",
             mbuild_core::BuilderInputObject {
                 object_path: temp.path().join("dummy"),
-                meta: Map::new(),
             },
         );
 

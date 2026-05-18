@@ -1,6 +1,6 @@
 use crate::BuilderError;
 use crate::cancellation::CancellationToken;
-use crate::cas::{BuildKey, MetaHash, ResultId, ReuseKey};
+use crate::cas::{BuildKey, ResultId, ReuseKey};
 use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -9,19 +9,6 @@ use std::fmt;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BuildRequest {
-    pub meta: BuildMeta,
-    pub build: Value,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BuildMeta {
-    pub name: String,
-    #[serde(default)]
-    pub extra: Map<String, Value>,
-}
 
 #[derive(Debug)]
 pub struct BuilderSpec {
@@ -78,7 +65,6 @@ impl BuilderSpec {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderInputObject {
     pub object_path: PathBuf,
-    pub meta: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -308,7 +294,6 @@ impl BuildContext {
 
 #[derive(Debug, Clone)]
 pub struct StagedBuildResult {
-    pub meta: Map<String, Value>,
     pub staged_path: PathBuf,
     pub object_hash: Option<ObjectHash>,
 }
@@ -316,7 +301,6 @@ pub struct StagedBuildResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultInputIdentity {
     pub object_hash: ObjectHash,
-    pub meta_hash: MetaHash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,20 +309,16 @@ pub struct Build {
     pub result_id: ResultId,
     #[serde(with = "serde_object_hash")]
     pub object_hash: ObjectHash,
-    pub meta_hash: MetaHash,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
-    pub meta: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultRecord {
     pub result_id: ResultId,
     pub object_hash: ObjectHash,
-    pub meta_hash: MetaHash,
     pub created_at: Option<String>,
     pub inputs: Vec<ResultInputIdentity>,
-    pub meta: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,10 +328,8 @@ pub struct RealizedResult {
     pub build_key: Option<BuildKey>,
     #[serde(with = "serde_object_hash")]
     pub object_hash: ObjectHash,
-    pub meta_hash: MetaHash,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
-    pub meta: Map<String, Value>,
 }
 
 mod serde_object_hash {
@@ -435,7 +413,6 @@ mod tests {
     fn sample_builder_object() -> BuilderInputObject {
         BuilderInputObject {
             object_path: PathBuf::from("/tmp/object"),
-            meta: Map::new(),
         }
     }
 
@@ -502,7 +479,6 @@ mod tests {
             assert_eq!(cx.state_dir, PathBuf::from("/tmp/builder"));
             assert_eq!(cx.temp_dir, PathBuf::from("/tmp/tmp"));
             Ok(StagedBuildResult {
-                meta: Map::new(),
                 staged_path: PathBuf::from("/tmp/out"),
                 object_hash: None,
             })
@@ -525,7 +501,7 @@ mod tests {
             )
             .unwrap();
 
-        assert!(result.meta.is_empty());
+        assert_eq!(result.staged_path, PathBuf::from("/tmp/out"));
     }
 
     #[test]

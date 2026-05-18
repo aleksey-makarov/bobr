@@ -99,8 +99,7 @@ The runtime rejects:
           "https://example.invalid/linux.tar.xz"
         ],
         "unpack": true
-      },
-      "meta": {}
+      }
     },
   }
 }
@@ -126,13 +125,10 @@ In v1, `Source` supports three origins:
 - `origin.digest` is the pinned manifest or index digest requested from the registry
 - pinned manifest lists / OCI indexes are resolved to the `linux/amd64` manifest
 
-`Source.meta.install` carries install metadata for unpacked directory objects
-when `origin.unpack = true`.
-
 `Source` may also omit `origin`. In that shape, the payload object must
 already exist in the store under `objects/<object_hash>`. If the canonical
 `<store>/results/<result_id>.json` record is missing, `mbuild` reconstructs
-it from the recipe metadata.
+it from the declared object hash.
 
 If a source origin materializes a different object than the declared
 `object_hash`, `mbuild` still imports the actual object into
@@ -163,7 +159,7 @@ The store layout is content-addressed:
 - `<store>/results/` stores canonical realized results by `result_id`
 - `<store>/reuses/` stores builder-only canonical reuse refs by `reuse_key`
 - `<store>/builds/` stores builder-only public build handles by `build_key`
-- `<store>/meta-refs/` and `<store>/object-refs/` store published current refs
+- `<store>/result-refs/` and `<store>/object-refs/` store published current refs
 
 `<store>/object-refs/<name>` always points at
 `../objects/<object_hash>`, regardless of object kind. Filesystem tree objects
@@ -185,12 +181,10 @@ directory.
 Each direct input identity contains:
 
 - `object_hash`
-- `meta_hash`
 
 `result_id` is computed from:
 
 - `object_hash`
-- `meta_hash`
 
 The dependency order comes from the builder input contract:
 

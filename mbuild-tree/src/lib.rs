@@ -8,7 +8,6 @@ use mbuild_core::{
 };
 use mbuild_runtime::{FsTreeTarEntrySource, FsTreeTarInput};
 use serde::{Deserialize, Serialize};
-use serde_json::Map;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -338,10 +337,10 @@ fn build_tree(
         format!("materializing tree output '{}'", output_path.display()),
     );
 
-    let (meta, object_hash) = match output_kind {
+    let object_hash = match output_kind {
         OutputKind::File => {
             materialize_file_output(&output_path, &normalized)?;
-            (Map::new(), None)
+            None
         }
         OutputKind::Directory => {
             let install = config
@@ -354,12 +353,11 @@ fn build_tree(
                 &cx.temp_dir,
                 materializer,
             )?;
-            (Map::new(), Some(object_hash))
+            Some(object_hash)
         }
     };
 
     Ok(StagedBuildResult {
-        meta,
         staged_path: output_path,
         object_hash,
     })
@@ -404,7 +402,6 @@ fn build_tree_merge(
         materialize_tree_merge_output(&output_path, &composed, &cx.temp_dir, materializer)?;
 
     Ok(StagedBuildResult {
-        meta: Map::new(),
         staged_path: output_path,
         object_hash: Some(object_hash),
     })
@@ -462,7 +459,6 @@ fn build_erofs_rootfs(
     run_mkfs_erofs(&mkfs_erofs, &config, &output_path, &tar_path)?;
 
     Ok(StagedBuildResult {
-        meta: Map::new(),
         staged_path: output_path,
         object_hash: None,
     })
@@ -1999,7 +1995,6 @@ mod tests {
                 *name,
                 BuilderInputObject {
                     object_path: result.staged_path.clone(),
-                    meta: Map::new(),
                 },
             );
         }
@@ -2400,7 +2395,6 @@ mod tests {
             "bad",
             BuilderInputObject {
                 object_path: not_tree,
-                meta: Map::new(),
             },
         );
         let mut cx = build_context(&temp.path().join("merge"));
@@ -2496,7 +2490,6 @@ mod tests {
             "base",
             BuilderInputObject {
                 object_path: base_object,
-                meta: Map::new(),
             },
         );
         let mut cx = build_context(&temp.path().join("merge"));
@@ -2562,7 +2555,6 @@ mod tests {
             "base",
             BuilderInputObject {
                 object_path: base_object,
-                meta: Map::new(),
             },
         );
         let mut cx = build_context(&temp.path().join("merge"));
@@ -2873,8 +2865,6 @@ mod tests {
                 &mut cx,
             )
             .unwrap();
-
-        assert!(result.meta.is_empty());
         assert!(result.staged_path.is_file());
         assert_eq!(fs::read_to_string(&result.staged_path).unwrap(), "hello");
     }
@@ -2933,7 +2923,6 @@ mod tests {
         assert!(result.staged_path.is_dir());
         assert!(result.staged_path.join("manifest.jsonl").is_file());
         assert!(fs_tree_root(&result).join("dev").is_dir());
-        assert!(result.meta.is_empty());
         assert_valid_fs_tree(&result);
     }
 
@@ -3036,7 +3025,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_tree_builds_fs_tree_with_empty_meta_and_manifest() {
+    fn directory_tree_builds_fs_tree_with_manifest() {
         let builder = TreeBuilder;
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
@@ -3083,7 +3072,6 @@ mod tests {
             fs::read_link(root.join("bin")).unwrap(),
             PathBuf::from("usr/bin")
         );
-        assert!(result.meta.is_empty());
 
         let manifest = fs_tree_manifest(&result);
         assert_eq!(
@@ -3531,7 +3519,6 @@ mod tests {
             "unexpected",
             BuilderInputObject {
                 object_path: std::path::PathBuf::from("/tmp/unexpected"),
-                meta: Map::new(),
             },
         );
 

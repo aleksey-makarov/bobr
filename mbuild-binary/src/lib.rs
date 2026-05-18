@@ -415,14 +415,12 @@ mod tests {
                 "script".to_string(),
                 BuilderInputObject {
                     object_path: temp.path().join("script"),
-                    meta: Map::new(),
                 },
             ),
             (
                 "source".to_string(),
                 BuilderInputObject {
                     object_path: temp.path().join("source"),
-                    meta: Map::new(),
                 },
             ),
         ];

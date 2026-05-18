@@ -122,9 +122,7 @@ pub(crate) fn execute_builder_node(
                 build_key,
                 result_id: result.result_id,
                 object_hash: result.object_hash,
-                meta_hash: result.meta_hash,
                 created_at: result.created_at.clone(),
-                meta: result.meta.clone(),
             },
             reuse_key,
             result,
@@ -225,9 +223,7 @@ pub(crate) fn lookup_canonical_result(
             build_key,
             result_id: result.result_id,
             object_hash: result.object_hash,
-            meta_hash: result.meta_hash,
             created_at: result.created_at.clone(),
-            meta: result.meta.clone(),
         },
         reuse_key,
         result,
@@ -623,7 +619,6 @@ mod tests {
             fs::write(cx.temp_dir.join("out").join("payload"), b"ok\n").unwrap();
 
             Ok(StagedBuildResult {
-                meta: Map::new(),
                 staged_path: cx.temp_dir.join("out"),
                 object_hash: None,
             })
@@ -664,7 +659,6 @@ mod tests {
             fs::write(cx.temp_dir.join("sandbox-scratch"), b"keep in quarantine\n").unwrap();
 
             Ok(StagedBuildResult {
-                meta: Map::new(),
                 staged_path: cx.temp_dir.join("out"),
                 object_hash: None,
             })
@@ -723,7 +717,6 @@ mod tests {
             fs::write(cx.temp_dir.join("scratch"), b"temp\n").unwrap();
 
             Ok(StagedBuildResult {
-                meta: Map::new(),
                 staged_path: cx.temp_dir.join("missing-output"),
                 object_hash: None,
             })
@@ -731,15 +724,12 @@ mod tests {
     }
 
     #[test]
-    fn lookup_canonical_result_depends_on_input_meta_hash() {
+    fn lookup_canonical_result_depends_on_input_object_hash() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
         let matching_inputs = vec![ResultInputIdentity {
             object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
-                .parse()
-                .unwrap(),
-            meta_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .parse()
                 .unwrap(),
         }];
@@ -751,9 +741,6 @@ mod tests {
         let lookup_build_key =
             BuildKey::from_str("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
                 .unwrap();
-        let meta = Map::new();
-        let expected_meta_hash = mbuild_core::compute_meta_hash(&meta).unwrap();
-
         let stage = temp.path().join("script.sh");
         fs::write(&stage, b"echo hi\n").unwrap();
         publish_output(
@@ -765,7 +752,6 @@ mod tests {
                 created_at: "2026-04-05T12:00:00.000000000Z".to_string(),
                 staged_path: stage,
                 inputs: matching_inputs.clone(),
-                meta,
             },
         )
         .unwrap();
@@ -779,11 +765,10 @@ mod tests {
         )
         .unwrap()
         .expect("expected canonical result hit");
-        assert_eq!(hit.build.meta_hash, expected_meta_hash);
+        assert_eq!(hit.build.build_key, lookup_build_key);
 
         let mismatching_inputs = vec![ResultInputIdentity {
-            object_hash: matching_inputs[0].object_hash,
-            meta_hash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            object_hash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                 .parse()
                 .unwrap(),
         }];
@@ -828,7 +813,6 @@ mod tests {
 
         assert!(state_dir.is_dir());
         assert!(!temp_dir.exists());
-        assert!(published.build.meta.is_empty());
         assert!(published.object_path.is_dir());
         assert!(published.object_path.join("payload").is_file());
     }
