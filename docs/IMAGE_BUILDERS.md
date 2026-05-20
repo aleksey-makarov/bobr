@@ -135,6 +135,38 @@ Synthetic recipe helpers lower to `Sandbox`:
 - `Meson`
 - `PerlModule`
 
+These explicit-rootfs helpers require `inputs.rootfs` and use it as supplied.
+They remain available for bootstrap recipes and other cases where the caller
+must choose the execution rootfs directly.
+
+Package-aware synthetic helpers are also available:
+
+- `AutotoolsPackage`
+- `MakefilePackage`
+- `MesonPackage`
+- `PerlModulePackage`
+- `SandboxPackage`
+
+Package helpers require `deps = { build = [...], runtime = [...] }`. They do
+not require or consume `inputs.rootfs`; the Nickel lowering layer builds a
+temporary `TreeMerge` rootfs from `base_filesystem`, the runtime closure of the
+helper's default build tools, and the runtime closure of `deps.build`, then
+injects that rootfs into the corresponding explicit-rootfs helper. The
+published package runtime dependencies remain the recipe's `deps.runtime`.
+
+Default build tools:
+
+- `AutotoolsPackage`: the common native toolchain plus `autoconf`, `m4`, and
+  `perl`
+- `MakefilePackage`: the common native toolchain
+- `MesonPackage`: the common native toolchain plus `pkgconf` and `python`
+- `PerlModulePackage`: the common native toolchain plus `perl`
+- `SandboxPackage`: `bash`, `tar`, `gzip`, `bzip2`, `xz`, and `patch`
+
+The common native toolchain is `linux_headers`, `glibc`, `binutils`, `gcc`,
+`bash`, `make`, `coreutils`, `gawk`, `sed`, `grep`, `tar`, `gzip`, `xz`,
+`bzip2`, `patch`, `findutils`, and `diffutils`.
+
 ## Current Limitations
 
 - `Source/oci-registry` currently selects only `linux/amd64`
