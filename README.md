@@ -77,6 +77,28 @@ The runtime rejects:
 - extra inputs for builders that do not allow them
 - non-string input values
 
+`Group` is the phony aggregate builder for requests that need one root but
+must realize several otherwise unrelated targets. It has empty config and one
+or more arbitrary inputs:
+
+```json
+{
+  "name": "all-targets",
+  "tag": "Group",
+  "config": {},
+  "inputs": {
+    "in000": "toolchain",
+    "in001": "rootfs",
+    "in002": "image"
+  }
+}
+```
+
+`Group` does not merge or inspect input payloads. It stages a constant
+zero-byte marker file after all inputs have been realized, so the root
+`RealizedResult` is only a completion marker. The meaningful artifacts are the
+input targets and their normal `result-refs/` and `object-refs/` publications.
+
 `Source` is a separate execution class with its own shape:
 
 ```json

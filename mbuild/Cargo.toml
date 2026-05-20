@@ -12,6 +12,7 @@ fsobj-hash = { path = "../fsobj-hash" }
 libc = "0.2"
 mbuild-core = { path = "../mbuild-core" }
 mbuild-binary = { path = "../mbuild-binary" }
+mbuild-group = { path = "../mbuild-group" }
 mbuild-origin-http = { path = "../mbuild-origin-http" }
 mbuild-origin-oci-registry = { path = "../mbuild-origin-oci-registry" }
 mbuild-image = { path = "../mbuild-image" }

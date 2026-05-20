@@ -78,6 +78,12 @@ Each result record contains:
 - direct input identities under `inputs`, where each entry contains:
   - `object_hash`
 
+`result_id` is derived only from `object_hash`, so different builder nodes can
+share one result record when they intentionally stage the same payload. The
+`Group` builder relies on this phony behavior: every `Group` stages the same
+zero-byte marker. Its published root result is a completion marker, not an
+authoritative manifest of the aggregate inputs.
+
 `builds/<build_key>` stores the corresponding public build handle as a symlink
 to the canonical result record. `reuses/<reuse_key>` stores the canonical
 builder reuse index. The language-level realized result is `RealizedResult`.

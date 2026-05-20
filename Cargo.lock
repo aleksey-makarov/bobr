@@ -1173,6 +1173,7 @@ dependencies = [
  "libc",
  "mbuild-binary",
  "mbuild-core",
+ "mbuild-group",
  "mbuild-image",
  "mbuild-origin-http",
  "mbuild-origin-oci-registry",
@@ -1210,6 +1211,16 @@ dependencies = [
  "sha2",
  "tempfile",
  "time",
+]
+
+[[package]]
+name = "mbuild-group"
+version = "0.1.0"
+dependencies = [
+ "mbuild-core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

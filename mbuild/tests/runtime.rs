@@ -17,7 +17,7 @@ use std::time::Duration;
 use std::time::Instant;
 use support::{
     base_image_recipe, build_ref_path, image_recipe, recipe_node, source_recipe,
-    spawn_test_oci_registry, store_root, tree_file_recipe, write_recipe,
+    spawn_test_oci_registry, store_root, text_recipe, tree_file_recipe, write_recipe,
 };
 #[cfg(feature = "integration-tests")]
 use support::{tree_directory_recipe, tree_symlink_recipe};
@@ -28,6 +28,7 @@ fn registered_builders_include_current_tags_only() {
     let tags = mbuild::builders::supported_builder_tags();
     for tag in [
         "Text",
+        "Group",
         "Tree",
         "TreeSubset",
         "TreeMerge",
@@ -42,6 +43,44 @@ fn registered_builders_include_current_tags_only() {
         assert!(
             !tags.contains(&tag),
             "legacy builder tag {tag} is still registered"
+        );
+    }
+}
+
+#[test]
+fn group_root_builds_independent_inputs() {
+    let workspace = tempdir().unwrap();
+    let recipe = recipe_node(
+        "all-targets",
+        "Group",
+        json!({}),
+        json!({
+            "first": text_recipe("first-target", "first\n", false),
+            "second": text_recipe("second-target", "second\n", false),
+        }),
+    );
+    let recipe_path = workspace.path().join("group.json");
+    write_recipe(&recipe_path, &recipe);
+
+    let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+
+    let object_path = store_root(workspace.path())
+        .join("objects")
+        .join(realized.object_hash.to_string());
+    assert_eq!(fs::read(object_path).unwrap(), b"");
+
+    for name in ["all-targets", "first-target", "second-target"] {
+        assert!(
+            store_root(workspace.path())
+                .join("result-refs")
+                .join(format!("{name}.json"))
+                .exists()
+        );
+        assert!(
+            store_root(workspace.path())
+                .join("object-refs")
+                .join(name)
+                .exists()
         );
     }
 }
