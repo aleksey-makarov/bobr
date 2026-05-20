@@ -2,10 +2,12 @@
 
 ## Summary
 
-`mbuild` currently implements three filesystem-related builders:
+`mbuild` currently implements four filesystem-related builders:
 
 - `Tree`: realize text files, symlinks, and explicit directories as one file object or
   one fs-tree directory object
+- `TreeSubset`: select a manifest-defined subset of one fs-tree directory object
+  into another fs-tree directory object
 - `TreeMerge`: compose fs-tree directory objects into one fs-tree directory object
 - `ErofsRootfs`: compose fs-tree directory objects into one EROFS rootfs image
 
@@ -17,6 +19,19 @@
 - it stages UTF-8 text files, symlinks, and explicit directories
 - it publishes either one file object or one fs-tree directory object,
   depending on the tree shape
+
+`TreeSubset` is the manifest-based selection path for fs-tree objects:
+
+- the builder reads the input `manifest.jsonl` and never discovers paths by
+  walking the input `root/` tree
+- include globs select manifest paths and parent directories are included
+  automatically
+- unmatched individual include globs are allowed, but an empty final subset is
+  rejected
+- regular files are hardlinked from the input fs-tree; copying is not allowed
+- symlinks are recreated with the same target
+- the output object hash is computed from the output manifest and the selected
+  input leaf hashes from object indexes
 
 `TreeMerge` is the manifest-based composition path for fs-tree objects:
 
@@ -152,6 +167,57 @@ Physical materialization:
 - when hardlinking is not supported or not permitted, regular file bytes are copied
 - symlinks are recreated with the same target
 - ownership and modes are materialized and validated against the merged manifest
+
+The realized result payload is one fs-tree directory object.
+
+## `TreeSubset`
+
+`TreeSubset` accepts this config:
+
+```json
+{
+  "include": [
+    "usr/lib64/libfoo.so*",
+    "usr/share/foo/**"
+  ]
+}
+```
+
+Inputs:
+
+- required `tree`: one fs-tree directory object
+
+Current behavior:
+
+- requires the input to have fs-tree object shape:
+  ```text
+  manifest.jsonl
+  root/
+  ```
+- reads the canonical input manifest and treats it as the source of truth
+- matches `include` globs against manifest paths using the same glob semantics
+  as `Tree` install rules
+- rejects empty include lists, empty patterns, absolute patterns, and patterns
+  containing `..`
+- allows individual include patterns to match no paths
+- rejects the build when the final selected subset contains no non-root paths
+- includes matched files, symlinks, and directories plus their parent
+  directories
+- selecting a directory directly includes only that directory; recursive
+  selection requires a pattern such as `dir/**`
+- writes one fs-tree directory object with a canonical selected manifest
+
+Physical materialization:
+
+- directories are created as needed
+- regular files are hardlinked from the input fs-tree
+- hardlink failure is a build error; `TreeSubset` does not copy file bytes
+- symlinks are recreated with the same target
+- ownership and modes are materialized and validated for directories and
+  symlinks; selected hardlinked files keep their already-validated input
+  metadata
+- the output object hash is computed from the selected manifest and selected
+  input leaf hashes from object indexes instead of hashing the staged tree
 
 The realized result payload is one fs-tree directory object.
 

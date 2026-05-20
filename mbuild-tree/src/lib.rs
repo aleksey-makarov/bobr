@@ -13,7 +13,7 @@ use mbuild_core::{
 use mbuild_runtime::{FsTreeTarEntrySource, FsTreeTarInput};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io;
@@ -206,6 +206,7 @@ impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
 }
 
 pub struct TreeBuilder;
+pub struct TreeSubsetBuilder;
 pub struct TreeMergeBuilder;
 pub struct ErofsRootfsBuilder;
 
@@ -220,11 +221,24 @@ static TREE_SPEC: BuilderSpec = BuilderSpec {
 #[serde(deny_unknown_fields)]
 pub struct TreeMergeConfig {}
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TreeSubsetConfig {
+    include: Vec<String>,
+}
+
 static TREE_MERGE_SPEC: BuilderSpec = BuilderSpec {
     tag: "TreeMerge",
     required_inputs: &[],
     optional_inputs: &[],
     allow_extra_inputs: true,
+};
+
+static TREE_SUBSET_SPEC: BuilderSpec = BuilderSpec {
+    tag: "TreeSubset",
+    required_inputs: &["tree"],
+    optional_inputs: &[],
+    allow_extra_inputs: false,
 };
 
 #[derive(Debug, Deserialize)]
@@ -277,6 +291,29 @@ impl TypedBuilder for TreeMergeBuilder {
     }
 }
 
+impl TypedBuilder for TreeSubsetBuilder {
+    type Config = TreeSubsetConfig;
+
+    fn spec(&self) -> &'static BuilderSpec {
+        &TREE_SUBSET_SPEC
+    }
+
+    fn build_typed(
+        &self,
+        config: Self::Config,
+        inputs: BuilderInputs,
+        cx: &mut BuildContext,
+    ) -> Result<StagedBuildResult, BuilderError> {
+        build_tree_subset(
+            config,
+            inputs,
+            cx,
+            &RuntimeOwnershipMaterializer,
+            &StdTreeSubsetLinker,
+        )
+    }
+}
+
 impl TypedBuilder for ErofsRootfsBuilder {
     type Config = ErofsRootfsConfig;
 
@@ -297,6 +334,25 @@ impl TypedBuilder for ErofsRootfsBuilder {
             &RuntimeErofsTarWriter,
             &PathProgramResolver,
         )
+    }
+}
+
+#[derive(Debug)]
+struct CompiledTreeSubsetPattern {
+    pattern: String,
+    matcher: GlobMatcher,
+}
+
+trait TreeSubsetLinker {
+    fn hard_link(&self, source: &Path, dst: &Path) -> io::Result<()>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StdTreeSubsetLinker;
+
+impl TreeSubsetLinker for StdTreeSubsetLinker {
+    fn hard_link(&self, source: &Path, dst: &Path) -> io::Result<()> {
+        fs::hard_link(source, dst)
     }
 }
 
@@ -350,6 +406,65 @@ fn build_tree(
         staged_path: output_path,
         object_hash,
         object_index: None,
+    })
+}
+
+fn build_tree_subset(
+    config: TreeSubsetConfig,
+    inputs: BuilderInputs,
+    cx: &mut BuildContext,
+    materializer: &impl OwnershipMaterializer,
+    linker: &impl TreeSubsetLinker,
+) -> Result<StagedBuildResult, BuilderError> {
+    let input = tree_subset_input(inputs.required("tree")?)?;
+    let patterns = compile_tree_subset_patterns(&config.include)?;
+
+    cx.log_event(
+        BuildLogLevel::Info,
+        "prepare",
+        format!(
+            "selecting subset from fs-tree input with {} include pattern(s)",
+            patterns.len()
+        ),
+    );
+
+    let compose_start = Instant::now();
+    let composed = compose_tree_subset(&input.compose, &patterns)?;
+    let entry_count = composed.manifest().entries().len();
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        "compose-done",
+        format!("selected {entry_count} fs-tree entries"),
+        None,
+        None,
+        tree_subset_compose_details(patterns.len(), entry_count, elapsed_ms(compose_start)),
+    );
+
+    let now_nanos = fsutil::current_epoch_nanos()
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+    let output_path = cx.temp_dir.join(format!("tree-subset-{now_nanos}.obj"));
+
+    cx.log_event(
+        BuildLogLevel::Info,
+        "materialize",
+        format!("materializing fs-tree subset '{}'", output_path.display()),
+    );
+
+    let temp_dir = cx.temp_dir.clone();
+    let (object_hash, object_index) = materialize_tree_subset_output(
+        &output_path,
+        &composed,
+        &input,
+        &temp_dir,
+        materializer,
+        linker,
+        cx,
+    )?;
+
+    Ok(StagedBuildResult {
+        staged_path: output_path,
+        object_hash: Some(object_hash),
+        object_index: Some(object_index),
     })
 }
 
@@ -895,7 +1010,20 @@ fn tree_merge_input(
     })
 }
 
-fn load_tree_merge_input_index(
+fn tree_subset_input(object: &BuilderInputObject) -> Result<IndexedTreeMergeInput, BuilderError> {
+    let compose = load_fs_tree_compose_input(&object.object_path).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "TreeSubset input 'tree' is not a valid fs-tree object: {error}"
+        ))
+    })?;
+    Ok(IndexedTreeMergeInput {
+        compose,
+        object: object.clone(),
+    })
+}
+
+fn load_fs_tree_input_index(
+    builder_name: &str,
     object: &BuilderInputObject,
 ) -> Result<Option<ObjectLeafIndex>, BuilderError> {
     if let Some(index_path) =
@@ -918,13 +1046,153 @@ fn load_tree_merge_input_index(
     })?;
     if indexed.object_hash != object.object_hash {
         return Err(BuilderError::ExecutionFailed(format!(
-            "TreeMerge input '{}' hash changed while indexing: expected {}, got {}",
+            "{builder_name} input '{}' hash changed while indexing: expected {}, got {}",
             object.object_path.display(),
             object.object_hash,
             indexed.object_hash
         )));
     }
     Ok(ObjectLeafIndex::from_fsobj_index(&indexed.leaf_index))
+}
+
+fn compile_tree_subset_patterns(
+    patterns: &[String],
+) -> Result<Vec<CompiledTreeSubsetPattern>, BuilderError> {
+    if patterns.is_empty() {
+        return Err(BuilderError::InvalidRecipe(
+            "invalid builder config: include must contain at least one pattern".to_string(),
+        ));
+    }
+
+    patterns
+        .iter()
+        .map(|pattern| {
+            validate_tree_subset_pattern(pattern)?;
+            let glob = Glob::new(pattern).map_err(|error| {
+                BuilderError::InvalidRecipe(format!(
+                    "invalid builder config: invalid include pattern '{}': {error}",
+                    pattern
+                ))
+            })?;
+            Ok(CompiledTreeSubsetPattern {
+                pattern: pattern.clone(),
+                matcher: glob.compile_matcher(),
+            })
+        })
+        .collect()
+}
+
+fn validate_tree_subset_pattern(pattern: &str) -> Result<(), BuilderError> {
+    if pattern.is_empty() {
+        return Err(BuilderError::InvalidRecipe(
+            "invalid builder config: include pattern must not be empty".to_string(),
+        ));
+    }
+    let path = Path::new(pattern);
+    if path.is_absolute() {
+        return Err(BuilderError::InvalidRecipe(format!(
+            "invalid builder config: include pattern '{pattern}' must be relative"
+        )));
+    }
+    if pattern.contains('\\') {
+        return Err(BuilderError::InvalidRecipe(format!(
+            "invalid builder config: include pattern '{pattern}' must use '/' separators"
+        )));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(BuilderError::InvalidRecipe(format!(
+            "invalid builder config: include pattern '{pattern}' must not contain '..'"
+        )));
+    }
+    Ok(())
+}
+
+fn compose_tree_subset(
+    input: &FsTreeComposeInput,
+    patterns: &[CompiledTreeSubsetPattern],
+) -> Result<ComposedFsTree, BuilderError> {
+    let mut by_path = BTreeMap::new();
+    for entry in input.manifest.entries() {
+        by_path.insert(entry.path(), entry);
+    }
+
+    let mut selected = BTreeSet::<String>::new();
+    for entry in input.manifest.entries() {
+        let path = entry.path();
+        if path.is_empty() {
+            continue;
+        }
+        if tree_subset_path_matches(path, patterns) {
+            selected.insert(path.to_string());
+            add_tree_subset_parent_dirs(path, &by_path, &mut selected)?;
+        }
+    }
+
+    if !selected.iter().any(|path| !path.is_empty()) {
+        return Err(BuilderError::InvalidRecipe(
+            "invalid builder config: include patterns selected no paths".to_string(),
+        ));
+    }
+
+    let mut manifest_entries = Vec::new();
+    for entry in input.manifest.entries() {
+        if selected.contains(entry.path()) {
+            manifest_entries.push(entry.clone());
+        }
+    }
+    let manifest = FsTreeManifest::from_entries(manifest_entries).map_err(map_fs_tree_error)?;
+    let entries = manifest
+        .entries()
+        .iter()
+        .map(|entry| match entry {
+            FsTreeEntry::Directory { .. } => ComposedFsTreeEntry::Directory,
+            FsTreeEntry::File { path, .. } => ComposedFsTreeEntry::File {
+                source_path: input.root_dir.join(path),
+            },
+            FsTreeEntry::Symlink { path, .. } => ComposedFsTreeEntry::Symlink {
+                source_path: input.root_dir.join(path),
+            },
+        })
+        .collect();
+
+    Ok(ComposedFsTree { manifest, entries })
+}
+
+fn tree_subset_path_matches(path: &str, patterns: &[CompiledTreeSubsetPattern]) -> bool {
+    patterns.iter().any(|pattern| {
+        pattern.matcher.is_match(path)
+            || pattern
+                .pattern
+                .strip_suffix("/**")
+                .is_some_and(|prefix| path == prefix)
+    })
+}
+
+fn add_tree_subset_parent_dirs(
+    path: &str,
+    by_path: &BTreeMap<&str, &FsTreeEntry>,
+    selected: &mut BTreeSet<String>,
+) -> Result<(), BuilderError> {
+    selected.insert(String::new());
+    let mut remainder = path;
+    while let Some((parent, _)) = remainder.rsplit_once('/') {
+        let entry = by_path.get(parent).ok_or_else(|| {
+            BuilderError::ExecutionFailed(format!(
+                "input fs-tree manifest is missing parent directory '{parent}' for '{path}'"
+            ))
+        })?;
+        if !matches!(entry, FsTreeEntry::Directory { .. }) {
+            return Err(BuilderError::ExecutionFailed(format!(
+                "input fs-tree manifest parent '{parent}' for '{path}' is not a directory"
+            )));
+        }
+        selected.insert(parent.to_string());
+        remainder = parent;
+    }
+    Ok(())
 }
 
 fn load_fs_tree_compose_input(object_path: &Path) -> Result<FsTreeComposeInput, BuilderError> {
@@ -1074,7 +1342,105 @@ fn materialize_tree_merge_output(
     log_tree_merge_ownership_events(cx, None, ownership_host_ms);
 
     let hash_start = Instant::now();
-    let (object_hash, object_index) = hash_tree_merge_output_from_indexes(composed, merge_inputs)?;
+    let (object_hash, object_index) =
+        hash_tree_merge_output_from_indexes("TreeMerge", composed, merge_inputs)?;
+    log_tree_merge_hash_event(cx, object_hash, elapsed_ms(hash_start), 0);
+    Ok((object_hash, object_index))
+}
+
+fn materialize_tree_subset_output(
+    output_path: &Path,
+    composed: &ComposedFsTree,
+    input: &IndexedTreeMergeInput,
+    temp_dir: &Path,
+    materializer: &impl OwnershipMaterializer,
+    linker: &impl TreeSubsetLinker,
+    cx: &mut BuildContext,
+) -> Result<(ObjectHash, ObjectLeafIndex), BuilderError> {
+    let paths =
+        create_fs_tree_staging_dir(output_path, composed.manifest()).map_err(map_fs_tree_error)?;
+    let mut materialize_entries = Vec::new();
+    let mut stats = TreeMergeStageStats::default();
+
+    for (manifest_entry, composed_entry) in
+        composed.manifest().entries().iter().zip(composed.entries())
+    {
+        match (manifest_entry, composed_entry) {
+            (FsTreeEntry::Directory { path, .. }, ComposedFsTreeEntry::Directory) => {
+                let step_start = Instant::now();
+                if !path.is_empty() {
+                    fs::create_dir(paths.root_dir.join(path)).map_err(|error| {
+                        BuilderError::ExecutionFailed(format!(
+                            "failed to create fs-tree subset directory '{}': {error}",
+                            paths.root_dir.join(path).display()
+                        ))
+                    })?;
+                }
+                stats.directory_ms += elapsed_ms(step_start);
+                stats.directory_count += 1;
+                materialize_entries.push(manifest_entry.clone());
+            }
+            (FsTreeEntry::File { path, .. }, ComposedFsTreeEntry::File { source_path }) => {
+                let dst = paths.root_dir.join(path);
+                let result = hardlink_tree_subset_file(
+                    source_path,
+                    &dst,
+                    manifest_entry,
+                    materializer,
+                    linker,
+                )?;
+                stats.file_count += 1;
+                stats.file_validate_ms += result.validate_ms;
+                stats.hardlink_ms += result.hardlink_ms;
+                stats.hardlinked_file_count += 1;
+            }
+            (
+                FsTreeEntry::Symlink { path, target, .. },
+                ComposedFsTreeEntry::Symlink { source_path },
+            ) => {
+                let dst = paths.root_dir.join(path);
+                let step_start = Instant::now();
+                create_tree_merge_symlink(source_path, &dst, target)?;
+                stats.symlink_ms += elapsed_ms(step_start);
+                stats.symlink_count += 1;
+                materialize_entries.push(manifest_entry.clone());
+            }
+            _ => {
+                return Err(BuilderError::ExecutionFailed(format!(
+                    "fs-tree subset entry for '{}' does not match manifest kind",
+                    manifest_entry.path()
+                )));
+            }
+        }
+    }
+
+    cx.log_event_with_details(
+        BuildLogLevel::Info,
+        "stage-done",
+        format!(
+            "staged fs-tree subset with {} entries",
+            composed.manifest().entries().len()
+        ),
+        None,
+        None,
+        tree_merge_stage_details(composed.manifest().entries().len(), &stats),
+    );
+
+    let materialize_manifest =
+        FsTreeManifest::from_entries(materialize_entries).map_err(map_fs_tree_error)?;
+    let ownership_start = Instant::now();
+    materializer.materialize_and_validate(
+        &paths.root_dir,
+        &paths.object_dir,
+        &materialize_manifest,
+        temp_dir,
+    )?;
+    let ownership_host_ms = elapsed_ms(ownership_start);
+    log_tree_merge_ownership_events(cx, None, ownership_host_ms);
+
+    let hash_start = Instant::now();
+    let (object_hash, object_index) =
+        hash_tree_merge_output_from_indexes("TreeSubset", composed, std::slice::from_ref(input))?;
     log_tree_merge_hash_event(cx, object_hash, elapsed_ms(hash_start), 0);
     Ok((object_hash, object_index))
 }
@@ -1091,6 +1457,36 @@ struct TreeMergeFileMaterializationResult {
     validate_ms: u128,
     hardlink_ms: u128,
     copy_ms: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TreeSubsetFileMaterializationResult {
+    validate_ms: u128,
+    hardlink_ms: u128,
+}
+
+fn hardlink_tree_subset_file(
+    source: &Path,
+    dst: &Path,
+    manifest_entry: &FsTreeEntry,
+    materializer: &impl OwnershipMaterializer,
+    linker: &impl TreeSubsetLinker,
+) -> Result<TreeSubsetFileMaterializationResult, BuilderError> {
+    let validate_start = Instant::now();
+    materializer.validate_hardlinked_file(source, manifest_entry)?;
+    let validate_ms = elapsed_ms(validate_start);
+    let hardlink_start = Instant::now();
+    linker.hard_link(source, dst).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to hardlink fs-tree subset file '{}' to '{}': {error}",
+            source.display(),
+            dst.display()
+        ))
+    })?;
+    Ok(TreeSubsetFileMaterializationResult {
+        validate_ms,
+        hardlink_ms: elapsed_ms(hardlink_start),
+    })
 }
 
 fn link_or_copy_tree_merge_file(
@@ -1153,6 +1549,7 @@ struct PendingDirectoryHashEntry {
 }
 
 fn hash_tree_merge_output_from_indexes(
+    builder_name: &str,
     composed: &ComposedFsTree,
     merge_inputs: &[IndexedTreeMergeInput],
 ) -> Result<(ObjectHash, ObjectLeafIndex), BuilderError> {
@@ -1164,7 +1561,7 @@ fn hash_tree_merge_output_from_indexes(
     let mut output_index = ObjectLeafIndex::empty();
     output_index.insert("manifest.jsonl", ObjectLeafKind::File, manifest_hash);
 
-    let source_leaf_hashes = collect_source_leaf_hashes(composed, merge_inputs)?;
+    let source_leaf_hashes = collect_source_leaf_hashes(builder_name, composed, merge_inputs)?;
     let mut directories = BTreeMap::<String, BTreeMap<Vec<u8>, PendingDirectoryHashEntry>>::new();
     directories.entry(String::new()).or_default();
 
@@ -1212,6 +1609,7 @@ fn hash_tree_merge_output_from_indexes(
 }
 
 fn collect_source_leaf_hashes(
+    builder_name: &str,
     composed: &ComposedFsTree,
     merge_inputs: &[IndexedTreeMergeInput],
 ) -> Result<BTreeMap<PathBuf, ObjectHash>, BuilderError> {
@@ -1221,9 +1619,9 @@ fn collect_source_leaf_hashes(
         if needed.is_empty() {
             continue;
         }
-        let Some(index) = load_tree_merge_input_index(&input.object)? else {
+        let Some(index) = load_fs_tree_input_index(builder_name, &input.object)? else {
             return Err(BuilderError::ExecutionFailed(format!(
-                "TreeMerge input '{}' is not indexable",
+                "{builder_name} input '{}' is not indexable",
                 input.object.object_path.display()
             )));
         };
@@ -1444,6 +1842,18 @@ fn tree_merge_compose_details(
     let mut details = Map::new();
     details.insert("duration_ms".to_string(), json_u128(duration_ms));
     details.insert("input_count".to_string(), json_usize(input_count));
+    details.insert("entry_count".to_string(), json_usize(entry_count));
+    details
+}
+
+fn tree_subset_compose_details(
+    pattern_count: usize,
+    entry_count: usize,
+    duration_ms: u128,
+) -> Map<String, Value> {
+    let mut details = Map::new();
+    details.insert("duration_ms".to_string(), json_u128(duration_ms));
+    details.insert("pattern_count".to_string(), json_usize(pattern_count));
     details.insert("entry_count".to_string(), json_usize(entry_count));
     details
 }
@@ -2144,6 +2554,11 @@ mod tests {
         materialized_paths: RefCell<Vec<String>>,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct FailingTreeSubsetLinker {
+        kind: io::ErrorKind,
+    }
+
     #[derive(Debug, Default)]
     struct RecordingBuildLogger {
         events: Mutex<Vec<BuildLogEvent>>,
@@ -2250,6 +2665,12 @@ mod tests {
         }
     }
 
+    impl TreeSubsetLinker for FailingTreeSubsetLinker {
+        fn hard_link(&self, _source: &Path, _dst: &Path) -> io::Result<()> {
+            Err(io::Error::from(self.kind))
+        }
+    }
+
     #[derive(Debug, Clone, Copy)]
     struct CurrentOwnerMap {
         uid: u32,
@@ -2286,6 +2707,23 @@ mod tests {
             cx: &mut BuildContext,
         ) -> Result<StagedBuildResult, BuilderError> {
             build_tree(config, inputs, cx, &CurrentOwnerMaterializer)
+        }
+    }
+
+    impl TreeSubsetBuilder {
+        fn build_typed_for_tests(
+            &self,
+            config: TreeSubsetConfig,
+            inputs: BuilderInputs,
+            cx: &mut BuildContext,
+        ) -> Result<StagedBuildResult, BuilderError> {
+            build_tree_subset(
+                config,
+                inputs,
+                cx,
+                &CurrentOwnerMaterializer,
+                &StdTreeSubsetLinker,
+            )
         }
     }
 
@@ -2504,6 +2942,12 @@ mod tests {
             .collect()
     }
 
+    fn tree_subset_config(patterns: &[&str]) -> TreeSubsetConfig {
+        TreeSubsetConfig {
+            include: patterns.iter().map(|pattern| pattern.to_string()).collect(),
+        }
+    }
+
     fn fixed_object_hash() -> ObjectHash {
         "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
@@ -2536,6 +2980,261 @@ mod tests {
     #[cfg(not(unix))]
     fn current_owner_map(_path: &Path) -> Result<CurrentOwnerMap, BuilderError> {
         Ok(CurrentOwnerMap { uid: 0, gid: 0 })
+    }
+
+    #[test]
+    fn tree_subset_selects_manifest_paths_and_recreates_symlinks() {
+        let builder = TreeSubsetBuilder;
+        let temp = tempdir().unwrap();
+        let input = build_fs_tree_for_tests(
+            temp.path(),
+            "input",
+            vec![
+                TreeEntry::File {
+                    path: "usr/lib64/libfoo.so.1".to_string(),
+                    text: "runtime\n".to_string(),
+                    executable: true,
+                },
+                TreeEntry::Symlink {
+                    path: "usr/lib64/libfoo.so".to_string(),
+                    target: "libfoo.so.1".to_string(),
+                },
+                TreeEntry::File {
+                    path: "usr/bin/tool".to_string(),
+                    text: "tool\n".to_string(),
+                    executable: true,
+                },
+            ],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("subset"));
+
+        let result = builder
+            .build_typed_for_tests(
+                tree_subset_config(&["usr/lib64/libfoo.so*", "not-present/**"]),
+                tree_merge_inputs(&[("tree", &input)]),
+                &mut cx,
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(fs_tree_root(&result).join("usr/lib64/libfoo.so.1")).unwrap(),
+            "runtime\n"
+        );
+        assert_eq!(
+            fs::read_link(fs_tree_root(&result).join("usr/lib64/libfoo.so")).unwrap(),
+            PathBuf::from("libfoo.so.1")
+        );
+        assert!(!fs_tree_root(&result).join("usr/bin/tool").exists());
+        assert!(fs_tree_root(&result).join("usr").is_dir());
+        assert!(fs_tree_root(&result).join("usr/lib64").is_dir());
+        assert_valid_fs_tree(&result);
+
+        let manifest_paths = fs_tree_manifest(&result)
+            .entries()
+            .iter()
+            .map(|entry| entry.path().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            manifest_paths,
+            vec![
+                "",
+                "usr",
+                "usr/lib64",
+                "usr/lib64/libfoo.so",
+                "usr/lib64/libfoo.so.1"
+            ]
+        );
+        let object_index = result.object_index.as_ref().unwrap();
+        assert!(object_index.get("manifest.jsonl").is_some());
+        assert!(object_index.get("root/usr/lib64/libfoo.so.1").is_some());
+        assert!(object_index.get("root/usr/lib64/libfoo.so").is_some());
+        assert!(object_index.get("root/usr/bin/tool").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_subset_hardlinks_selected_files() {
+        let builder = TreeSubsetBuilder;
+        let temp = tempdir().unwrap();
+        let input = build_fs_tree_for_tests(
+            temp.path(),
+            "input",
+            vec![TreeEntry::File {
+                path: "lib/libfoo.so.1".to_string(),
+                text: "runtime\n".to_string(),
+                executable: true,
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("subset"));
+
+        let result = builder
+            .build_typed_for_tests(
+                tree_subset_config(&["lib/libfoo.so*"]),
+                tree_merge_inputs(&[("tree", &input)]),
+                &mut cx,
+            )
+            .unwrap();
+
+        let src = fs::metadata(fs_tree_root(&input).join("lib/libfoo.so.1")).unwrap();
+        let dst = fs::metadata(fs_tree_root(&result).join("lib/libfoo.so.1")).unwrap();
+        assert_eq!((src.dev(), src.ino()), (dst.dev(), dst.ino()));
+    }
+
+    #[test]
+    fn tree_subset_rejects_empty_result_but_allows_unmatched_patterns() {
+        let builder = TreeSubsetBuilder;
+        let temp = tempdir().unwrap();
+        let input = build_fs_tree_for_tests(
+            temp.path(),
+            "input",
+            vec![TreeEntry::File {
+                path: "lib/libfoo.so.1".to_string(),
+                text: "runtime\n".to_string(),
+                executable: true,
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("empty"));
+
+        let error = builder
+            .build_typed_for_tests(
+                tree_subset_config(&["not-present/**"]),
+                tree_merge_inputs(&[("tree", &input)]),
+                &mut cx,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("selected no paths"));
+    }
+
+    #[test]
+    fn tree_subset_rejects_invalid_config_and_input() {
+        let builder = TreeSubsetBuilder;
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(&temp.path().join("missing"));
+        let error = builder
+            .build_typed_for_tests(
+                tree_subset_config(&["lib/*"]),
+                BuilderInputs::empty(),
+                &mut cx,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("required input slot 'tree' is missing")
+        );
+
+        let input = build_fs_tree_for_tests(
+            temp.path(),
+            "input",
+            vec![TreeEntry::Dir {
+                path: "lib".to_string(),
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("bad-pattern"));
+        let error = builder
+            .build_typed_for_tests(
+                tree_subset_config(&["../lib/*"]),
+                tree_merge_inputs(&[("tree", &input)]),
+                &mut cx,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("must not contain '..'"));
+
+        let not_tree = temp.path().join("not-tree");
+        fs::write(&not_tree, b"not a tree").unwrap();
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert(
+            "tree",
+            BuilderInputObject {
+                object_hash: hash_path(&not_tree).unwrap(),
+                object_path: not_tree,
+            },
+        );
+        let mut cx = build_context(&temp.path().join("not-tree-cx"));
+        let error = builder
+            .build_typed_for_tests(tree_subset_config(&["lib/*"]), inputs, &mut cx)
+            .unwrap_err();
+        assert!(error.to_string().contains("is not a valid fs-tree object"));
+    }
+
+    #[test]
+    fn tree_subset_fails_when_hardlink_fails() {
+        let temp = tempdir().unwrap();
+        let input = build_fs_tree_for_tests(
+            temp.path(),
+            "input",
+            vec![TreeEntry::File {
+                path: "lib/libfoo.so.1".to_string(),
+                text: "runtime\n".to_string(),
+                executable: true,
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("subset"));
+
+        let error = build_tree_subset(
+            tree_subset_config(&["lib/libfoo.so*"]),
+            tree_merge_inputs(&[("tree", &input)]),
+            &mut cx,
+            &CurrentOwnerMaterializer,
+            &FailingTreeSubsetLinker {
+                kind: io::ErrorKind::PermissionDenied,
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to hardlink fs-tree subset file")
+        );
+    }
+
+    #[test]
+    fn tree_subset_uses_manifest_without_discovering_input_tree() {
+        let builder = TreeSubsetBuilder;
+        let temp = tempdir().unwrap();
+        let object_dir = temp.path().join("input-object");
+        let manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::directory("bin", 0, 0, 0o755),
+            FsTreeEntry::file("bin/tool", 0, 0, 0o755),
+            FsTreeEntry::directory("locked", 0, 0, 0o000),
+        ])
+        .unwrap();
+        let paths = create_fs_tree_staging_dir(&object_dir, &manifest).unwrap();
+        fs::create_dir(paths.root_dir.join("bin")).unwrap();
+        fs::write(paths.root_dir.join("bin/tool"), b"tool\n").unwrap();
+        fs::set_permissions(
+            paths.root_dir.join("bin/tool"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert(
+            "tree",
+            BuilderInputObject {
+                object_hash: hash_path(&object_dir).unwrap(),
+                object_path: object_dir,
+            },
+        );
+        let mut cx = build_context(&temp.path().join("subset"));
+
+        let result = builder
+            .build_typed_for_tests(tree_subset_config(&["bin/tool"]), inputs, &mut cx)
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(fs_tree_root(&result).join("bin/tool")).unwrap(),
+            "tool\n"
+        );
+        assert!(!fs_tree_root(&result).join("locked").exists());
+        assert_valid_fs_tree(&result);
     }
 
     #[test]

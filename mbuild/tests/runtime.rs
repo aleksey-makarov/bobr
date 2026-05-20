@@ -29,6 +29,7 @@ fn registered_builders_include_current_tags_only() {
     for tag in [
         "Text",
         "Tree",
+        "TreeSubset",
         "TreeMerge",
         "ErofsRootfs",
         "Sandbox",
