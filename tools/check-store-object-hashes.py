@@ -24,6 +24,7 @@ HEX64 = re.compile(r"^[0-9a-f]{64}$")
 @dataclass(frozen=True)
 class CheckResult:
     expected_hash: str
+    display_name: str
     object_path: Path
     actual_hash: str | None = None
     error: str | None = None
@@ -35,6 +36,14 @@ class CheckResult:
     @property
     def mismatch(self) -> bool:
         return self.error is None and self.actual_hash != self.expected_hash
+
+
+@dataclass(frozen=True)
+class CheckSummary:
+    total: int
+    ok_count: int
+    mismatch_count: int
+    error_count: int
 
 
 def main() -> int:
@@ -74,8 +83,9 @@ def main() -> int:
         store = args.store.resolve()
         fsobj_hash = resolve_fsobj_hash(args.fsobj_hash)
         objects = collect_objects(store, args.allow_non_object_entries)
-        results = check_objects(objects, fsobj_hash, args.jobs)
-        return print_results(results)
+        object_ref_names = collect_object_ref_names(store)
+        summary = check_objects(objects, object_ref_names, fsobj_hash, args.jobs)
+        return print_summary(summary)
     except CheckError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -139,19 +149,88 @@ def collect_objects(store: Path, allow_non_object_entries: bool) -> list[Path]:
     return objects
 
 
-def check_objects(objects: list[Path], fsobj_hash: Path, jobs: int) -> list[CheckResult]:
+def collect_object_ref_names(store: Path) -> dict[str, str]:
+    object_refs_dir = store / "object-refs"
+    if not object_refs_dir.is_dir():
+        return {}
+
+    object_ref_names: dict[str, str] = {}
+    try:
+        entries = list(object_refs_dir.iterdir())
+    except OSError:
+        return {}
+
+    for entry in entries:
+        if not entry.is_symlink():
+            continue
+
+        try:
+            target = os.readlink(entry)
+        except OSError:
+            continue
+
+        match = re.fullmatch(r"\.\./objects/([0-9a-f]{64})", target)
+        if match is None:
+            continue
+
+        object_hash = match.group(1)
+        name = entry.name
+        current = object_ref_names.get(object_hash)
+        if current is None or (len(name), name) < (len(current), current):
+            object_ref_names[object_hash] = name
+
+    return object_ref_names
+
+
+def check_objects(
+    objects: list[Path],
+    object_ref_names: dict[str, str],
+    fsobj_hash: Path,
+    jobs: int,
+) -> CheckSummary:
     if jobs < 1:
         raise CheckError("--jobs must be at least 1")
 
+    total = len(objects)
+    ok_count = 0
+    mismatch_count = 0
+    error_count = 0
+
+    print(f"checking {total} object(s) with {jobs} job(s)", flush=True)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
         futures = [
-            executor.submit(check_one_object, object_path, fsobj_hash)
+            executor.submit(
+                check_one_object,
+                object_path,
+                object_ref_names.get(object_path.name, "<unreferenced>"),
+                fsobj_hash,
+            )
             for object_path in objects
         ]
-        return [future.result() for future in concurrent.futures.as_completed(futures)]
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            print_result(result)
+            if result.ok:
+                ok_count += 1
+            elif result.mismatch:
+                mismatch_count += 1
+            else:
+                error_count += 1
+
+    return CheckSummary(
+        total=total,
+        ok_count=ok_count,
+        mismatch_count=mismatch_count,
+        error_count=error_count,
+    )
 
 
-def check_one_object(object_path: Path, fsobj_hash: Path) -> CheckResult:
+def check_one_object(
+    object_path: Path,
+    display_name: str,
+    fsobj_hash: Path,
+) -> CheckResult:
     expected_hash = object_path.name
     try:
         completed = subprocess.run(
@@ -162,12 +241,13 @@ def check_one_object(object_path: Path, fsobj_hash: Path) -> CheckResult:
             text=True,
         )
     except OSError as error:
-        return CheckResult(expected_hash, object_path, error=str(error))
+        return CheckResult(expected_hash, display_name, object_path, error=str(error))
 
     if completed.returncode != 0:
         stderr = completed.stderr.strip()
         return CheckResult(
             expected_hash,
+            display_name,
             object_path,
             error=stderr or f"fsobj-hash exited with status {completed.returncode}",
         )
@@ -176,40 +256,42 @@ def check_one_object(object_path: Path, fsobj_hash: Path) -> CheckResult:
     if not HEX64.fullmatch(actual_hash):
         return CheckResult(
             expected_hash,
+            display_name,
             object_path,
             actual_hash=actual_hash,
             error=f"fsobj-hash printed invalid hash: {actual_hash!r}",
         )
 
-    return CheckResult(expected_hash, object_path, actual_hash=actual_hash)
+    return CheckResult(expected_hash, display_name, object_path, actual_hash=actual_hash)
 
 
-def print_results(results: list[CheckResult]) -> int:
-    total = len(results)
-    errors = sorted((result for result in results if result.error), key=sort_key)
-    mismatches = sorted((result for result in results if result.mismatch), key=sort_key)
-
-    for result in errors:
-        print(f"ERROR {result.expected_hash} {result.object_path}: {result.error}", file=sys.stderr)
-    for result in mismatches:
+def print_result(result: CheckResult) -> None:
+    if result.ok:
+        print(f"OK {result.display_name} {result.expected_hash}", flush=True)
+    elif result.mismatch:
         print(
-            f"MISMATCH {result.expected_hash} {result.object_path}: got {result.actual_hash}",
+            f"MISMATCH {result.display_name} {result.expected_hash}: "
+            f"got {result.actual_hash}",
             file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print(
+            f"ERROR {result.display_name} {result.expected_hash}: {result.error}",
+            file=sys.stderr,
+            flush=True,
         )
 
-    ok_count = total - len(errors) - len(mismatches)
+
+def print_summary(summary: CheckSummary) -> int:
     print(
-        f"checked {total} object(s): {ok_count} ok, "
-        f"{len(mismatches)} mismatch(es), {len(errors)} error(s)"
+        f"checked {summary.total} object(s): {summary.ok_count} ok, "
+        f"{summary.mismatch_count} mismatch(es), {summary.error_count} error(s)"
     )
 
-    if errors or mismatches:
+    if summary.error_count or summary.mismatch_count:
         return 1
     return 0
-
-
-def sort_key(result: CheckResult) -> str:
-    return result.expected_hash
 
 
 if __name__ == "__main__":
