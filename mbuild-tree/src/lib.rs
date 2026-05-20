@@ -6,9 +6,9 @@ use globset::{Glob, GlobMatcher};
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     ComposedFsTree, ComposedFsTreeEntry, FsTreeComposeInput, FsTreeEntry, FsTreeManifest,
-    FsTreeOwnerMap, ObjectLeafIndex, ObjectLeafKind, StagedBuildResult, TypedBuilder,
-    compose_fs_trees, create_fs_tree_staging_dir, fsutil, object_index_path_for_object_path,
-    read_object_leaf_index, rebuild_object_index,
+    FsTreeOwnerMap, ObjectLeafIndex, ObjectLeafIndexEntry, ObjectLeafKind, StagedBuildResult,
+    TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir, fsutil,
+    object_index_path_for_object_path, read_object_leaf_index, rebuild_object_index,
 };
 use mbuild_runtime::{FsTreeTarEntrySource, FsTreeTarInput};
 use serde::{Deserialize, Serialize};
@@ -144,6 +144,18 @@ enum MaterializedKind {
 struct IndexedTreeMergeInput {
     compose: FsTreeComposeInput,
     object: BuilderInputObject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InputLeafIdentity {
+    kind: ObjectLeafKind,
+    node_hash: ObjectHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeenInputLeaf {
+    entry: FsTreeEntry,
+    identity: InputLeafIdentity,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -492,11 +504,8 @@ fn build_tree_merge(
         .iter()
         .map(|(name, object)| tree_merge_input(name, object))
         .collect::<Result<Vec<_>, _>>()?;
-    let compose_inputs = merge_inputs
-        .iter()
-        .map(|input| input.compose.clone())
-        .collect::<Vec<_>>();
-    let composed = compose_fs_trees(&compose_inputs).map_err(map_fs_tree_error)?;
+    let composed =
+        compose_rootfs_inputs_allowing_identical_leaf_overlap("TreeMerge", &merge_inputs)?;
     let entry_count = composed.manifest().entries().len();
     cx.log_event_with_details(
         BuildLogLevel::Info,
@@ -561,11 +570,16 @@ fn build_erofs_rootfs(
         format!("composing {} fs-tree input(s) for EROFS", inputs.len()),
     );
 
-    let compose_inputs = inputs
+    let merge_inputs = inputs
         .iter()
         .map(|(name, object)| erofs_rootfs_input(name, object))
         .collect::<Result<Vec<_>, _>>()?;
-    let composed = compose_fs_trees(&compose_inputs).map_err(map_fs_tree_error)?;
+    let compose_inputs = merge_inputs
+        .iter()
+        .map(|input| input.compose.clone())
+        .collect::<Vec<_>>();
+    let composed =
+        compose_rootfs_inputs_allowing_identical_leaf_overlap("ErofsRootfs", &merge_inputs)?;
 
     let now_nanos = fsutil::current_epoch_nanos()
         .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
@@ -613,13 +627,16 @@ fn validate_erofs_config(config: &ErofsRootfsConfig) -> Result<(), BuilderError>
 fn erofs_rootfs_input(
     name: &str,
     object: &BuilderInputObject,
-) -> Result<FsTreeComposeInput, BuilderError> {
-    let input = load_fs_tree_compose_input(&object.object_path).map_err(|error| {
+) -> Result<IndexedTreeMergeInput, BuilderError> {
+    let compose = load_fs_tree_compose_input(&object.object_path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
             "ErofsRootfs input '{name}' is not a valid fs-tree object: {error}"
         ))
     })?;
-    Ok(input)
+    Ok(IndexedTreeMergeInput {
+        compose,
+        object: object.clone(),
+    })
 }
 
 trait ErofsTarWriter {
@@ -1053,6 +1070,164 @@ fn load_fs_tree_input_index(
         )));
     }
     Ok(ObjectLeafIndex::from_fsobj_index(&indexed.leaf_index))
+}
+
+fn compose_rootfs_inputs_allowing_identical_leaf_overlap(
+    builder_name: &str,
+    inputs: &[IndexedTreeMergeInput],
+) -> Result<ComposedFsTree, BuilderError> {
+    let mut input_indexes = vec![None; inputs.len()];
+    let mut seen_leaves = BTreeMap::<String, SeenInputLeaf>::new();
+    let mut compose_inputs = Vec::with_capacity(inputs.len());
+
+    for (input_index, input) in inputs.iter().enumerate() {
+        let mut entries = Vec::new();
+        for entry in input.compose.manifest.entries() {
+            if is_fs_tree_leaf(entry) {
+                let index = cached_fs_tree_input_index(
+                    builder_name,
+                    input,
+                    &mut input_indexes[input_index],
+                )?;
+                let identity = input_leaf_identity(builder_name, input, index, entry)?;
+                if let Some(seen) = seen_leaves.get(entry.path()) {
+                    ensure_identical_leaf_overlap(entry, identity, seen)?;
+                    continue;
+                }
+                seen_leaves.insert(
+                    entry.path().to_string(),
+                    SeenInputLeaf {
+                        entry: entry.clone(),
+                        identity,
+                    },
+                );
+            }
+            entries.push(entry.clone());
+        }
+
+        compose_inputs.push(FsTreeComposeInput {
+            manifest: FsTreeManifest::from_entries(entries).map_err(map_fs_tree_error)?,
+            root_dir: input.compose.root_dir.clone(),
+        });
+    }
+
+    compose_fs_trees(&compose_inputs).map_err(map_fs_tree_error)
+}
+
+fn cached_fs_tree_input_index<'a>(
+    builder_name: &str,
+    input: &IndexedTreeMergeInput,
+    cache: &'a mut Option<Option<ObjectLeafIndex>>,
+) -> Result<Option<&'a ObjectLeafIndex>, BuilderError> {
+    if cache.is_none() {
+        *cache = Some(load_fs_tree_input_index(builder_name, &input.object)?);
+    }
+    Ok(cache
+        .as_ref()
+        .expect("cache was initialized above")
+        .as_ref())
+}
+
+fn input_leaf_identity(
+    builder_name: &str,
+    input: &IndexedTreeMergeInput,
+    index: Option<&ObjectLeafIndex>,
+    entry: &FsTreeEntry,
+) -> Result<InputLeafIdentity, BuilderError> {
+    let Some(index) = index else {
+        return Err(BuilderError::ExecutionFailed(format!(
+            "{builder_name} input '{}' is not indexable",
+            input.object.object_path.display()
+        )));
+    };
+    let index_path = format!("root/{}", entry.path());
+    let indexed = index.get(&index_path).ok_or_else(|| {
+        BuilderError::ExecutionFailed(format!(
+            "missing input leaf hash for '{}' in '{}'",
+            index_path,
+            input.object.object_path.display()
+        ))
+    })?;
+    let expected_kind = object_leaf_kind_for_manifest_entry(entry).ok_or_else(|| {
+        BuilderError::ExecutionFailed(format!(
+            "fs-tree path '{}' is not a file or symlink",
+            entry.path()
+        ))
+    })?;
+    if indexed.kind != expected_kind {
+        return Err(BuilderError::ExecutionFailed(format!(
+            "{builder_name} input '{}' has object-index kind mismatch at '{}': manifest is {}, index is {}",
+            input.object.object_path.display(),
+            entry.path(),
+            object_leaf_kind_name(expected_kind),
+            object_leaf_kind_name(indexed.kind),
+        )));
+    }
+
+    Ok(indexed_leaf_identity(*indexed))
+}
+
+fn ensure_identical_leaf_overlap(
+    entry: &FsTreeEntry,
+    identity: InputLeafIdentity,
+    seen: &SeenInputLeaf,
+) -> Result<(), BuilderError> {
+    if seen.entry == *entry && seen.identity == identity {
+        return Ok(());
+    }
+
+    let reason = if leaf_entry_kind(&seen.entry) != leaf_entry_kind(entry) {
+        format!(
+            "{} vs {}",
+            leaf_entry_kind(&seen.entry),
+            leaf_entry_kind(entry)
+        )
+    } else if seen.entry != *entry {
+        "metadata differs".to_string()
+    } else {
+        "leaf hash differs".to_string()
+    };
+    Err(BuilderError::ExecutionFailed(format!(
+        "conflicting fs-tree entries at '{}': duplicate leaf entries differ ({reason})",
+        entry.path()
+    )))
+}
+
+fn is_fs_tree_leaf(entry: &FsTreeEntry) -> bool {
+    matches!(
+        entry,
+        FsTreeEntry::File { .. } | FsTreeEntry::Symlink { .. }
+    )
+}
+
+fn object_leaf_kind_for_manifest_entry(entry: &FsTreeEntry) -> Option<ObjectLeafKind> {
+    match entry {
+        FsTreeEntry::File { .. } => Some(ObjectLeafKind::File),
+        FsTreeEntry::Symlink { .. } => Some(ObjectLeafKind::Symlink),
+        FsTreeEntry::Directory { .. } => None,
+    }
+}
+
+fn indexed_leaf_identity(entry: ObjectLeafIndexEntry) -> InputLeafIdentity {
+    InputLeafIdentity {
+        kind: entry.kind,
+        node_hash: entry.node_hash,
+    }
+}
+
+fn leaf_entry_kind(entry: &FsTreeEntry) -> &'static str {
+    match entry {
+        FsTreeEntry::File { .. } => "file",
+        FsTreeEntry::Symlink { .. } => "symlink",
+        FsTreeEntry::Directory { .. } => "directory",
+    }
+}
+
+fn object_leaf_kind_name(kind: ObjectLeafKind) -> &'static str {
+    match kind {
+        ObjectLeafKind::File => "file",
+        ObjectLeafKind::Symlink => "symlink",
+    }
 }
 
 fn compile_tree_subset_patterns(
@@ -3285,6 +3460,53 @@ mod tests {
     }
 
     #[test]
+    fn erofs_rootfs_allows_identical_duplicate_file_overlap() {
+        let builder = ErofsRootfsBuilder;
+        let temp = tempdir().unwrap();
+        let left = build_fs_tree_for_tests(
+            temp.path(),
+            "left",
+            vec![TreeEntry::File {
+                path: "usr/lib64/libsame.so.1".to_string(),
+                text: "same\n".to_string(),
+                executable: false,
+            }],
+            sample_install(),
+        );
+        let right = build_fs_tree_for_tests(
+            temp.path(),
+            "right",
+            vec![TreeEntry::File {
+                path: "usr/lib64/libsame.so.1".to_string(),
+                text: "same\n".to_string(),
+                executable: false,
+            }],
+            sample_install(),
+        );
+        let log_path = temp.path().join("mkfs-args.txt");
+        let mkfs = install_fake_mkfs_erofs(temp.path(), &log_path, false);
+        let mut cx = build_context(&temp.path().join("erofs"));
+
+        let result = builder
+            .build_typed_for_tests(
+                ErofsRootfsConfig {
+                    compression: None,
+                    label: None,
+                },
+                tree_merge_inputs(&[("left", &left), ("right", &right)]),
+                &mut cx,
+                mkfs,
+            )
+            .unwrap();
+
+        assert!(result.staged_path.is_file());
+        assert_eq!(
+            fs::read_to_string(&result.staged_path).unwrap(),
+            "fake erofs image\n"
+        );
+    }
+
+    #[test]
     fn erofs_rootfs_passes_compression_and_label_to_mkfs() {
         let builder = ErofsRootfsBuilder;
         let temp = tempdir().unwrap();
@@ -3912,6 +4134,94 @@ mod tests {
     }
 
     #[test]
+    fn tree_merge_allows_identical_duplicate_file_overlap() {
+        let builder = TreeMergeBuilder;
+        let temp = tempdir().unwrap();
+        let left = build_fs_tree_for_tests(
+            temp.path(),
+            "left",
+            vec![TreeEntry::File {
+                path: "usr/lib64/libsame.so.1".to_string(),
+                text: "same\n".to_string(),
+                executable: false,
+            }],
+            sample_install(),
+        );
+        let right = build_fs_tree_for_tests(
+            temp.path(),
+            "right",
+            vec![TreeEntry::File {
+                path: "usr/lib64/libsame.so.1".to_string(),
+                text: "same\n".to_string(),
+                executable: false,
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("merge"));
+
+        let result = builder
+            .build_typed_for_tests(
+                TreeMergeConfig {},
+                tree_merge_inputs(&[("left", &left), ("right", &right)]),
+                &mut cx,
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(fs_tree_root(&result).join("usr/lib64/libsame.so.1")).unwrap(),
+            "same\n"
+        );
+        assert_eq!(
+            fs_tree_manifest(&result)
+                .entries()
+                .iter()
+                .filter(|entry| entry.path() == "usr/lib64/libsame.so.1")
+                .count(),
+            1
+        );
+        assert_valid_fs_tree(&result);
+    }
+
+    #[test]
+    fn tree_merge_allows_identical_duplicate_symlink_overlap() {
+        let builder = TreeMergeBuilder;
+        let temp = tempdir().unwrap();
+        let left = build_fs_tree_for_tests(
+            temp.path(),
+            "left",
+            vec![TreeEntry::Symlink {
+                path: "usr/lib64/libsame.so".to_string(),
+                target: "libsame.so.1".to_string(),
+            }],
+            sample_install(),
+        );
+        let right = build_fs_tree_for_tests(
+            temp.path(),
+            "right",
+            vec![TreeEntry::Symlink {
+                path: "usr/lib64/libsame.so".to_string(),
+                target: "libsame.so.1".to_string(),
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("merge"));
+
+        let result = builder
+            .build_typed_for_tests(
+                TreeMergeConfig {},
+                tree_merge_inputs(&[("left", &left), ("right", &right)]),
+                &mut cx,
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_link(fs_tree_root(&result).join("usr/lib64/libsame.so")).unwrap(),
+            Path::new("libsame.so.1")
+        );
+        assert_valid_fs_tree(&result);
+    }
+
+    #[test]
     fn tree_merge_rejects_directory_attr_mismatch() {
         let builder = TreeMergeBuilder;
         let temp = tempdir().unwrap();
@@ -3945,7 +4255,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_merge_rejects_duplicate_files_and_symlinks() {
+    fn tree_merge_rejects_non_identical_duplicate_files_and_symlinks() {
         let builder = TreeMergeBuilder;
         let temp = tempdir().unwrap();
         let left_file = build_fs_tree_for_tests(
@@ -4005,6 +4315,43 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("conflicting fs-tree entries"));
+    }
+
+    #[test]
+    fn tree_merge_rejects_duplicate_file_with_matching_hash_but_different_metadata() {
+        let builder = TreeMergeBuilder;
+        let temp = tempdir().unwrap();
+        let left = build_fs_tree_for_tests(
+            temp.path(),
+            "left",
+            vec![TreeEntry::File {
+                path: "bin/tool".to_string(),
+                text: "same\n".to_string(),
+                executable: false,
+            }],
+            install_with_modes(0o755, 0o644),
+        );
+        let right = build_fs_tree_for_tests(
+            temp.path(),
+            "right",
+            vec![TreeEntry::File {
+                path: "bin/tool".to_string(),
+                text: "same\n".to_string(),
+                executable: false,
+            }],
+            install_with_modes(0o755, 0o600),
+        );
+        let mut cx = build_context(&temp.path().join("merge"));
+
+        let error = builder
+            .build_typed_for_tests(
+                TreeMergeConfig {},
+                tree_merge_inputs(&[("left", &left), ("right", &right)]),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("metadata differs"));
     }
 
     #[test]

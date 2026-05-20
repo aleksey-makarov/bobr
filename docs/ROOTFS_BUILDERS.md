@@ -156,7 +156,8 @@ Current behavior:
 - reads canonical manifests and treats them as the source of truth
 - validates each input `root/` directory against its manifest before merging
 - allows overlapping directory paths only when `uid`, `gid`, and `mode` match
-- rejects duplicate file or symlink paths
+- allows duplicate file or symlink paths only when manifest metadata and
+  object-index leaf hashes match
 - rejects file-vs-directory, symlink-vs-directory, and parent/child leaf conflicts
 - writes one fs-tree directory object with a canonical merged manifest
 
@@ -247,7 +248,8 @@ Current behavior:
   ```
 - reads canonical manifests and treats them as the source of truth
 - allows overlapping directory paths only when `uid`, `gid`, and `mode` match
-- rejects duplicate file or symlink paths
+- allows duplicate file or symlink paths only when manifest metadata and
+  object-index leaf hashes match
 - rejects file-vs-directory, symlink-vs-directory, and parent/child leaf conflicts
 - writes a deterministic tar stream in canonical manifest order, excluding the
   implicit root entry
