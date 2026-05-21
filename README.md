@@ -1,6 +1,6 @@
 # mbuild
 
-<img src="bobr.svg" alt="bobr" width="200">
+<img src="docs/bobr.svg" alt="bobr" width="200">
 
 `mbuild` executes one JSON DAG request.
 
