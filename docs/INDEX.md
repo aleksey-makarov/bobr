@@ -11,8 +11,8 @@
    `Sandbox` on the image and rootfs-backed execution paths.
 
 3. [ROOTFS_BUILDERS.md](./ROOTFS_BUILDERS.md)
-   Current behavior of `Tree`, `TreeSubset`, `TreeMerge`, `ErofsRootfs`, and
-   the fs-tree filesystem authoring/composition path.
+   Current behavior of `Tree`, `TreeSubset`, `TreeMerge`, `ErofsRootfs`,
+   `Initramfs`, and the fs-tree filesystem authoring/composition path.
 
 4. [SPLIT_OUTPUTS.md](./SPLIT_OUTPUTS.md)
    Naming convention for split package outputs and how those outputs are used

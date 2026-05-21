@@ -2,7 +2,7 @@
 
 ## Summary
 
-`mbuild` currently implements four filesystem-related builders:
+`mbuild` currently implements five filesystem-related builders:
 
 - `Tree`: realize text files, symlinks, and explicit directories as one file object or
   one fs-tree directory object
@@ -10,6 +10,8 @@
   into another fs-tree directory object
 - `TreeMerge`: compose fs-tree directory objects into one fs-tree directory object
 - `ErofsRootfs`: compose fs-tree directory objects into one EROFS rootfs image
+- `Initramfs`: compose fs-tree directory objects into one Linux `newc`
+  initramfs image
 
 `Tree` is a direct authoring path:
 
@@ -53,6 +55,19 @@
 - tar headers use logical `uid`, `gid`, mode, symlink targets, and `mtime=0`
   from the merged manifest
 - it runs `mkfs.erofs --tar=f` on the host to produce one EROFS image file
+
+`Initramfs` is the cpio-producing counterpart to `TreeMerge`:
+
+- the builder reads canonical `manifest.jsonl` files from fs-tree inputs
+- it merges manifest entries with the same conflict semantics as `TreeMerge`
+- it writes one deterministic Linux `newc` cpio archive directly, without
+  invoking a host or target `cpio` program
+- regular file bytes are read from the selected input fs-tree roots inside the
+  ownership user namespace
+- cpio headers use logical `uid`, `gid`, mode, symlink targets, and `mtime=0`
+  from the merged manifest
+- symlink mode is encoded as `0777` because fs-tree manifests do not carry
+  symlink mode
 
 ## `Tree`
 
@@ -276,6 +291,45 @@ Config fields:
 
 The realized result payload is one regular file containing an EROFS filesystem
 image.
+
+## `Initramfs`
+
+`Initramfs` accepts this config:
+
+```json
+{}
+```
+
+Inputs:
+
+- one or more named fs-tree directory inputs
+- input order follows the standard builder input order: required inputs,
+  optional inputs, then extra inputs in lexical input-name order
+
+Current behavior:
+
+- requires every input to have fs-tree object shape:
+  ```text
+  manifest.jsonl
+  root/
+  ```
+- reads canonical manifests and treats them as the source of truth
+- allows overlapping directory paths only when `uid`, `gid`, and `mode` match
+- allows duplicate file or symlink paths only when manifest metadata and
+  object-index leaf hashes match
+- rejects file-vs-directory, symlink-vs-directory, and parent/child leaf conflicts
+- writes an uncompressed Linux `newc` cpio archive in canonical manifest order
+- encodes the fs-tree root entry as `.`
+- sets cpio directory and file `uid`, `gid`, `mode`, and `mtime=0` from the
+  merged manifest
+- sets cpio symlink `uid`, `gid`, target payload, and `mtime=0` from the merged
+  manifest; symlink mode is encoded as `0777`
+- reads file bytes from input `root/` directories inside the ownership user
+  namespace, so files owned through the configured idmap remain readable
+- terminates the archive with `TRAILER!!!`
+
+The realized result payload is one regular file containing an uncompressed
+initramfs archive suitable for Linux `-initrd` users such as QEMU.
 
 ## Current Limitations
 

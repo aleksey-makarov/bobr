@@ -3,6 +3,8 @@ use fsobj_hash::{
     hash_fs_tree_object_from_hashes, hash_path, hash_path_with_leaf_index,
 };
 use globset::{Glob, GlobMatcher};
+#[cfg(test)]
+use mbuild_core::InitramfsEntrySource;
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     ComposedFsTree, ComposedFsTreeEntry, FsTreeComposeInput, FsTreeEntry, FsTreeManifest,
@@ -10,7 +12,9 @@ use mbuild_core::{
     TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir, fsutil,
     object_index_path_for_object_path, read_object_leaf_index, rebuild_object_index,
 };
-use mbuild_runtime::{FsTreeTarEntrySource, FsTreeTarInput};
+use mbuild_runtime::{
+    FsTreeInitramfsEntrySource, FsTreeInitramfsInput, FsTreeTarEntrySource, FsTreeTarInput,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -221,6 +225,7 @@ pub struct TreeBuilder;
 pub struct TreeSubsetBuilder;
 pub struct TreeMergeBuilder;
 pub struct ErofsRootfsBuilder;
+pub struct InitramfsBuilder;
 
 static TREE_SPEC: BuilderSpec = BuilderSpec {
     tag: "Tree",
@@ -264,6 +269,17 @@ pub struct ErofsRootfsConfig {
 
 static EROFS_ROOTFS_SPEC: BuilderSpec = BuilderSpec {
     tag: "ErofsRootfs",
+    required_inputs: &[],
+    optional_inputs: &[],
+    allow_extra_inputs: true,
+};
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitramfsConfig {}
+
+static INITRAMFS_SPEC: BuilderSpec = BuilderSpec {
+    tag: "Initramfs",
     required_inputs: &[],
     optional_inputs: &[],
     allow_extra_inputs: true,
@@ -346,6 +362,23 @@ impl TypedBuilder for ErofsRootfsBuilder {
             &RuntimeErofsTarWriter,
             &PathProgramResolver,
         )
+    }
+}
+
+impl TypedBuilder for InitramfsBuilder {
+    type Config = InitramfsConfig;
+
+    fn spec(&self) -> &'static BuilderSpec {
+        &INITRAMFS_SPEC
+    }
+
+    fn build_typed(
+        &self,
+        config: Self::Config,
+        inputs: BuilderInputs,
+        cx: &mut BuildContext,
+    ) -> Result<StagedBuildResult, BuilderError> {
+        build_initramfs(config, inputs, cx, &RuntimeInitramfsWriter)
     }
 }
 
@@ -610,6 +643,57 @@ fn build_erofs_rootfs(
     })
 }
 
+fn build_initramfs(
+    _config: InitramfsConfig,
+    inputs: BuilderInputs,
+    cx: &mut BuildContext,
+    initramfs_writer: &impl InitramfsWriter,
+) -> Result<StagedBuildResult, BuilderError> {
+    let inputs = inputs.extras(&INITRAMFS_SPEC).collect::<Vec<_>>();
+    if inputs.is_empty() {
+        return Err(BuilderError::ExecutionFailed(
+            "Initramfs builder requires at least one fs-tree input".to_string(),
+        ));
+    }
+
+    cx.log_event(
+        BuildLogLevel::Info,
+        "prepare",
+        format!("composing {} fs-tree input(s) for initramfs", inputs.len()),
+    );
+
+    let merge_inputs = inputs
+        .iter()
+        .map(|(name, object)| initramfs_input(name, object))
+        .collect::<Result<Vec<_>, _>>()?;
+    let compose_inputs = merge_inputs
+        .iter()
+        .map(|input| input.compose.clone())
+        .collect::<Vec<_>>();
+    let composed =
+        compose_rootfs_inputs_allowing_identical_leaf_overlap("Initramfs", &merge_inputs)?;
+
+    let now_nanos = fsutil::current_epoch_nanos()
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+    let output_path = cx.temp_dir.join(format!("initramfs-{now_nanos}.img"));
+
+    cx.log_event(
+        BuildLogLevel::Info,
+        "initramfs",
+        format!(
+            "writing deterministic initramfs '{}'",
+            output_path.display()
+        ),
+    );
+    initramfs_writer.write_initramfs(&compose_inputs, &composed, &output_path, &cx.temp_dir)?;
+
+    Ok(StagedBuildResult {
+        staged_path: output_path,
+        object_hash: None,
+        object_index: None,
+    })
+}
+
 fn validate_erofs_config(config: &ErofsRootfsConfig) -> Result<(), BuilderError> {
     if matches!(config.compression.as_deref(), Some("")) {
         return Err(BuilderError::InvalidRecipe(
@@ -639,6 +723,21 @@ fn erofs_rootfs_input(
     })
 }
 
+fn initramfs_input(
+    name: &str,
+    object: &BuilderInputObject,
+) -> Result<IndexedTreeMergeInput, BuilderError> {
+    let compose = load_fs_tree_compose_input(&object.object_path).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "Initramfs input '{name}' is not a valid fs-tree object: {error}"
+        ))
+    })?;
+    Ok(IndexedTreeMergeInput {
+        compose,
+        object: object.clone(),
+    })
+}
+
 trait ErofsTarWriter {
     fn write_tar(
         &self,
@@ -647,6 +746,48 @@ trait ErofsTarWriter {
         output_tar: &Path,
         workspace: &Path,
     ) -> Result<(), BuilderError>;
+}
+
+trait InitramfsWriter {
+    fn write_initramfs(
+        &self,
+        inputs: &[FsTreeComposeInput],
+        composed: &ComposedFsTree,
+        output_initramfs: &Path,
+        workspace: &Path,
+    ) -> Result<(), BuilderError>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimeInitramfsWriter;
+
+impl InitramfsWriter for RuntimeInitramfsWriter {
+    fn write_initramfs(
+        &self,
+        inputs: &[FsTreeComposeInput],
+        composed: &ComposedFsTree,
+        output_initramfs: &Path,
+        workspace: &Path,
+    ) -> Result<(), BuilderError> {
+        let idmap = mbuild_runtime::cached_host_idmap()
+            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+        let initramfs_inputs = inputs
+            .iter()
+            .map(|input| FsTreeInitramfsInput {
+                root_dir: input.root_dir.clone(),
+            })
+            .collect::<Vec<_>>();
+        let sources = initramfs_sources(inputs, composed)?;
+        mbuild_runtime::write_fs_tree_initramfs_in_ownership_namespace(
+            &initramfs_inputs,
+            composed.manifest(),
+            &sources,
+            output_initramfs,
+            idmap.as_ref(),
+            workspace,
+        )
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -714,7 +855,49 @@ fn erofs_tar_sources(
         .collect()
 }
 
+fn initramfs_sources(
+    inputs: &[FsTreeComposeInput],
+    composed: &ComposedFsTree,
+) -> Result<Vec<FsTreeInitramfsEntrySource>, BuilderError> {
+    composed
+        .manifest()
+        .entries()
+        .iter()
+        .zip(composed.entries())
+        .map(
+            |(manifest_entry, composed_entry)| match (manifest_entry, composed_entry) {
+                (FsTreeEntry::Directory { .. }, ComposedFsTreeEntry::Directory) => {
+                    Ok(FsTreeInitramfsEntrySource::Directory)
+                }
+                (FsTreeEntry::File { .. }, ComposedFsTreeEntry::File { source_path }) => {
+                    let (input_index, rel_path) = locate_rootfs_source(inputs, source_path)?;
+                    Ok(FsTreeInitramfsEntrySource::File {
+                        input_index,
+                        path: rel_path,
+                    })
+                }
+                (FsTreeEntry::Symlink { .. }, ComposedFsTreeEntry::Symlink { .. }) => {
+                    Ok(FsTreeInitramfsEntrySource::Symlink)
+                }
+                _ => Err(BuilderError::ExecutionFailed(format!(
+                    "merged fs-tree entry for '{}' does not match manifest kind",
+                    manifest_entry.path()
+                ))),
+            },
+        )
+        .collect()
+}
+
 fn locate_erofs_source(
+    inputs: &[FsTreeComposeInput],
+    source_path: &Path,
+) -> Result<(usize, String), BuilderError> {
+    locate_rootfs_source(inputs, source_path).map_err(|error| {
+        BuilderError::ExecutionFailed(error.to_string().replace("rootfs", "ErofsRootfs"))
+    })
+}
+
+fn locate_rootfs_source(
     inputs: &[FsTreeComposeInput],
     source_path: &Path,
 ) -> Result<(usize, String), BuilderError> {
@@ -736,7 +919,7 @@ fn locate_erofs_source(
         }
     }
     Err(BuilderError::ExecutionFailed(format!(
-        "fs-tree source path '{}' is not under any ErofsRootfs input root",
+        "fs-tree source path '{}' is not under any rootfs input root",
         source_path.display()
     )))
 }
@@ -765,6 +948,53 @@ fn write_composed_fs_tree_tar_host(
         ))
     })?;
     write_composed_fs_tree_tar_stream(file, composed)
+}
+
+#[cfg(test)]
+fn write_composed_fs_tree_initramfs_host(
+    composed: &ComposedFsTree,
+    output_initramfs: &Path,
+) -> Result<(), BuilderError> {
+    let file = fs::File::create(output_initramfs).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to create initramfs '{}': {error}",
+            output_initramfs.display()
+        ))
+    })?;
+    let sources = initramfs_host_sources(composed)?;
+    mbuild_core::write_newc_initramfs(file, composed.manifest().entries(), &sources)
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))
+}
+
+#[cfg(test)]
+fn initramfs_host_sources(
+    composed: &ComposedFsTree,
+) -> Result<Vec<InitramfsEntrySource>, BuilderError> {
+    composed
+        .manifest()
+        .entries()
+        .iter()
+        .zip(composed.entries())
+        .map(
+            |(manifest_entry, composed_entry)| match (manifest_entry, composed_entry) {
+                (FsTreeEntry::Directory { .. }, ComposedFsTreeEntry::Directory) => {
+                    Ok(InitramfsEntrySource::Directory)
+                }
+                (FsTreeEntry::File { .. }, ComposedFsTreeEntry::File { source_path }) => {
+                    Ok(InitramfsEntrySource::File {
+                        path: source_path.clone(),
+                    })
+                }
+                (FsTreeEntry::Symlink { .. }, ComposedFsTreeEntry::Symlink { .. }) => {
+                    Ok(InitramfsEntrySource::Symlink)
+                }
+                _ => Err(BuilderError::ExecutionFailed(format!(
+                    "merged fs-tree entry for '{}' does not match manifest kind",
+                    manifest_entry.path()
+                ))),
+            },
+        )
+        .collect()
 }
 
 #[cfg(test)]
@@ -2931,6 +3161,17 @@ mod tests {
         }
     }
 
+    impl InitramfsBuilder {
+        fn build_typed_for_tests(
+            &self,
+            config: InitramfsConfig,
+            inputs: BuilderInputs,
+            cx: &mut BuildContext,
+        ) -> Result<StagedBuildResult, BuilderError> {
+            build_initramfs(config, inputs, cx, &HostInitramfsWriter)
+        }
+    }
+
     #[derive(Debug, Clone, Copy)]
     struct HostErofsTarWriter;
 
@@ -2943,6 +3184,21 @@ mod tests {
             _workspace: &Path,
         ) -> Result<(), BuilderError> {
             write_composed_fs_tree_tar_host(composed, output_tar)
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct HostInitramfsWriter;
+
+    impl InitramfsWriter for HostInitramfsWriter {
+        fn write_initramfs(
+            &self,
+            _inputs: &[FsTreeComposeInput],
+            composed: &ComposedFsTree,
+            output_initramfs: &Path,
+            _workspace: &Path,
+        ) -> Result<(), BuilderError> {
+            write_composed_fs_tree_initramfs_host(composed, output_initramfs)
         }
     }
 
@@ -3457,6 +3713,101 @@ mod tests {
         assert!(!args.iter().any(|arg| arg == "-L"));
         assert!(args[args.len() - 2].ends_with(".erofs"));
         assert!(args[args.len() - 1].ends_with(".tar"));
+    }
+
+    #[test]
+    fn initramfs_writes_newc_file() {
+        let builder = InitramfsBuilder;
+        let temp = tempdir().unwrap();
+        let tree = build_fs_tree_for_tests(
+            temp.path(),
+            "tree",
+            vec![
+                TreeEntry::File {
+                    path: "init".to_string(),
+                    text: "#!/bin/sh\n".to_string(),
+                    executable: true,
+                },
+                TreeEntry::Symlink {
+                    path: "bin/sh".to_string(),
+                    target: "../init".to_string(),
+                },
+            ],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("initramfs"));
+
+        let result = builder
+            .build_typed_for_tests(
+                InitramfsConfig {},
+                tree_merge_inputs(&[("tree", &tree)]),
+                &mut cx,
+            )
+            .unwrap();
+
+        assert!(result.staged_path.is_file());
+        assert_eq!(result.object_hash, None);
+        let bytes = fs::read(&result.staged_path).unwrap();
+        assert!(bytes.starts_with(b"070701"));
+        assert!(
+            bytes
+                .windows("#!/bin/sh\n".len())
+                .any(|window| window == b"#!/bin/sh\n")
+        );
+        assert!(
+            bytes
+                .windows("TRAILER!!!".len())
+                .any(|window| window == b"TRAILER!!!")
+        );
+    }
+
+    #[test]
+    fn initramfs_allows_identical_duplicate_file_overlap() {
+        let builder = InitramfsBuilder;
+        let temp = tempdir().unwrap();
+        let left = build_fs_tree_for_tests(
+            temp.path(),
+            "left",
+            vec![TreeEntry::File {
+                path: "etc/same".to_string(),
+                text: "same\n".to_string(),
+                executable: false,
+            }],
+            sample_install(),
+        );
+        let right = build_fs_tree_for_tests(
+            temp.path(),
+            "right",
+            vec![TreeEntry::File {
+                path: "etc/same".to_string(),
+                text: "same\n".to_string(),
+                executable: false,
+            }],
+            sample_install(),
+        );
+        let mut cx = build_context(&temp.path().join("initramfs"));
+
+        let result = builder
+            .build_typed_for_tests(
+                InitramfsConfig {},
+                tree_merge_inputs(&[("left", &left), ("right", &right)]),
+                &mut cx,
+            )
+            .unwrap();
+
+        assert!(result.staged_path.is_file());
+    }
+
+    #[test]
+    fn initramfs_rejects_zero_inputs() {
+        let temp = tempdir().unwrap();
+        let mut cx = build_context(&temp.path().join("initramfs"));
+
+        let error = InitramfsBuilder
+            .build_typed_for_tests(InitramfsConfig {}, BuilderInputs::empty(), &mut cx)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("requires at least one"));
     }
 
     #[test]

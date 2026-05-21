@@ -20,6 +20,7 @@
 mod bundle;
 mod error;
 mod idmap;
+mod initramfs_writer;
 mod ownership;
 mod preflight;
 mod run;
@@ -31,6 +32,10 @@ mod executor;
 
 pub use error::{IdmapError, RuntimeError};
 pub use idmap::{MbuildIdmap, cached_host_idmap};
+pub use initramfs_writer::{
+    FsTreeInitramfsEntrySource, FsTreeInitramfsInput,
+    write_fs_tree_initramfs_in_ownership_namespace,
+};
 pub use ownership::{
     OwnershipHashResult, OwnershipTimings, apply_ownership_batch, apply_ownership_batch_and_hash,
     apply_ownership_batch_and_hash_fs_tree_object,
