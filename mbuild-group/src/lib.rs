@@ -73,7 +73,6 @@ impl TypedBuilder for GroupBuilder {
         Ok(StagedBuildResult {
             staged_path: marker_path,
             object_hash: None,
-            object_index: None,
         })
     }
 }
@@ -145,7 +144,6 @@ mod tests {
 
         assert_eq!(std::fs::read(&result.staged_path).unwrap(), b"");
         assert!(result.object_hash.is_none());
-        assert!(result.object_index.is_none());
 
         #[cfg(unix)]
         {

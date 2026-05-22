@@ -83,7 +83,12 @@ directory. It extracts the image root filesystem into an fs-tree object:
 ```text
 manifest.jsonl
 root/
+oci-config.json
 ```
+
+`manifest.jsonl` carries required `h` fields for file and symlink entries.
+`oci-config.json` is top-level metadata: rootfs composition ignores it, but it
+participates in the published object hash.
 
 The result can be consumed by `TreeMerge`, `ErofsRootfs`, or `Sandbox` as a
 rootfs/tree input.

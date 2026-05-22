@@ -1,7 +1,6 @@
 use crate::builder::{Build, PublishedBuild, ResultInputIdentity, ResultRecord, StagedBuildResult};
 use crate::fsutil;
-use crate::object_index::{ObjectLeafIndex, read_object_leaf_index, write_object_leaf_index};
-use fsobj_hash::{ObjectHash, hash_path_with_leaf_index};
+use fsobj_hash::{ObjectHash, hash_path};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -28,7 +27,6 @@ const RESULTS_DIR: &str = "results";
 const REUSES_DIR: &str = "reuses";
 const OBJECT_REFS_DIR: &str = "object-refs";
 const RESULT_REFS_DIR: &str = "result-refs";
-const OBJECT_INDEXES_DIR: &str = "object-indexes";
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BuildKey([u8; 32]);
@@ -278,7 +276,6 @@ impl std::error::Error for CasError {}
 pub struct StoreLayout {
     pub root: PathBuf,
     pub objects: PathBuf,
-    pub object_indexes: PathBuf,
     pub builds: PathBuf,
     pub reuses: PathBuf,
     pub results: PathBuf,
@@ -291,7 +288,6 @@ impl StoreLayout {
         let layout = Self {
             root: root.to_path_buf(),
             objects: root.join(OBJECTS_DIR),
-            object_indexes: root.join(OBJECT_INDEXES_DIR),
             builds: root.join(BUILDS_DIR),
             reuses: root.join(REUSES_DIR),
             results: root.join(RESULTS_DIR),
@@ -311,7 +307,6 @@ impl StoreLayout {
     fn ensure(&self) -> Result<(), CasError> {
         ensure_dir(&self.root, "mbuild root")?;
         ensure_dir(&self.objects, "objects")?;
-        ensure_dir(&self.object_indexes, "object-indexes")?;
         ensure_dir(&self.builds, "builds")?;
         ensure_dir(&self.reuses, "reuses")?;
         ensure_dir(&self.results, "results")?;
@@ -380,7 +375,6 @@ pub fn publish_output(
     let staged = StagedBuildResult {
         staged_path: request.staged_path,
         object_hash: None,
-        object_index: None,
     };
     let published = materialize_build(
         layout,
@@ -488,12 +482,7 @@ pub fn materialize_build(
     inputs: Vec<ResultInputIdentity>,
     staged: StagedBuildResult,
 ) -> Result<PublishedBuild, CasError> {
-    let object_hash = import_object_with_hash(
-        layout,
-        &staged.staged_path,
-        staged.object_hash,
-        staged.object_index.as_ref(),
-    )?;
+    let object_hash = import_object_with_hash(layout, &staged.staged_path, staged.object_hash)?;
     let result_id = compute_result_id(object_hash)?;
     let result = ResultRecord {
         result_id,
@@ -565,61 +554,6 @@ pub fn publish_refs(
 
 pub fn object_path(layout: &StoreLayout, object_hash: ObjectHash) -> PathBuf {
     layout.objects.join(object_hash.to_hex())
-}
-
-pub fn object_index_path(layout: &StoreLayout, object_hash: ObjectHash) -> PathBuf {
-    layout
-        .object_indexes
-        .join(format!("{}.jsonl", object_hash.to_hex()))
-}
-
-pub fn object_index_path_for_object_path(
-    object_path: &Path,
-    object_hash: ObjectHash,
-) -> Option<PathBuf> {
-    let objects_dir = object_path.parent()?;
-    if objects_dir.file_name()? != OBJECTS_DIR {
-        return None;
-    }
-    Some(
-        objects_dir
-            .parent()?
-            .join(OBJECT_INDEXES_DIR)
-            .join(format!("{}.jsonl", object_hash.to_hex())),
-    )
-}
-
-pub fn load_object_index(
-    layout: &StoreLayout,
-    object_hash: ObjectHash,
-) -> Result<Option<ObjectLeafIndex>, CasError> {
-    read_object_leaf_index(&object_index_path(layout, object_hash))
-}
-
-pub fn rebuild_object_index(
-    index_path: &Path,
-    object_path: &Path,
-    expected_hash: ObjectHash,
-) -> Result<Option<ObjectLeafIndex>, CasError> {
-    let indexed = hash_path_with_leaf_index(object_path).map_err(|error| {
-        CasError::Hashing(format!(
-            "failed to hash object '{}' while rebuilding index: {error}",
-            object_path.display()
-        ))
-    })?;
-    if indexed.object_hash != expected_hash {
-        return Err(CasError::Hashing(format!(
-            "object '{}' hash changed while rebuilding index: expected {}, got {}",
-            object_path.display(),
-            expected_hash,
-            indexed.object_hash
-        )));
-    }
-    let Some(index) = ObjectLeafIndex::from_fsobj_index(&indexed.leaf_index) else {
-        return Ok(None);
-    };
-    write_object_leaf_index(index_path, &index)?;
-    Ok(Some(index))
 }
 
 pub fn build_ref_path(layout: &StoreLayout, build_key: BuildKey) -> PathBuf {
@@ -782,40 +716,26 @@ fn build_from_result(build_key: BuildKey, result: &ResultRecord) -> Build {
 }
 
 pub fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectHash, CasError> {
-    import_object_with_hash(layout, staged_path, None, None)
+    import_object_with_hash(layout, staged_path, None)
 }
 
 fn import_object_with_hash(
     layout: &StoreLayout,
     staged_path: &Path,
     object_hash: Option<ObjectHash>,
-    object_index: Option<&ObjectLeafIndex>,
 ) -> Result<ObjectHash, CasError> {
     let precomputed = object_hash.is_some();
-    let mut computed_index = None;
     let object_hash = match object_hash {
         Some(object_hash) => object_hash,
-        None => {
-            let indexed = hash_path_with_leaf_index(staged_path).map_err(|error| {
-                CasError::Hashing(format!(
-                    "failed to hash staged object '{}': {error}",
-                    staged_path.display()
-                ))
-            })?;
-            computed_index = ObjectLeafIndex::from_fsobj_index(&indexed.leaf_index);
-            indexed.object_hash
-        }
-    };
-    let index = object_index.or(computed_index.as_ref());
-    let write_index = |index: Option<&ObjectLeafIndex>| -> Result<(), CasError> {
-        if let Some(index) = index {
-            write_object_leaf_index(&object_index_path(layout, object_hash), index)?;
-        }
-        Ok(())
+        None => hash_path(staged_path).map_err(|error| {
+            CasError::Hashing(format!(
+                "failed to hash staged object '{}': {error}",
+                staged_path.display()
+            ))
+        })?,
     };
     let destination = layout.objects.join(object_hash.to_hex());
     if destination.exists() {
-        write_index(index)?;
         if !precomputed {
             remove_path_force(staged_path)?;
         }
@@ -824,7 +744,6 @@ fn import_object_with_hash(
 
     if let Err(error) = fs::rename(staged_path, &destination) {
         if destination.exists() {
-            write_index(index)?;
             if !precomputed {
                 remove_path_force(staged_path)?;
             }
@@ -837,7 +756,6 @@ fn import_object_with_hash(
         )));
     }
 
-    write_index(index)?;
     Ok(object_hash)
 }
 
@@ -1338,8 +1256,8 @@ fn map_fsutil_error(error: fsutil::FsUtilError) -> CasError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{FsTreeEntry, FsTreeManifest, ObjectLeafKind, create_fs_tree_staging_dir};
-    use fsobj_hash::{hash_file_bytes, hash_path};
+    use crate::{FsTreeEntry, FsTreeManifest, create_fs_tree_staging_dir};
+    use fsobj_hash::hash_path;
     use serde_json::json;
     use std::fs;
     #[cfg(unix)]
@@ -2086,7 +2004,6 @@ mod tests {
             StagedBuildResult {
                 staged_path: stage_dir,
                 object_hash: Some(object_hash),
-                object_index: None,
             },
         )
         .unwrap();
@@ -2137,55 +2054,23 @@ mod tests {
     }
 
     #[test]
-    fn store_layout_creates_object_indexes_dir() {
+    fn store_layout_does_not_create_object_indexes_dir() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
-        assert!(layout.object_indexes.is_dir());
+        assert!(!layout.root.join("object-indexes").exists());
     }
 
     #[test]
-    fn import_object_writes_leaf_index_when_hashing_staged_path() {
+    fn import_object_does_not_write_leaf_index_when_hashing_staged_path() {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
         let stage_dir = temp.path().join("stage");
         fs::create_dir(&stage_dir).unwrap();
         fs::write(stage_dir.join("payload"), b"hello\n").unwrap();
 
-        let object_hash = import_object(&layout, &stage_dir).unwrap();
-        let index = load_object_index(&layout, object_hash).unwrap().unwrap();
-        let entry = index.get("payload").unwrap();
-        assert_eq!(entry.kind, ObjectLeafKind::File);
-        assert_eq!(entry.node_hash, hash_file_bytes(false, b"hello\n"));
-    }
+        import_object(&layout, &stage_dir).unwrap();
 
-    #[test]
-    fn materialize_build_stores_supplied_leaf_index_for_precomputed_hash() {
-        let temp = tempdir().unwrap();
-        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
-        let stage_dir = temp.path().join("stage");
-        fs::create_dir(&stage_dir).unwrap();
-        fs::write(stage_dir.join("payload"), b"hello\n").unwrap();
-        let object_hash = hash_path(&stage_dir).unwrap();
-        let payload_hash = hash_file_bytes(false, b"hello\n");
-        let mut object_index = ObjectLeafIndex::empty();
-        object_index.insert("payload", ObjectLeafKind::File, payload_hash);
-
-        materialize_build(
-            &layout,
-            build_key_for("Test", json!({}), &[]),
-            reuse_key_for("Test", json!({}), &[]),
-            sample_created_at(),
-            vec![],
-            StagedBuildResult {
-                staged_path: stage_dir,
-                object_hash: Some(object_hash),
-                object_index: Some(object_index),
-            },
-        )
-        .unwrap();
-
-        let index = load_object_index(&layout, object_hash).unwrap().unwrap();
-        assert_eq!(index.get("payload").unwrap().node_hash, payload_hash);
+        assert!(!layout.root.join("object-indexes").exists());
     }
 
     #[test]
@@ -2244,7 +2129,6 @@ mod tests {
             StagedBuildResult {
                 staged_path: first_stage,
                 object_hash: Some(object_hash),
-                object_index: None,
             },
         )
         .unwrap();
@@ -2261,7 +2145,6 @@ mod tests {
             StagedBuildResult {
                 staged_path: second_stage,
                 object_hash: Some(object_hash),
-                object_index: None,
             },
         )
         .unwrap();

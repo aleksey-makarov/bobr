@@ -12,7 +12,7 @@ use crate::{
     run::run_init_with_executor,
     spec::build_ownership_spec,
 };
-use fsobj_hash::{ObjectHash, hash_fs_tree_object, hash_path};
+use fsobj_hash::{ObjectHash, hash_fs_tree_object_with_extra_files, hash_path};
 use libcontainer::oci_spec::runtime::Spec;
 use libcontainer::workload::{
     Executor, ExecutorError, ExecutorSetEnvsError, ExecutorValidationError,
@@ -183,8 +183,35 @@ pub fn apply_ownership_batch_and_hash_fs_tree_object_with_timings(
         target_root,
         manifest,
         manifest,
+        Vec::new(),
         idmap,
         workspace,
+    )
+}
+
+/// Apply fs-tree owners and modes, then compute the hash of a synthetic
+/// fs-tree object with additional top-level non-executable metadata files.
+///
+/// `extra_files` contains `(name, bytes)` pairs. Names are fsobj directory entry
+/// names, not paths; callers use this for metadata such as `oci-config.json`
+/// that participates in object identity but is not part of `root/`.
+pub fn apply_ownership_batch_and_hash_fs_tree_object_with_extra_files(
+    target_root: &Path,
+    manifest: &FsTreeManifest,
+    extra_files: Vec<(Vec<u8>, Vec<u8>)>,
+    idmap: &MbuildIdmap,
+    workspace: &Path,
+) -> Result<ObjectHash, RuntimeError> {
+    Ok(
+        apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
+            target_root,
+            manifest,
+            manifest,
+            extra_files,
+            idmap,
+            workspace,
+        )?
+        .object_hash,
     )
 }
 
@@ -207,6 +234,7 @@ pub fn apply_selected_ownership_batch_and_hash_fs_tree_object(
             target_root,
             materialize_manifest,
             object_manifest,
+            Vec::new(),
             idmap,
             workspace,
         )?
@@ -220,6 +248,7 @@ pub fn apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
     target_root: &Path,
     materialize_manifest: &FsTreeManifest,
     object_manifest: &FsTreeManifest,
+    extra_files: Vec<(Vec<u8>, Vec<u8>)>,
     idmap: &MbuildIdmap,
     workspace: &Path,
 ) -> Result<OwnershipHashResult, RuntimeError> {
@@ -230,6 +259,7 @@ pub fn apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
         workspace,
         Some(HashReport::FsTreeObject {
             manifest: object_manifest.clone(),
+            extra_files,
         }),
     )?;
     read_ownership_hash_result(bundle.result_log_path())
@@ -275,7 +305,10 @@ fn run_ownership_batch(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HashReport {
     TargetRoot,
-    FsTreeObject { manifest: FsTreeManifest },
+    FsTreeObject {
+        manifest: FsTreeManifest,
+        extra_files: Vec<(Vec<u8>, Vec<u8>)>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -426,7 +459,10 @@ impl OwnershipExecutor {
                     hash_ms: elapsed_ms(hash_start),
                 })
             }
-            HashReport::FsTreeObject { manifest } => {
+            HashReport::FsTreeObject {
+                manifest,
+                extra_files,
+            } => {
                 let manifest_start = Instant::now();
                 let manifest_bytes = manifest.to_canonical_bytes().map_err(|error| {
                     report(
@@ -438,18 +474,26 @@ impl OwnershipExecutor {
                 })?;
                 let manifest_serialize_ms = elapsed_ms(manifest_start);
                 let hash_start = Instant::now();
-                let object_hash = hash_fs_tree_object(&manifest_bytes, &self.target_inside)
-                    .map_err(|error| {
-                        report(
-                            "hash",
-                            &self.target_inside,
-                            format!(
-                                "failed to hash fs-tree object rooted at '{}': {error}",
-                                self.target_inside.display()
-                            ),
-                            None,
-                        )
-                    })?;
+                let extra_file_refs = extra_files
+                    .iter()
+                    .map(|(name, content)| (name.as_slice(), content.as_slice()))
+                    .collect::<Vec<_>>();
+                let object_hash = hash_fs_tree_object_with_extra_files(
+                    &manifest_bytes,
+                    &self.target_inside,
+                    &extra_file_refs,
+                )
+                .map_err(|error| {
+                    report(
+                        "hash",
+                        &self.target_inside,
+                        format!(
+                            "failed to hash fs-tree object rooted at '{}': {error}",
+                            self.target_inside.display()
+                        ),
+                        None,
+                    )
+                })?;
                 Ok(HashComputation {
                     object_hash,
                     manifest_serialize_ms,
@@ -996,6 +1040,7 @@ mod tests {
             Some(temp.path().join("result.json")),
             Some(HashReport::FsTreeObject {
                 manifest: manifest.clone(),
+                extra_files: Vec::new(),
             }),
         )
         .apply()
@@ -1005,7 +1050,7 @@ mod tests {
         let got = got.unwrap();
         assert_eq!(
             got.object_hash,
-            hash_fs_tree_object(&manifest_bytes, &target).unwrap()
+            fsobj_hash::hash_fs_tree_object(&manifest_bytes, &target).unwrap()
         );
         assert_ne!(got.object_hash, hash_path(&target).unwrap());
         assert!(got.timings.total_ms >= got.timings.hash_ms);
@@ -1072,12 +1117,7 @@ mod tests {
         let owner = current_owner();
         let executor = OwnershipExecutor {
             target_inside: target.clone(),
-            entries: vec![FsTreeEntry::File {
-                path: "../escape".to_string(),
-                uid: owner.0,
-                gid: owner.1,
-                mode: 0o644,
-            }],
+            entries: vec![FsTreeEntry::file("../escape", owner.0, owner.1, 0o644)],
             error_log_inside: temp.path().join("error.json"),
             result_log_inside: None,
             hash_report: None,
@@ -1097,12 +1137,7 @@ mod tests {
         let owner = current_owner();
         let executor = OwnershipExecutor {
             target_inside: target,
-            entries: vec![FsTreeEntry::File {
-                path: "child".to_string(),
-                uid: owner.0,
-                gid: owner.1,
-                mode: 0o644,
-            }],
+            entries: vec![FsTreeEntry::file("child", owner.0, owner.1, 0o644)],
             error_log_inside: temp.path().join("error.json"),
             result_log_inside: None,
             hash_report: None,

@@ -1,6 +1,6 @@
 use fsobj_hash::{
     DirectoryEntryHash, EntryKind, ObjectHash, hash_directory_node, hash_file_bytes,
-    hash_fs_tree_object_from_hashes, hash_path, hash_path_with_leaf_index,
+    hash_fs_tree_object_from_hashes, hash_path, hash_symlink_node,
 };
 use globset::{Glob, GlobMatcher};
 #[cfg(test)]
@@ -8,9 +8,8 @@ use mbuild_core::InitramfsEntrySource;
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     ComposedFsTree, ComposedFsTreeEntry, FsTreeComposeInput, FsTreeEntry, FsTreeManifest,
-    FsTreeOwnerMap, ObjectLeafIndex, ObjectLeafIndexEntry, ObjectLeafKind, StagedBuildResult,
-    TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir, fsutil,
-    object_index_path_for_object_path, read_object_leaf_index, rebuild_object_index,
+    FsTreeOwnerMap, StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir,
+    fsutil,
 };
 use mbuild_runtime::{
     FsTreeInitramfsEntrySource, FsTreeInitramfsInput, FsTreeTarEntrySource, FsTreeTarInput,
@@ -139,7 +138,7 @@ struct CompiledInstallRule {
 
 #[derive(Debug, Clone)]
 enum MaterializedKind {
-    File { executable: bool },
+    File { text: String, executable: bool },
     Directory,
     Symlink { target: String },
 }
@@ -147,12 +146,11 @@ enum MaterializedKind {
 #[derive(Debug, Clone)]
 struct IndexedTreeMergeInput {
     compose: FsTreeComposeInput,
-    object: BuilderInputObject,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InputLeafIdentity {
-    kind: ObjectLeafKind,
+    kind: EntryKind,
     node_hash: ObjectHash,
 }
 
@@ -450,7 +448,6 @@ fn build_tree(
     Ok(StagedBuildResult {
         staged_path: output_path,
         object_hash,
-        object_index: None,
     })
 }
 
@@ -496,10 +493,9 @@ fn build_tree_subset(
     );
 
     let temp_dir = cx.temp_dir.clone();
-    let (object_hash, object_index) = materialize_tree_subset_output(
+    let object_hash = materialize_tree_subset_output(
         &output_path,
         &composed,
-        &input,
         &temp_dir,
         materializer,
         linker,
@@ -509,7 +505,6 @@ fn build_tree_subset(
     Ok(StagedBuildResult {
         staged_path: output_path,
         object_hash: Some(object_hash),
-        object_index: Some(object_index),
     })
 }
 
@@ -564,19 +559,12 @@ fn build_tree_merge(
     );
 
     let temp_dir = cx.temp_dir.clone();
-    let (object_hash, object_index) = materialize_tree_merge_output(
-        &output_path,
-        &composed,
-        &merge_inputs,
-        &temp_dir,
-        materializer,
-        cx,
-    )?;
+    let object_hash =
+        materialize_tree_merge_output(&output_path, &composed, &temp_dir, materializer, cx)?;
 
     Ok(StagedBuildResult {
         staged_path: output_path,
         object_hash: Some(object_hash),
-        object_index: Some(object_index),
     })
 }
 
@@ -639,7 +627,6 @@ fn build_erofs_rootfs(
     Ok(StagedBuildResult {
         staged_path: output_path,
         object_hash: None,
-        object_index: None,
     })
 }
 
@@ -690,7 +677,6 @@ fn build_initramfs(
     Ok(StagedBuildResult {
         staged_path: output_path,
         object_hash: None,
-        object_index: None,
     })
 }
 
@@ -717,10 +703,8 @@ fn erofs_rootfs_input(
             "ErofsRootfs input '{name}' is not a valid fs-tree object: {error}"
         ))
     })?;
-    Ok(IndexedTreeMergeInput {
-        compose,
-        object: object.clone(),
-    })
+    let _ = object;
+    Ok(IndexedTreeMergeInput { compose })
 }
 
 fn initramfs_input(
@@ -732,10 +716,8 @@ fn initramfs_input(
             "Initramfs input '{name}' is not a valid fs-tree object: {error}"
         ))
     })?;
-    Ok(IndexedTreeMergeInput {
-        compose,
-        object: object.clone(),
-    })
+    let _ = object;
+    Ok(IndexedTreeMergeInput { compose })
 }
 
 trait ErofsTarWriter {
@@ -1082,6 +1064,7 @@ fn append_erofs_tar_file<W: Write>(
         uid,
         gid,
         mode,
+        ..
     } = entry
     else {
         return Err(BuilderError::ExecutionFailed(
@@ -1126,6 +1109,7 @@ fn append_erofs_tar_symlink<W: Write>(
         uid,
         gid,
         target,
+        ..
     } = entry
     else {
         return Err(BuilderError::ExecutionFailed(
@@ -1251,10 +1235,8 @@ fn tree_merge_input(
             "TreeMerge input '{name}' is not a valid fs-tree object: {error}"
         ))
     })?;
-    Ok(IndexedTreeMergeInput {
-        compose,
-        object: object.clone(),
-    })
+    let _ = object;
+    Ok(IndexedTreeMergeInput { compose })
 }
 
 fn tree_subset_input(object: &BuilderInputObject) -> Result<IndexedTreeMergeInput, BuilderError> {
@@ -1263,63 +1245,22 @@ fn tree_subset_input(object: &BuilderInputObject) -> Result<IndexedTreeMergeInpu
             "TreeSubset input 'tree' is not a valid fs-tree object: {error}"
         ))
     })?;
-    Ok(IndexedTreeMergeInput {
-        compose,
-        object: object.clone(),
-    })
-}
-
-fn load_fs_tree_input_index(
-    builder_name: &str,
-    object: &BuilderInputObject,
-) -> Result<Option<ObjectLeafIndex>, BuilderError> {
-    if let Some(index_path) =
-        object_index_path_for_object_path(&object.object_path, object.object_hash)
-    {
-        match read_object_leaf_index(&index_path) {
-            Ok(Some(index)) => return Ok(Some(index)),
-            Ok(None) | Err(_) => {
-                return rebuild_object_index(&index_path, &object.object_path, object.object_hash)
-                    .map_err(|error| BuilderError::ExecutionFailed(error.to_string()));
-            }
-        }
-    }
-
-    let indexed = hash_path_with_leaf_index(&object.object_path).map_err(|error| {
-        BuilderError::ExecutionFailed(format!(
-            "failed to build transient input index for '{}': {error}",
-            object.object_path.display()
-        ))
-    })?;
-    if indexed.object_hash != object.object_hash {
-        return Err(BuilderError::ExecutionFailed(format!(
-            "{builder_name} input '{}' hash changed while indexing: expected {}, got {}",
-            object.object_path.display(),
-            object.object_hash,
-            indexed.object_hash
-        )));
-    }
-    Ok(ObjectLeafIndex::from_fsobj_index(&indexed.leaf_index))
+    let _ = object;
+    Ok(IndexedTreeMergeInput { compose })
 }
 
 fn compose_rootfs_inputs_allowing_identical_leaf_overlap(
     builder_name: &str,
     inputs: &[IndexedTreeMergeInput],
 ) -> Result<ComposedFsTree, BuilderError> {
-    let mut input_indexes = vec![None; inputs.len()];
     let mut seen_leaves = BTreeMap::<String, SeenInputLeaf>::new();
     let mut compose_inputs = Vec::with_capacity(inputs.len());
 
-    for (input_index, input) in inputs.iter().enumerate() {
+    for input in inputs {
         let mut entries = Vec::new();
         for entry in input.compose.manifest.entries() {
             if is_fs_tree_leaf(entry) {
-                let index = cached_fs_tree_input_index(
-                    builder_name,
-                    input,
-                    &mut input_indexes[input_index],
-                )?;
-                let identity = input_leaf_identity(builder_name, input, index, entry)?;
+                let identity = input_leaf_identity(builder_name, entry)?;
                 if let Some(seen) = seen_leaves.get(entry.path()) {
                     ensure_identical_leaf_overlap(entry, identity, seen)?;
                     continue;
@@ -1344,57 +1285,27 @@ fn compose_rootfs_inputs_allowing_identical_leaf_overlap(
     compose_fs_trees(&compose_inputs).map_err(map_fs_tree_error)
 }
 
-fn cached_fs_tree_input_index<'a>(
-    builder_name: &str,
-    input: &IndexedTreeMergeInput,
-    cache: &'a mut Option<Option<ObjectLeafIndex>>,
-) -> Result<Option<&'a ObjectLeafIndex>, BuilderError> {
-    if cache.is_none() {
-        *cache = Some(load_fs_tree_input_index(builder_name, &input.object)?);
-    }
-    Ok(cache
-        .as_ref()
-        .expect("cache was initialized above")
-        .as_ref())
-}
-
 fn input_leaf_identity(
     builder_name: &str,
-    input: &IndexedTreeMergeInput,
-    index: Option<&ObjectLeafIndex>,
     entry: &FsTreeEntry,
 ) -> Result<InputLeafIdentity, BuilderError> {
-    let Some(index) = index else {
-        return Err(BuilderError::ExecutionFailed(format!(
-            "{builder_name} input '{}' is not indexable",
-            input.object.object_path.display()
-        )));
-    };
-    let index_path = format!("root/{}", entry.path());
-    let indexed = index.get(&index_path).ok_or_else(|| {
-        BuilderError::ExecutionFailed(format!(
-            "missing input leaf hash for '{}' in '{}'",
-            index_path,
-            input.object.object_path.display()
-        ))
-    })?;
-    let expected_kind = object_leaf_kind_for_manifest_entry(entry).ok_or_else(|| {
+    let expected_kind = leaf_entry_kind_for_manifest_entry(entry).ok_or_else(|| {
         BuilderError::ExecutionFailed(format!(
             "fs-tree path '{}' is not a file or symlink",
             entry.path()
         ))
     })?;
-    if indexed.kind != expected_kind {
+    let Some(node_hash) = entry.leaf_hash() else {
         return Err(BuilderError::ExecutionFailed(format!(
-            "{builder_name} input '{}' has object-index kind mismatch at '{}': manifest is {}, index is {}",
-            input.object.object_path.display(),
-            entry.path(),
-            object_leaf_kind_name(expected_kind),
-            object_leaf_kind_name(indexed.kind),
+            "{builder_name} input manifest leaf '{}' is missing hash",
+            entry.path()
         )));
-    }
+    };
 
-    Ok(indexed_leaf_identity(*indexed))
+    Ok(InputLeafIdentity {
+        kind: expected_kind,
+        node_hash,
+    })
 }
 
 fn ensure_identical_leaf_overlap(
@@ -1430,18 +1341,11 @@ fn is_fs_tree_leaf(entry: &FsTreeEntry) -> bool {
     )
 }
 
-fn object_leaf_kind_for_manifest_entry(entry: &FsTreeEntry) -> Option<ObjectLeafKind> {
+fn leaf_entry_kind_for_manifest_entry(entry: &FsTreeEntry) -> Option<EntryKind> {
     match entry {
-        FsTreeEntry::File { .. } => Some(ObjectLeafKind::File),
-        FsTreeEntry::Symlink { .. } => Some(ObjectLeafKind::Symlink),
+        FsTreeEntry::File { .. } => Some(EntryKind::File),
+        FsTreeEntry::Symlink { .. } => Some(EntryKind::Symlink),
         FsTreeEntry::Directory { .. } => None,
-    }
-}
-
-fn indexed_leaf_identity(entry: ObjectLeafIndexEntry) -> InputLeafIdentity {
-    InputLeafIdentity {
-        kind: entry.kind,
-        node_hash: entry.node_hash,
     }
 }
 
@@ -1450,13 +1354,6 @@ fn leaf_entry_kind(entry: &FsTreeEntry) -> &'static str {
         FsTreeEntry::File { .. } => "file",
         FsTreeEntry::Symlink { .. } => "symlink",
         FsTreeEntry::Directory { .. } => "directory",
-    }
-}
-
-fn object_leaf_kind_name(kind: ObjectLeafKind) -> &'static str {
-    match kind {
-        ObjectLeafKind::File => "file",
-        ObjectLeafKind::Symlink => "symlink",
     }
 }
 
@@ -1654,11 +1551,10 @@ fn require_regular_non_executable_file(path: &Path, label: &str) -> Result<(), B
 fn materialize_tree_merge_output(
     output_path: &Path,
     composed: &ComposedFsTree,
-    merge_inputs: &[IndexedTreeMergeInput],
     temp_dir: &Path,
     materializer: &impl OwnershipMaterializer,
     cx: &mut BuildContext,
-) -> Result<(ObjectHash, ObjectLeafIndex), BuilderError> {
+) -> Result<ObjectHash, BuilderError> {
     let paths =
         create_fs_tree_staging_dir(output_path, composed.manifest()).map_err(map_fs_tree_error)?;
     let mut materialize_entries = Vec::new();
@@ -1747,21 +1643,19 @@ fn materialize_tree_merge_output(
     log_tree_merge_ownership_events(cx, None, ownership_host_ms);
 
     let hash_start = Instant::now();
-    let (object_hash, object_index) =
-        hash_tree_merge_output_from_indexes("TreeMerge", composed, merge_inputs)?;
+    let object_hash = hash_tree_output_from_manifest(composed)?;
     log_tree_merge_hash_event(cx, object_hash, elapsed_ms(hash_start), 0);
-    Ok((object_hash, object_index))
+    Ok(object_hash)
 }
 
 fn materialize_tree_subset_output(
     output_path: &Path,
     composed: &ComposedFsTree,
-    input: &IndexedTreeMergeInput,
     temp_dir: &Path,
     materializer: &impl OwnershipMaterializer,
     linker: &impl TreeSubsetLinker,
     cx: &mut BuildContext,
-) -> Result<(ObjectHash, ObjectLeafIndex), BuilderError> {
+) -> Result<ObjectHash, BuilderError> {
     let paths =
         create_fs_tree_staging_dir(output_path, composed.manifest()).map_err(map_fs_tree_error)?;
     let mut materialize_entries = Vec::new();
@@ -1844,10 +1738,9 @@ fn materialize_tree_subset_output(
     log_tree_merge_ownership_events(cx, None, ownership_host_ms);
 
     let hash_start = Instant::now();
-    let (object_hash, object_index) =
-        hash_tree_merge_output_from_indexes("TreeSubset", composed, std::slice::from_ref(input))?;
+    let object_hash = hash_tree_output_from_manifest(composed)?;
     log_tree_merge_hash_event(cx, object_hash, elapsed_ms(hash_start), 0);
-    Ok((object_hash, object_index))
+    Ok(object_hash)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1953,20 +1846,13 @@ struct PendingDirectoryHashEntry {
     node_hash: ObjectHash,
 }
 
-fn hash_tree_merge_output_from_indexes(
-    builder_name: &str,
-    composed: &ComposedFsTree,
-    merge_inputs: &[IndexedTreeMergeInput],
-) -> Result<(ObjectHash, ObjectLeafIndex), BuilderError> {
+fn hash_tree_output_from_manifest(composed: &ComposedFsTree) -> Result<ObjectHash, BuilderError> {
     let manifest_bytes = composed
         .manifest()
         .to_canonical_bytes()
         .map_err(map_fs_tree_error)?;
     let manifest_hash = hash_file_bytes(false, &manifest_bytes);
-    let mut output_index = ObjectLeafIndex::empty();
-    output_index.insert("manifest.jsonl", ObjectLeafKind::File, manifest_hash);
 
-    let source_leaf_hashes = collect_source_leaf_hashes(builder_name, composed, merge_inputs)?;
     let mut directories = BTreeMap::<String, BTreeMap<Vec<u8>, PendingDirectoryHashEntry>>::new();
     directories.entry(String::new()).or_default();
 
@@ -1980,24 +1866,12 @@ fn hash_tree_merge_output_from_indexes(
                     insert_directory_entry(&mut directories, path);
                 }
             }
-            (FsTreeEntry::File { path, .. }, ComposedFsTreeEntry::File { source_path }) => {
-                let node_hash = *source_leaf_hashes.get(source_path).ok_or_else(|| {
-                    BuilderError::ExecutionFailed(format!(
-                        "missing input leaf hash for '{}'",
-                        source_path.display()
-                    ))
-                })?;
-                output_index.insert(format!("root/{path}"), ObjectLeafKind::File, node_hash);
+            (FsTreeEntry::File { path, hash, .. }, ComposedFsTreeEntry::File { .. }) => {
+                let node_hash = *hash;
                 insert_leaf_directory_entry(&mut directories, path, EntryKind::File, node_hash);
             }
-            (FsTreeEntry::Symlink { path, .. }, ComposedFsTreeEntry::Symlink { source_path }) => {
-                let node_hash = *source_leaf_hashes.get(source_path).ok_or_else(|| {
-                    BuilderError::ExecutionFailed(format!(
-                        "missing input leaf hash for '{}'",
-                        source_path.display()
-                    ))
-                })?;
-                output_index.insert(format!("root/{path}"), ObjectLeafKind::Symlink, node_hash);
+            (FsTreeEntry::Symlink { path, hash, .. }, ComposedFsTreeEntry::Symlink { .. }) => {
+                let node_hash = *hash;
                 insert_leaf_directory_entry(&mut directories, path, EntryKind::Symlink, node_hash);
             }
             _ => {
@@ -2009,68 +1883,7 @@ fn hash_tree_merge_output_from_indexes(
     }
 
     let root_hash = hash_directory_from_map("", &directories)?;
-    let object_hash = hash_fs_tree_object_from_hashes(manifest_hash, root_hash);
-    Ok((object_hash, output_index))
-}
-
-fn collect_source_leaf_hashes(
-    builder_name: &str,
-    composed: &ComposedFsTree,
-    merge_inputs: &[IndexedTreeMergeInput],
-) -> Result<BTreeMap<PathBuf, ObjectHash>, BuilderError> {
-    let mut hashes = BTreeMap::new();
-    for input in merge_inputs {
-        let needed = hashes_needed_from_input(&input.compose.root_dir, composed)?;
-        if needed.is_empty() {
-            continue;
-        }
-        let Some(index) = load_fs_tree_input_index(builder_name, &input.object)? else {
-            return Err(BuilderError::ExecutionFailed(format!(
-                "{builder_name} input '{}' is not indexable",
-                input.object.object_path.display()
-            )));
-        };
-        for root_relative_path in needed {
-            let index_path = format!("root/{root_relative_path}");
-            let entry = index.get(&index_path).ok_or_else(|| {
-                BuilderError::ExecutionFailed(format!(
-                    "missing input leaf hash for '{}' in '{}'",
-                    index_path,
-                    input.object.object_path.display()
-                ))
-            })?;
-            hashes.insert(
-                input.compose.root_dir.join(root_relative_path),
-                entry.node_hash,
-            );
-        }
-    }
-    Ok(hashes)
-}
-
-fn hashes_needed_from_input(
-    root_dir: &Path,
-    composed: &ComposedFsTree,
-) -> Result<Vec<String>, BuilderError> {
-    let mut needed = Vec::new();
-    for composed_entry in composed.entries() {
-        if let ComposedFsTreeEntry::File { source_path }
-        | ComposedFsTreeEntry::Symlink { source_path } = composed_entry
-        {
-            if let Ok(relative) = source_path.strip_prefix(root_dir) {
-                let relative = relative.to_str().ok_or_else(|| {
-                    BuilderError::ExecutionFailed(format!(
-                        "TreeMerge input path '{}' is not UTF-8",
-                        relative.display()
-                    ))
-                })?;
-                needed.push(relative.to_string());
-            }
-        }
-    }
-    needed.sort();
-    needed.dedup();
-    Ok(needed)
+    Ok(hash_fs_tree_object_from_hashes(manifest_hash, root_hash))
 }
 
 fn insert_directory_entry(
@@ -2324,6 +2137,7 @@ fn validate_tree_merge_file_attrs(
         uid,
         gid,
         mode,
+        ..
     } = manifest_entry
     else {
         return Err(BuilderError::ExecutionFailed(format!(
@@ -2728,11 +2542,12 @@ fn fs_tree_manifest_for_entries(
         let fs_entry = match entry {
             NormalizedEntry::File {
                 rel_path,
+                text,
                 executable,
-                ..
             } => fs_tree_entry_for_path(
                 rel_path,
                 MaterializedKind::File {
+                    text: text.clone(),
                     executable: *executable,
                 },
                 rules,
@@ -2789,16 +2604,25 @@ fn fs_tree_entry_for_path(
             gid,
             required_attr(attrs.directory_mode, rel_path, "directory_mode")?,
         )),
-        MaterializedKind::File { executable } => {
+        MaterializedKind::File { text, executable } => {
             let mode = if executable {
                 required_attr(attrs.executable_file_mode, rel_path, "executable_file_mode")?
             } else {
                 required_attr(attrs.regular_file_mode, rel_path, "regular_file_mode")?
             };
-            Ok(FsTreeEntry::file(rel_path, uid, gid, mode))
+            Ok(FsTreeEntry::file_with_hash(
+                rel_path,
+                uid,
+                gid,
+                mode,
+                hash_file_bytes(mode & 0o111 != 0, text.as_bytes()),
+            ))
         }
         MaterializedKind::Symlink { target } => {
-            Ok(FsTreeEntry::symlink(rel_path, uid, gid, target))
+            let hash = hash_symlink_node(target.as_bytes());
+            Ok(FsTreeEntry::symlink_with_hash(
+                rel_path, uid, gid, target, hash,
+            ))
         }
     }
 }
@@ -3476,11 +3300,16 @@ mod tests {
                 "usr/lib64/libfoo.so.1"
             ]
         );
-        let object_index = result.object_index.as_ref().unwrap();
-        assert!(object_index.get("manifest.jsonl").is_some());
-        assert!(object_index.get("root/usr/lib64/libfoo.so.1").is_some());
-        assert!(object_index.get("root/usr/lib64/libfoo.so").is_some());
-        assert!(object_index.get("root/usr/bin/tool").is_none());
+        for path in ["usr/lib64/libfoo.so", "usr/lib64/libfoo.so.1"] {
+            assert!(
+                fs_tree_manifest(&result)
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.path() == path)
+                    .and_then(FsTreeEntry::leaf_hash)
+                    .is_some()
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -3633,7 +3462,7 @@ mod tests {
         let manifest = FsTreeManifest::from_entries(vec![
             FsTreeEntry::directory("", 0, 0, 0o755),
             FsTreeEntry::directory("bin", 0, 0, 0o755),
-            FsTreeEntry::file("bin/tool", 0, 0, 0o755),
+            FsTreeEntry::file_with_hash("bin/tool", 0, 0, 0o755, hash_file_bytes(true, b"tool\n")),
             FsTreeEntry::directory("locked", 0, 0, 0o000),
         ])
         .unwrap();
@@ -4235,11 +4064,16 @@ mod tests {
             )
             .unwrap();
         assert_valid_fs_tree(&result);
-        let object_index = result.object_index.as_ref().unwrap();
-        assert!(object_index.get("manifest.jsonl").is_some());
-        assert!(object_index.get("root/bin/left").is_some());
-        assert!(object_index.get("root/etc/right.conf").is_some());
-        assert!(object_index.get("root/bin").is_none());
+        for path in ["bin/left", "etc/right.conf"] {
+            assert!(
+                fs_tree_manifest(&result)
+                    .entries()
+                    .iter()
+                    .find(|entry| entry.path() == path)
+                    .and_then(FsTreeEntry::leaf_hash)
+                    .is_some()
+            );
+        }
 
         let events = logger.events();
         let phases = events
@@ -5020,11 +4854,29 @@ mod tests {
             manifest.entries(),
             &[
                 FsTreeEntry::directory("", 0, 0, 0o755),
-                FsTreeEntry::symlink("bin", 0, 0, "usr/bin"),
+                FsTreeEntry::symlink_with_hash(
+                    "bin",
+                    0,
+                    0,
+                    "usr/bin",
+                    hash_symlink_node(b"usr/bin")
+                ),
                 FsTreeEntry::directory("dev", 0, 0, 0o755),
                 FsTreeEntry::directory("etc", 0, 0, 0o755),
-                FsTreeEntry::file("etc/hostname", 0, 0, 0o644),
-                FsTreeEntry::file("init", 0, 0, 0o755),
+                FsTreeEntry::file_with_hash(
+                    "etc/hostname",
+                    0,
+                    0,
+                    0o644,
+                    hash_file_bytes(false, b"mbuild\n")
+                ),
+                FsTreeEntry::file_with_hash(
+                    "init",
+                    0,
+                    0,
+                    0o755,
+                    hash_file_bytes(true, b"#!/bin/sh\n")
+                ),
             ]
         );
         assert_valid_fs_tree(&result);
@@ -5323,11 +5175,13 @@ mod tests {
                 .entries()
                 .contains(&FsTreeEntry::directory("etc", 42, 43, 0o755))
         );
-        assert!(
-            manifest
-                .entries()
-                .contains(&FsTreeEntry::file("etc/hostname", 42, 43, 0o644))
-        );
+        assert!(manifest.entries().contains(&FsTreeEntry::file_with_hash(
+            "etc/hostname",
+            42,
+            43,
+            0o644,
+            hash_file_bytes(false, b"mbuild\n")
+        )));
     }
 
     #[test]
@@ -5373,11 +5227,13 @@ mod tests {
                 .entries()
                 .contains(&FsTreeEntry::directory("etc", 42, 43, 0o700))
         );
-        assert!(
-            manifest
-                .entries()
-                .contains(&FsTreeEntry::file("etc/hostname", 42, 43, 0o600))
-        );
+        assert!(manifest.entries().contains(&FsTreeEntry::file_with_hash(
+            "etc/hostname",
+            42,
+            43,
+            0o600,
+            hash_file_bytes(false, b"mbuild\n")
+        )));
     }
 
     #[test]

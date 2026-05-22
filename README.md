@@ -178,6 +178,8 @@ directory is the store root itself. A request may still choose a path named
 The store layout is content-addressed:
 
 - `<store>/objects/` stores payload objects by `object_hash`
+- fs-tree leaf hashes live in `manifest.jsonl`; the store does not maintain
+  `object-indexes/`
 - `<store>/results/` stores canonical realized results by `result_id`
 - `<store>/reuses/` stores builder-only canonical reuse refs by `reuse_key`
 - `<store>/builds/` stores builder-only public build handles by `build_key`
@@ -186,7 +188,7 @@ The store layout is content-addressed:
 `<store>/object-refs/<name>` always points at
 `../objects/<object_hash>`, regardless of object kind. Filesystem tree objects
 still store their payload as `manifest.jsonl` plus `root/` inside that object
-directory.
+directory. File and symlink manifest entries include required `h` leaf hashes.
 
 `build_key` is computed from:
 

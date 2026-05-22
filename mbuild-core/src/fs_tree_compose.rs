@@ -392,6 +392,7 @@ fn materialize_composed_fs_tree_inner(
                     uid,
                     gid,
                     mode,
+                    ..
                 },
                 ComposedFsTreeEntry::File { source_path },
             ) => {
@@ -413,6 +414,7 @@ fn materialize_composed_fs_tree_inner(
                     uid,
                     gid,
                     target,
+                    ..
                 },
                 ComposedFsTreeEntry::Symlink { source_path },
             ) => {
@@ -626,6 +628,7 @@ impl FsTreeLinker for StdFsTreeLinker {
 mod tests {
     use super::*;
     use crate::FsTreeObjectError;
+    use fsobj_hash::{hash_file_bytes, hash_symlink_node};
     use std::fs::File;
     use std::io::Write;
     use std::os::unix::fs::MetadataExt;
@@ -677,6 +680,24 @@ mod tests {
         FsTreeEntry::directory("", 0, 0, 0o755)
     }
 
+    fn payload_file(path: &str, mode: u32) -> FsTreeEntry {
+        FsTreeEntry::file_with_hash(
+            path,
+            0,
+            0,
+            mode,
+            hash_file_bytes(mode & 0o111 != 0, b"payload\n"),
+        )
+    }
+
+    fn target_symlink(path: &str) -> FsTreeEntry {
+        FsTreeEntry::symlink_with_hash(path, 0, 0, "tool", hash_symlink_node(b"tool"))
+    }
+
+    fn hashed_symlink(path: &str, target: &str) -> FsTreeEntry {
+        FsTreeEntry::symlink_with_hash(path, 0, 0, target, hash_symlink_node(target.as_bytes()))
+    }
+
     fn manifest(entries: Vec<FsTreeEntry>) -> FsTreeManifest {
         FsTreeManifest::from_entries(entries).unwrap()
     }
@@ -716,8 +737,8 @@ mod tests {
             vec![
                 root(),
                 FsTreeEntry::directory("bin", 0, 0, 0o755),
-                FsTreeEntry::file("bin/tool", 0, 0, 0o755),
-                FsTreeEntry::symlink("bin/tool-link", 0, 0, "tool"),
+                payload_file("bin/tool", 0o755),
+                target_symlink("bin/tool-link"),
             ],
         );
 
@@ -750,7 +771,7 @@ mod tests {
             vec![
                 root(),
                 FsTreeEntry::directory("bin", 0, 0, 0o755),
-                FsTreeEntry::file("bin/left", 0, 0, 0o644),
+                payload_file("bin/left", 0o644),
             ],
         );
         let right = input(
@@ -759,7 +780,7 @@ mod tests {
             vec![
                 root(),
                 FsTreeEntry::directory("bin", 0, 0, 0o755),
-                FsTreeEntry::file("bin/right", 0, 0, 0o644),
+                payload_file("bin/right", 0o644),
             ],
         );
 
@@ -817,12 +838,12 @@ mod tests {
         let left_file = input(
             temp.path(),
             "left-file",
-            vec![root(), FsTreeEntry::file("x", 0, 0, 0o644)],
+            vec![root(), payload_file("x", 0o644)],
         );
         let right_file = input(
             temp.path(),
             "right-file",
-            vec![root(), FsTreeEntry::file("x", 0, 0, 0o644)],
+            vec![root(), payload_file("x", 0o644)],
         );
         assert!(matches!(
             compose_fs_trees(&[left_file, right_file]),
@@ -832,12 +853,12 @@ mod tests {
         let left_link = input(
             temp.path(),
             "left-link",
-            vec![root(), FsTreeEntry::symlink("x", 0, 0, "target")],
+            vec![root(), hashed_symlink("x", "target")],
         );
         let right_link = input(
             temp.path(),
             "right-link",
-            vec![root(), FsTreeEntry::symlink("x", 0, 0, "target")],
+            vec![root(), hashed_symlink("x", "target")],
         );
         assert!(matches!(
             compose_fs_trees(&[left_link, right_link]),
@@ -848,11 +869,7 @@ mod tests {
     #[test]
     fn file_directory_and_symlink_kind_conflicts_are_rejected() {
         let temp = tempdir().unwrap();
-        let file = input(
-            temp.path(),
-            "file",
-            vec![root(), FsTreeEntry::file("x", 0, 0, 0o644)],
-        );
+        let file = input(temp.path(), "file", vec![root(), payload_file("x", 0o644)]);
         let dir = input(
             temp.path(),
             "dir",
@@ -866,13 +883,9 @@ mod tests {
         let link = input(
             temp.path(),
             "link",
-            vec![root(), FsTreeEntry::symlink("x", 0, 0, "target")],
+            vec![root(), hashed_symlink("x", "target")],
         );
-        let file = input(
-            temp.path(),
-            "file2",
-            vec![root(), FsTreeEntry::file("x", 0, 0, 0o644)],
-        );
+        let file = input(temp.path(), "file2", vec![root(), payload_file("x", 0o644)]);
         assert!(matches!(
             compose_fs_trees(&[link, file]),
             Err(FsTreeComposeError::Conflict(_))
@@ -882,18 +895,14 @@ mod tests {
     #[test]
     fn parent_child_conflict_across_inputs_is_rejected() {
         let temp = tempdir().unwrap();
-        let leaf = input(
-            temp.path(),
-            "leaf",
-            vec![root(), FsTreeEntry::file("a", 0, 0, 0o644)],
-        );
+        let leaf = input(temp.path(), "leaf", vec![root(), payload_file("a", 0o644)]);
         let child = input(
             temp.path(),
             "child",
             vec![
                 root(),
                 FsTreeEntry::directory("a", 0, 0, 0o755),
-                FsTreeEntry::file("a/b", 0, 0, 0o644),
+                payload_file("a/b", 0o644),
             ],
         );
         assert!(matches!(
@@ -915,8 +924,8 @@ mod tests {
             vec![
                 root(),
                 FsTreeEntry::directory("bin", 0, 0, 0o755),
-                FsTreeEntry::file("bin/tool", 0, 0, 0o644),
-                FsTreeEntry::symlink("bin/tool-link", 0, 0, "tool"),
+                payload_file("bin/tool", 0o644),
+                target_symlink("bin/tool-link"),
             ],
         );
         create_input_dir(&input, "bin", 0o755);
@@ -955,7 +964,7 @@ mod tests {
         let input = input(
             temp.path(),
             "input",
-            vec![root(), FsTreeEntry::file("file", 0, 0, 0o644)],
+            vec![root(), payload_file("file", 0o644)],
         );
         write_input_file(&input, "file", b"payload\n", 0o644);
         let composed = compose_fs_trees(std::slice::from_ref(&input)).unwrap();
@@ -980,7 +989,7 @@ mod tests {
         let input = input(
             temp.path(),
             "input",
-            vec![root(), FsTreeEntry::file("file", 0, 0, 0o755)],
+            vec![root(), payload_file("file", 0o755)],
         );
         write_input_file(&input, "file", b"payload\n", 0o644);
         let composed = compose_fs_trees(std::slice::from_ref(&input)).unwrap();
@@ -1009,7 +1018,7 @@ mod tests {
         let input = input(
             temp.path(),
             "input",
-            vec![root(), FsTreeEntry::file("file", 0, 0, 0o644)],
+            vec![root(), payload_file("file", 0o644)],
         );
         write_input_file(&input, "file", b"payload\n", 0o644);
         let composed = compose_fs_trees(std::slice::from_ref(&input)).unwrap();

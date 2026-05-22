@@ -97,6 +97,7 @@ fn write_entry<W: Write>(
                 uid,
                 gid,
                 mode,
+                ..
             },
             InitramfsEntrySource::File { path: source_path },
         ) => {
@@ -139,6 +140,7 @@ fn write_entry<W: Write>(
                 uid,
                 gid,
                 target,
+                ..
             },
             InitramfsEntrySource::Symlink,
         ) => {

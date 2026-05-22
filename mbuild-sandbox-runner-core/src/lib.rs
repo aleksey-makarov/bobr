@@ -1,4 +1,4 @@
-use fsobj_hash::{ObjectHash, hash_fs_tree_object};
+use fsobj_hash::{ObjectHash, hash_fs_tree_object, hash_path, hash_symlink_node};
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::{Gid, Pid, Uid, chown, setgid, setgroups, setuid};
@@ -586,11 +586,18 @@ fn scan_output_entry(
             scan_output_entry(&child.path(), &child_rel_path, entries)?;
         }
     } else if file_type.is_file() {
-        entries.push(FsTreeEntry::file(
+        let hash = hash_path(path).map_err(|error| {
+            SandboxRunnerFailureReport::runtime(
+                "sandbox-manifest-output",
+                format!("failed to hash output file '{}': {error}", path.display()),
+            )
+        })?;
+        entries.push(FsTreeEntry::file_with_hash(
             rel_path,
             uid,
             gid,
             metadata.permissions().mode() & 0o7777,
+            hash,
         ));
     } else if file_type.is_symlink() {
         let target = fs::read_link(path).map_err(|error| {
@@ -605,7 +612,13 @@ fn scan_output_entry(
                 format!("symlink target for '{}' is not UTF-8", path.display()),
             )
         })?;
-        entries.push(FsTreeEntry::symlink(rel_path, uid, gid, target));
+        entries.push(FsTreeEntry::symlink_with_hash(
+            rel_path,
+            uid,
+            gid,
+            target,
+            hash_symlink_node(target.as_bytes()),
+        ));
     } else {
         return Err(SandboxRunnerFailureReport::runtime(
             "sandbox-manifest-output",
@@ -878,23 +891,26 @@ mod tests {
             owner.gid(),
             0o700
         )));
-        assert!(manifest.entries().contains(&FsTreeEntry::file(
+        assert!(manifest.entries().contains(&FsTreeEntry::file_with_hash(
             "file",
             owner.uid(),
             owner.gid(),
-            0o640
+            0o640,
+            hash_path(root.join("file")).unwrap()
         )));
-        assert!(manifest.entries().contains(&FsTreeEntry::file(
+        assert!(manifest.entries().contains(&FsTreeEntry::file_with_hash(
             "exe",
             owner.uid(),
             owner.gid(),
-            0o755
+            0o755,
+            hash_path(root.join("exe")).unwrap()
         )));
-        assert!(manifest.entries().contains(&FsTreeEntry::symlink(
+        assert!(manifest.entries().contains(&FsTreeEntry::symlink_with_hash(
             "link",
             owner.uid(),
             owner.gid(),
-            "file"
+            "file",
+            hash_symlink_node(b"file")
         )));
     }
 

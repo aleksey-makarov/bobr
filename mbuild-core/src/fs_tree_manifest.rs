@@ -1,8 +1,10 @@
+use fsobj_hash::ObjectHash;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::path::Path;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsTreeManifest {
@@ -16,6 +18,7 @@ pub enum FsTreeEntry {
         uid: u32,
         gid: u32,
         mode: u32,
+        hash: ObjectHash,
     },
     Directory {
         path: String,
@@ -28,6 +31,7 @@ pub enum FsTreeEntry {
         uid: u32,
         gid: u32,
         target: String,
+        hash: ObjectHash,
     },
 }
 
@@ -144,6 +148,23 @@ impl FsTreeEntry {
             uid,
             gid,
             mode,
+            hash: placeholder_leaf_hash(),
+        }
+    }
+
+    pub fn file_with_hash(
+        path: impl Into<String>,
+        uid: u32,
+        gid: u32,
+        mode: u32,
+        hash: ObjectHash,
+    ) -> Self {
+        Self::File {
+            path: path.into(),
+            uid,
+            gid,
+            mode,
+            hash,
         }
     }
 
@@ -162,6 +183,23 @@ impl FsTreeEntry {
             uid,
             gid,
             target: target.into(),
+            hash: placeholder_leaf_hash(),
+        }
+    }
+
+    pub fn symlink_with_hash(
+        path: impl Into<String>,
+        uid: u32,
+        gid: u32,
+        target: impl Into<String>,
+        hash: ObjectHash,
+    ) -> Self {
+        Self::Symlink {
+            path: path.into(),
+            uid,
+            gid,
+            target: target.into(),
+            hash,
         }
     }
 
@@ -178,6 +216,13 @@ impl FsTreeEntry {
             Self::File { .. } => EntryKind::File,
             Self::Directory { .. } => EntryKind::Directory,
             Self::Symlink { .. } => EntryKind::Symlink,
+        }
+    }
+
+    pub fn leaf_hash(&self) -> Option<ObjectHash> {
+        match self {
+            Self::File { hash, .. } | Self::Symlink { hash, .. } => Some(*hash),
+            Self::Directory { .. } => None,
         }
     }
 }
@@ -349,12 +394,13 @@ fn parse_entry_line(line: &str, line_number: usize) -> Result<FsTreeEntry, FsTre
     let entry_type = required_string(object, "t", line_number)?;
     match entry_type {
         "f" => {
-            require_exact_keys(object, &["p", "t", "u", "g", "m"], line_number)?;
+            require_exact_keys(object, &["p", "t", "u", "g", "m", "h"], line_number)?;
             Ok(FsTreeEntry::File {
                 path,
                 uid: required_u32(object, "u", line_number)?,
                 gid: required_u32(object, "g", line_number)?,
                 mode: required_mode(object, "m", line_number)?,
+                hash: required_hash(object, "h", line_number)?,
             })
         }
         "d" => {
@@ -367,12 +413,13 @@ fn parse_entry_line(line: &str, line_number: usize) -> Result<FsTreeEntry, FsTre
             })
         }
         "l" => {
-            require_exact_keys(object, &["p", "t", "u", "g", "x"], line_number)?;
+            require_exact_keys(object, &["p", "t", "u", "g", "x", "h"], line_number)?;
             Ok(FsTreeEntry::Symlink {
                 path,
                 uid: required_u32(object, "u", line_number)?,
                 gid: required_u32(object, "g", line_number)?,
                 target: required_string(object, "x", line_number)?.to_string(),
+                hash: required_hash(object, "h", line_number)?,
             })
         }
         _ => Err(FsTreeManifestError::Parse(format!(
@@ -447,6 +494,19 @@ fn required_mode(
     Ok(mode as u32)
 }
 
+fn required_hash(
+    object: &Map<String, Value>,
+    key: &str,
+    line_number: usize,
+) -> Result<ObjectHash, FsTreeManifestError> {
+    let raw = required_string(object, key, line_number)?;
+    ObjectHash::from_str(raw).map_err(|error| {
+        FsTreeManifestError::Parse(format!(
+            "key '{key}' on fs-tree manifest line {line_number} must be a lowercase fsobj hash: {error}"
+        ))
+    })
+}
+
 fn required_u64(
     object: &Map<String, Value>,
     key: &str,
@@ -475,6 +535,7 @@ fn write_canonical_entry(
             uid,
             gid,
             mode,
+            hash,
         } => {
             out.extend_from_slice(br#"{"p":""#);
             write_canonical_string(path, out)?;
@@ -484,6 +545,9 @@ fn write_canonical_entry(
             write_u32(*gid, out);
             out.extend_from_slice(br#","m":"#);
             write_u32(*mode, out);
+            out.extend_from_slice(br#","h":""#);
+            out.extend_from_slice(hash.to_string().as_bytes());
+            out.push(b'"');
             out.extend_from_slice(b"}\n");
         }
         FsTreeEntry::Directory {
@@ -507,6 +571,7 @@ fn write_canonical_entry(
             uid,
             gid,
             target,
+            hash,
         } => {
             out.extend_from_slice(br#"{"p":""#);
             write_canonical_string(path, out)?;
@@ -516,6 +581,9 @@ fn write_canonical_entry(
             write_u32(*gid, out);
             out.extend_from_slice(br#","x":""#);
             write_canonical_string(target, out)?;
+            out.extend_from_slice(br#","h":""#);
+            out.extend_from_slice(hash.to_string().as_bytes());
+            out.push(b'"');
             out.extend_from_slice(b"}\n");
         }
     }
@@ -547,6 +615,11 @@ fn write_u32(value: u32, out: &mut Vec<u8>) {
 
 fn printable_path(path: &str) -> String {
     path.chars().flat_map(char::escape_default).collect()
+}
+
+fn placeholder_leaf_hash() -> ObjectHash {
+    ObjectHash::from_str("0000000000000000000000000000000000000000000000000000000000000000")
+        .expect("placeholder hash is valid lowercase hex")
 }
 
 #[cfg(test)]
@@ -595,9 +668,9 @@ mod tests {
                 "\n",
                 r#"{"p":"bin","t":"d","u":0,"g":0,"m":493}"#,
                 "\n",
-                r#"{"p":"bin/tool","t":"f","u":1000,"g":1001,"m":493}"#,
+                r#"{"p":"bin/tool","t":"f","u":1000,"g":1001,"m":493,"h":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
                 "\n",
-                r#"{"p":"tool-link","t":"l","u":2,"g":3,"x":"bin/tool"}"#,
+                r#"{"p":"tool-link","t":"l","u":2,"g":3,"x":"bin/tool","h":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
                 "\n",
             )
         );
@@ -620,7 +693,7 @@ mod tests {
         let bytes = concat!(
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
-            r#"{"p":"a","t":"f","u":1,"g":2,"m":420}"#,
+            r#"{"p":"a","t":"f","u":1,"g":2,"m":420,"h":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
             "\n",
         )
         .as_bytes();
@@ -682,9 +755,9 @@ mod tests {
         assert_parse_rejects(concat!(
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
-            r#"{"p":"a","t":"f","u":0,"g":0,"m":420}"#,
+            r#"{"p":"a","t":"f","u":0,"g":0,"m":420,"h":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
             "\n",
-            r#"{"p":"a","t":"f","u":0,"g":0,"m":420}"#,
+            r#"{"p":"a","t":"f","u":0,"g":0,"m":420,"h":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
             "\n",
         ));
     }
@@ -694,9 +767,9 @@ mod tests {
         assert_parse_rejects(concat!(
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
-            r#"{"p":"b","t":"f","u":0,"g":0,"m":420}"#,
+            r#"{"p":"b","t":"f","u":0,"g":0,"m":420,"h":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
             "\n",
-            r#"{"p":"a","t":"f","u":0,"g":0,"m":420}"#,
+            r#"{"p":"a","t":"f","u":0,"g":0,"m":420,"h":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
             "\n",
         ));
     }
@@ -747,9 +820,9 @@ mod tests {
             concat!(
                 r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
                 "\n",
-                r#"{"p":"a\"b","t":"f","u":0,"g":0,"m":420}"#,
+                r#"{"p":"a\"b","t":"f","u":0,"g":0,"m":420,"h":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
                 "\n",
-                r#"{"p":"a\\b","t":"f","u":0,"g":0,"m":420}"#,
+                r#"{"p":"a\\b","t":"f","u":0,"g":0,"m":420,"h":"0000000000000000000000000000000000000000000000000000000000000000"}"#,
                 "\n",
             )
         );

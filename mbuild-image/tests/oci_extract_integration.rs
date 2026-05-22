@@ -45,7 +45,7 @@ fn oci_extract_materializes_runtime_ownership() -> TestResult<()> {
 
     let manifest = FsTreeManifest::read_canonical(&result.staged_path.join("manifest.jsonl"))?;
     assert!(manifest.entries().iter().any(|entry| {
-        matches!(entry, FsTreeEntry::File { path, uid: 1, gid: 1, mode: 0o755 } if path == "bin/tool")
+        matches!(entry, FsTreeEntry::File { path, uid: 1, gid: 1, mode: 0o755, .. } if path == "bin/tool")
     }));
     Ok(())
 }

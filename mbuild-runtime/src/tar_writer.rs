@@ -332,6 +332,7 @@ fn append_file<W: io::Write>(
         uid,
         gid,
         mode,
+        ..
     } = entry
     else {
         unreachable!("caller matched file entry")
@@ -389,6 +390,7 @@ fn append_symlink<W: io::Write>(
         uid,
         gid,
         target,
+        ..
     } = entry
     else {
         unreachable!("caller matched symlink entry")

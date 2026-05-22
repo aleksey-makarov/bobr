@@ -1,4 +1,5 @@
 use crate::{FsTreeEntry, FsTreeManifest, FsTreeManifestError};
+use fsobj_hash::{hash_path, hash_symlink_node};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fmt;
@@ -313,12 +314,19 @@ fn validate_path_against_entry(
     let file_type = metadata.file_type();
 
     match manifest_entry {
-        FsTreeEntry::File { uid, gid, mode, .. } => {
+        FsTreeEntry::File {
+            uid,
+            gid,
+            mode,
+            hash,
+            ..
+        } => {
             if !file_type.is_file() {
                 return Err(kind_mismatch(rel_path, "file", &file_type));
             }
             validate_owner(rel_path, &metadata, *uid, *gid, owner_map)?;
             validate_mode(rel_path, &metadata, *mode)?;
+            validate_leaf_hash(path, rel_path, *hash)?;
         }
         FsTreeEntry::Directory { uid, gid, mode, .. } => {
             if !file_type.is_dir() {
@@ -328,16 +336,58 @@ fn validate_path_against_entry(
             validate_mode(rel_path, &metadata, *mode)?;
         }
         FsTreeEntry::Symlink {
-            uid, gid, target, ..
+            uid,
+            gid,
+            target,
+            hash,
+            ..
         } => {
             if !file_type.is_symlink() {
                 return Err(kind_mismatch(rel_path, "symlink", &file_type));
             }
             validate_owner(rel_path, &metadata, *uid, *gid, owner_map)?;
             validate_symlink_target(path, rel_path, target)?;
+            validate_symlink_hash(rel_path, target, *hash)?;
         }
     }
 
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_leaf_hash(
+    path: &Path,
+    rel_path: &str,
+    expected_hash: fsobj_hash::ObjectHash,
+) -> Result<(), FsTreeObjectError> {
+    let actual_hash = hash_path(path).map_err(|error| {
+        FsTreeObjectError::Invalid(format!(
+            "failed to hash fs-tree leaf '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if actual_hash != expected_hash {
+        return Err(FsTreeObjectError::Invalid(format!(
+            "leaf hash mismatch for fs-tree entry '{}': expected {}, got {}",
+            rel_path, expected_hash, actual_hash
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_symlink_hash(
+    rel_path: &str,
+    target: &str,
+    expected_hash: fsobj_hash::ObjectHash,
+) -> Result<(), FsTreeObjectError> {
+    let actual_hash = hash_symlink_node(target.as_bytes());
+    if actual_hash != expected_hash {
+        return Err(FsTreeObjectError::Invalid(format!(
+            "leaf hash mismatch for fs-tree entry '{}': expected {}, got {}",
+            rel_path, expected_hash, actual_hash
+        )));
+    }
     Ok(())
 }
 
@@ -514,6 +564,7 @@ fn set_root_mode_from_manifest(
 #[cfg(unix)]
 mod tests {
     use super::*;
+    use fsobj_hash::{hash_file_bytes, hash_symlink_node};
     use std::fs::File;
     use std::io::Write;
     use std::os::unix::ffi::OsStringExt;
@@ -557,6 +608,20 @@ mod tests {
         FsTreeEntry::directory("", uid, gid, 0o755)
     }
 
+    fn payload_file(path: &str, uid: u32, gid: u32, mode: u32) -> FsTreeEntry {
+        FsTreeEntry::file_with_hash(
+            path,
+            uid,
+            gid,
+            mode,
+            hash_file_bytes(mode & 0o111 != 0, b"payload\n"),
+        )
+    }
+
+    fn hashed_symlink(path: &str, uid: u32, gid: u32, target: &str) -> FsTreeEntry {
+        FsTreeEntry::symlink_with_hash(path, uid, gid, target, hash_symlink_node(target.as_bytes()))
+    }
+
     fn make_manifest(entries: Vec<FsTreeEntry>) -> FsTreeManifest {
         FsTreeManifest::from_entries(entries).unwrap()
     }
@@ -573,8 +638,8 @@ mod tests {
         let manifest = make_manifest(vec![
             root(0, 0),
             FsTreeEntry::directory("bin", 0, 0, 0o755),
-            FsTreeEntry::file("bin/tool", 0, 0, 0o644),
-            FsTreeEntry::symlink("bin/tool-link", 0, 0, "tool"),
+            payload_file("bin/tool", 0, 0, 0o644),
+            hashed_symlink("bin/tool-link", 0, 0, "tool"),
         ]);
         let paths = create_fs_tree_staging_dir(&object_dir, &manifest).unwrap();
         fs::create_dir(paths.root_dir.join("bin")).unwrap();
@@ -789,10 +854,7 @@ mod tests {
     fn accepts_symlink_without_mode_comparison() {
         let temp = tempdir().unwrap();
         let object_dir = temp.path().join("object");
-        let manifest = make_manifest(vec![
-            root(0, 0),
-            FsTreeEntry::symlink("link", 0, 0, "target"),
-        ]);
+        let manifest = make_manifest(vec![root(0, 0), hashed_symlink("link", 0, 0, "target")]);
         let paths = create_fs_tree_staging_dir(&object_dir, &manifest).unwrap();
         symlink("target", paths.root_dir.join("link")).unwrap();
 

@@ -108,7 +108,6 @@ impl TypedBuilder for ImageBuilder {
         Ok(StagedBuildResult {
             staged_path,
             object_hash: None,
-            object_index: None,
         })
     }
 }

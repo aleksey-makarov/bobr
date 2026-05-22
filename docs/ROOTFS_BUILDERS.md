@@ -33,7 +33,7 @@
 - regular files are hardlinked from the input fs-tree; copying is not allowed
 - symlinks are recreated with the same target
 - the output object hash is computed from the output manifest and the selected
-  input leaf hashes from object indexes
+  input leaf hashes stored in manifest `h` fields
 
 `TreeMerge` is the manifest-based composition path for fs-tree objects:
 
@@ -128,6 +128,9 @@ Current behavior:
   manifest.jsonl
   root/
   ```
+- `manifest.jsonl` is canonical JSONL; file and symlink entries carry required
+  `h` fields containing their fsobj node hashes, and directory entries must not
+  carry `h`
 - `install` is rejected for file output and required for directory output
 - `install.rules` uses path selectors with partial field overrides
 - directory output consumes `install.rules` into `manifest.jsonl`
@@ -172,7 +175,7 @@ Current behavior:
 - validates each input `root/` directory against its manifest before merging
 - allows overlapping directory paths only when `uid`, `gid`, and `mode` match
 - allows duplicate file or symlink paths only when manifest metadata and
-  object-index leaf hashes match
+  manifest `h` leaf hashes match
 - rejects file-vs-directory, symlink-vs-directory, and parent/child leaf conflicts
 - writes one fs-tree directory object with a canonical merged manifest
 
@@ -233,7 +236,7 @@ Physical materialization:
   symlinks; selected hardlinked files keep their already-validated input
   metadata
 - the output object hash is computed from the selected manifest and selected
-  input leaf hashes from object indexes instead of hashing the staged tree
+  manifest `h` leaf hashes instead of hashing the staged tree
 
 The realized result payload is one fs-tree directory object.
 
@@ -264,7 +267,7 @@ Current behavior:
 - reads canonical manifests and treats them as the source of truth
 - allows overlapping directory paths only when `uid`, `gid`, and `mode` match
 - allows duplicate file or symlink paths only when manifest metadata and
-  object-index leaf hashes match
+  manifest `h` leaf hashes match
 - rejects file-vs-directory, symlink-vs-directory, and parent/child leaf conflicts
 - writes a deterministic tar stream in canonical manifest order, excluding the
   implicit root entry
@@ -316,7 +319,7 @@ Current behavior:
 - reads canonical manifests and treats them as the source of truth
 - allows overlapping directory paths only when `uid`, `gid`, and `mode` match
 - allows duplicate file or symlink paths only when manifest metadata and
-  object-index leaf hashes match
+  manifest `h` leaf hashes match
 - rejects file-vs-directory, symlink-vs-directory, and parent/child leaf conflicts
 - writes an uncompressed Linux `newc` cpio archive in canonical manifest order
 - encodes the fs-tree root entry as `.`

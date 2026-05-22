@@ -1,4 +1,5 @@
 use flate2::read::GzDecoder;
+use fsobj_hash::{hash_file_bytes, hash_symlink_node};
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     FsTreeEntry, FsTreeManifest, FsTreeObjectError, FsTreeObjectPaths, FsTreeOwnerMap, ObjectHash,
@@ -89,7 +90,8 @@ impl OciExtractBuilder {
 
         let records =
             extract_oci_image_layers(&image.object_path, &extract_root).map_err(map_error)?;
-        let manifest = build_manifest_from_tar_records(&records).map_err(map_error)?;
+        let manifest =
+            build_manifest_from_tar_records(&records, &extract_root).map_err(map_error)?;
         let config_bytes = read_oci_config_bytes(&image.object_path).map_err(map_error)?;
         let paths =
             create_oci_fs_tree_staging_dir(&staged, &manifest, &config_bytes).map_err(map_error)?;
@@ -115,7 +117,6 @@ impl OciExtractBuilder {
         Ok(StagedBuildResult {
             staged_path: staged,
             object_hash: Some(object_hash),
-            object_index: None,
         })
     }
 }
@@ -168,9 +169,18 @@ impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
     ) -> Result<ObjectHash, OciExtractError> {
         let idmap = mbuild_runtime::cached_host_idmap()
             .map_err(|error| OciExtractError::Runtime(error.to_string()))?;
-        mbuild_runtime::apply_ownership_batch_and_hash(
+        mbuild_runtime::apply_ownership_batch_and_hash_fs_tree_object_with_extra_files(
             &paths.fs_tree.root_dir,
             manifest,
+            vec![(
+                OCI_CONFIG_FILE_NAME.as_bytes().to_vec(),
+                fs::read(&paths.oci_config_path).map_err(|error| {
+                    OciExtractError::Io(format!(
+                        "failed to read OCI config '{}': {error}",
+                        paths.oci_config_path.display()
+                    ))
+                })?,
+            )],
             &idmap,
             workspace,
         )
@@ -808,6 +818,7 @@ fn ensure_parent_directories(
 
 pub fn build_manifest_from_tar_records(
     records: &[TarEntryRecord],
+    root_dir: &Path,
 ) -> Result<FsTreeManifest, OciExtractError> {
     let mut by_path = BTreeMap::<String, FsTreeEntry>::new();
     by_path.insert(String::new(), FsTreeEntry::directory("", 0, 0, 0o755));
@@ -815,27 +826,41 @@ pub fn build_manifest_from_tar_records(
     for record in records {
         add_implicit_manifest_parents(&record.path, &mut by_path);
         let entry = match record.kind {
-            TarRecordKind::File => FsTreeEntry::file(
-                &record.path,
-                record.uid,
-                record.gid,
-                record.mode.expect("file record has mode"),
-            ),
+            TarRecordKind::File => {
+                let mode = record.mode.expect("file record has mode");
+                let bytes = fs::read(root_dir.join(&record.path)).map_err(|error| {
+                    OciExtractError::Io(format!(
+                        "failed to read extracted file '{}': {error}",
+                        root_dir.join(&record.path).display()
+                    ))
+                })?;
+                FsTreeEntry::file_with_hash(
+                    &record.path,
+                    record.uid,
+                    record.gid,
+                    mode,
+                    hash_file_bytes(mode & 0o111 != 0, &bytes),
+                )
+            }
             TarRecordKind::Directory => FsTreeEntry::directory(
                 &record.path,
                 record.uid,
                 record.gid,
                 record.mode.expect("directory record has mode"),
             ),
-            TarRecordKind::Symlink => FsTreeEntry::symlink(
-                &record.path,
-                record.uid,
-                record.gid,
-                record
+            TarRecordKind::Symlink => {
+                let target = record
                     .symlink_target
                     .as_deref()
-                    .expect("symlink record has target"),
-            ),
+                    .expect("symlink record has target");
+                FsTreeEntry::symlink_with_hash(
+                    &record.path,
+                    record.uid,
+                    record.gid,
+                    target,
+                    hash_symlink_node(target.as_bytes()),
+                )
+            }
         };
         by_path.insert(record.path.clone(), entry);
     }
@@ -975,7 +1000,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
 
         let records = extract_oci_image_layers(&oci, &root).unwrap();
-        let manifest = build_manifest_from_tar_records(&records).unwrap();
+        let manifest = build_manifest_from_tar_records(&records, &root).unwrap();
 
         assert_eq!(fs::read(root.join("bin/tool")).unwrap(), b"hello\n");
         assert_eq!(
@@ -983,7 +1008,7 @@ mod tests {
             Path::new("bin/tool")
         );
         assert!(manifest.entries().iter().any(|entry| {
-            matches!(entry, FsTreeEntry::File { path, uid: 1, gid: 2, mode: 0o755 } if path == "bin/tool")
+            matches!(entry, FsTreeEntry::File { path, uid: 1, gid: 2, mode: 0o755, .. } if path == "bin/tool")
         }));
         assert!(manifest.entries().iter().any(|entry| {
             matches!(
@@ -993,6 +1018,7 @@ mod tests {
                     uid: 3,
                     gid: 4,
                     target,
+                    ..
                 } if path == "tool-link" && target == "bin/tool"
             )
         }));
@@ -1120,8 +1146,11 @@ mod tests {
             mode: Some(0o755),
             symlink_target: None,
         }];
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("usr/bin")).unwrap();
+        fs::write(root.path().join("usr/bin/tool"), b"tool").unwrap();
 
-        let manifest = build_manifest_from_tar_records(&records).unwrap();
+        let manifest = build_manifest_from_tar_records(&records, root.path()).unwrap();
 
         assert!(manifest.entries().iter().any(|entry| {
             matches!(entry, FsTreeEntry::Directory { path, uid: 0, gid: 0, mode: 0o755 } if path == "usr")

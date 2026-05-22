@@ -99,7 +99,6 @@ impl TypedBuilder for SandboxBuilder {
         Ok(StagedBuildResult {
             staged_path,
             object_hash: Some(outcome.object_hash),
-            object_index: None,
         })
     }
 }

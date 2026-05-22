@@ -70,6 +70,9 @@ fn tree_directory_output_materializes_runtime_ownership() -> TestResult<()> {
         &mut cx,
     )?;
 
+    let root = result.staged_path.join("root");
+    let file_hash = fsobj_hash::hash_path(root.join("owned/file"))?;
+    let symlink_hash = fsobj_hash::hash_symlink_node(b"file");
     let manifest = FsTreeManifest::read_canonical(&result.staged_path.join("manifest.jsonl"))?;
     assert!(
         manifest
@@ -81,18 +84,31 @@ fn tree_directory_output_materializes_runtime_ownership() -> TestResult<()> {
             .entries()
             .contains(&FsTreeEntry::directory("owned/dir", 1, 1, 0o755))
     );
-    assert!(
-        manifest
-            .entries()
-            .contains(&FsTreeEntry::file("owned/file", 1, 1, 0o644))
-    );
-    assert!(
-        manifest
-            .entries()
-            .contains(&FsTreeEntry::symlink("owned/link", 1, 1, "file"))
-    );
+    assert!(manifest.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            FsTreeEntry::File {
+                path,
+                uid: 1,
+                gid: 1,
+                mode: 0o644,
+                hash,
+            } if path == "owned/file" && *hash == file_hash
+        )
+    }));
+    assert!(manifest.entries().iter().any(|entry| {
+        matches!(
+            entry,
+            FsTreeEntry::Symlink {
+                path,
+                uid: 1,
+                gid: 1,
+                target,
+                hash,
+            } if path == "owned/link" && target == "file" && *hash == symlink_hash
+        )
+    }));
 
-    let root = result.staged_path.join("root");
     assert_owner_and_mode(&root, idmap.current_uid(), idmap.current_gid(), 0o755)?;
     assert_owner_and_mode(
         root.join("owned"),

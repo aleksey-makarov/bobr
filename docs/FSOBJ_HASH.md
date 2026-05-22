@@ -72,27 +72,32 @@ A directory hash depends on:
 
 Child entries are sorted by raw name bytes.
 
-## Leaf Indexes
+## Leaf Hashes
 
-`fsobj-hash` can compute a leaf index while hashing a filesystem path.
-The index records only regular file and symlink node hashes, keyed by
-object-relative path. Directory entries are intentionally not persisted in the
-index.
+`fsobj-hash` can compute a transient leaf index while hashing a filesystem
+path. The index records only regular file and symlink node hashes, keyed by
+object-relative path. Directory entries are intentionally not part of that
+leaf set.
 
-Directory hashes are cheap to recompute from structure:
+Fs-tree objects do not persist a separate leaf-index file. Their canonical
+`manifest.jsonl` stores the fsobj node hash for every file and symlink entry in
+the required `h` field. Directory entries do not have `h`.
 
-- regular file and symlink hashes come from the leaf index
-- directory entries come from the caller's tree description
+Directory hashes are recomputed from structure:
+
+- regular file and symlink hashes come from manifest `h` fields
+- directory entries come from the manifest tree structure
 - empty directories are represented by hashing a directory with no children
 
-This keeps the index as a cache for expensive payload-byte hashing, not as a
-second persisted Merkle tree format.
-
 Synthetic fs-tree objects use the same fsobj hash algorithm. Their object hash
-is the directory hash of two entries:
+is the directory hash of at least these entries:
 
 - `manifest.jsonl`
 - `root`
+
+Builders may define additional top-level metadata files. Those files are part
+of the object hash when present. For example, `OciExtract` includes
+`oci-config.json`.
 
 The manifest file node hash can be computed directly from canonical manifest
 bytes. The `root` directory hash can be recomputed bottom-up from the

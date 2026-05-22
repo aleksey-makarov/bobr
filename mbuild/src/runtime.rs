@@ -621,7 +621,6 @@ mod tests {
             Ok(StagedBuildResult {
                 staged_path: cx.temp_dir.join("out"),
                 object_hash: None,
-                object_index: None,
             })
         }
     }
@@ -662,7 +661,6 @@ mod tests {
             Ok(StagedBuildResult {
                 staged_path: cx.temp_dir.join("out"),
                 object_hash: None,
-                object_index: None,
             })
         }
     }
@@ -721,7 +719,6 @@ mod tests {
             Ok(StagedBuildResult {
                 staged_path: cx.temp_dir.join("missing-output"),
                 object_hash: None,
-                object_index: None,
             })
         }
     }

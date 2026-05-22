@@ -83,7 +83,6 @@ impl TypedBuilder for TextBuilder {
         Ok(StagedBuildResult {
             staged_path: tmp_path,
             object_hash: None,
-            object_index: None,
         })
     }
 }

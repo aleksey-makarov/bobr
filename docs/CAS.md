@@ -7,7 +7,6 @@ results as result records, and public build handles as symlink refs to those
 results.
 
 - `objects/` holds payloads addressed by `object_hash`
-- `object-indexes/` holds derived leaf-hash indexes addressed by `object_hash`
 - `results/` holds canonical result records addressed by `result_id`
 - `reuses/` holds builder-only canonical reuse refs addressed by `reuse_key`
 - `builds/` holds builder-only public build-handle refs addressed by `build_key`
@@ -25,8 +24,6 @@ envelope. `mbuild` does not add an implicit `.mbuild/` directory.
 <store>/
   objects/
     <object_hash>
-  object-indexes/
-    <object_hash>.jsonl
   reuses/
     <reuse_key> -> ../results/<result_id>.json
   builds/
@@ -50,24 +47,14 @@ Concrete directory payload formats are builder-specific. For example, the
 current image builders may realize image-related objects as OCI image layout
 directories.
 
-`object-indexes/<object_hash>.jsonl` is a derived cache. It is safe to delete:
-mbuild can rebuild it from `objects/<object_hash>` when needed. The file has no
-header or version line. Each line is one JSON object with:
-
-- `path`: object-relative UTF-8 path
-- `type`: `file` or `symlink`
-- `hash`: fsobj node hash for that leaf
-
-Directory entries are not stored in this index. Callers that need directory
-hashes recompute them from their own tree structure and leaf hashes. For
-fs-tree objects this structure is `manifest.jsonl`, which also accounts for
-empty directories.
+Fs-tree objects store leaf hashes directly in `manifest.jsonl`. There is no
+store-level derived leaf index: if a file or symlink entry in an fs-tree
+manifest omits its `h` field, the object is invalid and consumers fail while
+reading the manifest.
 
 Generic CAS objects may contain non-UTF-8 filesystem names. Such objects can
-still be imported and addressed by `object_hash`; mbuild simply skips the
-human-readable JSONL index if a path cannot be represented as UTF-8. Fs-tree
-objects are already UTF-8-only because their manifest paths and symlink targets
-are JSON strings.
+still be imported and addressed by `object_hash`. Fs-tree objects are
+UTF-8-only because their manifest paths and symlink targets are JSON strings.
 
 `results/<result_id>.json` stores one canonical realized result record.
 
@@ -125,8 +112,9 @@ After the runtime reuses or builds a node, it updates:
 
 This `object-refs/` rule is the same for every object kind. Filesystem tree
 objects still store their payload as an object directory containing
-`manifest.jsonl` and `root/`; `root/` is part of the object layout, not the
-publication symlink target.
+`manifest.jsonl` and `root/`; optional top-level metadata files are part of
+the object layout for builders that define them. `root/` is part of the object
+layout, not the publication symlink target.
 
 If the current publication name already points at a different result, the old
 current refs are rotated into timestamp-suffixed history refs.

@@ -80,24 +80,42 @@ pub fn hash_fs_tree_object(
     manifest_bytes: &[u8],
     root_dir: impl AsRef<Path>,
 ) -> Result<ObjectHash, Error> {
+    hash_fs_tree_object_with_extra_files(manifest_bytes, root_dir, &[])
+}
+
+pub fn hash_fs_tree_object_with_extra_files(
+    manifest_bytes: &[u8],
+    root_dir: impl AsRef<Path>,
+    extra_files: &[(&[u8], &[u8])],
+) -> Result<ObjectHash, Error> {
     let root = path_source::load_directory_path(root_dir.as_ref())?;
     let manifest = Node::File(FileNode {
         executable: false,
         content_hash: hash::sha256_bytes(manifest_bytes),
         size: manifest_bytes.len() as u64,
     });
-    let object = Node::Directory(DirectoryNode {
-        entries: vec![
-            DirectoryEntry {
-                name: b"manifest.jsonl".to_vec(),
-                node: Box::new(manifest),
-            },
-            DirectoryEntry {
-                name: b"root".to_vec(),
-                node: Box::new(root),
-            },
-        ],
-    });
+    let mut entries = vec![
+        DirectoryEntry {
+            name: b"manifest.jsonl".to_vec(),
+            node: Box::new(manifest),
+        },
+        DirectoryEntry {
+            name: b"root".to_vec(),
+            node: Box::new(root),
+        },
+    ];
+    for (name, content) in extra_files {
+        entries.push(DirectoryEntry {
+            name: name.to_vec(),
+            node: Box::new(Node::File(FileNode {
+                executable: false,
+                content_hash: hash::sha256_bytes(content),
+                size: content.len() as u64,
+            })),
+        });
+    }
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    let object = Node::Directory(DirectoryNode { entries });
     Ok(hash::hash_node(&object))
 }
 
