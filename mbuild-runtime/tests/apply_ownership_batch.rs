@@ -1,10 +1,7 @@
 #![cfg(all(feature = "integration-tests", target_os = "linux"))]
 
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
-use mbuild_runtime::{
-    MbuildIdmap, RuntimeError, apply_ownership_batch,
-    apply_ownership_batch_and_hash_fs_tree_object_with_extra_files,
-};
+use mbuild_runtime::{MbuildIdmap, RuntimeError, apply_ownership_batch};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
@@ -89,48 +86,6 @@ fn apply_ownership_batch_returns_structured_executor_error() -> TestResult<()> {
     );
     assert!(error.to_string().contains("kind error at /target/entry"));
     assert!(error.to_string().contains("expected file"));
-    assert_runtime_workspace_empty(&workspace)?;
-
-    Ok(())
-}
-
-#[test]
-fn apply_ownership_batch_with_extra_files_hashes_fs_tree_object() -> TestResult<()> {
-    let _guard = runtime_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    init_tracing();
-    let idmap = MbuildIdmap::from_host_environment()?;
-    let temp = tempdir()?;
-    let workspace = temp.path().join("workspace");
-    let target = temp.path().join("target");
-    fs::create_dir(&workspace)?;
-    fs::create_dir(&target)?;
-    fs::write(target.join("tool"), b"tool")?;
-    fs::set_permissions(target.join("tool"), fs::Permissions::from_mode(0o755))?;
-
-    let manifest = FsTreeManifest::from_entries(vec![
-        FsTreeEntry::directory("", 0, 0, 0o755),
-        FsTreeEntry::file("tool", 1, 1, 0o755),
-    ])?;
-    let manifest_bytes = manifest.to_canonical_bytes()?;
-    let expected = fsobj_hash::hash_fs_tree_object(&manifest_bytes, &target)?;
-
-    let got = apply_ownership_batch_and_hash_fs_tree_object_with_extra_files(
-        &target,
-        &manifest,
-        Vec::new(),
-        &idmap,
-        &workspace,
-    );
-
-    assert_eq!(got?, expected);
-    assert_owner_and_mode(
-        target.join("tool"),
-        idmap.physical_uid(1)?,
-        idmap.physical_gid(1)?,
-        0o755,
-    )?;
     assert_runtime_workspace_empty(&workspace)?;
 
     Ok(())

@@ -1,11 +1,10 @@
 use crate::error::RuntimeError;
 use crate::executor::read_executor_error_report;
 use crate::idmap::MbuildIdmap;
-use crate::ownership::HashReport;
 use mbuild_core::FsTreeManifest;
 use mbuild_core::runtime_helper_protocol::{
     HELPER_BINARY_NAME, HELPER_PROTOCOL_VERSION, HelperProtocolInfo, OwnershipHelperConfig,
-    OwnershipHelperHashReport, OwnershipHelperIdmap,
+    OwnershipHelperIdmap,
 };
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -20,15 +19,8 @@ use std::sync::{Arc, OnceLock};
 use tracing::warn;
 use uuid::Uuid;
 
-pub(crate) struct LocalOwnershipRun {
+struct LocalOwnershipRun {
     dir: PathBuf,
-    result_report: PathBuf,
-}
-
-impl LocalOwnershipRun {
-    pub(crate) fn result_report(&self) -> &Path {
-        &self.result_report
-    }
 }
 
 impl Drop for LocalOwnershipRun {
@@ -60,8 +52,7 @@ pub(crate) fn run_local_ownership(
     manifest: &FsTreeManifest,
     idmap: &MbuildIdmap,
     workspace: &Path,
-    hash_report: Option<HashReport>,
-) -> Result<LocalOwnershipRun, RuntimeError> {
+) -> Result<(), RuntimeError> {
     let tools = cached_local_ownership_tools()?;
     let state_root = workspace.join("state");
     let bundles_root = workspace.join("bundles");
@@ -70,24 +61,13 @@ pub(crate) fn run_local_ownership(
 
     let dir = bundles_root.join(Uuid::new_v4().simple().to_string());
     fs::create_dir(&dir)?;
-    let run = LocalOwnershipRun {
-        result_report: dir.join("result.json"),
-        dir,
-    };
+    let run = LocalOwnershipRun { dir };
     let error_report = run.dir.join("error.json");
     let config_path = run.dir.join("ownership-helper.json");
     fs::File::create(&error_report)?;
-    fs::File::create(run.result_report())?;
 
     let target_root = fs::canonicalize(target_root)?;
-    let config = helper_config(
-        &target_root,
-        manifest,
-        idmap,
-        &error_report,
-        run.result_report(),
-        hash_report,
-    )?;
+    let config = helper_config(&target_root, manifest, idmap, &error_report)?;
     let bytes = serde_json::to_vec(&config).map_err(|error| {
         RuntimeError::Executor(format!(
             "failed to serialize ownership helper config: {error}"
@@ -97,7 +77,7 @@ pub(crate) fn run_local_ownership(
 
     let lifecycle_result = launch_helper(&tools, idmap, &config_path);
     resolve_helper_report(&error_report, lifecycle_result)?;
-    Ok(run)
+    Ok(())
 }
 
 fn helper_config(
@@ -105,38 +85,16 @@ fn helper_config(
     manifest: &FsTreeManifest,
     idmap: &MbuildIdmap,
     error_report: &Path,
-    result_report: &Path,
-    hash_report: Option<HashReport>,
 ) -> Result<OwnershipHelperConfig, RuntimeError> {
     let manifest = String::from_utf8(manifest.to_canonical_bytes().map_err(|error| {
         RuntimeError::InvalidInput(format!("failed to serialize ownership manifest: {error}"))
     })?)
     .expect("canonical fs-tree manifest is UTF-8");
-    let hash_report = match hash_report {
-        Some(HashReport::FsTreeObject {
-            manifest,
-            extra_files,
-        }) => {
-            let manifest = String::from_utf8(manifest.to_canonical_bytes().map_err(|error| {
-                RuntimeError::InvalidInput(format!(
-                    "failed to serialize ownership hash manifest: {error}"
-                ))
-            })?)
-            .expect("canonical fs-tree manifest is UTF-8");
-            Some(OwnershipHelperHashReport::FsTreeObject {
-                manifest,
-                extra_files,
-            })
-        }
-        None => None,
-    };
 
     Ok(OwnershipHelperConfig {
         target_root: target_root.to_path_buf(),
         error_report: error_report.to_path_buf(),
-        result_report: Some(result_report.to_path_buf()),
         manifest,
-        hash_report,
         idmap: OwnershipHelperIdmap {
             current_uid: idmap.current_uid(),
             current_gid: idmap.current_gid(),
@@ -599,20 +557,11 @@ mod tests {
             &manifest,
             &idmap,
             Path::new("/tmp/error.json"),
-            Path::new("/tmp/result.json"),
-            Some(HashReport::FsTreeObject {
-                manifest: manifest.clone(),
-                extra_files: Vec::new(),
-            }),
         )
         .unwrap();
 
         assert_eq!(config.target_root, PathBuf::from("/tmp/root"));
         assert_eq!(config.idmap.current_gid, 1001);
         assert!(config.manifest.ends_with('\n'));
-        assert!(matches!(
-            config.hash_report,
-            Some(OwnershipHelperHashReport::FsTreeObject { .. })
-        ));
     }
 }

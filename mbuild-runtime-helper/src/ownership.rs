@@ -5,10 +5,8 @@
 //! lifecycle and passes only a JSON config file; this module owns interpreting
 //! that config, mutating the target tree, and writing structured report files.
 
-use fsobj_hash::{ObjectHash, hash_fs_tree_object_with_extra_files};
 use mbuild_core::runtime_helper_protocol::{
-    ExecutorErrorReport, OwnershipHelperConfig, OwnershipHelperHashReport, OwnershipTimings,
-    write_executor_error_report, write_executor_result_report_with_timings,
+    ExecutorErrorReport, OwnershipHelperConfig, write_executor_error_report,
 };
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
 use nix::unistd::{Gid, Uid, chown};
@@ -18,7 +16,6 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
-use std::time::Instant;
 
 /// Run the ownership operation from a JSON config file path.
 ///
@@ -49,24 +46,12 @@ fn read_config(path: &Path) -> Result<OwnershipHelperConfig, String> {
 /// intentionally rooted at `/target` instead of exposing host paths.
 fn run_config(config: OwnershipHelperConfig) -> Result<(), String> {
     let manifest = parse_manifest("manifest", &config.manifest, &config.error_report)?;
-    let hash_report = match config.hash_report {
-        Some(OwnershipHelperHashReport::FsTreeObject {
-            manifest,
-            extra_files,
-        }) => Some(HashReport::FsTreeObject {
-            manifest: parse_manifest("hash manifest", &manifest, &config.error_report)?,
-            extra_files,
-        }),
-        None => None,
-    };
 
-    let executor = OwnershipExecutor::with_paths_display_and_result(
+    let executor = OwnershipExecutor::with_paths_display(
         &manifest,
         config.target_root,
         PathBuf::from("/target"),
         config.error_report.clone(),
-        config.result_report.clone(),
-        hash_report,
     );
     run_executor(&executor)
 }
@@ -88,29 +73,13 @@ fn parse_manifest(label: &str, text: &str, error_report: &Path) -> Result<FsTree
     })
 }
 
-/// Apply an executor and translate its outcome into the report-file protocol.
+/// Apply an executor and translate failures into the report-file protocol.
 ///
-/// Successful ownership-only runs write no result file. Successful hash-producing
-/// runs write `result_log_inside` when the parent requested one. Failures always
-/// try to write `error_log_inside` before returning a textual error for stderr.
+/// Successful runs write no report file. Failures always try to write
+/// `error_log_inside` before returning a textual error for stderr.
 fn run_executor(executor: &OwnershipExecutor) -> Result<(), String> {
     match executor.apply() {
-        Ok(result) => {
-            if let (Some(path), Some(result)) = (&executor.result_log_inside, result) {
-                write_executor_result_report_with_timings(
-                    path,
-                    result.object_hash,
-                    Some(result.timings),
-                )
-                .map_err(|error| {
-                    format!(
-                        "failed to write executor result report '{}': {error}",
-                        path.display()
-                    )
-                })?;
-            }
-            Ok(())
-        }
+        Ok(()) => Ok(()),
         Err(report) => {
             write_executor_error_report(&executor.error_log_inside, &report).map_err(|error| {
                 format!(
@@ -123,35 +92,14 @@ fn run_executor(executor: &OwnershipExecutor) -> Result<(), String> {
     }
 }
 
-/// Helper-local hash request derived from the wire protocol.
-///
-/// Hashing is always performed after ownership and mode materialization. The
-/// parent asks for a hash by setting this field and provides `result_report`
-/// when it needs the hash returned across the process boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum HashReport {
-    /// Hash the fs-tree object shape `{ manifest.jsonl, root/, ...extra }`.
-    FsTreeObject {
-        /// Manifest that defines the synthetic fs-tree object, not necessarily
-        /// the same manifest used for materialization.
-        manifest: FsTreeManifest,
-        /// Extra top-level files included in the synthetic object hash.
-        ///
-        /// Each pair is `(name_bytes, content_bytes)`: `name_bytes` is one
-        /// fsobj directory entry name under the synthetic object root, and
-        /// `content_bytes` is the complete file payload hashed for that entry.
-        extra_files: Vec<(Vec<u8>, Vec<u8>)>,
-    },
-}
-
 /// Ownership materialization executor for one helper invocation.
 ///
 /// The executor stores immutable execution state. It validates every manifest
 /// entry against the current target tree, applies ownership first, then modes,
-/// validates the final tree, and optionally computes a hash result.
+/// validates the final tree.
 #[derive(Debug, Clone)]
 struct OwnershipExecutor {
-    /// Real helper-visible path to the target root to mutate and hash.
+    /// Real helper-visible path to the target root to mutate.
     target_inside: PathBuf,
     /// Stable display root used in structured reports instead of host paths.
     target_display: PathBuf,
@@ -159,30 +107,6 @@ struct OwnershipExecutor {
     entries: Vec<FsTreeEntry>,
     /// Helper-visible path for the structured failure report.
     error_log_inside: PathBuf,
-    /// Optional helper-visible path for the structured success report.
-    result_log_inside: Option<PathBuf>,
-    /// Optional post-materialization hash request.
-    hash_report: Option<HashReport>,
-}
-
-/// Successful executor result that can be serialized to `result_log_inside`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OwnershipHelperResult {
-    /// Object hash computed after materialization.
-    object_hash: ObjectHash,
-    /// Helper-side phase timings.
-    timings: OwnershipTimings,
-}
-
-/// Hash result plus timing components folded into the final result timings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HashComputation {
-    /// Computed object hash.
-    object_hash: ObjectHash,
-    /// Time spent serializing the manifest used for fs-tree object hashing.
-    manifest_serialize_ms: u128,
-    /// Time spent computing the target-root or fs-tree-object hash.
-    hash_ms: u128,
 }
 
 impl OwnershipExecutor {
@@ -192,24 +116,11 @@ impl OwnershipExecutor {
         target_inside: PathBuf,
         error_log_inside: PathBuf,
     ) -> Self {
-        Self::with_paths_and_result(manifest, target_inside, error_log_inside, None, None)
-    }
-
-    #[cfg(test)]
-    fn with_paths_and_result(
-        manifest: &FsTreeManifest,
-        target_inside: PathBuf,
-        error_log_inside: PathBuf,
-        result_log_inside: Option<PathBuf>,
-        hash_report: Option<HashReport>,
-    ) -> Self {
-        Self::with_paths_display_and_result(
+        Self::with_paths_display(
             manifest,
             target_inside.clone(),
             target_inside,
             error_log_inside,
-            result_log_inside,
-            hash_report,
         )
     }
 
@@ -217,40 +128,30 @@ impl OwnershipExecutor {
     ///
     /// `target_inside` is the real path used for syscalls. `target_display` is
     /// the report path prefix visible to users and must not be used for syscalls.
-    fn with_paths_display_and_result(
+    fn with_paths_display(
         manifest: &FsTreeManifest,
         target_inside: PathBuf,
         target_display: PathBuf,
         error_log_inside: PathBuf,
-        result_log_inside: Option<PathBuf>,
-        hash_report: Option<HashReport>,
     ) -> Self {
         Self {
             target_inside,
             target_display,
             entries: manifest.entries().to_vec(),
             error_log_inside,
-            result_log_inside,
-            hash_report,
         }
     }
 
-    /// Materialize ownership/modes and optionally compute a result hash.
+    /// Materialize ownership/modes.
     ///
     /// Ownership changes happen before any mode changes so restrictive modes in
     /// the manifest cannot prevent later `chown`/`lchown` calls. File modes are
     /// then applied before directory modes. Directory modes are applied
     /// deepest-first so chmodding a parent directory cannot remove access needed
     /// to finish nested entries.
-    fn apply(&self) -> Result<Option<OwnershipHelperResult>, ExecutorErrorReport> {
-        let total_start = Instant::now();
-        let mut timings = OwnershipTimings::default();
-
-        let step_start = Instant::now();
+    fn apply(&self) -> Result<(), ExecutorErrorReport> {
         let entries = self.validate_entries()?;
-        timings.validate_entries_ms = elapsed_ms(step_start);
 
-        let step_start = Instant::now();
         for entry in &entries {
             match entry.kind {
                 EntryKind::File | EntryKind::Directory => {
@@ -259,17 +160,13 @@ impl OwnershipExecutor {
                 EntryKind::Symlink => {}
             }
         }
-        timings.chown_ms = elapsed_ms(step_start);
 
-        let step_start = Instant::now();
         for entry in &entries {
             if entry.kind == EntryKind::Symlink {
                 lchown_if_needed(&entry.path, &entry.report_path, entry.uid, entry.gid)?;
             }
         }
-        timings.lchown_ms = elapsed_ms(step_start);
 
-        let step_start = Instant::now();
         for entry in &entries {
             if entry.kind == EntryKind::File {
                 chmod(
@@ -279,18 +176,14 @@ impl OwnershipExecutor {
                 )?;
             }
         }
-        timings.chmod_files_ms = elapsed_ms(step_start);
 
-        let validate_start = Instant::now();
         for entry in entries
             .iter()
             .filter(|entry| entry.kind != EntryKind::Directory)
         {
             Self::validate_applied_entry(entry)?;
         }
-        timings.validate_applied_ms = elapsed_ms(validate_start);
 
-        let step_start = Instant::now();
         // Parent directory modes can make children unreachable. Defer every
         // directory chmod until non-directories are done and validated, then
         // walk from leaves to root. Each directory is validated immediately
@@ -308,74 +201,9 @@ impl OwnershipExecutor {
                 &entry.report_path,
                 entry.mode.expect("directory entry has mode"),
             )?;
-            let validate_start = Instant::now();
             Self::validate_applied_entry(entry)?;
-            timings.validate_applied_ms += elapsed_ms(validate_start);
         }
-        timings.chmod_dirs_ms = elapsed_ms(step_start);
-
-        if let Some(report) = self.hash_report.as_ref() {
-            let hash_result = self.hash_result(report)?;
-            timings.manifest_serialize_ms = hash_result.manifest_serialize_ms;
-            timings.hash_ms = hash_result.hash_ms;
-            timings.total_ms = elapsed_ms(total_start);
-            Ok(Some(OwnershipHelperResult {
-                object_hash: hash_result.object_hash,
-                timings,
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Compute the requested post-materialization hash.
-    fn hash_result(
-        &self,
-        report_kind: &HashReport,
-    ) -> Result<HashComputation, ExecutorErrorReport> {
-        match report_kind {
-            HashReport::FsTreeObject {
-                manifest,
-                extra_files,
-            } => {
-                let manifest_start = Instant::now();
-                let manifest_bytes = manifest.to_canonical_bytes().map_err(|error| {
-                    report(
-                        "hash",
-                        &self.target_display,
-                        format!("failed to serialize fs-tree manifest for hashing: {error}"),
-                        None,
-                    )
-                })?;
-                let manifest_serialize_ms = elapsed_ms(manifest_start);
-                let hash_start = Instant::now();
-                let extra_file_refs = extra_files
-                    .iter()
-                    .map(|(name, content)| (name.as_slice(), content.as_slice()))
-                    .collect::<Vec<_>>();
-                let object_hash = hash_fs_tree_object_with_extra_files(
-                    &manifest_bytes,
-                    &self.target_inside,
-                    &extra_file_refs,
-                )
-                .map_err(|error| {
-                    report(
-                        "hash",
-                        &self.target_display,
-                        format!(
-                            "failed to hash fs-tree object rooted at '{}': {error}",
-                            self.target_display.display()
-                        ),
-                        None,
-                    )
-                })?;
-                Ok(HashComputation {
-                    object_hash,
-                    manifest_serialize_ms,
-                    hash_ms: elapsed_ms(hash_start),
-                })
-            }
-        }
+        Ok(())
     }
 
     /// Resolve every manifest entry to a concrete target path and metadata.
@@ -521,10 +349,6 @@ impl OwnershipExecutor {
             self.target_display.join(relative)
         }
     }
-}
-
-fn elapsed_ms(start: Instant) -> u128 {
-    start.elapsed().as_millis()
 }
 
 /// Manifest entry resolved against the target tree.
@@ -893,44 +717,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_returns_fs_tree_object_hash_when_requested() {
-        let temp = tempdir().unwrap();
-        let target = temp.path().join("target");
-        fs::create_dir(&target).unwrap();
-        fs::write(target.join("tool"), b"tool").unwrap();
-
-        let owner = current_owner();
-        let manifest = FsTreeManifest::from_entries(vec![
-            FsTreeEntry::directory("", owner.0, owner.1, 0o755),
-            FsTreeEntry::file("tool", owner.0, owner.1, 0o755),
-        ])
-        .unwrap();
-
-        let got = OwnershipExecutor::with_paths_and_result(
-            &manifest,
-            target.clone(),
-            temp.path().join("error.json"),
-            Some(temp.path().join("result.json")),
-            Some(HashReport::FsTreeObject {
-                manifest: manifest.clone(),
-                extra_files: Vec::new(),
-            }),
-        )
-        .apply()
-        .unwrap();
-        let manifest_bytes = manifest.to_canonical_bytes().unwrap();
-
-        let got = got.unwrap();
-        assert_eq!(
-            got.object_hash,
-            fsobj_hash::hash_fs_tree_object(&manifest_bytes, &target).unwrap()
-        );
-        assert_ne!(got.object_hash, fsobj_hash::hash_path(&target).unwrap());
-        assert!(got.timings.total_ms >= got.timings.hash_ms);
-        assert_mode(target.join("tool"), 0o755);
-    }
-
-    #[test]
     fn run_executor_writes_missing_path_report() {
         let temp = tempdir().unwrap();
         let target = temp.path().join("target");
@@ -989,8 +775,6 @@ mod tests {
             target_display: target.clone(),
             entries: vec![FsTreeEntry::file("../escape", owner.0, owner.1, 0o644)],
             error_log_inside: temp.path().join("error.json"),
-            result_log_inside: None,
-            hash_report: None,
         };
 
         let report = executor.apply().unwrap_err();
@@ -1010,8 +794,6 @@ mod tests {
             target_display: target,
             entries: vec![FsTreeEntry::file("child", owner.0, owner.1, 0o644)],
             error_log_inside: temp.path().join("error.json"),
-            result_log_inside: None,
-            hash_report: None,
         };
 
         let report = executor.apply().unwrap_err();

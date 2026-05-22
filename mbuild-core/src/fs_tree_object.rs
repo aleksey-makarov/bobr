@@ -1,6 +1,9 @@
 use crate::{FsTreeEntry, FsTreeManifest, FsTreeManifestError};
-use fsobj_hash::{hash_path, hash_symlink_node};
-use std::collections::{HashMap, HashSet};
+use fsobj_hash::{
+    DirectoryEntryHash, EntryKind, ObjectHash, hash_directory_node, hash_file_bytes,
+    hash_fs_tree_object_from_hashes, hash_path, hash_symlink_node,
+};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
@@ -138,6 +141,159 @@ pub fn create_fs_tree_staging_dir(
     set_root_mode_from_manifest(&paths.root_dir, manifest)?;
 
     Ok(paths)
+}
+
+/// Compute the fs-tree object hash described by `manifest`.
+///
+/// This reconstructs the `root/` directory hash from manifest leaf hashes and
+/// directory paths, then combines it with the canonical `manifest.jsonl` hash.
+/// It does not read the materialized root directory.
+pub fn hash_fs_tree_object_from_manifest(
+    manifest: &FsTreeManifest,
+) -> Result<ObjectHash, FsTreeObjectError> {
+    let manifest_bytes = manifest.to_canonical_bytes()?;
+    let manifest_hash = hash_file_bytes(false, &manifest_bytes);
+    let root_hash = hash_manifest_root(manifest);
+    Ok(hash_fs_tree_object_from_hashes(manifest_hash, root_hash))
+}
+
+/// Compute the fs-tree object hash described by `manifest` plus sidecar files.
+///
+/// `extra_files` contains top-level `(name_bytes, content_bytes)` files that
+/// sit next to `manifest.jsonl` and `root/` in the object hash. These files are
+/// hashed as non-executable regular files.
+pub fn hash_fs_tree_object_from_manifest_with_extra_files(
+    manifest: &FsTreeManifest,
+    extra_files: &[(&[u8], &[u8])],
+) -> Result<ObjectHash, FsTreeObjectError> {
+    let manifest_bytes = manifest.to_canonical_bytes()?;
+    let manifest_hash = hash_file_bytes(false, &manifest_bytes);
+    let root_hash = hash_manifest_root(manifest);
+
+    let mut entries = vec![
+        DirectoryEntryHash {
+            name: MANIFEST_FILE_NAME.as_bytes(),
+            kind: EntryKind::File,
+            node_hash: manifest_hash,
+        },
+        DirectoryEntryHash {
+            name: ROOT_DIR_NAME.as_bytes(),
+            kind: EntryKind::Directory,
+            node_hash: root_hash,
+        },
+    ];
+    for (name, content) in extra_files {
+        entries.push(DirectoryEntryHash {
+            name,
+            kind: EntryKind::File,
+            node_hash: hash_file_bytes(false, content),
+        });
+    }
+    Ok(hash_directory_node(&entries))
+}
+
+#[derive(Debug, Clone)]
+struct PendingManifestHashEntry {
+    name: Vec<u8>,
+    kind: EntryKind,
+    node_hash: ObjectHash,
+    child_path: Option<String>,
+}
+
+fn hash_manifest_root(manifest: &FsTreeManifest) -> ObjectHash {
+    let mut directories = BTreeMap::<String, BTreeMap<Vec<u8>, PendingManifestHashEntry>>::new();
+    directories.entry(String::new()).or_default();
+
+    for entry in manifest.entries() {
+        match entry {
+            FsTreeEntry::Directory { path, .. } => {
+                directories.entry(path.clone()).or_default();
+                if !path.is_empty() {
+                    insert_manifest_directory_entry(&mut directories, path);
+                }
+            }
+            FsTreeEntry::File { path, hash, .. } => {
+                insert_manifest_leaf_entry(&mut directories, path, EntryKind::File, *hash);
+            }
+            FsTreeEntry::Symlink { path, hash, .. } => {
+                insert_manifest_leaf_entry(&mut directories, path, EntryKind::Symlink, *hash);
+            }
+        }
+    }
+
+    hash_manifest_directory("", &directories)
+}
+
+fn insert_manifest_directory_entry(
+    directories: &mut BTreeMap<String, BTreeMap<Vec<u8>, PendingManifestHashEntry>>,
+    path: &str,
+) {
+    let parent = manifest_parent_path(path).to_string();
+    let name = manifest_path_name(path).to_vec();
+    directories
+        .entry(parent)
+        .or_default()
+        .entry(name.clone())
+        .or_insert(PendingManifestHashEntry {
+            name,
+            kind: EntryKind::Directory,
+            node_hash: hash_directory_node(&[]),
+            child_path: Some(path.to_string()),
+        });
+}
+
+fn insert_manifest_leaf_entry(
+    directories: &mut BTreeMap<String, BTreeMap<Vec<u8>, PendingManifestHashEntry>>,
+    path: &str,
+    kind: EntryKind,
+    node_hash: ObjectHash,
+) {
+    let parent = manifest_parent_path(path).to_string();
+    let name = manifest_path_name(path).to_vec();
+    directories.entry(parent).or_default().insert(
+        name.clone(),
+        PendingManifestHashEntry {
+            name,
+            kind,
+            node_hash,
+            child_path: None,
+        },
+    );
+}
+
+fn hash_manifest_directory(
+    path: &str,
+    directories: &BTreeMap<String, BTreeMap<Vec<u8>, PendingManifestHashEntry>>,
+) -> ObjectHash {
+    let mut entries = Vec::new();
+    if let Some(children) = directories.get(path) {
+        for entry in children.values() {
+            let node_hash = if entry.kind == EntryKind::Directory {
+                let child_path = entry.child_path.as_deref().expect("directory has path");
+                hash_manifest_directory(child_path, directories)
+            } else {
+                entry.node_hash
+            };
+            entries.push(DirectoryEntryHash {
+                name: &entry.name,
+                kind: entry.kind,
+                node_hash,
+            });
+        }
+    }
+    hash_directory_node(&entries)
+}
+
+fn manifest_parent_path(path: &str) -> &str {
+    path.rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("")
+}
+
+fn manifest_path_name(path: &str) -> &[u8] {
+    path.rsplit_once('/')
+        .map(|(_, name)| name.as_bytes())
+        .unwrap_or_else(|| path.as_bytes())
 }
 
 #[cfg(unix)]
@@ -651,6 +807,34 @@ mod tests {
         write_file(&paths.root_dir.join("bin/tool"), 0o644);
         symlink("tool", paths.root_dir.join("bin/tool-link")).unwrap();
         (object_dir, manifest, owner)
+    }
+
+    #[test]
+    fn hashes_fs_tree_object_from_manifest_without_reading_root() {
+        let temp = tempdir().unwrap();
+        let (object_dir, manifest, _) = create_valid_object(temp.path());
+
+        assert_eq!(
+            hash_fs_tree_object_from_manifest(&manifest).unwrap(),
+            hash_path(&object_dir).unwrap()
+        );
+    }
+
+    #[test]
+    fn hashes_fs_tree_object_from_manifest_with_extra_files() {
+        let temp = tempdir().unwrap();
+        let (object_dir, manifest, _) = create_valid_object(temp.path());
+        let config = br#"{"architecture":"amd64"}"#;
+        fs::write(object_dir.join("oci-config.json"), config).unwrap();
+
+        assert_eq!(
+            hash_fs_tree_object_from_manifest_with_extra_files(
+                &manifest,
+                &[(b"oci-config.json", config.as_slice())],
+            )
+            .unwrap(),
+            hash_path(&object_dir).unwrap()
+        );
     }
 
     #[test]

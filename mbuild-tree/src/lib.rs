@@ -1,7 +1,4 @@
-use fsobj_hash::{
-    DirectoryEntryHash, EntryKind, ObjectHash, hash_directory_node, hash_file_bytes,
-    hash_fs_tree_object_from_hashes, hash_path, hash_symlink_node,
-};
+use fsobj_hash::{EntryKind, ObjectHash, hash_file_bytes, hash_path, hash_symlink_node};
 use globset::{Glob, GlobMatcher};
 #[cfg(test)]
 use mbuild_core::InitramfsEntrySource;
@@ -1640,7 +1637,7 @@ fn materialize_tree_merge_output(
         temp_dir,
     )?;
     let ownership_host_ms = elapsed_ms(ownership_start);
-    log_tree_merge_ownership_events(cx, None, ownership_host_ms);
+    log_tree_merge_ownership_events(cx, ownership_host_ms);
 
     let hash_start = Instant::now();
     let object_hash = hash_tree_output_from_manifest(composed)?;
@@ -1735,7 +1732,7 @@ fn materialize_tree_subset_output(
         temp_dir,
     )?;
     let ownership_host_ms = elapsed_ms(ownership_start);
-    log_tree_merge_ownership_events(cx, None, ownership_host_ms);
+    log_tree_merge_ownership_events(cx, ownership_host_ms);
 
     let hash_start = Instant::now();
     let object_hash = hash_tree_output_from_manifest(composed)?;
@@ -1839,152 +1836,22 @@ fn should_copy_after_link_error(kind: io::ErrorKind) -> bool {
     )
 }
 
-#[derive(Debug, Clone)]
-struct PendingDirectoryHashEntry {
-    name: Vec<u8>,
-    kind: EntryKind,
-    node_hash: ObjectHash,
-}
-
 fn hash_tree_output_from_manifest(composed: &ComposedFsTree) -> Result<ObjectHash, BuilderError> {
-    let manifest_bytes = composed
-        .manifest()
-        .to_canonical_bytes()
-        .map_err(map_fs_tree_error)?;
-    let manifest_hash = hash_file_bytes(false, &manifest_bytes);
-
-    let mut directories = BTreeMap::<String, BTreeMap<Vec<u8>, PendingDirectoryHashEntry>>::new();
-    directories.entry(String::new()).or_default();
-
-    for (manifest_entry, composed_entry) in
-        composed.manifest().entries().iter().zip(composed.entries())
-    {
-        match (manifest_entry, composed_entry) {
-            (FsTreeEntry::Directory { path, .. }, ComposedFsTreeEntry::Directory) => {
-                directories.entry(path.clone()).or_default();
-                if !path.is_empty() {
-                    insert_directory_entry(&mut directories, path);
-                }
-            }
-            (FsTreeEntry::File { path, hash, .. }, ComposedFsTreeEntry::File { .. }) => {
-                let node_hash = *hash;
-                insert_leaf_directory_entry(&mut directories, path, EntryKind::File, node_hash);
-            }
-            (FsTreeEntry::Symlink { path, hash, .. }, ComposedFsTreeEntry::Symlink { .. }) => {
-                let node_hash = *hash;
-                insert_leaf_directory_entry(&mut directories, path, EntryKind::Symlink, node_hash);
-            }
-            _ => {
-                return Err(BuilderError::ExecutionFailed(
-                    "composed fs-tree entry kind does not match manifest entry".to_string(),
-                ));
-            }
-        }
-    }
-
-    let root_hash = hash_directory_from_map("", &directories)?;
-    Ok(hash_fs_tree_object_from_hashes(manifest_hash, root_hash))
+    mbuild_core::hash_fs_tree_object_from_manifest(composed.manifest()).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to hash fs-tree object from manifest: {error}"
+        ))
+    })
 }
 
-fn insert_directory_entry(
-    directories: &mut BTreeMap<String, BTreeMap<Vec<u8>, PendingDirectoryHashEntry>>,
-    path: &str,
-) {
-    let parent = parent_path(path).to_string();
-    let name = path_name(path).to_vec();
-    directories
-        .entry(parent)
-        .or_default()
-        .entry(name.clone())
-        .or_insert(PendingDirectoryHashEntry {
-            name,
-            kind: EntryKind::Directory,
-            node_hash: hash_directory_node(&[]),
-        });
-}
-
-fn insert_leaf_directory_entry(
-    directories: &mut BTreeMap<String, BTreeMap<Vec<u8>, PendingDirectoryHashEntry>>,
-    path: &str,
-    kind: EntryKind,
-    node_hash: ObjectHash,
-) {
-    let parent = parent_path(path).to_string();
-    let name = path_name(path).to_vec();
-    directories.entry(parent).or_default().insert(
-        name.clone(),
-        PendingDirectoryHashEntry {
-            name,
-            kind,
-            node_hash,
-        },
-    );
-}
-
-fn hash_directory_from_map(
-    path: &str,
-    directories: &BTreeMap<String, BTreeMap<Vec<u8>, PendingDirectoryHashEntry>>,
-) -> Result<ObjectHash, BuilderError> {
-    let mut entries = Vec::new();
-    if let Some(children) = directories.get(path) {
-        for entry in children.values() {
-            let node_hash = if entry.kind == EntryKind::Directory {
-                let child_path = join_manifest_path(path, &entry.name)?;
-                hash_directory_from_map(&child_path, directories)?
-            } else {
-                entry.node_hash
-            };
-            entries.push(DirectoryEntryHash {
-                name: &entry.name,
-                kind: entry.kind,
-                node_hash,
-            });
-        }
-    }
-    Ok(hash_directory_node(&entries))
-}
-
-fn parent_path(path: &str) -> &str {
-    path.rsplit_once('/')
-        .map(|(parent, _)| parent)
-        .unwrap_or("")
-}
-
-fn path_name(path: &str) -> &[u8] {
-    path.rsplit_once('/')
-        .map(|(_, name)| name.as_bytes())
-        .unwrap_or_else(|| path.as_bytes())
-}
-
-fn join_manifest_path(parent: &str, name: &[u8]) -> Result<String, BuilderError> {
-    let name = std::str::from_utf8(name).map_err(|error| {
-        BuilderError::ExecutionFailed(format!("invalid UTF-8 directory name in manifest: {error}"))
-    })?;
-    if parent.is_empty() {
-        Ok(name.to_string())
-    } else {
-        Ok(format!("{parent}/{name}"))
-    }
-}
-
-fn log_tree_merge_ownership_events(
-    cx: &mut BuildContext,
-    timings: Option<&mbuild_core::runtime_helper_protocol::OwnershipTimings>,
-    host_duration_ms: u128,
-) {
-    let ownership_ms = timings
-        .map(tree_merge_ownership_ms)
-        .unwrap_or(host_duration_ms);
+fn log_tree_merge_ownership_events(cx: &mut BuildContext, host_duration_ms: u128) {
     let mut ownership_details = Map::new();
-    ownership_details.insert("duration_ms".to_string(), json_u128(ownership_ms));
+    ownership_details.insert("duration_ms".to_string(), json_u128(host_duration_ms));
     ownership_details.insert("host_duration_ms".to_string(), json_u128(host_duration_ms));
-    if let Some(timings) = timings {
-        add_timing_details(&mut ownership_details, timings);
-    }
     cx.log_event_with_details(
         BuildLogLevel::Info,
         "ownership-done",
-        format!("materialized ownership in {ownership_ms} ms"),
+        format!("materialized ownership in {host_duration_ms} ms"),
         None,
         None,
         ownership_details,
@@ -2011,47 +1878,6 @@ fn log_tree_merge_hash_event(
         None,
         hash_details,
     );
-}
-
-fn tree_merge_ownership_ms(
-    timings: &mbuild_core::runtime_helper_protocol::OwnershipTimings,
-) -> u128 {
-    timings.validate_entries_ms
-        + timings.chown_ms
-        + timings.lchown_ms
-        + timings.chmod_files_ms
-        + timings.chmod_dirs_ms
-        + timings.validate_applied_ms
-}
-
-fn add_timing_details(
-    details: &mut Map<String, Value>,
-    timings: &mbuild_core::runtime_helper_protocol::OwnershipTimings,
-) {
-    details.insert("total_ms".to_string(), json_u128(timings.total_ms));
-    details.insert(
-        "validate_entries_ms".to_string(),
-        json_u128(timings.validate_entries_ms),
-    );
-    details.insert("chown_ms".to_string(), json_u128(timings.chown_ms));
-    details.insert("lchown_ms".to_string(), json_u128(timings.lchown_ms));
-    details.insert(
-        "chmod_files_ms".to_string(),
-        json_u128(timings.chmod_files_ms),
-    );
-    details.insert(
-        "chmod_dirs_ms".to_string(),
-        json_u128(timings.chmod_dirs_ms),
-    );
-    details.insert(
-        "validate_applied_ms".to_string(),
-        json_u128(timings.validate_applied_ms),
-    );
-    details.insert(
-        "manifest_serialize_ms".to_string(),
-        json_u128(timings.manifest_serialize_ms),
-    );
-    details.insert("hash_ms".to_string(), json_u128(timings.hash_ms));
 }
 
 fn tree_merge_compose_details(
@@ -4033,7 +3859,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_merge_logs_phase_timings_and_stage_counts() {
+    fn tree_merge_logs_stage_counts_and_hash_event() {
         let builder = TreeMergeBuilder;
         let temp = tempdir().unwrap();
         let left = build_fs_tree_for_tests(

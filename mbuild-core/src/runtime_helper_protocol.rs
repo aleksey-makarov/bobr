@@ -9,13 +9,11 @@
 //! must pass paths that are valid for the helper process after namespace setup;
 //! for local ownership that means absolute paths in the host filesystem.
 
-use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 /// Runtime helper binary name expected by the parent runtime.
 pub const HELPER_BINARY_NAME: &str = "mbuild-runtime-helper";
@@ -49,24 +47,6 @@ pub struct OwnershipHelperIdmap {
     pub subgid_count: u32,
 }
 
-/// Optional hash mode requested after ownership materialization.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum OwnershipHelperHashReport {
-    /// Hash a synthetic fs-tree object from a manifest, root, and extra files.
-    FsTreeObject {
-        /// Canonical `manifest.jsonl` bytes encoded as UTF-8 text.
-        manifest: String,
-        /// Additional top-level object files as `(name_bytes, content_bytes)`.
-        ///
-        /// `name_bytes` is one fsobj directory entry name under the synthetic
-        /// object root, for example `b"build.json"`. It is not a path and must
-        /// not contain `/`. `content_bytes` is the complete file payload hashed
-        /// for that entry.
-        extra_files: Vec<(Vec<u8>, Vec<u8>)>,
-    },
-}
-
 /// JSON configuration consumed by the ownership helper operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnershipHelperConfig {
@@ -85,27 +65,8 @@ pub struct OwnershipHelperConfig {
     /// [`ExecutorErrorReport`].
     pub error_report: PathBuf,
 
-    /// Optional absolute path where the helper writes a structured success
-    /// result.
-    ///
-    /// This is optional because not every helper operation has a success
-    /// payload. Ownership-only materialization needs only process success or an
-    /// `error_report`; hash-producing ownership operations pass `Some(path)` so
-    /// the helper can return the computed object hash and timings. If this is
-    /// `None`, a successful helper run does not write a result report.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_report: Option<PathBuf>,
-
     /// Canonical materialization manifest bytes encoded as UTF-8 text.
     pub manifest: String,
-
-    /// Optional hash mode requested by the parent.
-    ///
-    /// When this is `Some`, callers that need the hash result should also set
-    /// [`Self::result_report`] to `Some`; otherwise the helper can compute the
-    /// hash but has no protocol path to return it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hash_report: Option<OwnershipHelperHashReport>,
 
     /// Logical-to-host id mapping configured by the parent.
     pub idmap: OwnershipHelperIdmap,
@@ -122,48 +83,6 @@ pub struct ExecutorErrorReport {
     pub message: String,
     /// Optional OS errno when the failure came from an OS operation.
     pub errno: Option<i32>,
-}
-
-/// Structured helper success report.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecutorResultReport {
-    /// Computed object hash encoded as lowercase hex.
-    pub object_hash: String,
-    /// Optional ownership helper phase timings.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timings: Option<OwnershipTimings>,
-}
-
-/// Helper-side phase timings reported by ownership operations.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OwnershipTimings {
-    /// Total helper-side time.
-    pub total_ms: u128,
-    /// Time spent resolving and validating manifest entries.
-    pub validate_entries_ms: u128,
-    /// Time spent applying file and directory ownership.
-    pub chown_ms: u128,
-    /// Time spent applying symlink ownership.
-    pub lchown_ms: u128,
-    /// Time spent applying file modes.
-    pub chmod_files_ms: u128,
-    /// Time spent applying directory modes.
-    pub chmod_dirs_ms: u128,
-    /// Time spent validating materialized entries after mutation.
-    pub validate_applied_ms: u128,
-    /// Time spent serializing the fs-tree manifest for hashing.
-    pub manifest_serialize_ms: u128,
-    /// Time spent hashing the target tree or fs-tree object.
-    pub hash_ms: u128,
-}
-
-/// Decoded helper success report.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecutorResult {
-    /// Computed object hash.
-    pub object_hash: ObjectHash,
-    /// Optional ownership helper phase timings.
-    pub timings: Option<OwnershipTimings>,
 }
 
 impl fmt::Display for ExecutorErrorReport {
@@ -199,43 +118,9 @@ pub fn read_executor_error_report(path: &Path) -> io::Result<Option<ExecutorErro
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-/// Write a structured helper success report to `path`.
-pub fn write_executor_result_report_with_timings(
-    path: &Path,
-    object_hash: ObjectHash,
-    timings: Option<OwnershipTimings>,
-) -> io::Result<()> {
-    let report = ExecutorResultReport {
-        object_hash: object_hash.to_string(),
-        timings,
-    };
-    let bytes = serde_json::to_vec(&report).map_err(io::Error::other)?;
-    fs::write(path, bytes)
-}
-
-/// Read a structured helper success report from `path`.
-///
-/// An empty file means "no report was written" and returns `Ok(None)`.
-pub fn read_executor_result_report(path: &Path) -> io::Result<Option<ExecutorResult>> {
-    let bytes = fs::read(path)?;
-    if bytes.is_empty() {
-        return Ok(None);
-    }
-
-    let report = serde_json::from_slice::<ExecutorResultReport>(&bytes)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let object_hash = ObjectHash::from_str(&report.object_hash)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    Ok(Some(ExecutorResult {
-        object_hash,
-        timings: report.timings,
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fsobj_hash::hash_file_bytes;
     use tempfile::tempdir;
 
     #[test]
@@ -273,45 +158,11 @@ mod tests {
     }
 
     #[test]
-    fn executor_result_report_round_trips_object_hash_and_timings() {
-        let temp = tempdir().unwrap();
-        let path = temp.path().join("result.json");
-        let object_hash = hash_file_bytes(false, b"test");
-        let timings = OwnershipTimings {
-            total_ms: 10,
-            validate_entries_ms: 1,
-            chown_ms: 2,
-            lchown_ms: 3,
-            chmod_files_ms: 4,
-            chmod_dirs_ms: 5,
-            validate_applied_ms: 6,
-            manifest_serialize_ms: 7,
-            hash_ms: 8,
-        };
-
-        write_executor_result_report_with_timings(&path, object_hash, Some(timings.clone()))
-            .unwrap();
-
-        assert_eq!(
-            read_executor_result_report(&path).unwrap(),
-            Some(ExecutorResult {
-                object_hash,
-                timings: Some(timings),
-            })
-        );
-    }
-
-    #[test]
-    fn ownership_helper_config_serializes_idmap_and_hash_mode() {
+    fn ownership_helper_config_serializes_idmap() {
         let config = OwnershipHelperConfig {
             target_root: PathBuf::from("/tmp/root"),
             error_report: PathBuf::from("/tmp/error.json"),
-            result_report: Some(PathBuf::from("/tmp/result.json")),
             manifest: "{}\n".to_string(),
-            hash_report: Some(OwnershipHelperHashReport::FsTreeObject {
-                manifest: "{}\n".to_string(),
-                extra_files: vec![(b"name".to_vec(), b"value".to_vec())],
-            }),
             idmap: OwnershipHelperIdmap {
                 current_uid: 1000,
                 current_gid: 1000,
@@ -325,7 +176,6 @@ mod tests {
         let value = serde_json::to_value(&config).unwrap();
         assert_eq!(value["target_root"], "/tmp/root");
         assert_eq!(value["idmap"]["subuid_base"], 100000);
-        assert_eq!(value["hash_report"]["kind"], "fs_tree_object");
 
         let decoded: OwnershipHelperConfig = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, config);

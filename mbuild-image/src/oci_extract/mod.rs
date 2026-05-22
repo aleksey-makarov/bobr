@@ -4,7 +4,7 @@ use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     FsTreeEntry, FsTreeManifest, FsTreeObjectError, FsTreeObjectPaths, FsTreeOwnerMap, ObjectHash,
     StagedBuildResult, TypedBuilder, ValidatedFsTreeObject, create_fs_tree_staging_dir,
-    validate_fs_tree_object,
+    hash_fs_tree_object_from_manifest_with_extra_files, validate_fs_tree_object,
 };
 use mbuild_origin_oci_registry::oci::{self, OciDescriptor, OciManifest};
 use serde::Deserialize;
@@ -110,8 +110,10 @@ impl OciExtractBuilder {
             )))
         })?;
 
-        let object_hash = materializer
-            .materialize_and_validate(&paths, &manifest, &cx.temp_dir)
+        let object_hash =
+            hash_oci_fs_tree_object_from_manifest(&manifest, &config_bytes).map_err(map_error)?;
+        materializer
+            .materialize_and_validate(&paths.fs_tree.root_dir, &manifest, &cx.temp_dir)
             .map_err(map_error)?;
 
         Ok(StagedBuildResult {
@@ -152,10 +154,10 @@ fn validate_oci_layout_input(image: &BuilderInputObject) -> Result<(), OciExtrac
 trait OwnershipMaterializer {
     fn materialize_and_validate(
         &self,
-        paths: &OciFsTreeObjectPaths,
+        root_dir: &Path,
         manifest: &FsTreeManifest,
         workspace: &Path,
-    ) -> Result<ObjectHash, OciExtractError>;
+    ) -> Result<(), OciExtractError>;
 }
 
 struct RuntimeOwnershipMaterializer;
@@ -163,29 +165,26 @@ struct RuntimeOwnershipMaterializer;
 impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
     fn materialize_and_validate(
         &self,
-        paths: &OciFsTreeObjectPaths,
+        root_dir: &Path,
         manifest: &FsTreeManifest,
         workspace: &Path,
-    ) -> Result<ObjectHash, OciExtractError> {
+    ) -> Result<(), OciExtractError> {
         let idmap = mbuild_runtime::cached_host_idmap()
             .map_err(|error| OciExtractError::Runtime(error.to_string()))?;
-        mbuild_runtime::apply_ownership_batch_and_hash_fs_tree_object_with_extra_files(
-            &paths.fs_tree.root_dir,
-            manifest,
-            vec![(
-                OCI_CONFIG_FILE_NAME.as_bytes().to_vec(),
-                fs::read(&paths.oci_config_path).map_err(|error| {
-                    OciExtractError::Io(format!(
-                        "failed to read OCI config '{}': {error}",
-                        paths.oci_config_path.display()
-                    ))
-                })?,
-            )],
-            &idmap,
-            workspace,
-        )
-        .map_err(|error| OciExtractError::Runtime(error.to_string()))
+        mbuild_runtime::apply_ownership_batch(root_dir, manifest, &idmap, workspace)
+            .map_err(|error| OciExtractError::Runtime(error.to_string()))
     }
+}
+
+fn hash_oci_fs_tree_object_from_manifest(
+    manifest: &FsTreeManifest,
+    config_bytes: &[u8],
+) -> Result<ObjectHash, OciExtractError> {
+    hash_fs_tree_object_from_manifest_with_extra_files(
+        manifest,
+        &[(OCI_CONFIG_FILE_NAME.as_bytes(), config_bytes)],
+    )
+    .map_err(|error| OciExtractError::Object(error.to_string()))
 }
 
 #[derive(Debug)]
@@ -961,7 +960,6 @@ mod tests {
     use std::io::Cursor;
     use std::io::Write;
     use std::os::unix::fs::MetadataExt;
-    use std::str::FromStr;
     use tempfile::tempdir;
 
     #[test]
@@ -1221,11 +1219,14 @@ mod tests {
         assert!(result.staged_path.join("manifest.jsonl").is_file());
         assert!(result.staged_path.join("root/bin/tool").is_file());
         assert!(result.staged_path.join("oci-config.json").is_file());
-        assert_eq!(result.object_hash, Some(test_object_hash()));
+        assert_eq!(
+            result.object_hash,
+            Some(expected_oci_object_hash(&result.staged_path))
+        );
     }
 
     #[test]
-    fn builder_does_not_host_validate_after_materializer_returns_hash() {
+    fn builder_does_not_host_validate_after_precomputing_hash() {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
         let tar = make_tar(|builder| append_dir(builder, "private", 0, 0, 0o000));
@@ -1248,7 +1249,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(result.object_hash, Some(test_object_hash()));
+        assert_eq!(
+            result.object_hash,
+            Some(expected_oci_object_hash(&result.staged_path))
+        );
         assert!(result.staged_path.join("root/private").is_dir());
     }
 
@@ -1278,13 +1282,12 @@ mod tests {
     impl OwnershipMaterializer for CurrentOwnerMaterializer {
         fn materialize_and_validate(
             &self,
-            paths: &OciFsTreeObjectPaths,
+            root_dir: &Path,
             manifest: &FsTreeManifest,
             _: &Path,
-        ) -> Result<ObjectHash, OciExtractError> {
-            apply_manifest_modes(&paths.fs_tree.root_dir, manifest);
-            validate_oci_fs_tree_object(&paths.fs_tree.object_dir, &CurrentOwnerMap)?;
-            Ok(test_object_hash())
+        ) -> Result<(), OciExtractError> {
+            apply_manifest_modes(root_dir, manifest);
+            Ok(())
         }
     }
 
@@ -1293,17 +1296,14 @@ mod tests {
     impl OwnershipMaterializer for UnreadableOwnerMaterializer {
         fn materialize_and_validate(
             &self,
-            paths: &OciFsTreeObjectPaths,
+            root_dir: &Path,
             manifest: &FsTreeManifest,
             _: &Path,
-        ) -> Result<ObjectHash, OciExtractError> {
-            apply_manifest_modes(&paths.fs_tree.root_dir, manifest);
-            fs::set_permissions(
-                paths.fs_tree.root_dir.join("private"),
-                fs::Permissions::from_mode(0o000),
-            )
-            .unwrap();
-            Ok(test_object_hash())
+        ) -> Result<(), OciExtractError> {
+            apply_manifest_modes(root_dir, manifest);
+            fs::set_permissions(root_dir.join("private"), fs::Permissions::from_mode(0o000))
+                .unwrap();
+            Ok(())
         }
     }
 
@@ -1347,9 +1347,10 @@ mod tests {
         }
     }
 
-    fn test_object_hash() -> ObjectHash {
-        ObjectHash::from_str("2222222222222222222222222222222222222222222222222222222222222222")
-            .unwrap()
+    fn expected_oci_object_hash(object_dir: &Path) -> ObjectHash {
+        let manifest = FsTreeManifest::read_canonical(&object_dir.join("manifest.jsonl")).unwrap();
+        let config_bytes = fs::read(object_dir.join(OCI_CONFIG_FILE_NAME)).unwrap();
+        hash_oci_fs_tree_object_from_manifest(&manifest, &config_bytes).unwrap()
     }
 
     fn build_context(root: &Path) -> BuildContext {

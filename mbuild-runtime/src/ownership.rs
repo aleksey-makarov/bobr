@@ -2,11 +2,9 @@
 
 use crate::{
     error::RuntimeError,
-    executor::read_executor_result_report_with_timings,
     idmap::MbuildIdmap,
     local_ownership::{preflight_local_ownership_runtime, run_local_ownership},
 };
-use fsobj_hash::ObjectHash;
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
 use std::path::Path;
 
@@ -27,68 +25,12 @@ pub fn apply_ownership_batch(
     idmap: &MbuildIdmap,
     workspace: &Path,
 ) -> Result<(), RuntimeError> {
-    run_ownership_batch(target_root, manifest, idmap, workspace, None)?;
-    Ok(())
-}
-
-/// Apply fs-tree owners and modes, then compute the hash of a synthetic
-/// fs-tree object with additional top-level non-executable metadata files.
-///
-/// `extra_files` contains `(name_bytes, content_bytes)` pairs. Names are fsobj
-/// directory entry names, not paths; callers use this for metadata such as
-/// `oci-config.json` that participates in object identity but is not part of
-/// `root/`.
-pub fn apply_ownership_batch_and_hash_fs_tree_object_with_extra_files(
-    target_root: &Path,
-    manifest: &FsTreeManifest,
-    extra_files: Vec<(Vec<u8>, Vec<u8>)>,
-    idmap: &MbuildIdmap,
-    workspace: &Path,
-) -> Result<ObjectHash, RuntimeError> {
-    let bundle = run_ownership_batch(
-        target_root,
-        manifest,
-        idmap,
-        workspace,
-        Some(HashReport::FsTreeObject {
-            manifest: manifest.clone(),
-            extra_files,
-        }),
-    )?;
-    read_ownership_hash_result(bundle.result_report())
-}
-
-fn read_ownership_hash_result(path: &Path) -> Result<ObjectHash, RuntimeError> {
-    let result = read_executor_result_report_with_timings(path)?.ok_or_else(|| {
-        RuntimeError::Executor(format!(
-            "executor result report '{}' is empty",
-            path.display()
-        ))
-    })?;
-    Ok(result.object_hash)
-}
-
-fn run_ownership_batch(
-    target_root: &Path,
-    manifest: &FsTreeManifest,
-    idmap: &MbuildIdmap,
-    workspace: &Path,
-    hash_report: Option<HashReport>,
-) -> Result<crate::local_ownership::LocalOwnershipRun, RuntimeError> {
     require_directory(target_root, "ownership target root")?;
     require_directory(workspace, "ownership workspace")?;
     precheck_manifest_owners(manifest, idmap)?;
     preflight_local_ownership_runtime(idmap)?;
 
-    run_local_ownership(target_root, manifest, idmap, workspace, hash_report)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HashReport {
-    FsTreeObject {
-        manifest: FsTreeManifest,
-        extra_files: Vec<(Vec<u8>, Vec<u8>)>,
-    },
+    run_local_ownership(target_root, manifest, idmap, workspace)
 }
 
 fn entry_attrs(entry: &FsTreeEntry) -> (u32, u32, Option<u32>) {

@@ -6,11 +6,9 @@
 //! lifecycle handling, and child-side error reporting are internal details.
 //!
 //! The current public capabilities are fs-tree ownership materialization through
-//! [`apply_ownership_batch`] and fs-tree object hashing through
-//! [`apply_ownership_batch_and_hash_fs_tree_object_with_extra_files`], plus
-//! deterministic fs-tree tar generation through
-//! [`write_fs_tree_tar_in_ownership_namespace`]. These helpers operate in a
-//! user namespace described by [`MbuildIdmap`].
+//! [`apply_ownership_batch`] plus deterministic fs-tree tar generation through
+//! [`write_fs_tree_tar_in_ownership_namespace`]. These helpers operate in a user
+//! namespace described by [`MbuildIdmap`].
 //!
 //! Runtime ownership materialization currently targets Linux hosts with
 //! configured `/etc/subuid` and `/etc/subgid` ranges, unprivileged user
@@ -38,9 +36,7 @@ pub use initramfs_writer::{
     FsTreeInitramfsEntrySource, FsTreeInitramfsInput,
     write_fs_tree_initramfs_in_ownership_namespace,
 };
-pub use ownership::{
-    apply_ownership_batch, apply_ownership_batch_and_hash_fs_tree_object_with_extra_files,
-};
+pub use ownership::apply_ownership_batch;
 pub use sandbox::{
     SandboxBuildConfig, SandboxBuildOutcome, SandboxInput, SandboxRunAs, SandboxStep,
     SandboxStepReport, run_sandbox_build,
