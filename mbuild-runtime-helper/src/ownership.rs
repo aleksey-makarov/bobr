@@ -96,9 +96,10 @@ fn run_executor(executor: &OwnershipExecutor) -> Result<(), String> {
 /// Ownership materialization executor for one helper invocation.
 ///
 /// The executor stores immutable execution state. It validates every manifest
-/// entry against the current target tree before mutating anything, then applies
-/// ownership and modes in post-order so parent directories remain accessible
-/// until every descendant has been materialized.
+/// entry path against the target root, then applies ownership and modes in
+/// post-order so parent directories remain accessible until every descendant
+/// has been materialized. Existence and kind are checked immediately before
+/// mutating each entry.
 #[derive(Debug, Clone)]
 struct OwnershipExecutor {
     /// Real helper-visible path to the target root to mutate.
@@ -146,75 +147,36 @@ impl OwnershipExecutor {
 
     /// Materialize ownership/modes.
     ///
-    /// The helper first resolves and validates the complete manifest without
-    /// mutating the target tree. It then walks the manifest tree in post-order:
-    /// files and symlinks are applied immediately, while each directory's owner
-    /// and mode are applied only after all children are complete. Both `chown`
-    /// and `chmod` can make descendants unreachable, so parent directories must
-    /// stay in their original state until their subtrees are done.
+    /// The helper first resolves manifest paths without touching the filesystem.
+    /// It then walks the manifest tree in post-order: files and symlinks are
+    /// applied immediately, while each directory's owner and mode are applied
+    /// only after all children are complete. Both `chown` and `chmod` can make
+    /// descendants unreachable, so parent directories must stay in their
+    /// original state until their subtrees are done.
     fn apply(&self) -> Result<(), ExecutorErrorReport> {
-        let tree = self.validate_entry_tree()?;
+        let tree = self.resolve_entry_tree()?;
         self.apply_entry_postorder(&tree, tree.root_index)
     }
 
-    /// Resolve every manifest entry and organize it as a directory tree.
-    fn validate_entry_tree(&self) -> Result<ResolvedTree, ExecutorErrorReport> {
-        let entries = self.validate_entries()?;
+    /// Resolve every manifest entry path and organize entries as a tree.
+    fn resolve_entry_tree(&self) -> Result<ResolvedTree, ExecutorErrorReport> {
+        let entries = self.resolve_entries()?;
         self.build_resolved_tree(entries)
     }
 
-    /// Resolve every manifest entry to a concrete target path and metadata.
-    fn validate_entries(&self) -> Result<Vec<ResolvedEntry>, ExecutorErrorReport> {
+    /// Resolve every manifest entry to a concrete target path.
+    fn resolve_entries(&self) -> Result<Vec<ResolvedEntry>, ExecutorErrorReport> {
         self.entries
             .iter()
-            .map(|entry| self.validate_entry(entry))
+            .map(|entry| self.resolve_entry(entry))
             .collect()
     }
 
-    /// Validate one manifest entry before any mutation happens.
-    ///
-    /// This catches missing paths and kind mismatches early and records the
-    /// report path that should be reused for later mutation/validation errors.
-    fn validate_entry(&self, entry: &FsTreeEntry) -> Result<ResolvedEntry, ExecutorErrorReport> {
+    /// Resolve one manifest entry without inspecting the target filesystem.
+    fn resolve_entry(&self, entry: &FsTreeEntry) -> Result<ResolvedEntry, ExecutorErrorReport> {
         let path = entry_path(&self.target_inside, entry.path())?;
         let report_path = self.report_path(&path);
-        let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                report_io(
-                    "missing",
-                    &report_path,
-                    format!("missing fs-tree entry '{}'", report_path.display()),
-                    error,
-                )
-            } else {
-                report_io(
-                    "stat",
-                    &report_path,
-                    format!(
-                        "failed to inspect fs-tree entry '{}'",
-                        report_path.display()
-                    ),
-                    error,
-                )
-            }
-        })?;
-
-        let actual_kind = EntryKind::from_metadata(&metadata);
         let expected_kind = EntryKind::from_entry(entry);
-        if actual_kind != Some(expected_kind) {
-            return Err(report(
-                "kind",
-                &report_path,
-                format!(
-                    "fs-tree entry '{}' has kind {}, expected {}",
-                    report_path.display(),
-                    actual_kind.map_or("other", EntryKind::as_str),
-                    expected_kind.as_str()
-                ),
-                None,
-            ));
-        }
-
         let (uid, gid, mode) = entry_attrs(entry);
         Ok(ResolvedEntry {
             manifest_path: entry.path().to_string(),
@@ -227,7 +189,7 @@ impl OwnershipExecutor {
         })
     }
 
-    /// Build parent/child links for validated entries.
+    /// Build parent/child links for resolved entries.
     ///
     /// `FsTreeManifest` normally guarantees root and parent directory entries,
     /// but this helper also reports malformed manually-constructed executors in
@@ -328,7 +290,9 @@ impl OwnershipExecutor {
 
         match entry.kind {
             EntryKind::File => {
+                Self::validate_entry_kind(entry)?;
                 chown_if_needed(&entry.path, &entry.report_path, entry.uid, entry.gid)?;
+                Self::validate_entry_kind(entry)?;
                 chmod(
                     &entry.path,
                     &entry.report_path,
@@ -336,7 +300,9 @@ impl OwnershipExecutor {
                 )?;
             }
             EntryKind::Directory => {
+                Self::validate_entry_kind(entry)?;
                 chown_if_needed(&entry.path, &entry.report_path, entry.uid, entry.gid)?;
+                Self::validate_entry_kind(entry)?;
                 chmod(
                     &entry.path,
                     &entry.report_path,
@@ -344,10 +310,31 @@ impl OwnershipExecutor {
                 )?;
             }
             EntryKind::Symlink => {
+                Self::validate_entry_kind(entry)?;
                 lchown_if_needed(&entry.path, &entry.report_path, entry.uid, entry.gid)?;
             }
         }
         Self::validate_applied_entry(entry)
+    }
+
+    /// Check that the entry exists and still has the manifest-declared kind.
+    fn validate_entry_kind(entry: &ResolvedEntry) -> Result<(), ExecutorErrorReport> {
+        let metadata = stat_entry(entry)?;
+        let actual_kind = EntryKind::from_metadata(&metadata);
+        if actual_kind != Some(entry.kind) {
+            return Err(report(
+                "kind",
+                &entry.report_path,
+                format!(
+                    "fs-tree entry '{}' has kind {}, expected {}",
+                    entry.report_path.display(),
+                    actual_kind.map_or("other", EntryKind::as_str),
+                    entry.kind.as_str()
+                ),
+                None,
+            ));
+        }
+        Ok(())
     }
 
     /// Re-check one materialized entry after its ownership and mode changes.
@@ -357,17 +344,7 @@ impl OwnershipExecutor {
     /// Parent directories are validated after descendants, so every validation
     /// still runs while all ancestors needed to reach `entry` are accessible.
     fn validate_applied_entry(entry: &ResolvedEntry) -> Result<(), ExecutorErrorReport> {
-        let metadata = fs::symlink_metadata(&entry.path).map_err(|error| {
-            report_io(
-                "stat",
-                &entry.report_path,
-                format!(
-                    "failed to inspect fs-tree entry '{}'",
-                    entry.report_path.display()
-                ),
-                error,
-            )
-        })?;
+        let metadata = stat_entry(entry)?;
 
         let actual_kind = EntryKind::from_metadata(&metadata);
         if actual_kind != Some(entry.kind) {
@@ -431,7 +408,7 @@ impl OwnershipExecutor {
     }
 }
 
-/// Validated manifest entries with explicit child indexes.
+/// Resolved manifest entries with explicit child indexes.
 #[derive(Debug)]
 struct ResolvedTree {
     /// Manifest entries resolved to helper-visible paths.
@@ -581,6 +558,29 @@ fn manifest_parent_path(path: &str) -> &str {
         Some((parent, _)) => parent,
         None => "",
     }
+}
+
+fn stat_entry(entry: &ResolvedEntry) -> Result<fs::Metadata, ExecutorErrorReport> {
+    fs::symlink_metadata(&entry.path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            report_io(
+                "missing",
+                &entry.report_path,
+                format!("missing fs-tree entry '{}'", entry.report_path.display()),
+                error,
+            )
+        } else {
+            report_io(
+                "stat",
+                &entry.report_path,
+                format!(
+                    "failed to inspect fs-tree entry '{}'",
+                    entry.report_path.display()
+                ),
+                error,
+            )
+        }
+    })
 }
 
 /// Apply file or directory ownership when it differs from the expected owner.
@@ -908,7 +908,10 @@ mod tests {
         let executor = OwnershipExecutor {
             target_inside: target.clone(),
             target_display: target,
-            entries: vec![FsTreeEntry::file("child", owner.0, owner.1, 0o644)],
+            entries: vec![
+                FsTreeEntry::directory("", owner.0, owner.1, 0o755),
+                FsTreeEntry::file("child", owner.0, owner.1, 0o644),
+            ],
             error_log_inside: temp.path().join("error.json"),
         };
 
