@@ -31,9 +31,6 @@ mod tar_writer;
 
 mod executor;
 
-#[doc(hidden)]
-pub mod helper;
-
 pub use error::{IdmapError, RuntimeError};
 pub use idmap::{MbuildIdmap, cached_host_idmap};
 pub use initramfs_writer::{

@@ -1,12 +1,12 @@
 use crate::error::RuntimeError;
 use crate::executor::read_executor_error_report;
-use crate::helper::ownership::{
-    OwnershipHelperConfig, OwnershipHelperHashReport, OwnershipHelperIdmap,
-};
-use crate::helper::{HELPER_BINARY_NAME, HELPER_PROTOCOL_VERSION, HelperProtocolInfo};
 use crate::idmap::MbuildIdmap;
 use crate::ownership::HashReport;
 use mbuild_core::FsTreeManifest;
+use mbuild_core::runtime_helper_protocol::{
+    HELPER_BINARY_NAME, HELPER_PROTOCOL_VERSION, HelperProtocolInfo, OwnershipHelperConfig,
+    OwnershipHelperHashReport, OwnershipHelperIdmap,
+};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -138,7 +138,14 @@ fn helper_config(
         result_report: Some(result_report.to_path_buf()),
         manifest,
         hash_report,
-        idmap: OwnershipHelperIdmap::from(idmap),
+        idmap: OwnershipHelperIdmap {
+            current_uid: idmap.current_uid(),
+            current_gid: idmap.current_gid(),
+            subuid_base: idmap.subuid_base(),
+            subuid_count: idmap.subuid_count(),
+            subgid_base: idmap.subgid_base(),
+            subgid_count: idmap.subgid_count(),
+        },
     })
 }
 

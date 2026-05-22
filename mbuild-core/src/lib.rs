@@ -9,6 +9,8 @@ pub mod fs_tree_object;
 pub mod fsutil;
 pub mod initramfs;
 pub mod origin;
+#[doc(hidden)]
+pub mod runtime_helper_protocol;
 
 pub use builder::*;
 pub use cancellation::*;

@@ -1,8 +1,6 @@
-//! Runtime helper binary entry point, protocol, and generic command handling.
-
-pub(crate) mod ownership;
-
-use serde::{Deserialize, Serialize};
+use mbuild_core::runtime_helper_protocol::{
+    HELPER_BINARY_NAME, HELPER_PROTOCOL_VERSION, HelperProtocolInfo,
+};
 use std::env;
 use std::ffi::OsString;
 use std::io;
@@ -13,42 +11,19 @@ use std::process::Command;
 use std::process::ExitCode;
 use std::str::FromStr;
 
-/// Helper binary name expected by the parent runtime.
-pub(crate) const HELPER_BINARY_NAME: &str = "mbuild-runtime-helper";
-
-/// Protocol version implemented by the runtime helper.
-pub(crate) const HELPER_PROTOCOL_VERSION: u32 = 1;
-
-/// Machine-readable protocol metadata printed by `--protocol-info`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct HelperProtocolInfo {
-    /// Helper binary protocol name.
-    pub(crate) name: String,
-    /// Helper protocol version.
-    pub(crate) protocol_version: u32,
-}
-
-/// Parsed helper command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HelperCommand {
-    /// Print protocol information as JSON.
+enum HelperCommand {
     ProtocolInfo,
-    /// Run ownership materialization from the given config path.
     Ownership {
-        /// JSON config path.
         config: PathBuf,
     },
-    /// Wait for parent setup, then exec this helper with the provided command.
     WaitExec {
-        /// Inherited file descriptor to wait on before exec.
         wait_fd: RawFd,
-        /// Helper command and arguments to exec after the wait completes.
         command: Vec<OsString>,
     },
 }
 
-/// Run the helper using process arguments.
-pub fn main_from_env() -> ExitCode {
+pub(crate) fn main_from_env() -> ExitCode {
     match main_result(env::args_os().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -69,7 +44,7 @@ fn main_result(args: Vec<OsString>) -> Result<(), String> {
                 .map_err(|error| format!("failed to write protocol info: {error}"))?;
             Ok(())
         }
-        HelperCommand::Ownership { config } => ownership::run_config_path(&config),
+        HelperCommand::Ownership { config } => crate::ownership::run_config_path(&config),
         HelperCommand::WaitExec { wait_fd, command } => {
             wait_for_parent(wait_fd)?;
             exec_helper_command(command)
@@ -77,8 +52,7 @@ fn main_result(args: Vec<OsString>) -> Result<(), String> {
     }
 }
 
-/// Parse helper command-line arguments.
-pub(crate) fn parse_args(args: Vec<OsString>) -> Result<HelperCommand, String> {
+fn parse_args(args: Vec<OsString>) -> Result<HelperCommand, String> {
     if args.len() == 1 && args[0] == "--protocol-info" {
         return Ok(HelperCommand::ProtocolInfo);
     }

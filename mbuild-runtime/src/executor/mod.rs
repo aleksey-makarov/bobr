@@ -3,66 +3,19 @@
 use crate::error::RuntimeError;
 use fsobj_hash::ObjectHash;
 use libcontainer::workload::ExecutorError;
-use serde::{Deserialize, Serialize};
-use std::fmt;
+pub(crate) use mbuild_core::runtime_helper_protocol::{
+    ExecutorErrorReport, ExecutorResult, ExecutorResultReport, ExecutorResultTimings,
+};
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExecutorErrorReport {
-    pub(crate) kind: String,
-    pub(crate) path: String,
-    pub(crate) message: String,
-    pub(crate) errno: Option<i32>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExecutorResultReport {
-    pub(crate) object_hash: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) timings: Option<ExecutorResultTimings>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExecutorResultTimings {
-    pub(crate) total_ms: u128,
-    pub(crate) validate_entries_ms: u128,
-    pub(crate) chown_ms: u128,
-    pub(crate) lchown_ms: u128,
-    pub(crate) chmod_files_ms: u128,
-    pub(crate) chmod_dirs_ms: u128,
-    pub(crate) validate_applied_ms: u128,
-    pub(crate) manifest_serialize_ms: u128,
-    pub(crate) hash_ms: u128,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExecutorResult {
-    pub(crate) object_hash: ObjectHash,
-    pub(crate) timings: Option<ExecutorResultTimings>,
-}
-
-impl fmt::Display for ExecutorErrorReport {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "{} error at {}: {}",
-            self.kind, self.path, self.message
-        )?;
-        if let Some(errno) = self.errno {
-            write!(formatter, " (errno {errno})")?;
-        }
-        Ok(())
-    }
-}
 
 pub(crate) fn write_executor_error_report(
     path: &Path,
     report: &ExecutorErrorReport,
 ) -> Result<(), ExecutorError> {
-    let bytes = serde_json::to_vec(report).map_err(executor_error)?;
-    fs::write(path, bytes).map_err(executor_error)
+    mbuild_core::runtime_helper_protocol::write_executor_error_report(path, report)
+        .map_err(executor_error)
 }
 
 pub(crate) fn read_executor_error_report(
@@ -89,17 +42,18 @@ pub(crate) fn write_executor_result_report(
     write_executor_result_report_with_timings(path, object_hash, None)
 }
 
+#[cfg(test)]
 pub(crate) fn write_executor_result_report_with_timings(
     path: &Path,
     object_hash: ObjectHash,
     timings: Option<ExecutorResultTimings>,
 ) -> Result<(), ExecutorError> {
-    let report = ExecutorResultReport {
-        object_hash: object_hash.to_string(),
+    mbuild_core::runtime_helper_protocol::write_executor_result_report_with_timings(
+        path,
+        object_hash,
         timings,
-    };
-    let bytes = serde_json::to_vec(&report).map_err(executor_error)?;
-    fs::write(path, bytes).map_err(executor_error)
+    )
+    .map_err(executor_error)
 }
 
 #[cfg(test)]
