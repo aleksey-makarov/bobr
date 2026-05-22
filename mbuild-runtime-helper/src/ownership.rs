@@ -280,9 +280,20 @@ impl OwnershipExecutor {
         }
         timings.chmod_files_ms = elapsed_ms(step_start);
 
+        let validate_start = Instant::now();
+        for entry in entries
+            .iter()
+            .filter(|entry| entry.kind != EntryKind::Directory)
+        {
+            Self::validate_applied_entry(entry)?;
+        }
+        timings.validate_applied_ms = elapsed_ms(validate_start);
+
         let step_start = Instant::now();
         // Parent directory modes can make children unreachable. Defer every
-        // directory chmod until files are done, then walk from leaves to root.
+        // directory chmod until non-directories are done and validated, then
+        // walk from leaves to root. Each directory is validated immediately
+        // after its chmod while its parent directories are still accessible.
         let mut directories = entries
             .iter()
             .filter(|entry| entry.kind == EntryKind::Directory)
@@ -296,12 +307,12 @@ impl OwnershipExecutor {
                 &entry.report_path,
                 entry.mode.expect("directory entry has mode"),
             )?;
+            let validate_start = Instant::now();
+            Self::validate_applied_entry(entry)?;
+            timings.validate_applied_ms += elapsed_ms(validate_start);
         }
         timings.chmod_dirs_ms = elapsed_ms(step_start);
 
-        let step_start = Instant::now();
-        Self::validate_applied_entries(&entries)?;
-        timings.validate_applied_ms = elapsed_ms(step_start);
         if let Some(report) = self.hash_report.as_ref() {
             let hash_result = self.hash_result(report)?;
             timings.manifest_serialize_ms = hash_result.manifest_serialize_ms;
@@ -449,70 +460,70 @@ impl OwnershipExecutor {
         })
     }
 
-    /// Re-check materialized entries after all ownership and mode changes.
+    /// Re-check one materialized entry after its ownership and mode changes.
     ///
     /// This guards against partial application and catches unexpected filesystem
     /// changes during the helper run before reporting success to the parent.
-    fn validate_applied_entries(entries: &[ResolvedEntry]) -> Result<(), ExecutorErrorReport> {
-        for entry in entries {
-            let metadata = fs::symlink_metadata(&entry.path).map_err(|error| {
-                report_io(
-                    "stat",
-                    &entry.report_path,
-                    format!(
-                        "failed to inspect fs-tree entry '{}'",
-                        entry.report_path.display()
-                    ),
-                    error,
-                )
-            })?;
+    /// Callers must do this before applying restrictive modes to any parent
+    /// directory needed to reach `entry`.
+    fn validate_applied_entry(entry: &ResolvedEntry) -> Result<(), ExecutorErrorReport> {
+        let metadata = fs::symlink_metadata(&entry.path).map_err(|error| {
+            report_io(
+                "stat",
+                &entry.report_path,
+                format!(
+                    "failed to inspect fs-tree entry '{}'",
+                    entry.report_path.display()
+                ),
+                error,
+            )
+        })?;
 
-            let actual_kind = EntryKind::from_metadata(&metadata);
-            if actual_kind != Some(entry.kind) {
+        let actual_kind = EntryKind::from_metadata(&metadata);
+        if actual_kind != Some(entry.kind) {
+            return Err(report(
+                "kind",
+                &entry.report_path,
+                format!(
+                    "fs-tree entry '{}' has kind {}, expected {} after ownership materialization",
+                    entry.report_path.display(),
+                    actual_kind.map_or("other", EntryKind::as_str),
+                    entry.kind.as_str()
+                ),
+                None,
+            ));
+        }
+
+        if metadata.uid() != entry.uid || metadata.gid() != entry.gid {
+            return Err(report(
+                "owner",
+                &entry.report_path,
+                format!(
+                    "fs-tree entry '{}' has owner {}:{}, expected {}:{}",
+                    entry.report_path.display(),
+                    metadata.uid(),
+                    metadata.gid(),
+                    entry.uid,
+                    entry.gid
+                ),
+                None,
+            ));
+        }
+
+        if let Some(expected_mode) = entry.mode {
+            let actual_mode = metadata.permissions().mode() & 0o7777;
+            if actual_mode != expected_mode {
                 return Err(report(
-                    "kind",
+                    "mode",
                     &entry.report_path,
                     format!(
-                        "fs-tree entry '{}' has kind {}, expected {} after ownership materialization",
+                        "fs-tree entry '{}' has mode {:o}, expected {:o}",
                         entry.report_path.display(),
-                        actual_kind.map_or("other", EntryKind::as_str),
-                        entry.kind.as_str()
+                        actual_mode,
+                        expected_mode
                     ),
                     None,
                 ));
-            }
-
-            if metadata.uid() != entry.uid || metadata.gid() != entry.gid {
-                return Err(report(
-                    "owner",
-                    &entry.report_path,
-                    format!(
-                        "fs-tree entry '{}' has owner {}:{}, expected {}:{}",
-                        entry.report_path.display(),
-                        metadata.uid(),
-                        metadata.gid(),
-                        entry.uid,
-                        entry.gid
-                    ),
-                    None,
-                ));
-            }
-
-            if let Some(expected_mode) = entry.mode {
-                let actual_mode = metadata.permissions().mode() & 0o7777;
-                if actual_mode != expected_mode {
-                    return Err(report(
-                        "mode",
-                        &entry.report_path,
-                        format!(
-                            "fs-tree entry '{}' has mode {:o}, expected {:o}",
-                            entry.report_path.display(),
-                            actual_mode,
-                            expected_mode
-                        ),
-                        None,
-                    ));
-                }
             }
         }
 
@@ -865,6 +876,38 @@ mod tests {
             .unwrap();
 
         assert_mode(target.join("tmp"), 0o1777);
+    }
+
+    #[test]
+    fn apply_defers_restrictive_directory_modes_until_children_are_done() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(target.join("locked")).unwrap();
+        fs::write(target.join("locked/file"), b"file").unwrap();
+
+        let owner = current_owner();
+        let manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", owner.0, owner.1, 0o755),
+            FsTreeEntry::directory("locked", owner.0, owner.1, 0o000),
+            FsTreeEntry::file("locked/file", owner.0, owner.1, 0o600),
+        ])
+        .unwrap();
+
+        OwnershipExecutor::with_paths(&manifest, target.clone(), temp.path().join("error.json"))
+            .apply()
+            .unwrap();
+
+        assert_mode(target.join("locked"), 0o000);
+        fs::set_permissions(target.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            fs::symlink_metadata(target.join("locked/file"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600
+        );
     }
 
     #[test]
