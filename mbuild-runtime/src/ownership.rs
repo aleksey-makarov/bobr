@@ -13,7 +13,7 @@ use std::path::Path;
 
 /// Result of ownership materialization plus object hashing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OwnershipHashResult {
+pub struct OwnershipResult {
     /// Hash of the materialized object.
     pub object_hash: ObjectHash,
     /// Timings reported by the ownership helper.
@@ -66,7 +66,7 @@ pub fn apply_ownership_batch_and_hash_with_timings(
     manifest: &FsTreeManifest,
     idmap: &MbuildIdmap,
     workspace: &Path,
-) -> Result<OwnershipHashResult, RuntimeError> {
+) -> Result<OwnershipResult, RuntimeError> {
     let bundle = run_ownership_batch(
         target_root,
         manifest,
@@ -106,7 +106,7 @@ pub fn apply_ownership_batch_and_hash_fs_tree_object_with_timings(
     manifest: &FsTreeManifest,
     idmap: &MbuildIdmap,
     workspace: &Path,
-) -> Result<OwnershipHashResult, RuntimeError> {
+) -> Result<OwnershipResult, RuntimeError> {
     apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
         target_root,
         manifest,
@@ -179,7 +179,7 @@ pub fn apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
     extra_files: Vec<(Vec<u8>, Vec<u8>)>,
     idmap: &MbuildIdmap,
     workspace: &Path,
-) -> Result<OwnershipHashResult, RuntimeError> {
+) -> Result<OwnershipResult, RuntimeError> {
     let bundle = run_ownership_batch(
         target_root,
         materialize_manifest,
@@ -193,14 +193,14 @@ pub fn apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
     read_ownership_hash_result(bundle.result_report())
 }
 
-fn read_ownership_hash_result(path: &Path) -> Result<OwnershipHashResult, RuntimeError> {
+fn read_ownership_hash_result(path: &Path) -> Result<OwnershipResult, RuntimeError> {
     let result = read_executor_result_report_with_timings(path)?.ok_or_else(|| {
         RuntimeError::Executor(format!(
             "executor result report '{}' is empty",
             path.display()
         ))
     })?;
-    Ok(OwnershipHashResult {
+    Ok(OwnershipResult {
         object_hash: result.object_hash,
         timings: result.timings.unwrap_or_default(),
     })

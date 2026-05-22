@@ -38,7 +38,7 @@ pub use initramfs_writer::{
     write_fs_tree_initramfs_in_ownership_namespace,
 };
 pub use ownership::{
-    OwnershipHashResult, apply_ownership_batch, apply_ownership_batch_and_hash,
+    OwnershipResult, apply_ownership_batch, apply_ownership_batch_and_hash,
     apply_ownership_batch_and_hash_fs_tree_object,
     apply_ownership_batch_and_hash_fs_tree_object_with_extra_files,
     apply_ownership_batch_and_hash_fs_tree_object_with_timings,
