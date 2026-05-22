@@ -139,6 +139,10 @@ enum HashReport {
         /// the same manifest used for materialization.
         manifest: FsTreeManifest,
         /// Extra top-level files included in the synthetic object hash.
+        ///
+        /// Each pair is `(name_bytes, content_bytes)`: `name_bytes` is one
+        /// fsobj directory entry name under the synthetic object root, and
+        /// `content_bytes` is the complete file payload hashed for that entry.
         extra_files: Vec<(Vec<u8>, Vec<u8>)>,
     },
 }

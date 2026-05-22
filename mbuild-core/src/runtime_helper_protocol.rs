@@ -59,7 +59,12 @@ pub enum OwnershipHelperHashReport {
     FsTreeObject {
         /// Canonical `manifest.jsonl` bytes encoded as UTF-8 text.
         manifest: String,
-        /// Additional top-level object files as `(name, content)` byte arrays.
+        /// Additional top-level object files as `(name_bytes, content_bytes)`.
+        ///
+        /// `name_bytes` is one fsobj directory entry name under the synthetic
+        /// object root, for example `b"build.json"`. It is not a path and must
+        /// not contain `/`. `content_bytes` is the complete file payload hashed
+        /// for that entry.
         extra_files: Vec<(Vec<u8>, Vec<u8>)>,
     },
 }
