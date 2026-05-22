@@ -926,9 +926,9 @@ mod tests {
     fn collect_graph_keeps_first_publish_name_for_deduped_nodes() {
         let request = json!({
             "root": {
-                "name": "final-image",
-                "tag": "Image",
-                "config": { "mode": "bootstrap" },
+                "name": "final-group",
+                "tag": "Group",
+                "config": {},
                 "inputs": {
                     "in001": "binary-b",
                     "in000": "binary-a"

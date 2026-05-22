@@ -1,7 +1,7 @@
 use mbuild_binary::SandboxBuilder;
 use mbuild_core::Builder;
 use mbuild_group::GroupBuilder;
-use mbuild_image::{ImageBuilder, OciExtractBuilder};
+use mbuild_image::OciExtractBuilder;
 use mbuild_text::TextBuilder;
 use mbuild_tree::{
     ErofsRootfsBuilder, InitramfsBuilder, TreeBuilder, TreeMergeBuilder, TreeSubsetBuilder,
@@ -9,7 +9,6 @@ use mbuild_tree::{
 
 static SANDBOX_BUILDER: SandboxBuilder = SandboxBuilder;
 static GROUP_BUILDER: GroupBuilder = GroupBuilder;
-static IMAGE_BUILDER: ImageBuilder = ImageBuilder;
 static OCI_EXTRACT_BUILDER: OciExtractBuilder = OciExtractBuilder;
 static TEXT_BUILDER: TextBuilder = TextBuilder;
 static TREE_BUILDER: TreeBuilder = TreeBuilder;
@@ -18,7 +17,7 @@ static TREE_MERGE_BUILDER: TreeMergeBuilder = TreeMergeBuilder;
 static EROFS_ROOTFS_BUILDER: ErofsRootfsBuilder = ErofsRootfsBuilder;
 static INITRAMFS_BUILDER: InitramfsBuilder = InitramfsBuilder;
 
-pub fn registered_builders() -> [&'static dyn Builder; 10] {
+pub fn registered_builders() -> [&'static dyn Builder; 9] {
     [
         &TEXT_BUILDER,
         &GROUP_BUILDER,
@@ -28,7 +27,6 @@ pub fn registered_builders() -> [&'static dyn Builder; 10] {
         &EROFS_ROOTFS_BUILDER,
         &INITRAMFS_BUILDER,
         &SANDBOX_BUILDER,
-        &IMAGE_BUILDER,
         &OCI_EXTRACT_BUILDER,
     ]
 }

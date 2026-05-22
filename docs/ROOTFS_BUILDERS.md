@@ -346,4 +346,3 @@ initramfs archive suitable for Linux `-initrd` users such as QEMU.
 Current limitations:
 
 - special files such as block devices, character devices, FIFOs, and sockets are not supported
-- the builder does not yet serve as the backend for `Image`; OCI-based composition remains a separate path

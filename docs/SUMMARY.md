@@ -3,7 +3,7 @@
 # Design Documents
 
 - [JSON Graph Build Model](TERM_MODEL.md)
-- [Image Builders](IMAGE_BUILDERS.md)
+- [OCI Image Inputs](IMAGE_BUILDERS.md)
 - [Rootfs Builders](ROOTFS_BUILDERS.md)
 - [Split Outputs](SPLIT_OUTPUTS.md)
 - [Content-Addressed Store](CAS.md)

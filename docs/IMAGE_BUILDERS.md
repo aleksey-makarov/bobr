@@ -1,21 +1,23 @@
-# Image Builders
+# OCI Image Inputs
 
 ## Summary
 
-`mbuild` keeps imported and built OCI images in the content-addressed store.
-The active image and rootfs-backed execution path consists of:
+`mbuild` keeps imported OCI images in the content-addressed store. The active
+OCI and rootfs-backed execution path consists of:
 
 - `Source` with `origin.type = "oci-registry"`: import one pinned external
   image from a registry into the store as an OCI image layout directory
-- `Image`: build one derived OCI image layout directory from filesystem tree
-  inputs, optionally on top of a base image
 - `OciExtract`: extract one OCI image layout input into an fs-tree object
-- `Sandbox`: execute an explicit step plan against a readonly rootfs directory
+- `Sandbox`: execute an explicit step plan against a readonly fs-tree rootfs
   input with `mbuild-runtime` and libcontainer
 
+There is no active builder for producing derived OCI image layouts from fs-tree
+inputs. Root filesystem composition is performed through fs-tree builders such
+as `TreeMerge`, `ErofsRootfs`, and `Initramfs`.
+
 The store, not the local container runtime image store, is the source of truth
-for imported and built image contents. Step execution uses rootfs inputs, not
-OCI image inputs.
+for imported image contents. Step execution uses rootfs inputs, not OCI image
+inputs.
 
 ## `Source/oci-registry`
 
@@ -48,33 +50,6 @@ Current behavior:
 
 `Source/oci-registry` currently targets `linux/amd64` only.
 
-## `Image`
-
-`Image` accepts:
-
-- optional `base`: one OCI image layout directory
-- one or more named filesystem tree inputs
-
-`Image.config` accepts:
-
-```json
-{
-  "mode": "bootstrap",
-  "ref_name": "optional/name:tag"
-}
-```
-
-Current behavior:
-
-- `mode = "bootstrap"` creates a new image from the input filesystem trees
-- `mode = "layered"` requires `base` and appends one layer with input tree
-  contents
-- when `mode` is omitted, the builder chooses `layered` if `base` is present
-  and `bootstrap` otherwise
-- extra inputs are consumed in lexical input name order
-- the realized payload is an OCI layout directory
-- the image manifest digest is recorded inside the OCI layout `index.json`
-
 ## `OciExtract`
 
 `OciExtract` accepts one `image` input that resolves to an OCI layout
@@ -90,15 +65,14 @@ oci-config.json
 `oci-config.json` is top-level metadata: rootfs composition ignores it, but it
 participates in the published object hash.
 
-The result can be consumed by `TreeMerge`, `ErofsRootfs`, or `Sandbox` as a
-rootfs/tree input.
+The result can be consumed by `TreeMerge`, `ErofsRootfs`, `Initramfs`, or
+`Sandbox` as a rootfs/tree input.
 
 ## `Sandbox`
 
 `Sandbox` accepts:
 
-- required `rootfs`: one fs-tree or directory object used as the readonly root
-  filesystem
+- required `rootfs`: one fs-tree object used as the readonly root filesystem
 - extra named inputs mounted read-only under `/__mbuild/inputs/<name>`
 
 `Sandbox.config` accepts an explicit ordered step plan:
@@ -175,6 +149,6 @@ The common native toolchain is `linux_headers`, `glibc`, `binutils`, `gcc`,
 ## Current Limitations
 
 - `Source/oci-registry` currently selects only `linux/amd64`
-- `Image` does not yet perform the same manifest-level conflict validation as
-  `TreeMerge`
-- `Sandbox` requires a prepared rootfs directory or fs-tree object
+- `mbuild` does not currently provide a builder for producing derived OCI
+  image layouts from fs-tree inputs
+- `Sandbox` requires a prepared fs-tree rootfs object

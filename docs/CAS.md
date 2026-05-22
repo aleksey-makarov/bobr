@@ -44,7 +44,7 @@ envelope. `mbuild` does not add an implicit `.mbuild/` directory.
 
 `objects/<object_hash>` is the payload itself, either a file or a directory.
 Concrete directory payload formats are builder-specific. For example, the
-current image builders may realize image-related objects as OCI image layout
+OCI registry source handler realizes imported images as OCI image layout
 directories.
 
 Fs-tree objects store leaf hashes directly in `manifest.jsonl`. There is no

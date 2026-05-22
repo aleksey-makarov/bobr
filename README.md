@@ -220,7 +220,7 @@ keep the general runtime independent from concrete builders.
 
 Concrete builder behavior is documented separately:
 
-- image-related builders: [`docs/IMAGE_BUILDERS.md`](./docs/IMAGE_BUILDERS.md)
+- OCI image inputs: [`docs/IMAGE_BUILDERS.md`](./docs/IMAGE_BUILDERS.md)
 - filesystem-related builders: [`docs/ROOTFS_BUILDERS.md`](./docs/ROOTFS_BUILDERS.md)
 
 For the architecture documents, start with [`docs/INDEX.md`](./docs/INDEX.md).

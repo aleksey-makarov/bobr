@@ -343,15 +343,10 @@ pub fn source_recipe(url: &str, source_hash: &str) -> Value {
     })
 }
 
-pub fn image_recipe(name: &str, inputs: Vec<Value>) -> Value {
+pub fn group_recipe(name: &str, inputs: Vec<Value>) -> Value {
     let mut named_inputs = serde_json::Map::new();
     for (index, input) in inputs.into_iter().enumerate() {
         named_inputs.insert(format!("in{index:03}"), input);
     }
-    recipe_node(
-        name,
-        "Image",
-        json!({ "mode": "bootstrap" }),
-        Value::Object(named_inputs),
-    )
+    recipe_node(name, "Group", json!({}), Value::Object(named_inputs))
 }

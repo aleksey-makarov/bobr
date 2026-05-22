@@ -16,7 +16,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use support::{
-    base_image_recipe, build_ref_path, image_recipe, recipe_node, source_recipe,
+    base_image_recipe, build_ref_path, group_recipe, recipe_node, source_recipe,
     spawn_test_oci_registry, store_root, text_recipe, tree_file_recipe, write_recipe,
 };
 #[cfg(feature = "integration-tests")]
@@ -35,15 +35,14 @@ fn registered_builders_include_current_tags_only() {
         "ErofsRootfs",
         "Initramfs",
         "Sandbox",
-        "Image",
         "OciExtract",
     ] {
         assert!(tags.contains(&tag), "missing registered builder tag {tag}");
     }
-    for tag in ["Binary", "Container", "Rootfs", "Ext4Rootfs"] {
+    for tag in ["Binary", "Container", "Rootfs", "Ext4Rootfs", "Image"] {
         assert!(
             !tags.contains(&tag),
-            "legacy builder tag {tag} is still registered"
+            "unsupported builder tag {tag} is still registered"
         );
     }
 }
@@ -251,8 +250,8 @@ fn make_full_recipe(
     digest: &str,
     image_object_hash: &str,
 ) -> Value {
-    image_recipe(
-        "final-image",
+    group_recipe(
+        "final-group",
         vec![
             named_source_recipe("source", url, source_hash),
             base_image_recipe(image, digest, image_object_hash),
@@ -273,9 +272,9 @@ fn named_source_recipe(name: &str, url: &str, source_hash: &str) -> Value {
     })
 }
 
-fn image_with_two_sources_recipe(url_a: &str, url_b: &str, source_hash: &str) -> Value {
-    image_recipe(
-        "final-image",
+fn group_with_two_sources_recipe(url_a: &str, url_b: &str, source_hash: &str) -> Value {
+    group_recipe(
+        "final-group",
         vec![
             json!({
                 "name": "source-a",
@@ -302,7 +301,7 @@ fn image_with_two_sources_recipe(url_a: &str, url_b: &str, source_hash: &str) ->
 }
 
 #[test]
-fn json_recipe_executes_all_real_builders() {
+fn json_recipe_executes_source_and_group_graph() {
     let workspace = tempdir().unwrap();
     let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
     let source_tar = {
@@ -341,9 +340,9 @@ fn json_recipe_executes_all_real_builders() {
         .unwrap()
         .expect("expected final Build to exist in store");
 
-    assert_oci_index_manifest_digest(&published.object_path);
+    assert!(published.object_path.is_file());
 
-    for name in ["source", "base-image", "final-image"] {
+    for name in ["source", "base-image", "final-group"] {
         assert!(
             store_root(workspace.path())
                 .join("result-refs")
@@ -387,9 +386,9 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
     };
     let source_hash = source_tree_hash(&source_tar);
     let recipe = recipe_node(
-        "final-image",
-        "Image",
-        json!({ "mode": "bootstrap" }),
+        "final-group",
+        "Group",
+        json!({}),
         json!({
             "in000": named_source_recipe("source-a", &url, &source_hash),
             "in001": named_source_recipe("source-b", &url, &source_hash)
@@ -449,8 +448,8 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
         Err(error) => panic!("failed to start test HTTP server: {error}"),
     };
     let source_hash = source_tree_hash(&source_tar);
-    let recipe = image_recipe(
-        "final-image",
+    let recipe = group_recipe(
+        "final-group",
         vec![named_source_recipe("source", &url, &source_hash)],
     );
     let recipe_path = workspace.path().join("root-reuse.json");
@@ -470,7 +469,7 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
 
     let result_refs = store_root(workspace.path()).join("result-refs");
     let object_refs = store_root(workspace.path()).join("object-refs");
-    for name in ["source", "final-image"] {
+    for name in ["source", "final-group"] {
         let result_ref = result_refs.join(format!("{name}.json"));
         let object_ref = object_refs.join(name);
         if result_ref.exists() {
@@ -484,8 +483,8 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
     assert_eq!(first.build_key, second.build_key);
-    assert!(result_refs.join("final-image.json").exists());
-    assert!(object_refs.join("final-image").exists());
+    assert!(result_refs.join("final-group.json").exists());
+    assert!(object_refs.join("final-group").exists());
     for name in ["source"] {
         assert!(!result_refs.join(format!("{name}.json")).exists());
         assert!(!object_refs.join(name).exists());
@@ -513,8 +512,8 @@ fn second_run_reuses_root_without_local_path_when_no_source_materialization_is_n
         Err(error) => panic!("failed to start test HTTP server: {error}"),
     };
     let source_hash = source_tree_hash(&source_tar);
-    let recipe = image_recipe(
-        "final-image",
+    let recipe = group_recipe(
+        "final-group",
         vec![named_source_recipe("source", &url, &source_hash)],
     );
     let recipe_path = workspace.path().join("root-reuse-no-local.json");
@@ -559,7 +558,7 @@ fn identical_fetch_sources_are_deduped_by_result_id() {
     )
     .unwrap();
     let source_hash = source_tree_hash(&source_tar);
-    let recipe = image_with_two_sources_recipe(
+    let recipe = group_with_two_sources_recipe(
         &format!("{base_url}?a=1"),
         &format!("{base_url}?a=2"),
         &source_hash,
@@ -582,8 +581,8 @@ fn identical_fetch_sources_are_deduped_by_result_id() {
     let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
-        .expect("expected Image Build to exist in store");
-    assert_oci_index_manifest_digest(&published.object_path);
+        .expect("expected Group Build to exist in store");
+    assert!(published.object_path.is_file());
 }
 
 #[test]
@@ -1050,11 +1049,4 @@ fn source_without_origin_requires_existing_object_or_result() {
 
 fn object_path_exists(layout: &StoreLayout, object_hash: fsobj_hash::ObjectHash) -> bool {
     layout.objects.join(object_hash.to_hex()).exists()
-}
-
-fn assert_oci_index_manifest_digest(object_path: &std::path::Path) {
-    let index: Value =
-        serde_json::from_slice(&fs::read(object_path.join("index.json")).unwrap()).unwrap();
-    let digest = index["manifests"][0]["digest"].as_str().unwrap();
-    assert!(digest.starts_with("sha256:"));
 }

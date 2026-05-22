@@ -181,9 +181,9 @@ Rust builders still receive:
 
 They do not receive unresolved recipe nodes.
 
-Concrete object formats are builder-specific. The current image-related builder
-contracts are described in [`IMAGE_BUILDERS.md`](./IMAGE_BUILDERS.md). The
-current filesystem composition builder contract is described in
+Concrete object formats are builder-specific. The current OCI import and
+extraction contracts are described in [`IMAGE_BUILDERS.md`](./IMAGE_BUILDERS.md).
+The current filesystem composition builder contract is described in
 [`ROOTFS_BUILDERS.md`](./ROOTFS_BUILDERS.md).
 
 Builders may use the realized payload content of resolved inputs. Input
