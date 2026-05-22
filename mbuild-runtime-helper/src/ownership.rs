@@ -10,6 +10,7 @@ use mbuild_core::runtime_helper_protocol::{
 };
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
 use nix::unistd::{Gid, Uid, chown};
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::io;
@@ -95,8 +96,9 @@ fn run_executor(executor: &OwnershipExecutor) -> Result<(), String> {
 /// Ownership materialization executor for one helper invocation.
 ///
 /// The executor stores immutable execution state. It validates every manifest
-/// entry against the current target tree, applies ownership first, then modes,
-/// validates the final tree.
+/// entry against the current target tree before mutating anything, then applies
+/// ownership and modes in post-order so parent directories remain accessible
+/// until every descendant has been materialized.
 #[derive(Debug, Clone)]
 struct OwnershipExecutor {
     /// Real helper-visible path to the target root to mutate.
@@ -144,66 +146,21 @@ impl OwnershipExecutor {
 
     /// Materialize ownership/modes.
     ///
-    /// Ownership changes happen before any mode changes so restrictive modes in
-    /// the manifest cannot prevent later `chown`/`lchown` calls. File modes are
-    /// then applied before directory modes. Directory modes are applied
-    /// deepest-first so chmodding a parent directory cannot remove access needed
-    /// to finish nested entries.
+    /// The helper first resolves and validates the complete manifest without
+    /// mutating the target tree. It then walks the manifest tree in post-order:
+    /// files and symlinks are applied immediately, while each directory's owner
+    /// and mode are applied only after all children are complete. Both `chown`
+    /// and `chmod` can make descendants unreachable, so parent directories must
+    /// stay in their original state until their subtrees are done.
     fn apply(&self) -> Result<(), ExecutorErrorReport> {
+        let tree = self.validate_entry_tree()?;
+        self.apply_entry_postorder(&tree, tree.root_index)
+    }
+
+    /// Resolve every manifest entry and organize it as a directory tree.
+    fn validate_entry_tree(&self) -> Result<ResolvedTree, ExecutorErrorReport> {
         let entries = self.validate_entries()?;
-
-        for entry in &entries {
-            match entry.kind {
-                EntryKind::File | EntryKind::Directory => {
-                    chown_if_needed(&entry.path, &entry.report_path, entry.uid, entry.gid)?;
-                }
-                EntryKind::Symlink => {}
-            }
-        }
-
-        for entry in &entries {
-            if entry.kind == EntryKind::Symlink {
-                lchown_if_needed(&entry.path, &entry.report_path, entry.uid, entry.gid)?;
-            }
-        }
-
-        for entry in &entries {
-            if entry.kind == EntryKind::File {
-                chmod(
-                    &entry.path,
-                    &entry.report_path,
-                    entry.mode.expect("file entry has mode"),
-                )?;
-            }
-        }
-
-        for entry in entries
-            .iter()
-            .filter(|entry| entry.kind != EntryKind::Directory)
-        {
-            Self::validate_applied_entry(entry)?;
-        }
-
-        // Parent directory modes can make children unreachable. Defer every
-        // directory chmod until non-directories are done and validated, then
-        // walk from leaves to root. Each directory is validated immediately
-        // after its chmod while its parent directories are still accessible.
-        let mut directories = entries
-            .iter()
-            .filter(|entry| entry.kind == EntryKind::Directory)
-            .collect::<Vec<_>>();
-        directories.sort_by(|left, right| {
-            path_depth(&right.manifest_path).cmp(&path_depth(&left.manifest_path))
-        });
-        for entry in directories {
-            chmod(
-                &entry.path,
-                &entry.report_path,
-                entry.mode.expect("directory entry has mode"),
-            )?;
-            Self::validate_applied_entry(entry)?;
-        }
-        Ok(())
+        self.build_resolved_tree(entries)
     }
 
     /// Resolve every manifest entry to a concrete target path and metadata.
@@ -270,12 +227,135 @@ impl OwnershipExecutor {
         })
     }
 
+    /// Build parent/child links for validated entries.
+    ///
+    /// `FsTreeManifest` normally guarantees root and parent directory entries,
+    /// but this helper also reports malformed manually-constructed executors in
+    /// tests without panicking.
+    fn build_resolved_tree(
+        &self,
+        entries: Vec<ResolvedEntry>,
+    ) -> Result<ResolvedTree, ExecutorErrorReport> {
+        let mut by_path = HashMap::with_capacity(entries.len());
+        for (index, entry) in entries.iter().enumerate() {
+            if by_path.insert(entry.manifest_path.clone(), index).is_some() {
+                return Err(report(
+                    "manifest",
+                    &entry.report_path,
+                    format!("duplicate fs-tree path '{}'", entry.manifest_path),
+                    None,
+                ));
+            }
+        }
+
+        let root_index = *by_path.get("").ok_or_else(|| {
+            report(
+                "manifest",
+                &self.target_display,
+                "fs-tree manifest must contain the root directory".to_string(),
+                None,
+            )
+        })?;
+        if entries[root_index].kind != EntryKind::Directory {
+            return Err(report(
+                "manifest",
+                &entries[root_index].report_path,
+                "fs-tree root path must be a directory".to_string(),
+                None,
+            ));
+        }
+
+        let mut children = vec![Vec::new(); entries.len()];
+        for (index, entry) in entries.iter().enumerate() {
+            if index == root_index {
+                continue;
+            }
+
+            let parent_path = manifest_parent_path(&entry.manifest_path);
+            let parent_index = *by_path.get(parent_path).ok_or_else(|| {
+                report(
+                    "manifest",
+                    &entry.report_path,
+                    format!(
+                        "missing parent directory '{}' for fs-tree path '{}'",
+                        parent_path, entry.manifest_path
+                    ),
+                    None,
+                )
+            })?;
+            if entries[parent_index].kind != EntryKind::Directory {
+                return Err(report(
+                    "manifest",
+                    &entry.report_path,
+                    format!(
+                        "parent '{}' for fs-tree path '{}' is not a directory",
+                        parent_path, entry.manifest_path
+                    ),
+                    None,
+                ));
+            }
+            children[parent_index].push(index);
+        }
+
+        for child_indexes in &mut children {
+            child_indexes.sort_by(|left, right| {
+                entries[*left]
+                    .manifest_path
+                    .as_bytes()
+                    .cmp(entries[*right].manifest_path.as_bytes())
+            });
+        }
+
+        Ok(ResolvedTree {
+            entries,
+            children,
+            root_index,
+        })
+    }
+
+    /// Apply one resolved entry after all descendants that depend on it.
+    fn apply_entry_postorder(
+        &self,
+        tree: &ResolvedTree,
+        index: usize,
+    ) -> Result<(), ExecutorErrorReport> {
+        let entry = &tree.entries[index];
+        if entry.kind == EntryKind::Directory {
+            for child_index in &tree.children[index] {
+                self.apply_entry_postorder(tree, *child_index)?;
+            }
+        }
+
+        match entry.kind {
+            EntryKind::File => {
+                chown_if_needed(&entry.path, &entry.report_path, entry.uid, entry.gid)?;
+                chmod(
+                    &entry.path,
+                    &entry.report_path,
+                    entry.mode.expect("file entry has mode"),
+                )?;
+            }
+            EntryKind::Directory => {
+                chown_if_needed(&entry.path, &entry.report_path, entry.uid, entry.gid)?;
+                chmod(
+                    &entry.path,
+                    &entry.report_path,
+                    entry.mode.expect("directory entry has mode"),
+                )?;
+            }
+            EntryKind::Symlink => {
+                lchown_if_needed(&entry.path, &entry.report_path, entry.uid, entry.gid)?;
+            }
+        }
+        Self::validate_applied_entry(entry)
+    }
+
     /// Re-check one materialized entry after its ownership and mode changes.
     ///
     /// This guards against partial application and catches unexpected filesystem
     /// changes during the helper run before reporting success to the parent.
-    /// Callers must do this before applying restrictive modes to any parent
-    /// directory needed to reach `entry`.
+    /// Parent directories are validated after descendants, so every validation
+    /// still runs while all ancestors needed to reach `entry` are accessible.
     fn validate_applied_entry(entry: &ResolvedEntry) -> Result<(), ExecutorErrorReport> {
         let metadata = fs::symlink_metadata(&entry.path).map_err(|error| {
             report_io(
@@ -351,10 +431,21 @@ impl OwnershipExecutor {
     }
 }
 
+/// Validated manifest entries with explicit child indexes.
+#[derive(Debug)]
+struct ResolvedTree {
+    /// Manifest entries resolved to helper-visible paths.
+    entries: Vec<ResolvedEntry>,
+    /// Child indexes for each `entries` index.
+    children: Vec<Vec<usize>>,
+    /// Index of the root directory entry.
+    root_index: usize,
+}
+
 /// Manifest entry resolved against the target tree.
 #[derive(Debug)]
 struct ResolvedEntry {
-    /// Original manifest path, used for directory-depth ordering.
+    /// Original manifest path, used for parent/child tree construction.
     manifest_path: String,
     /// Real helper-visible filesystem path.
     path: PathBuf,
@@ -485,6 +576,13 @@ fn validate_manifest_path(
     Ok(())
 }
 
+fn manifest_parent_path(path: &str) -> &str {
+    match path.rsplit_once('/') {
+        Some((parent, _)) => parent,
+        None => "",
+    }
+}
+
 /// Apply file or directory ownership when it differs from the expected owner.
 fn chown_if_needed(
     path: &Path,
@@ -574,14 +672,6 @@ fn chmod(path: &Path, report_path: &Path, mode: u32) -> Result<(), ExecutorError
             error,
         )
     })
-}
-
-fn path_depth(path: &str) -> usize {
-    if path.is_empty() {
-        0
-    } else {
-        path.split('/').count()
-    }
 }
 
 fn report(
@@ -714,6 +804,32 @@ mod tests {
                 & 0o7777,
             0o600
         );
+    }
+
+    #[test]
+    fn apply_defers_restrictive_root_mode_until_tree_is_done() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(target.join("dir")).unwrap();
+        fs::write(target.join("dir/file"), b"file").unwrap();
+
+        let owner = current_owner();
+        let manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", owner.0, owner.1, 0o000),
+            FsTreeEntry::directory("dir", owner.0, owner.1, 0o700),
+            FsTreeEntry::file("dir/file", owner.0, owner.1, 0o600),
+        ])
+        .unwrap();
+
+        OwnershipExecutor::with_paths(&manifest, target.clone(), temp.path().join("error.json"))
+            .apply()
+            .unwrap();
+
+        assert_mode(&target, 0o000);
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_mode(target.join("dir"), 0o700);
+        assert_mode(target.join("dir/file"), 0o600);
     }
 
     #[test]

@@ -59,6 +59,55 @@ fn apply_ownership_batch_materializes_logical_owners_and_modes() -> TestResult<(
 }
 
 #[test]
+fn apply_ownership_batch_defers_parent_directory_until_descendants() -> TestResult<()> {
+    let _guard = runtime_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    init_tracing();
+    let idmap = MbuildIdmap::from_host_environment()?;
+    let temp = tempdir()?;
+    let workspace = temp.path().join("workspace");
+    let target = temp.path().join("target");
+    fs::create_dir(&workspace)?;
+    fs::create_dir(&target)?;
+    fs::create_dir(target.join("locked"))?;
+    fs::create_dir(target.join("locked/nested"))?;
+    fs::write(target.join("locked/nested/file"), b"file")?;
+    fs::set_permissions(target.join("locked"), fs::Permissions::from_mode(0o700))?;
+
+    let manifest = FsTreeManifest::from_entries(vec![
+        FsTreeEntry::directory("", 0, 0, 0o755),
+        FsTreeEntry::directory("locked", 1, 1, 0o711),
+        FsTreeEntry::directory("locked/nested", 1, 1, 0o711),
+        FsTreeEntry::file("locked/nested/file", 1, 1, 0o600),
+    ])?;
+
+    apply_ownership_batch(&target, &manifest, &idmap, &workspace)?;
+
+    assert_owner_and_mode(
+        target.join("locked"),
+        idmap.physical_uid(1)?,
+        idmap.physical_gid(1)?,
+        0o711,
+    )?;
+    assert_owner_and_mode(
+        target.join("locked/nested"),
+        idmap.physical_uid(1)?,
+        idmap.physical_gid(1)?,
+        0o711,
+    )?;
+    assert_owner_and_mode(
+        target.join("locked/nested/file"),
+        idmap.physical_uid(1)?,
+        idmap.physical_gid(1)?,
+        0o600,
+    )?;
+    assert_runtime_workspace_empty(&workspace)?;
+
+    Ok(())
+}
+
+#[test]
 fn apply_ownership_batch_returns_structured_executor_error() -> TestResult<()> {
     let _guard = runtime_test_lock()
         .lock()
