@@ -1969,7 +1969,7 @@ fn join_manifest_path(parent: &str, name: &[u8]) -> Result<String, BuilderError>
 
 fn log_tree_merge_ownership_events(
     cx: &mut BuildContext,
-    timings: Option<&mbuild_runtime::OwnershipTimings>,
+    timings: Option<&mbuild_core::runtime_helper_protocol::OwnershipTimings>,
     host_duration_ms: u128,
 ) {
     let ownership_ms = timings
@@ -2013,7 +2013,9 @@ fn log_tree_merge_hash_event(
     );
 }
 
-fn tree_merge_ownership_ms(timings: &mbuild_runtime::OwnershipTimings) -> u128 {
+fn tree_merge_ownership_ms(
+    timings: &mbuild_core::runtime_helper_protocol::OwnershipTimings,
+) -> u128 {
     timings.validate_entries_ms
         + timings.chown_ms
         + timings.lchown_ms
@@ -2024,7 +2026,7 @@ fn tree_merge_ownership_ms(timings: &mbuild_runtime::OwnershipTimings) -> u128 {
 
 fn add_timing_details(
     details: &mut Map<String, Value>,
-    timings: &mbuild_runtime::OwnershipTimings,
+    timings: &mbuild_core::runtime_helper_protocol::OwnershipTimings,
 ) {
     details.insert("total_ms".to_string(), json_u128(timings.total_ms));
     details.insert(

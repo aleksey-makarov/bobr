@@ -7,7 +7,7 @@
 
 use fsobj_hash::{ObjectHash, hash_fs_tree_object_with_extra_files, hash_path};
 use mbuild_core::runtime_helper_protocol::{
-    ExecutorErrorReport, ExecutorResultTimings, OwnershipHelperConfig, OwnershipHelperHashReport,
+    ExecutorErrorReport, OwnershipHelperConfig, OwnershipHelperHashReport, OwnershipTimings,
     write_executor_error_report, write_executor_result_report_with_timings,
 };
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
@@ -170,7 +170,7 @@ struct OwnershipHelperResult {
     /// Object hash computed after materialization.
     object_hash: ObjectHash,
     /// Helper-side phase timings.
-    timings: ExecutorResultTimings,
+    timings: OwnershipTimings,
 }
 
 /// Hash result plus timing components folded into the final result timings.
@@ -243,7 +243,7 @@ impl OwnershipExecutor {
     /// to finish nested entries.
     fn apply(&self) -> Result<Option<OwnershipHelperResult>, ExecutorErrorReport> {
         let total_start = Instant::now();
-        let mut timings = ExecutorResultTimings::default();
+        let mut timings = OwnershipTimings::default();
 
         let step_start = Instant::now();
         let entries = self.validate_entries()?;

@@ -3,8 +3,10 @@
 use crate::error::RuntimeError;
 use fsobj_hash::ObjectHash;
 use libcontainer::workload::ExecutorError;
+#[cfg(test)]
+use mbuild_core::runtime_helper_protocol::OwnershipTimings;
 pub(crate) use mbuild_core::runtime_helper_protocol::{
-    ExecutorErrorReport, ExecutorResult, ExecutorResultReport, ExecutorResultTimings,
+    ExecutorErrorReport, ExecutorResult, ExecutorResultReport,
 };
 use std::fs;
 use std::path::Path;
@@ -46,7 +48,7 @@ pub(crate) fn write_executor_result_report(
 pub(crate) fn write_executor_result_report_with_timings(
     path: &Path,
     object_hash: ObjectHash,
-    timings: Option<ExecutorResultTimings>,
+    timings: Option<OwnershipTimings>,
 ) -> Result<(), ExecutorError> {
     mbuild_core::runtime_helper_protocol::write_executor_result_report_with_timings(
         path,
@@ -186,7 +188,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let path = temp.path().join("result.json");
         let object_hash = test_object_hash();
-        let timings = ExecutorResultTimings {
+        let timings = OwnershipTimings {
             total_ms: 10,
             validate_entries_ms: 1,
             chown_ms: 2,

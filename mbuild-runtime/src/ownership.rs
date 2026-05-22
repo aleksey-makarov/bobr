@@ -2,11 +2,12 @@
 
 use crate::{
     error::RuntimeError,
-    executor::{ExecutorResultTimings, read_executor_result_report_with_timings},
+    executor::read_executor_result_report_with_timings,
     idmap::MbuildIdmap,
     local_ownership::{preflight_local_ownership_runtime, run_local_ownership},
 };
 use fsobj_hash::ObjectHash;
+use mbuild_core::runtime_helper_protocol::OwnershipTimings;
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
 use std::path::Path;
 
@@ -17,61 +18,6 @@ pub struct OwnershipHashResult {
     pub object_hash: ObjectHash,
     /// Timings reported by the ownership helper.
     pub timings: OwnershipTimings,
-}
-
-/// Phase timings reported by the ownership helper.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OwnershipTimings {
-    /// Total helper-side time.
-    pub total_ms: u128,
-    /// Time spent resolving and validating manifest entries.
-    pub validate_entries_ms: u128,
-    /// Time spent applying file and directory ownership.
-    pub chown_ms: u128,
-    /// Time spent applying symlink ownership.
-    pub lchown_ms: u128,
-    /// Time spent applying file modes.
-    pub chmod_files_ms: u128,
-    /// Time spent applying directory modes.
-    pub chmod_dirs_ms: u128,
-    /// Time spent validating the materialized entries after mutation.
-    pub validate_applied_ms: u128,
-    /// Time spent serializing the fs-tree manifest for hashing.
-    pub manifest_serialize_ms: u128,
-    /// Time spent hashing the target tree or fs-tree object.
-    pub hash_ms: u128,
-}
-
-impl From<ExecutorResultTimings> for OwnershipTimings {
-    fn from(timings: ExecutorResultTimings) -> Self {
-        Self {
-            total_ms: timings.total_ms,
-            validate_entries_ms: timings.validate_entries_ms,
-            chown_ms: timings.chown_ms,
-            lchown_ms: timings.lchown_ms,
-            chmod_files_ms: timings.chmod_files_ms,
-            chmod_dirs_ms: timings.chmod_dirs_ms,
-            validate_applied_ms: timings.validate_applied_ms,
-            manifest_serialize_ms: timings.manifest_serialize_ms,
-            hash_ms: timings.hash_ms,
-        }
-    }
-}
-
-impl From<OwnershipTimings> for ExecutorResultTimings {
-    fn from(timings: OwnershipTimings) -> Self {
-        Self {
-            total_ms: timings.total_ms,
-            validate_entries_ms: timings.validate_entries_ms,
-            chown_ms: timings.chown_ms,
-            lchown_ms: timings.lchown_ms,
-            chmod_files_ms: timings.chmod_files_ms,
-            chmod_dirs_ms: timings.chmod_dirs_ms,
-            validate_applied_ms: timings.validate_applied_ms,
-            manifest_serialize_ms: timings.manifest_serialize_ms,
-            hash_ms: timings.hash_ms,
-        }
-    }
 }
 
 /// Apply fs-tree owners and modes to an existing directory tree.
@@ -256,7 +202,7 @@ fn read_ownership_hash_result(path: &Path) -> Result<OwnershipHashResult, Runtim
     })?;
     Ok(OwnershipHashResult {
         object_hash: result.object_hash,
-        timings: result.timings.map(Into::into).unwrap_or_default(),
+        timings: result.timings.unwrap_or_default(),
     })
 }
 

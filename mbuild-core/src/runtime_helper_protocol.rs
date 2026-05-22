@@ -126,14 +126,14 @@ pub struct ExecutorErrorReport {
 pub struct ExecutorResultReport {
     /// Computed object hash encoded as lowercase hex.
     pub object_hash: String,
-    /// Optional helper-side phase timings.
+    /// Optional ownership helper phase timings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timings: Option<ExecutorResultTimings>,
+    pub timings: Option<OwnershipTimings>,
 }
 
 /// Helper-side phase timings reported by ownership operations.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExecutorResultTimings {
+pub struct OwnershipTimings {
     /// Total helper-side time.
     pub total_ms: u128,
     /// Time spent resolving and validating manifest entries.
@@ -159,8 +159,8 @@ pub struct ExecutorResultTimings {
 pub struct ExecutorResult {
     /// Computed object hash.
     pub object_hash: ObjectHash,
-    /// Optional helper-side phase timings.
-    pub timings: Option<ExecutorResultTimings>,
+    /// Optional ownership helper phase timings.
+    pub timings: Option<OwnershipTimings>,
 }
 
 impl fmt::Display for ExecutorErrorReport {
@@ -200,7 +200,7 @@ pub fn read_executor_error_report(path: &Path) -> io::Result<Option<ExecutorErro
 pub fn write_executor_result_report_with_timings(
     path: &Path,
     object_hash: ObjectHash,
-    timings: Option<ExecutorResultTimings>,
+    timings: Option<OwnershipTimings>,
 ) -> io::Result<()> {
     let report = ExecutorResultReport {
         object_hash: object_hash.to_string(),
@@ -274,7 +274,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let path = temp.path().join("result.json");
         let object_hash = hash_file_bytes(false, b"test");
-        let timings = ExecutorResultTimings {
+        let timings = OwnershipTimings {
             total_ms: 10,
             validate_entries_ms: 1,
             chown_ms: 2,
