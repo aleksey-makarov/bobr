@@ -1,11 +1,11 @@
 use crate::error::RuntimeError;
 use crate::executor::read_executor_error_report;
+use crate::helper::ownership::{
+    OwnershipHelperConfig, OwnershipHelperHashReport, OwnershipHelperIdmap,
+};
+use crate::helper::{HELPER_BINARY_NAME, HELPER_PROTOCOL_VERSION, HelperProtocolInfo};
 use crate::idmap::MbuildIdmap;
 use crate::ownership::HashReport;
-use crate::ownership_helper::{
-    HELPER_BINARY_NAME, HELPER_PROTOCOL_VERSION, HelperProtocolInfo, OwnershipHelperConfig,
-    OwnershipHelperHashReport, OwnershipHelperIdmap,
-};
 use mbuild_core::FsTreeManifest;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -156,11 +156,13 @@ fn launch_helper(
 
     let mut command = Command::new(&tools.helper);
     command
-        .arg("ownership-trampoline")
-        .arg("--config")
-        .arg(config_path)
+        .arg("wait-exec")
         .arg("--wait-fd")
         .arg(parent_ready_read.to_string())
+        .arg("--")
+        .arg("ownership")
+        .arg("--config")
+        .arg(config_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
