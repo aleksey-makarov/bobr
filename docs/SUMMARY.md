@@ -1,7 +1,5 @@
 # Summary
 
-[Design Index](INDEX.md)
-
 # Design Documents
 
 - [JSON Graph Build Model](TERM_MODEL.md)

@@ -2,4 +2,4 @@
 title = "MBuild"
 authors = ["Aleksei Makarov"]
 language = "en"
-src = "."
+src = "docs"
