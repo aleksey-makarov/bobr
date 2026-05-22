@@ -113,7 +113,6 @@ fn helper_config(
     })?)
     .expect("canonical fs-tree manifest is UTF-8");
     let hash_report = match hash_report {
-        Some(HashReport::TargetRoot) => Some(OwnershipHelperHashReport::TargetRoot),
         Some(HashReport::FsTreeObject {
             manifest,
             extra_files,
@@ -601,16 +600,19 @@ mod tests {
             &idmap,
             Path::new("/tmp/error.json"),
             Path::new("/tmp/result.json"),
-            Some(HashReport::TargetRoot),
+            Some(HashReport::FsTreeObject {
+                manifest: manifest.clone(),
+                extra_files: Vec::new(),
+            }),
         )
         .unwrap();
 
         assert_eq!(config.target_root, PathBuf::from("/tmp/root"));
         assert_eq!(config.idmap.current_gid, 1001);
         assert!(config.manifest.ends_with('\n'));
-        assert_eq!(
+        assert!(matches!(
             config.hash_report,
-            Some(OwnershipHelperHashReport::TargetRoot)
-        );
+            Some(OwnershipHelperHashReport::FsTreeObject { .. })
+        ));
     }
 }

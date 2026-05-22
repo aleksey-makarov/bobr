@@ -2,9 +2,8 @@
 
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
 use mbuild_runtime::{
-    MbuildIdmap, RuntimeError, apply_ownership_batch, apply_ownership_batch_and_hash,
-    apply_ownership_batch_and_hash_fs_tree_object,
-    apply_selected_ownership_batch_and_hash_fs_tree_object,
+    MbuildIdmap, RuntimeError, apply_ownership_batch,
+    apply_ownership_batch_and_hash_fs_tree_object_with_extra_files,
 };
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -96,42 +95,7 @@ fn apply_ownership_batch_returns_structured_executor_error() -> TestResult<()> {
 }
 
 #[test]
-fn apply_ownership_batch_and_hash_returns_runtime_hash() -> TestResult<()> {
-    let _guard = runtime_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    init_tracing();
-    let idmap = MbuildIdmap::from_host_environment()?;
-    let temp = tempdir()?;
-    let workspace = temp.path().join("workspace");
-    let target = temp.path().join("target");
-    fs::create_dir(&workspace)?;
-    fs::create_dir(&target)?;
-    fs::write(target.join("tool"), b"tool")?;
-    fs::set_permissions(target.join("tool"), fs::Permissions::from_mode(0o755))?;
-
-    let manifest = FsTreeManifest::from_entries(vec![
-        FsTreeEntry::directory("", 0, 0, 0o755),
-        FsTreeEntry::file("tool", 1, 1, 0o755),
-    ])?;
-    let expected = fsobj_hash::hash_path(&target)?;
-
-    let got = apply_ownership_batch_and_hash(&target, &manifest, &idmap, &workspace)?;
-
-    assert_eq!(got, expected);
-    assert_owner_and_mode(
-        target.join("tool"),
-        idmap.physical_uid(1)?,
-        idmap.physical_gid(1)?,
-        0o755,
-    )?;
-    assert_runtime_workspace_empty(&workspace)?;
-
-    Ok(())
-}
-
-#[test]
-fn apply_ownership_batch_and_hash_fs_tree_object_returns_object_hash() -> TestResult<()> {
+fn apply_ownership_batch_with_extra_files_hashes_fs_tree_object() -> TestResult<()> {
     let _guard = runtime_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -152,71 +116,19 @@ fn apply_ownership_batch_and_hash_fs_tree_object_returns_object_hash() -> TestRe
     let manifest_bytes = manifest.to_canonical_bytes()?;
     let expected = fsobj_hash::hash_fs_tree_object(&manifest_bytes, &target)?;
 
-    let got =
-        apply_ownership_batch_and_hash_fs_tree_object(&target, &manifest, &idmap, &workspace)?;
+    let got = apply_ownership_batch_and_hash_fs_tree_object_with_extra_files(
+        &target,
+        &manifest,
+        Vec::new(),
+        &idmap,
+        &workspace,
+    );
 
-    assert_eq!(got, expected);
+    assert_eq!(got?, expected);
     assert_owner_and_mode(
         target.join("tool"),
         idmap.physical_uid(1)?,
         idmap.physical_gid(1)?,
-        0o755,
-    )?;
-    assert_runtime_workspace_empty(&workspace)?;
-
-    Ok(())
-}
-
-#[test]
-fn selected_ownership_batch_hashes_full_fs_tree_object() -> TestResult<()> {
-    let _guard = runtime_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    init_tracing();
-    let idmap = MbuildIdmap::from_host_environment()?;
-    let temp = tempdir()?;
-    let workspace = temp.path().join("workspace");
-    let target = temp.path().join("target");
-    fs::create_dir(&workspace)?;
-    fs::create_dir(&target)?;
-    fs::write(target.join("mutable"), b"mutable")?;
-    fs::write(target.join("hardlinked"), b"hardlinked")?;
-    fs::set_permissions(target.join("mutable"), fs::Permissions::from_mode(0o644))?;
-    fs::set_permissions(target.join("hardlinked"), fs::Permissions::from_mode(0o755))?;
-
-    let materialize_manifest = FsTreeManifest::from_entries(vec![
-        FsTreeEntry::directory("", 0, 0, 0o755),
-        FsTreeEntry::file("mutable", 1, 1, 0o644),
-    ])?;
-    let object_manifest = FsTreeManifest::from_entries(vec![
-        FsTreeEntry::directory("", 0, 0, 0o755),
-        FsTreeEntry::file("hardlinked", 0, 0, 0o755),
-        FsTreeEntry::file("mutable", 1, 1, 0o644),
-    ])?;
-
-    let got = apply_selected_ownership_batch_and_hash_fs_tree_object(
-        &target,
-        &materialize_manifest,
-        &object_manifest,
-        &idmap,
-        &workspace,
-    )?;
-    let manifest_bytes = object_manifest.to_canonical_bytes()?;
-
-    assert_eq!(
-        got,
-        fsobj_hash::hash_fs_tree_object(&manifest_bytes, &target)?
-    );
-    assert_owner_and_mode(
-        target.join("mutable"),
-        idmap.physical_uid(1)?,
-        idmap.physical_gid(1)?,
-        0o644,
-    )?;
-    assert_owner_and_mode(
-        target.join("hardlinked"),
-        idmap.current_uid(),
-        idmap.current_gid(),
         0o755,
     )?;
     assert_runtime_workspace_empty(&workspace)?;

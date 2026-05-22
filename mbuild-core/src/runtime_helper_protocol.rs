@@ -53,8 +53,6 @@ pub struct OwnershipHelperIdmap {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum OwnershipHelperHashReport {
-    /// Hash `target_root` directly after ownership and mode materialization.
-    TargetRoot,
     /// Hash a synthetic fs-tree object from a manifest, root, and extra files.
     FsTreeObject {
         /// Canonical `manifest.jsonl` bytes encoded as UTF-8 text.

@@ -7,18 +7,8 @@ use crate::{
     local_ownership::{preflight_local_ownership_runtime, run_local_ownership},
 };
 use fsobj_hash::ObjectHash;
-use mbuild_core::runtime_helper_protocol::OwnershipTimings;
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
 use std::path::Path;
-
-/// Result of ownership materialization plus object hashing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OwnershipResult {
-    /// Hash of the materialized object.
-    pub object_hash: ObjectHash,
-    /// Timings reported by the ownership helper.
-    pub timings: OwnershipTimings,
-}
 
 /// Apply fs-tree owners and modes to an existing directory tree.
 ///
@@ -41,88 +31,13 @@ pub fn apply_ownership_batch(
     Ok(())
 }
 
-/// Apply fs-tree owners and modes, then compute the fs object hash inside the
-/// same user namespace.
-///
-/// The returned hash is computed after ownership and mode materialization. This
-/// lets callers publish target-owned trees without requiring the host user to
-/// recursively read the materialized root.
-pub fn apply_ownership_batch_and_hash(
-    target_root: &Path,
-    manifest: &FsTreeManifest,
-    idmap: &MbuildIdmap,
-    workspace: &Path,
-) -> Result<ObjectHash, RuntimeError> {
-    Ok(
-        apply_ownership_batch_and_hash_with_timings(target_root, manifest, idmap, workspace)?
-            .object_hash,
-    )
-}
-
-/// Apply fs-tree owners and modes, compute the fs object hash, and return
-/// helper-side phase timings.
-pub fn apply_ownership_batch_and_hash_with_timings(
-    target_root: &Path,
-    manifest: &FsTreeManifest,
-    idmap: &MbuildIdmap,
-    workspace: &Path,
-) -> Result<OwnershipResult, RuntimeError> {
-    let bundle = run_ownership_batch(
-        target_root,
-        manifest,
-        idmap,
-        workspace,
-        Some(HashReport::TargetRoot),
-    )?;
-    read_ownership_hash_result(bundle.result_report())
-}
-
-/// Apply fs-tree owners and modes, then compute the hash of a synthetic
-/// fs-tree object made from `manifest.jsonl` and `target_root`.
-///
-/// The returned hash matches the object shape created by mbuild fs-tree
-/// builders: a directory with canonical `manifest.jsonl` plus `root/`.
-/// Hashing happens inside the ownership user namespace so callers can publish
-/// trees that are not recursively readable by the host user.
-pub fn apply_ownership_batch_and_hash_fs_tree_object(
-    target_root: &Path,
-    manifest: &FsTreeManifest,
-    idmap: &MbuildIdmap,
-    workspace: &Path,
-) -> Result<ObjectHash, RuntimeError> {
-    Ok(apply_ownership_batch_and_hash_fs_tree_object_with_timings(
-        target_root,
-        manifest,
-        idmap,
-        workspace,
-    )?
-    .object_hash)
-}
-
-/// Apply fs-tree owners and modes, compute the synthetic fs-tree object hash,
-/// and return helper-side phase timings.
-pub fn apply_ownership_batch_and_hash_fs_tree_object_with_timings(
-    target_root: &Path,
-    manifest: &FsTreeManifest,
-    idmap: &MbuildIdmap,
-    workspace: &Path,
-) -> Result<OwnershipResult, RuntimeError> {
-    apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
-        target_root,
-        manifest,
-        manifest,
-        Vec::new(),
-        idmap,
-        workspace,
-    )
-}
-
 /// Apply fs-tree owners and modes, then compute the hash of a synthetic
 /// fs-tree object with additional top-level non-executable metadata files.
 ///
-/// `extra_files` contains `(name, bytes)` pairs. Names are fsobj directory entry
-/// names, not paths; callers use this for metadata such as `oci-config.json`
-/// that participates in object identity but is not part of `root/`.
+/// `extra_files` contains `(name_bytes, content_bytes)` pairs. Names are fsobj
+/// directory entry names, not paths; callers use this for metadata such as
+/// `oci-config.json` that participates in object identity but is not part of
+/// `root/`.
 pub fn apply_ownership_batch_and_hash_fs_tree_object_with_extra_files(
     target_root: &Path,
     manifest: &FsTreeManifest,
@@ -130,80 +45,27 @@ pub fn apply_ownership_batch_and_hash_fs_tree_object_with_extra_files(
     idmap: &MbuildIdmap,
     workspace: &Path,
 ) -> Result<ObjectHash, RuntimeError> {
-    Ok(
-        apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
-            target_root,
-            manifest,
-            manifest,
-            extra_files,
-            idmap,
-            workspace,
-        )?
-        .object_hash,
-    )
-}
-
-/// Apply fs-tree owners and modes for selected entries, then compute the hash
-/// of a synthetic fs-tree object made from `object_manifest` and `target_root`.
-///
-/// Entries omitted from `materialize_manifest` are not mutated; callers must
-/// validate them before calling this function. This is intended for composed
-/// trees where some files are immutable hardlinks to store inputs and must not
-/// be chowned or chmodded.
-pub fn apply_selected_ownership_batch_and_hash_fs_tree_object(
-    target_root: &Path,
-    materialize_manifest: &FsTreeManifest,
-    object_manifest: &FsTreeManifest,
-    idmap: &MbuildIdmap,
-    workspace: &Path,
-) -> Result<ObjectHash, RuntimeError> {
-    Ok(
-        apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
-            target_root,
-            materialize_manifest,
-            object_manifest,
-            Vec::new(),
-            idmap,
-            workspace,
-        )?
-        .object_hash,
-    )
-}
-
-/// Apply selected fs-tree owners and modes, compute the synthetic fs-tree
-/// object hash, and return helper-side phase timings.
-pub fn apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
-    target_root: &Path,
-    materialize_manifest: &FsTreeManifest,
-    object_manifest: &FsTreeManifest,
-    extra_files: Vec<(Vec<u8>, Vec<u8>)>,
-    idmap: &MbuildIdmap,
-    workspace: &Path,
-) -> Result<OwnershipResult, RuntimeError> {
     let bundle = run_ownership_batch(
         target_root,
-        materialize_manifest,
+        manifest,
         idmap,
         workspace,
         Some(HashReport::FsTreeObject {
-            manifest: object_manifest.clone(),
+            manifest: manifest.clone(),
             extra_files,
         }),
     )?;
     read_ownership_hash_result(bundle.result_report())
 }
 
-fn read_ownership_hash_result(path: &Path) -> Result<OwnershipResult, RuntimeError> {
+fn read_ownership_hash_result(path: &Path) -> Result<ObjectHash, RuntimeError> {
     let result = read_executor_result_report_with_timings(path)?.ok_or_else(|| {
         RuntimeError::Executor(format!(
             "executor result report '{}' is empty",
             path.display()
         ))
     })?;
-    Ok(OwnershipResult {
-        object_hash: result.object_hash,
-        timings: result.timings.unwrap_or_default(),
-    })
+    Ok(result.object_hash)
 }
 
 fn run_ownership_batch(
@@ -223,7 +85,6 @@ fn run_ownership_batch(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HashReport {
-    TargetRoot,
     FsTreeObject {
         manifest: FsTreeManifest,
         extra_files: Vec<(Vec<u8>, Vec<u8>)>,

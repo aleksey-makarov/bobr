@@ -5,7 +5,7 @@
 //! lifecycle and passes only a JSON config file; this module owns interpreting
 //! that config, mutating the target tree, and writing structured report files.
 
-use fsobj_hash::{ObjectHash, hash_fs_tree_object_with_extra_files, hash_path};
+use fsobj_hash::{ObjectHash, hash_fs_tree_object_with_extra_files};
 use mbuild_core::runtime_helper_protocol::{
     ExecutorErrorReport, OwnershipHelperConfig, OwnershipHelperHashReport, OwnershipTimings,
     write_executor_error_report, write_executor_result_report_with_timings,
@@ -50,7 +50,6 @@ fn read_config(path: &Path) -> Result<OwnershipHelperConfig, String> {
 fn run_config(config: OwnershipHelperConfig) -> Result<(), String> {
     let manifest = parse_manifest("manifest", &config.manifest, &config.error_report)?;
     let hash_report = match config.hash_report {
-        Some(OwnershipHelperHashReport::TargetRoot) => Some(HashReport::TargetRoot),
         Some(OwnershipHelperHashReport::FsTreeObject {
             manifest,
             extra_files,
@@ -131,8 +130,6 @@ fn run_executor(executor: &OwnershipExecutor) -> Result<(), String> {
 /// when it needs the hash returned across the process boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum HashReport {
-    /// Hash the materialized target root directly.
-    TargetRoot,
     /// Hash the fs-tree object shape `{ manifest.jsonl, root/, ...extra }`.
     FsTreeObject {
         /// Manifest that defines the synthetic fs-tree object, not necessarily
@@ -337,25 +334,6 @@ impl OwnershipExecutor {
         report_kind: &HashReport,
     ) -> Result<HashComputation, ExecutorErrorReport> {
         match report_kind {
-            HashReport::TargetRoot => {
-                let hash_start = Instant::now();
-                let object_hash = hash_path(&self.target_inside).map_err(|error| {
-                    report(
-                        "hash",
-                        &self.target_display,
-                        format!(
-                            "failed to hash fs-tree target '{}': {error}",
-                            self.target_display.display()
-                        ),
-                        None,
-                    )
-                })?;
-                Ok(HashComputation {
-                    object_hash,
-                    manifest_serialize_ms: 0,
-                    hash_ms: elapsed_ms(hash_start),
-                })
-            }
             HashReport::FsTreeObject {
                 manifest,
                 extra_files,
@@ -915,36 +893,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_returns_hash_when_result_path_is_requested() {
-        let temp = tempdir().unwrap();
-        let target = temp.path().join("target");
-        fs::create_dir(&target).unwrap();
-        fs::write(target.join("tool"), b"tool").unwrap();
-
-        let owner = current_owner();
-        let manifest = FsTreeManifest::from_entries(vec![
-            FsTreeEntry::directory("", owner.0, owner.1, 0o755),
-            FsTreeEntry::file("tool", owner.0, owner.1, 0o755),
-        ])
-        .unwrap();
-
-        let got = OwnershipExecutor::with_paths_and_result(
-            &manifest,
-            target.clone(),
-            temp.path().join("error.json"),
-            Some(temp.path().join("result.json")),
-            Some(HashReport::TargetRoot),
-        )
-        .apply()
-        .unwrap();
-
-        let got = got.unwrap();
-        assert_eq!(got.object_hash, hash_path(&target).unwrap());
-        assert!(got.timings.total_ms >= got.timings.hash_ms);
-        assert_mode(target.join("tool"), 0o755);
-    }
-
-    #[test]
     fn apply_returns_fs_tree_object_hash_when_requested() {
         let temp = tempdir().unwrap();
         let target = temp.path().join("target");
@@ -977,7 +925,7 @@ mod tests {
             got.object_hash,
             fsobj_hash::hash_fs_tree_object(&manifest_bytes, &target).unwrap()
         );
-        assert_ne!(got.object_hash, hash_path(&target).unwrap());
+        assert_ne!(got.object_hash, fsobj_hash::hash_path(&target).unwrap());
         assert!(got.timings.total_ms >= got.timings.hash_ms);
         assert_mode(target.join("tool"), 0o755);
     }
