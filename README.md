@@ -63,6 +63,13 @@ Builder node payload fields:
 - `config`: opaque builder payload
 - `inputs`: object keyed by named input dependencies
 
+Nickel recipes may use higher-level synthetic tags before lowering. The
+package-aware helpers `Autotools`, `Makefile`, `Meson`, `PerlModule`, and
+`SandboxBuild` inject a generated build rootfs and lower to Rust-side `Sandbox`
+requests. The explicit-rootfs helper tags are `AutotoolsRootfs`,
+`MakefileRootfs`, `MesonRootfs`, `PerlModuleRootfs`, and
+`SandboxBuildRootfs`.
+
 Input encoding is generic:
 
 - every present input value is one node id string
