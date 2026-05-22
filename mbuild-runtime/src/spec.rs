@@ -9,6 +9,7 @@ use libcontainer::oci_spec::runtime::{
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 pub(crate) fn build_ownership_spec(
     idmap: &MbuildIdmap,
     target_host_path: &Path,

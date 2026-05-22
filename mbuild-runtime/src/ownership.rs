@@ -1,6 +1,5 @@
 //! Public ownership materialization entrypoints.
 
-use crate::bundle::create_bundle;
 use crate::{
     error::RuntimeError,
     executor::{
@@ -8,9 +7,7 @@ use crate::{
         write_executor_error_report, write_executor_result_report_with_timings,
     },
     idmap::MbuildIdmap,
-    preflight::preflight_ownership_runtime,
-    run::run_init_with_executor,
-    spec::build_ownership_spec,
+    local_ownership::{preflight_local_ownership_runtime, run_local_ownership},
 };
 use fsobj_hash::{ObjectHash, hash_fs_tree_object_with_extra_files, hash_path};
 use libcontainer::oci_spec::runtime::Spec;
@@ -146,7 +143,7 @@ pub fn apply_ownership_batch_and_hash_with_timings(
         workspace,
         Some(HashReport::TargetRoot),
     )?;
-    read_ownership_hash_result(bundle.result_log_path())
+    read_ownership_hash_result(bundle.result_report())
 }
 
 /// Apply fs-tree owners and modes, then compute the hash of a synthetic
@@ -262,7 +259,7 @@ pub fn apply_selected_ownership_batch_and_hash_fs_tree_object_with_timings(
             extra_files,
         }),
     )?;
-    read_ownership_hash_result(bundle.result_log_path())
+    read_ownership_hash_result(bundle.result_report())
 }
 
 fn read_ownership_hash_result(path: &Path) -> Result<OwnershipHashResult, RuntimeError> {
@@ -284,22 +281,13 @@ fn run_ownership_batch(
     idmap: &MbuildIdmap,
     workspace: &Path,
     hash_report: Option<HashReport>,
-) -> Result<crate::bundle::Bundle, RuntimeError> {
+) -> Result<crate::local_ownership::LocalOwnershipRun, RuntimeError> {
     require_directory(target_root, "ownership target root")?;
     require_directory(workspace, "ownership workspace")?;
     precheck_manifest_owners(manifest, idmap)?;
-    preflight_ownership_runtime(idmap)?;
+    preflight_local_ownership_runtime(idmap)?;
 
-    let spec = build_ownership_spec(idmap, target_root)?;
-    let bundle = create_bundle(workspace, &spec)?;
-    let executor = if let Some(kind) = hash_report {
-        OwnershipExecutor::new_with_hash_report(manifest, kind)
-    } else {
-        OwnershipExecutor::new(manifest)
-    };
-    run_init_with_executor(&bundle, workspace, executor)?;
-
-    Ok(bundle)
+    run_local_ownership(target_root, manifest, idmap, workspace, hash_report)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +302,7 @@ pub(crate) enum HashReport {
 #[derive(Debug, Clone)]
 pub(crate) struct OwnershipExecutor {
     target_inside: PathBuf,
+    target_display: PathBuf,
     entries: Vec<FsTreeEntry>,
     error_log_inside: PathBuf,
     result_log_inside: Option<PathBuf>,
@@ -328,24 +317,7 @@ struct HashComputation {
 }
 
 impl OwnershipExecutor {
-    pub(crate) fn new(manifest: &FsTreeManifest) -> Self {
-        Self::with_paths(
-            manifest,
-            PathBuf::from("/target"),
-            PathBuf::from("/error.json"),
-        )
-    }
-
-    pub(crate) fn new_with_hash_report(manifest: &FsTreeManifest, report: HashReport) -> Self {
-        Self::with_paths_and_result(
-            manifest,
-            PathBuf::from("/target"),
-            PathBuf::from("/error.json"),
-            Some(PathBuf::from("/result.json")),
-            Some(report),
-        )
-    }
-
+    #[cfg(test)]
     pub(crate) fn with_paths(
         manifest: &FsTreeManifest,
         target_inside: PathBuf,
@@ -354,6 +326,7 @@ impl OwnershipExecutor {
         Self::with_paths_and_result(manifest, target_inside, error_log_inside, None, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn with_paths_and_result(
         manifest: &FsTreeManifest,
         target_inside: PathBuf,
@@ -361,8 +334,27 @@ impl OwnershipExecutor {
         result_log_inside: Option<PathBuf>,
         hash_report: Option<HashReport>,
     ) -> Self {
+        Self::with_paths_display_and_result(
+            manifest,
+            target_inside.clone(),
+            target_inside,
+            error_log_inside,
+            result_log_inside,
+            hash_report,
+        )
+    }
+
+    pub(crate) fn with_paths_display_and_result(
+        manifest: &FsTreeManifest,
+        target_inside: PathBuf,
+        target_display: PathBuf,
+        error_log_inside: PathBuf,
+        result_log_inside: Option<PathBuf>,
+        hash_report: Option<HashReport>,
+    ) -> Self {
         Self {
             target_inside,
+            target_display,
             entries: manifest.entries().to_vec(),
             error_log_inside,
             result_log_inside,
@@ -382,7 +374,7 @@ impl OwnershipExecutor {
         for entry in &entries {
             match entry.kind {
                 EntryKind::File | EntryKind::Directory => {
-                    chown_if_needed(&entry.path, entry.uid, entry.gid)?;
+                    chown_if_needed(&entry.path, &entry.report_path, entry.uid, entry.gid)?;
                 }
                 EntryKind::Symlink => {}
             }
@@ -392,7 +384,7 @@ impl OwnershipExecutor {
         let step_start = Instant::now();
         for entry in &entries {
             if entry.kind == EntryKind::Symlink {
-                lchown_if_needed(&entry.path, entry.uid, entry.gid)?;
+                lchown_if_needed(&entry.path, &entry.report_path, entry.uid, entry.gid)?;
             }
         }
         timings.lchown_ms = elapsed_ms(step_start);
@@ -400,7 +392,11 @@ impl OwnershipExecutor {
         let step_start = Instant::now();
         for entry in &entries {
             if entry.kind == EntryKind::File {
-                chmod(&entry.path, entry.mode.expect("file entry has mode"))?;
+                chmod(
+                    &entry.path,
+                    &entry.report_path,
+                    entry.mode.expect("file entry has mode"),
+                )?;
             }
         }
         timings.chmod_files_ms = elapsed_ms(step_start);
@@ -414,7 +410,11 @@ impl OwnershipExecutor {
             path_depth(&right.manifest_path).cmp(&path_depth(&left.manifest_path))
         });
         for entry in directories {
-            chmod(&entry.path, entry.mode.expect("directory entry has mode"))?;
+            chmod(
+                &entry.path,
+                &entry.report_path,
+                entry.mode.expect("directory entry has mode"),
+            )?;
         }
         timings.chmod_dirs_ms = elapsed_ms(step_start);
 
@@ -445,10 +445,10 @@ impl OwnershipExecutor {
                 let object_hash = hash_path(&self.target_inside).map_err(|error| {
                     report(
                         "hash",
-                        &self.target_inside,
+                        &self.target_display,
                         format!(
                             "failed to hash fs-tree target '{}': {error}",
-                            self.target_inside.display()
+                            self.target_display.display()
                         ),
                         None,
                     )
@@ -467,7 +467,7 @@ impl OwnershipExecutor {
                 let manifest_bytes = manifest.to_canonical_bytes().map_err(|error| {
                     report(
                         "hash",
-                        &self.target_inside,
+                        &self.target_display,
                         format!("failed to serialize fs-tree manifest for hashing: {error}"),
                         None,
                     )
@@ -486,10 +486,10 @@ impl OwnershipExecutor {
                 .map_err(|error| {
                     report(
                         "hash",
-                        &self.target_inside,
+                        &self.target_display,
                         format!(
                             "failed to hash fs-tree object rooted at '{}': {error}",
-                            self.target_inside.display()
+                            self.target_display.display()
                         ),
                         None,
                     )
@@ -512,19 +512,23 @@ impl OwnershipExecutor {
 
     fn validate_entry(&self, entry: &FsTreeEntry) -> Result<ResolvedEntry, ExecutorErrorReport> {
         let path = entry_path(&self.target_inside, entry.path())?;
+        let report_path = self.report_path(&path);
         let metadata = fs::symlink_metadata(&path).map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
                 report_io(
                     "missing",
-                    &path,
-                    format!("missing fs-tree entry '{}'", path.display()),
+                    &report_path,
+                    format!("missing fs-tree entry '{}'", report_path.display()),
                     error,
                 )
             } else {
                 report_io(
                     "stat",
-                    &path,
-                    format!("failed to inspect fs-tree entry '{}'", path.display()),
+                    &report_path,
+                    format!(
+                        "failed to inspect fs-tree entry '{}'",
+                        report_path.display()
+                    ),
                     error,
                 )
             }
@@ -535,10 +539,10 @@ impl OwnershipExecutor {
         if actual_kind != Some(expected_kind) {
             return Err(report(
                 "kind",
-                &path,
+                &report_path,
                 format!(
                     "fs-tree entry '{}' has kind {}, expected {}",
-                    path.display(),
+                    report_path.display(),
                     actual_kind.map_or("other", EntryKind::as_str),
                     expected_kind.as_str()
                 ),
@@ -550,6 +554,7 @@ impl OwnershipExecutor {
         Ok(ResolvedEntry {
             manifest_path: entry.path().to_string(),
             path,
+            report_path,
             kind: expected_kind,
             uid,
             gid,
@@ -562,8 +567,11 @@ impl OwnershipExecutor {
             let metadata = fs::symlink_metadata(&entry.path).map_err(|error| {
                 report_io(
                     "stat",
-                    &entry.path,
-                    format!("failed to inspect fs-tree entry '{}'", entry.path.display()),
+                    &entry.report_path,
+                    format!(
+                        "failed to inspect fs-tree entry '{}'",
+                        entry.report_path.display()
+                    ),
                     error,
                 )
             })?;
@@ -572,10 +580,10 @@ impl OwnershipExecutor {
             if actual_kind != Some(entry.kind) {
                 return Err(report(
                     "kind",
-                    &entry.path,
+                    &entry.report_path,
                     format!(
                         "fs-tree entry '{}' has kind {}, expected {} after ownership materialization",
-                        entry.path.display(),
+                        entry.report_path.display(),
                         actual_kind.map_or("other", EntryKind::as_str),
                         entry.kind.as_str()
                     ),
@@ -586,10 +594,10 @@ impl OwnershipExecutor {
             if metadata.uid() != entry.uid || metadata.gid() != entry.gid {
                 return Err(report(
                     "owner",
-                    &entry.path,
+                    &entry.report_path,
                     format!(
                         "fs-tree entry '{}' has owner {}:{}, expected {}:{}",
-                        entry.path.display(),
+                        entry.report_path.display(),
                         metadata.uid(),
                         metadata.gid(),
                         entry.uid,
@@ -604,10 +612,10 @@ impl OwnershipExecutor {
                 if actual_mode != expected_mode {
                     return Err(report(
                         "mode",
-                        &entry.path,
+                        &entry.report_path,
                         format!(
                             "fs-tree entry '{}' has mode {:o}, expected {:o}",
-                            entry.path.display(),
+                            entry.report_path.display(),
                             actual_mode,
                             expected_mode
                         ),
@@ -618,6 +626,15 @@ impl OwnershipExecutor {
         }
 
         Ok(())
+    }
+
+    fn report_path(&self, path: &Path) -> PathBuf {
+        let relative = path.strip_prefix(&self.target_inside).unwrap_or(path);
+        if relative.as_os_str().is_empty() {
+            self.target_display.clone()
+        } else {
+            self.target_display.join(relative)
+        }
     }
 }
 
@@ -658,6 +675,7 @@ fn elapsed_ms(start: Instant) -> u128 {
 struct ResolvedEntry {
     manifest_path: String,
     path: PathBuf,
+    report_path: PathBuf,
     kind: EntryKind,
     uid: u32,
     gid: u32,
@@ -808,12 +826,20 @@ fn validate_manifest_path(
     Ok(())
 }
 
-fn chown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), ExecutorErrorReport> {
+fn chown_if_needed(
+    path: &Path,
+    report_path: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<(), ExecutorErrorReport> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         report_io(
             "stat",
-            path,
-            format!("failed to inspect fs-tree entry '{}'", path.display()),
+            report_path,
+            format!(
+                "failed to inspect fs-tree entry '{}'",
+                report_path.display()
+            ),
             error,
         )
     })?;
@@ -824,19 +850,27 @@ fn chown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), ExecutorErrorR
     chown(path, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid))).map_err(|error| {
         report_errno(
             "chown",
-            path,
-            format!("failed to chown '{}': {error}", path.display()),
+            report_path,
+            format!("failed to chown '{}': {error}", report_path.display()),
             error as i32,
         )
     })
 }
 
-fn lchown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), ExecutorErrorReport> {
+fn lchown_if_needed(
+    path: &Path,
+    report_path: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<(), ExecutorErrorReport> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         report_io(
             "stat",
-            path,
-            format!("failed to inspect fs-tree entry '{}'", path.display()),
+            report_path,
+            format!(
+                "failed to inspect fs-tree entry '{}'",
+                report_path.display()
+            ),
             error,
         )
     })?;
@@ -847,10 +881,10 @@ fn lchown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), ExecutorError
     let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|error| {
         report(
             "path",
-            path,
+            report_path,
             format!(
                 "failed to convert path '{}' for lchown: {error}",
-                path.display()
+                report_path.display()
             ),
             None,
         )
@@ -862,19 +896,19 @@ fn lchown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), ExecutorError
         let error = io::Error::last_os_error();
         Err(report_io(
             "lchown",
-            path,
-            format!("failed to lchown '{}': {error}", path.display()),
+            report_path,
+            format!("failed to lchown '{}': {error}", report_path.display()),
             error,
         ))
     }
 }
 
-fn chmod(path: &Path, mode: u32) -> Result<(), ExecutorErrorReport> {
+fn chmod(path: &Path, report_path: &Path, mode: u32) -> Result<(), ExecutorErrorReport> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|error| {
         report_io(
             "chmod",
-            path,
-            format!("failed to chmod '{}': {error}", path.display()),
+            report_path,
+            format!("failed to chmod '{}': {error}", report_path.display()),
             error,
         )
     })
@@ -1117,6 +1151,7 @@ mod tests {
         let owner = current_owner();
         let executor = OwnershipExecutor {
             target_inside: target.clone(),
+            target_display: target.clone(),
             entries: vec![FsTreeEntry::file("../escape", owner.0, owner.1, 0o644)],
             error_log_inside: temp.path().join("error.json"),
             result_log_inside: None,
@@ -1136,7 +1171,8 @@ mod tests {
         fs::write(&target, b"not a directory").unwrap();
         let owner = current_owner();
         let executor = OwnershipExecutor {
-            target_inside: target,
+            target_inside: target.clone(),
+            target_display: target,
             entries: vec![FsTreeEntry::file("child", owner.0, owner.1, 0o644)],
             error_log_inside: temp.path().join("error.json"),
             result_log_inside: None,

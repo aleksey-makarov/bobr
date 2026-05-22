@@ -13,7 +13,7 @@
 //!
 //! Runtime ownership materialization currently targets Linux hosts with
 //! configured `/etc/subuid` and `/etc/subgid` ranges, unprivileged user
-//! namespace support, and a working `libcontainer` setup.
+//! namespace support, and executable `newuidmap`/`newgidmap` helpers.
 
 #![deny(missing_docs)]
 
@@ -21,6 +21,7 @@ mod bundle;
 mod error;
 mod idmap;
 mod initramfs_writer;
+mod local_ownership;
 mod ownership;
 mod preflight;
 mod run;
@@ -29,6 +30,9 @@ mod spec;
 mod tar_writer;
 
 mod executor;
+
+#[doc(hidden)]
+pub mod ownership_helper;
 
 pub use error::{IdmapError, RuntimeError};
 pub use idmap::{MbuildIdmap, cached_host_idmap};

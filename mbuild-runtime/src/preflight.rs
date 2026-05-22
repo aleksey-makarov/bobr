@@ -5,6 +5,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
@@ -13,10 +14,32 @@ use std::time::{Duration, Instant};
 const BUSCTL_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(crate) fn preflight_ownership_runtime(idmap: &MbuildIdmap) -> Result<(), RuntimeError> {
-    check_ownership_runtime_preflight(idmap, &HostPreflightProbe)
+    check_libcontainer_ownership_runtime_preflight(idmap, &HostPreflightProbe)
 }
 
-fn check_ownership_runtime_preflight(
+pub(crate) fn preflight_local_ownership_runtime(idmap: &MbuildIdmap) -> Result<(), RuntimeError> {
+    check_local_ownership_runtime_preflight(idmap, &HostPreflightProbe)
+}
+
+fn check_local_ownership_runtime_preflight(
+    idmap: &MbuildIdmap,
+    probe: &impl PreflightProbe,
+) -> Result<(), RuntimeError> {
+    let mut failures = Vec::new();
+
+    check_idmap(idmap, &mut failures);
+    check_user_namespace_sysctl(probe, &mut failures);
+    check_command_in_path(probe, "newuidmap", &mut failures);
+    check_command_in_path(probe, "newgidmap", &mut failures);
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(RuntimeError::Preflight(failures.join("; ")))
+    }
+}
+
+fn check_libcontainer_ownership_runtime_preflight(
     idmap: &MbuildIdmap,
     probe: &impl PreflightProbe,
 ) -> Result<(), RuntimeError> {
@@ -153,6 +176,14 @@ fn check_positive_sysctl(path: &Path, value: &str, label: &str, failures: &mut V
     }
 }
 
+fn check_command_in_path(probe: &impl PreflightProbe, name: &str, failures: &mut Vec<String>) {
+    match probe.command_in_path(name) {
+        Ok(true) => {}
+        Ok(false) => failures.push(format!("{name} not found in PATH")),
+        Err(error) => failures.push(format!("failed to inspect PATH for {name}: {error}")),
+    }
+}
+
 fn check_user_bus(probe: &impl PreflightProbe, failures: &mut Vec<String>) {
     if probe
         .env_var_os("DBUS_SESSION_BUS_ADDRESS")
@@ -234,6 +265,7 @@ trait PreflightProbe {
     fn path_kind(&self, path: &Path) -> io::Result<PathKind>;
     fn read_to_string(&self, path: &Path) -> io::Result<String>;
     fn env_var_os(&self, key: &str) -> Option<OsString>;
+    fn command_in_path(&self, name: &str) -> io::Result<bool>;
     fn run_busctl_user_status(&self, timeout: Duration) -> Result<CommandOutput, BusctlError>;
 }
 
@@ -301,6 +333,26 @@ impl PreflightProbe for HostPreflightProbe {
 
     fn env_var_os(&self, key: &str) -> Option<OsString> {
         env::var_os(key)
+    }
+
+    fn command_in_path(&self, name: &str) -> io::Result<bool> {
+        let Some(path) = env::var_os("PATH") else {
+            return Ok(false);
+        };
+        for dir in env::split_paths(&path) {
+            let candidate = dir.join(name);
+            match fs::metadata(&candidate) {
+                Ok(metadata)
+                    if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 =>
+                {
+                    return Ok(true);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(false)
     }
 
     fn run_busctl_user_status(&self, timeout: Duration) -> Result<CommandOutput, BusctlError> {
@@ -379,14 +431,16 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
 
     #[test]
-    fn preflight_accepts_complete_host_shape() {
-        check_ownership_runtime_preflight(&test_idmap(), &FakeProbe::complete()).unwrap();
+    fn libcontainer_preflight_accepts_complete_host_shape() {
+        check_libcontainer_ownership_runtime_preflight(&test_idmap(), &FakeProbe::complete())
+            .unwrap();
     }
 
     #[test]
-    fn preflight_aggregates_missing_prerequisites() {
+    fn libcontainer_preflight_aggregates_missing_prerequisites() {
         let probe = FakeProbe::default();
-        let error = check_ownership_runtime_preflight(&test_idmap(), &probe).unwrap_err();
+        let error =
+            check_libcontainer_ownership_runtime_preflight(&test_idmap(), &probe).unwrap_err();
 
         assert!(matches!(error, RuntimeError::Preflight(_)));
         let message = error.to_string();
@@ -397,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_rejects_disabled_user_namespaces() {
+    fn local_preflight_rejects_disabled_user_namespaces() {
         let mut probe = FakeProbe::complete();
         probe.files.insert(
             "/proc/sys/user/max_user_namespaces".to_string(),
@@ -408,11 +462,28 @@ mod tests {
             "0\n".to_string(),
         );
 
-        let error = check_ownership_runtime_preflight(&test_idmap(), &probe).unwrap_err();
+        let error = check_local_ownership_runtime_preflight(&test_idmap(), &probe).unwrap_err();
 
         let message = error.to_string();
         assert!(message.contains("unprivileged user namespaces disabled"));
         assert!(message.contains("unprivileged user namespace clone disabled"));
+    }
+
+    #[test]
+    fn local_preflight_accepts_userns_and_newidmap_helpers() {
+        check_local_ownership_runtime_preflight(&test_idmap(), &FakeProbe::complete()).unwrap();
+    }
+
+    #[test]
+    fn local_preflight_reports_missing_newidmap_helpers() {
+        let mut probe = FakeProbe::complete();
+        probe.commands.clear();
+
+        let error = check_local_ownership_runtime_preflight(&test_idmap(), &probe).unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("newuidmap not found"));
+        assert!(message.contains("newgidmap not found"));
     }
 
     #[test]
@@ -425,7 +496,7 @@ mod tests {
         );
         probe.kinds.remove("/run/user/1000/bus");
 
-        check_ownership_runtime_preflight(&test_idmap(), &probe).unwrap();
+        check_libcontainer_ownership_runtime_preflight(&test_idmap(), &probe).unwrap();
     }
 
     #[test]
@@ -434,7 +505,8 @@ mod tests {
         probe.envs.remove("DBUS_SESSION_BUS_ADDRESS");
         probe.kinds.remove("/run/user/1000/bus");
 
-        let error = check_ownership_runtime_preflight(&test_idmap(), &probe).unwrap_err();
+        let error =
+            check_libcontainer_ownership_runtime_preflight(&test_idmap(), &probe).unwrap_err();
 
         assert!(error.to_string().contains("/run/user/1000/bus"));
     }
@@ -448,7 +520,8 @@ mod tests {
             stderr: b"dbus failed\nsecond line\n".to_vec(),
         });
 
-        let error = check_ownership_runtime_preflight(&test_idmap(), &probe).unwrap_err();
+        let error =
+            check_libcontainer_ownership_runtime_preflight(&test_idmap(), &probe).unwrap_err();
 
         let message = error.to_string();
         assert!(message.contains("exit code 1"));
@@ -460,7 +533,8 @@ mod tests {
         let mut probe = FakeProbe::complete();
         probe.busctl = BusctlResult::TimedOut;
 
-        let error = check_ownership_runtime_preflight(&test_idmap(), &probe).unwrap_err();
+        let error =
+            check_libcontainer_ownership_runtime_preflight(&test_idmap(), &probe).unwrap_err();
 
         assert!(error.to_string().contains("timed out"));
     }
@@ -470,7 +544,7 @@ mod tests {
         let probe = FakeProbe::complete();
         let idmap = MbuildIdmap::for_tests(1000, 1000, 100000, 0, 200000, 0);
 
-        let error = check_ownership_runtime_preflight(&idmap, &probe).unwrap_err();
+        let error = check_local_ownership_runtime_preflight(&idmap, &probe).unwrap_err();
 
         let message = error.to_string();
         assert!(message.contains("empty subuid range"));
@@ -486,6 +560,7 @@ mod tests {
         kinds: HashMap<String, PathKind>,
         files: HashMap<String, String>,
         envs: HashMap<String, OsString>,
+        commands: HashSet<String>,
         inspect_errors: HashSet<String>,
         busctl: BusctlResult,
     }
@@ -526,6 +601,8 @@ mod tests {
                 "XDG_RUNTIME_DIR".to_string(),
                 OsString::from("/run/user/1000"),
             );
+            probe.commands.insert("newuidmap".to_string());
+            probe.commands.insert("newgidmap".to_string());
             probe.busctl = BusctlResult::Output(CommandOutput {
                 status: ExitStatus::from_raw(0),
                 stdout: Vec::new(),
@@ -541,6 +618,7 @@ mod tests {
                 kinds: HashMap::new(),
                 files: HashMap::new(),
                 envs: HashMap::new(),
+                commands: HashSet::new(),
                 inspect_errors: HashSet::new(),
                 busctl: BusctlResult::NotFound,
             }
@@ -566,6 +644,10 @@ mod tests {
 
         fn env_var_os(&self, key: &str) -> Option<OsString> {
             self.envs.get(key).cloned()
+        }
+
+        fn command_in_path(&self, name: &str) -> io::Result<bool> {
+            Ok(self.commands.contains(name))
         }
 
         fn run_busctl_user_status(&self, _: Duration) -> Result<CommandOutput, BusctlError> {

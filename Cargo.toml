@@ -8,6 +8,7 @@ members = [
   "mbuild-origin-oci-registry",
   "mbuild-image",
   "mbuild-runtime",
+  "mbuild-runtime-helper",
   "mbuild-sandbox-runner",
   "mbuild-sandbox-runner-core",
   "mbuild-text",
