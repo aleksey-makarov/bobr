@@ -107,8 +107,6 @@ pub enum HelperCommand {
     Ownership {
         /// JSON config path.
         config: PathBuf,
-        /// Optional inherited file descriptor to wait on before starting work.
-        wait_fd: Option<RawFd>,
     },
     /// Wait for parent namespace setup, then exec the real ownership command.
     OwnershipTrampoline {
@@ -141,10 +139,7 @@ fn main_result(args: Vec<OsString>) -> Result<(), String> {
                 .map_err(|error| format!("failed to write protocol info: {error}"))?;
             Ok(())
         }
-        HelperCommand::Ownership { config, wait_fd } => {
-            if let Some(fd) = wait_fd {
-                wait_for_parent(fd)?;
-            }
+        HelperCommand::Ownership { config } => {
             let config = read_config(&config)?;
             run_ownership_config(config)
         }
@@ -163,7 +158,6 @@ pub fn parse_args(args: Vec<OsString>) -> Result<HelperCommand, String> {
 
     if args.first().is_some_and(|arg| arg == "ownership") {
         let mut config = None;
-        let mut wait_fd = None;
         let mut index = 1;
         while index < args.len() {
             match args[index].to_str() {
@@ -174,24 +168,13 @@ pub fn parse_args(args: Vec<OsString>) -> Result<HelperCommand, String> {
                         .ok_or_else(|| "--config requires a path".to_string())?;
                     config = Some(PathBuf::from(value));
                 }
-                Some("--wait-fd") => {
-                    index += 1;
-                    let value = args
-                        .get(index)
-                        .and_then(|value| value.to_str())
-                        .ok_or_else(|| "--wait-fd requires a file descriptor".to_string())?;
-                    wait_fd = Some(
-                        RawFd::from_str(value)
-                            .map_err(|error| format!("invalid --wait-fd '{value}': {error}"))?,
-                    );
-                }
                 Some(flag) => return Err(format!("unknown ownership argument '{flag}'")),
                 None => return Err("ownership arguments must be UTF-8".to_string()),
             }
             index += 1;
         }
         let config = config.ok_or_else(|| "ownership requires --config".to_string())?;
-        return Ok(HelperCommand::Ownership { config, wait_fd });
+        return Ok(HelperCommand::Ownership { config });
     }
 
     if args
@@ -235,7 +218,7 @@ pub fn parse_args(args: Vec<OsString>) -> Result<HelperCommand, String> {
     }
 
     Err(format!(
-        "usage: {HELPER_BINARY_NAME} --protocol-info | ownership --config PATH [--wait-fd FD]"
+        "usage: {HELPER_BINARY_NAME} --protocol-info | ownership --config PATH"
     ))
 }
 
@@ -364,15 +347,26 @@ mod tests {
                 OsString::from("ownership"),
                 OsString::from("--config"),
                 OsString::from("/tmp/config.json"),
-                OsString::from("--wait-fd"),
-                OsString::from("7"),
             ])
             .unwrap(),
             HelperCommand::Ownership {
                 config: PathBuf::from("/tmp/config.json"),
-                wait_fd: Some(7),
             }
         );
+    }
+
+    #[test]
+    fn parse_ownership_rejects_wait_fd() {
+        let error = parse_args(vec![
+            OsString::from("ownership"),
+            OsString::from("--config"),
+            OsString::from("/tmp/config.json"),
+            OsString::from("--wait-fd"),
+            OsString::from("7"),
+        ])
+        .unwrap_err();
+
+        assert!(error.contains("unknown ownership argument '--wait-fd'"));
     }
 
     #[test]
