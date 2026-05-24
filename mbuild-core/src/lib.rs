@@ -21,6 +21,7 @@ pub use fs_tree_object::*;
 pub use fsobj_hash::ObjectHash;
 pub use initramfs::*;
 pub use origin::*;
+pub use runtime_helper_protocol::FsTreeArchiveEntrySource;
 
 #[derive(Debug)]
 pub enum BuilderError {

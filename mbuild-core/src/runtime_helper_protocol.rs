@@ -73,7 +73,7 @@ pub struct OwnershipHelperConfig {
     pub idmap: OwnershipHelperIdmap,
 }
 
-/// Source selected for one manifest entry in an archive helper operation.
+/// Source selected for one manifest entry in an fs-tree archive operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum FsTreeArchiveEntrySource {

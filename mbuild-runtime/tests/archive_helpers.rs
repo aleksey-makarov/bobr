@@ -2,9 +2,8 @@
 
 use mbuild_core::{FsTreeEntry, FsTreeManifest, InitramfsEntrySource, write_newc_initramfs};
 use mbuild_runtime::{
-    FsTreeInitramfsEntrySource, FsTreeInitramfsInput, FsTreeTarEntrySource, FsTreeTarInput,
-    MbuildIdmap, apply_ownership_batch, write_fs_tree_initramfs_in_ownership_namespace,
-    write_fs_tree_tar_in_ownership_namespace,
+    FsTreeArchiveEntrySource, FsTreeArchiveInput, MbuildIdmap, apply_ownership_batch,
+    write_fs_tree_initramfs_in_ownership_namespace, write_fs_tree_tar_in_ownership_namespace,
 };
 use std::fs;
 use std::io;
@@ -39,13 +38,13 @@ fn fs_tree_tar_helper_reads_subuid_owned_file() -> TestResult<()> {
     apply_ownership_batch(&input_root, &manifest, &idmap, &ownership_workspace)?;
 
     write_fs_tree_tar_in_ownership_namespace(
-        &[FsTreeTarInput {
+        &[FsTreeArchiveInput {
             root_dir: input_root.clone(),
         }],
         &manifest,
         &[
-            FsTreeTarEntrySource::Directory,
-            FsTreeTarEntrySource::File {
+            FsTreeArchiveEntrySource::Directory,
+            FsTreeArchiveEntrySource::File {
                 input_index: 0,
                 path: "data".to_string(),
             },
@@ -84,18 +83,18 @@ fn fs_tree_initramfs_helper_matches_core_writer() -> TestResult<()> {
     ])?;
 
     write_fs_tree_initramfs_in_ownership_namespace(
-        &[FsTreeInitramfsInput {
+        &[FsTreeArchiveInput {
             root_dir: input_root.clone(),
         }],
         &manifest,
         &[
-            FsTreeInitramfsEntrySource::Directory,
-            FsTreeInitramfsEntrySource::Directory,
-            FsTreeInitramfsEntrySource::File {
+            FsTreeArchiveEntrySource::Directory,
+            FsTreeArchiveEntrySource::Directory,
+            FsTreeArchiveEntrySource::File {
                 input_index: 0,
                 path: "bin/init".to_string(),
             },
-            FsTreeInitramfsEntrySource::Symlink,
+            FsTreeArchiveEntrySource::Symlink,
         ],
         &output_initramfs,
         &idmap,

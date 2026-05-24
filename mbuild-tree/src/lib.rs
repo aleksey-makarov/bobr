@@ -8,9 +8,7 @@ use mbuild_core::{
     FsTreeOwnerMap, StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir,
     fsutil,
 };
-use mbuild_runtime::{
-    FsTreeInitramfsEntrySource, FsTreeInitramfsInput, FsTreeTarEntrySource, FsTreeTarInput,
-};
+use mbuild_runtime::{FsTreeArchiveEntrySource, FsTreeArchiveInput};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -750,15 +748,15 @@ impl InitramfsWriter for RuntimeInitramfsWriter {
     ) -> Result<(), BuilderError> {
         let idmap = mbuild_runtime::cached_host_idmap()
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-        let initramfs_inputs = inputs
+        let archive_inputs = inputs
             .iter()
-            .map(|input| FsTreeInitramfsInput {
+            .map(|input| FsTreeArchiveInput {
                 root_dir: input.root_dir.clone(),
             })
             .collect::<Vec<_>>();
-        let sources = initramfs_sources(inputs, composed)?;
+        let sources = archive_sources("rootfs", inputs, composed)?;
         mbuild_runtime::write_fs_tree_initramfs_in_ownership_namespace(
-            &initramfs_inputs,
+            &archive_inputs,
             composed.manifest(),
             &sources,
             output_initramfs,
@@ -782,15 +780,15 @@ impl ErofsTarWriter for RuntimeErofsTarWriter {
     ) -> Result<(), BuilderError> {
         let idmap = mbuild_runtime::cached_host_idmap()
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-        let tar_inputs = inputs
+        let archive_inputs = inputs
             .iter()
-            .map(|input| FsTreeTarInput {
+            .map(|input| FsTreeArchiveInput {
                 root_dir: input.root_dir.clone(),
             })
             .collect::<Vec<_>>();
-        let sources = erofs_tar_sources(inputs, composed)?;
+        let sources = archive_sources("ErofsRootfs", inputs, composed)?;
         mbuild_runtime::write_fs_tree_tar_in_ownership_namespace(
-            &tar_inputs,
+            &archive_inputs,
             composed.manifest(),
             &sources,
             output_tar,
@@ -801,10 +799,11 @@ impl ErofsTarWriter for RuntimeErofsTarWriter {
     }
 }
 
-fn erofs_tar_sources(
+fn archive_sources(
+    input_label: &str,
     inputs: &[FsTreeComposeInput],
     composed: &ComposedFsTree,
-) -> Result<Vec<FsTreeTarEntrySource>, BuilderError> {
+) -> Result<Vec<FsTreeArchiveEntrySource>, BuilderError> {
     composed
         .manifest()
         .entries()
@@ -813,17 +812,18 @@ fn erofs_tar_sources(
         .map(
             |(manifest_entry, composed_entry)| match (manifest_entry, composed_entry) {
                 (FsTreeEntry::Directory { .. }, ComposedFsTreeEntry::Directory) => {
-                    Ok(FsTreeTarEntrySource::Directory)
+                    Ok(FsTreeArchiveEntrySource::Directory)
                 }
                 (FsTreeEntry::File { .. }, ComposedFsTreeEntry::File { source_path }) => {
-                    let (input_index, rel_path) = locate_erofs_source(inputs, source_path)?;
-                    Ok(FsTreeTarEntrySource::File {
+                    let (input_index, rel_path) =
+                        locate_archive_source(input_label, inputs, source_path)?;
+                    Ok(FsTreeArchiveEntrySource::File {
                         input_index,
                         path: rel_path,
                     })
                 }
                 (FsTreeEntry::Symlink { .. }, ComposedFsTreeEntry::Symlink { .. }) => {
-                    Ok(FsTreeTarEntrySource::Symlink)
+                    Ok(FsTreeArchiveEntrySource::Symlink)
                 }
                 _ => Err(BuilderError::ExecutionFailed(format!(
                     "merged fs-tree entry for '{}' does not match manifest kind",
@@ -834,49 +834,8 @@ fn erofs_tar_sources(
         .collect()
 }
 
-fn initramfs_sources(
-    inputs: &[FsTreeComposeInput],
-    composed: &ComposedFsTree,
-) -> Result<Vec<FsTreeInitramfsEntrySource>, BuilderError> {
-    composed
-        .manifest()
-        .entries()
-        .iter()
-        .zip(composed.entries())
-        .map(
-            |(manifest_entry, composed_entry)| match (manifest_entry, composed_entry) {
-                (FsTreeEntry::Directory { .. }, ComposedFsTreeEntry::Directory) => {
-                    Ok(FsTreeInitramfsEntrySource::Directory)
-                }
-                (FsTreeEntry::File { .. }, ComposedFsTreeEntry::File { source_path }) => {
-                    let (input_index, rel_path) = locate_rootfs_source(inputs, source_path)?;
-                    Ok(FsTreeInitramfsEntrySource::File {
-                        input_index,
-                        path: rel_path,
-                    })
-                }
-                (FsTreeEntry::Symlink { .. }, ComposedFsTreeEntry::Symlink { .. }) => {
-                    Ok(FsTreeInitramfsEntrySource::Symlink)
-                }
-                _ => Err(BuilderError::ExecutionFailed(format!(
-                    "merged fs-tree entry for '{}' does not match manifest kind",
-                    manifest_entry.path()
-                ))),
-            },
-        )
-        .collect()
-}
-
-fn locate_erofs_source(
-    inputs: &[FsTreeComposeInput],
-    source_path: &Path,
-) -> Result<(usize, String), BuilderError> {
-    locate_rootfs_source(inputs, source_path).map_err(|error| {
-        BuilderError::ExecutionFailed(error.to_string().replace("rootfs", "ErofsRootfs"))
-    })
-}
-
-fn locate_rootfs_source(
+fn locate_archive_source(
+    input_label: &str,
     inputs: &[FsTreeComposeInput],
     source_path: &Path,
 ) -> Result<(usize, String), BuilderError> {
@@ -884,13 +843,13 @@ fn locate_rootfs_source(
         if let Ok(rel_path) = source_path.strip_prefix(&input.root_dir) {
             let rel_path = rel_path_to_manifest_string(rel_path).ok_or_else(|| {
                 BuilderError::ExecutionFailed(format!(
-                    "fs-tree source path '{}' is not representable as a manifest path",
+                    "fs-tree {input_label} source path '{}' is not representable as a manifest path",
                     source_path.display()
                 ))
             })?;
             if rel_path.is_empty() {
                 return Err(BuilderError::ExecutionFailed(format!(
-                    "fs-tree source path '{}' points at an input root, expected a file",
+                    "fs-tree {input_label} source path '{}' points at an input root, expected a file",
                     source_path.display()
                 )));
             }
@@ -898,7 +857,7 @@ fn locate_rootfs_source(
         }
     }
     Err(BuilderError::ExecutionFailed(format!(
-        "fs-tree source path '{}' is not under any rootfs input root",
+        "fs-tree {input_label} source path '{}' is not under any {input_label} input root",
         source_path.display()
     )))
 }

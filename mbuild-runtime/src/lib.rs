@@ -5,10 +5,10 @@
 //! functions exported from this crate root. OCI bundle construction, executor
 //! lifecycle handling, and child-side error reporting are internal details.
 //!
-//! The current public capabilities are fs-tree ownership materialization through
-//! [`apply_ownership_batch`] plus deterministic fs-tree tar generation through
-//! [`write_fs_tree_tar_in_ownership_namespace`]. These helpers operate in a user
-//! namespace described by [`MbuildIdmap`].
+//! The current public capabilities are fs-tree ownership materialization
+//! through [`apply_ownership_batch`] plus deterministic fs-tree tar and
+//! initramfs generation. These helpers operate in a user namespace described by
+//! [`MbuildIdmap`].
 //!
 //! Runtime ownership materialization currently targets Linux hosts with
 //! configured `/etc/subuid` and `/etc/subgid` ranges, unprivileged user
@@ -16,6 +16,7 @@
 
 #![deny(missing_docs)]
 
+mod archive_writer;
 mod bundle;
 mod error;
 mod idmap;
@@ -31,17 +32,14 @@ mod tar_writer;
 
 mod executor;
 
+pub use archive_writer::FsTreeArchiveInput;
 pub use error::{IdmapError, RuntimeError};
 pub use idmap::{MbuildIdmap, cached_host_idmap};
-pub use initramfs_writer::{
-    FsTreeInitramfsEntrySource, FsTreeInitramfsInput,
-    write_fs_tree_initramfs_in_ownership_namespace,
-};
+pub use initramfs_writer::write_fs_tree_initramfs_in_ownership_namespace;
+pub use mbuild_core::FsTreeArchiveEntrySource;
 pub use ownership::apply_ownership_batch;
 pub use sandbox::{
     SandboxBuildConfig, SandboxBuildOutcome, SandboxInput, SandboxRunAs, SandboxStep,
     SandboxStepReport, run_sandbox_build,
 };
-pub use tar_writer::{
-    FsTreeTarEntrySource, FsTreeTarInput, write_fs_tree_tar_in_ownership_namespace,
-};
+pub use tar_writer::write_fs_tree_tar_in_ownership_namespace;
