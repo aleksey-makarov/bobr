@@ -4,7 +4,6 @@ use crate::bundle::{Bundle, create_bundle};
 use crate::error::RuntimeError;
 use crate::idmap::MbuildIdmap;
 use crate::preflight::preflight_ownership_runtime;
-use crate::run::libcontainer_start_lock;
 use fsobj_hash::ObjectHash;
 use libcontainer::container::builder::ContainerBuilder;
 use libcontainer::oci_spec::runtime::{
@@ -35,7 +34,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -174,6 +173,15 @@ pub fn run_sandbox_build(
             Err(error)
         }
     }
+}
+
+fn libcontainer_start_lock() -> Result<MutexGuard<'static, ()>, RuntimeError> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    // libcontainer 0.6 creates/connects notify.sock by temporarily changing the
+    // process cwd, so concurrent container build/start calls are unsafe.
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| RuntimeError::Libcontainer("libcontainer start lock is poisoned".to_string()))
 }
 
 fn validate_config(config: &SandboxBuildConfig) -> Result<(), RuntimeError> {

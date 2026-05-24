@@ -1,25 +1,18 @@
 //! Initramfs writer support for fs-tree consumers.
 
 use crate::{
-    bundle::create_bundle,
     error::RuntimeError,
-    executor::{ExecutorErrorReport, write_executor_error_report},
     idmap::MbuildIdmap,
-    preflight::preflight_ownership_runtime,
-    run::run_init_with_executor,
-    spec::build_tar_writer_spec,
+    local_helper::{preflight_local_helper_runtime, run_local_helper_with_config},
 };
-use libcontainer::oci_spec::runtime::Spec;
-use libcontainer::workload::{
-    Executor, ExecutorError, ExecutorSetEnvsError, ExecutorValidationError,
+use mbuild_core::runtime_helper_protocol::{
+    FsTreeArchiveEntrySource, FsTreeArchiveInput, FsTreeInitramfsHelperConfig,
 };
-use mbuild_core::{FsTreeEntry, FsTreeManifest, InitramfsEntrySource, write_newc_initramfs};
-use std::collections::HashMap;
+use mbuild_core::{FsTreeEntry, FsTreeManifest};
 use std::fs;
-use std::io;
 use std::path::{Component, Path, PathBuf};
 
-/// A host fs-tree root that will be bind-mounted read-only for initramfs generation.
+/// A host fs-tree root used as a file-byte source for initramfs generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsTreeInitramfsInput {
     /// Host path to the input object's `root/` directory.
@@ -31,7 +24,7 @@ pub struct FsTreeInitramfsInput {
 pub enum FsTreeInitramfsEntrySource {
     /// Directory entry; metadata comes from the manifest.
     Directory,
-    /// Regular file entry whose bytes are read from one mounted input root.
+    /// Regular file entry whose bytes are read from one input root.
     File {
         /// Index into the `FsTreeInitramfsInput` slice.
         input_index: usize,
@@ -46,9 +39,8 @@ pub enum FsTreeInitramfsEntrySource {
 /// ownership user namespace.
 ///
 /// `sources` must have the same length and order as `manifest.entries()`.
-/// Regular file bytes are read from read-only input-root bind mounts inside the
-/// namespace, while `output_initramfs` is created through a writable bind mount
-/// of its parent directory.
+/// Regular file bytes are read from input roots inside the ownership user
+/// namespace, while `output_initramfs` is created by the runtime helper.
 pub fn write_fs_tree_initramfs_in_ownership_namespace(
     inputs: &[FsTreeInitramfsInput],
     manifest: &FsTreeManifest,
@@ -65,43 +57,30 @@ pub fn write_fs_tree_initramfs_in_ownership_namespace(
         workspace,
         idmap,
     )?;
-    preflight_ownership_runtime(idmap)?;
+    preflight_local_helper_runtime(idmap)?;
+    let output_initramfs = canonicalize_output_path(output_initramfs, "initramfs output path")?;
+    let input_roots = canonicalize_input_roots(inputs)?;
 
-    let output_dir = output_initramfs.parent().ok_or_else(|| {
-        RuntimeError::InvalidInput(format!(
-            "initramfs output path '{}' has no parent directory",
-            output_initramfs.display()
-        ))
-    })?;
-    let output_name = output_initramfs.file_name().ok_or_else(|| {
-        RuntimeError::InvalidInput(format!(
-            "initramfs output path '{}' has no file name",
-            output_initramfs.display()
-        ))
-    })?;
-    let output_name = output_name.to_str().ok_or_else(|| {
-        RuntimeError::InvalidInput(format!(
-            "initramfs output file name for '{}' is not UTF-8",
-            output_initramfs.display()
-        ))
-    })?;
-
-    let input_roots = inputs
-        .iter()
-        .map(|input| input.root_dir.clone())
-        .collect::<Vec<_>>();
-    let spec = build_tar_writer_spec(idmap, &input_roots, output_dir)?;
-    let bundle = create_bundle(workspace, &spec)?;
-    prepare_mount_targets(bundle.rootfs_dir(), inputs.len())?;
-
-    let executor = FsTreeInitramfsExecutor {
-        entries: manifest.entries().to_vec(),
-        sources: sources.to_vec(),
-        output_inside: PathBuf::from("/out").join(output_name),
-        error_log_inside: PathBuf::from("/error.json"),
-    };
-    run_init_with_executor(&bundle, workspace, executor)?;
-    Ok(())
+    run_local_helper_with_config(
+        idmap,
+        workspace,
+        "fs-tree-initramfs",
+        "fs-tree-initramfs-helper.json",
+        |error_report| {
+            let config = initramfs_helper_config(
+                &input_roots,
+                manifest,
+                sources,
+                &output_initramfs,
+                error_report,
+            )?;
+            serde_json::to_vec(&config).map_err(|error| {
+                RuntimeError::Executor(format!(
+                    "failed to serialize fs-tree initramfs helper config: {error}"
+                ))
+            })
+        },
+    )
 }
 
 fn validate_request(
@@ -185,82 +164,71 @@ fn validate_request(
     Ok(())
 }
 
-fn prepare_mount_targets(rootfs: &Path, input_count: usize) -> Result<(), RuntimeError> {
-    fs::create_dir_all(rootfs.join("inputs"))?;
-    for index in 0..input_count {
-        fs::create_dir(rootfs.join("inputs").join(index.to_string()))?;
-    }
-    fs::create_dir(rootfs.join("out"))?;
-    Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct FsTreeInitramfsExecutor {
-    entries: Vec<FsTreeEntry>,
-    sources: Vec<FsTreeInitramfsEntrySource>,
-    output_inside: PathBuf,
-    error_log_inside: PathBuf,
-}
-
-impl FsTreeInitramfsExecutor {
-    fn write_initramfs(&self) -> Result<(), ExecutorErrorReport> {
-        let file = fs::File::create(&self.output_inside).map_err(|error| {
-            report_io(
-                "create",
-                &self.output_inside,
-                format!(
-                    "failed to create initramfs output '{}'",
-                    self.output_inside.display()
-                ),
-                error,
-            )
-        })?;
-        let sources = initramfs_sources_inside(&self.sources, Path::new("/inputs"))?;
-        write_newc_initramfs(file, &self.entries, &sources).map_err(|error| {
-            report(
-                "write",
-                &self.output_inside,
-                format!("failed to write initramfs: {error}"),
-                None,
-            )
-        })
-    }
-}
-
-impl Executor for FsTreeInitramfsExecutor {
-    fn setup_envs(&self, _: HashMap<String, String>) -> Result<(), ExecutorSetEnvsError> {
-        Ok(())
-    }
-
-    fn validate(&self, _: &Spec) -> Result<(), ExecutorValidationError> {
-        Ok(())
-    }
-
-    fn exec(&self, _: &Spec) -> Result<(), ExecutorError> {
-        match self.write_initramfs() {
-            Ok(()) => std::process::exit(0),
-            Err(report) => {
-                write_executor_error_report(&self.error_log_inside, &report)?;
-                Err(ExecutorError::Other(report.to_string()))
-            }
-        }
-    }
-}
-
-fn initramfs_sources_inside(
+fn initramfs_helper_config(
+    input_roots: &[PathBuf],
+    manifest: &FsTreeManifest,
     sources: &[FsTreeInitramfsEntrySource],
-    input_mount_root: &Path,
-) -> Result<Vec<InitramfsEntrySource>, ExecutorErrorReport> {
+    output_initramfs: &Path,
+    error_report: &Path,
+) -> Result<FsTreeInitramfsHelperConfig, RuntimeError> {
+    Ok(FsTreeInitramfsHelperConfig {
+        output_initramfs: output_initramfs.to_path_buf(),
+        error_report: error_report.to_path_buf(),
+        manifest: manifest_text(manifest, "fs-tree initramfs manifest")?,
+        inputs: archive_inputs(input_roots),
+        sources: archive_sources(sources),
+    })
+}
+
+fn manifest_text(manifest: &FsTreeManifest, label: &str) -> Result<String, RuntimeError> {
+    String::from_utf8(manifest.to_canonical_bytes().map_err(|error| {
+        RuntimeError::InvalidInput(format!("failed to serialize {label}: {error}"))
+    })?)
+    .map_err(|error| RuntimeError::InvalidInput(format!("{label} is not UTF-8: {error}")))
+}
+
+fn canonicalize_input_roots(inputs: &[FsTreeInitramfsInput]) -> Result<Vec<PathBuf>, RuntimeError> {
+    inputs
+        .iter()
+        .map(|input| fs::canonicalize(&input.root_dir).map_err(RuntimeError::Io))
+        .collect()
+}
+
+fn canonicalize_output_path(path: &Path, label: &str) -> Result<PathBuf, RuntimeError> {
+    let parent = path.parent().ok_or_else(|| {
+        RuntimeError::InvalidInput(format!(
+            "{label} '{}' has no parent directory",
+            path.display()
+        ))
+    })?;
+    let file_name = path.file_name().ok_or_else(|| {
+        RuntimeError::InvalidInput(format!("{label} '{}' has no file name", path.display()))
+    })?;
+    let parent = fs::canonicalize(parent)?;
+    Ok(parent.join(file_name))
+}
+
+fn archive_inputs(input_roots: &[PathBuf]) -> Vec<FsTreeArchiveInput> {
+    input_roots
+        .iter()
+        .map(|root_dir| FsTreeArchiveInput {
+            root_dir: root_dir.clone(),
+        })
+        .collect()
+}
+
+fn archive_sources(sources: &[FsTreeInitramfsEntrySource]) -> Vec<FsTreeArchiveEntrySource> {
     sources
         .iter()
         .map(|source| match source {
-            FsTreeInitramfsEntrySource::Directory => Ok(InitramfsEntrySource::Directory),
+            FsTreeInitramfsEntrySource::Directory => FsTreeArchiveEntrySource::Directory,
             FsTreeInitramfsEntrySource::File { input_index, path } => {
-                Ok(InitramfsEntrySource::File {
-                    path: input_mount_root.join(input_index.to_string()).join(path),
-                })
+                FsTreeArchiveEntrySource::File {
+                    input_index: *input_index,
+                    path: path.clone(),
+                }
             }
-            FsTreeInitramfsEntrySource::Symlink => Ok(InitramfsEntrySource::Symlink),
+            FsTreeInitramfsEntrySource::Symlink => FsTreeArchiveEntrySource::Symlink,
         })
         .collect()
 }
@@ -294,30 +262,42 @@ fn entry_owner(entry: &FsTreeEntry) -> (u32, u32) {
     }
 }
 
-fn report_io(
-    label: impl Into<String>,
-    path: &Path,
-    message: String,
-    error: io::Error,
-) -> ExecutorErrorReport {
-    report(
-        label,
-        path,
-        format!("{message}: {error}"),
-        error.raw_os_error(),
-    )
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
 
-fn report(
-    label: impl Into<String>,
-    path: &Path,
-    message: impl Into<String>,
-    errno: Option<i32>,
-) -> ExecutorErrorReport {
-    ExecutorErrorReport {
-        kind: label.into(),
-        path: path.display().to_string(),
-        message: message.into(),
-        errno,
+    #[test]
+    fn initramfs_helper_config_serializes_manifest_inputs_and_sources() {
+        let temp = tempdir().unwrap();
+        let manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::file("file", 1, 1, 0o644),
+        ])
+        .unwrap();
+        let config = initramfs_helper_config(
+            &[PathBuf::from("/input/root")],
+            &manifest,
+            &[
+                FsTreeInitramfsEntrySource::Directory,
+                FsTreeInitramfsEntrySource::File {
+                    input_index: 0,
+                    path: "file".to_string(),
+                },
+            ],
+            &temp.path().join("initramfs.img"),
+            &temp.path().join("error.json"),
+        )
+        .unwrap();
+
+        assert!(config.manifest.ends_with('\n'));
+        assert_eq!(config.inputs[0].root_dir, PathBuf::from("/input/root"));
+        assert_eq!(
+            config.sources[1],
+            FsTreeArchiveEntrySource::File {
+                input_index: 0,
+                path: "file".to_string(),
+            }
+        );
     }
 }

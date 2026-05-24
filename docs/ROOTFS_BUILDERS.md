@@ -276,8 +276,9 @@ Current behavior:
 - sets tar symlink `uid`, `gid`, target, and `mtime=0` from the merged manifest;
   symlink mode is encoded as `0777` because fs-tree manifests do not carry
   symlink mode
-- reads file bytes from input `root/` directories inside the ownership user
-  namespace, so files owned through the configured idmap remain readable
+- reads file bytes from helper-visible input `root/` directories inside the
+  ownership user namespace, so files owned through the configured idmap remain
+  readable
 - runs `mkfs.erofs` from `PATH` on the host:
   ```sh
   mkfs.erofs --tar=f --sort=path -T 0 -U clear \
@@ -327,8 +328,9 @@ Current behavior:
   merged manifest
 - sets cpio symlink `uid`, `gid`, target payload, and `mtime=0` from the merged
   manifest; symlink mode is encoded as `0777`
-- reads file bytes from input `root/` directories inside the ownership user
-  namespace, so files owned through the configured idmap remain readable
+- reads file bytes from helper-visible input `root/` directories inside the
+  ownership user namespace, so files owned through the configured idmap remain
+  readable
 - terminates the archive with `TRAILER!!!`
 
 The realized result payload is one regular file containing an uncompressed

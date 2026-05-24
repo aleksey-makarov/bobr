@@ -20,11 +20,12 @@ mod bundle;
 mod error;
 mod idmap;
 mod initramfs_writer;
+mod local_helper;
 mod local_ownership;
 mod ownership;
 mod preflight;
-mod run;
 mod sandbox;
+#[cfg(test)]
 mod spec;
 mod tar_writer;
 

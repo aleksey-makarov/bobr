@@ -17,6 +17,12 @@ enum HelperCommand {
     Ownership {
         config: PathBuf,
     },
+    FsTreeTar {
+        config: PathBuf,
+    },
+    FsTreeInitramfs {
+        config: PathBuf,
+    },
     WaitExec {
         wait_fd: RawFd,
         command: Vec<OsString>,
@@ -45,6 +51,10 @@ fn main_result(args: Vec<OsString>) -> Result<(), String> {
             Ok(())
         }
         HelperCommand::Ownership { config } => crate::ownership::run_config_path(&config),
+        HelperCommand::FsTreeTar { config } => crate::tar_writer::run_config_path(&config),
+        HelperCommand::FsTreeInitramfs { config } => {
+            crate::initramfs_writer::run_config_path(&config)
+        }
         HelperCommand::WaitExec { wait_fd, command } => {
             wait_for_parent(wait_fd)?;
             exec_helper_command(command)
@@ -58,8 +68,18 @@ fn parse_args(args: Vec<OsString>) -> Result<HelperCommand, String> {
     }
 
     if args.first().is_some_and(|arg| arg == "ownership") {
-        let config = parse_ownership_args(&args[1..])?;
+        let config = parse_config_args("ownership", &args[1..])?;
         return Ok(HelperCommand::Ownership { config });
+    }
+
+    if args.first().is_some_and(|arg| arg == "fs-tree-tar") {
+        let config = parse_config_args("fs-tree-tar", &args[1..])?;
+        return Ok(HelperCommand::FsTreeTar { config });
+    }
+
+    if args.first().is_some_and(|arg| arg == "fs-tree-initramfs") {
+        let config = parse_config_args("fs-tree-initramfs", &args[1..])?;
+        return Ok(HelperCommand::FsTreeInitramfs { config });
     }
 
     if args.first().is_some_and(|arg| arg == "wait-exec") {
@@ -68,11 +88,11 @@ fn parse_args(args: Vec<OsString>) -> Result<HelperCommand, String> {
     }
 
     Err(format!(
-        "usage: {HELPER_BINARY_NAME} --protocol-info | ownership --config PATH | wait-exec --wait-fd FD -- COMMAND [ARGS...]"
+        "usage: {HELPER_BINARY_NAME} --protocol-info | ownership --config PATH | fs-tree-tar --config PATH | fs-tree-initramfs --config PATH | wait-exec --wait-fd FD -- COMMAND [ARGS...]"
     ))
 }
 
-fn parse_ownership_args(args: &[OsString]) -> Result<PathBuf, String> {
+fn parse_config_args(command: &str, args: &[OsString]) -> Result<PathBuf, String> {
     let mut config = None;
     let mut index = 0;
     while index < args.len() {
@@ -84,12 +104,12 @@ fn parse_ownership_args(args: &[OsString]) -> Result<PathBuf, String> {
                     .ok_or_else(|| "--config requires a path".to_string())?;
                 config = Some(PathBuf::from(value));
             }
-            Some(flag) => return Err(format!("unknown ownership argument '{flag}'")),
-            None => return Err("ownership arguments must be UTF-8".to_string()),
+            Some(flag) => return Err(format!("unknown {command} argument '{flag}'")),
+            None => return Err(format!("{command} arguments must be UTF-8")),
         }
         index += 1;
     }
-    config.ok_or_else(|| "ownership requires --config".to_string())
+    config.ok_or_else(|| format!("{command} requires --config"))
 }
 
 fn parse_wait_exec_args(args: &[OsString]) -> Result<(RawFd, Vec<OsString>), String> {
@@ -180,6 +200,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_fs_tree_tar_command() {
+        assert_eq!(
+            parse_args(vec![
+                OsString::from("fs-tree-tar"),
+                OsString::from("--config"),
+                OsString::from("/tmp/tar.json"),
+            ])
+            .unwrap(),
+            HelperCommand::FsTreeTar {
+                config: PathBuf::from("/tmp/tar.json"),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_fs_tree_initramfs_command() {
+        assert_eq!(
+            parse_args(vec![
+                OsString::from("fs-tree-initramfs"),
+                OsString::from("--config"),
+                OsString::from("/tmp/initramfs.json"),
+            ])
+            .unwrap(),
+            HelperCommand::FsTreeInitramfs {
+                config: PathBuf::from("/tmp/initramfs.json"),
+            }
+        );
+    }
+
+    #[test]
     fn parse_wait_exec_command() {
         assert_eq!(
             parse_args(vec![
@@ -228,6 +278,12 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("unknown ownership argument '--wait-fd'"));
+    }
+
+    #[test]
+    fn parse_fs_tree_tar_requires_config() {
+        let error = parse_args(vec![OsString::from("fs-tree-tar")]).unwrap_err();
+        assert!(error.contains("--config"));
     }
 
     #[test]

@@ -7,7 +7,8 @@
 //!
 //! Path fields in this protocol are host/helper namespace paths. The parent
 //! must pass paths that are valid for the helper process after namespace setup;
-//! for local ownership that means absolute paths in the host filesystem.
+//! for the current local helper launcher that means absolute paths in the host
+//! filesystem.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -19,7 +20,7 @@ use std::path::{Path, PathBuf};
 pub const HELPER_BINARY_NAME: &str = "mbuild-runtime-helper";
 
 /// Version of the helper command-line and JSON report protocol.
-pub const HELPER_PROTOCOL_VERSION: u32 = 1;
+pub const HELPER_PROTOCOL_VERSION: u32 = 2;
 
 /// Machine-readable protocol metadata printed by `--protocol-info`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +71,71 @@ pub struct OwnershipHelperConfig {
 
     /// Logical-to-host id mapping configured by the parent.
     pub idmap: OwnershipHelperIdmap,
+}
+
+/// A helper-visible fs-tree input root for archive generation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsTreeArchiveInput {
+    /// Absolute path to an input object's `root/` directory.
+    ///
+    /// The path must be valid in the helper process. For the current local
+    /// helper launcher this is a canonical host path.
+    pub root_dir: PathBuf,
+}
+
+/// Source selected for one manifest entry in an archive helper operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum FsTreeArchiveEntrySource {
+    /// Directory entry; metadata comes from the manifest.
+    Directory,
+    /// Regular file entry whose bytes are read from one input root.
+    File {
+        /// Index into the operation's `inputs` array.
+        input_index: usize,
+        /// Path relative to the selected input root.
+        path: String,
+    },
+    /// Symlink entry; target and metadata come from the manifest.
+    Symlink,
+}
+
+/// JSON configuration consumed by the fs-tree tar helper operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsTreeTarHelperConfig {
+    /// Absolute path to the output tar file in the helper-visible filesystem.
+    pub output_tar: PathBuf,
+
+    /// Absolute path where the helper writes a structured failure report.
+    pub error_report: PathBuf,
+
+    /// Canonical fs-tree manifest bytes encoded as UTF-8 text.
+    pub manifest: String,
+
+    /// Helper-visible input roots used by file sources.
+    pub inputs: Vec<FsTreeArchiveInput>,
+
+    /// Per-entry source mapping in the same order as `manifest.entries()`.
+    pub sources: Vec<FsTreeArchiveEntrySource>,
+}
+
+/// JSON configuration consumed by the fs-tree initramfs helper operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsTreeInitramfsHelperConfig {
+    /// Absolute path to the output initramfs file in the helper-visible filesystem.
+    pub output_initramfs: PathBuf,
+
+    /// Absolute path where the helper writes a structured failure report.
+    pub error_report: PathBuf,
+
+    /// Canonical fs-tree manifest bytes encoded as UTF-8 text.
+    pub manifest: String,
+
+    /// Helper-visible input roots used by file sources.
+    pub inputs: Vec<FsTreeArchiveInput>,
+
+    /// Per-entry source mapping in the same order as `manifest.entries()`.
+    pub sources: Vec<FsTreeArchiveEntrySource>,
 }
 
 /// Structured helper failure report.
@@ -178,6 +244,34 @@ mod tests {
         assert_eq!(value["idmap"]["subuid_base"], 100000);
 
         let decoded: OwnershipHelperConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn fs_tree_tar_helper_config_serializes_sources() {
+        let config = FsTreeTarHelperConfig {
+            output_tar: PathBuf::from("/tmp/rootfs.tar"),
+            error_report: PathBuf::from("/tmp/error.json"),
+            manifest: "{}\n".to_string(),
+            inputs: vec![FsTreeArchiveInput {
+                root_dir: PathBuf::from("/tmp/input/root"),
+            }],
+            sources: vec![
+                FsTreeArchiveEntrySource::Directory,
+                FsTreeArchiveEntrySource::File {
+                    input_index: 0,
+                    path: "bin/tool".to_string(),
+                },
+                FsTreeArchiveEntrySource::Symlink,
+            ],
+        };
+
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["output_tar"], "/tmp/rootfs.tar");
+        assert_eq!(value["sources"][1]["kind"], "file");
+        assert_eq!(value["sources"][1]["path"], "bin/tool");
+
+        let decoded: FsTreeTarHelperConfig = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, config);
     }
 

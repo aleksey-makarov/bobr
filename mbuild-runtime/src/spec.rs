@@ -7,7 +7,7 @@ use libcontainer::oci_spec::runtime::{
     LinuxResources, MountBuilder, ProcessBuilder, RootBuilder, Spec, SpecBuilder, UserBuilder,
 };
 use std::fmt::Display;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[cfg(test)]
 pub(crate) fn build_ownership_spec(
@@ -88,101 +88,6 @@ pub(crate) fn build_ownership_spec(
                         .build(),
                 )?,
             ])
-            .linux(linux)
-            .build(),
-    )
-}
-
-pub(crate) fn build_tar_writer_spec(
-    idmap: &MbuildIdmap,
-    input_roots: &[PathBuf],
-    output_dir: &Path,
-) -> Result<Spec, RuntimeError> {
-    let uid_mappings = vec![
-        linux_id_mapping(0, idmap.current_uid(), 1)?,
-        linux_id_mapping(1, idmap.subuid_base(), idmap.subuid_count())?,
-    ];
-    let gid_mappings = vec![
-        linux_id_mapping(0, idmap.current_gid(), 1)?,
-        linux_id_mapping(1, idmap.subgid_base(), idmap.subgid_count())?,
-    ];
-
-    let linux = build_oci(
-        LinuxBuilder::default()
-            .namespaces(vec![
-                build_oci(
-                    LinuxNamespaceBuilder::default()
-                        .typ(LinuxNamespaceType::User)
-                        .build(),
-                )?,
-                build_oci(
-                    LinuxNamespaceBuilder::default()
-                        .typ(LinuxNamespaceType::Mount)
-                        .build(),
-                )?,
-                build_oci(
-                    LinuxNamespaceBuilder::default()
-                        .typ(LinuxNamespaceType::Pid)
-                        .build(),
-                )?,
-            ])
-            .uid_mappings(uid_mappings)
-            .gid_mappings(gid_mappings)
-            .resources(LinuxResources::default())
-            .masked_paths(Vec::<String>::new())
-            .readonly_paths(Vec::<String>::new())
-            .build(),
-    )?;
-
-    let mut mounts = Vec::with_capacity(input_roots.len() + 2);
-    for (index, input_root) in input_roots.iter().enumerate() {
-        mounts.push(build_oci(
-            MountBuilder::default()
-                .destination(PathBuf::from(format!("/inputs/{index}")))
-                .typ("bind")
-                .source(input_root)
-                .options(vec!["rbind".to_string(), "ro".to_string()])
-                .build(),
-        )?);
-    }
-    mounts.push(build_oci(
-        MountBuilder::default()
-            .destination("/out")
-            .typ("bind")
-            .source(output_dir)
-            .options(vec!["rbind".to_string(), "rw".to_string()])
-            .build(),
-    )?);
-    mounts.push(build_oci(
-        MountBuilder::default()
-            .destination("/proc")
-            .typ("proc")
-            .source("proc")
-            .build(),
-    )?);
-
-    build_oci(
-        SpecBuilder::default()
-            .version("1.0.2")
-            .root(build_oci(
-                RootBuilder::default()
-                    .path("rootfs")
-                    .readonly(false)
-                    .build(),
-            )?)
-            .process(build_oci(
-                ProcessBuilder::default()
-                    .terminal(false)
-                    .user(build_oci(
-                        UserBuilder::default().uid(0_u32).gid(0_u32).build(),
-                    )?)
-                    .args(vec!["/dev/null".to_string()])
-                    .cwd("/")
-                    .capabilities(helper_capabilities()?)
-                    .no_new_privileges(false)
-                    .build(),
-            )?)
-            .mounts(mounts)
             .linux(linux)
             .build(),
     )

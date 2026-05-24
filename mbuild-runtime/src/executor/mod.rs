@@ -1,11 +1,13 @@
 //! Child-side executors used by runtime containers.
 
 use crate::error::RuntimeError;
+#[cfg(test)]
 use libcontainer::workload::ExecutorError;
 pub(crate) use mbuild_core::runtime_helper_protocol::ExecutorErrorReport;
 use std::fs;
 use std::path::Path;
 
+#[cfg(test)]
 pub(crate) fn write_executor_error_report(
     path: &Path,
     report: &ExecutorErrorReport,
@@ -30,6 +32,7 @@ pub(crate) fn read_executor_error_report(
     })
 }
 
+#[cfg(test)]
 fn executor_error(error: impl std::fmt::Display) -> ExecutorError {
     ExecutorError::Other(error.to_string())
 }

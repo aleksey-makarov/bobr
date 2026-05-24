@@ -1,4 +1,4 @@
-//! Host preflight checks for runtime-backed ownership materialization.
+//! Host preflight checks for runtime-backed helper operations.
 
 use crate::{error::RuntimeError, idmap::MbuildIdmap};
 use std::env;
@@ -17,11 +17,11 @@ pub(crate) fn preflight_ownership_runtime(idmap: &MbuildIdmap) -> Result<(), Run
     check_libcontainer_ownership_runtime_preflight(idmap, &HostPreflightProbe)
 }
 
-pub(crate) fn preflight_local_ownership_runtime(idmap: &MbuildIdmap) -> Result<(), RuntimeError> {
-    check_local_ownership_runtime_preflight(idmap, &HostPreflightProbe)
+pub(crate) fn preflight_local_helper_runtime(idmap: &MbuildIdmap) -> Result<(), RuntimeError> {
+    check_local_helper_runtime_preflight(idmap, &HostPreflightProbe)
 }
 
-fn check_local_ownership_runtime_preflight(
+fn check_local_helper_runtime_preflight(
     idmap: &MbuildIdmap,
     probe: &impl PreflightProbe,
 ) -> Result<(), RuntimeError> {
@@ -462,7 +462,7 @@ mod tests {
             "0\n".to_string(),
         );
 
-        let error = check_local_ownership_runtime_preflight(&test_idmap(), &probe).unwrap_err();
+        let error = check_local_helper_runtime_preflight(&test_idmap(), &probe).unwrap_err();
 
         let message = error.to_string();
         assert!(message.contains("unprivileged user namespaces disabled"));
@@ -471,7 +471,7 @@ mod tests {
 
     #[test]
     fn local_preflight_accepts_userns_and_newidmap_helpers() {
-        check_local_ownership_runtime_preflight(&test_idmap(), &FakeProbe::complete()).unwrap();
+        check_local_helper_runtime_preflight(&test_idmap(), &FakeProbe::complete()).unwrap();
     }
 
     #[test]
@@ -479,7 +479,7 @@ mod tests {
         let mut probe = FakeProbe::complete();
         probe.commands.clear();
 
-        let error = check_local_ownership_runtime_preflight(&test_idmap(), &probe).unwrap_err();
+        let error = check_local_helper_runtime_preflight(&test_idmap(), &probe).unwrap_err();
 
         let message = error.to_string();
         assert!(message.contains("newuidmap not found"));
@@ -544,7 +544,7 @@ mod tests {
         let probe = FakeProbe::complete();
         let idmap = MbuildIdmap::for_tests(1000, 1000, 100000, 0, 200000, 0);
 
-        let error = check_local_ownership_runtime_preflight(&idmap, &probe).unwrap_err();
+        let error = check_local_helper_runtime_preflight(&idmap, &probe).unwrap_err();
 
         let message = error.to_string();
         assert!(message.contains("empty subuid range"));
