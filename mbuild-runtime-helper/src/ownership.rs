@@ -46,7 +46,7 @@ fn read_config(path: &Path) -> Result<OwnershipHelperConfig, String> {
 /// will inspect after the helper exits. Display paths in structured errors are
 /// intentionally rooted at `/target` instead of exposing host paths.
 fn run_config(config: OwnershipHelperConfig) -> Result<(), String> {
-    let manifest = parse_manifest("manifest", &config.manifest, &config.error_report)?;
+    let manifest = read_manifest("manifest", &config.manifest_path, &config.error_report)?;
 
     let executor = OwnershipExecutor::with_paths_display(
         &manifest,
@@ -57,16 +57,36 @@ fn run_config(config: OwnershipHelperConfig) -> Result<(), String> {
     run_executor(&executor)
 }
 
-/// Parse a canonical fs-tree manifest and write a structured report on failure.
+/// Read a canonical fs-tree manifest and write a structured report on failure.
 ///
-/// Manifest parse errors happen before an [`OwnershipExecutor`] exists, so this
-/// function writes directly to the configured error report path.
-fn parse_manifest(label: &str, text: &str, error_report: &Path) -> Result<FsTreeManifest, String> {
-    FsTreeManifest::parse_canonical_bytes(text.as_bytes()).map_err(|error| {
+/// Manifest read/parse errors happen before an [`OwnershipExecutor`] exists, so
+/// this function writes directly to the configured error report path.
+fn read_manifest(
+    label: &str,
+    manifest_path: &Path,
+    error_report: &Path,
+) -> Result<FsTreeManifest, String> {
+    let bytes = fs::read(manifest_path).map_err(|error| {
         let report = ExecutorErrorReport {
             kind: "manifest".to_string(),
-            path: error_report.display().to_string(),
-            message: format!("failed to parse {label}: {error}"),
+            path: manifest_path.display().to_string(),
+            message: format!(
+                "failed to read {label} '{}': {error}",
+                manifest_path.display()
+            ),
+            errno: error.raw_os_error(),
+        };
+        let _ = write_executor_error_report(error_report, &report);
+        report.to_string()
+    })?;
+    FsTreeManifest::parse_canonical_bytes(&bytes).map_err(|error| {
+        let report = ExecutorErrorReport {
+            kind: "manifest".to_string(),
+            path: manifest_path.display().to_string(),
+            message: format!(
+                "failed to parse {label} '{}': {error}",
+                manifest_path.display()
+            ),
             errno: None,
         };
         let _ = write_executor_error_report(error_report, &report);

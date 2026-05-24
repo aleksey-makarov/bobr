@@ -3,7 +3,9 @@
 use crate::{
     error::RuntimeError,
     idmap::MbuildIdmap,
-    local_helper::{preflight_local_helper_runtime, run_local_helper_with_config},
+    local_helper::{
+        preflight_local_helper_runtime, run_local_helper_with_config, write_helper_manifest,
+    },
 };
 use mbuild_core::runtime_helper_protocol::{FsTreeArchiveEntrySource, FsTreeInitramfsHelperConfig};
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
@@ -64,10 +66,12 @@ pub fn write_fs_tree_initramfs_in_ownership_namespace(
         workspace,
         "fs-tree-initramfs",
         "fs-tree-initramfs-helper.json",
-        |error_report| {
+        |run_dir, error_report| {
+            let manifest_path = run_dir.join("fs-tree-initramfs-manifest.jsonl");
+            write_helper_manifest(&manifest_path, manifest, "fs-tree initramfs manifest")?;
             let config = initramfs_helper_config(
                 &input_roots,
-                manifest,
+                &manifest_path,
                 sources,
                 &output_initramfs,
                 error_report,
@@ -164,7 +168,7 @@ fn validate_request(
 
 fn initramfs_helper_config(
     input_roots: &[PathBuf],
-    manifest: &FsTreeManifest,
+    manifest_path: &Path,
     sources: &[FsTreeInitramfsEntrySource],
     output_initramfs: &Path,
     error_report: &Path,
@@ -172,17 +176,10 @@ fn initramfs_helper_config(
     Ok(FsTreeInitramfsHelperConfig {
         output_initramfs: output_initramfs.to_path_buf(),
         error_report: error_report.to_path_buf(),
-        manifest: manifest_text(manifest, "fs-tree initramfs manifest")?,
+        manifest_path: manifest_path.to_path_buf(),
         inputs: input_roots.to_vec(),
         sources: archive_sources(sources),
     })
-}
-
-fn manifest_text(manifest: &FsTreeManifest, label: &str) -> Result<String, RuntimeError> {
-    String::from_utf8(manifest.to_canonical_bytes().map_err(|error| {
-        RuntimeError::InvalidInput(format!("failed to serialize {label}: {error}"))
-    })?)
-    .map_err(|error| RuntimeError::InvalidInput(format!("{label} is not UTF-8: {error}")))
 }
 
 fn canonicalize_input_roots(inputs: &[FsTreeInitramfsInput]) -> Result<Vec<PathBuf>, RuntimeError> {
@@ -259,14 +256,9 @@ mod tests {
     #[test]
     fn initramfs_helper_config_serializes_manifest_inputs_and_sources() {
         let temp = tempdir().unwrap();
-        let manifest = FsTreeManifest::from_entries(vec![
-            FsTreeEntry::directory("", 0, 0, 0o755),
-            FsTreeEntry::file("file", 1, 1, 0o644),
-        ])
-        .unwrap();
         let config = initramfs_helper_config(
             &[PathBuf::from("/input/root")],
-            &manifest,
+            &temp.path().join("manifest.jsonl"),
             &[
                 FsTreeInitramfsEntrySource::Directory,
                 FsTreeInitramfsEntrySource::File {
@@ -279,7 +271,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(config.manifest.ends_with('\n'));
+        assert_eq!(config.manifest_path, temp.path().join("manifest.jsonl"));
         assert_eq!(config.inputs[0], PathBuf::from("/input/root"));
         assert_eq!(
             config.sources[1],

@@ -1,6 +1,7 @@
 use crate::error::RuntimeError;
 use crate::executor::read_executor_error_report;
 use crate::idmap::MbuildIdmap;
+use mbuild_core::FsTreeManifest;
 use mbuild_core::runtime_helper_protocol::{
     HELPER_BINARY_NAME, HELPER_PROTOCOL_VERSION, HelperProtocolInfo,
 };
@@ -53,7 +54,7 @@ pub(crate) fn run_local_helper_with_config<F>(
     build_config: F,
 ) -> Result<(), RuntimeError>
 where
-    F: FnOnce(&Path) -> Result<Vec<u8>, RuntimeError>,
+    F: FnOnce(&Path, &Path) -> Result<Vec<u8>, RuntimeError>,
 {
     let tools = cached_local_helper_tools()?;
     let state_root = workspace.join("state");
@@ -63,15 +64,29 @@ where
 
     let dir = bundles_root.join(Uuid::new_v4().simple().to_string());
     fs::create_dir(&dir)?;
-    let run = LocalHelperRun { dir };
+    let run = LocalHelperRun {
+        dir: fs::canonicalize(dir)?,
+    };
     let error_report = run.dir.join("error.json");
     let config_path = run.dir.join(config_file_name);
     fs::File::create(&error_report)?;
-    let bytes = build_config(&error_report)?;
+    let bytes = build_config(&run.dir, &error_report)?;
     fs::write(&config_path, bytes)?;
 
     let lifecycle_result = launch_helper(&tools, idmap, operation, &config_path);
     resolve_helper_report(&error_report, lifecycle_result)?;
+    Ok(())
+}
+
+pub(crate) fn write_helper_manifest(
+    path: &Path,
+    manifest: &FsTreeManifest,
+    label: &str,
+) -> Result<(), RuntimeError> {
+    let bytes = manifest.to_canonical_bytes().map_err(|error| {
+        RuntimeError::InvalidInput(format!("failed to serialize {label}: {error}"))
+    })?;
+    fs::write(path, bytes)?;
     Ok(())
 }
 

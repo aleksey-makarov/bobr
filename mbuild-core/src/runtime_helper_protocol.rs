@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 pub const HELPER_BINARY_NAME: &str = "mbuild-runtime-helper";
 
 /// Version of the helper command-line and JSON report protocol.
-pub const HELPER_PROTOCOL_VERSION: u32 = 2;
+pub const HELPER_PROTOCOL_VERSION: u32 = 3;
 
 /// Machine-readable protocol metadata printed by `--protocol-info`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,8 +66,8 @@ pub struct OwnershipHelperConfig {
     /// [`ExecutorErrorReport`].
     pub error_report: PathBuf,
 
-    /// Canonical materialization manifest bytes encoded as UTF-8 text.
-    pub manifest: String,
+    /// Absolute helper-visible path to a canonical fs-tree manifest file.
+    pub manifest_path: PathBuf,
 
     /// Logical-to-host id mapping configured by the parent.
     pub idmap: OwnershipHelperIdmap,
@@ -99,8 +99,8 @@ pub struct FsTreeTarHelperConfig {
     /// Absolute path where the helper writes a structured failure report.
     pub error_report: PathBuf,
 
-    /// Canonical fs-tree manifest bytes encoded as UTF-8 text.
-    pub manifest: String,
+    /// Absolute helper-visible path to a canonical fs-tree manifest file.
+    pub manifest_path: PathBuf,
 
     /// Absolute helper-visible input roots used by file sources.
     pub inputs: Vec<PathBuf>,
@@ -118,8 +118,8 @@ pub struct FsTreeInitramfsHelperConfig {
     /// Absolute path where the helper writes a structured failure report.
     pub error_report: PathBuf,
 
-    /// Canonical fs-tree manifest bytes encoded as UTF-8 text.
-    pub manifest: String,
+    /// Absolute helper-visible path to a canonical fs-tree manifest file.
+    pub manifest_path: PathBuf,
 
     /// Absolute helper-visible input roots used by file sources.
     pub inputs: Vec<PathBuf>,
@@ -218,7 +218,7 @@ mod tests {
         let config = OwnershipHelperConfig {
             target_root: PathBuf::from("/tmp/root"),
             error_report: PathBuf::from("/tmp/error.json"),
-            manifest: "{}\n".to_string(),
+            manifest_path: PathBuf::from("/tmp/manifest.jsonl"),
             idmap: OwnershipHelperIdmap {
                 current_uid: 1000,
                 current_gid: 1000,
@@ -242,7 +242,7 @@ mod tests {
         let config = FsTreeTarHelperConfig {
             output_tar: PathBuf::from("/tmp/rootfs.tar"),
             error_report: PathBuf::from("/tmp/error.json"),
-            manifest: "{}\n".to_string(),
+            manifest_path: PathBuf::from("/tmp/manifest.jsonl"),
             inputs: vec![PathBuf::from("/tmp/input/root")],
             sources: vec![
                 FsTreeArchiveEntrySource::Directory,
@@ -256,6 +256,7 @@ mod tests {
 
         let value = serde_json::to_value(&config).unwrap();
         assert_eq!(value["output_tar"], "/tmp/rootfs.tar");
+        assert_eq!(value["manifest_path"], "/tmp/manifest.jsonl");
         assert_eq!(value["sources"][1]["kind"], "file");
         assert_eq!(value["sources"][1]["path"], "bin/tool");
 
