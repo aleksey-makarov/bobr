@@ -31,11 +31,7 @@ fn run_config(config: FsTreeInitramfsHelperConfig) -> Result<(), String> {
     let executor = FsTreeInitramfsExecutor {
         entries: manifest.entries().to_vec(),
         sources: config.sources,
-        input_roots: config
-            .inputs
-            .into_iter()
-            .map(|input| input.root_dir)
-            .collect(),
+        input_roots: config.inputs,
         output: config.output_initramfs,
         error_report: config.error_report,
     };

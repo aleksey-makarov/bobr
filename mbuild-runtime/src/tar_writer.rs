@@ -5,9 +5,7 @@ use crate::{
     idmap::MbuildIdmap,
     local_helper::{preflight_local_helper_runtime, run_local_helper_with_config},
 };
-use mbuild_core::runtime_helper_protocol::{
-    FsTreeArchiveEntrySource, FsTreeArchiveInput, FsTreeTarHelperConfig,
-};
+use mbuild_core::runtime_helper_protocol::{FsTreeArchiveEntrySource, FsTreeTarHelperConfig};
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -163,7 +161,7 @@ fn tar_helper_config(
         output_tar: output_tar.to_path_buf(),
         error_report: error_report.to_path_buf(),
         manifest: manifest_text(manifest, "fs-tree tar manifest")?,
-        inputs: archive_inputs(input_roots),
+        inputs: input_roots.to_vec(),
         sources: archive_sources(sources),
     })
 }
@@ -194,15 +192,6 @@ fn canonicalize_output_path(path: &Path, label: &str) -> Result<PathBuf, Runtime
     })?;
     let parent = fs::canonicalize(parent)?;
     Ok(parent.join(file_name))
-}
-
-fn archive_inputs(input_roots: &[PathBuf]) -> Vec<FsTreeArchiveInput> {
-    input_roots
-        .iter()
-        .map(|root_dir| FsTreeArchiveInput {
-            root_dir: root_dir.clone(),
-        })
-        .collect()
 }
 
 fn archive_sources(sources: &[FsTreeTarEntrySource]) -> Vec<FsTreeArchiveEntrySource> {
@@ -301,7 +290,7 @@ mod tests {
         .unwrap();
 
         assert!(config.manifest.ends_with('\n'));
-        assert_eq!(config.inputs[0].root_dir, PathBuf::from("/input/root"));
+        assert_eq!(config.inputs[0], PathBuf::from("/input/root"));
         assert_eq!(
             config.sources[1],
             FsTreeArchiveEntrySource::File {

@@ -31,11 +31,7 @@ fn run_config(config: FsTreeTarHelperConfig) -> Result<(), String> {
     let executor = FsTreeTarExecutor {
         entries: manifest.entries().to_vec(),
         sources: config.sources,
-        input_roots: config
-            .inputs
-            .into_iter()
-            .map(|input| input.root_dir)
-            .collect(),
+        input_roots: config.inputs,
         output: config.output_tar,
         error_report: config.error_report,
     };

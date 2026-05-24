@@ -73,16 +73,6 @@ pub struct OwnershipHelperConfig {
     pub idmap: OwnershipHelperIdmap,
 }
 
-/// A helper-visible fs-tree input root for archive generation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FsTreeArchiveInput {
-    /// Absolute path to an input object's `root/` directory.
-    ///
-    /// The path must be valid in the helper process. For the current local
-    /// helper launcher this is a canonical host path.
-    pub root_dir: PathBuf,
-}
-
 /// Source selected for one manifest entry in an archive helper operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -112,8 +102,8 @@ pub struct FsTreeTarHelperConfig {
     /// Canonical fs-tree manifest bytes encoded as UTF-8 text.
     pub manifest: String,
 
-    /// Helper-visible input roots used by file sources.
-    pub inputs: Vec<FsTreeArchiveInput>,
+    /// Absolute helper-visible input roots used by file sources.
+    pub inputs: Vec<PathBuf>,
 
     /// Per-entry source mapping in the same order as `manifest.entries()`.
     pub sources: Vec<FsTreeArchiveEntrySource>,
@@ -131,8 +121,8 @@ pub struct FsTreeInitramfsHelperConfig {
     /// Canonical fs-tree manifest bytes encoded as UTF-8 text.
     pub manifest: String,
 
-    /// Helper-visible input roots used by file sources.
-    pub inputs: Vec<FsTreeArchiveInput>,
+    /// Absolute helper-visible input roots used by file sources.
+    pub inputs: Vec<PathBuf>,
 
     /// Per-entry source mapping in the same order as `manifest.entries()`.
     pub sources: Vec<FsTreeArchiveEntrySource>,
@@ -253,9 +243,7 @@ mod tests {
             output_tar: PathBuf::from("/tmp/rootfs.tar"),
             error_report: PathBuf::from("/tmp/error.json"),
             manifest: "{}\n".to_string(),
-            inputs: vec![FsTreeArchiveInput {
-                root_dir: PathBuf::from("/tmp/input/root"),
-            }],
+            inputs: vec![PathBuf::from("/tmp/input/root")],
             sources: vec![
                 FsTreeArchiveEntrySource::Directory,
                 FsTreeArchiveEntrySource::File {
