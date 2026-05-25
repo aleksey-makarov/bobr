@@ -8,7 +8,8 @@ use crate::{
     error::RuntimeError,
     idmap::MbuildIdmap,
     local_helper::{
-        preflight_local_helper_runtime, run_local_helper_with_config, write_helper_manifest,
+        LocalHelperOperation, preflight_local_helper_runtime, run_local_helper_operation,
+        write_helper_manifest,
     },
 };
 use mbuild_core::runtime_helper_protocol::FsTreeInitramfsHelperConfig;
@@ -42,70 +43,85 @@ pub fn write_fs_tree_initramfs_in_ownership_namespace(
     let output_initramfs = canonicalize_output_path(output_initramfs, "initramfs output path")?;
     let input_roots = canonicalize_input_roots(inputs)?;
 
-    run_local_helper_with_config(
+    run_local_helper_operation(
         idmap,
         workspace,
-        "fs-tree-initramfs",
-        "fs-tree-initramfs-helper.json",
-        |run_dir, error_report| {
-            let manifest_path = run_dir.join("fs-tree-initramfs-manifest.jsonl");
-            write_helper_manifest(&manifest_path, manifest, "fs-tree initramfs manifest")?;
-            let config = initramfs_helper_config(
-                &input_roots,
-                &manifest_path,
-                sources,
-                &output_initramfs,
-                error_report,
-            )?;
-            serde_json::to_vec(&config).map_err(|error| {
-                RuntimeError::Executor(format!(
-                    "failed to serialize fs-tree initramfs helper config: {error}"
-                ))
-            })
+        FsTreeInitramfsOperation {
+            input_roots,
+            manifest,
+            sources,
+            output_initramfs,
         },
     )
 }
 
-fn initramfs_helper_config(
-    input_roots: &[PathBuf],
-    manifest_path: &Path,
-    sources: &[FsTreeArchiveEntrySource],
-    output_initramfs: &Path,
-    error_report: &Path,
-) -> Result<FsTreeInitramfsHelperConfig, RuntimeError> {
-    Ok(FsTreeInitramfsHelperConfig {
-        output_initramfs: output_initramfs.to_path_buf(),
-        error_report: error_report.to_path_buf(),
-        manifest_path: manifest_path.to_path_buf(),
-        inputs: input_roots.to_vec(),
-        sources: sources.to_vec(),
-    })
+struct FsTreeInitramfsOperation<'a> {
+    input_roots: Vec<PathBuf>,
+    manifest: &'a FsTreeManifest,
+    sources: &'a [FsTreeArchiveEntrySource],
+    output_initramfs: PathBuf,
+}
+
+impl LocalHelperOperation for FsTreeInitramfsOperation<'_> {
+    type Config = FsTreeInitramfsHelperConfig;
+
+    const COMMAND: &'static str = "fs-tree-initramfs";
+    const CONFIG_FILE: &'static str = "fs-tree-initramfs-helper.json";
+    const CONFIG_LABEL: &'static str = "fs-tree initramfs helper config";
+
+    fn build_config(
+        &self,
+        run_dir: &Path,
+        error_report: &Path,
+    ) -> Result<Self::Config, RuntimeError> {
+        let manifest_path = run_dir.join("fs-tree-initramfs-manifest.jsonl");
+        write_helper_manifest(&manifest_path, self.manifest, "fs-tree initramfs manifest")?;
+        Ok(FsTreeInitramfsHelperConfig {
+            output_initramfs: self.output_initramfs.clone(),
+            error_report: error_report.to_path_buf(),
+            manifest_path,
+            inputs: self.input_roots.clone(),
+            sources: self.sources.to_vec(),
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mbuild_core::FsTreeEntry;
     use tempfile::tempdir;
 
     #[test]
-    fn initramfs_helper_config_serializes_manifest_inputs_and_sources() {
+    fn initramfs_operation_builds_config_with_manifest_inputs_and_sources() {
         let temp = tempdir().unwrap();
-        let config = initramfs_helper_config(
-            &[PathBuf::from("/input/root")],
-            &temp.path().join("manifest.jsonl"),
-            &[
-                FsTreeArchiveEntrySource::Directory,
-                FsTreeArchiveEntrySource::File {
-                    input_index: 0,
-                    path: "file".to_string(),
-                },
-            ],
-            &temp.path().join("initramfs.img"),
-            &temp.path().join("error.json"),
-        )
+        let manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::file("file", 1, 1, 0o644),
+        ])
         .unwrap();
+        let sources = [
+            FsTreeArchiveEntrySource::Directory,
+            FsTreeArchiveEntrySource::File {
+                input_index: 0,
+                path: "file".to_string(),
+            },
+        ];
+        let operation = FsTreeInitramfsOperation {
+            input_roots: vec![PathBuf::from("/input/root")],
+            manifest: &manifest,
+            sources: &sources,
+            output_initramfs: temp.path().join("initramfs.img"),
+        };
+        let config = operation
+            .build_config(temp.path(), &temp.path().join("error.json"))
+            .unwrap();
 
-        assert_eq!(config.manifest_path, temp.path().join("manifest.jsonl"));
+        assert_eq!(
+            config.manifest_path,
+            temp.path().join("fs-tree-initramfs-manifest.jsonl")
+        );
+        assert!(config.manifest_path.is_file());
         assert_eq!(config.inputs[0], PathBuf::from("/input/root"));
         assert_eq!(
             config.sources[1],

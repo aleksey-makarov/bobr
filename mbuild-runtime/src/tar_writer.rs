@@ -8,7 +8,8 @@ use crate::{
     error::RuntimeError,
     idmap::MbuildIdmap,
     local_helper::{
-        preflight_local_helper_runtime, run_local_helper_with_config, write_helper_manifest,
+        LocalHelperOperation, preflight_local_helper_runtime, run_local_helper_operation,
+        write_helper_manifest,
     },
 };
 use mbuild_core::runtime_helper_protocol::FsTreeTarHelperConfig;
@@ -36,44 +37,47 @@ pub fn write_fs_tree_tar_in_ownership_namespace(
     let output_tar = canonicalize_output_path(output_tar, "tar output path")?;
     let input_roots = canonicalize_input_roots(inputs)?;
 
-    run_local_helper_with_config(
+    run_local_helper_operation(
         idmap,
         workspace,
-        "fs-tree-tar",
-        "fs-tree-tar-helper.json",
-        |run_dir, error_report| {
-            let manifest_path = run_dir.join("fs-tree-tar-manifest.jsonl");
-            write_helper_manifest(&manifest_path, manifest, "fs-tree tar manifest")?;
-            let config = tar_helper_config(
-                &input_roots,
-                &manifest_path,
-                sources,
-                &output_tar,
-                error_report,
-            )?;
-            serde_json::to_vec(&config).map_err(|error| {
-                RuntimeError::Executor(format!(
-                    "failed to serialize fs-tree tar helper config: {error}"
-                ))
-            })
+        FsTreeTarOperation {
+            input_roots,
+            manifest,
+            sources,
+            output_tar,
         },
     )
 }
 
-fn tar_helper_config(
-    input_roots: &[PathBuf],
-    manifest_path: &Path,
-    sources: &[FsTreeArchiveEntrySource],
-    output_tar: &Path,
-    error_report: &Path,
-) -> Result<FsTreeTarHelperConfig, RuntimeError> {
-    Ok(FsTreeTarHelperConfig {
-        output_tar: output_tar.to_path_buf(),
-        error_report: error_report.to_path_buf(),
-        manifest_path: manifest_path.to_path_buf(),
-        inputs: input_roots.to_vec(),
-        sources: sources.to_vec(),
-    })
+struct FsTreeTarOperation<'a> {
+    input_roots: Vec<PathBuf>,
+    manifest: &'a FsTreeManifest,
+    sources: &'a [FsTreeArchiveEntrySource],
+    output_tar: PathBuf,
+}
+
+impl LocalHelperOperation for FsTreeTarOperation<'_> {
+    type Config = FsTreeTarHelperConfig;
+
+    const COMMAND: &'static str = "fs-tree-tar";
+    const CONFIG_FILE: &'static str = "fs-tree-tar-helper.json";
+    const CONFIG_LABEL: &'static str = "fs-tree tar helper config";
+
+    fn build_config(
+        &self,
+        run_dir: &Path,
+        error_report: &Path,
+    ) -> Result<Self::Config, RuntimeError> {
+        let manifest_path = run_dir.join("fs-tree-tar-manifest.jsonl");
+        write_helper_manifest(&manifest_path, self.manifest, "fs-tree tar manifest")?;
+        Ok(FsTreeTarHelperConfig {
+            output_tar: self.output_tar.clone(),
+            error_report: error_report.to_path_buf(),
+            manifest_path,
+            inputs: self.input_roots.clone(),
+            sources: self.sources.to_vec(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -108,24 +112,35 @@ mod tests {
     }
 
     #[test]
-    fn tar_helper_config_serializes_manifest_inputs_and_sources() {
+    fn tar_operation_builds_config_with_manifest_inputs_and_sources() {
         let temp = tempdir().unwrap();
-        let config = tar_helper_config(
-            &[PathBuf::from("/input/root")],
-            &temp.path().join("manifest.jsonl"),
-            &[
-                FsTreeArchiveEntrySource::Directory,
-                FsTreeArchiveEntrySource::File {
-                    input_index: 0,
-                    path: "file".to_string(),
-                },
-            ],
-            &temp.path().join("out.tar"),
-            &temp.path().join("error.json"),
-        )
+        let manifest = FsTreeManifest::from_entries(vec![
+            FsTreeEntry::directory("", 0, 0, 0o755),
+            FsTreeEntry::file("file", 1, 1, 0o644),
+        ])
         .unwrap();
+        let sources = [
+            FsTreeArchiveEntrySource::Directory,
+            FsTreeArchiveEntrySource::File {
+                input_index: 0,
+                path: "file".to_string(),
+            },
+        ];
+        let operation = FsTreeTarOperation {
+            input_roots: vec![PathBuf::from("/input/root")],
+            manifest: &manifest,
+            sources: &sources,
+            output_tar: temp.path().join("out.tar"),
+        };
+        let config = operation
+            .build_config(temp.path(), &temp.path().join("error.json"))
+            .unwrap();
 
-        assert_eq!(config.manifest_path, temp.path().join("manifest.jsonl"));
+        assert_eq!(
+            config.manifest_path,
+            temp.path().join("fs-tree-tar-manifest.jsonl")
+        );
+        assert!(config.manifest_path.is_file());
         assert_eq!(config.inputs[0], PathBuf::from("/input/root"));
         assert_eq!(
             config.sources[1],

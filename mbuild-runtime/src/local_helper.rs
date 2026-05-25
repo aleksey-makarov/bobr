@@ -5,6 +5,7 @@ use mbuild_core::FsTreeManifest;
 use mbuild_core::runtime_helper_protocol::{
     HELPER_BINARY_NAME, HELPER_PROTOCOL_VERSION, HelperProtocolInfo,
 };
+use serde::Serialize;
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -46,7 +47,43 @@ pub(crate) fn preflight_local_helper_runtime(idmap: &MbuildIdmap) -> Result<(), 
     Ok(())
 }
 
-pub(crate) fn run_local_helper_with_config<F>(
+pub(crate) trait LocalHelperOperation {
+    type Config: Serialize;
+
+    const COMMAND: &'static str;
+    const CONFIG_FILE: &'static str;
+    const CONFIG_LABEL: &'static str;
+
+    fn build_config(
+        &self,
+        run_dir: &Path,
+        error_report: &Path,
+    ) -> Result<Self::Config, RuntimeError>;
+}
+
+pub(crate) fn run_local_helper_operation<O>(
+    idmap: &MbuildIdmap,
+    workspace: &Path,
+    operation: O,
+) -> Result<(), RuntimeError>
+where
+    O: LocalHelperOperation,
+{
+    run_local_helper_with_config(
+        idmap,
+        workspace,
+        O::COMMAND,
+        O::CONFIG_FILE,
+        |run_dir, error_report| {
+            let config = operation.build_config(run_dir, error_report)?;
+            serde_json::to_vec(&config).map_err(|error| {
+                RuntimeError::Executor(format!("failed to serialize {}: {error}", O::CONFIG_LABEL))
+            })
+        },
+    )
+}
+
+fn run_local_helper_with_config<F>(
     idmap: &MbuildIdmap,
     workspace: &Path,
     operation: &str,

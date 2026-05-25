@@ -1,12 +1,13 @@
 use crate::error::RuntimeError;
 use crate::idmap::MbuildIdmap;
 use crate::local_helper::{
-    preflight_local_helper_runtime, run_local_helper_with_config, write_helper_manifest,
+    LocalHelperOperation, preflight_local_helper_runtime, run_local_helper_operation,
+    write_helper_manifest,
 };
 use mbuild_core::FsTreeManifest;
 use mbuild_core::runtime_helper_protocol::{OwnershipHelperConfig, OwnershipHelperIdmap};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub(crate) fn preflight_local_ownership_runtime(idmap: &MbuildIdmap) -> Result<(), RuntimeError> {
     preflight_local_helper_runtime(idmap)
@@ -19,63 +20,80 @@ pub(crate) fn run_local_ownership(
     workspace: &Path,
 ) -> Result<(), RuntimeError> {
     let target_root = fs::canonicalize(target_root)?;
-    run_local_helper_with_config(
+    run_local_helper_operation(
         idmap,
         workspace,
-        "ownership",
-        "ownership-helper.json",
-        |run_dir, error_report| {
-            let manifest_path = run_dir.join("ownership-manifest.jsonl");
-            write_helper_manifest(&manifest_path, manifest, "ownership manifest")?;
-            let config = helper_config(&target_root, &manifest_path, idmap, error_report)?;
-            serde_json::to_vec(&config).map_err(|error| {
-                RuntimeError::Executor(format!(
-                    "failed to serialize ownership helper config: {error}"
-                ))
-            })
+        OwnershipOperation {
+            target_root,
+            manifest,
+            idmap,
         },
     )
 }
 
-fn helper_config(
-    target_root: &Path,
-    manifest_path: &Path,
-    idmap: &MbuildIdmap,
-    error_report: &Path,
-) -> Result<OwnershipHelperConfig, RuntimeError> {
-    Ok(OwnershipHelperConfig {
-        target_root: target_root.to_path_buf(),
-        error_report: error_report.to_path_buf(),
-        manifest_path: manifest_path.to_path_buf(),
-        idmap: OwnershipHelperIdmap {
-            current_uid: idmap.current_uid(),
-            current_gid: idmap.current_gid(),
-            subuid_base: idmap.subuid_base(),
-            subuid_count: idmap.subuid_count(),
-            subgid_base: idmap.subgid_base(),
-            subgid_count: idmap.subgid_count(),
-        },
-    })
+struct OwnershipOperation<'a> {
+    target_root: PathBuf,
+    manifest: &'a FsTreeManifest,
+    idmap: &'a MbuildIdmap,
+}
+
+impl LocalHelperOperation for OwnershipOperation<'_> {
+    type Config = OwnershipHelperConfig;
+
+    const COMMAND: &'static str = "ownership";
+    const CONFIG_FILE: &'static str = "ownership-helper.json";
+    const CONFIG_LABEL: &'static str = "ownership helper config";
+
+    fn build_config(
+        &self,
+        run_dir: &Path,
+        error_report: &Path,
+    ) -> Result<Self::Config, RuntimeError> {
+        let manifest_path = run_dir.join("ownership-manifest.jsonl");
+        write_helper_manifest(&manifest_path, self.manifest, "ownership manifest")?;
+        Ok(OwnershipHelperConfig {
+            target_root: self.target_root.clone(),
+            error_report: error_report.to_path_buf(),
+            manifest_path,
+            idmap: OwnershipHelperIdmap {
+                current_uid: self.idmap.current_uid(),
+                current_gid: self.idmap.current_gid(),
+                subuid_base: self.idmap.subuid_base(),
+                subuid_count: self.idmap.subuid_count(),
+                subgid_base: self.idmap.subgid_base(),
+                subgid_count: self.idmap.subgid_count(),
+            },
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use mbuild_core::FsTreeEntry;
+    use tempfile::tempdir;
 
     #[test]
-    fn helper_config_serializes_manifest_and_idmap() {
+    fn ownership_operation_builds_config_with_manifest_and_idmap() {
+        let temp = tempdir().unwrap();
         let idmap = MbuildIdmap::for_tests(1000, 1001, 100000, 3, 200000, 4);
-        let config = helper_config(
-            Path::new("/tmp/root"),
-            Path::new("/tmp/manifest.jsonl"),
-            &idmap,
-            Path::new("/tmp/error.json"),
-        )
-        .unwrap();
+        let manifest =
+            FsTreeManifest::from_entries(vec![FsTreeEntry::directory("", 0, 0, 0o755)]).unwrap();
+        let operation = OwnershipOperation {
+            target_root: PathBuf::from("/tmp/root"),
+            manifest: &manifest,
+            idmap: &idmap,
+        };
+        let config = operation
+            .build_config(temp.path(), &temp.path().join("error.json"))
+            .unwrap();
 
         assert_eq!(config.target_root, PathBuf::from("/tmp/root"));
-        assert_eq!(config.manifest_path, PathBuf::from("/tmp/manifest.jsonl"));
+        assert_eq!(
+            config.manifest_path,
+            temp.path().join("ownership-manifest.jsonl")
+        );
+        assert!(config.manifest_path.is_file());
         assert_eq!(config.idmap.current_gid, 1001);
     }
 }

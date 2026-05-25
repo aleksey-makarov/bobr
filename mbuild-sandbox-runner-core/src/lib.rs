@@ -1,7 +1,10 @@
 use fsobj_hash::{ObjectHash, hash_fs_tree_object, hash_path, hash_symlink_node};
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
+#[cfg(not(test))]
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-use nix::unistd::{Gid, Pid, Uid, chown, setgid, setgroups, setuid};
+#[cfg(not(test))]
+use nix::unistd::Pid;
+use nix::unistd::{Gid, Uid, chown, setgid, setgroups, setuid};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -643,7 +646,10 @@ fn prepare_error(operation: &str, path: &Path, error: io::Error) -> SandboxRunne
 fn terminate_remaining_children() {
     #[cfg(test)]
     {
-        reap_finished_children();
+        // Unit tests run multiple runner instances concurrently in one process.
+        // A process-wide waitpid(-1) here can reap another test's step child
+        // before that test calls Child::wait, turning a step failure report
+        // into a runtime wait error.
     }
     #[cfg(not(test))]
     {
@@ -658,6 +664,10 @@ fn terminate_remaining_children() {
     }
 }
 
+#[cfg(test)]
+fn reap_finished_children() {}
+
+#[cfg(not(test))]
 fn reap_finished_children() {
     loop {
         match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
