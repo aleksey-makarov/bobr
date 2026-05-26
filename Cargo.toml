@@ -2,7 +2,7 @@
 members = [
   "mbuild",
   "mbuild-core",
-  "mbuild-binary",
+  "mbuild-sandbox",
   "mbuild-group",
   "mbuild-origin-http",
   "mbuild-origin-oci-registry",

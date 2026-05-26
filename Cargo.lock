@@ -900,12 +900,12 @@ dependencies = [
  "flate2",
  "fsobj-hash",
  "libc",
- "mbuild-binary",
  "mbuild-core",
  "mbuild-group",
  "mbuild-image",
  "mbuild-origin-http",
  "mbuild-origin-oci-registry",
+ "mbuild-sandbox",
  "mbuild-text",
  "mbuild-tree",
  "mockito",
@@ -916,17 +916,6 @@ dependencies = [
  "tempfile",
  "time",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "mbuild-binary"
-version = "0.1.0"
-dependencies = [
- "mbuild-core",
- "mbuild-runtime",
- "serde",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -1029,6 +1018,17 @@ dependencies = [
  "nix",
  "serde_json",
  "tar",
+ "tempfile",
+]
+
+[[package]]
+name = "mbuild-sandbox"
+version = "0.1.0"
+dependencies = [
+ "mbuild-core",
+ "mbuild-runtime",
+ "serde",
+ "serde_json",
  "tempfile",
 ]
 

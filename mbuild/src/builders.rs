@@ -1,7 +1,7 @@
-use mbuild_binary::SandboxBuilder;
 use mbuild_core::Builder;
 use mbuild_group::GroupBuilder;
 use mbuild_image::OciExtractBuilder;
+use mbuild_sandbox::SandboxBuilder;
 use mbuild_text::TextBuilder;
 use mbuild_tree::{
     ErofsRootfsBuilder, InitramfsBuilder, TreeBuilder, TreeMergeBuilder, TreeSubsetBuilder,
