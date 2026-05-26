@@ -1,3 +1,23 @@
+//! Recipe-facing `Sandbox` builder implementation.
+//!
+//! This crate owns the `Sandbox` builder surface that recipe authors see:
+//! parsing builder config, validating step definitions, resolving input
+//! interpolation, materializing `script_config`, and staging the final sandbox
+//! output as an fs-tree object.
+//!
+//! It deliberately does not implement namespace or mount setup. Once a recipe
+//! is lowered into [`SandboxBuildConfig`], execution is delegated to
+//! `mbuild-runtime`, which prepares the launcher workspace and runs
+//! `mbuild-sandbox-runner`.
+//!
+//! The main flow is:
+//!
+//! 1. Validate the recipe-facing `SandboxConfig`.
+//! 2. Resolve named inputs to stable container paths under `/__mbuild/inputs`.
+//! 3. Write `script_config` into a host directory that is mounted read-only.
+//! 4. Build `SandboxBuildConfig` for `mbuild-runtime`.
+//! 5. Stage the runtime output directory as an fs-tree object.
+
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     StagedBuildResult, TypedBuilder, fsutil,
@@ -13,24 +33,41 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Host-side name of the raw output directory before fs-tree staging.
 pub(crate) const OUTPUT_DIR_NAME: &str = "out";
+/// Host-side name of the directory containing materialized `script_config`.
 pub(crate) const CONFIG_DIR_NAME: &str = "config";
+/// Container path prefix used for recipe inputs other than `rootfs`.
 pub(crate) const INPUT_MOUNT_ROOT: &str = "/__mbuild/inputs";
+/// Container path where materialized `script_config` is mounted.
 pub(crate) const CONFIG_MOUNT_PATH: &str = "/__mbuild/config";
+/// Container path of the writable build directory.
 pub(crate) const BUILD_DIR_MOUNT_PATH: &str = "/__mbuild/build";
+/// Container path of the writable output directory.
 pub(crate) const OUT_DIR_MOUNT_PATH: &str = "/__mbuild/out";
 
+/// Builder implementation registered for recipe nodes tagged `Sandbox`.
 pub struct SandboxBuilder;
+
+/// Name of the staged fs-tree object directory inside the node temp dir.
 const FS_TREE_OBJECT_DIR_NAME: &str = "fs-tree-object";
 
+/// Recipe-facing `Sandbox` builder config.
+///
+/// `script_config` is an optional JSON tree with string leaves. It is written
+/// to files before execution and mounted at `/__mbuild/config`. `steps` are
+/// resolved into process executions inside the sandbox.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxConfig {
+    /// Optional tree of config files exposed to build steps.
     #[serde(default)]
     pub(crate) script_config: Option<Value>,
+    /// Ordered command steps to execute inside the sandbox.
     pub(crate) steps: Vec<BuildStep>,
 }
 
+/// Static builder contract advertised to the mbuild recipe runtime.
 pub(crate) static SANDBOX_SPEC: BuilderSpec = BuilderSpec {
     tag: "Sandbox",
     required_inputs: &["rootfs"],
@@ -106,11 +143,13 @@ impl TypedBuilder for SandboxBuilder {
     }
 }
 
+/// Validate the full recipe-facing config before host paths are prepared.
 fn validate_sandbox_config(config: &SandboxConfig) -> BResult<()> {
     validate_script_config(config.script_config.as_ref())?;
     validate_steps(&config.steps)
 }
 
+/// Ensure the required `rootfs` input resolves to a directory payload.
 fn validate_rootfs(rootfs: &BuilderInputObject) -> BResult<()> {
     let rootfs_path = object_payload_path(&rootfs.object_path);
     if !rootfs_path.is_dir() {
@@ -122,6 +161,11 @@ fn validate_rootfs(rootfs: &BuilderInputObject) -> BResult<()> {
     Ok(())
 }
 
+/// Lower recipe inputs and steps into the runtime-facing sandbox config.
+///
+/// This is the boundary between recipe semantics and runtime semantics:
+/// interpolation has already been checked, and the returned config contains
+/// concrete host paths plus absolute container mount paths.
 fn resolve_sandbox_config(
     rootfs: &BuilderInputObject,
     inputs: &[(String, BuilderInputObject)],
@@ -171,6 +215,11 @@ fn resolve_sandbox_config(
     })
 }
 
+/// Return the actual filesystem payload for a builder input object.
+///
+/// fs-tree objects are stored as `manifest.jsonl` plus `root/`; plain directory
+/// objects are used directly. Sandbox execution wants the payload root in both
+/// cases.
 fn object_payload_path(object_path: &Path) -> PathBuf {
     let fs_tree_root = object_path.join("root");
     if object_path.join("manifest.jsonl").is_file() && fs_tree_root.is_dir() {
@@ -180,6 +229,11 @@ fn object_payload_path(object_path: &Path) -> PathBuf {
     }
 }
 
+/// Convert the raw sandbox output directory into the canonical fs-tree shape.
+///
+/// The runtime scans and hashes the output before this function is called. This
+/// staging step preserves that manifest and moves the actual output tree under
+/// `root/`, which is the store representation used for fs-tree objects.
 fn stage_fs_tree_output(
     cx: &BuildContext,
     output_path: &Path,
@@ -205,6 +259,7 @@ fn stage_fs_tree_output(
     Ok(staged_path)
 }
 
+/// Resolve one recipe step into the process config consumed by `mbuild-runtime`.
 fn resolve_sandbox_step(
     step: &BuildStep,
     inputs: &[(String, BuilderInputObject)],
@@ -248,6 +303,10 @@ fn resolve_sandbox_step(
     })
 }
 
+/// Allocate the host log file path reported for a step stream.
+///
+/// Build contexts normally allocate stable raw log paths. The fallback keeps
+/// unit tests and minimal contexts functional without changing report shape.
 fn allocate_step_log_path(cx: &BuildContext, label: &str, fallback: PathBuf) -> BResult<PathBuf> {
     let path = match cx.allocate_raw_log_path(label) {
         Ok(path) => path,
@@ -264,6 +323,7 @@ fn allocate_step_log_path(cx: &BuildContext, label: &str, fallback: PathBuf) -> 
     Ok(path)
 }
 
+/// Convert an arbitrary step name into a filesystem-safe log basename.
 fn sanitize_log_name(name: &str) -> String {
     name.chars()
         .map(|ch| {
@@ -276,6 +336,11 @@ fn sanitize_log_name(name: &str) -> String {
         .collect()
 }
 
+/// Write a high-level sandbox result log into the build context.
+///
+/// Step-level stdout/stderr logs are written directly by the runner. This
+/// report ties those logs to the output hash and canonical manifest for easier
+/// inspection after a successful sandbox build.
 fn write_build_report(cx: &BuildContext, outcome: &mbuild_runtime::SandboxBuildOutcome) {
     let steps = outcome
         .steps
@@ -324,15 +389,21 @@ fn write_build_report(cx: &BuildContext, outcome: &mbuild_runtime::SandboxBuildO
     }
 }
 
+/// Internal error categories before they are mapped to `BuilderError`.
 #[derive(Debug)]
 pub(crate) enum SandboxError {
+    /// The recipe config is structurally invalid.
     InvalidConfig(String),
+    /// A recipe input did not resolve to a usable host path.
     InputResolutionFailed(String),
+    /// Sandbox execution or output staging failed.
     BuildFailed(String),
+    /// Host filesystem preparation failed.
     FsFailed(String),
 }
 
 impl SandboxError {
+    /// Return the human-readable error payload.
     fn message(&self) -> &str {
         match self {
             Self::InvalidConfig(message)
@@ -349,26 +420,37 @@ impl fmt::Display for SandboxError {
     }
 }
 
+/// Crate-local result type using `SandboxError`.
 pub(crate) type BResult<T> = Result<T, SandboxError>;
 
+/// User identity requested for one sandbox step.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum StepUser {
+    /// Run as the sandbox build user, currently logical uid/gid `1:1`.
     BuildUser,
+    /// Run as root inside the sandbox user namespace.
     Root,
 }
 
+/// One recipe-facing process step.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct BuildStep {
+    /// Stable step name used in reports and log filenames.
     pub(crate) name: String,
+    /// User identity for process execution.
     pub(crate) run_as: StepUser,
+    /// Working directory after interpolation.
     pub(crate) cwd: String,
+    /// Command argv after interpolation.
     pub(crate) argv: Vec<String>,
+    /// Additional string environment variables after interpolation.
     #[serde(default)]
     pub(crate) env: Map<String, Value>,
 }
 
+/// Validate step shape without resolving interpolation.
 pub(crate) fn validate_steps(steps: &[BuildStep]) -> BResult<()> {
     if steps.is_empty() {
         return Err(SandboxError::InvalidConfig(
@@ -405,6 +487,7 @@ pub(crate) fn validate_steps(steps: &[BuildStep]) -> BResult<()> {
     Ok(())
 }
 
+/// Validate that environment keys and values can be materialized.
 fn validate_step_env(env: &Map<String, Value>, path: &str) -> BResult<()> {
     for (key, value) in env {
         validate_script_config_key(key, path)?;
@@ -417,6 +500,7 @@ fn validate_step_env(env: &Map<String, Value>, path: &str) -> BResult<()> {
     Ok(())
 }
 
+/// Validate a recipe input name before using it as a mount path segment.
 fn validate_input_name(name: &str) -> BResult<()> {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
@@ -437,10 +521,16 @@ fn validate_input_name(name: &str) -> BResult<()> {
     Ok(())
 }
 
+/// Return the absolute container path for a named extra input.
 pub(crate) fn input_mount_path(name: &str) -> String {
     format!("{INPUT_MOUNT_ROOT}/{name}")
 }
 
+/// Collect and validate all extra inputs accepted by the `Sandbox` spec.
+///
+/// The `rootfs` input is handled separately. Extra inputs become readonly
+/// mounts and interpolation variables. Reserved names are rejected because they
+/// would shadow built-in variables.
 pub(crate) fn collect_named_inputs(
     spec: &BuilderSpec,
     builder_name: &str,
@@ -459,6 +549,11 @@ pub(crate) fn collect_named_inputs(
     Ok(named)
 }
 
+/// Render one step string by expanding `@{name}` interpolation variables.
+///
+/// `@@{name}` is an escape that produces a literal `@{name}`. The renderer is
+/// byte-index based, but it advances by UTF-8 char width for non-syntax text so
+/// non-ASCII literals remain valid even though interpolation names are ASCII.
 fn interpolate_step_string(
     value: &str,
     inputs: &[(String, BuilderInputObject)],
@@ -503,6 +598,7 @@ fn interpolate_step_string(
     Ok(rendered)
 }
 
+/// Validate an interpolation or interpolation escape name.
 fn validate_interpolation_name(key: &str, value: &str, escaped: bool) -> BResult<()> {
     let mut chars = key.chars();
     let Some(first) = chars.next() else {
@@ -530,6 +626,7 @@ fn validate_interpolation_name(key: &str, value: &str, escaped: bool) -> BResult
     Ok(())
 }
 
+/// Resolve a built-in or named-input interpolation variable.
 fn interpolation_value(key: &str, inputs: &[(String, BuilderInputObject)]) -> BResult<String> {
     match key {
         "build" => Ok(BUILD_DIR_MOUNT_PATH.to_string()),
@@ -550,6 +647,7 @@ fn interpolation_value(key: &str, inputs: &[(String, BuilderInputObject)]) -> BR
     }
 }
 
+/// Resolve and validate a step working directory.
 pub(crate) fn resolve_step_cwd(
     step: &BuildStep,
     inputs: &[(String, BuilderInputObject)],
@@ -564,6 +662,7 @@ pub(crate) fn resolve_step_cwd(
     Ok(cwd)
 }
 
+/// Resolve all argv entries for a step.
 pub(crate) fn resolve_step_argv(
     step: &BuildStep,
     inputs: &[(String, BuilderInputObject)],
@@ -574,6 +673,7 @@ pub(crate) fn resolve_step_argv(
         .collect()
 }
 
+/// Resolve all environment values for a step.
 pub(crate) fn resolve_step_env(
     step: &BuildStep,
     inputs: &[(String, BuilderInputObject)],
@@ -591,6 +691,10 @@ pub(crate) fn resolve_step_env(
     Ok(rendered)
 }
 
+/// Eagerly validate interpolation in every step field.
+///
+/// The builder calls this before creating host runtime directories so config
+/// errors are reported as recipe errors rather than partial execution failures.
 pub(crate) fn validate_step_interpolations(
     steps: &[BuildStep],
     inputs: &[(String, BuilderInputObject)],
@@ -603,10 +707,12 @@ pub(crate) fn validate_step_interpolations(
     Ok(())
 }
 
+/// Convert fsutil errors into sandbox-local filesystem errors.
 pub(crate) fn map_fsutil_error(error: fsutil::FsUtilError) -> SandboxError {
     SandboxError::FsFailed(error.to_string())
 }
 
+/// Map sandbox-local errors to the recipe runtime error categories.
 pub(crate) fn map_error(error: SandboxError) -> BuilderError {
     match error {
         SandboxError::InvalidConfig(message) => BuilderError::InvalidRecipe(message),
@@ -616,6 +722,7 @@ pub(crate) fn map_error(error: SandboxError) -> BuilderError {
     }
 }
 
+/// Validate `script_config` before materializing it on disk.
 pub(crate) fn validate_script_config(value: Option<&Value>) -> BResult<()> {
     match value {
         None | Some(Value::Null) => Ok(()),
@@ -623,6 +730,7 @@ pub(crate) fn validate_script_config(value: Option<&Value>) -> BResult<()> {
     }
 }
 
+/// Recursively validate one `script_config` node.
 fn validate_script_config_node(value: &Value, path: &str) -> BResult<()> {
     match value {
         Value::String(_) => Ok(()),
@@ -645,6 +753,7 @@ fn validate_script_config_node(value: &Value, path: &str) -> BResult<()> {
     }
 }
 
+/// Validate a `script_config` object key before using it as a path segment.
 fn validate_script_config_key(key: &str, path: &str) -> BResult<()> {
     if key.is_empty()
         || key == "."
@@ -661,6 +770,11 @@ fn validate_script_config_key(key: &str, path: &str) -> BResult<()> {
     Ok(())
 }
 
+/// Materialize `script_config` under `root`.
+///
+/// Records and arrays become directories. String leaves become files. Array
+/// entries use zero-padded numeric filenames so lexical order preserves array
+/// order.
 pub(crate) fn write_script_config(root: &Path, value: Option<&Value>) -> BResult<()> {
     match value {
         None | Some(Value::Null) => Ok(()),
@@ -668,6 +782,7 @@ pub(crate) fn write_script_config(root: &Path, value: Option<&Value>) -> BResult
     }
 }
 
+/// Recursively write one `script_config` node to the host filesystem.
 fn write_script_config_node(path: &Path, value: &Value, debug_path: &str) -> BResult<()> {
     match value {
         Value::String(contents) => fs::write(path, contents).map_err(|error| {
