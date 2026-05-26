@@ -151,17 +151,10 @@ fn resolve_sandbox_config(
         .collect::<BResult<Vec<_>>>()?;
 
     let workspace = cx.temp_dir.join("runtime");
-    let state_dir = cx.state_dir.join("runtime");
     std::fs::create_dir_all(&workspace).map_err(|error| {
         SandboxError::FsFailed(format!(
             "failed to create sandbox runtime workspace '{}': {error}",
             workspace.display()
-        ))
-    })?;
-    std::fs::create_dir_all(&state_dir).map_err(|error| {
-        SandboxError::FsFailed(format!(
-            "failed to create sandbox runtime state dir '{}': {error}",
-            state_dir.display()
         ))
     })?;
 
@@ -170,7 +163,6 @@ fn resolve_sandbox_config(
         out_dir: output_path.to_path_buf(),
         config_dir: config_path.to_path_buf(),
         workspace,
-        state_dir,
         inputs: sandbox_inputs,
         steps: sandbox_steps,
     })

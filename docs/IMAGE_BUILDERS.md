@@ -9,7 +9,7 @@ OCI and rootfs-backed execution path consists of:
   image from a registry into the store as an OCI image layout directory
 - `OciExtract`: extract one OCI image layout input into an fs-tree object
 - `Sandbox`: execute an explicit step plan against a readonly fs-tree rootfs
-  input with `mbuild-runtime` and libcontainer
+  input with the `mbuild-runtime` sandbox launcher
 
 There is no active builder for producing derived OCI image layouts from fs-tree
 inputs. Root filesystem composition is performed through fs-tree builders such

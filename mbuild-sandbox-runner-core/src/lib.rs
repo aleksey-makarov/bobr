@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub const RUNNER_BINARY_NAME: &str = "mbuild-sandbox-runner";
-pub const RUNNER_PROTOCOL_VERSION: u32 = 1;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 2;
 
 const BUILD_USER_UID: u32 = 1;
 const BUILD_USER_GID: u32 = 1;
@@ -48,6 +48,32 @@ pub struct RunnerConfig {
     pub success_report: PathBuf,
     pub failure_report: PathBuf,
     pub breadcrumbs: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxLauncherConfig {
+    pub protocol_version: u32,
+    pub root: PathBuf,
+    pub mounts: Vec<SandboxLauncherMount>,
+    pub runner_config: PathBuf,
+    pub failure_report: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxLauncherMount {
+    pub kind: SandboxLauncherMountKind,
+    pub source: Option<PathBuf>,
+    pub target: PathBuf,
+    pub readonly: bool,
+    pub options: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxLauncherMountKind {
+    Bind,
+    Proc,
+    Tmpfs,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,7 +134,7 @@ pub struct SandboxRunnerFailureReport {
 }
 
 impl SandboxRunnerFailureReport {
-    fn runtime(label: &str, message: String) -> Self {
+    pub fn runtime(label: &str, message: String) -> Self {
         Self {
             label: label.to_string(),
             message,

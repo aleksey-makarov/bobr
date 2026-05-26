@@ -9,10 +9,6 @@ integration-tests = []
 [dependencies]
 fsobj-hash = { path = "../fsobj-hash" }
 libc = "0.2"
-libcontainer = { git = "https://github.com/youki-dev/youki", rev = "4b2f0e00a4a11107f3a338c21c17407d2f664ec9", default-features = false, features = [
-  "systemd",
-  "v2",
-] }
 mbuild-core = { path = "../mbuild-core" }
 mbuild-sandbox-runner-core = { path = "../mbuild-sandbox-runner-core" }
 nix = { version = "0.29", features = ["fs", "process", "user"] }

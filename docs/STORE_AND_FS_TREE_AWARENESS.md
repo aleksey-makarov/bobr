@@ -14,12 +14,13 @@ store objects, fs-tree manifests, logical ownership, and extended ids.
 | `TreeMerge` | One fs-tree directory object | Reads input manifests, validates each input root against its manifest, merges logical uid/gid/mode metadata, and materializes the merged tree. Regular files are hardlinked when possible. | Uses the runtime helper for ownership materialization where host ownership must be applied. |
 | `ErofsRootfs` | One EROFS image file | Consumes fs-tree manifests. Tar headers used as the EROFS input carry logical uid, gid, mode, symlink targets, and deterministic mtimes from the merged manifest. | Uses the runtime helper to write the tar stream in the ownership namespace, then runs `mkfs.erofs` on the host. |
 | `Initramfs` | One Linux `newc` cpio archive file | Consumes fs-tree manifests. Cpio headers carry logical uid, gid, mode, symlink targets, and deterministic mtimes from the merged manifest. | Uses the runtime helper to read input file bytes in the ownership namespace and write the archive. |
-| `Sandbox` | One fs-tree directory object | Reads a prepared fs-tree rootfs as input and scans the produced output manifest after execution. Extended ids are currently handled by the container/user-namespace runtime path, not by the local helper operation model. | Still uses the libcontainer-based sandbox runtime. |
+| `Sandbox` | One fs-tree directory object | Reads a prepared fs-tree rootfs as input and scans the produced output manifest after execution. Extended ids are handled by the sandbox launcher user namespace. | Uses the dedicated `mbuild-sandbox-runner` launcher path. |
 | `OciExtract` | One fs-tree directory object plus `oci-config.json` | Reads uid/gid/mode information from OCI layer tar headers into the fs-tree manifest, including non-host logical ids, then materializes the extracted root. | Uses the runtime helper for ownership materialization where host ownership must be applied. |
 
-`Sandbox` is the remaining builder path that still relies on the
-libcontainer-based runtime rather than the local helper operations used by
-the parent-side fs-tree authoring and archive paths.
+`Sandbox` runs through a dedicated launcher because it needs step execution,
+mount isolation, and output scanning inside one prepared root filesystem.
+The parent-side fs-tree authoring and archive paths continue to use the local
+runtime helper operations.
 
 ## Source and Origins
 

@@ -1,9 +1,9 @@
 //! Runtime support for idmap-backed builder operations.
 //!
-//! `mbuild-runtime` exposes builder-facing runtime capabilities rather than
-//! raw `libcontainer` primitives. Public callers should use the facade
-//! functions exported from this crate root. OCI bundle construction, executor
-//! lifecycle handling, and child-side error reporting are internal details.
+//! `mbuild-runtime` exposes builder-facing runtime capabilities. Public
+//! callers should use the facade functions exported from this crate root.
+//! Helper launch, sandbox bootstrap, and child-side error reporting are
+//! internal details.
 //!
 //! The current public capabilities are fs-tree ownership materialization
 //! through [`apply_ownership_batch`] plus deterministic fs-tree tar and
@@ -17,7 +17,6 @@
 #![deny(missing_docs)]
 
 mod archive_writer;
-mod bundle;
 mod error;
 mod idmap;
 mod initramfs_writer;
@@ -26,8 +25,6 @@ mod local_ownership;
 mod ownership;
 mod preflight;
 mod sandbox;
-#[cfg(test)]
-mod spec;
 mod tar_writer;
 
 mod executor;

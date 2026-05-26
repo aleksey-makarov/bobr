@@ -18,11 +18,6 @@ pub enum RuntimeError {
     #[error("runtime preflight failed: {0}")]
     Preflight(String),
 
-    /// `libcontainer` failed while creating, starting, waiting for, or deleting
-    /// a runtime container.
-    #[error("libcontainer error: {0}")]
-    Libcontainer(String),
-
     /// Child-side runtime execution failed and returned a structured report or
     /// non-zero lifecycle status.
     #[error("executor error: {0}")]
