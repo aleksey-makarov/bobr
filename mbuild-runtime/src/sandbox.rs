@@ -11,15 +11,16 @@ use mbuild_sandbox_runner_core::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::{CString, OsStr, OsString};
 use std::fs;
 use std::fs::File;
-use std::io;
+use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 use tracing::warn;
@@ -595,7 +596,7 @@ fn read_u64_le(bytes: &[u8], offset: usize) -> Result<u64, String> {
 }
 
 struct SandboxLifecycle {
-    child: Option<Child>,
+    child: Option<LauncherChild>,
     run_dir: PathBuf,
     success_report_path: PathBuf,
     failure_report_path: PathBuf,
@@ -609,63 +610,50 @@ impl SandboxLifecycle {
         prepared: PreparedSandbox,
     ) -> Result<Self, RuntimeError> {
         let child_ready = Pipe::new()?;
+        let exec_ready = Pipe::new()?;
         let parent_ready = Pipe::new()?;
         let child_ready_read = child_ready.read_raw();
         let child_ready_write = child_ready.write_raw();
+        let exec_ready_read = exec_ready.read_raw();
+        let exec_ready_write = exec_ready.write_raw();
         let parent_ready_read = parent_ready.read_raw();
         let parent_ready_write = parent_ready.write_raw();
-
-        let mut command = Command::new(&tools.runner.host_path);
-        command
-            .arg("launch")
-            .arg("--wait-fd")
-            .arg(parent_ready_read.to_string())
-            .arg("--config")
-            .arg(&prepared.launcher_config)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-
-        unsafe {
-            command.pre_exec(move || {
-                if libc::unshare(libc::CLONE_NEWUSER) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                let byte = [1_u8; 1];
-                let written = libc::write(child_ready_write, byte.as_ptr().cast(), byte.len());
-                if written != 1 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-
-        let mut child = command.spawn().map_err(|error| {
-            RuntimeError::Executor(format!(
-                "failed to spawn sandbox runner '{}': {error}",
-                tools.runner.host_path.display()
-            ))
-        })?;
+        let child = fork_sandbox_runner(
+            &tools.runner.host_path,
+            &prepared.launcher_config,
+            parent_ready_read,
+            child_ready_write,
+            exec_ready_read,
+        )?;
         let Pipe {
             read: child_ready_read_fd,
             write: child_ready_write_fd,
         } = child_ready;
         let Pipe {
+            read: exec_ready_read_fd,
+            write: exec_ready_write_fd,
+        } = exec_ready;
+        let Pipe {
             read: parent_ready_read_fd,
             write: parent_ready_write_fd,
         } = parent_ready;
         drop(child_ready_write_fd);
+        drop(exec_ready_read_fd);
         drop(parent_ready_read_fd);
 
         let setup_result = wait_for_child_userns(child_ready_read)
-            .and_then(|()| configure_id_maps(&tools.newuidmap, &tools.newgidmap, child.id(), idmap))
+            .and_then(|()| {
+                configure_id_maps(&tools.newuidmap, &tools.newgidmap, child.pid_u32(), idmap)
+            })
+            .and_then(|()| signal_child_ready(exec_ready_write))
             .and_then(|()| signal_child_ready(parent_ready_write));
 
         drop(parent_ready_write_fd);
+        drop(exec_ready_write_fd);
         drop(child_ready_read_fd);
 
         if let Err(error) = setup_result {
-            terminate_child(&mut child);
+            terminate_child(child);
             return Err(error);
         }
 
@@ -684,14 +672,14 @@ impl SandboxLifecycle {
             .take()
             .ok_or_else(|| RuntimeError::Executor("sandbox runner already waited".to_string()))?;
         let output = child.wait_with_output()?;
-        if output.status.success() {
+        if output.success {
             read_sandbox_success_report(&self.success_report_path)
         } else {
             Err(read_sandbox_failure_report(
                 &self.failure_report_path,
                 format!(
                     "sandbox runner exited with {}{}",
-                    status_message(output.status),
+                    output.status_message,
                     command_context(&output.stderr)
                 ),
             ))
@@ -702,7 +690,7 @@ impl SandboxLifecycle {
         if self.cleaned_up {
             return Ok(());
         }
-        if let Some(child) = &mut self.child {
+        if let Some(child) = self.child.take() {
             terminate_child(child);
         }
         remove_run_dir(&self.run_dir)?;
@@ -716,7 +704,7 @@ impl Drop for SandboxLifecycle {
         if self.cleaned_up {
             return;
         }
-        if let Some(child) = &mut self.child {
+        if let Some(child) = self.child.take() {
             terminate_child(child);
         }
         if let Err(error) = remove_run_dir(&self.run_dir) {
@@ -726,6 +714,182 @@ impl Drop for SandboxLifecycle {
             );
         }
     }
+}
+
+struct LauncherChild {
+    pid: libc::pid_t,
+    stderr: OwnedFd,
+}
+
+struct LauncherOutput {
+    success: bool,
+    status_message: String,
+    stderr: Vec<u8>,
+}
+
+impl LauncherChild {
+    fn pid_u32(&self) -> u32 {
+        self.pid as u32
+    }
+
+    fn wait_with_output(self) -> Result<LauncherOutput, RuntimeError> {
+        let status = wait_for_pid(self.pid)?;
+        let mut stderr = Vec::new();
+        let mut file = File::from(self.stderr);
+        file.read_to_end(&mut stderr)?;
+        Ok(LauncherOutput {
+            success: raw_wait_status_success(status),
+            status_message: raw_wait_status_message(status),
+            stderr,
+        })
+    }
+}
+
+fn fork_sandbox_runner(
+    runner_path: &Path,
+    launcher_config: &Path,
+    parent_ready_read: RawFd,
+    child_ready_write: RawFd,
+    exec_ready_read: RawFd,
+) -> Result<LauncherChild, RuntimeError> {
+    let stderr = Pipe::new()?;
+    let c_runner = path_cstring(runner_path)?;
+    let arg0 = c_runner.clone();
+    let args = [
+        arg0,
+        CString::new("launch").unwrap(),
+        CString::new("--wait-fd").unwrap(),
+        CString::new(parent_ready_read.to_string()).unwrap(),
+        CString::new("--config").unwrap(),
+        path_cstring(launcher_config)?,
+    ];
+    let mut arg_ptrs = args.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
+    arg_ptrs.push(std::ptr::null());
+
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(RuntimeError::Executor(format!(
+            "failed to fork sandbox runner '{}': {}",
+            runner_path.display(),
+            io::Error::last_os_error()
+        )));
+    }
+    if pid == 0 {
+        child_exec_sandbox_runner(
+            &c_runner,
+            &arg_ptrs,
+            stderr.write_raw(),
+            child_ready_write,
+            exec_ready_read,
+        );
+    }
+
+    let Pipe {
+        read: stderr_read,
+        write: stderr_write,
+    } = stderr;
+    drop(stderr_write);
+    Ok(LauncherChild {
+        pid,
+        stderr: stderr_read,
+    })
+}
+
+fn child_exec_sandbox_runner(
+    runner: &CString,
+    args: &[*const libc::c_char],
+    stderr_write: RawFd,
+    child_ready_write: RawFd,
+    exec_ready_read: RawFd,
+) -> ! {
+    if child_setup_stdio(stderr_write).is_err() {
+        unsafe { libc::_exit(127) };
+    }
+    if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
+        child_write_stderr(b"failed to unshare user namespace\n");
+        unsafe { libc::_exit(127) };
+    }
+    let byte = [1_u8; 1];
+    let written = unsafe { libc::write(child_ready_write, byte.as_ptr().cast(), byte.len()) };
+    if written != 1 {
+        child_write_stderr(b"failed to signal user namespace readiness\n");
+        unsafe { libc::_exit(127) };
+    }
+    if pre_exec_wait_one_byte(exec_ready_read).is_err() {
+        child_write_stderr(b"failed to wait for exec readiness\n");
+        unsafe { libc::_exit(127) };
+    }
+    unsafe {
+        libc::close(child_ready_write);
+        libc::close(exec_ready_read);
+        libc::execv(runner.as_ptr(), args.as_ptr());
+    }
+    child_write_stderr(b"failed to exec sandbox runner\n");
+    unsafe { libc::_exit(127) };
+}
+
+fn child_setup_stdio(stderr_write: RawFd) -> io::Result<()> {
+    let dev_null = c"/dev/null";
+    let null_fd = unsafe { libc::open(dev_null.as_ptr(), libc::O_RDWR) };
+    if null_fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::dup2(null_fd, libc::STDIN_FILENO) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::dup2(null_fd, libc::STDOUT_FILENO) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::dup2(stderr_write, libc::STDERR_FILENO) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe {
+        libc::close(null_fd);
+        libc::close(stderr_write);
+    }
+    Ok(())
+}
+
+fn child_write_stderr(message: &'static [u8]) {
+    unsafe {
+        let _ = libc::write(libc::STDERR_FILENO, message.as_ptr().cast(), message.len());
+    }
+}
+
+fn wait_for_pid(pid: libc::pid_t) -> Result<i32, RuntimeError> {
+    let mut status = 0;
+    loop {
+        let result = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if result == pid {
+            return Ok(status);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(RuntimeError::Executor(format!(
+                "failed to wait for sandbox runner pid {pid}: {error}"
+            )));
+        }
+    }
+}
+
+fn raw_wait_status_success(status: i32) -> bool {
+    libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+}
+
+fn raw_wait_status_message(status: i32) -> String {
+    if libc::WIFEXITED(status) {
+        format!("exit code {}", libc::WEXITSTATUS(status))
+    } else if libc::WIFSIGNALED(status) {
+        format!("signal {}", libc::WTERMSIG(status))
+    } else {
+        format!("raw wait status {status}")
+    }
+}
+
+fn path_cstring(path: &Path) -> Result<CString, RuntimeError> {
+    CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        RuntimeError::InvalidInput(format!("path contains NUL byte: '{}'", path.display()))
+    })
 }
 
 fn wait_for_child_userns(fd: RawFd) -> Result<(), RuntimeError> {
@@ -762,6 +926,26 @@ fn read_one_byte(fd: RawFd, label: &str) -> Result<(), RuntimeError> {
             return Err(RuntimeError::Executor(format!(
                 "failed to read sandbox runner {label} pipe: {error}"
             )));
+        }
+    }
+}
+
+fn pre_exec_wait_one_byte(fd: RawFd) -> io::Result<()> {
+    let mut byte = [0_u8; 1];
+    loop {
+        let result = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), byte.len()) };
+        if result == 1 {
+            return Ok(());
+        }
+        if result == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "parent closed sandbox exec readiness pipe",
+            ));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
         }
     }
 }
@@ -831,9 +1015,11 @@ fn write_setgroups_deny(pid: u32) -> Result<(), RuntimeError> {
     }
 }
 
-fn terminate_child(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+fn terminate_child(child: LauncherChild) {
+    unsafe {
+        libc::kill(child.pid, libc::SIGKILL);
+    }
+    let _ = wait_for_pid(child.pid);
 }
 
 fn remove_run_dir(path: &Path) -> Result<(), RuntimeError> {
@@ -943,6 +1129,11 @@ fn build_launcher_config(
 ) -> Result<SandboxLauncherConfig, RuntimeError> {
     let mut mounts = rootfs_top_level_mounts(&config.rootfs)?;
     mounts.extend([
+        bind_mount(Path::new("/dev/null"), Path::new("/dev/null"), false),
+        bind_mount(Path::new("/dev/zero"), Path::new("/dev/zero"), false),
+        bind_mount(Path::new("/dev/full"), Path::new("/dev/full"), false),
+        bind_mount(Path::new("/dev/random"), Path::new("/dev/random"), false),
+        bind_mount(Path::new("/dev/urandom"), Path::new("/dev/urandom"), false),
         proc_mount(Path::new("/proc")),
         tmpfs_mount(Path::new("/tmp"), &["mode=1777"]),
         tmpfs_mount(Path::new("/run"), &["mode=755"]),
@@ -1054,12 +1245,17 @@ fn populate_root_skeleton(
         Path::new("__mbuild/out"),
         Path::new("__mbuild/runner"),
         Path::new("__mbuild/runtime"),
+        Path::new("dev"),
         Path::new("proc"),
         Path::new("run"),
         Path::new("tmp"),
     ] {
         fs::create_dir_all(sandbox_root.join(path))?;
     }
+    create_dev_symlink(sandbox_root, "fd", "/proc/self/fd")?;
+    create_dev_symlink(sandbox_root, "stdin", "/proc/self/fd/0")?;
+    create_dev_symlink(sandbox_root, "stdout", "/proc/self/fd/1")?;
+    create_dev_symlink(sandbox_root, "stderr", "/proc/self/fd/2")?;
     File::create(
         sandbox_root
             .join("__mbuild/runner")
@@ -1068,6 +1264,14 @@ fn populate_root_skeleton(
     for log in &runtime_files.step_logs {
         create_mount_target(sandbox_root, &log.container_stdout)?;
         create_mount_target(sandbox_root, &log.container_stderr)?;
+    }
+    Ok(())
+}
+
+fn create_dev_symlink(sandbox_root: &Path, name: &str, target: &str) -> Result<(), RuntimeError> {
+    let link = sandbox_root.join("dev").join(name);
+    if !link.exists() && !link.is_symlink() {
+        symlink(target, link)?;
     }
     Ok(())
 }
@@ -1385,6 +1589,14 @@ mod tests {
         );
         assert!(root.join("run").is_dir());
         assert!(!root.join("usr").exists());
+        assert_eq!(
+            fs::read_link(root.join("dev/fd")).unwrap(),
+            Path::new("/proc/self/fd")
+        );
+        assert_eq!(
+            fs::read_link(root.join("dev/stdin")).unwrap(),
+            Path::new("/proc/self/fd/0")
+        );
     }
 
     #[test]

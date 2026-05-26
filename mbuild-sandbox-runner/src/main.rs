@@ -109,10 +109,13 @@ fn read_launcher_config(path: &Path) -> Result<SandboxLauncherConfig, String> {
 }
 
 fn run_supervisor(config: &SandboxLauncherConfig) -> io::Result<i32> {
-    unshare(libc::CLONE_NEWNS | libc::CLONE_NEWNET | libc::CLONE_NEWUTS | libc::CLONE_NEWIPC)?;
-    set_hostname("mbuild")?;
-    mount_private()?;
-    unshare(libc::CLONE_NEWPID)?;
+    unshare_namespace("mount namespace", libc::CLONE_NEWNS)?;
+    unshare_namespace("network namespace", libc::CLONE_NEWNET)?;
+    unshare_namespace("UTS namespace", libc::CLONE_NEWUTS)?;
+    unshare_namespace("IPC namespace", libc::CLONE_NEWIPC)?;
+    set_hostname("mbuild").map_err(|error| context_error("set hostname", error))?;
+    mount_private().map_err(|error| context_error("make mount tree private", error))?;
+    unshare_namespace("PID namespace", libc::CLONE_NEWPID)?;
 
     let pid = unsafe { libc::fork() };
     if pid < 0 {
@@ -133,17 +136,24 @@ fn run_supervisor(config: &SandboxLauncherConfig) -> io::Result<i32> {
 }
 
 fn run_pid1(config: &SandboxLauncherConfig) -> io::Result<i32> {
-    mount_layout(config)?;
-    set_no_new_privs()?;
-    chroot(&config.root)?;
-    std::env::set_current_dir("/")?;
-    drop_capabilities()?;
+    mount_layout(config).map_err(|error| context_error("mount sandbox layout", error))?;
+    set_no_new_privs().map_err(|error| context_error("set no_new_privs", error))?;
+    chroot(&config.root)
+        .map_err(|error| context_error(format!("chroot '{}'", config.root.display()), error))?;
+    std::env::set_current_dir("/")
+        .map_err(|error| context_error("chdir '/' after chroot", error))?;
+    drop_capabilities().map_err(|error| context_error("drop capabilities", error))?;
     Ok(run_config_path(&config.runner_config))
 }
 
 fn mount_layout(config: &SandboxLauncherConfig) -> io::Result<()> {
     for mount in &config.mounts {
-        prepare_mount_target(&config.root, mount)?;
+        prepare_mount_target(&config.root, mount).map_err(|error| {
+            context_error(
+                format!("prepare mount target '{}'", mount.target.display()),
+                error,
+            )
+        })?;
         match mount.kind {
             SandboxLauncherMountKind::Bind => bind_mount(&config.root, mount)?,
             SandboxLauncherMountKind::Proc => proc_mount(&config.root, mount)?,
@@ -182,34 +192,72 @@ fn bind_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
         .as_ref()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "bind source missing"))?;
     let target = root.join(relative_target(&mount.target)?);
-    mount_syscall(
-        Some(source),
-        &target,
-        None,
-        libc::MS_BIND | libc::MS_REC,
-        None,
-    )?;
+    let metadata = fs::metadata(source)?;
+    let bind_flags = if metadata.is_dir() {
+        libc::MS_BIND | libc::MS_REC
+    } else {
+        libc::MS_BIND
+    };
+    mount_syscall(Some(source), &target, None, bind_flags, None).map_err(|error| {
+        context_error(
+            format!(
+                "bind mount '{}' -> '{}'",
+                source.display(),
+                mount.target.display()
+            ),
+            error,
+        )
+    })?;
     if mount.readonly {
         mount_syscall(
             Some(source),
             &target,
             None,
-            libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_REC,
+            libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
             None,
-        )?;
+        )
+        .map_err(|error| {
+            context_error(
+                format!("remount readonly bind '{}'", mount.target.display()),
+                error,
+            )
+        })?;
     }
     Ok(())
 }
 
 fn proc_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
     let target = root.join(relative_target(&mount.target)?);
-    mount_syscall(None, &target, Some("proc"), 0, Some("proc"))
+    mount_syscall(Some(Path::new("proc")), &target, Some("proc"), 0, None)
+        .map_err(|error| context_error(format!("mount proc '{}'", mount.target.display()), error))
 }
 
 fn tmpfs_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
     let target = root.join(relative_target(&mount.target)?);
-    let data = mount.options.join(",");
-    mount_syscall(None, &target, Some("tmpfs"), 0, Some(&data))
+    let mut flags = 0;
+    let mut data_options = Vec::new();
+    for option in &mount.options {
+        match option.as_str() {
+            "nosuid" => flags |= libc::MS_NOSUID,
+            "nodev" => flags |= libc::MS_NODEV,
+            "noexec" => flags |= libc::MS_NOEXEC,
+            option => data_options.push(option),
+        }
+    }
+    let data = data_options.join(",");
+    let data = if data.is_empty() {
+        None
+    } else {
+        Some(data.as_str())
+    };
+    mount_syscall(
+        Some(Path::new("tmpfs")),
+        &target,
+        Some("tmpfs"),
+        flags,
+        data,
+    )
+    .map_err(|error| context_error(format!("mount tmpfs '{}'", mount.target.display()), error))
 }
 
 fn mount_private() -> io::Result<()> {
@@ -265,12 +313,19 @@ fn chroot(root: &Path) -> io::Result<()> {
     }
 }
 
-fn unshare(flags: libc::c_int) -> io::Result<()> {
+fn unshare_namespace(label: &str, flags: libc::c_int) -> io::Result<()> {
     if unsafe { libc::unshare(flags) } == 0 {
         Ok(())
     } else {
-        Err(io::Error::last_os_error())
+        Err(context_error(
+            format!("unshare {label}"),
+            io::Error::last_os_error(),
+        ))
     }
+}
+
+fn context_error(context: impl std::fmt::Display, error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("{context}: {error}"))
 }
 
 fn set_hostname(name: &str) -> io::Result<()> {
