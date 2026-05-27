@@ -33,23 +33,22 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Host-side name of the raw output directory before fs-tree staging.
-pub(crate) const OUTPUT_DIR_NAME: &str = "out";
-/// Host-side name of the directory containing materialized `script_config`.
-pub(crate) const CONFIG_DIR_NAME: &str = "config";
-/// Container path prefix used for recipe inputs other than `rootfs`.
-pub(crate) const INPUT_MOUNT_ROOT: &str = "/__mbuild/inputs";
-/// Container path where materialized `script_config` is mounted.
-pub(crate) const CONFIG_MOUNT_PATH: &str = "/__mbuild/config";
-/// Container path of the writable build directory.
-pub(crate) const BUILD_DIR_MOUNT_PATH: &str = "/__mbuild/build";
-/// Container path of the writable output directory.
-pub(crate) const OUT_DIR_MOUNT_PATH: &str = "/__mbuild/out";
-
 /// Builder implementation registered for recipe nodes tagged `Sandbox`.
 pub struct SandboxBuilder;
 
-/// Name of the staged fs-tree object directory inside the node temp dir.
+// Host-side name of the raw output directory before fs-tree staging.
+const OUTPUT_DIR_NAME: &str = "out";
+// Host-side name of the directory containing materialized `script_config`.
+const CONFIG_DIR_NAME: &str = "config";
+// Container path prefix used for recipe inputs other than `rootfs`.
+const INPUT_MOUNT_ROOT: &str = "/__mbuild/inputs";
+// Container path where materialized `script_config` is mounted.
+const CONFIG_MOUNT_PATH: &str = "/__mbuild/config";
+// Container path of the writable build directory.
+const BUILD_DIR_MOUNT_PATH: &str = "/__mbuild/build";
+// Container path of the writable output directory.
+const OUT_DIR_MOUNT_PATH: &str = "/__mbuild/out";
+// Name of the staged fs-tree object directory inside the node temp dir.
 const FS_TREE_OBJECT_DIR_NAME: &str = "fs-tree-object";
 
 /// Recipe-facing `Sandbox` builder config.
@@ -62,18 +61,77 @@ const FS_TREE_OBJECT_DIR_NAME: &str = "fs-tree-object";
 pub struct SandboxConfig {
     /// Optional tree of config files exposed to build steps.
     #[serde(default)]
-    pub(crate) script_config: Option<Value>,
+    script_config: Option<Value>,
     /// Ordered command steps to execute inside the sandbox.
-    pub(crate) steps: Vec<BuildStep>,
+    steps: Vec<BuildStep>,
 }
 
-/// Static builder contract advertised to the mbuild recipe runtime.
-pub(crate) static SANDBOX_SPEC: BuilderSpec = BuilderSpec {
+/// User identity requested for one sandbox step.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum StepUser {
+    /// Run as the sandbox build user, currently logical uid/gid `1:1`.
+    BuildUser,
+    /// Run as root inside the sandbox user namespace.
+    Root,
+}
+
+/// One recipe-facing process step.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BuildStep {
+    /// Stable step name used in reports and log filenames.
+    name: String,
+    /// User identity for process execution.
+    run_as: StepUser,
+    /// Working directory before interpolation.
+    cwd: String,
+    /// Command argv before interpolation.
+    argv: Vec<String>,
+    /// Additional string environment variables before interpolation.
+    #[serde(default)]
+    env: Map<String, Value>,
+}
+
+// Static builder contract advertised to the mbuild recipe runtime.
+static SANDBOX_SPEC: BuilderSpec = BuilderSpec {
     tag: "Sandbox",
     required_inputs: &["rootfs"],
     optional_inputs: &[],
     allow_extra_inputs: true,
 };
+
+// Internal error categories before they are mapped to `BuilderError`.
+#[derive(Debug)]
+enum SandboxError {
+    /// The recipe config is structurally invalid.
+    InvalidConfig(String),
+    /// A recipe input did not resolve to a usable host path.
+    InputResolutionFailed(String),
+    /// Sandbox execution or output staging failed.
+    BuildFailed(String),
+    /// Host filesystem preparation failed.
+    FsFailed(String),
+}
+
+impl SandboxError {
+    fn message(&self) -> &str {
+        match self {
+            Self::InvalidConfig(message)
+            | Self::InputResolutionFailed(message)
+            | Self::BuildFailed(message)
+            | Self::FsFailed(message) => message,
+        }
+    }
+}
+
+impl fmt::Display for SandboxError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+type BResult<T> = Result<T, SandboxError>;
 
 impl TypedBuilder for SandboxBuilder {
     type Config = SandboxConfig;
@@ -141,24 +199,6 @@ impl TypedBuilder for SandboxBuilder {
             object_hash: Some(outcome.object_hash),
         })
     }
-}
-
-/// Validate the full recipe-facing config before host paths are prepared.
-fn validate_sandbox_config(config: &SandboxConfig) -> BResult<()> {
-    validate_script_config(config.script_config.as_ref())?;
-    validate_steps(&config.steps)
-}
-
-/// Ensure the required `rootfs` input resolves to a directory payload.
-fn validate_rootfs(rootfs: &BuilderInputObject) -> BResult<()> {
-    let rootfs_path = object_payload_path(&rootfs.object_path);
-    if !rootfs_path.is_dir() {
-        return Err(SandboxError::InputResolutionFailed(format!(
-            "rootfs input must resolve to a directory: {}",
-            rootfs_path.display()
-        )));
-    }
-    Ok(())
 }
 
 /// Lower recipe inputs and steps into the runtime-facing sandbox config.
@@ -389,69 +429,26 @@ fn write_build_report(cx: &BuildContext, outcome: &mbuild_runtime::SandboxBuildO
     }
 }
 
-/// Internal error categories before they are mapped to `BuilderError`.
-#[derive(Debug)]
-pub(crate) enum SandboxError {
-    /// The recipe config is structurally invalid.
-    InvalidConfig(String),
-    /// A recipe input did not resolve to a usable host path.
-    InputResolutionFailed(String),
-    /// Sandbox execution or output staging failed.
-    BuildFailed(String),
-    /// Host filesystem preparation failed.
-    FsFailed(String),
+/// Validate the full recipe-facing config before host paths are prepared.
+fn validate_sandbox_config(config: &SandboxConfig) -> BResult<()> {
+    validate_script_config(config.script_config.as_ref())?;
+    validate_steps(&config.steps)
 }
 
-impl SandboxError {
-    /// Return the human-readable error payload.
-    fn message(&self) -> &str {
-        match self {
-            Self::InvalidConfig(message)
-            | Self::InputResolutionFailed(message)
-            | Self::BuildFailed(message)
-            | Self::FsFailed(message) => message,
-        }
+/// Ensure the required `rootfs` input resolves to a directory payload.
+fn validate_rootfs(rootfs: &BuilderInputObject) -> BResult<()> {
+    let rootfs_path = object_payload_path(&rootfs.object_path);
+    if !rootfs_path.is_dir() {
+        return Err(SandboxError::InputResolutionFailed(format!(
+            "rootfs input must resolve to a directory: {}",
+            rootfs_path.display()
+        )));
     }
-}
-
-impl fmt::Display for SandboxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.message())
-    }
-}
-
-/// Crate-local result type using `SandboxError`.
-pub(crate) type BResult<T> = Result<T, SandboxError>;
-
-/// User identity requested for one sandbox step.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub(crate) enum StepUser {
-    /// Run as the sandbox build user, currently logical uid/gid `1:1`.
-    BuildUser,
-    /// Run as root inside the sandbox user namespace.
-    Root,
-}
-
-/// One recipe-facing process step.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct BuildStep {
-    /// Stable step name used in reports and log filenames.
-    pub(crate) name: String,
-    /// User identity for process execution.
-    pub(crate) run_as: StepUser,
-    /// Working directory after interpolation.
-    pub(crate) cwd: String,
-    /// Command argv after interpolation.
-    pub(crate) argv: Vec<String>,
-    /// Additional string environment variables after interpolation.
-    #[serde(default)]
-    pub(crate) env: Map<String, Value>,
+    Ok(())
 }
 
 /// Validate step shape without resolving interpolation.
-pub(crate) fn validate_steps(steps: &[BuildStep]) -> BResult<()> {
+fn validate_steps(steps: &[BuildStep]) -> BResult<()> {
     if steps.is_empty() {
         return Err(SandboxError::InvalidConfig(
             "steps must contain at least one step".to_string(),
@@ -522,7 +519,7 @@ fn validate_input_name(name: &str) -> BResult<()> {
 }
 
 /// Return the absolute container path for a named extra input.
-pub(crate) fn input_mount_path(name: &str) -> String {
+fn input_mount_path(name: &str) -> String {
     format!("{INPUT_MOUNT_ROOT}/{name}")
 }
 
@@ -531,7 +528,7 @@ pub(crate) fn input_mount_path(name: &str) -> String {
 /// The `rootfs` input is handled separately. Extra inputs become readonly
 /// mounts and interpolation variables. Reserved names are rejected because they
 /// would shadow built-in variables.
-pub(crate) fn collect_named_inputs(
+fn collect_named_inputs(
     spec: &BuilderSpec,
     builder_name: &str,
     inputs: &BuilderInputs,
@@ -648,10 +645,7 @@ fn interpolation_value(key: &str, inputs: &[(String, BuilderInputObject)]) -> BR
 }
 
 /// Resolve and validate a step working directory.
-pub(crate) fn resolve_step_cwd(
-    step: &BuildStep,
-    inputs: &[(String, BuilderInputObject)],
-) -> BResult<String> {
+fn resolve_step_cwd(step: &BuildStep, inputs: &[(String, BuilderInputObject)]) -> BResult<String> {
     let cwd = interpolate_step_string(&step.cwd, inputs)?;
     if cwd.is_empty() || !cwd.starts_with('/') {
         return Err(SandboxError::InvalidConfig(format!(
@@ -663,7 +657,7 @@ pub(crate) fn resolve_step_cwd(
 }
 
 /// Resolve all argv entries for a step.
-pub(crate) fn resolve_step_argv(
+fn resolve_step_argv(
     step: &BuildStep,
     inputs: &[(String, BuilderInputObject)],
 ) -> BResult<Vec<String>> {
@@ -674,7 +668,7 @@ pub(crate) fn resolve_step_argv(
 }
 
 /// Resolve all environment values for a step.
-pub(crate) fn resolve_step_env(
+fn resolve_step_env(
     step: &BuildStep,
     inputs: &[(String, BuilderInputObject)],
 ) -> BResult<Vec<(String, String)>> {
@@ -695,7 +689,7 @@ pub(crate) fn resolve_step_env(
 ///
 /// The builder calls this before creating host runtime directories so config
 /// errors are reported as recipe errors rather than partial execution failures.
-pub(crate) fn validate_step_interpolations(
+fn validate_step_interpolations(
     steps: &[BuildStep],
     inputs: &[(String, BuilderInputObject)],
 ) -> BResult<()> {
@@ -708,12 +702,12 @@ pub(crate) fn validate_step_interpolations(
 }
 
 /// Convert fsutil errors into sandbox-local filesystem errors.
-pub(crate) fn map_fsutil_error(error: fsutil::FsUtilError) -> SandboxError {
+fn map_fsutil_error(error: fsutil::FsUtilError) -> SandboxError {
     SandboxError::FsFailed(error.to_string())
 }
 
 /// Map sandbox-local errors to the recipe runtime error categories.
-pub(crate) fn map_error(error: SandboxError) -> BuilderError {
+fn map_error(error: SandboxError) -> BuilderError {
     match error {
         SandboxError::InvalidConfig(message) => BuilderError::InvalidRecipe(message),
         SandboxError::InputResolutionFailed(message)
@@ -723,7 +717,7 @@ pub(crate) fn map_error(error: SandboxError) -> BuilderError {
 }
 
 /// Validate `script_config` before materializing it on disk.
-pub(crate) fn validate_script_config(value: Option<&Value>) -> BResult<()> {
+fn validate_script_config(value: Option<&Value>) -> BResult<()> {
     match value {
         None | Some(Value::Null) => Ok(()),
         Some(value) => validate_script_config_node(value, "<root>"),
@@ -775,7 +769,7 @@ fn validate_script_config_key(key: &str, path: &str) -> BResult<()> {
 /// Records and arrays become directories. String leaves become files. Array
 /// entries use zero-padded numeric filenames so lexical order preserves array
 /// order.
-pub(crate) fn write_script_config(root: &Path, value: Option<&Value>) -> BResult<()> {
+fn write_script_config(root: &Path, value: Option<&Value>) -> BResult<()> {
     match value {
         None | Some(Value::Null) => Ok(()),
         Some(value) => write_script_config_node(root, value, "<root>"),
