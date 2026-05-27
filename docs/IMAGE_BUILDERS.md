@@ -75,7 +75,55 @@ The result can be consumed by `TreeMerge`, `ErofsRootfs`, `Initramfs`, or
 - required `rootfs`: one fs-tree object used as the readonly root filesystem
 - extra named inputs mounted read-only under `/__mbuild/inputs/<name>`
 
-`Sandbox.config` accepts an explicit ordered step plan:
+Extra input names are also interpolation variable names. They must start with
+an ASCII letter or `_`, and the remaining characters must be ASCII letters,
+digits, or `_`. The names `build`, `out`, and `config` are reserved.
+
+### `Sandbox.config`
+
+`Sandbox.config` is a JSON object with these fields:
+
+- `steps`: required non-empty array of step objects
+- `script_config`: optional config tree materialized at `/__mbuild/config`
+
+Unknown fields are rejected. In particular, `Sandbox.config` does not accept
+`install` metadata; filesystem ownership and modes are represented by the
+output manifest produced by the runtime.
+
+Each step object has this shape:
+
+- `name`: non-empty string after trimming; used in reports and log names
+- `run_as`: `"build-user"` or `"root"`
+- `cwd`: non-empty string before interpolation; must resolve to an absolute path
+- `argv`: non-empty array of non-empty strings
+- `env`: optional object whose values must be strings
+
+`cwd`, every `argv` item, and every `env` value support interpolation. `name`,
+`run_as`, `env` keys, and `script_config` do not support interpolation.
+
+Supported interpolation variables:
+
+- `@{build}`: writable build directory
+- `@{out}`: writable output directory
+- `@{config}`: materialized `script_config` directory
+- `@{<input>}`: readonly mount for an extra named input
+
+`@@{name}` escapes interpolation and renders the literal text `@{name}`.
+Unknown variables, malformed interpolation expressions, and interpolation
+names that are not valid input names are invalid config.
+
+`script_config` may be absent or `null`, which creates an empty config
+directory. Otherwise it is a recursive tree:
+
+- JSON objects become directories
+- JSON arrays become directories with zero-padded numeric entries such as
+  `00000000`, preserving array order lexically
+- JSON strings become file contents
+
+Object keys in `script_config` must be non-empty, must not be `.` or `..`, and
+may contain only ASCII letters, digits, `.`, `_`, and `-`.
+
+Example:
 
 ```json
 {
@@ -96,16 +144,7 @@ The result can be consumed by `TreeMerge`, `ErofsRootfs`, `Initramfs`, or
 }
 ```
 
-Supported interpolation variables:
-
-- `@{build}`: writable build directory
-- `@{out}`: writable output directory
-- `@{config}`: materialized `script_config` directory
-- `@{<input>}`: readonly mount for an extra named input
-
-The published `Sandbox` result is an fs-tree object. `Sandbox` does not accept
-`install` metadata in config; filesystem ownership and modes are represented by
-the output manifest produced by the runtime.
+The published `Sandbox` result is an fs-tree object.
 
 Package-aware synthetic recipe helpers lower to `Sandbox`:
 
