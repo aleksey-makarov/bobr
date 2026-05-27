@@ -150,9 +150,9 @@ impl TypedBuilder for SandboxBuilder {
         let rootfs = inputs.required("rootfs")?;
         validate_rootfs(rootfs).map_err(map_error)?;
 
-        let named_inputs =
-            collect_named_inputs(&SANDBOX_SPEC, "Sandbox", &inputs).map_err(map_error)?;
-        validate_step_interpolations(&config.steps, &named_inputs).map_err(map_error)?;
+        let extra_inputs =
+            collect_extra_inputs(&SANDBOX_SPEC, "Sandbox", &inputs).map_err(map_error)?;
+        validate_step_interpolations(&config.steps, &extra_inputs).map_err(map_error)?;
 
         let output_path = cx.temp_dir.join(OUTPUT_DIR_NAME);
         fsutil::recreate_empty_dir_force(&output_path)
@@ -166,7 +166,7 @@ impl TypedBuilder for SandboxBuilder {
 
         let sandbox_config = resolve_sandbox_config(
             rootfs,
-            &named_inputs,
+            &extra_inputs,
             &config.steps,
             &output_path,
             &config_path,
@@ -182,7 +182,7 @@ impl TypedBuilder for SandboxBuilder {
             "sandbox-prepare",
             format!(
                 "resolved readonly rootfs, {} input mount(s), build dir, and config dir",
-                named_inputs.len()
+                extra_inputs.len()
             ),
         );
 
@@ -528,7 +528,7 @@ fn input_mount_path(name: &str) -> String {
 /// The `rootfs` input is handled separately. Extra inputs become readonly
 /// mounts and interpolation variables. Reserved names are rejected because they
 /// would shadow built-in variables.
-fn collect_named_inputs(
+fn collect_extra_inputs(
     spec: &BuilderSpec,
     builder_name: &str,
     inputs: &BuilderInputs,
@@ -1017,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn step_interpolation_resolves_named_inputs() {
+    fn step_interpolation_resolves_extra_inputs() {
         let temp = tempdir().unwrap();
         let inputs = vec![
             (
