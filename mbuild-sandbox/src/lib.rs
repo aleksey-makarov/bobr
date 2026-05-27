@@ -164,15 +164,50 @@ impl TypedBuilder for SandboxBuilder {
             .map_err(map_error)?;
         write_script_config(&config_path, config.script_config.as_ref()).map_err(map_error)?;
 
-        let sandbox_config = resolve_sandbox_config(
-            rootfs,
-            &extra_inputs,
-            &config.steps,
-            &output_path,
-            &config_path,
-            cx,
-        )
-        .map_err(map_error)?;
+        let sandbox_inputs = extra_inputs
+            .iter()
+            .map(|(name, input)| {
+                let host_path = object_payload_path(&input.object_path);
+                if !host_path.is_dir() && !host_path.is_file() {
+                    return Err(SandboxError::InputResolutionFailed(format!(
+                        "sandbox input must resolve to a file or directory: {}",
+                        host_path.display()
+                    )));
+                }
+                Ok(SandboxInput {
+                    name: name.clone(),
+                    host_path,
+                    mount_path: PathBuf::from(input_mount_path(name)),
+                })
+            })
+            .collect::<BResult<Vec<_>>>()
+            .map_err(map_error)?;
+
+        let sandbox_steps = config
+            .steps
+            .iter()
+            .map(|step| build_sandbox_step(step, &extra_inputs, cx))
+            .collect::<BResult<Vec<_>>>()
+            .map_err(map_error)?;
+
+        let workspace = cx.temp_dir.join("runtime");
+        std::fs::create_dir_all(&workspace)
+            .map_err(|error| {
+                SandboxError::FsFailed(format!(
+                    "failed to create sandbox runtime workspace '{}': {error}",
+                    workspace.display()
+                ))
+            })
+            .map_err(map_error)?;
+
+        let sandbox_config = SandboxBuildConfig {
+            rootfs: object_payload_path(&rootfs.object_path),
+            out_dir: output_path.clone(),
+            config_dir: config_path,
+            workspace,
+            inputs: sandbox_inputs,
+            steps: sandbox_steps,
+        };
         let idmap = cached_host_idmap().map_err(|error| {
             BuilderError::ExecutionFailed(format!("failed to load host idmap: {error}"))
         })?;
@@ -181,7 +216,7 @@ impl TypedBuilder for SandboxBuilder {
             BuildLogLevel::Info,
             "sandbox-prepare",
             format!(
-                "resolved readonly rootfs, {} input mount(s), build dir, and config dir",
+                "prepared readonly rootfs, {} input mount(s), build dir, and config dir",
                 extra_inputs.len()
             ),
         );
@@ -199,60 +234,6 @@ impl TypedBuilder for SandboxBuilder {
             object_hash: Some(outcome.object_hash),
         })
     }
-}
-
-/// Lower recipe inputs and steps into the runtime-facing sandbox config.
-///
-/// This is the boundary between recipe semantics and runtime semantics:
-/// interpolation has already been checked, and the returned config contains
-/// concrete host paths plus absolute container mount paths.
-fn resolve_sandbox_config(
-    rootfs: &BuilderInputObject,
-    inputs: &[(String, BuilderInputObject)],
-    steps: &[BuildStep],
-    output_path: &Path,
-    config_path: &Path,
-    cx: &BuildContext,
-) -> BResult<SandboxBuildConfig> {
-    let sandbox_inputs = inputs
-        .iter()
-        .map(|(name, input)| {
-            let host_path = object_payload_path(&input.object_path);
-            if !host_path.is_dir() && !host_path.is_file() {
-                return Err(SandboxError::InputResolutionFailed(format!(
-                    "sandbox input must resolve to a file or directory: {}",
-                    host_path.display()
-                )));
-            }
-            Ok(SandboxInput {
-                name: name.clone(),
-                host_path,
-                mount_path: PathBuf::from(input_mount_path(name)),
-            })
-        })
-        .collect::<BResult<Vec<_>>>()?;
-
-    let sandbox_steps = steps
-        .iter()
-        .map(|step| resolve_sandbox_step(step, inputs, cx))
-        .collect::<BResult<Vec<_>>>()?;
-
-    let workspace = cx.temp_dir.join("runtime");
-    std::fs::create_dir_all(&workspace).map_err(|error| {
-        SandboxError::FsFailed(format!(
-            "failed to create sandbox runtime workspace '{}': {error}",
-            workspace.display()
-        ))
-    })?;
-
-    Ok(SandboxBuildConfig {
-        rootfs: object_payload_path(&rootfs.object_path),
-        out_dir: output_path.to_path_buf(),
-        config_dir: config_path.to_path_buf(),
-        workspace,
-        inputs: sandbox_inputs,
-        steps: sandbox_steps,
-    })
 }
 
 /// Return the actual filesystem payload for a builder input object.
@@ -299,8 +280,8 @@ fn stage_fs_tree_output(
     Ok(staged_path)
 }
 
-/// Resolve one recipe step into the process config consumed by `mbuild-runtime`.
-fn resolve_sandbox_step(
+/// Build one runtime step config consumed by `mbuild-runtime`.
+fn build_sandbox_step(
     step: &BuildStep,
     inputs: &[(String, BuilderInputObject)],
     cx: &BuildContext,
@@ -912,98 +893,23 @@ mod tests {
     }
 
     #[test]
-    fn resolve_sandbox_config_maps_extra_inputs() {
+    fn object_payload_path_uses_fs_tree_payload_root() {
         let temp = tempdir().unwrap();
-        let rootfs = temp.path().join("rootfs");
-        let source = temp.path().join("source");
-        let out = temp.path().join("out");
-        let config = temp.path().join("config");
-        for path in [&rootfs, &source, &out, &config] {
-            std::fs::create_dir_all(path).unwrap();
-        }
-        let cx = BuildContext::with_noop_logger(temp.path().join("state"), temp.path().join("tmp"));
-        std::fs::create_dir_all(&cx.temp_dir).unwrap();
-        let rootfs_input = BuilderInputObject {
-            object_path: rootfs,
-            object_hash: "0000000000000000000000000000000000000000000000000000000000000000"
-                .parse()
-                .unwrap(),
-        };
-        let inputs = vec![(
-            "source".to_string(),
-            BuilderInputObject {
-                object_path: source.clone(),
-                object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
-                    .parse()
-                    .unwrap(),
-            },
-        )];
-        let step = BuildStep {
-            name: "build".to_string(),
-            run_as: StepUser::BuildUser,
-            cwd: "@{source}".to_string(),
-            argv: vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
-            env: Map::new(),
-        };
+        let object = temp.path().join("object");
+        let payload = object.join("root");
+        std::fs::create_dir_all(&payload).unwrap();
+        std::fs::write(object.join("manifest.jsonl"), "").unwrap();
 
-        let config =
-            resolve_sandbox_config(&rootfs_input, &inputs, &[step], &out, &config, &cx).unwrap();
-
-        assert_eq!(config.inputs.len(), 1);
-        assert_eq!(
-            config.inputs[0].mount_path,
-            PathBuf::from("/__mbuild/inputs/source")
-        );
-        assert_eq!(
-            config.steps[0].cwd,
-            PathBuf::from("/__mbuild/inputs/source")
-        );
+        assert_eq!(object_payload_path(&object), payload);
     }
 
     #[test]
-    fn resolve_sandbox_config_uses_fs_tree_payload_roots() {
+    fn object_payload_path_keeps_plain_directory() {
         let temp = tempdir().unwrap();
-        let rootfs = temp.path().join("rootfs-object");
-        let rootfs_payload = rootfs.join("root");
-        let source = temp.path().join("source-object");
-        let source_payload = source.join("root");
-        let out = temp.path().join("out");
-        let config = temp.path().join("config");
-        for path in [&rootfs_payload, &source_payload, &out, &config] {
-            std::fs::create_dir_all(path).unwrap();
-        }
-        std::fs::write(rootfs.join("manifest.jsonl"), "").unwrap();
-        std::fs::write(source.join("manifest.jsonl"), "").unwrap();
-        let cx = BuildContext::with_noop_logger(temp.path().join("state"), temp.path().join("tmp"));
-        std::fs::create_dir_all(&cx.temp_dir).unwrap();
-        let rootfs_input = BuilderInputObject {
-            object_path: rootfs,
-            object_hash: "0000000000000000000000000000000000000000000000000000000000000000"
-                .parse()
-                .unwrap(),
-        };
-        let inputs = vec![(
-            "source".to_string(),
-            BuilderInputObject {
-                object_path: source,
-                object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
-                    .parse()
-                    .unwrap(),
-            },
-        )];
-        let step = BuildStep {
-            name: "build".to_string(),
-            run_as: StepUser::BuildUser,
-            cwd: "@{source}".to_string(),
-            argv: vec!["sh".to_string(), "-c".to_string(), "true".to_string()],
-            env: Map::new(),
-        };
+        let object = temp.path().join("object");
+        std::fs::create_dir_all(&object).unwrap();
 
-        let config =
-            resolve_sandbox_config(&rootfs_input, &inputs, &[step], &out, &config, &cx).unwrap();
-
-        assert_eq!(config.rootfs, rootfs_payload);
-        assert_eq!(config.inputs[0].host_path, source_payload);
+        assert_eq!(object_payload_path(&object), object);
     }
 
     fn step() -> BuildStep {
