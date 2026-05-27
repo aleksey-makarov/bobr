@@ -412,10 +412,25 @@ fn validate_steps(steps: &[BuildStep]) -> BResult<()> {
         ));
     }
 
+    let mut seen_names = HashMap::new();
+    let mut seen_log_names = HashMap::new();
     for (index, step) in steps.iter().enumerate() {
         if step.name.trim().is_empty() {
             return Err(SandboxError::InvalidConfig(format!(
                 "steps[{index}].name must not be empty"
+            )));
+        }
+        if let Some(previous) = seen_names.insert(step.name.as_str(), index) {
+            return Err(SandboxError::InvalidConfig(format!(
+                "steps[{index}].name '{}' duplicates steps[{previous}].name",
+                step.name
+            )));
+        }
+        let log_name = sanitize_log_name(&step.name);
+        if let Some(previous) = seen_log_names.insert(log_name.clone(), index) {
+            return Err(SandboxError::InvalidConfig(format!(
+                "steps[{index}].name '{}' collides with steps[{previous}].name '{}' after log-name sanitization ('{log_name}')",
+                step.name, steps[previous].name
             )));
         }
         if step.cwd.trim().is_empty() {
@@ -444,12 +459,29 @@ fn validate_steps(steps: &[BuildStep]) -> BResult<()> {
 /// Validate that environment keys and values can be materialized.
 fn validate_step_env(env: &Map<String, Value>, path: &str) -> BResult<()> {
     for (key, value) in env {
-        validate_script_config_key(key, path)?;
+        validate_env_key(key, path)?;
         if !matches!(value, Value::String(_)) {
             return Err(SandboxError::InvalidConfig(format!(
                 "{path}.{key} must be a string"
             )));
         }
+    }
+    Ok(())
+}
+
+/// Validate a step environment key before passing it to the runner.
+fn validate_env_key(key: &str, path: &str) -> BResult<()> {
+    if key.is_empty()
+        || key == "."
+        || key == ".."
+        || !key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+    {
+        return Err(SandboxError::InvalidConfig(format!(
+            "env key '{}' at {} is invalid; allowed chars: [A-Za-z0-9._-]",
+            key, path
+        )));
     }
     Ok(())
 }
@@ -935,6 +967,16 @@ mod tests {
         }
     }
 
+    fn minimal_step(name: &str) -> BuildStep {
+        BuildStep {
+            name: name.to_string(),
+            run_as: StepUser::BuildUser,
+            cwd: "/".to_string(),
+            argv: vec!["true".to_string()],
+            env: Map::new(),
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn validate_rootfs_accepts_valid_fs_tree_and_returns_root_dir() {
@@ -996,6 +1038,104 @@ mod tests {
                 .host_path,
             dir
         );
+    }
+
+    #[test]
+    fn validate_steps_rejects_duplicate_step_names() {
+        let error = validate_steps(&[minimal_step("build"), minimal_step("build")])
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("steps[1].name 'build' duplicates steps[0].name"));
+    }
+
+    #[test]
+    fn validate_steps_rejects_sanitized_log_name_collisions() {
+        let error = validate_steps(&[minimal_step("a/b"), minimal_step("a_b")])
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("steps[1].name 'a_b' collides with steps[0].name 'a/b'"));
+        assert!(error.contains("a_b"));
+    }
+
+    #[test]
+    fn validate_steps_accepts_distinct_non_colliding_names() {
+        validate_steps(&[minimal_step("a/b"), minimal_step("a-b")]).unwrap();
+    }
+
+    #[test]
+    fn collect_extra_inputs_rejects_reserved_and_invalid_names() {
+        let temp = tempdir().unwrap();
+        let mut reserved = BuilderInputs::empty();
+        reserved.insert("build", input_object(temp.path().join("build")));
+        let error = collect_extra_inputs(&SANDBOX_SPEC, "Sandbox", &reserved)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("input name 'build' conflicts with a reserved Sandbox"));
+
+        let mut invalid = BuilderInputs::empty();
+        invalid.insert("bad-name", input_object(temp.path().join("bad-name")));
+        let error = collect_extra_inputs(&SANDBOX_SPEC, "Sandbox", &invalid)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("input name 'bad-name' must contain only ASCII"));
+    }
+
+    #[test]
+    fn interpolation_rejects_malformed_and_unknown_variables() {
+        let error = interpolate_step_string("@{missing", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unterminated interpolation"));
+
+        let error = interpolate_step_string("@{bad-name}", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid interpolation variable '@{bad-name}'"));
+
+        let error = interpolate_step_string("@{missing}", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown interpolation variable '@{missing}'"));
+    }
+
+    #[test]
+    fn env_validation_uses_env_specific_errors() {
+        let mut env = Map::new();
+        env.insert("bad/key".to_string(), Value::String("value".to_string()));
+
+        let error = validate_step_env(&env, "steps[0].env")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("env key 'bad/key' at steps[0].env is invalid"));
+        assert!(!error.contains("script_config key"));
+    }
+
+    #[test]
+    fn env_validation_rejects_non_string_values() {
+        let mut env = Map::new();
+        env.insert("CC".to_string(), Value::from(1));
+
+        let error = validate_step_env(&env, "steps[0].env")
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("steps[0].env.CC must be a string"));
+    }
+
+    #[test]
+    fn script_config_validation_rejects_invalid_key_and_value() {
+        let error = validate_script_config(Some(&json!({ "bad/key": "value" })))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("script_config key 'bad/key' at <root> is invalid"));
+
+        let error = validate_script_config(Some(&json!(true)))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("script_config supports only records, arrays, and string leaves"));
     }
 
     fn step() -> BuildStep {
