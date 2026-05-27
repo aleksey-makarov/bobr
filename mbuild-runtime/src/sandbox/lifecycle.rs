@@ -32,50 +32,10 @@ impl SandboxLifecycle {
         idmap: &MbuildIdmap,
         prepared: PreparedSandbox,
     ) -> Result<Self, RuntimeError> {
-        let child_ready = Pipe::new()?;
-        let exec_ready = Pipe::new()?;
-        let parent_ready = Pipe::new()?;
-        let child_ready_read = child_ready.read_raw();
-        let child_ready_write = child_ready.write_raw();
-        let exec_ready_read = exec_ready.read_raw();
-        let exec_ready_write = exec_ready.write_raw();
-        let parent_ready_read = parent_ready.read_raw();
-        let parent_ready_write = parent_ready.write_raw();
-        let child = fork_sandbox_runner(
-            &tools.runner.host_path,
-            &prepared.launcher_config,
-            parent_ready_read,
-            child_ready_write,
-            exec_ready_read,
-        )?;
-        let Pipe {
-            read: child_ready_read_fd,
-            write: child_ready_write_fd,
-        } = child_ready;
-        let Pipe {
-            read: exec_ready_read_fd,
-            write: exec_ready_write_fd,
-        } = exec_ready;
-        let Pipe {
-            read: parent_ready_read_fd,
-            write: parent_ready_write_fd,
-        } = parent_ready;
-        drop(child_ready_write_fd);
-        drop(exec_ready_read_fd);
-        drop(parent_ready_read_fd);
+        let (child, handshake) =
+            fork_sandbox_runner(&tools.runner.host_path, &prepared.launcher_config)?;
 
-        let setup_result = wait_for_child_userns(child_ready_read)
-            .and_then(|()| {
-                configure_id_maps(&tools.newuidmap, &tools.newgidmap, child.pid_u32(), idmap)
-            })
-            .and_then(|()| signal_child_ready(exec_ready_write))
-            .and_then(|()| signal_child_ready(parent_ready_write));
-
-        drop(parent_ready_write_fd);
-        drop(exec_ready_write_fd);
-        drop(child_ready_read_fd);
-
-        if let Err(error) = setup_result {
+        if let Err(error) = complete_launcher_setup(&child, handshake, tools, idmap) {
             let stderr = child.terminate_with_output().unwrap_or_default();
             return Err(add_stderr_context(error, &stderr));
         }
@@ -150,6 +110,12 @@ struct LauncherOutput {
     stderr: Vec<u8>,
 }
 
+struct LauncherHandshake {
+    userns_ready_read: OwnedFd,
+    idmap_ready_write: OwnedFd,
+    runner_start_write: OwnedFd,
+}
+
 impl LauncherChild {
     fn pid_u32(&self) -> u32 {
         self.pid as u32
@@ -185,18 +151,21 @@ impl LauncherChild {
 fn fork_sandbox_runner(
     runner_path: &Path,
     launcher_config: &Path,
-    parent_ready_read: RawFd,
-    child_ready_write: RawFd,
-    exec_ready_read: RawFd,
-) -> Result<LauncherChild, RuntimeError> {
+) -> Result<(LauncherChild, LauncherHandshake), RuntimeError> {
     let stderr = Pipe::new()?;
+    let userns_ready = Pipe::new()?;
+    let idmap_ready = Pipe::new()?;
+    let runner_start = Pipe::new()?;
+    let userns_ready_write = userns_ready.write_raw();
+    let idmap_ready_read = idmap_ready.read_raw();
+    let runner_start_read = runner_start.read_raw();
     let c_runner = path_cstring(runner_path)?;
     let arg0 = c_runner.clone();
     let args = [
         arg0,
         CString::new("launch").unwrap(),
         CString::new("--wait-fd").unwrap(),
-        CString::new(parent_ready_read.to_string()).unwrap(),
+        CString::new(runner_start_read.to_string()).unwrap(),
         CString::new("--config").unwrap(),
         path_cstring(launcher_config)?,
     ];
@@ -216,8 +185,8 @@ fn fork_sandbox_runner(
             &c_runner,
             &arg_ptrs,
             stderr.write_raw(),
-            child_ready_write,
-            exec_ready_read,
+            userns_ready_write,
+            idmap_ready_read,
         );
     }
 
@@ -225,11 +194,45 @@ fn fork_sandbox_runner(
         read: stderr_read,
         write: stderr_write,
     } = stderr;
+    let Pipe {
+        read: userns_ready_read,
+        write: userns_ready_write,
+    } = userns_ready;
+    let Pipe {
+        read: idmap_ready_read,
+        write: idmap_ready_write,
+    } = idmap_ready;
+    let Pipe {
+        read: runner_start_read,
+        write: runner_start_write,
+    } = runner_start;
     drop(stderr_write);
-    Ok(LauncherChild {
-        pid,
-        stderr: stderr_read,
-    })
+    drop(userns_ready_write);
+    drop(idmap_ready_read);
+    drop(runner_start_read);
+    Ok((
+        LauncherChild {
+            pid,
+            stderr: stderr_read,
+        },
+        LauncherHandshake {
+            userns_ready_read,
+            idmap_ready_write,
+            runner_start_write,
+        },
+    ))
+}
+
+fn complete_launcher_setup(
+    child: &LauncherChild,
+    handshake: LauncherHandshake,
+    tools: &SandboxTools,
+    idmap: &MbuildIdmap,
+) -> Result<(), RuntimeError> {
+    wait_for_child_userns(handshake.userns_ready_read.as_raw_fd())?;
+    configure_id_maps(&tools.newuidmap, &tools.newgidmap, child.pid_u32(), idmap)?;
+    signal_child_ready(handshake.idmap_ready_write.as_raw_fd())?;
+    signal_child_ready(handshake.runner_start_write.as_raw_fd())
 }
 
 fn child_exec_sandbox_runner(
