@@ -75,6 +75,16 @@ The result can be consumed by `TreeMerge`, `ErofsRootfs`, `Initramfs`, or
 - required `rootfs`: one fs-tree object used as the readonly root filesystem
 - extra named inputs mounted read-only under `/__mbuild/inputs/<name>`
 
+The `rootfs` input must be a valid fs-tree object. Sandbox execution consumes
+that object's `root/` directory as the container root filesystem after
+validating it against `manifest.jsonl`.
+
+Extra inputs are ordinary store objects from the sandbox point of view. They
+are mounted as the whole realized object path. If an extra input is a directory
+that happens to contain `manifest.jsonl` and `root/`, `Sandbox` does not treat
+it as an fs-tree payload and does not mount `root/` instead of the object
+directory.
+
 Extra input names are also interpolation variable names. They must start with
 an ASCII letter or `_`, and the remaining characters must be ASCII letters,
 digits, or `_`. The names `build`, `out`, and `config` are reserved.
@@ -191,4 +201,5 @@ The common native toolchain is `linux_headers`, `glibc`, `binutils`, `gcc`,
 - `Source/oci-registry` currently selects only `linux/amd64`
 - `mbuild` does not currently provide a builder for producing derived OCI
   image layouts from fs-tree inputs
-- Rust-side `Sandbox` requests require a prepared fs-tree rootfs object
+- Rust-side `Sandbox` requests require a prepared fs-tree rootfs object and use
+  its validated `root/` directory as the execution root

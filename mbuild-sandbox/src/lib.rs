@@ -20,7 +20,7 @@
 
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
-    StagedBuildResult, TypedBuilder, fsutil,
+    FsTreeOwnerMap, StagedBuildResult, TypedBuilder, fsutil, validate_fs_tree_object,
 };
 use mbuild_runtime::{
     SandboxBuildConfig, SandboxInput, SandboxRunAs, SandboxStep, cached_host_idmap,
@@ -148,7 +148,10 @@ impl TypedBuilder for SandboxBuilder {
     ) -> Result<StagedBuildResult, BuilderError> {
         validate_sandbox_config(&config).map_err(map_error)?;
         let rootfs = inputs.required("rootfs")?;
-        validate_rootfs(rootfs).map_err(map_error)?;
+        let idmap = cached_host_idmap().map_err(|error| {
+            BuilderError::ExecutionFailed(format!("failed to load host idmap: {error}"))
+        })?;
+        let rootfs_root_dir = validate_rootfs(rootfs, idmap.as_ref()).map_err(map_error)?;
 
         let extra_inputs =
             collect_extra_inputs(&SANDBOX_SPEC, "Sandbox", &inputs).map_err(map_error)?;
@@ -166,20 +169,7 @@ impl TypedBuilder for SandboxBuilder {
 
         let sandbox_inputs = extra_inputs
             .iter()
-            .map(|(name, input)| {
-                let host_path = object_payload_path(&input.object_path);
-                if !host_path.is_dir() && !host_path.is_file() {
-                    return Err(SandboxError::InputResolutionFailed(format!(
-                        "sandbox input must resolve to a file or directory: {}",
-                        host_path.display()
-                    )));
-                }
-                Ok(SandboxInput {
-                    name: name.clone(),
-                    host_path,
-                    mount_path: PathBuf::from(input_mount_path(name)),
-                })
-            })
+            .map(|(name, input)| build_sandbox_input(name, input))
             .collect::<BResult<Vec<_>>>()
             .map_err(map_error)?;
 
@@ -201,16 +191,13 @@ impl TypedBuilder for SandboxBuilder {
             .map_err(map_error)?;
 
         let sandbox_config = SandboxBuildConfig {
-            rootfs: object_payload_path(&rootfs.object_path),
+            rootfs: rootfs_root_dir,
             out_dir: output_path.clone(),
             config_dir: config_path,
             workspace,
             inputs: sandbox_inputs,
             steps: sandbox_steps,
         };
-        let idmap = cached_host_idmap().map_err(|error| {
-            BuilderError::ExecutionFailed(format!("failed to load host idmap: {error}"))
-        })?;
 
         cx.log_event(
             BuildLogLevel::Info,
@@ -233,20 +220,6 @@ impl TypedBuilder for SandboxBuilder {
             staged_path,
             object_hash: Some(outcome.object_hash),
         })
-    }
-}
-
-/// Return the actual filesystem payload for a builder input object.
-///
-/// fs-tree objects are stored as `manifest.jsonl` plus `root/`; plain directory
-/// objects are used directly. Sandbox execution wants the payload root in both
-/// cases.
-fn object_payload_path(object_path: &Path) -> PathBuf {
-    let fs_tree_root = object_path.join("root");
-    if object_path.join("manifest.jsonl").is_file() && fs_tree_root.is_dir() {
-        fs_tree_root
-    } else {
-        object_path.to_path_buf()
     }
 }
 
@@ -416,16 +389,19 @@ fn validate_sandbox_config(config: &SandboxConfig) -> BResult<()> {
     validate_steps(&config.steps)
 }
 
-/// Ensure the required `rootfs` input resolves to a directory payload.
-fn validate_rootfs(rootfs: &BuilderInputObject) -> BResult<()> {
-    let rootfs_path = object_payload_path(&rootfs.object_path);
-    if !rootfs_path.is_dir() {
-        return Err(SandboxError::InputResolutionFailed(format!(
-            "rootfs input must resolve to a directory: {}",
-            rootfs_path.display()
-        )));
-    }
-    Ok(())
+/// Ensure the required `rootfs` input is a valid fs-tree object.
+fn validate_rootfs(
+    rootfs: &BuilderInputObject,
+    owner_map: &impl FsTreeOwnerMap,
+) -> BResult<PathBuf> {
+    validate_fs_tree_object(&rootfs.object_path, owner_map)
+        .map(|validated| validated.paths.root_dir)
+        .map_err(|error| {
+            SandboxError::InputResolutionFailed(format!(
+                "rootfs input must be a valid fs-tree object '{}': {error}",
+                rootfs.object_path.display()
+            ))
+        })
 }
 
 /// Validate step shape without resolving interpolation.
@@ -502,6 +478,25 @@ fn validate_input_name(name: &str) -> BResult<()> {
 /// Return the absolute container path for a named extra input.
 fn input_mount_path(name: &str) -> String {
     format!("{INPUT_MOUNT_ROOT}/{name}")
+}
+
+/// Lower one extra input to the runtime mount shape.
+///
+/// Extra inputs are mounted as complete store objects. They do not interpret
+/// fs-tree layout files such as `manifest.jsonl` or `root/`.
+fn build_sandbox_input(name: &str, input: &BuilderInputObject) -> BResult<SandboxInput> {
+    let host_path = input.object_path.clone();
+    if !host_path.is_dir() && !host_path.is_file() {
+        return Err(SandboxError::InputResolutionFailed(format!(
+            "sandbox input must resolve to a file or directory: {}",
+            host_path.display()
+        )));
+    }
+    Ok(SandboxInput {
+        name: name.to_string(),
+        host_path,
+        mount_path: PathBuf::from(input_mount_path(name)),
+    })
 }
 
 /// Collect and validate all extra inputs accepted by the `Sandbox` spec.
@@ -792,8 +787,13 @@ fn write_script_config_node(path: &Path, value: &Value, debug_path: &str) -> BRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{Builder, BuilderInputs};
+    use mbuild_core::{
+        Builder, BuilderInputs, FsTreeEntry, FsTreeManifest, FsTreeObjectError, FsTreeOwnerMap,
+        IdentityFsTreeOwnerMap,
+    };
     use serde_json::json;
+    #[cfg(unix)]
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     use tempfile::tempdir;
 
     #[test]
@@ -892,24 +892,110 @@ mod tests {
         assert!(!output.exists());
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct ConstantOwnerMap {
+        uid: u32,
+        gid: u32,
+    }
+
+    impl FsTreeOwnerMap for ConstantOwnerMap {
+        fn physical_uid(&self, _logical_uid: u32) -> Result<u32, FsTreeObjectError> {
+            Ok(self.uid)
+        }
+
+        fn physical_gid(&self, _logical_gid: u32) -> Result<u32, FsTreeObjectError> {
+            Ok(self.gid)
+        }
+    }
+
+    fn input_object(object_path: PathBuf) -> BuilderInputObject {
+        BuilderInputObject {
+            object_path,
+            object_hash: "0000000000000000000000000000000000000000000000000000000000000000"
+                .parse()
+                .unwrap(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_minimal_fs_tree_object(object: &Path) -> ConstantOwnerMap {
+        std::fs::create_dir(object).unwrap();
+        let root = object.join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let metadata = std::fs::metadata(&root).unwrap();
+        let manifest =
+            FsTreeManifest::from_entries(vec![FsTreeEntry::directory("", 0, 0, 0o755)]).unwrap();
+        manifest
+            .write_canonical(&object.join("manifest.jsonl"))
+            .unwrap();
+        ConstantOwnerMap {
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+        }
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn object_payload_path_uses_fs_tree_payload_root() {
+    fn validate_rootfs_accepts_valid_fs_tree_and_returns_root_dir() {
         let temp = tempdir().unwrap();
         let object = temp.path().join("object");
-        let payload = object.join("root");
-        std::fs::create_dir_all(&payload).unwrap();
-        std::fs::write(object.join("manifest.jsonl"), "").unwrap();
+        let owner = write_minimal_fs_tree_object(&object);
 
-        assert_eq!(object_payload_path(&object), payload);
+        assert_eq!(
+            validate_rootfs(&input_object(object.clone()), &owner).unwrap(),
+            object.join("root")
+        );
     }
 
     #[test]
-    fn object_payload_path_keeps_plain_directory() {
+    fn validate_rootfs_rejects_plain_directory() {
         let temp = tempdir().unwrap();
         let object = temp.path().join("object");
         std::fs::create_dir_all(&object).unwrap();
 
-        assert_eq!(object_payload_path(&object), object);
+        let error = validate_rootfs(&input_object(object.clone()), &IdentityFsTreeOwnerMap)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("rootfs input must be a valid fs-tree object"));
+        assert!(error.contains(&object.display().to_string()));
+    }
+
+    #[test]
+    fn sandbox_input_mounts_fs_tree_shaped_object_directory() {
+        let temp = tempdir().unwrap();
+        let object = temp.path().join("object");
+        std::fs::create_dir_all(object.join("root")).unwrap();
+        std::fs::write(object.join("manifest.jsonl"), "").unwrap();
+
+        let input = build_sandbox_input("source", &input_object(object.clone())).unwrap();
+
+        assert_eq!(input.name, "source");
+        assert_eq!(input.host_path, object);
+        assert_eq!(input.mount_path, PathBuf::from("/__mbuild/inputs/source"));
+    }
+
+    #[test]
+    fn sandbox_input_accepts_plain_file_and_directory_objects() {
+        let temp = tempdir().unwrap();
+        let file = temp.path().join("file-object");
+        let dir = temp.path().join("dir-object");
+        std::fs::write(&file, "payload").unwrap();
+        std::fs::create_dir(&dir).unwrap();
+
+        assert_eq!(
+            build_sandbox_input("file", &input_object(file.clone()))
+                .unwrap()
+                .host_path,
+            file
+        );
+        assert_eq!(
+            build_sandbox_input("dir", &input_object(dir.clone()))
+                .unwrap()
+                .host_path,
+            dir
+        );
     }
 
     fn step() -> BuildStep {
