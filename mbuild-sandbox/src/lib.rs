@@ -191,7 +191,7 @@ impl TypedBuilder for SandboxBuilder {
             .map_err(map_error)?;
 
         let sandbox_config = SandboxBuildConfig {
-            rootfs: rootfs_root_dir,
+            root_dir: rootfs_root_dir,
             out_dir: output_path.clone(),
             config_dir: config_path,
             workspace,
@@ -527,7 +527,6 @@ fn build_sandbox_input(name: &str, input: &BuilderInputObject) -> BResult<Sandbo
     Ok(SandboxInput {
         name: name.to_string(),
         host_path,
-        mount_path: PathBuf::from(input_mount_path(name)),
     })
 }
 
@@ -1015,7 +1014,7 @@ mod tests {
 
         assert_eq!(input.name, "source");
         assert_eq!(input.host_path, object);
-        assert_eq!(input.mount_path, PathBuf::from("/__mbuild/inputs/source"));
+        assert_eq!(input_mount_path(&input.name), "/__mbuild/inputs/source");
     }
 
     #[test]

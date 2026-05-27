@@ -9,7 +9,7 @@ use mbuild_sandbox_runner_core::{
     RunnerStepConfig, SandboxLauncherConfig, SandboxLauncherMount, SandboxLauncherMountKind,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::ffi::{CString, OsStr, OsString};
 use std::fs;
@@ -19,10 +19,11 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
+use std::thread;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -46,12 +47,10 @@ pub enum SandboxRunAs {
 /// A named input mount passed to a sandbox build.
 #[derive(Debug, Clone)]
 pub struct SandboxInput {
-    /// Recipe input name.
+    /// Recipe input name. Must match `[A-Za-z_][A-Za-z0-9_]*`.
     pub name: String,
     /// Host path to the realized input object.
     pub host_path: PathBuf,
-    /// Absolute mount path inside the sandbox.
-    pub mount_path: PathBuf,
 }
 
 /// One command step to execute inside a sandbox build.
@@ -76,8 +75,8 @@ pub struct SandboxStep {
 /// Runtime configuration for one sandbox build.
 #[derive(Debug, Clone)]
 pub struct SandboxBuildConfig {
-    /// Realized rootfs object path.
-    pub rootfs: PathBuf,
+    /// Prepared root filesystem directory used as the sandbox root base.
+    pub root_dir: PathBuf,
     /// Host directory for build output.
     pub out_dir: PathBuf,
     /// Host directory for script config.
@@ -147,17 +146,18 @@ pub fn run_sandbox_build(
 }
 
 fn validate_config(config: &SandboxBuildConfig) -> Result<(), RuntimeError> {
-    require_directory(&config.rootfs, "sandbox rootfs")?;
+    require_directory(&config.root_dir, "sandbox root directory")?;
     require_directory(&config.out_dir, "sandbox output directory")?;
     require_directory(&config.config_dir, "sandbox config directory")?;
     require_directory(&config.workspace, "sandbox workspace")?;
-    reject_reserved_rootfs_entry(&config.rootfs, "__mbuild")?;
+    validate_root_dir_top_level(&config.root_dir)?;
+    let mut input_names = HashSet::new();
     for input in &config.inputs {
-        if input.mount_path.is_relative() {
+        validate_input_name(&input.name)?;
+        if !input_names.insert(input.name.as_str()) {
             return Err(RuntimeError::InvalidInput(format!(
-                "sandbox input '{}' mount path must be absolute: '{}'",
-                input.name,
-                input.mount_path.display()
+                "sandbox input '{}' is defined more than once",
+                input.name
             )));
         }
         if !input.host_path.is_dir() && !input.host_path.is_file() {
@@ -168,6 +168,7 @@ fn validate_config(config: &SandboxBuildConfig) -> Result<(), RuntimeError> {
             )));
         }
     }
+    validate_steps(&config.steps)?;
     Ok(())
 }
 
@@ -182,7 +183,7 @@ impl PreparedSandbox {
         let dirs = SandboxDirs::create(&config.workspace)?;
         let runtime_files = SandboxRuntimeFiles::create(&dirs.runtime_files, config)?;
         write_runner_config(config, &runtime_files)?;
-        populate_root_skeleton(&dirs.rootfs, &config.rootfs, &runtime_files)?;
+        populate_root_skeleton(&dirs.rootfs, &config.root_dir, &runtime_files)?;
         let launcher_config = dirs.root.join("launcher-config.json");
         let launcher = build_launcher_config(config, &dirs, &runtime_files, runner_path)?;
         serde_json::to_writer(File::create(&launcher_config)?, &launcher)
@@ -653,8 +654,8 @@ impl SandboxLifecycle {
         drop(child_ready_read_fd);
 
         if let Err(error) = setup_result {
-            terminate_child(child);
-            return Err(error);
+            let stderr = child.terminate_with_output().unwrap_or_default();
+            return Err(add_stderr_context(error, &stderr));
         }
 
         Ok(Self {
@@ -733,15 +734,29 @@ impl LauncherChild {
     }
 
     fn wait_with_output(self) -> Result<LauncherOutput, RuntimeError> {
+        let stderr = self.stderr;
+        let stderr_reader = thread::spawn(move || {
+            let mut stderr_bytes = Vec::new();
+            let mut file = File::from(stderr);
+            file.read_to_end(&mut stderr_bytes)?;
+            Ok::<_, io::Error>(stderr_bytes)
+        });
         let status = wait_for_pid(self.pid)?;
-        let mut stderr = Vec::new();
-        let mut file = File::from(self.stderr);
-        file.read_to_end(&mut stderr)?;
+        let stderr = stderr_reader
+            .join()
+            .map_err(|_| RuntimeError::Executor("sandbox stderr reader panicked".to_string()))??;
         Ok(LauncherOutput {
             success: raw_wait_status_success(status),
             status_message: raw_wait_status_message(status),
             stderr,
         })
+    }
+
+    fn terminate_with_output(self) -> Result<Vec<u8>, RuntimeError> {
+        unsafe {
+            libc::kill(self.pid, libc::SIGKILL);
+        }
+        self.wait_with_output().map(|output| output.stderr)
     }
 }
 
@@ -1127,7 +1142,7 @@ fn build_launcher_config(
     runtime_files: &SandboxRuntimeFiles,
     runner_path: &Path,
 ) -> Result<SandboxLauncherConfig, RuntimeError> {
-    let mut mounts = rootfs_top_level_mounts(&config.rootfs)?;
+    let mut mounts = rootfs_top_level_mounts(&config.root_dir)?;
     mounts.extend([
         bind_mount(Path::new("/dev/null"), Path::new("/dev/null"), false),
         bind_mount(Path::new("/dev/zero"), Path::new("/dev/zero"), false),
@@ -1154,8 +1169,13 @@ fn build_launcher_config(
     }
 
     for input in &config.inputs {
-        mounts.push(bind_mount(&input.host_path, &input.mount_path, true));
+        mounts.push(bind_mount(
+            &input.host_path,
+            &input_mount_path(&input.name),
+            true,
+        ));
     }
+    validate_launcher_mount_targets(&mounts)?;
 
     Ok(SandboxLauncherConfig {
         protocol_version: RUNNER_PROTOCOL_VERSION,
@@ -1168,7 +1188,7 @@ fn build_launcher_config(
 
 fn rootfs_top_level_mounts(rootfs: &Path) -> Result<Vec<SandboxLauncherMount>, RuntimeError> {
     let mut entries = rootfs_top_level_entries(rootfs)?;
-    entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    entries.sort_by_key(|entry| entry.file_name());
 
     let mut mounts = Vec::new();
     for entry in entries {
@@ -1189,6 +1209,11 @@ fn rootfs_top_level_mounts(rootfs: &Path) -> Result<Vec<SandboxLauncherMount>, R
 
         if file_type.is_dir() || file_type.is_file() {
             mounts.push(bind_mount(&source, &destination, true));
+        } else if !file_type.is_symlink() {
+            return Err(RuntimeError::InvalidInput(format!(
+                "sandbox rootfs '{}' top-level entry '/{name}' must be a file, directory, or symlink",
+                rootfs.display()
+            )));
         }
     }
 
@@ -1277,18 +1302,17 @@ fn create_dev_symlink(sandbox_root: &Path, name: &str, target: &str) -> Result<(
 }
 
 fn create_mount_target(sandbox_root: &Path, container_path: &Path) -> Result<(), RuntimeError> {
-    let relative = container_path.strip_prefix("/").map_err(|_| {
-        RuntimeError::InvalidInput(format!(
-            "container mount target '{}' must be absolute",
-            container_path.display()
-        ))
-    })?;
+    let relative = safe_relative_container_target(container_path, "container mount target")?;
     let target = sandbox_root.join(relative);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
     File::create(target)?;
     Ok(())
+}
+
+fn input_mount_path(name: &str) -> PathBuf {
+    Path::new("/__mbuild/inputs").join(name)
 }
 
 fn bind_mount(source: &Path, target: &Path, readonly: bool) -> SandboxLauncherMount {
@@ -1351,6 +1375,153 @@ fn step_env(step: &SandboxStep) -> HashMap<String, String> {
     env
 }
 
+fn validate_input_name(name: &str) -> Result<(), RuntimeError> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err(RuntimeError::InvalidInput(
+            "sandbox input name must not be empty".to_string(),
+        ));
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(RuntimeError::InvalidInput(format!(
+            "sandbox input name '{name}' must start with an ASCII letter or underscore"
+        )));
+    }
+    if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return Err(RuntimeError::InvalidInput(format!(
+            "sandbox input name '{name}' must contain only ASCII letters, digits, and underscores"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_steps(steps: &[SandboxStep]) -> Result<(), RuntimeError> {
+    let mut names = HashSet::new();
+    let mut log_paths = HashSet::new();
+    for (index, step) in steps.iter().enumerate() {
+        if step.name.is_empty() {
+            return Err(RuntimeError::InvalidInput(format!(
+                "sandbox step at index {index} name must not be empty"
+            )));
+        }
+        if !names.insert(step.name.as_str()) {
+            return Err(RuntimeError::InvalidInput(format!(
+                "sandbox step '{}' is defined more than once",
+                step.name
+            )));
+        }
+        if !step.cwd.is_absolute() {
+            return Err(RuntimeError::InvalidInput(format!(
+                "sandbox step '{}' cwd must be absolute: '{}'",
+                step.name,
+                step.cwd.display()
+            )));
+        }
+        if step.argv.is_empty() {
+            return Err(RuntimeError::InvalidInput(format!(
+                "sandbox step '{}' argv must not be empty",
+                step.name
+            )));
+        }
+        if step.argv[0].is_empty() {
+            return Err(RuntimeError::InvalidInput(format!(
+                "sandbox step '{}' argv[0] must not be empty",
+                step.name
+            )));
+        }
+        for (stream, path) in [("stdout", &step.stdout_path), ("stderr", &step.stderr_path)] {
+            if !log_paths.insert(path.clone()) {
+                return Err(RuntimeError::InvalidInput(format!(
+                    "sandbox step '{}' {stream} log path is not unique: '{}'",
+                    step.name,
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_root_dir_top_level(root_dir: &Path) -> Result<(), RuntimeError> {
+    reject_reserved_rootfs_entry(root_dir, "__mbuild")?;
+    for entry in rootfs_top_level_entries(root_dir)? {
+        let name = entry.file_name();
+        let name = name.to_str().ok_or_else(|| {
+            RuntimeError::InvalidInput(format!(
+                "sandbox root directory '{}' contains non-UTF-8 top-level entry",
+                root_dir.display()
+            ))
+        })?;
+        let file_type = entry.file_type()?;
+        if !(file_type.is_file() || file_type.is_dir() || file_type.is_symlink()) {
+            return Err(RuntimeError::InvalidInput(format!(
+                "sandbox root directory '{}' top-level entry '/{name}' must be a file, directory, or symlink",
+                root_dir.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_launcher_mount_targets(mounts: &[SandboxLauncherMount]) -> Result<(), RuntimeError> {
+    let mut targets = HashSet::new();
+    for mount in mounts {
+        safe_relative_container_target(&mount.target, "sandbox launcher mount target")?;
+        if !targets.insert(mount.target.clone()) {
+            return Err(RuntimeError::InvalidInput(format!(
+                "sandbox launcher mount target '{}' is defined more than once",
+                mount.target.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn safe_relative_container_target(path: &Path, label: &str) -> Result<PathBuf, RuntimeError> {
+    if !path.is_absolute() {
+        return Err(RuntimeError::InvalidInput(format!(
+            "{label} '{}' must be absolute",
+            path.display()
+        )));
+    }
+    if path
+        .as_os_str()
+        .as_bytes()
+        .split(|byte| *byte == b'/')
+        .any(|segment| segment == b"." || segment == b"..")
+    {
+        return Err(RuntimeError::InvalidInput(format!(
+            "{label} '{}' must not contain '.' or '..' components",
+            path.display()
+        )));
+    }
+    let mut relative = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(segment) => relative.push(segment),
+            Component::CurDir | Component::ParentDir => {
+                return Err(RuntimeError::InvalidInput(format!(
+                    "{label} '{}' must not contain '.' or '..' components",
+                    path.display()
+                )));
+            }
+            _ => {
+                return Err(RuntimeError::InvalidInput(format!(
+                    "{label} '{}' contains an unsupported path component",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(RuntimeError::InvalidInput(format!(
+            "{label} must not be '/'"
+        )));
+    }
+    Ok(relative)
+}
+
 fn require_directory(path: &Path, label: &str) -> Result<(), RuntimeError> {
     if path.is_dir() {
         Ok(())
@@ -1392,6 +1563,22 @@ fn command_context(stderr: &[u8]) -> String {
         .unwrap_or_default()
 }
 
+fn add_stderr_context(error: RuntimeError, stderr: &[u8]) -> RuntimeError {
+    let context = command_context(stderr);
+    if context.is_empty() {
+        return error;
+    }
+    match error {
+        RuntimeError::InvalidInput(message) => {
+            RuntimeError::InvalidInput(format!("{message}{context}"))
+        }
+        RuntimeError::Preflight(message) => RuntimeError::Preflight(format!("{message}{context}")),
+        RuntimeError::Executor(message) => RuntimeError::Executor(format!("{message}{context}")),
+        RuntimeError::Io(error) => RuntimeError::Executor(format!("{error}{context}")),
+        RuntimeError::Idmap(error) => RuntimeError::Executor(format!("{error}{context}")),
+    }
+}
+
 struct Pipe {
     read: OwnedFd,
     write: OwnedFd,
@@ -1423,7 +1610,37 @@ mod tests {
     use super::*;
     use fsobj_hash::hash_fs_tree_object;
     use mbuild_core::FsTreeEntry;
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
+
+    fn valid_config(temp: &TempDir) -> SandboxBuildConfig {
+        let root_dir = temp.path().join("rootfs");
+        let out_dir = temp.path().join("out");
+        let config_dir = temp.path().join("config");
+        let workspace = temp.path().join("workspace");
+        for path in [&root_dir, &out_dir, &config_dir, &workspace] {
+            fs::create_dir_all(path).unwrap();
+        }
+        SandboxBuildConfig {
+            root_dir,
+            out_dir,
+            config_dir,
+            workspace,
+            inputs: Vec::new(),
+            steps: Vec::new(),
+        }
+    }
+
+    fn runtime_step(temp: &TempDir, name: &str) -> SandboxStep {
+        SandboxStep {
+            name: name.to_string(),
+            run_as: SandboxRunAs::BuildUser,
+            cwd: PathBuf::from("/"),
+            argv: vec!["true".to_string()],
+            env: HashMap::new(),
+            stdout_path: temp.path().join(format!("{name}.stdout")),
+            stderr_path: temp.path().join(format!("{name}.stderr")),
+        }
+    }
 
     #[test]
     fn launcher_config_uses_readonly_rootfs_binds_and_writable_runtime_mounts() {
@@ -1442,14 +1659,13 @@ mod tests {
         }
         symlink("usr/bin", rootfs.join("bin")).unwrap();
         let build_config = SandboxBuildConfig {
-            rootfs: rootfs.clone(),
+            root_dir: rootfs.clone(),
             out_dir: out.clone(),
             config_dir: config,
             workspace: workspace.clone(),
             inputs: vec![SandboxInput {
                 name: "source".to_string(),
                 host_path: source.clone(),
-                mount_path: PathBuf::from("/__mbuild/inputs/source"),
             }],
             steps: Vec::new(),
         };
@@ -1542,7 +1758,7 @@ mod tests {
         }
         fs::create_dir(rootfs.join("__mbuild")).unwrap();
         let build_config = SandboxBuildConfig {
-            rootfs: rootfs.clone(),
+            root_dir: rootfs.clone(),
             out_dir: out,
             config_dir: config,
             workspace,
@@ -1557,6 +1773,127 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_config_rejects_invalid_input_names() {
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("input");
+        fs::create_dir(&input).unwrap();
+        let mut config = valid_config(&temp);
+        config.inputs.push(SandboxInput {
+            name: "bad-name".to_string(),
+            host_path: input,
+        });
+
+        let error = validate_config(&config).unwrap_err();
+
+        assert!(error.to_string().contains("must contain only ASCII"));
+    }
+
+    #[test]
+    fn launcher_config_derives_input_mount_path() {
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("input");
+        fs::create_dir(&input).unwrap();
+        let mut build_config = valid_config(&temp);
+        build_config.inputs.push(SandboxInput {
+            name: "source".to_string(),
+            host_path: input.clone(),
+        });
+        let dirs = SandboxDirs::create(&build_config.workspace).unwrap();
+        let runtime_files =
+            SandboxRuntimeFiles::create(&dirs.runtime_files, &build_config).unwrap();
+        let runner_path = temp.path().join(RUNNER_BINARY_NAME);
+        fs::write(&runner_path, "#!/bin/sh\n").unwrap();
+
+        let launcher =
+            build_launcher_config(&build_config, &dirs, &runtime_files, &runner_path).unwrap();
+
+        let mount = launcher
+            .mounts
+            .iter()
+            .find(|mount| mount.target == Path::new("/__mbuild/inputs/source"))
+            .expect("derived input mount exists");
+        assert_eq!(mount.source.as_deref(), Some(input.as_path()));
+    }
+
+    #[test]
+    fn sandbox_config_rejects_invalid_steps_and_duplicate_logs() {
+        let temp = tempdir().unwrap();
+        let mut config = valid_config(&temp);
+        config.steps = vec![runtime_step(&temp, "build")];
+        config.steps[0].cwd = PathBuf::from("relative");
+        let error = validate_config(&config).unwrap_err();
+        assert!(error.to_string().contains("cwd must be absolute"));
+
+        let mut config = valid_config(&temp);
+        config.steps = vec![runtime_step(&temp, "build")];
+        config.steps[0].argv.clear();
+        let error = validate_config(&config).unwrap_err();
+        assert!(error.to_string().contains("argv must not be empty"));
+
+        let mut config = valid_config(&temp);
+        config.steps = vec![runtime_step(&temp, "build")];
+        config.steps[0].argv[0].clear();
+        let error = validate_config(&config).unwrap_err();
+        assert!(error.to_string().contains("argv[0] must not be empty"));
+
+        let mut config = valid_config(&temp);
+        config.steps = vec![runtime_step(&temp, "build"), runtime_step(&temp, "build")];
+        let error = validate_config(&config).unwrap_err();
+        assert!(error.to_string().contains("defined more than once"));
+
+        let mut config = valid_config(&temp);
+        let mut step = runtime_step(&temp, "build");
+        step.stderr_path = step.stdout_path.clone();
+        config.steps = vec![step];
+        let error = validate_config(&config).unwrap_err();
+        assert!(error.to_string().contains("log path is not unique"));
+    }
+
+    #[test]
+    fn sandbox_config_rejects_unsupported_root_top_level_file_types() {
+        let temp = tempdir().unwrap();
+        let config = valid_config(&temp);
+        let fifo = config.root_dir.join("fifo");
+        let c_fifo = path_cstring(&fifo).unwrap();
+        let result = unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o644) };
+        assert_eq!(result, 0, "mkfifo failed: {}", io::Error::last_os_error());
+
+        let error = validate_config(&config).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("must be a file, directory, or symlink")
+        );
+    }
+
+    #[test]
+    fn launcher_config_rejects_duplicate_mount_targets() {
+        let mounts = vec![
+            tmpfs_mount(Path::new("/tmp"), &[]),
+            bind_mount(Path::new("/dev/null"), Path::new("/tmp"), true),
+        ];
+
+        let error = validate_launcher_mount_targets(&mounts).unwrap_err();
+
+        assert!(error.to_string().contains("defined more than once"));
+    }
+
+    #[test]
+    fn container_target_validation_rejects_unsafe_paths() {
+        for path in ["relative", "/", "/tmp/../out", "/tmp/./out"] {
+            let error = safe_relative_container_target(Path::new(path), "mount target")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("absolute")
+                    || error.contains("must not be '/'")
+                    || error.contains("must not contain")
+            );
+        }
+    }
+
+    #[test]
     fn sandbox_root_skeleton_copies_top_level_symlinks_and_skipped_dirs() {
         let temp = tempdir().unwrap();
         let lower = temp.path().join("lower");
@@ -1568,7 +1905,7 @@ mod tests {
         symlink("usr/bin", lower.join("bin")).unwrap();
 
         let config = SandboxBuildConfig {
-            rootfs: lower.clone(),
+            root_dir: lower.clone(),
             out_dir: temp.path().join("out"),
             config_dir: temp.path().join("config"),
             workspace: temp.path().join("workspace"),
@@ -1632,6 +1969,51 @@ mod tests {
         let resolved = resolve_sandbox_runner_path_from(None, Some(&current_exe), None).unwrap();
 
         assert_eq!(resolved, sibling);
+    }
+
+    #[test]
+    fn launcher_child_wait_with_output_drains_large_stderr() {
+        let stderr = Pipe::new().unwrap();
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed: {}", io::Error::last_os_error());
+        if pid == 0 {
+            let Pipe { read, write } = stderr;
+            drop(read);
+            let mut remaining = 1024 * 1024;
+            let chunk = [b'x'; 8192];
+            while remaining > 0 {
+                let size = remaining.min(chunk.len());
+                let written =
+                    unsafe { libc::write(write.as_raw_fd(), chunk.as_ptr().cast(), size) };
+                if written <= 0 {
+                    unsafe { libc::_exit(2) };
+                }
+                remaining -= written as usize;
+            }
+            unsafe { libc::_exit(0) };
+        }
+        let Pipe { read, write } = stderr;
+        drop(write);
+        let child = LauncherChild { pid, stderr: read };
+
+        let output = child.wait_with_output().unwrap();
+
+        assert!(output.success);
+        assert_eq!(output.stderr.len(), 1024 * 1024);
+    }
+
+    #[test]
+    fn setup_failure_context_includes_child_stderr_line() {
+        let error = add_stderr_context(
+            RuntimeError::Executor("setup failed".to_string()),
+            b"\nchild setup detail\nsecond line\n",
+        );
+
+        assert!(
+            error
+                .to_string()
+                .contains("setup failed: child setup detail")
+        );
     }
 
     #[test]

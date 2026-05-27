@@ -6,9 +6,14 @@
 //! internal details.
 //!
 //! The current public capabilities are fs-tree ownership materialization
-//! through [`apply_ownership_batch`] plus deterministic fs-tree tar and
-//! initramfs generation. These helpers operate in a user namespace described by
-//! [`MbuildIdmap`].
+//! through [`apply_ownership_batch`], deterministic fs-tree tar and initramfs
+//! generation, and `Sandbox` execution through [`run_sandbox_build`]. These
+//! helpers operate in a user namespace described by [`MbuildIdmap`].
+//!
+//! The public `Sandbox` runtime capability accepts a prepared root filesystem
+//! directory through [`SandboxBuildConfig::root_dir`], mounts extra
+//! [`SandboxInput`] values under `/__mbuild/inputs/<name>`, runs ordered
+//! [`SandboxStep`] commands, and returns the scanned fs-tree output manifest.
 //!
 //! Runtime ownership materialization currently targets Linux hosts with
 //! configured `/etc/subuid` and `/etc/subgid` ranges, unprivileged user
