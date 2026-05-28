@@ -20,7 +20,7 @@
 
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
-    FsTreeOwnerMap, StagedBuildResult, TypedBuilder, fsutil, validate_fs_tree_object,
+    StagedBuildResult, TypedBuilder, fsutil, load_fs_tree_object,
 };
 use mbuild_runtime::{
     SandboxBuildConfig, SandboxInput, SandboxRunAs, SandboxStep, cached_host_idmap,
@@ -151,7 +151,7 @@ impl TypedBuilder for SandboxBuilder {
         let idmap = cached_host_idmap().map_err(|error| {
             BuilderError::ExecutionFailed(format!("failed to load host idmap: {error}"))
         })?;
-        let rootfs_root_dir = validate_rootfs(rootfs, idmap.as_ref()).map_err(map_error)?;
+        let rootfs_root_dir = validate_rootfs(rootfs).map_err(map_error)?;
 
         let extra_inputs =
             collect_extra_inputs(&SANDBOX_SPEC, "Sandbox", &inputs).map_err(map_error)?;
@@ -390,12 +390,9 @@ fn validate_sandbox_config(config: &SandboxConfig) -> BResult<()> {
 }
 
 /// Ensure the required `rootfs` input is a valid fs-tree object.
-fn validate_rootfs(
-    rootfs: &BuilderInputObject,
-    owner_map: &impl FsTreeOwnerMap,
-) -> BResult<PathBuf> {
-    validate_fs_tree_object(&rootfs.object_path, owner_map)
-        .map(|validated| validated.paths.root_dir)
+fn validate_rootfs(rootfs: &BuilderInputObject) -> BResult<PathBuf> {
+    load_fs_tree_object(&rootfs.object_path)
+        .map(|loaded| loaded.paths.root_dir)
         .map_err(|error| {
             SandboxError::InputResolutionFailed(format!(
                 "rootfs input must be a valid fs-tree object '{}': {error}",
@@ -818,13 +815,10 @@ fn write_script_config_node(path: &Path, value: &Value, debug_path: &str) -> BRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{
-        Builder, BuilderInputs, FsTreeEntry, FsTreeManifest, FsTreeObjectError, FsTreeOwnerMap,
-        IdentityFsTreeOwnerMap,
-    };
+    use mbuild_core::{Builder, BuilderInputs, FsTreeEntry, FsTreeManifest};
     use serde_json::json;
     #[cfg(unix)]
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     #[test]
@@ -923,22 +917,6 @@ mod tests {
         assert!(!output.exists());
     }
 
-    #[derive(Debug, Clone, Copy)]
-    struct ConstantOwnerMap {
-        uid: u32,
-        gid: u32,
-    }
-
-    impl FsTreeOwnerMap for ConstantOwnerMap {
-        fn physical_uid(&self, _logical_uid: u32) -> Result<u32, FsTreeObjectError> {
-            Ok(self.uid)
-        }
-
-        fn physical_gid(&self, _logical_gid: u32) -> Result<u32, FsTreeObjectError> {
-            Ok(self.gid)
-        }
-    }
-
     fn input_object(object_path: PathBuf) -> BuilderInputObject {
         BuilderInputObject {
             object_path,
@@ -949,21 +927,16 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn write_minimal_fs_tree_object(object: &Path) -> ConstantOwnerMap {
+    fn write_minimal_fs_tree_object(object: &Path) {
         std::fs::create_dir(object).unwrap();
         let root = object.join("root");
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let metadata = std::fs::metadata(&root).unwrap();
         let manifest =
             FsTreeManifest::from_entries(vec![FsTreeEntry::directory("", 0, 0, 0o755)]).unwrap();
         manifest
             .write_canonical(&object.join("manifest.jsonl"))
             .unwrap();
-        ConstantOwnerMap {
-            uid: metadata.uid(),
-            gid: metadata.gid(),
-        }
     }
 
     fn minimal_step(name: &str) -> BuildStep {
@@ -981,10 +954,10 @@ mod tests {
     fn validate_rootfs_accepts_valid_fs_tree_and_returns_root_dir() {
         let temp = tempdir().unwrap();
         let object = temp.path().join("object");
-        let owner = write_minimal_fs_tree_object(&object);
+        write_minimal_fs_tree_object(&object);
 
         assert_eq!(
-            validate_rootfs(&input_object(object.clone()), &owner).unwrap(),
+            validate_rootfs(&input_object(object.clone())).unwrap(),
             object.join("root")
         );
     }
@@ -995,7 +968,7 @@ mod tests {
         let object = temp.path().join("object");
         std::fs::create_dir_all(&object).unwrap();
 
-        let error = validate_rootfs(&input_object(object.clone()), &IdentityFsTreeOwnerMap)
+        let error = validate_rootfs(&input_object(object.clone()))
             .unwrap_err()
             .to_string();
 

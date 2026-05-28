@@ -3,12 +3,10 @@
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use mbuild_core::{
-    BuildContext, BuilderInputObject, BuilderInputs, FsTreeEntry, FsTreeManifest, TypedBuilder,
+    BuildContext, BuilderInputObject, BuilderInputs, FsTreeEntry, TypedBuilder, load_fs_tree_object,
 };
-use mbuild_image::oci_extract::validate_oci_fs_tree_object;
 use mbuild_image::{OciExtractBuilder, OciExtractConfig};
 use mbuild_origin_oci_registry::oci::{self, OciDescriptor};
-use mbuild_runtime::MbuildIdmap;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Cursor, Write};
@@ -21,7 +19,6 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 #[test]
 fn oci_extract_materializes_runtime_ownership() -> TestResult<()> {
     let temp = tempdir()?;
-    let idmap = MbuildIdmap::from_host_environment()?;
     let oci = create_oci_layout(temp.path())?;
     let mut cx = build_context(temp.path())?;
     let mut inputs = BuilderInputs::empty();
@@ -40,10 +37,15 @@ fn oci_extract_materializes_runtime_ownership() -> TestResult<()> {
         fs::read(result.staged_path.join("root/bin/tool"))?,
         b"tool\n"
     );
-    validate_oci_fs_tree_object(&result.staged_path, &idmap)
+    let loaded = load_fs_tree_object(&result.staged_path)
         .map_err(|error| io::Error::other(error.to_string()))?;
+    let oci_config: serde_json::Value =
+        serde_json::from_slice(&fs::read(result.staged_path.join("oci-config.json"))?)?;
 
-    let manifest = FsTreeManifest::read_canonical(&result.staged_path.join("manifest.jsonl"))?;
+    assert_eq!(loaded.paths.root_dir, result.staged_path.join("root"));
+    assert_eq!(oci_config["architecture"], "amd64");
+
+    let manifest = loaded.manifest;
     assert!(manifest.entries().iter().any(|entry| {
         matches!(entry, FsTreeEntry::File { path, uid: 1, gid: 1, mode: 0o755, .. } if path == "bin/tool")
     }));

@@ -2,10 +2,12 @@ use flate2::read::GzDecoder;
 use fsobj_hash::{hash_file_bytes, hash_symlink_node};
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
-    FsTreeEntry, FsTreeManifest, FsTreeObjectError, FsTreeObjectPaths, FsTreeOwnerMap, ObjectHash,
-    StagedBuildResult, TypedBuilder, ValidatedFsTreeObject, create_fs_tree_staging_dir,
-    hash_fs_tree_object_from_manifest_with_extra_files, validate_fs_tree_object,
+    FsTreeEntry, FsTreeManifest, FsTreeObjectError, FsTreeObjectPaths, ObjectHash,
+    StagedBuildResult, TypedBuilder, create_fs_tree_staging_dir,
+    hash_fs_tree_object_from_manifest_with_extra_files,
 };
+#[cfg(test)]
+use mbuild_core::{FsTreeOwnerMap, ValidatedFsTreeObject, validate_fs_tree_object};
 use mbuild_origin_oci_registry::oci::{self, OciDescriptor, OciManifest};
 use serde::Deserialize;
 use serde_json::Value;
@@ -13,8 +15,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use tar::{Archive, EntryType};
 use tracing::warn;
@@ -228,10 +232,11 @@ fn map_error(error: OciExtractError) -> BuilderError {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedOciFsTreeObject {
-    pub fs_tree: ValidatedFsTreeObject,
-    pub oci_config: Value,
+pub(crate) struct ValidatedOciFsTreeObject {
+    pub(crate) fs_tree: ValidatedFsTreeObject,
+    pub(crate) oci_config: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,7 +245,8 @@ pub struct OciFsTreeObjectPaths {
     pub oci_config_path: PathBuf,
 }
 
-pub fn validate_oci_fs_tree_object(
+#[cfg(test)]
+pub(crate) fn validate_oci_fs_tree_object(
     object_dir: &Path,
     owner_map: &impl FsTreeOwnerMap,
 ) -> Result<ValidatedOciFsTreeObject, OciExtractError> {

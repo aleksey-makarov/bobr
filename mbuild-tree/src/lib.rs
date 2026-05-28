@@ -6,7 +6,7 @@ use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     ComposedFsTree, ComposedFsTreeEntry, FsTreeComposeInput, FsTreeEntry, FsTreeManifest,
     FsTreeOwnerMap, StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir,
-    fsutil,
+    fsutil, load_fs_tree_object,
 };
 use mbuild_runtime::{FsTreeArchiveEntrySource, FsTreeArchiveInput};
 use serde::{Deserialize, Serialize};
@@ -1454,54 +1454,11 @@ fn add_tree_subset_parent_dirs(
 }
 
 fn load_fs_tree_compose_input(object_path: &Path) -> Result<FsTreeComposeInput, BuilderError> {
-    let manifest_path = object_path.join("manifest.jsonl");
-    let root_dir = object_path.join("root");
-    require_directory(object_path, "fs-tree object directory")?;
-    require_regular_non_executable_file(&manifest_path, "fs-tree manifest")?;
-    require_directory(&root_dir, "fs-tree root directory")?;
-    let manifest = FsTreeManifest::read_canonical(&manifest_path)
-        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-    Ok(FsTreeComposeInput { manifest, root_dir })
-}
-
-fn require_directory(path: &Path, label: &str) -> Result<(), BuilderError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        BuilderError::ExecutionFailed(format!(
-            "failed to inspect {label} '{}': {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_dir() {
-        Ok(())
-    } else {
-        Err(BuilderError::ExecutionFailed(format!(
-            "{label} '{}' must be a directory",
-            path.display()
-        )))
-    }
-}
-
-fn require_regular_non_executable_file(path: &Path, label: &str) -> Result<(), BuilderError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        BuilderError::ExecutionFailed(format!(
-            "failed to inspect {label} '{}': {error}",
-            path.display()
-        ))
-    })?;
-    if !metadata.file_type().is_file() {
-        return Err(BuilderError::ExecutionFailed(format!(
-            "{label} '{}' must be a regular file",
-            path.display()
-        )));
-    }
-    #[cfg(unix)]
-    if metadata.permissions().mode() & 0o111 != 0 {
-        return Err(BuilderError::ExecutionFailed(format!(
-            "{label} '{}' must not be executable",
-            path.display()
-        )));
-    }
-    Ok(())
+    let loaded = load_fs_tree_object(object_path).map_err(map_fs_tree_error)?;
+    Ok(FsTreeComposeInput {
+        manifest: loaded.manifest,
+        root_dir: loaded.paths.root_dir,
+    })
 }
 
 fn materialize_tree_merge_output(

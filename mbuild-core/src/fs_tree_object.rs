@@ -58,6 +58,12 @@ pub struct ValidatedFsTreeObject {
     pub manifest: FsTreeManifest,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedFsTreeObject {
+    pub paths: FsTreeObjectPaths,
+    pub manifest: FsTreeManifest,
+}
+
 pub trait FsTreeOwnerMap {
     fn physical_uid(&self, logical_uid: u32) -> Result<u32, FsTreeObjectError>;
     fn physical_gid(&self, logical_gid: u32) -> Result<u32, FsTreeObjectError>;
@@ -91,11 +97,7 @@ pub fn validate_fs_tree_object(
 
     #[cfg(unix)]
     {
-        let paths = FsTreeObjectPaths {
-            object_dir: object_dir.to_path_buf(),
-            manifest_path: object_dir.join(MANIFEST_FILE_NAME),
-            root_dir: object_dir.join(ROOT_DIR_NAME),
-        };
+        let paths = fs_tree_object_paths(object_dir);
 
         require_directory(object_dir, "fs-tree object directory")?;
         validate_top_level_shape(&paths)?;
@@ -104,6 +106,28 @@ pub fn validate_fs_tree_object(
         validate_root_against_manifest(&paths.root_dir, &manifest, owner_map)?;
 
         Ok(ValidatedFsTreeObject { paths, manifest })
+    }
+}
+
+pub fn load_fs_tree_object(object_dir: &Path) -> Result<LoadedFsTreeObject, FsTreeObjectError> {
+    #[cfg(not(unix))]
+    {
+        let _ = object_dir;
+        return Err(FsTreeObjectError::Invalid(
+            "fs-tree object loading is only supported on unix hosts".to_string(),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        let paths = fs_tree_object_paths(object_dir);
+
+        require_directory(object_dir, "fs-tree object directory")?;
+        validate_top_level_shape(&paths)?;
+
+        let manifest = FsTreeManifest::read_canonical(&paths.manifest_path)?;
+
+        Ok(LoadedFsTreeObject { paths, manifest })
     }
 }
 
@@ -441,6 +465,14 @@ fn validate_root_entry(
         _ => Err(FsTreeObjectError::Invalid(
             "fs-tree manifest root entry must be a directory".to_string(),
         )),
+    }
+}
+
+fn fs_tree_object_paths(object_dir: &Path) -> FsTreeObjectPaths {
+    FsTreeObjectPaths {
+        object_dir: object_dir.to_path_buf(),
+        manifest_path: object_dir.join(MANIFEST_FILE_NAME),
+        root_dir: object_dir.join(ROOT_DIR_NAME),
     }
 }
 
@@ -846,6 +878,51 @@ mod tests {
 
         assert_eq!(validated.paths.object_dir, object_dir);
         assert_eq!(validated.manifest, manifest);
+    }
+
+    #[test]
+    fn loads_valid_object_without_recursive_validation() {
+        let temp = tempdir().unwrap();
+        let (object_dir, manifest, _) = create_valid_object(temp.path());
+
+        let loaded = load_fs_tree_object(&object_dir).unwrap();
+
+        assert_eq!(loaded.paths.object_dir, object_dir);
+        assert_eq!(loaded.paths.root_dir, loaded.paths.object_dir.join("root"));
+        assert_eq!(loaded.manifest, manifest);
+    }
+
+    #[test]
+    fn load_does_not_scan_closed_root_children() {
+        let temp = tempdir().unwrap();
+        let object_dir = temp.path().join("object");
+        let manifest = make_manifest(vec![root(0, 0), FsTreeEntry::directory("locked", 0, 0, 0)]);
+        let paths = create_fs_tree_staging_dir(&object_dir, &manifest).unwrap();
+        let locked = paths.root_dir.join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0)).unwrap();
+
+        let loaded = load_fs_tree_object(&object_dir).unwrap();
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(loaded.manifest, manifest);
+    }
+
+    #[test]
+    fn load_rejects_bad_top_level_shape() {
+        let temp = tempdir().unwrap();
+        assert!(load_fs_tree_object(&temp.path().join("missing")).is_err());
+
+        let object_dir = temp.path().join("object");
+        let manifest = make_manifest(vec![root(0, 0)]);
+        let paths = create_fs_tree_staging_dir(&object_dir, &manifest).unwrap();
+
+        fs::remove_file(&paths.manifest_path).unwrap();
+        assert!(load_fs_tree_object(&object_dir).is_err());
+        manifest.write_canonical(&paths.manifest_path).unwrap();
+
+        fs::remove_dir(&paths.root_dir).unwrap();
+        assert!(load_fs_tree_object(&object_dir).is_err());
     }
 
     #[test]
