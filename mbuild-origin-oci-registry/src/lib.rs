@@ -15,9 +15,7 @@ pub use registry::{
 
 const OCI_LAYOUT_SUBDIR: &str = "image";
 
-static OCI_REGISTRY_ORIGIN_SPEC: OriginSpec = OriginSpec {
-    tag: "oci-registry",
-};
+static OCI_REGISTRY_ORIGIN_SPEC: OriginSpec = OriginSpec { tag: "OciRegistry" };
 
 #[derive(Debug)]
 enum OciRegistryOriginError {
@@ -58,8 +56,8 @@ impl OriginHandler for OciRegistryOriginHandler {
         mut object: Map<String, Value>,
         field_path: &str,
     ) -> Result<Box<dyn ParsedOrigin>, String> {
-        let kind = take_string(&mut object, field_path, "type")?;
-        debug_assert_eq!(kind, "oci-registry");
+        let kind = take_string(&mut object, field_path, "tag")?;
+        debug_assert_eq!(kind, "OciRegistry");
         let image = take_string(&mut object, field_path, "image")?;
         if image.trim().is_empty() {
             return Err(format!("{field_path}.image: image must not be empty"));
@@ -158,10 +156,7 @@ mod tests {
         let origin = OciRegistryOriginHandler
             .parse(
                 Map::from_iter([
-                    (
-                        "type".to_string(),
-                        Value::String("oci-registry".to_string()),
-                    ),
+                    ("tag".to_string(), Value::String("OciRegistry".to_string())),
                     (
                         "image".to_string(),
                         Value::String("docker.io/library/alpine:3.20".to_string()),
@@ -174,7 +169,7 @@ mod tests {
                 "$.origin",
             )
             .unwrap();
-        assert_eq!(origin.spec().tag, "oci-registry");
+        assert_eq!(origin.spec().tag, "OciRegistry");
     }
 
     #[test]
@@ -182,10 +177,7 @@ mod tests {
         let error = OciRegistryOriginHandler
             .parse(
                 Map::from_iter([
-                    (
-                        "type".to_string(),
-                        Value::String("oci-registry".to_string()),
-                    ),
+                    ("tag".to_string(), Value::String("OciRegistry".to_string())),
                     (
                         "image".to_string(),
                         Value::String("docker.io/library/alpine:3.20".to_string()),
@@ -206,10 +198,7 @@ mod tests {
         let error = OciRegistryOriginHandler
             .parse(
                 Map::from_iter([
-                    (
-                        "type".to_string(),
-                        Value::String("oci-registry".to_string()),
-                    ),
+                    ("tag".to_string(), Value::String("OciRegistry".to_string())),
                     ("image".to_string(), Value::String("   ".to_string())),
                     (
                         "digest".to_string(),
@@ -273,7 +262,6 @@ mod tests {
         let staged = materialize_oci_registry_origin(
             &OriginContext {
                 temp_root: temp.path(),
-                local_root: None,
             },
             &origin,
         )

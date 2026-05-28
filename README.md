@@ -123,7 +123,7 @@ input targets and their normal `result-refs/` and `object-refs/` publications.
       "tag": "Source",
       "object_hash": "0123...abcd",
       "origin": {
-        "type": "http",
+        "tag": "Http",
         "url": [
           "https://example.invalid/linux.tar.xz"
         ],
@@ -142,14 +142,14 @@ input targets and their normal `result-refs/` and `object-refs/` publications.
 
 In v1, `Source` supports three origins:
 
-- `origin.type = "path"`
-- `origin.path` must be a non-empty relative path without `..`
+- `origin.tag = "Path"`
+- `origin.path` must be an absolute host path
 - `origin.unpack` defaults to `false`; when true, the local path is treated as a tar archive
-- `origin.type = "http"`
+- `origin.tag = "Http"`
 - `origin.url` is one HTTP(S) URL or an ordered fallback list
 - `origin.unpack` defaults to `false`
 - `origin.archive_format` may override archive detection for unpacked sources
-- `origin.type = "oci-registry"`
+- `origin.tag = "OciRegistry"`
 - `origin.image` is the registry image locator kept in the recipe
 - `origin.digest` is the pinned manifest or index digest requested from the registry
 - pinned manifest lists / OCI indexes are resolved to the `linux/amd64` manifest
@@ -179,8 +179,6 @@ CLI contract:
 `paths.store` must be an absolute path to an existing directory. That
 directory is the store root itself. A request may still choose a path named
 `.mbuild`, but `mbuild` no longer adds an extra `.mbuild/` layer implicitly.
-`paths.local` is optional and is required only when the request contains a
-`Source` with `origin.type = "path"`.
 
 The store layout is content-addressed:
 

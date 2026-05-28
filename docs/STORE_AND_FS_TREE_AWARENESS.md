@@ -32,11 +32,11 @@ result against the declared `object_hash`.
 | Source/origin | Materialized path | Store behavior | fs-tree / extended-id behavior |
 | --- | --- | --- | --- |
 | `Source` without `origin` | Nothing is materialized. The declared object is expected to already exist in the store. | Reuses the existing `objects/<object_hash>` path and records the source result. | Not fs-tree aware. |
-| `path`, `unpack = false` | A local file or directory copied from `paths.local` into staging. | Imports the staged file or directory as a plain path object. | Does not read or write fs-tree manifests, idmaps, or logical ownership. |
-| `path`, `unpack = true` | A local tar archive unpacked into a staging directory. | Imports the unpacked directory as a plain path object. | Tar uid/gid metadata is not converted into fs-tree logical ids. |
-| `http`, `unpack = false` | A downloaded blob file. | Imports the downloaded file as a plain path object. | Not fs-tree aware. |
-| `http`, `unpack = true` | A downloaded archive unpacked into a staging directory. | Imports the unpacked directory as a plain path object. | Archive ownership metadata is not converted into fs-tree logical ids. |
-| `oci-registry` | An OCI image layout directory fetched by pinned digest. | Imports the OCI layout directory as a plain path object. | The origin itself is not fs-tree aware. `OciExtract` is the later builder that converts OCI layer metadata into an fs-tree manifest. |
+| `Path`, `unpack = false` | A local file or directory copied from an absolute host path into staging. | Imports the staged file or directory as a plain path object. | Does not read or write fs-tree manifests, idmaps, or logical ownership. |
+| `Path`, `unpack = true` | A local tar archive unpacked into a staging directory. | Imports the unpacked directory as a plain path object. | Tar uid/gid metadata is not converted into fs-tree logical ids. |
+| `Http`, `unpack = false` | A downloaded blob file. | Imports the downloaded file as a plain path object. | Not fs-tree aware. |
+| `Http`, `unpack = true` | A downloaded archive unpacked into a staging directory. | Imports the unpacked directory as a plain path object. | Archive ownership metadata is not converted into fs-tree logical ids. |
+| `OciRegistry` | An OCI image layout directory fetched by pinned digest. | Imports the OCI layout directory as a plain path object. | The origin itself is not fs-tree aware. `OciExtract` is the later builder that converts OCI layer metadata into an fs-tree manifest. |
 
 If a source directory happens to contain files named `manifest.jsonl` and
 `root/`, the source executor still treats it as an ordinary directory object.

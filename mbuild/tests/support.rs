@@ -23,7 +23,6 @@ pub fn write_recipe_with_options(recipe_path: &Path, recipe: &Value, options: &V
     let envelope = json!({
         "paths": {
             "store": store.to_string_lossy(),
-            "local": root.to_string_lossy(),
         },
         "options": options,
         "nodes": request,
@@ -243,8 +242,8 @@ pub fn tree_symlink_recipe(name: &str) -> Value {
 /// `(server, image_ref, pinned_digest, object_hash)`.
 ///
 /// The `image_ref` is in the form `localhost:<port>/testimage@<pinned_digest>`
-/// and can be used directly in a `Source` recipe with `origin.type =
-/// "oci-registry"`.
+/// and can be used directly in a `Source` recipe with `origin.tag =
+/// "OciRegistry"`.
 ///
 /// The server must be kept alive until the build completes.
 pub fn spawn_test_oci_registry() -> (mockito::ServerGuard, String, String, String) {
@@ -319,7 +318,7 @@ pub fn base_image_recipe(image: &str, digest: &str, object_hash: &str) -> Value 
         "tag": "Source",
         "object_hash": object_hash,
         "origin": {
-            "type": "oci-registry",
+            "tag": "OciRegistry",
             "image": image,
             "digest": digest,
         }
@@ -336,7 +335,7 @@ pub fn source_recipe(url: &str, source_hash: &str) -> Value {
         "tag": "Source",
         "object_hash": source_hash,
         "origin": {
-            "type": "http",
+            "tag": "Http",
             "url": url,
             "unpack": true,
         }

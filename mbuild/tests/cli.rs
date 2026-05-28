@@ -227,9 +227,9 @@ fn cli_reports_relative_store_path() {
 }
 
 #[test]
-fn cli_reports_relative_local_path() {
+fn cli_reports_unexpected_local_path() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("relative-local.json");
+    let recipe_path = workspace.path().join("unexpected-local.json");
     let store = store_root(workspace.path());
     fs::create_dir_all(&store).unwrap();
     fs::write(
@@ -245,8 +245,8 @@ fn cli_reports_relative_local_path() {
                     "tag": "Source",
                     "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
                     "origin": {
-                        "type": "path",
-                        "path": "payload.txt"
+                        "tag": "Path",
+                        "path": "/tmp/payload.txt"
                     },
                 }
             }
@@ -264,15 +264,15 @@ fn cli_reports_relative_local_path() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("$.paths.local: expected absolute path"),
+        stderr.contains("$.paths: unexpected fields: local"),
         "{stderr}"
     );
 }
 
 #[test]
-fn cli_reports_missing_local_only_when_source_path_materializes() {
+fn cli_reports_relative_source_path() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("missing-local.json");
+    let recipe_path = workspace.path().join("relative-source-path.json");
     let store = store_root(workspace.path());
     fs::create_dir_all(&store).unwrap();
     fs::write(
@@ -285,7 +285,7 @@ fn cli_reports_missing_local_only_when_source_path_materializes() {
                     "tag": "Source",
                     "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
                     "origin": {
-                        "type": "path",
+                        "tag": "Path",
                         "path": "payload.txt"
                     },
                 }
@@ -303,9 +303,9 @@ fn cli_reports_missing_local_only_when_source_path_materializes() {
 
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("error[build-failed]"), "{stderr}");
+    assert!(stderr.contains("error[invalid-input]"), "{stderr}");
     assert!(
-        stderr.contains("missing local path base for source origin"),
+        stderr.contains("$.nodes.root.origin.path: expected absolute path"),
         "{stderr}"
     );
 }

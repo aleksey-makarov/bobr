@@ -5,7 +5,7 @@
 `mbuild` keeps imported OCI images in the content-addressed store. The active
 OCI and rootfs-backed execution path consists of:
 
-- `Source` with `origin.type = "oci-registry"`: import one pinned external
+- `Source` with `origin.tag = "OciRegistry"`: import one pinned external
   image from a registry into the store as an OCI image layout directory
 - `OciExtract`: extract one OCI image layout input into an fs-tree object
 - `Sandbox`: execute an explicit step plan against a readonly fs-tree rootfs
@@ -19,7 +19,7 @@ The store, not the local container runtime image store, is the source of truth
 for imported image contents. Step execution uses rootfs inputs, not OCI image
 inputs.
 
-## `Source/oci-registry`
+## `Source/OciRegistry`
 
 Imported registry images use a `Source` node like this:
 
@@ -29,7 +29,7 @@ Imported registry images use a `Source` node like this:
   "tag": "Source",
   "object_hash": "<oci-layout object hash>",
   "origin": {
-    "type": "oci-registry",
+    "tag": "OciRegistry",
     "image": "docker.io/library/buildpack-deps:bookworm",
     "digest": "sha256:<pinned manifest-or-index digest>"
   }
@@ -48,7 +48,7 @@ Current behavior:
 - writes `index.json` without image-ref annotations, so the canonical object is
   independent of the registry mirror named by `origin.image`
 
-`Source/oci-registry` currently targets `linux/amd64` only.
+`Source/OciRegistry` currently targets `linux/amd64` only.
 
 ## `OciExtract`
 
@@ -198,7 +198,7 @@ The common native toolchain is `linux_headers`, `glibc`, `binutils`, `gcc`,
 
 ## Current Limitations
 
-- `Source/oci-registry` currently selects only `linux/amd64`
+- `Source/OciRegistry` currently selects only `linux/amd64`
 - `mbuild` does not currently provide a builder for producing derived OCI
   image layouts from fs-tree inputs
 - Rust-side `Sandbox` requests require a prepared fs-tree rootfs object and use

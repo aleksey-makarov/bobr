@@ -133,7 +133,7 @@ pub fn run_recipe_request_in_store_with_options(
     let root_recipe = request.node("root")?;
     let root_name = root_recipe.name().to_string();
     let root_tag = root_recipe.tag().to_string();
-    ensure_planned(&layout, paths.local.as_deref(), &mut nodes, root_key)?;
+    ensure_planned(&layout, &mut nodes, root_key)?;
 
     let mut completed = HashMap::new();
     for (key, node) in &nodes {
@@ -166,7 +166,6 @@ pub fn run_recipe_request_in_store_with_options(
 
     execute_misses(
         &layout,
-        paths.local.as_deref(),
         logger,
         &nodes,
         &mut completed,
@@ -186,9 +185,6 @@ pub fn render_result_as_json(result: &RealizedResult) -> Result<String, RuntimeE
 
 fn validate_runtime_paths(paths: &RecipePaths) -> Result<(), RuntimeError> {
     validate_existing_dir(&paths.store, "store path")?;
-    if let Some(local) = &paths.local {
-        validate_existing_dir(local, "local path")?;
-    }
     Ok(())
 }
 
@@ -210,7 +206,6 @@ fn validate_existing_dir(path: &Path, label: &str) -> Result<(), RuntimeError> {
 
 fn ensure_planned(
     layout: &StoreLayout,
-    local_root: Option<&Path>,
     nodes: &mut HashMap<BuildKey, PlannedNode>,
     key: BuildKey,
 ) -> Result<(), RuntimeError> {
@@ -246,7 +241,7 @@ fn ensure_planned(
                 Ok::<_, RuntimeError>(())
             })?;
             for dep in deps {
-                ensure_planned(layout, local_root, nodes, dep)?;
+                ensure_planned(layout, nodes, dep)?;
             }
 
             if let Some(realized) = lookup_canonical_for_planned_node(layout, nodes, key)? {
@@ -390,7 +385,6 @@ fn lookup_canonical_for_planned_node(
 
 fn execute_misses(
     layout: &StoreLayout,
-    local_root: Option<&Path>,
     logger: Arc<BuildRunLogger>,
     nodes: &HashMap<BuildKey, PlannedNode>,
     completed: &mut HashMap<BuildKey, RealizedResult>,
@@ -446,7 +440,6 @@ fn execute_misses(
                 RuntimeError::Store(format!("missing planned node for key '{}'", key))
             })?;
             let layout = layout.clone();
-            let local_root = local_root.map(Path::to_path_buf);
             let logger = logger.clone();
             let tx = tx.clone();
             let cancellation = cancellation.clone();
@@ -467,14 +460,9 @@ fn execute_misses(
                         cancellation,
                         builder_inputs.expect("builder inputs must be prepared"),
                     ),
-                    PlannedRecipe::Source(source_recipe) => execute_source_recipe(
-                        &layout,
-                        local_root.as_deref(),
-                        logger,
-                        key,
-                        cancellation,
-                        source_recipe,
-                    ),
+                    PlannedRecipe::Source(source_recipe) => {
+                        execute_source_recipe(&layout, logger, key, cancellation, source_recipe)
+                    }
                 };
                 let _ = tx.send((key, result));
             });
@@ -805,7 +793,6 @@ fn execute_builder_recipe(
 
 fn execute_source_recipe(
     layout: &StoreLayout,
-    local_root: Option<&Path>,
     run_logger: Arc<BuildRunLogger>,
     key: BuildKey,
     cancellation: CancellationToken,
@@ -893,7 +880,6 @@ fn execute_source_recipe(
         .expect("origin checked above")
         .materialize(&OriginContext {
             temp_root: temp_root.as_path(),
-            local_root,
         }) {
         Ok(path) => path,
         Err(error) => {
@@ -1177,7 +1163,7 @@ mod tests {
             result_id,
         };
 
-        let error = execute_source_recipe(&layout, None, logger, key, cancellation, recipe)
+        let error = execute_source_recipe(&layout, logger, key, cancellation, recipe)
             .expect_err("expected cancellation");
 
         assert_eq!(error.class(), "cancelled");

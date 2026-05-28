@@ -7,7 +7,7 @@
    bottom-up execution of missing nodes.
 
 2. [OCI Image Inputs](./IMAGE_BUILDERS.md)
-   Current behavior of `Source/oci-registry`, `OciExtract`, and `Sandbox` on
+   Current behavior of `Source/OciRegistry`, `OciExtract`, and `Sandbox` on
    the OCI import and rootfs-backed execution paths.
 
 3. [Rootfs Builders](./ROOTFS_BUILDERS.md)

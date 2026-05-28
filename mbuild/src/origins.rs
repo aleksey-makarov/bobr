@@ -19,7 +19,7 @@ pub fn registered_origins() -> [&'static dyn OriginHandler; 3] {
 pub fn get_origin(tag: &str) -> Option<&'static dyn OriginHandler> {
     registered_origins()
         .iter()
-        .find(|origin| origin.spec().tag.eq_ignore_ascii_case(tag))
+        .find(|origin| origin.spec().tag == tag)
         .copied()
 }
 
@@ -38,14 +38,14 @@ pub(crate) fn parse_origin_value(
         .as_object()
         .cloned()
         .ok_or_else(|| RuntimeError::RecipeLoad(format!("{field_path}: expected object")))?;
-    let kind = object
-        .get("type")
+    let tag = object
+        .get("tag")
         .and_then(Value::as_str)
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{field_path}.type: expected string")))?;
+        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{field_path}.tag: expected string")))?;
     let supported = supported_origin_tags().join(", ");
-    let handler = get_origin(kind).ok_or_else(|| {
+    let handler = get_origin(tag).ok_or_else(|| {
         RuntimeError::RecipeLoad(format!(
-            "{field_path}.type: unsupported source origin type '{kind}' (supported: {supported})"
+            "{field_path}.tag: unsupported source origin tag '{tag}' (supported: {supported})"
         ))
     })?;
     handler
@@ -59,19 +59,19 @@ mod tests {
 
     #[test]
     fn path_origin_is_registered() {
-        let origin = get_origin("path").expect("path origin should be registered");
-        assert_eq!(origin.spec().tag, "path");
+        let origin = get_origin("Path").expect("Path origin should be registered");
+        assert_eq!(origin.spec().tag, "Path");
     }
 
     #[test]
     fn http_origin_is_registered() {
-        let origin = get_origin("http").expect("http origin should be registered");
-        assert_eq!(origin.spec().tag, "http");
+        let origin = get_origin("Http").expect("Http origin should be registered");
+        assert_eq!(origin.spec().tag, "Http");
     }
 
     #[test]
     fn oci_registry_origin_is_registered() {
-        let origin = get_origin("oci-registry").expect("oci-registry origin should be registered");
-        assert_eq!(origin.spec().tag, "oci-registry");
+        let origin = get_origin("OciRegistry").expect("OciRegistry origin should be registered");
+        assert_eq!(origin.spec().tag, "OciRegistry");
     }
 }

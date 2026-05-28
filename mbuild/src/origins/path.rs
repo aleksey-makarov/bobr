@@ -1,10 +1,10 @@
 use mbuild_core::{OriginContext, OriginHandler, OriginSpec, ParsedOrigin};
 use serde_json::{Map, Value};
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use tar::Archive;
 
-static PATH_ORIGIN_SPEC: OriginSpec = OriginSpec { tag: "path" };
+static PATH_ORIGIN_SPEC: OriginSpec = OriginSpec { tag: "Path" };
 
 #[derive(Debug)]
 pub(super) struct PathOriginHandler;
@@ -25,10 +25,10 @@ impl OriginHandler for PathOriginHandler {
         mut object: Map<String, Value>,
         field_path: &str,
     ) -> Result<Box<dyn ParsedOrigin>, String> {
-        let kind = take_string(&mut object, field_path, "type")?;
-        debug_assert_eq!(kind, "path");
+        let kind = take_string(&mut object, field_path, "tag")?;
+        debug_assert_eq!(kind, "Path");
         let path_value = PathBuf::from(take_string(&mut object, field_path, "path")?);
-        validate_relative_source_path(&path_value, &format!("{field_path}.path"))?;
+        validate_absolute_source_path(&path_value, &format!("{field_path}.path"))?;
         let unpack = take_optional_bool(&mut object, field_path, "unpack")?.unwrap_or(false);
         if !object.is_empty() {
             return Err(format!(
@@ -50,9 +50,9 @@ impl ParsedOrigin for PathOrigin {
 
     fn materialize(&self, cx: &OriginContext<'_>) -> Result<PathBuf, String> {
         if self.unpack {
-            materialize_path_source_tar(cx.temp_root, cx.local_root, &self.path)
+            materialize_path_source_tar(cx.temp_root, &self.path)
         } else {
-            materialize_path_source_direct(cx.temp_root, cx.local_root, &self.path)
+            materialize_path_source_direct(cx.temp_root, &self.path)
         }
     }
 
@@ -85,28 +85,17 @@ fn take_optional_bool(
         .ok_or_else(|| format!("{path}.{field}: expected boolean"))
 }
 
-fn validate_relative_source_path(path: &PathBuf, field_path: &str) -> Result<(), String> {
+fn validate_absolute_source_path(path: &PathBuf, field_path: &str) -> Result<(), String> {
     if path.as_os_str().is_empty() {
         return Err(format!("{field_path}: path must not be empty"));
     }
-    if path.is_absolute() {
-        return Err(format!("{field_path}: expected relative path"));
-    }
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(format!("{field_path}: path must not contain '..'"));
+    if !path.is_absolute() {
+        return Err(format!("{field_path}: expected absolute path"));
     }
     Ok(())
 }
 
-fn materialize_path_source_direct(
-    temp_root: &Path,
-    local_root: Option<&Path>,
-    source_path: &Path,
-) -> Result<PathBuf, String> {
-    let source_path = resolve_local_source_path(local_root, source_path)?;
+fn materialize_path_source_direct(temp_root: &Path, source_path: &Path) -> Result<PathBuf, String> {
     let source_meta = fs::metadata(&source_path).map_err(|error| {
         format!(
             "failed to inspect source path '{}': {error}",
@@ -141,12 +130,7 @@ fn materialize_path_source_direct(
     Ok(staged_path)
 }
 
-fn materialize_path_source_tar(
-    temp_root: &Path,
-    local_root: Option<&Path>,
-    source_path: &Path,
-) -> Result<PathBuf, String> {
-    let source_path = resolve_local_source_path(local_root, source_path)?;
+fn materialize_path_source_tar(temp_root: &Path, source_path: &Path) -> Result<PathBuf, String> {
     let file = fs::File::open(&source_path).map_err(|error| {
         format!(
             "failed to open tar source '{}': {error}",
@@ -169,34 +153,6 @@ fn materialize_path_source_tar(
         )
     })?;
     Ok(staged_path)
-}
-
-fn resolve_local_source_path(
-    local_root: Option<&Path>,
-    relative_path: &Path,
-) -> Result<PathBuf, String> {
-    let Some(local_root) = local_root else {
-        return Err(format!(
-            "missing local path base for source origin '{}'",
-            relative_path.display()
-        ));
-    };
-    if relative_path.is_absolute() {
-        return Err(format!(
-            "source path '{}' must be relative",
-            relative_path.display()
-        ));
-    }
-    if relative_path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(format!(
-            "source path '{}' must not contain '..'",
-            relative_path.display()
-        ));
-    }
-    Ok(local_root.join(relative_path))
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {

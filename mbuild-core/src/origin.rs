@@ -10,7 +10,6 @@ pub struct OriginSpec {
 #[derive(Debug, Clone, Copy)]
 pub struct OriginContext<'a> {
     pub temp_root: &'a Path,
-    pub local_root: Option<&'a Path>,
 }
 
 pub trait ParsedOrigin: fmt::Debug + Send + Sync {

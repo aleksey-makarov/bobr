@@ -18,7 +18,6 @@ pub struct RecipeEnvelope {
 #[derive(Debug, Clone)]
 pub struct RecipePaths {
     pub store: PathBuf,
-    pub local: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -376,30 +375,13 @@ fn parse_paths_value(value: Value, path: &str) -> Result<RecipePaths, RuntimeErr
             "{path}.store: expected absolute path"
         )));
     }
-    let local = match object.remove("local") {
-        Some(Value::String(value)) => {
-            let local = PathBuf::from(value);
-            if !local.is_absolute() {
-                return Err(RuntimeError::RecipeLoad(format!(
-                    "{path}.local: expected absolute path"
-                )));
-            }
-            Some(local)
-        }
-        Some(_) => {
-            return Err(RuntimeError::RecipeLoad(format!(
-                "{path}.local: expected string"
-            )));
-        }
-        None => None,
-    };
     if !object.is_empty() {
         return Err(RuntimeError::RecipeLoad(format!(
             "{path}: unexpected fields: {}",
             object.keys().cloned().collect::<Vec<_>>().join(", ")
         )));
     }
-    Ok(RecipePaths { store, local })
+    Ok(RecipePaths { store })
 }
 
 fn parse_options_value(value: Value, path: &str) -> Result<RecipeOptions, RuntimeError> {
@@ -655,8 +637,8 @@ mod tests {
                 "tag": "Source",
                 "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
                 "origin": {
-                    "type": "path",
-                    "path": "source.tar",
+                    "tag": "Path",
+                    "path": "/tmp/source.tar",
                     "unpack": true
                 }
             }
@@ -674,8 +656,8 @@ mod tests {
                 "tag": "Source",
                 "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
                 "origin": {
-                    "type": "path",
-                    "path": "source.tar",
+                    "tag": "Path",
+                    "path": "/tmp/source.tar",
                     "unpack": true
                 }
             }
@@ -710,7 +692,7 @@ mod tests {
                 "tag": "Source",
                 "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
                 "origin": {
-                    "type": "oci-registry",
+                    "tag": "OciRegistry",
                     "image": "docker.io/library/alpine:3.20",
                     "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 }
@@ -721,47 +703,26 @@ mod tests {
         let PlannedRecipe::Source(source) = &node.recipe else {
             panic!("expected source recipe");
         };
-        assert_eq!(source.origin.as_ref().unwrap().spec().tag, "oci-registry");
+        assert_eq!(source.origin.as_ref().unwrap().spec().tag, "OciRegistry");
     }
 
     #[test]
-    fn source_path_origin_rejects_absolute_paths() {
+    fn source_path_origin_requires_absolute_paths() {
         let request = json!({
             "root": {
                 "name": "local-source",
                 "tag": "Source",
                 "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
                 "origin": {
-                    "type": "path",
-                    "path": "/tmp/source.tar",
+                    "tag": "Path",
+                    "path": "source.tar",
                     "unpack": true
                 }
             }
         });
         let error = collect_one(&request).unwrap_err();
         assert!(
-            error.to_string().contains("expected relative path"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn source_path_origin_rejects_parent_segments() {
-        let request = json!({
-            "root": {
-                "name": "local-source",
-                "tag": "Source",
-                "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
-                "origin": {
-                    "type": "path",
-                    "path": "../source.tar",
-                    "unpack": true
-                }
-            }
-        });
-        let error = collect_one(&request).unwrap_err();
-        assert!(
-            error.to_string().contains("must not contain '..'"),
+            error.to_string().contains("expected absolute path"),
             "{error}"
         );
     }
@@ -879,7 +840,7 @@ mod tests {
             "tag": "Source",
             "object_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "origin": {
-                "type": "http",
+                "tag": "Http",
                 "url": "https://example.invalid/source.tar.gz",
                 "unpack": true
             }

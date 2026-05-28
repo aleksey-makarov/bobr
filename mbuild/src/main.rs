@@ -100,9 +100,6 @@ fn build(
 
     let store_path = envelope.paths.store.clone();
     validate_existing_dir(&store_path, "store path")?;
-    if let Some(local_path) = envelope.paths.local.as_ref() {
-        validate_existing_dir(local_path, "local path")?;
-    }
 
     env::set_current_dir(&store_path).map_err(|error| {
         MbuildError::InvalidInput(format!(

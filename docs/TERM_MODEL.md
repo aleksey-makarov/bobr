@@ -76,14 +76,14 @@ Children are always referenced by node id.
 
 In v1, `Source` supports:
 
-- `origin.type = "path"`
-- `origin.path` must be a non-empty relative path without `..`
+- `origin.tag = "Path"`
+- `origin.path` must be an absolute host path
 - `origin.unpack`, defaulting to `false`; when true, the local path is treated as a tar archive
-- `origin.type = "http"`
+- `origin.tag = "Http"`
 - `origin.url` as one HTTP(S) URL or an ordered fallback list
 - `origin.unpack`, defaulting to `false`
 - `origin.archive_format` as an optional explicit unpack override
-- `origin.type = "oci-registry"`
+- `origin.tag = "OciRegistry"`
 - `origin.image` as the registry image locator
 - `origin.digest` as the pinned manifest or index digest
 - manifest lists and OCI indexes resolve to the `linux/amd64` manifest only
@@ -149,9 +149,8 @@ For each `Source` node, Rust:
    `<store>/objects/<object_hash>` already exists
 4. if the object exists, reconstructs the missing canonical result record from
    `object_hash`
-5. if `origin.type = "path"` is present, resolves `origin.path` against
-   `paths.local`
-6. if `origin.type = "http"` is present, downloads from `origin.url` in order
+5. if `origin.tag = "Path"` is present, materializes `origin.path` directly
+6. if `origin.tag = "Http"` is present, downloads from `origin.url` in order
    and either stages one file object or unpacks one directory object
 7. imports the staged object into `objects/<actual_hash>`
 8. if `actual_hash != object_hash`, fails without writing the canonical
@@ -205,5 +204,3 @@ Builder semantics depend only on:
 - `stderr`: live progress log unless `--quiet`
 - `--jobs/-j`: limit parallel execution, default = available CPU parallelism
 - `paths.store`: absolute path to an existing store root directory
-- `paths.local`: optional absolute path to an existing local-source root
-  directory; required only for `Source` path origins

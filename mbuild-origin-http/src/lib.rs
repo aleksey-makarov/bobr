@@ -18,7 +18,7 @@ use zip::read::ZipArchive;
 const REDIRECT_LIMIT: usize = 10;
 const USER_AGENT: &str = "mbuild-origin-http/0.1";
 
-static HTTP_ORIGIN_SPEC: OriginSpec = OriginSpec { tag: "http" };
+static HTTP_ORIGIN_SPEC: OriginSpec = OriginSpec { tag: "Http" };
 
 #[derive(Debug)]
 enum HttpOriginError {
@@ -90,8 +90,8 @@ impl OriginHandler for HttpOriginHandler {
         mut object: Map<String, Value>,
         field_path: &str,
     ) -> Result<Box<dyn ParsedOrigin>, String> {
-        let kind = take_string(&mut object, field_path, "type")?;
-        debug_assert_eq!(kind, "http");
+        let kind = take_string(&mut object, field_path, "tag")?;
+        debug_assert_eq!(kind, "Http");
         let urls = take_url_field(&mut object, field_path, "url")?.into_list();
         if urls.is_empty() {
             return Err(format!("{field_path}.url: url list must not be empty"));
@@ -729,19 +729,19 @@ mod tests {
     #[test]
     fn parses_valid_http_origin() {
         let origin = parse_origin(serde_json::json!({
-            "type": "http",
+            "tag": "Http",
             "url": ["https://example.invalid/a.tar.gz", "https://example.invalid/b.tar.gz"],
             "unpack": false,
             "archive_format": "zip"
         }))
         .unwrap();
-        assert_eq!(origin.spec().tag, "http");
+        assert_eq!(origin.spec().tag, "Http");
     }
 
     #[test]
     fn rejects_invalid_url_shape() {
         let error = parse_origin(serde_json::json!({
-            "type": "http",
+            "tag": "Http",
             "url": [1, 2]
         }))
         .unwrap_err();
@@ -754,7 +754,7 @@ mod tests {
     #[test]
     fn rejects_non_http_urls() {
         let error = parse_origin(serde_json::json!({
-            "type": "http",
+            "tag": "Http",
             "url": "ftp://example.invalid/source.tar.gz"
         }))
         .unwrap_err();
@@ -771,7 +771,7 @@ mod tests {
         let ((bad_url, good_url), handle) =
             spawn_fallback_server(payload.clone(), "application/octet-stream").unwrap();
         let origin = parse_origin(serde_json::json!({
-            "type": "http",
+            "tag": "Http",
             "url": [bad_url, good_url],
             "unpack": false
         }))
@@ -779,7 +779,6 @@ mod tests {
         let staged = origin
             .materialize(&OriginContext {
                 temp_root: temp.path(),
-                local_root: None,
             })
             .unwrap();
         handle.join().unwrap();
@@ -796,7 +795,7 @@ mod tests {
             Err(error) => panic!("failed to start test HTTP server: {error}"),
         };
         let origin = parse_origin(serde_json::json!({
-            "type": "http",
+            "tag": "Http",
             "url": url,
             "unpack": false
         }))
@@ -804,7 +803,6 @@ mod tests {
         let staged = origin
             .materialize(&OriginContext {
                 temp_root: temp.path(),
-                local_root: None,
             })
             .unwrap();
         handle.join().unwrap();
@@ -822,14 +820,13 @@ mod tests {
             Err(error) => panic!("failed to start test HTTP server: {error}"),
         };
         let origin = parse_origin(serde_json::json!({
-            "type": "http",
+            "tag": "Http",
             "url": url
         }))
         .unwrap();
         let staged = origin
             .materialize(&OriginContext {
                 temp_root: temp.path(),
-                local_root: None,
             })
             .unwrap();
         handle.join().unwrap();
@@ -847,7 +844,7 @@ mod tests {
             Err(error) => panic!("failed to start test HTTP server: {error}"),
         };
         let origin = parse_origin(serde_json::json!({
-            "type": "http",
+            "tag": "Http",
             "url": url,
             "unpack": true
         }))
@@ -855,7 +852,6 @@ mod tests {
         let staged = origin
             .materialize(&OriginContext {
                 temp_root: temp.path(),
-                local_root: None,
             })
             .unwrap();
         handle.join().unwrap();

@@ -91,7 +91,7 @@ fn source_recipe_node(name: &str, object_hash: &str, origin_path: &str, unpack: 
         "tag": "Source",
         "object_hash": object_hash,
         "origin": {
-            "type": "path",
+            "tag": "Path",
             "path": origin_path,
             "unpack": unpack
         },
@@ -265,7 +265,7 @@ fn named_source_recipe(name: &str, url: &str, source_hash: &str) -> Value {
         "tag": "Source",
         "object_hash": source_hash,
         "origin": {
-            "type": "http",
+            "tag": "Http",
             "url": url,
             "unpack": true
         },
@@ -281,7 +281,7 @@ fn group_with_two_sources_recipe(url_a: &str, url_b: &str, source_hash: &str) ->
                 "tag": "Source",
                 "object_hash": source_hash,
                 "origin": {
-                    "type": "http",
+                    "tag": "Http",
                     "url": url_a,
                     "unpack": true
                 },
@@ -291,7 +291,7 @@ fn group_with_two_sources_recipe(url_a: &str, url_b: &str, source_hash: &str) ->
                 "tag": "Source",
                 "object_hash": source_hash,
                 "origin": {
-                    "type": "http",
+                    "tag": "Http",
                     "url": url_b,
                     "unpack": true
                 },
@@ -492,12 +492,12 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
 }
 
 #[test]
-fn second_run_reuses_root_without_local_path_when_no_source_materialization_is_needed() {
+fn second_run_reuses_root_without_source_materialization() {
     let workspace = tempdir().unwrap();
     let source_tar = {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut tar = tar::Builder::new(encoder);
-        let body = b"hello from lazy local path test\n";
+        let body = b"hello from lazy source materialization test\n";
         let mut header = tar::Header::new_gnu();
         header.set_path("pkg/README.txt").unwrap();
         header.set_size(body.len() as u64);
@@ -521,14 +521,6 @@ fn second_run_reuses_root_without_local_path_when_no_source_materialization_is_n
 
     let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
     handle.join().unwrap();
-
-    let mut envelope: Value = serde_json::from_slice(&fs::read(&recipe_path).unwrap()).unwrap();
-    envelope
-        .get_mut("paths")
-        .and_then(Value::as_object_mut)
-        .expect("recipe envelope must have paths")
-        .remove("local");
-    fs::write(&recipe_path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
 
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
@@ -683,7 +675,7 @@ fn source_path_file_materializes_known_object_without_build_handle() {
         &source_recipe_node(
             "source-file",
             &object_hash.to_string(),
-            "payload.txt",
+            &source_path.to_string_lossy(),
             false,
         ),
     );
@@ -726,7 +718,12 @@ fn source_path_tar_materializes_unpacked_tree_without_build_handle() {
     let recipe_path = workspace.path().join("source-tar.json");
     write_recipe(
         &recipe_path,
-        &source_recipe_node("source-tar", &object_hash.to_string(), "payload.tar", true),
+        &source_recipe_node(
+            "source-tar",
+            &object_hash.to_string(),
+            &tar_path.to_string_lossy(),
+            true,
+        ),
     );
 
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
@@ -897,7 +894,12 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
     let recipe_path = workspace.path().join("source-path-mismatch.json");
     write_recipe(
         &recipe_path,
-        &source_recipe_node("source-file", wrong_hash, "payload.txt", false),
+        &source_recipe_node(
+            "source-file",
+            wrong_hash,
+            &source_path.to_string_lossy(),
+            false,
+        ),
     );
 
     let error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
@@ -939,7 +941,7 @@ fn source_without_origin_reuses_existing_canonical_result() {
         &source_recipe_node(
             "source-file",
             &object_hash.to_string(),
-            "payload.txt",
+            &source_path.to_string_lossy(),
             false,
         ),
     );
@@ -1000,7 +1002,7 @@ fn source_without_origin_republishes_existing_object() {
         &source_recipe_node(
             "source-file",
             &object_hash.to_string(),
-            "payload.txt",
+            &source_path.to_string_lossy(),
             false,
         ),
     );
