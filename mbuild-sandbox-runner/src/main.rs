@@ -1,14 +1,14 @@
 use mbuild_sandbox_runner_core::{
     RUNNER_PROTOCOL_VERSION, SandboxLauncherConfig, SandboxLauncherMount, SandboxLauncherMountKind,
-    SandboxRunnerFailureReport, protocol_info, run_config_path,
+    SandboxRunnerFailureReport, protocol_info, relative_launcher_target, run_config_path,
+    validate_launcher_config,
 };
-use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 const KEEP_CAPABILITIES: &[i32] = &[0, 1, 2, 3, 4, 6, 7, 8];
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
@@ -111,24 +111,6 @@ fn read_launcher_config(path: &Path) -> Result<SandboxLauncherConfig, String> {
     Ok(config)
 }
 
-fn validate_launcher_config(config: &SandboxLauncherConfig) -> io::Result<()> {
-    let mut targets = HashSet::new();
-    for mount in &config.mounts {
-        relative_target(&mount.target)?;
-        if !targets.insert(mount.target.clone()) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "mount target '{}' is defined more than once",
-                    mount.target.display()
-                ),
-            ));
-        }
-    }
-    relative_target(&config.runner_config)?;
-    Ok(())
-}
-
 fn run_supervisor(config: &SandboxLauncherConfig) -> io::Result<i32> {
     unshare_namespace("mount namespace", libc::CLONE_NEWNS)?;
     unshare_namespace("network namespace", libc::CLONE_NEWNET)?;
@@ -185,7 +167,7 @@ fn mount_layout(config: &SandboxLauncherConfig) -> io::Result<()> {
 }
 
 fn prepare_mount_target(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
-    let target = root.join(relative_target(&mount.target)?);
+    let target = root.join(relative_launcher_target(&mount.target)?);
     match mount.kind {
         SandboxLauncherMountKind::Bind => {
             let source = mount.source.as_ref().ok_or_else(|| {
@@ -212,7 +194,7 @@ fn bind_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
         .source
         .as_ref()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "bind source missing"))?;
-    let target = root.join(relative_target(&mount.target)?);
+    let target = root.join(relative_launcher_target(&mount.target)?);
     let metadata = fs::metadata(source)?;
     let bind_flags = if metadata.is_dir() {
         libc::MS_BIND | libc::MS_REC
@@ -248,13 +230,13 @@ fn bind_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
 }
 
 fn proc_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
-    let target = root.join(relative_target(&mount.target)?);
+    let target = root.join(relative_launcher_target(&mount.target)?);
     mount_syscall(Some(Path::new("proc")), &target, Some("proc"), 0, None)
         .map_err(|error| context_error(format!("mount proc '{}'", mount.target.display()), error))
 }
 
 fn tmpfs_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
-    let target = root.join(relative_target(&mount.target)?);
+    let target = root.join(relative_launcher_target(&mount.target)?);
     let mut flags = 0;
     let mut data_options = Vec::new();
     for option in &mount.options {
@@ -445,61 +427,6 @@ fn write_launcher_failure(path: &Path, label: &str, error: impl std::fmt::Displa
     }
 }
 
-fn relative_target(target: &Path) -> io::Result<PathBuf> {
-    if !target.is_absolute() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("mount target '{}' must be absolute", target.display()),
-        ));
-    }
-    if target
-        .as_os_str()
-        .as_bytes()
-        .split(|byte| *byte == b'/')
-        .any(|segment| segment == b"." || segment == b"..")
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "mount target '{}' must not contain '.' or '..' components",
-                target.display()
-            ),
-        ));
-    }
-    let mut relative = PathBuf::new();
-    for component in target.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(segment) => relative.push(segment),
-            Component::CurDir | Component::ParentDir => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "mount target '{}' must not contain '.' or '..' components",
-                        target.display()
-                    ),
-                ));
-            }
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "mount target '{}' contains an unsupported path component",
-                        target.display()
-                    ),
-                ));
-            }
-        }
-    }
-    if relative.as_os_str().is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "mount target must not be '/'",
-        ));
-    }
-    Ok(relative)
-}
-
 fn path_cstring(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes()).map_err(|_| {
         io::Error::new(
@@ -544,12 +471,12 @@ mod tests {
     fn relative_target_rejects_unsafe_paths() {
         for target in ["relative", "/", "/tmp/../out", "/tmp/./out"] {
             assert!(
-                relative_target(Path::new(target)).is_err(),
+                relative_launcher_target(Path::new(target)).is_err(),
                 "{target} should be rejected"
             );
         }
         assert_eq!(
-            relative_target(Path::new("/__mbuild/out")).unwrap(),
+            relative_launcher_target(Path::new("/__mbuild/out")).unwrap(),
             PathBuf::from("__mbuild/out")
         );
     }

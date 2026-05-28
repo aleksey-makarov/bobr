@@ -6,7 +6,7 @@ use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
 use nix::unistd::{Gid, Uid, chown, setgid, setgroups, setuid};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
 use std::fs::File;
@@ -15,7 +15,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -74,6 +74,79 @@ pub enum SandboxLauncherMountKind {
     Bind,
     Proc,
     Tmpfs,
+}
+
+pub fn validate_launcher_config(config: &SandboxLauncherConfig) -> io::Result<()> {
+    let mut targets = HashSet::new();
+    for mount in &config.mounts {
+        let relative = relative_launcher_target(&mount.target)?;
+        if !targets.insert(relative) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "mount target '{}' is defined more than once",
+                    mount.target.display()
+                ),
+            ));
+        }
+    }
+    relative_launcher_target(&config.runner_config)?;
+    Ok(())
+}
+
+pub fn relative_launcher_target(target: &Path) -> io::Result<PathBuf> {
+    if !target.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("mount target '{}' must be absolute", target.display()),
+        ));
+    }
+    if target
+        .as_os_str()
+        .as_bytes()
+        .split(|byte| *byte == b'/')
+        .any(|segment| segment == b"." || segment == b"..")
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "mount target '{}' must not contain '.' or '..' components",
+                target.display()
+            ),
+        ));
+    }
+    let mut relative = PathBuf::new();
+    for component in target.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(segment) => relative.push(segment),
+            Component::CurDir | Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "mount target '{}' must not contain '.' or '..' components",
+                        target.display()
+                    ),
+                ));
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "mount target '{}' contains an unsupported path component",
+                        target.display()
+                    ),
+                ));
+            }
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "mount target must not be '/'",
+        ));
+    }
+    Ok(relative)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -792,6 +865,50 @@ fn lchown(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn relative_launcher_target_rejects_unsafe_paths() {
+        for target in ["relative", "/", "/tmp/../out", "/tmp/./out"] {
+            assert!(
+                relative_launcher_target(Path::new(target)).is_err(),
+                "{target} should be rejected"
+            );
+        }
+        assert_eq!(
+            relative_launcher_target(Path::new("/__mbuild/out")).unwrap(),
+            PathBuf::from("__mbuild/out")
+        );
+    }
+
+    #[test]
+    fn validate_launcher_config_rejects_duplicate_mount_targets() {
+        let config = SandboxLauncherConfig {
+            protocol_version: RUNNER_PROTOCOL_VERSION,
+            root: PathBuf::from("/tmp/root"),
+            mounts: vec![
+                SandboxLauncherMount {
+                    kind: SandboxLauncherMountKind::Tmpfs,
+                    source: None,
+                    target: PathBuf::from("/tmp"),
+                    readonly: false,
+                    options: Vec::new(),
+                },
+                SandboxLauncherMount {
+                    kind: SandboxLauncherMountKind::Tmpfs,
+                    source: None,
+                    target: PathBuf::from("/tmp/"),
+                    readonly: false,
+                    options: Vec::new(),
+                },
+            ],
+            runner_config: PathBuf::from("/__mbuild/runtime/runner-config.json"),
+            failure_report: PathBuf::from("/tmp/failure.json"),
+        };
+
+        let error = validate_launcher_config(&config).unwrap_err();
+
+        assert!(error.to_string().contains("defined more than once"));
+    }
 
     #[test]
     fn protocol_info_reports_current_runner_protocol() {

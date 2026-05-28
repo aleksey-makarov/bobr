@@ -7,14 +7,14 @@ use crate::error::RuntimeError;
 use mbuild_sandbox_runner_core::{
     RUNNER_BINARY_NAME, RUNNER_PROTOCOL_VERSION, RunnerConfig, RunnerRunAs, RunnerStepConfig,
     SandboxLauncherConfig, SandboxLauncherMount, SandboxLauncherMountKind,
+    relative_launcher_target, validate_launcher_config,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::symlink;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 pub(super) struct PreparedSandbox {
@@ -196,15 +196,16 @@ fn build_launcher_config(
             true,
         ));
     }
-    validate_launcher_mount_targets(&mounts)?;
-
-    Ok(SandboxLauncherConfig {
+    let launcher = SandboxLauncherConfig {
         protocol_version: RUNNER_PROTOCOL_VERSION,
         root: dirs.rootfs.clone(),
         mounts,
         runner_config: PathBuf::from(CONTAINER_RUNNER_CONFIG),
         failure_report: runtime_files.failure_report.clone(),
-    })
+    };
+    validate_launcher_config(&launcher)
+        .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
+    Ok(launcher)
 }
 
 fn rootfs_top_level_mounts(rootfs: &Path) -> Result<Vec<SandboxLauncherMount>, RuntimeError> {
@@ -323,7 +324,8 @@ fn create_dev_symlink(sandbox_root: &Path, name: &str, target: &str) -> Result<(
 }
 
 fn create_mount_target(sandbox_root: &Path, container_path: &Path) -> Result<(), RuntimeError> {
-    let relative = safe_relative_container_target(container_path, "container mount target")?;
+    let relative = relative_launcher_target(container_path)
+        .map_err(|error| RuntimeError::InvalidInput(error.to_string()))?;
     let target = sandbox_root.join(relative);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
@@ -394,65 +396,6 @@ fn step_env(step: &SandboxStep) -> HashMap<String, String> {
     ]);
     env.extend(step.env.clone());
     env
-}
-
-fn validate_launcher_mount_targets(mounts: &[SandboxLauncherMount]) -> Result<(), RuntimeError> {
-    let mut targets = HashSet::new();
-    for mount in mounts {
-        safe_relative_container_target(&mount.target, "sandbox launcher mount target")?;
-        if !targets.insert(mount.target.clone()) {
-            return Err(RuntimeError::InvalidInput(format!(
-                "sandbox launcher mount target '{}' is defined more than once",
-                mount.target.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn safe_relative_container_target(path: &Path, label: &str) -> Result<PathBuf, RuntimeError> {
-    if !path.is_absolute() {
-        return Err(RuntimeError::InvalidInput(format!(
-            "{label} '{}' must be absolute",
-            path.display()
-        )));
-    }
-    if path
-        .as_os_str()
-        .as_bytes()
-        .split(|byte| *byte == b'/')
-        .any(|segment| segment == b"." || segment == b"..")
-    {
-        return Err(RuntimeError::InvalidInput(format!(
-            "{label} '{}' must not contain '.' or '..' components",
-            path.display()
-        )));
-    }
-    let mut relative = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(segment) => relative.push(segment),
-            Component::CurDir | Component::ParentDir => {
-                return Err(RuntimeError::InvalidInput(format!(
-                    "{label} '{}' must not contain '.' or '..' components",
-                    path.display()
-                )));
-            }
-            _ => {
-                return Err(RuntimeError::InvalidInput(format!(
-                    "{label} '{}' contains an unsupported path component",
-                    path.display()
-                )));
-            }
-        }
-    }
-    if relative.as_os_str().is_empty() {
-        return Err(RuntimeError::InvalidInput(format!(
-            "{label} must not be '/'"
-        )));
-    }
-    Ok(relative)
 }
 
 #[cfg(test)]
@@ -616,8 +559,15 @@ mod tests {
             tmpfs_mount(Path::new("/tmp"), &[]),
             bind_mount(Path::new("/dev/null"), Path::new("/tmp"), true),
         ];
+        let config = SandboxLauncherConfig {
+            protocol_version: RUNNER_PROTOCOL_VERSION,
+            root: PathBuf::from("/tmp/root"),
+            mounts,
+            runner_config: PathBuf::from(CONTAINER_RUNNER_CONFIG),
+            failure_report: PathBuf::from("/tmp/failure.json"),
+        };
 
-        let error = validate_launcher_mount_targets(&mounts).unwrap_err();
+        let error = validate_launcher_config(&config).unwrap_err();
 
         assert!(error.to_string().contains("defined more than once"));
     }
@@ -625,7 +575,7 @@ mod tests {
     #[test]
     fn container_target_validation_rejects_unsafe_paths() {
         for path in ["relative", "/", "/tmp/../out", "/tmp/./out"] {
-            let error = safe_relative_container_target(Path::new(path), "mount target")
+            let error = relative_launcher_target(Path::new(path))
                 .unwrap_err()
                 .to_string();
             assert!(
