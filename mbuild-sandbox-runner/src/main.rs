@@ -1,13 +1,12 @@
 use mbuild_sandbox_runner_core::{
     RUNNER_PROTOCOL_VERSION, SandboxLauncherConfig, SandboxLauncherMount, SandboxLauncherMountKind,
-    SandboxRunnerFailureReport, protocol_info, relative_launcher_target, run_config_path,
-    validate_launcher_config,
+    SandboxRunnerFailureReport, path_cstring, protocol_info, read_handshake_byte,
+    relative_launcher_target, run_config_path, validate_launcher_config,
 };
 use std::ffi::CString;
 use std::fs::{self, File};
-use std::io::{self, Read};
-use std::os::fd::{FromRawFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
+use std::io;
+use std::os::fd::RawFd;
 use std::path::{Path, PathBuf};
 
 const CAP_CHOWN: u32 = 0;
@@ -103,7 +102,7 @@ fn launch(wait_fd: RawFd, config_path: &Path) -> i32 {
         }
     };
 
-    if let Err(error) = read_one_byte(wait_fd) {
+    if let Err(error) = read_handshake_byte(wait_fd) {
         write_launcher_failure(&failure_report, "launcher-handshake", error);
         return 1;
     }
@@ -449,24 +448,9 @@ fn wait_for_child(pid: libc::pid_t) -> io::Result<i32> {
     }
 }
 
-fn read_one_byte(fd: RawFd) -> io::Result<()> {
-    let mut file = unsafe { File::from_raw_fd(fd) };
-    let mut byte = [0_u8; 1];
-    file.read_exact(&mut byte)
-}
-
 fn write_launcher_failure(file: &File, label: &str, error: impl std::fmt::Display) {
     let report = SandboxRunnerFailureReport::runtime(label, error.to_string());
     let _ = serde_json::to_writer(file, &report);
-}
-
-fn path_cstring(path: &Path) -> io::Result<CString> {
-    CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("path contains NUL byte: '{}'", path.display()),
-        )
-    })
 }
 
 #[cfg(test)]

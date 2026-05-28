@@ -7,12 +7,14 @@ use super::reports::{
 use super::tools::SandboxTools;
 use crate::error::RuntimeError;
 use crate::idmap::MbuildIdmap;
+use mbuild_sandbox_runner_core::{
+    path_cstring as core_path_cstring, read_handshake_byte, write_handshake_byte,
+};
 use std::ffi::CString;
 use std::fs;
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
@@ -369,9 +371,7 @@ fn raw_wait_status_message(status: i32) -> String {
 }
 
 fn path_cstring(path: &Path) -> Result<CString, RuntimeError> {
-    CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        RuntimeError::InvalidInput(format!("path contains NUL byte: '{}'", path.display()))
-    })
+    core_path_cstring(path).map_err(|error| RuntimeError::InvalidInput(error.to_string()))
 }
 
 fn wait_for_child_userns(fd: RawFd) -> Result<(), RuntimeError> {
@@ -379,57 +379,39 @@ fn wait_for_child_userns(fd: RawFd) -> Result<(), RuntimeError> {
 }
 
 fn signal_child_ready(fd: RawFd) -> Result<(), RuntimeError> {
-    let byte = [1_u8; 1];
-    let written = unsafe { libc::write(fd, byte.as_ptr().cast(), byte.len()) };
-    if written == 1 {
-        Ok(())
-    } else {
-        Err(RuntimeError::Executor(format!(
+    write_handshake_byte(fd).map_err(|error| {
+        RuntimeError::Executor(format!(
             "failed to signal sandbox runner readiness: {}",
-            io::Error::last_os_error()
-        )))
-    }
+            error
+        ))
+    })
 }
 
 fn read_one_byte(fd: RawFd, label: &str) -> Result<(), RuntimeError> {
-    let mut byte = [0_u8; 1];
-    loop {
-        let result = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), byte.len()) };
-        if result == 1 {
-            return Ok(());
-        }
-        if result == 0 {
-            return Err(RuntimeError::Executor(format!(
+    read_handshake_byte(fd).map_err(|error| {
+        if error.kind() == io::ErrorKind::BrokenPipe {
+            RuntimeError::Executor(format!(
                 "sandbox runner closed {label} pipe before signalling readiness"
-            )));
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(RuntimeError::Executor(format!(
+            ))
+        } else {
+            RuntimeError::Executor(format!(
                 "failed to read sandbox runner {label} pipe: {error}"
-            )));
+            ))
         }
-    }
+    })
 }
 
 fn pre_exec_wait_one_byte(fd: RawFd) -> io::Result<()> {
-    let mut byte = [0_u8; 1];
-    loop {
-        let result = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), byte.len()) };
-        if result == 1 {
-            return Ok(());
-        }
-        if result == 0 {
-            return Err(io::Error::new(
+    read_handshake_byte(fd).map_err(|error| {
+        if error.kind() == io::ErrorKind::BrokenPipe {
+            io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "parent closed sandbox exec readiness pipe",
-            ));
+            )
+        } else {
+            error
         }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
-    }
+    })
 }
 
 fn configure_id_maps(

@@ -11,6 +11,7 @@ use std::ffi::CString;
 use std::fs;
 use std::fs::File;
 use std::io;
+use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -145,6 +146,55 @@ pub fn relative_launcher_target(target: &Path) -> io::Result<PathBuf> {
         ));
     }
     Ok(relative)
+}
+
+pub fn path_cstring(path: &Path) -> io::Result<CString> {
+    CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("path contains NUL byte: '{}'", path.display()),
+        )
+    })
+}
+
+pub fn read_handshake_byte(fd: RawFd) -> io::Result<()> {
+    let mut byte = [0_u8; 1];
+    loop {
+        let result = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), byte.len()) };
+        if result == 1 {
+            return Ok(());
+        }
+        if result == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "handshake pipe closed before signalling readiness",
+            ));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+pub fn write_handshake_byte(fd: RawFd) -> io::Result<()> {
+    let byte = [1_u8; 1];
+    loop {
+        let result = unsafe { libc::write(fd, byte.as_ptr().cast(), byte.len()) };
+        if result == 1 {
+            return Ok(());
+        }
+        if result == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "failed to write handshake byte",
+            ));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -768,7 +818,26 @@ fn lchown(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use tempfile::tempdir;
+
+    struct Pipe {
+        read: OwnedFd,
+        write: OwnedFd,
+    }
+
+    impl Pipe {
+        fn new() -> io::Result<Self> {
+            let mut fds = [0; 2];
+            if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self {
+                read: unsafe { OwnedFd::from_raw_fd(fds[0]) },
+                write: unsafe { OwnedFd::from_raw_fd(fds[1]) },
+            })
+        }
+    }
 
     #[test]
     fn relative_launcher_target_rejects_unsafe_paths() {
@@ -782,6 +851,46 @@ mod tests {
             relative_launcher_target(Path::new("/__mbuild/out")).unwrap(),
             PathBuf::from("__mbuild/out")
         );
+    }
+
+    #[test]
+    fn path_cstring_rejects_nul_paths() {
+        let path = Path::new("bad\0path");
+
+        let error = path_cstring(path).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("NUL"));
+    }
+
+    #[test]
+    fn read_handshake_byte_reads_one_byte() {
+        let pipe = Pipe::new().unwrap();
+        write_handshake_byte(pipe.write.as_raw_fd()).unwrap();
+
+        read_handshake_byte(pipe.read.as_raw_fd()).unwrap();
+    }
+
+    #[test]
+    fn read_handshake_byte_reports_closed_writer() {
+        let pipe = Pipe::new().unwrap();
+        drop(pipe.write);
+
+        let error = read_handshake_byte(pipe.read.as_raw_fd()).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[test]
+    fn write_handshake_byte_writes_readable_byte() {
+        let pipe = Pipe::new().unwrap();
+        let mut byte = [0_u8; 1];
+
+        write_handshake_byte(pipe.write.as_raw_fd()).unwrap();
+        let read = unsafe { libc::read(pipe.read.as_raw_fd(), byte.as_mut_ptr().cast(), 1) };
+
+        assert_eq!(read, 1);
+        assert_eq!(byte, [1]);
     }
 
     #[test]
