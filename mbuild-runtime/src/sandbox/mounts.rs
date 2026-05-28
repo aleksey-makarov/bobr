@@ -198,6 +198,8 @@ fn build_launcher_config(
         root: dirs.rootfs.clone(),
         mounts,
         runner_config: PathBuf::from(CONTAINER_RUNNER_CONFIG),
+        // Host path by design: the launcher opens this before chroot and
+        // writes launcher-level failures through that fd afterwards.
         failure_report: runtime_files.failure_report.clone(),
     };
     validate_launcher_config(&launcher)

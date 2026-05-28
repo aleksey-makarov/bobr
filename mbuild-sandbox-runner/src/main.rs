@@ -92,16 +92,26 @@ fn launch(wait_fd: RawFd, config_path: &Path) -> i32 {
             return 2;
         }
     };
+    let failure_report = match File::create(&config.failure_report) {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!(
+                "failed to open launcher failure report '{}': {error}",
+                config.failure_report.display()
+            );
+            return 2;
+        }
+    };
 
     if let Err(error) = read_one_byte(wait_fd) {
-        write_launcher_failure(&config.failure_report, "launcher-handshake", error);
+        write_launcher_failure(&failure_report, "launcher-handshake", error);
         return 1;
     }
 
-    match run_supervisor(&config) {
+    match run_supervisor(&config, &failure_report) {
         Ok(code) => code,
         Err(error) => {
-            write_launcher_failure(&config.failure_report, "launcher-bootstrap", error);
+            write_launcher_failure(&failure_report, "launcher-bootstrap", error);
             1
         }
     }
@@ -131,7 +141,7 @@ fn read_launcher_config(path: &Path) -> Result<SandboxLauncherConfig, String> {
     Ok(config)
 }
 
-fn run_supervisor(config: &SandboxLauncherConfig) -> io::Result<i32> {
+fn run_supervisor(config: &SandboxLauncherConfig, failure_report: &File) -> io::Result<i32> {
     unshare_namespace("mount namespace", libc::CLONE_NEWNS)?;
     unshare_namespace("network namespace", libc::CLONE_NEWNET)?;
     unshare_namespace("UTS namespace", libc::CLONE_NEWUTS)?;
@@ -148,7 +158,7 @@ fn run_supervisor(config: &SandboxLauncherConfig) -> io::Result<i32> {
         let code = match run_pid1(config) {
             Ok(code) => code,
             Err(error) => {
-                write_launcher_failure(&config.failure_report, "launcher-pid1", error);
+                write_launcher_failure(failure_report, "launcher-pid1", error);
                 1
             }
         };
@@ -445,11 +455,9 @@ fn read_one_byte(fd: RawFd) -> io::Result<()> {
     file.read_exact(&mut byte)
 }
 
-fn write_launcher_failure(path: &Path, label: &str, error: impl std::fmt::Display) {
+fn write_launcher_failure(file: &File, label: &str, error: impl std::fmt::Display) {
     let report = SandboxRunnerFailureReport::runtime(label, error.to_string());
-    if let Ok(file) = File::create(path) {
-        let _ = serde_json::to_writer(file, &report);
-    }
+    let _ = serde_json::to_writer(file, &report);
 }
 
 fn path_cstring(path: &Path) -> io::Result<CString> {
@@ -498,6 +506,28 @@ mod tests {
 
         let mask = capability_mask(KEEP_CAPABILITIES);
         assert_ne!(mask[0] & (1_u32 << CAP_KILL), 0);
+    }
+
+    #[test]
+    fn launcher_failure_report_writes_through_open_file() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mbuild-launcher-failure-{}-{suffix}.json",
+            std::process::id()
+        ));
+        let file = File::create(&path).unwrap();
+
+        write_launcher_failure(&file, "launcher-pid1", "drop capabilities: EPERM");
+        drop(file);
+        let report: SandboxRunnerFailureReport =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let _ = fs::remove_file(path);
+
+        assert_eq!(report.label, "launcher-pid1");
+        assert!(report.message.contains("drop capabilities"));
     }
 
     #[test]
