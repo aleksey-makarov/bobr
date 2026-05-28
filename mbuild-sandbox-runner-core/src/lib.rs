@@ -10,18 +10,17 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
 use std::fs::File;
-use std::io::{self, Write};
-use std::os::fd::{AsRawFd, RawFd};
+use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 pub const RUNNER_BINARY_NAME: &str = "mbuild-sandbox-runner";
-pub const RUNNER_PROTOCOL_VERSION: u32 = 2;
+pub const RUNNER_PROTOCOL_VERSION: u32 = 3;
 
 const BUILD_USER_UID: u32 = 1;
 const BUILD_USER_GID: u32 = 1;
@@ -47,7 +46,6 @@ pub struct RunnerConfig {
     pub output_dir: PathBuf,
     pub success_report: PathBuf,
     pub failure_report: PathBuf,
-    pub breadcrumbs: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,18 +329,22 @@ struct SandboxRunner {
     output_dir: PathBuf,
     success_report: Arc<File>,
     failure_report: Arc<File>,
-    breadcrumbs: Arc<File>,
+}
+
+type RunnerResult<T> = Result<T, Box<SandboxRunnerFailureReport>>;
+
+fn runner_error(report: SandboxRunnerFailureReport) -> Box<SandboxRunnerFailureReport> {
+    Box::new(report)
 }
 
 impl SandboxRunner {
     fn new(config: RunnerConfig) -> io::Result<Self> {
         let success_report = Arc::new(File::create(&config.success_report)?);
         let failure_report = Arc::new(File::create(&config.failure_report)?);
-        let breadcrumbs = Arc::new(File::create(&config.breadcrumbs)?);
         let steps = config
             .steps
             .into_iter()
-            .map(|step| SandboxRunnerStep::new(step, Arc::clone(&breadcrumbs)))
+            .map(SandboxRunnerStep::new)
             .collect::<io::Result<Vec<_>>>()?;
         Ok(Self {
             prepare_paths: config.prepare_paths,
@@ -350,15 +352,12 @@ impl SandboxRunner {
             output_dir: config.output_dir,
             success_report,
             failure_report,
-            breadcrumbs,
         })
     }
 
     fn exec(&self) -> i32 {
-        self.breadcrumb("executor:exec:start");
         let exit_code = match self.run() {
             Ok(outcome) => {
-                self.breadcrumb("executor:run:ok");
                 if let Err(error) = self.write_success(&outcome) {
                     eprintln!("{error}");
                     1
@@ -367,46 +366,38 @@ impl SandboxRunner {
                 }
             }
             Err(report) => {
-                self.breadcrumb(&format!("executor:run:error:{}", report.to_error_message()));
                 if let Err(error) = self.write_failure(&report) {
                     eprintln!("{error}");
                 }
                 1
             }
         };
-        self.breadcrumb("terminate-remaining-children:start");
         terminate_remaining_children();
-        self.breadcrumb(&format!("process-exit:{exit_code}"));
         exit_code
     }
 
-    fn run(&self) -> Result<SandboxRunnerOutcome, SandboxRunnerFailureReport> {
-        self.breadcrumb("run:start");
-        self.breadcrumb("prepare:start");
+    fn run(&self) -> RunnerResult<SandboxRunnerOutcome> {
         self.prepare()?;
-        self.breadcrumb("prepare:done");
 
         let mut reports = Vec::new();
         for step in &self.steps {
-            self.breadcrumb(&format!("step:{}:run:start", step.name));
             reports.push(step.run()?);
-            self.breadcrumb(&format!("step:{}:run:done", step.name));
         }
 
-        self.breadcrumb("manifest:scan:start");
         let manifest = scan_output_manifest(&self.output_dir)?;
-        self.breadcrumb("manifest:scan:done");
-        self.breadcrumb("manifest:canonical:start");
         let manifest_bytes = manifest.to_canonical_bytes().map_err(|error| {
-            SandboxRunnerFailureReport::runtime("sandbox-manifest-output", error.to_string())
+            runner_error(SandboxRunnerFailureReport::runtime(
+                "sandbox-manifest-output",
+                error.to_string(),
+            ))
         })?;
-        self.breadcrumb("manifest:canonical:done");
-        self.breadcrumb("hash-output:start");
         let object_hash =
             hash_fs_tree_object(&manifest_bytes, &self.output_dir).map_err(|error| {
-                SandboxRunnerFailureReport::runtime("sandbox-hash-output", error.to_string())
+                runner_error(SandboxRunnerFailureReport::runtime(
+                    "sandbox-hash-output",
+                    error.to_string(),
+                ))
             })?;
-        self.breadcrumb("hash-output:done");
         Ok(SandboxRunnerOutcome {
             object_hash,
             manifest,
@@ -414,21 +405,16 @@ impl SandboxRunner {
         })
     }
 
-    fn prepare(&self) -> Result<(), SandboxRunnerFailureReport> {
+    fn prepare(&self) -> RunnerResult<()> {
         for path in &self.prepare_paths {
-            self.breadcrumb(&format!("prepare:create-dir:start:{}", path.display()));
             fs::create_dir_all(path).map_err(|error| prepare_error("create dir", path, error))?;
-            self.breadcrumb(&format!("prepare:create-dir:done:{}", path.display()));
-            self.breadcrumb(&format!("prepare:chown:start:{}", path.display()));
             chown_tree(path, BUILD_USER_UID, BUILD_USER_GID)
                 .map_err(|error| prepare_error("chown", path, error))?;
-            self.breadcrumb(&format!("prepare:chown:done:{}", path.display()));
         }
         Ok(())
     }
 
     fn write_success(&self, outcome: &SandboxRunnerOutcome) -> io::Result<()> {
-        self.breadcrumb("write-success:start");
         let manifest_jsonl = String::from_utf8(
             outcome
                 .manifest
@@ -442,22 +428,11 @@ impl SandboxRunner {
             steps: outcome.steps.clone(),
         };
         serde_json::to_writer(&*self.success_report, &report).map_err(io::Error::other)?;
-        self.breadcrumb("write-success:done");
         Ok(())
     }
 
     fn write_failure(&self, report: &SandboxRunnerFailureReport) -> io::Result<()> {
-        self.breadcrumb(&format!(
-            "write-failure:start:{}",
-            report.to_error_message()
-        ));
-        serde_json::to_writer(&*self.failure_report, report).map_err(io::Error::other)?;
-        self.breadcrumb("write-failure:done");
-        Ok(())
-    }
-
-    fn breadcrumb(&self, message: &str) {
-        write_breadcrumb(&self.breadcrumbs, message);
+        serde_json::to_writer(&*self.failure_report, report).map_err(io::Error::other)
     }
 }
 
@@ -478,11 +453,10 @@ struct SandboxRunnerStep {
     report_stderr_path: PathBuf,
     stdout: Arc<File>,
     stderr: Arc<File>,
-    breadcrumbs: Arc<File>,
 }
 
 impl SandboxRunnerStep {
-    fn new(step: RunnerStepConfig, breadcrumbs: Arc<File>) -> io::Result<Self> {
+    fn new(step: RunnerStepConfig) -> io::Result<Self> {
         Ok(Self {
             name: step.name,
             run_as: step.run_as,
@@ -493,44 +467,33 @@ impl SandboxRunnerStep {
             report_stderr_path: step.report_stderr_path,
             stdout: Arc::new(File::create(&step.stdout_path)?),
             stderr: Arc::new(File::create(&step.stderr_path)?),
-            breadcrumbs,
         })
     }
 
-    fn run(&self) -> Result<SandboxStepReport, SandboxRunnerFailureReport> {
-        self.breadcrumb("start");
+    fn run(&self) -> RunnerResult<SandboxStepReport> {
         let executable = self.argv.first().ok_or_else(|| {
-            SandboxRunnerFailureReport::step_runtime(
+            runner_error(SandboxRunnerFailureReport::step_runtime(
                 self,
                 "step argument vector must contain at least one element".to_string(),
                 0,
-            )
+            ))
         })?;
-        self.breadcrumb(&format!(
-            "argv-ready: executable={} argc={} cwd={} run_as={}",
-            executable,
-            self.argv.len(),
-            self.cwd.display(),
-            self.run_as.as_str()
-        ));
         let start = Instant::now();
-        self.breadcrumb("stdout-clone:start");
         let stdout = self.stdout.try_clone().map_err(|error| {
-            SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
+            runner_error(SandboxRunnerFailureReport::step_runtime(
+                self,
+                error.to_string(),
+                elapsed_ms(start),
+            ))
         })?;
-        self.breadcrumb("stdout-clone:done");
-        self.breadcrumb("stderr-clone:start");
         let stderr = self.stderr.try_clone().map_err(|error| {
-            SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
+            runner_error(SandboxRunnerFailureReport::step_runtime(
+                self,
+                error.to_string(),
+                elapsed_ms(start),
+            ))
         })?;
-        self.breadcrumb("stderr-clone:done");
-        self.breadcrumb("pre-exec-breadcrumbs-clone:start");
-        let pre_exec_breadcrumbs = self.breadcrumbs.try_clone().map_err(|error| {
-            SandboxRunnerFailureReport::step_runtime(self, error.to_string(), elapsed_ms(start))
-        })?;
-        self.breadcrumb("pre-exec-breadcrumbs-clone:done");
 
-        self.breadcrumb("command-build:start");
         let mut command = Command::new(executable);
         command
             .args(&self.argv[1..])
@@ -543,18 +506,11 @@ impl SandboxRunnerStep {
         let run_as = self.run_as;
         let setgroups_allowed = setgroups_allowed();
         unsafe {
-            command.pre_exec(move || {
-                apply_step_credentials(run_as, setgroups_allowed, pre_exec_breadcrumbs.as_raw_fd())
-            });
+            command.pre_exec(move || apply_step_credentials(run_as, setgroups_allowed));
         }
-        self.breadcrumb(&format!(
-            "command-build:done setgroups_allowed={setgroups_allowed}"
-        ));
 
-        self.breadcrumb("command-spawn:start");
         let mut child = command.spawn().map_err(|error| {
-            self.breadcrumb(&format!("command-spawn:error:{error}"));
-            SandboxRunnerFailureReport::step_runtime(
+            runner_error(SandboxRunnerFailureReport::step_runtime(
                 self,
                 format!(
                     "failed to spawn '{}' as {}: {error}",
@@ -562,17 +518,12 @@ impl SandboxRunnerStep {
                     self.run_as.as_str()
                 ),
                 elapsed_ms(start),
-            )
+            ))
         })?;
         let child_pid = child.id();
-        self.breadcrumb(&format!("command-spawn:done child_pid={child_pid}"));
 
-        self.breadcrumb(&format!("command-wait:start child_pid={child_pid}"));
         let status = child.wait().map_err(|error| {
-            self.breadcrumb(&format!(
-                "command-wait:error child_pid={child_pid} error={error}"
-            ));
-            SandboxRunnerFailureReport::step_runtime(
+            runner_error(SandboxRunnerFailureReport::step_runtime(
                 self,
                 format!(
                     "failed to wait for '{}' as {} child pid {}: {error}",
@@ -581,17 +532,11 @@ impl SandboxRunnerStep {
                     child_pid
                 ),
                 elapsed_ms(start),
-            )
+            ))
         })?;
-        self.breadcrumb(&format!(
-            "command-wait:done child_pid={child_pid} status={status:?}"
-        ));
-        self.breadcrumb("reap-children:start");
         reap_finished_children();
-        self.breadcrumb("reap-children:done");
         let duration_ms = elapsed_ms(start);
         if status.success() {
-            self.breadcrumb(&format!("success:duration_ms={duration_ms}"));
             Ok(SandboxStepReport {
                 name: self.name.clone(),
                 run_as: self.run_as.as_str().to_string(),
@@ -601,37 +546,23 @@ impl SandboxRunnerStep {
                 stderr_path: self.report_stderr_path.clone(),
             })
         } else {
-            self.breadcrumb(&format!(
-                "failed:duration_ms={duration_ms} status={status:?}"
-            ));
-            Err(SandboxRunnerFailureReport::failed_step(
+            Err(runner_error(SandboxRunnerFailureReport::failed_step(
                 self,
                 &status,
                 duration_ms,
-            ))
+            )))
         }
     }
-
-    fn breadcrumb(&self, message: &str) {
-        write_breadcrumb(&self.breadcrumbs, &format!("step:{}:{message}", self.name));
-    }
 }
 
-fn write_breadcrumb(file: &File, message: &str) {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| format!("{}.{:09}", duration.as_secs(), duration.subsec_nanos()))
-        .unwrap_or_else(|_| "time-error".to_string());
-    let mut file = file;
-    let _ = writeln!(file, "{elapsed} pid={} {message}", std::process::id());
-    let _ = file.flush();
-}
-
-fn scan_output_manifest(root: &Path) -> Result<FsTreeManifest, SandboxRunnerFailureReport> {
+fn scan_output_manifest(root: &Path) -> RunnerResult<FsTreeManifest> {
     let mut entries = Vec::new();
     scan_output_entry(root, "", &mut entries)?;
     FsTreeManifest::from_entries(entries).map_err(|error| {
-        SandboxRunnerFailureReport::runtime("sandbox-manifest-output", error.to_string())
+        runner_error(SandboxRunnerFailureReport::runtime(
+            "sandbox-manifest-output",
+            error.to_string(),
+        ))
     })
 }
 
@@ -639,12 +570,12 @@ fn scan_output_entry(
     path: &Path,
     rel_path: &str,
     entries: &mut Vec<FsTreeEntry>,
-) -> Result<(), SandboxRunnerFailureReport> {
+) -> RunnerResult<()> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
-        SandboxRunnerFailureReport::runtime(
+        runner_error(SandboxRunnerFailureReport::runtime(
             "sandbox-manifest-output",
             format!("failed to inspect '{}': {error}", path.display()),
-        )
+        ))
     })?;
     let file_type = metadata.file_type();
     let uid = metadata.uid();
@@ -658,27 +589,27 @@ fn scan_output_entry(
             metadata.permissions().mode() & 0o7777,
         ));
         let children = fs::read_dir(path).map_err(|error| {
-            SandboxRunnerFailureReport::runtime(
+            runner_error(SandboxRunnerFailureReport::runtime(
                 "sandbox-manifest-output",
                 format!("failed to read directory '{}': {error}", path.display()),
-            )
+            ))
         })?;
         for child in children {
             let child = child.map_err(|error| {
-                SandboxRunnerFailureReport::runtime(
+                runner_error(SandboxRunnerFailureReport::runtime(
                     "sandbox-manifest-output",
                     format!(
                         "failed to read directory entry in '{}': {error}",
                         path.display()
                     ),
-                )
+                ))
             })?;
             let name = child.file_name();
             let name = name.to_str().ok_or_else(|| {
-                SandboxRunnerFailureReport::runtime(
+                runner_error(SandboxRunnerFailureReport::runtime(
                     "sandbox-manifest-output",
                     format!("output path under '{}' is not UTF-8", path.display()),
-                )
+                ))
             })?;
             let child_rel_path = if rel_path.is_empty() {
                 name.to_string()
@@ -689,10 +620,10 @@ fn scan_output_entry(
         }
     } else if file_type.is_file() {
         let hash = hash_path(path).map_err(|error| {
-            SandboxRunnerFailureReport::runtime(
+            runner_error(SandboxRunnerFailureReport::runtime(
                 "sandbox-manifest-output",
                 format!("failed to hash output file '{}': {error}", path.display()),
-            )
+            ))
         })?;
         entries.push(FsTreeEntry::file_with_hash(
             rel_path,
@@ -703,16 +634,16 @@ fn scan_output_entry(
         ));
     } else if file_type.is_symlink() {
         let target = fs::read_link(path).map_err(|error| {
-            SandboxRunnerFailureReport::runtime(
+            runner_error(SandboxRunnerFailureReport::runtime(
                 "sandbox-manifest-output",
                 format!("failed to read symlink '{}': {error}", path.display()),
-            )
+            ))
         })?;
         let target = target.to_str().ok_or_else(|| {
-            SandboxRunnerFailureReport::runtime(
+            runner_error(SandboxRunnerFailureReport::runtime(
                 "sandbox-manifest-output",
                 format!("symlink target for '{}' is not UTF-8", path.display()),
-            )
+            ))
         })?;
         entries.push(FsTreeEntry::symlink_with_hash(
             rel_path,
@@ -722,10 +653,10 @@ fn scan_output_entry(
             hash_symlink_node(target.as_bytes()),
         ));
     } else {
-        return Err(SandboxRunnerFailureReport::runtime(
+        return Err(runner_error(SandboxRunnerFailureReport::runtime(
             "sandbox-manifest-output",
             format!("unsupported output file type '{}'", path.display()),
-        ));
+        )));
     }
 
     Ok(())
@@ -735,11 +666,15 @@ fn elapsed_ms(start: Instant) -> u128 {
     start.elapsed().as_millis()
 }
 
-fn prepare_error(operation: &str, path: &Path, error: io::Error) -> SandboxRunnerFailureReport {
-    SandboxRunnerFailureReport::runtime(
+fn prepare_error(
+    operation: &str,
+    path: &Path,
+    error: io::Error,
+) -> Box<SandboxRunnerFailureReport> {
+    runner_error(SandboxRunnerFailureReport::runtime(
         "sandbox-prepare",
         format!("{operation} '{}': {error}", path.display()),
-    )
+    ))
 }
 
 fn terminate_remaining_children() {
@@ -785,49 +720,21 @@ fn setgroups_allowed() -> bool {
     }
 }
 
-fn raw_pre_exec_breadcrumb(fd: RawFd, message: &'static [u8]) {
-    unsafe {
-        let _ = libc::write(fd, message.as_ptr().cast(), message.len());
-    }
-}
-
-fn apply_step_credentials(
-    run_as: RunnerRunAs,
-    setgroups_allowed: bool,
-    breadcrumbs_fd: RawFd,
-) -> io::Result<()> {
-    raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:start\n");
+fn apply_step_credentials(run_as: RunnerRunAs, setgroups_allowed: bool) -> io::Result<()> {
     match run_as {
         RunnerRunAs::BuildUser => {
-            if setgroups_allowed {
-                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgroups:start\n");
-                if let Err(error) = setgroups(&[]) {
-                    raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgroups:error\n");
-                    return Err(credential_error("setgroups([])", error));
-                }
-                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgroups:done\n");
-            } else {
-                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgroups:skipped\n");
+            if setgroups_allowed && let Err(error) = setgroups(&[]) {
+                return Err(credential_error("setgroups([])", error));
             }
-            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgid:start\n");
             if let Err(error) = setgid(Gid::from_raw(BUILD_USER_GID)) {
-                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgid:error\n");
                 return Err(credential_error("setgid(1)", error));
             }
-            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setgid:done\n");
-            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setuid:start\n");
             if let Err(error) = setuid(Uid::from_raw(BUILD_USER_UID)) {
-                raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setuid:error\n");
                 return Err(credential_error("setuid(1)", error));
             }
-            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:setuid:done\n");
-            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:done\n");
             Ok(())
         }
-        RunnerRunAs::Root => {
-            raw_pre_exec_breadcrumb(breadcrumbs_fd, b"pre-exec:root:done\n");
-            Ok(())
-        }
+        RunnerRunAs::Root => Ok(()),
     }
 }
 
@@ -1115,7 +1022,6 @@ mod tests {
                 output_dir: root.join("out"),
                 success_report: root.join("success.json"),
                 failure_report: root.join("failure.json"),
-                breadcrumbs: root.join("breadcrumbs.log"),
             },
         }
     }

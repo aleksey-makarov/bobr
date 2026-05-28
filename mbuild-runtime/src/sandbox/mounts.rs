@@ -1,7 +1,7 @@
 use super::config::{SandboxBuildConfig, SandboxRunAs, SandboxStep};
 use super::{
-    CONTAINER_BREADCRUMBS, CONTAINER_FAILURE_REPORT, CONTAINER_LOG_DIR, CONTAINER_RUNNER_CONFIG,
-    CONTAINER_RUNNER_DIR, CONTAINER_RUNTIME_DIR, CONTAINER_SUCCESS_REPORT,
+    CONTAINER_FAILURE_REPORT, CONTAINER_LOG_DIR, CONTAINER_RUNNER_CONFIG, CONTAINER_RUNNER_DIR,
+    CONTAINER_RUNTIME_DIR, CONTAINER_SUCCESS_REPORT,
 };
 use crate::error::RuntimeError;
 use mbuild_sandbox_runner_core::{
@@ -103,7 +103,6 @@ fn write_runner_config(
         output_dir: PathBuf::from("/__mbuild/out"),
         success_report: PathBuf::from(CONTAINER_SUCCESS_REPORT),
         failure_report: PathBuf::from(CONTAINER_FAILURE_REPORT),
-        breadcrumbs: PathBuf::from(CONTAINER_BREADCRUMBS),
     };
     serde_json::to_writer(File::create(&runtime_files.runner_config)?, &runner_config)
         .map_err(|error| RuntimeError::Executor(error.to_string()))
@@ -122,11 +121,9 @@ impl SandboxRuntimeFiles {
         fs::create_dir_all(root)?;
         let success_report = root.join("sandbox-success.json");
         let failure_report = root.join("sandbox-failure.json");
-        let breadcrumbs = root.join("sandbox-breadcrumbs.log");
         let runner_config = root.join("runner-config.json");
         File::create(&success_report)?;
         File::create(&failure_report)?;
-        File::create(&breadcrumbs)?;
         File::create(&runner_config)?;
         fs::create_dir_all(root.join("logs"))?;
         let mut step_logs = Vec::new();

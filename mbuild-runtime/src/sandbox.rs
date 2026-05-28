@@ -21,7 +21,6 @@ const CONTAINER_LOG_DIR: &str = "/__mbuild/logs";
 const CONTAINER_RUNNER_CONFIG: &str = "/__mbuild/runtime/runner-config.json";
 const CONTAINER_SUCCESS_REPORT: &str = "/__mbuild/runtime/sandbox-success.json";
 const CONTAINER_FAILURE_REPORT: &str = "/__mbuild/runtime/sandbox-failure.json";
-const CONTAINER_BREADCRUMBS: &str = "/__mbuild/runtime/sandbox-breadcrumbs.log";
 
 /// Execute a complete sandbox build and return the output hash.
 pub fn run_sandbox_build(
