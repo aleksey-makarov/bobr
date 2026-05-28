@@ -56,17 +56,33 @@ impl fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
+pub(crate) struct ExecuteBuilderNodeRequest<'a> {
+    pub(crate) layout: &'a StoreLayout,
+    pub(crate) builder: &'static dyn Builder,
+    pub(crate) build_key: BuildKey,
+    pub(crate) build_name: &'a str,
+    pub(crate) created_at: &'a str,
+    pub(crate) run_logger: Arc<BuildRunLogger>,
+    pub(crate) cancellation: CancellationToken,
+    pub(crate) config: Value,
+    pub(crate) inputs: ResolvedInputs,
+}
+
 pub(crate) fn execute_builder_node(
-    layout: &StoreLayout,
-    builder: &'static dyn Builder,
-    build_key: BuildKey,
-    build_name: &str,
-    created_at: &str,
-    run_logger: Arc<BuildRunLogger>,
-    cancellation: CancellationToken,
-    config: Value,
-    inputs: ResolvedInputs,
+    request: ExecuteBuilderNodeRequest<'_>,
 ) -> Result<PublishedBuild, RuntimeError> {
+    let ExecuteBuilderNodeRequest {
+        layout,
+        builder,
+        build_key,
+        build_name,
+        created_at,
+        run_logger,
+        cancellation,
+        config,
+        inputs,
+    } = request;
+
     check_cancelled(&cancellation)?;
     let inputs_identity = inputs
         .ordered_input_identities(builder.spec())
@@ -798,17 +814,17 @@ mod tests {
         fs::create_dir_all(&temp_dir).unwrap();
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
-        let published = execute_builder_node(
-            &layout,
-            &RUNTIME_TEST_BUILDER,
+        let published = execute_builder_node(ExecuteBuilderNodeRequest {
+            layout: &layout,
+            builder: &RUNTIME_TEST_BUILDER,
             build_key,
-            "runtime-test",
-            "2026-04-05T12:00:00.000000000Z",
-            logger,
-            CancellationToken::new(),
+            build_name: "runtime-test",
+            created_at: "2026-04-05T12:00:00.000000000Z",
+            run_logger: logger,
+            cancellation: CancellationToken::new(),
             config,
             inputs,
-        )
+        })
         .unwrap();
 
         assert!(state_dir.is_dir());
@@ -873,17 +889,17 @@ mod tests {
         let state_dir = layout.root.join("builder-state").join("sandbox");
         let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
 
-        let published = execute_builder_node(
-            &layout,
-            &SANDBOX_RUNTIME_TEST_BUILDER,
+        let published = execute_builder_node(ExecuteBuilderNodeRequest {
+            layout: &layout,
+            builder: &SANDBOX_RUNTIME_TEST_BUILDER,
             build_key,
-            "sandbox-runtime-test",
-            "2026-04-05T12:00:00.000000000Z",
-            logger,
-            CancellationToken::new(),
+            build_name: "sandbox-runtime-test",
+            created_at: "2026-04-05T12:00:00.000000000Z",
+            run_logger: logger,
+            cancellation: CancellationToken::new(),
             config,
             inputs,
-        )
+        })
         .unwrap();
 
         assert!(!temp_dir.exists());
@@ -907,17 +923,17 @@ mod tests {
         fs::create_dir_all(&temp_dir).unwrap();
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
-        execute_builder_node(
-            &layout,
-            &SANDBOX_RUNTIME_TEST_BUILDER,
+        execute_builder_node(ExecuteBuilderNodeRequest {
+            layout: &layout,
+            builder: &SANDBOX_RUNTIME_TEST_BUILDER,
             build_key,
-            "sandbox-runtime-test",
-            "2026-04-05T12:00:00.000000000Z",
-            logger,
-            CancellationToken::new(),
+            build_name: "sandbox-runtime-test",
+            created_at: "2026-04-05T12:00:00.000000000Z",
+            run_logger: logger,
+            cancellation: CancellationToken::new(),
             config,
             inputs,
-        )
+        })
         .unwrap();
 
         assert!(!temp_dir.exists());
@@ -948,17 +964,17 @@ mod tests {
         fs::create_dir_all(&temp_dir).unwrap();
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
-        let error = execute_builder_node(
-            &layout,
-            &RUNTIME_FAIL_BUILDER,
+        let error = execute_builder_node(ExecuteBuilderNodeRequest {
+            layout: &layout,
+            builder: &RUNTIME_FAIL_BUILDER,
             build_key,
-            "runtime-fail",
-            "2026-04-05T12:00:00.000000000Z",
-            logger,
-            CancellationToken::new(),
+            build_name: "runtime-fail",
+            created_at: "2026-04-05T12:00:00.000000000Z",
+            run_logger: logger,
+            cancellation: CancellationToken::new(),
             config,
             inputs,
-        )
+        })
         .unwrap_err();
 
         assert_eq!(error.class(), "build");
@@ -1015,17 +1031,17 @@ mod tests {
             .join("tmp")
             .join(build_key.to_hex());
 
-        let error = execute_builder_node(
-            &layout,
-            &RUNTIME_BROKEN_STAGE_BUILDER,
+        let error = execute_builder_node(ExecuteBuilderNodeRequest {
+            layout: &layout,
+            builder: &RUNTIME_BROKEN_STAGE_BUILDER,
             build_key,
-            "runtime-broken-stage",
-            "2026-04-05T12:00:00.000000000Z",
-            logger,
-            CancellationToken::new(),
+            build_name: "runtime-broken-stage",
+            created_at: "2026-04-05T12:00:00.000000000Z",
+            run_logger: logger,
+            cancellation: CancellationToken::new(),
             config,
             inputs,
-        )
+        })
         .unwrap_err();
 
         assert_eq!(error.class(), "store");
@@ -1043,17 +1059,17 @@ mod tests {
         let cancellation = CancellationToken::new();
         cancellation.cancel();
 
-        let error = execute_builder_node(
-            &layout,
-            &RUNTIME_TEST_BUILDER,
+        let error = execute_builder_node(ExecuteBuilderNodeRequest {
+            layout: &layout,
+            builder: &RUNTIME_TEST_BUILDER,
             build_key,
-            "runtime-test",
-            "2026-04-05T12:00:00.000000000Z",
-            logger,
+            build_name: "runtime-test",
+            created_at: "2026-04-05T12:00:00.000000000Z",
+            run_logger: logger,
             cancellation,
             config,
             inputs,
-        )
+        })
         .unwrap_err();
 
         assert_eq!(error.class(), "cancelled");

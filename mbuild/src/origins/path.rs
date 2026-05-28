@@ -85,7 +85,7 @@ fn take_optional_bool(
         .ok_or_else(|| format!("{path}.{field}: expected boolean"))
 }
 
-fn validate_absolute_source_path(path: &PathBuf, field_path: &str) -> Result<(), String> {
+fn validate_absolute_source_path(path: &Path, field_path: &str) -> Result<(), String> {
     if path.as_os_str().is_empty() {
         return Err(format!("{field_path}: path must not be empty"));
     }
@@ -96,7 +96,7 @@ fn validate_absolute_source_path(path: &PathBuf, field_path: &str) -> Result<(),
 }
 
 fn materialize_path_source_direct(temp_root: &Path, source_path: &Path) -> Result<PathBuf, String> {
-    let source_meta = fs::metadata(&source_path).map_err(|error| {
+    let source_meta = fs::metadata(source_path).map_err(|error| {
         format!(
             "failed to inspect source path '{}': {error}",
             source_path.display()
@@ -104,7 +104,7 @@ fn materialize_path_source_direct(temp_root: &Path, source_path: &Path) -> Resul
     })?;
     let staged_path = temp_root.join("staged");
     if source_meta.is_dir() {
-        copy_dir_recursive(&source_path, &staged_path)?;
+        copy_dir_recursive(source_path, &staged_path)?;
     } else if source_meta.is_file() {
         if let Some(parent) = staged_path.parent() {
             fs::create_dir_all(parent).map_err(|error| {
@@ -114,7 +114,7 @@ fn materialize_path_source_direct(temp_root: &Path, source_path: &Path) -> Resul
                 )
             })?;
         }
-        fs::copy(&source_path, &staged_path).map_err(|error| {
+        fs::copy(source_path, &staged_path).map_err(|error| {
             format!(
                 "failed to copy source file '{}' to '{}': {error}",
                 source_path.display(),
@@ -131,7 +131,7 @@ fn materialize_path_source_direct(temp_root: &Path, source_path: &Path) -> Resul
 }
 
 fn materialize_path_source_tar(temp_root: &Path, source_path: &Path) -> Result<PathBuf, String> {
-    let file = fs::File::open(&source_path).map_err(|error| {
+    let file = fs::File::open(source_path).map_err(|error| {
         format!(
             "failed to open tar source '{}': {error}",
             source_path.display()

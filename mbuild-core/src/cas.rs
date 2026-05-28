@@ -512,20 +512,20 @@ pub fn publish_result_refs(
     let current_result_ref_path = layout.result_refs.join(format!("{output_name}.json"));
     let current_object_ref_path = layout.object_refs.join(output_name);
 
-    if let Some(current) = load_current_publication(layout, output_name)? {
-        if current.result.result_id != result.result_id {
-            let generation_name =
-                allocate_generation_name(layout, output_name, &generation_suffix(&current)?)?;
+    if let Some(current) = load_current_publication(layout, output_name)?
+        && current.result.result_id != result.result_id
+    {
+        let generation_name =
+            allocate_generation_name(layout, output_name, &generation_suffix(&current)?)?;
 
-            if let Some(target) = current.result_target {
-                create_generation_ref(
-                    &target,
-                    &layout.result_refs.join(format!("{generation_name}.json")),
-                )?;
-            }
-            if let Some(target) = current.object_target {
-                create_generation_ref(&target, &layout.object_refs.join(&generation_name))?;
-            }
+        if let Some(target) = current.result_target {
+            create_generation_ref(
+                &target,
+                &layout.result_refs.join(format!("{generation_name}.json")),
+            )?;
+        }
+        if let Some(target) = current.object_target {
+            create_generation_ref(&target, &layout.object_refs.join(&generation_name))?;
         }
     }
 

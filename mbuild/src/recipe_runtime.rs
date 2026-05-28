@@ -6,8 +6,8 @@ use crate::recipe::{
 };
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
-    RuntimeError, check_cancelled, execute_builder_node, log_runtime_event, lookup_build_handle,
-    lookup_canonical_result, map_store_error,
+    ExecuteBuilderNodeRequest, RuntimeError, check_cancelled, execute_builder_node,
+    log_runtime_event, lookup_build_handle, lookup_canonical_result, map_store_error,
 };
 use fsobj_hash::hash_path;
 use mbuild_core::{
@@ -768,23 +768,23 @@ fn execute_builder_recipe(
     inputs: ResolvedInputs,
 ) -> Result<ExecutedNode, RuntimeError> {
     let created_at = logger.created_at().to_string();
-    let published = execute_builder_node(
+    let published = execute_builder_node(ExecuteBuilderNodeRequest {
         layout,
-        builders::get_builder(recipe.spec.tag).ok_or_else(|| {
+        builder: builders::get_builder(recipe.spec.tag).ok_or_else(|| {
             RuntimeError::UnknownBuilder(format!(
                 "unknown builder tag '{}'; supported builders: {}",
                 recipe.spec.tag,
                 builders::supported_builder_tags().join(", ")
             ))
         })?,
-        key,
-        &recipe.name,
-        &created_at,
-        logger,
+        build_key: key,
+        build_name: &recipe.name,
+        created_at: &created_at,
+        run_logger: logger,
         cancellation,
-        recipe.config,
+        config: recipe.config,
         inputs,
-    )?;
+    })?;
     Ok(ExecutedNode {
         realized: realized_result_from_record(Some(key), &published.result),
         result: published.result,

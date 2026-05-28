@@ -485,10 +485,8 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
     assert_eq!(first.build_key, second.build_key);
     assert!(result_refs.join("final-group.json").exists());
     assert!(object_refs.join("final-group").exists());
-    for name in ["source"] {
-        assert!(!result_refs.join(format!("{name}.json")).exists());
-        assert!(!object_refs.join(name).exists());
-    }
+    assert!(!result_refs.join("source.json").exists());
+    assert!(!object_refs.join("source").exists());
 }
 
 #[test]

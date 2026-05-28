@@ -2067,12 +2067,11 @@ fn normalize_entries(entries: Vec<TreeEntry>) -> Result<Vec<NormalizedEntry>, Bu
 }
 
 fn determine_output_kind(entries: &[NormalizedEntry]) -> OutputKind {
-    if entries.len() == 1 {
-        if let Some(NormalizedEntry::File { rel_path, .. }) = entries.first()
-            && !rel_path.contains('/')
-        {
-            return OutputKind::File;
-        }
+    if entries.len() == 1
+        && let Some(NormalizedEntry::File { rel_path, .. }) = entries.first()
+        && !rel_path.contains('/')
+    {
+        return OutputKind::File;
     }
     OutputKind::Directory
 }
@@ -2325,9 +2324,11 @@ fn add_parent_directories(
     for segment in components.iter().take(components.len().saturating_sub(1)) {
         current.push(segment);
         let path = current.to_string_lossy().replace('\\', "/");
-        if !manifest_entries.contains_key(&path) {
+        if let std::collections::btree_map::Entry::Vacant(entry_slot) = manifest_entries.entry(path)
+        {
+            let path = entry_slot.key().to_string();
             let entry = fs_tree_entry_for_path(&path, MaterializedKind::Directory, rules)?;
-            manifest_entries.insert(path, entry);
+            entry_slot.insert(entry);
         }
     }
     Ok(())
@@ -4012,7 +4013,7 @@ mod tests {
             Some(hash_path(&result.staged_path).unwrap())
         );
         let materialized_paths = materializer.materialized_paths.borrow();
-        assert!(materialized_paths.iter().any(|path| path == ""));
+        assert!(materialized_paths.iter().any(|path| path.is_empty()));
         assert!(materialized_paths.iter().any(|path| path == "bin"));
         assert!(materialized_paths.iter().any(|path| path == "etc"));
         assert!(!materialized_paths.iter().any(|path| path == "bin/left"));

@@ -1327,7 +1327,7 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        dirs.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+        dirs.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
         for (path, mode) in dirs {
             fs::set_permissions(root.join(path), fs::Permissions::from_mode(*mode)).unwrap();
         }

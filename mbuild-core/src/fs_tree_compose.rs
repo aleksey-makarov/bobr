@@ -397,12 +397,15 @@ fn materialize_composed_fs_tree_inner(
                 ComposedFsTreeEntry::File { source_path },
             ) => {
                 let dst = paths.root_dir.join(path);
+                let file_attrs = FileMaterializationAttrs {
+                    logical_uid: *uid,
+                    logical_gid: *gid,
+                    mode: *mode,
+                };
                 link_or_copy_file(
                     source_path,
                     &dst,
-                    *uid,
-                    *gid,
-                    *mode,
+                    file_attrs,
                     owner_map,
                     owner_applier,
                     linker,
@@ -469,13 +472,18 @@ fn validate_composed_shape(composed: &ComposedFsTree) -> Result<(), FsTreeCompos
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FileMaterializationAttrs {
+    logical_uid: u32,
+    logical_gid: u32,
+    mode: u32,
+}
+
 #[cfg(unix)]
 fn link_or_copy_file(
     source: &Path,
     dst: &Path,
-    logical_uid: u32,
-    logical_gid: u32,
-    mode: u32,
+    attrs: FileMaterializationAttrs,
     owner_map: &impl FsTreeOwnerMap,
     owner_applier: &impl FsTreeOwnerApplier,
     linker: &impl FsTreeLinker,
@@ -490,8 +498,14 @@ fn link_or_copy_file(
                     dst.display()
                 ))
             })?;
-            apply_file_owner(dst, logical_uid, logical_gid, owner_map, owner_applier)?;
-            chmod(dst, mode)?;
+            apply_file_owner(
+                dst,
+                attrs.logical_uid,
+                attrs.logical_gid,
+                owner_map,
+                owner_applier,
+            )?;
+            chmod(dst, attrs.mode)?;
             Ok(())
         }
         Err(error) => Err(FsTreeComposeError::Io(format!(

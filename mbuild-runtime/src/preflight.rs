@@ -242,7 +242,7 @@ mod tests {
         MbuildIdmap::for_tests(1000, 1000, 100000, 65536, 200000, 65536)
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     struct FakeProbe {
         kinds: HashMap<String, PathKind>,
         files: HashMap<String, String>,
@@ -271,16 +271,6 @@ mod tests {
             probe.commands.insert("newuidmap".to_string());
             probe.commands.insert("newgidmap".to_string());
             probe
-        }
-    }
-
-    impl Default for FakeProbe {
-        fn default() -> Self {
-            Self {
-                kinds: HashMap::new(),
-                files: HashMap::new(),
-                commands: HashSet::new(),
-            }
         }
     }
 

@@ -900,7 +900,7 @@ mod tests {
         let paths = create_fs_tree_staging_dir(&object_dir, &manifest).unwrap();
         let locked = paths.root_dir.join("locked");
         fs::create_dir(&locked).unwrap();
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0)).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o0)).unwrap();
 
         let loaded = load_fs_tree_object(&object_dir).unwrap();
 

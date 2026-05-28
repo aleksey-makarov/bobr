@@ -46,17 +46,9 @@ impl RunTimestamp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RunOptions {
     pub emit_progress: bool,
-}
-
-impl Default for RunOptions {
-    fn default() -> Self {
-        Self {
-            emit_progress: false,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -315,13 +307,8 @@ fn sanitize_component(value: &str) -> String {
 }
 
 fn current_timestamp_utc() -> OffsetDateTime {
-    let now = OffsetDateTime::from_unix_timestamp_nanos(
-        (fsutil::current_epoch_nanos().unwrap_or(0) as i128)
-            .try_into()
-            .unwrap_or_default(),
-    )
-    .unwrap_or_else(|_| OffsetDateTime::now_utc());
-    now
+    OffsetDateTime::from_unix_timestamp_nanos(fsutil::current_epoch_nanos().unwrap_or(0) as i128)
+        .unwrap_or_else(|_| OffsetDateTime::now_utc())
 }
 
 fn current_human_timestamp() -> String {
