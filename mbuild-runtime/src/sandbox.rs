@@ -7,7 +7,7 @@ mod reports;
 mod tools;
 
 use crate::error::RuntimeError;
-use crate::idmap::MbuildIdmap;
+use crate::idmap::cached_host_idmap;
 use lifecycle::SandboxLifecycle;
 use mounts::PreparedSandbox;
 use tracing::warn;
@@ -15,24 +15,16 @@ use tracing::warn;
 pub use config::{SandboxBuildConfig, SandboxInput, SandboxRunAs, SandboxStep};
 pub use reports::{SandboxBuildOutcome, SandboxStepReport};
 
-const CONTAINER_RUNTIME_DIR: &str = "/__mbuild/runtime";
-const CONTAINER_RUNNER_DIR: &str = "/__mbuild/runner";
-const CONTAINER_LOG_DIR: &str = "/__mbuild/logs";
-const CONTAINER_RUNNER_CONFIG: &str = "/__mbuild/runtime/runner-config.json";
-const CONTAINER_SUCCESS_REPORT: &str = "/__mbuild/runtime/sandbox-success.json";
-const CONTAINER_FAILURE_REPORT: &str = "/__mbuild/runtime/sandbox-failure.json";
-
 /// Execute a complete sandbox build and return the output hash.
-pub fn run_sandbox_build(
-    config: SandboxBuildConfig,
-    idmap: &MbuildIdmap,
-) -> Result<SandboxBuildOutcome, RuntimeError> {
+pub fn run_sandbox_build(config: SandboxBuildConfig) -> Result<SandboxBuildOutcome, RuntimeError> {
     config::validate_config(&config)?;
-    crate::preflight::preflight_local_helper_runtime(idmap)?;
+    let idmap = cached_host_idmap()
+        .map_err(|error| RuntimeError::Preflight(format!("failed to load host idmap: {error}")))?;
+    crate::preflight::preflight_local_helper_runtime(idmap.as_ref())?;
     let tools = tools::cached_sandbox_tools()?;
 
     let prepared = PreparedSandbox::create(&config, &tools.runner.host_path)?;
-    let mut lifecycle = SandboxLifecycle::start(&tools, idmap, prepared)?;
+    let mut lifecycle = SandboxLifecycle::start(&tools, idmap.as_ref(), prepared)?;
     let result = lifecycle.wait_for_outcome();
     let cleanup = lifecycle.cleanup();
 

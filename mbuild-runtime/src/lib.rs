@@ -7,8 +7,9 @@
 //!
 //! The current public capabilities are fs-tree ownership materialization
 //! through [`apply_ownership_batch`], deterministic fs-tree tar and initramfs
-//! generation, and `Sandbox` execution through [`run_sandbox_build`]. These
-//! helpers operate in a user namespace described by [`MbuildIdmap`].
+//! generation, and `Sandbox` execution through [`run_sandbox_build`].
+//! Ownership and archive helpers accept an explicit [`MbuildIdmap`]; sandbox
+//! execution resolves the cached host idmap internally.
 //!
 //! The public `Sandbox` runtime capability accepts a prepared root filesystem
 //! directory through [`SandboxBuildConfig::root_dir`], mounts extra

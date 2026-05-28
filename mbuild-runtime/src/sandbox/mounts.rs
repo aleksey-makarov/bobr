@@ -1,13 +1,12 @@
 use super::config::{SandboxBuildConfig, SandboxRunAs, SandboxStep};
-use super::{
-    CONTAINER_FAILURE_REPORT, CONTAINER_LOG_DIR, CONTAINER_RUNNER_CONFIG, CONTAINER_RUNNER_DIR,
-    CONTAINER_RUNTIME_DIR, CONTAINER_SUCCESS_REPORT,
-};
 use crate::error::RuntimeError;
 use mbuild_sandbox_runner_core::{
-    RUNNER_BINARY_NAME, RUNNER_PROTOCOL_VERSION, RunnerConfig, RunnerRunAs, RunnerStepConfig,
-    SandboxLauncherConfig, SandboxLauncherMount, SandboxLauncherMountKind,
-    relative_launcher_target, validate_launcher_config,
+    CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_FAILURE_REPORT, CONTAINER_INPUTS_DIR,
+    CONTAINER_LOG_DIR, CONTAINER_MBUILD_DIR, CONTAINER_OUT_DIR, CONTAINER_RUNNER_CONFIG,
+    CONTAINER_RUNNER_DIR, CONTAINER_RUNTIME_DIR, CONTAINER_SUCCESS_REPORT, RUNNER_BINARY_NAME,
+    RUNNER_PROTOCOL_VERSION, RunnerConfig, RunnerRunAs, RunnerStepConfig, SandboxLauncherConfig,
+    SandboxLauncherMount, SandboxLauncherMountKind, relative_launcher_target,
+    validate_launcher_config,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -98,9 +97,9 @@ fn write_runner_config(
         .collect::<Vec<_>>();
     let runner_config = RunnerConfig {
         protocol_version: RUNNER_PROTOCOL_VERSION,
-        prepare_paths: vec![PathBuf::from("/__mbuild/build")],
+        prepare_paths: vec![PathBuf::from(CONTAINER_BUILD_DIR)],
         steps,
-        output_dir: PathBuf::from("/__mbuild/out"),
+        output_dir: PathBuf::from(CONTAINER_OUT_DIR),
         success_report: PathBuf::from(CONTAINER_SUCCESS_REPORT),
         failure_report: PathBuf::from(CONTAINER_FAILURE_REPORT),
     };
@@ -170,9 +169,9 @@ fn build_launcher_config(
         proc_mount(Path::new("/proc")),
         tmpfs_mount(Path::new("/tmp"), false, &["mode=1777"]),
         tmpfs_mount(Path::new("/run"), true, &["mode=755"]),
-        bind_mount(&dirs.build_dir, Path::new("/__mbuild/build"), false),
-        bind_mount(&config.config_dir, Path::new("/__mbuild/config"), true),
-        bind_mount(&config.out_dir, Path::new("/__mbuild/out"), false),
+        bind_mount(&dirs.build_dir, Path::new(CONTAINER_BUILD_DIR), false),
+        bind_mount(&config.config_dir, Path::new(CONTAINER_CONFIG_DIR), true),
+        bind_mount(&config.out_dir, Path::new(CONTAINER_OUT_DIR), false),
         bind_mount(
             runner_path,
             &Path::new(CONTAINER_RUNNER_DIR).join(RUNNER_BINARY_NAME),
@@ -283,18 +282,18 @@ fn populate_root_skeleton(
         }
     }
     for path in [
-        Path::new("__mbuild"),
-        Path::new("__mbuild/build"),
-        Path::new("__mbuild/config"),
-        Path::new("__mbuild/inputs"),
-        Path::new("__mbuild/logs"),
-        Path::new("__mbuild/out"),
-        Path::new("__mbuild/runner"),
-        Path::new("__mbuild/runtime"),
-        Path::new("dev"),
-        Path::new("proc"),
-        Path::new("run"),
-        Path::new("tmp"),
+        relative_container_path(CONTAINER_MBUILD_DIR)?,
+        relative_container_path(CONTAINER_BUILD_DIR)?,
+        relative_container_path(CONTAINER_CONFIG_DIR)?,
+        relative_container_path(CONTAINER_INPUTS_DIR)?,
+        relative_container_path(CONTAINER_LOG_DIR)?,
+        relative_container_path(CONTAINER_OUT_DIR)?,
+        relative_container_path(CONTAINER_RUNNER_DIR)?,
+        relative_container_path(CONTAINER_RUNTIME_DIR)?,
+        PathBuf::from("dev"),
+        PathBuf::from("proc"),
+        PathBuf::from("run"),
+        PathBuf::from("tmp"),
     ] {
         fs::create_dir_all(sandbox_root.join(path))?;
     }
@@ -304,7 +303,7 @@ fn populate_root_skeleton(
     create_dev_symlink(sandbox_root, "stderr", "/proc/self/fd/2")?;
     File::create(
         sandbox_root
-            .join("__mbuild/runner")
+            .join(relative_container_path(CONTAINER_RUNNER_DIR)?)
             .join(RUNNER_BINARY_NAME),
     )?;
     for log in &runtime_files.step_logs {
@@ -312,6 +311,11 @@ fn populate_root_skeleton(
         create_mount_target(sandbox_root, &log.container_stderr)?;
     }
     Ok(())
+}
+
+fn relative_container_path(container_path: &str) -> Result<PathBuf, RuntimeError> {
+    relative_launcher_target(Path::new(container_path))
+        .map_err(|error| RuntimeError::InvalidInput(error.to_string()))
 }
 
 fn create_dev_symlink(sandbox_root: &Path, name: &str, target: &str) -> Result<(), RuntimeError> {
@@ -334,7 +338,7 @@ fn create_mount_target(sandbox_root: &Path, container_path: &Path) -> Result<(),
 }
 
 fn input_mount_path(name: &str) -> PathBuf {
-    Path::new("/__mbuild/inputs").join(name)
+    Path::new(CONTAINER_INPUTS_DIR).join(name)
 }
 
 fn bind_mount(source: &Path, target: &Path, readonly: bool) -> SandboxLauncherMount {
@@ -378,18 +382,18 @@ fn step_env(step: &SandboxStep) -> HashMap<String, String> {
             "PATH".to_string(),
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
         ),
-        ("HOME".to_string(), "/__mbuild/build".to_string()),
+        ("HOME".to_string(), CONTAINER_BUILD_DIR.to_string()),
         ("TMPDIR".to_string(), "/tmp".to_string()),
         ("USER".to_string(), "mbuild".to_string()),
         (
             "MBUILD_CONFIG_DIR".to_string(),
-            "/__mbuild/config".to_string(),
+            CONTAINER_CONFIG_DIR.to_string(),
         ),
         (
             "MBUILD_BUILD_DIR".to_string(),
-            "/__mbuild/build".to_string(),
+            CONTAINER_BUILD_DIR.to_string(),
         ),
-        ("MBUILD_OUT_DIR".to_string(), "/__mbuild/out".to_string()),
+        ("MBUILD_OUT_DIR".to_string(), CONTAINER_OUT_DIR.to_string()),
         ("MBUILD_STEP_NAME".to_string(), step.name.clone()),
     ]);
     env.extend(step.env.clone());
@@ -472,12 +476,12 @@ mod tests {
         assert!(!mounts.iter().any(|mount| mount.target == Path::new("/dev")
             && mount.source.as_deref() == Some(rootfs.join("dev").as_path())));
         assert!(mounts.iter().any(|mount| {
-            mount.target == Path::new("/__mbuild/build")
+            mount.target == Path::new(CONTAINER_BUILD_DIR)
                 && mount.source.as_deref() == Some(dirs.build_dir.as_path())
                 && !mount.readonly
         }));
         assert!(mounts.iter().any(|mount| {
-            mount.target == Path::new("/__mbuild/out")
+            mount.target == Path::new(CONTAINER_OUT_DIR)
                 && mount.source.as_deref() == Some(out.as_path())
                 && !mount.readonly
         }));
@@ -494,13 +498,13 @@ mod tests {
         assert_eq!(run_mount.kind, SandboxLauncherMountKind::Tmpfs);
         assert!(run_mount.options.iter().any(|option| option == "noexec"));
         assert!(mounts.iter().any(|mount| {
-            mount.target == Path::new("/__mbuild/config")
+            mount.target == Path::new(CONTAINER_CONFIG_DIR)
                 && mount.source.as_deref() == Some(build_config.config_dir.as_path())
                 && mount.readonly
         }));
         let source_bind = mounts
             .iter()
-            .find(|mount| mount.target == Path::new("/__mbuild/inputs/source"))
+            .find(|mount| mount.target == Path::new(CONTAINER_INPUTS_DIR).join("source"))
             .expect("source input bind mount exists");
         assert_eq!(source_bind.source.as_deref(), Some(source.as_path()));
         assert!(source_bind.readonly);
@@ -552,7 +556,7 @@ mod tests {
         let mount = launcher
             .mounts
             .iter()
-            .find(|mount| mount.target == Path::new("/__mbuild/inputs/source"))
+            .find(|mount| mount.target == Path::new(CONTAINER_INPUTS_DIR).join("source"))
             .expect("derived input mount exists");
         assert_eq!(mount.source.as_deref(), Some(input.as_path()));
     }

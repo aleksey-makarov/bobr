@@ -458,6 +458,7 @@ fn write_launcher_failure(file: &File, label: &str, error: impl std::fmt::Displa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mbuild_sandbox_runner_core::{CONTAINER_OUT_DIR, CONTAINER_RUNNER_CONFIG};
 
     #[test]
     fn parses_launch_args() {
@@ -525,7 +526,7 @@ mod tests {
             );
         }
         assert_eq!(
-            relative_launcher_target(Path::new("/__mbuild/out")).unwrap(),
+            relative_launcher_target(Path::new(CONTAINER_OUT_DIR)).unwrap(),
             PathBuf::from("__mbuild/out")
         );
     }
@@ -551,7 +552,7 @@ mod tests {
                     options: Vec::new(),
                 },
             ],
-            runner_config: PathBuf::from("/__mbuild/runtime/runner-config.json"),
+            runner_config: PathBuf::from(CONTAINER_RUNNER_CONFIG),
             failure_report: PathBuf::from("/tmp/failure.json"),
         };
 

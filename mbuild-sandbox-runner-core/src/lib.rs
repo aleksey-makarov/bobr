@@ -23,6 +23,30 @@ use std::time::Instant;
 pub const RUNNER_BINARY_NAME: &str = "mbuild-sandbox-runner";
 pub const RUNNER_PROTOCOL_VERSION: u32 = 3;
 
+macro_rules! container_mbuild_dir {
+    () => {
+        "/__mbuild"
+    };
+}
+
+macro_rules! container_path {
+    ($relative:literal) => {
+        concat!(container_mbuild_dir!(), "/", $relative)
+    };
+}
+
+pub const CONTAINER_MBUILD_DIR: &str = container_mbuild_dir!();
+pub const CONTAINER_BUILD_DIR: &str = container_path!("build");
+pub const CONTAINER_CONFIG_DIR: &str = container_path!("config");
+pub const CONTAINER_INPUTS_DIR: &str = container_path!("inputs");
+pub const CONTAINER_LOG_DIR: &str = container_path!("logs");
+pub const CONTAINER_OUT_DIR: &str = container_path!("out");
+pub const CONTAINER_RUNNER_DIR: &str = container_path!("runner");
+pub const CONTAINER_RUNTIME_DIR: &str = container_path!("runtime");
+pub const CONTAINER_RUNNER_CONFIG: &str = container_path!("runtime/runner-config.json");
+pub const CONTAINER_SUCCESS_REPORT: &str = container_path!("runtime/sandbox-success.json");
+pub const CONTAINER_FAILURE_REPORT: &str = container_path!("runtime/sandbox-failure.json");
+
 const BUILD_USER_UID: u32 = 1;
 const BUILD_USER_GID: u32 = 1;
 
@@ -848,7 +872,7 @@ mod tests {
             );
         }
         assert_eq!(
-            relative_launcher_target(Path::new("/__mbuild/out")).unwrap(),
+            relative_launcher_target(Path::new(CONTAINER_OUT_DIR)).unwrap(),
             PathBuf::from("__mbuild/out")
         );
     }
@@ -914,7 +938,7 @@ mod tests {
                     options: Vec::new(),
                 },
             ],
-            runner_config: PathBuf::from("/__mbuild/runtime/runner-config.json"),
+            runner_config: PathBuf::from(CONTAINER_RUNNER_CONFIG),
             failure_report: PathBuf::from("/tmp/failure.json"),
         };
 

@@ -23,8 +23,10 @@ use mbuild_core::{
     StagedBuildResult, TypedBuilder, fsutil, load_fs_tree_object,
 };
 use mbuild_runtime::{
-    SandboxBuildConfig, SandboxInput, SandboxRunAs, SandboxStep, cached_host_idmap,
-    run_sandbox_build,
+    SandboxBuildConfig, SandboxInput, SandboxRunAs, SandboxStep, run_sandbox_build,
+};
+use mbuild_sandbox_runner_core::{
+    CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_INPUTS_DIR, CONTAINER_OUT_DIR,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -40,14 +42,6 @@ pub struct SandboxBuilder;
 const OUTPUT_DIR_NAME: &str = "out";
 // Host-side name of the directory containing materialized `script_config`.
 const CONFIG_DIR_NAME: &str = "config";
-// Container path prefix used for recipe inputs other than `rootfs`.
-const INPUT_MOUNT_ROOT: &str = "/__mbuild/inputs";
-// Container path where materialized `script_config` is mounted.
-const CONFIG_MOUNT_PATH: &str = "/__mbuild/config";
-// Container path of the writable build directory.
-const BUILD_DIR_MOUNT_PATH: &str = "/__mbuild/build";
-// Container path of the writable output directory.
-const OUT_DIR_MOUNT_PATH: &str = "/__mbuild/out";
 // Name of the staged fs-tree object directory inside the node temp dir.
 const FS_TREE_OBJECT_DIR_NAME: &str = "fs-tree-object";
 
@@ -148,9 +142,6 @@ impl TypedBuilder for SandboxBuilder {
     ) -> Result<StagedBuildResult, BuilderError> {
         validate_sandbox_config(&config).map_err(map_error)?;
         let rootfs = inputs.required("rootfs")?;
-        let idmap = cached_host_idmap().map_err(|error| {
-            BuilderError::ExecutionFailed(format!("failed to load host idmap: {error}"))
-        })?;
         let rootfs_root_dir = validate_rootfs(rootfs).map_err(map_error)?;
 
         let extra_inputs =
@@ -208,7 +199,7 @@ impl TypedBuilder for SandboxBuilder {
             ),
         );
 
-        let outcome = run_sandbox_build(sandbox_config, idmap.as_ref()).map_err(|error| {
+        let outcome = run_sandbox_build(sandbox_config).map_err(|error| {
             BuilderError::ExecutionFailed(format!("sandbox build failed: {error}"))
         })?;
         write_build_report(cx, &outcome);
@@ -506,7 +497,7 @@ fn validate_input_name(name: &str) -> BResult<()> {
 
 /// Return the absolute container path for a named extra input.
 fn input_mount_path(name: &str) -> String {
-    format!("{INPUT_MOUNT_ROOT}/{name}")
+    format!("{CONTAINER_INPUTS_DIR}/{name}")
 }
 
 /// Lower one extra input to the runtime mount shape.
@@ -630,9 +621,9 @@ fn validate_interpolation_name(key: &str, value: &str, escaped: bool) -> BResult
 /// Resolve a built-in or named-input interpolation variable.
 fn interpolation_value(key: &str, inputs: &[(String, BuilderInputObject)]) -> BResult<String> {
     match key {
-        "build" => Ok(BUILD_DIR_MOUNT_PATH.to_string()),
-        "out" => Ok(OUT_DIR_MOUNT_PATH.to_string()),
-        "config" => Ok(CONFIG_MOUNT_PATH.to_string()),
+        "build" => Ok(CONTAINER_BUILD_DIR.to_string()),
+        "out" => Ok(CONTAINER_OUT_DIR.to_string()),
+        "config" => Ok(CONTAINER_CONFIG_DIR.to_string()),
         _ => inputs
             .iter()
             .find_map(|(name, _)| {
@@ -987,7 +978,10 @@ mod tests {
 
         assert_eq!(input.name, "source");
         assert_eq!(input.host_path, object);
-        assert_eq!(input_mount_path(&input.name), "/__mbuild/inputs/source");
+        assert_eq!(
+            input_mount_path(&input.name),
+            format!("{CONTAINER_INPUTS_DIR}/source")
+        );
     }
 
     #[test]
@@ -1146,11 +1140,14 @@ mod tests {
 
         assert_eq!(
             resolve_step_cwd(&step(), &inputs).unwrap(),
-            "/__mbuild/inputs/source"
+            format!("{CONTAINER_INPUTS_DIR}/source")
         );
         assert_eq!(
             resolve_step_argv(&step(), &inputs).unwrap(),
-            vec!["/__mbuild/inputs/script", "--flag"]
+            vec![
+                format!("{CONTAINER_INPUTS_DIR}/script"),
+                "--flag".to_string()
+            ]
         );
     }
 
