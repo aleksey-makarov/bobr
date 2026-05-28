@@ -534,7 +534,7 @@ impl SandboxRunnerStep {
                 elapsed_ms(start),
             ))
         })?;
-        reap_finished_children();
+        terminate_remaining_children();
         let duration_ms = elapsed_ms(start);
         if status.success() {
             Ok(SandboxStepReport {
@@ -697,9 +697,6 @@ fn terminate_remaining_children() {
         reap_finished_children();
     }
 }
-
-#[cfg(test)]
-fn reap_finished_children() {}
 
 #[cfg(not(test))]
 fn reap_finished_children() {
