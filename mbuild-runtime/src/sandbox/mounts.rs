@@ -168,8 +168,8 @@ fn build_launcher_config(
         bind_mount(Path::new("/dev/random"), Path::new("/dev/random"), false),
         bind_mount(Path::new("/dev/urandom"), Path::new("/dev/urandom"), false),
         proc_mount(Path::new("/proc")),
-        tmpfs_mount(Path::new("/tmp"), &["mode=1777"]),
-        tmpfs_mount(Path::new("/run"), &["mode=755"]),
+        tmpfs_mount(Path::new("/tmp"), false, &["mode=1777"]),
+        tmpfs_mount(Path::new("/run"), true, &["mode=755"]),
         bind_mount(&dirs.build_dir, Path::new("/__mbuild/build"), false),
         bind_mount(&config.config_dir, Path::new("/__mbuild/config"), true),
         bind_mount(&config.out_dir, Path::new("/__mbuild/out"), false),
@@ -357,12 +357,11 @@ fn proc_mount(target: &Path) -> SandboxLauncherMount {
     }
 }
 
-fn tmpfs_mount(target: &Path, extra_options: &[&str]) -> SandboxLauncherMount {
-    let mut options = vec![
-        "nosuid".to_string(),
-        "nodev".to_string(),
-        "noexec".to_string(),
-    ];
+fn tmpfs_mount(target: &Path, noexec: bool, extra_options: &[&str]) -> SandboxLauncherMount {
+    let mut options = vec!["nosuid".to_string(), "nodev".to_string()];
+    if noexec {
+        options.push("noexec".to_string());
+    }
     options.extend(extra_options.iter().map(|option| option.to_string()));
     SandboxLauncherMount {
         kind: SandboxLauncherMountKind::Tmpfs,
@@ -482,12 +481,18 @@ mod tests {
                 && mount.source.as_deref() == Some(out.as_path())
                 && !mount.readonly
         }));
-        assert!(mounts.iter().any(|mount| {
-            mount.target == Path::new("/tmp") && mount.kind == SandboxLauncherMountKind::Tmpfs
-        }));
-        assert!(mounts.iter().any(|mount| {
-            mount.target == Path::new("/run") && mount.kind == SandboxLauncherMountKind::Tmpfs
-        }));
+        let tmp_mount = mounts
+            .iter()
+            .find(|mount| mount.target == Path::new("/tmp"))
+            .expect("/tmp tmpfs mount exists");
+        assert_eq!(tmp_mount.kind, SandboxLauncherMountKind::Tmpfs);
+        assert!(!tmp_mount.options.iter().any(|option| option == "noexec"));
+        let run_mount = mounts
+            .iter()
+            .find(|mount| mount.target == Path::new("/run"))
+            .expect("/run tmpfs mount exists");
+        assert_eq!(run_mount.kind, SandboxLauncherMountKind::Tmpfs);
+        assert!(run_mount.options.iter().any(|option| option == "noexec"));
         assert!(mounts.iter().any(|mount| {
             mount.target == Path::new("/__mbuild/config")
                 && mount.source.as_deref() == Some(build_config.config_dir.as_path())
@@ -555,7 +560,7 @@ mod tests {
     #[test]
     fn launcher_config_rejects_duplicate_mount_targets() {
         let mounts = vec![
-            tmpfs_mount(Path::new("/tmp"), &[]),
+            tmpfs_mount(Path::new("/tmp"), false, &[]),
             bind_mount(Path::new("/dev/null"), Path::new("/tmp"), true),
         ];
         let config = SandboxLauncherConfig {
