@@ -91,7 +91,7 @@ fn launch(wait_fd: RawFd, config_path: &Path) -> i32 {
             return 2;
         }
     };
-    let failure_report = match File::create(&config.failure_report) {
+    let launcher_failure_report = match File::create(&config.failure_report) {
         Ok(file) => file,
         Err(error) => {
             eprintln!(
@@ -103,14 +103,14 @@ fn launch(wait_fd: RawFd, config_path: &Path) -> i32 {
     };
 
     if let Err(error) = read_handshake_byte(wait_fd) {
-        write_launcher_failure(&failure_report, "launcher-handshake", error);
+        write_launcher_failure(&launcher_failure_report, "launcher-handshake", error);
         return 1;
     }
 
-    match run_supervisor(&config, &failure_report) {
+    match run_supervisor(&config, &launcher_failure_report) {
         Ok(code) => code,
         Err(error) => {
-            write_launcher_failure(&failure_report, "launcher-bootstrap", error);
+            write_launcher_failure(&launcher_failure_report, "launcher-bootstrap", error);
             1
         }
     }
@@ -175,6 +175,8 @@ fn run_pid1(config: &SandboxLauncherConfig) -> io::Result<i32> {
     std::env::set_current_dir("/")
         .map_err(|error| context_error("chdir '/' after chroot", error))?;
     drop_capabilities().map_err(|error| context_error("drop capabilities", error))?;
+    // After this handoff, runner core owns the report contents. Launcher code
+    // must not write the failure report on paths where run_config_path ran.
     Ok(run_config_path(&config.runner_config))
 }
 
