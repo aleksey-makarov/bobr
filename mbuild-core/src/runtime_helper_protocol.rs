@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 pub const HELPER_BINARY_NAME: &str = "mbuild-runtime-helper";
 
 /// Version of the helper command-line and JSON report protocol.
-pub const HELPER_PROTOCOL_VERSION: u32 = 3;
+pub const HELPER_PROTOCOL_VERSION: u32 = 4;
 
 /// Machine-readable protocol metadata printed by `--protocol-info`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +128,49 @@ pub struct FsTreeInitramfsHelperConfig {
     pub sources: Vec<FsTreeArchiveEntrySource>,
 }
 
+/// JSON configuration consumed by the fs-tree materialization helper operation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsTreeMaterializeHelperConfig {
+    /// Absolute path to the output fs-tree object directory in the helper-visible filesystem.
+    pub output_object_dir: PathBuf,
+
+    /// Absolute path where the helper writes a structured failure report.
+    pub error_report: PathBuf,
+
+    /// Absolute path where the helper writes a structured success report.
+    pub success_report: PathBuf,
+
+    /// Absolute helper-visible path to a canonical fs-tree manifest file.
+    pub manifest_path: PathBuf,
+
+    /// Absolute helper-visible input roots used by file sources.
+    pub inputs: Vec<PathBuf>,
+
+    /// Per-entry source mapping in the same order as `manifest.entries()`.
+    pub sources: Vec<FsTreeArchiveEntrySource>,
+}
+
+/// Structured success report written by the fs-tree materialization helper.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FsTreeMaterializeReport {
+    /// Number of directory entries materialized, including the root directory.
+    pub directory_count: usize,
+    /// Number of regular file entries materialized.
+    pub file_count: usize,
+    /// Number of regular file entries materialized by hardlink.
+    pub hardlinked_file_count: usize,
+    /// Number of symlink entries materialized.
+    pub symlink_count: usize,
+    /// Milliseconds spent creating directories.
+    pub directory_ms: u128,
+    /// Milliseconds spent hardlinking and validating files.
+    pub hardlink_ms: u128,
+    /// Milliseconds spent creating and validating symlinks.
+    pub symlink_ms: u128,
+    /// Milliseconds spent applying ownership and mode metadata.
+    pub ownership_ms: u128,
+}
+
 /// Structured helper failure report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutorErrorReport {
@@ -171,6 +214,22 @@ pub fn read_executor_error_report(path: &Path) -> io::Result<Option<ExecutorErro
     }
     serde_json::from_slice(&bytes)
         .map(Some)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// Write a structured fs-tree materialization success report to `path`.
+pub fn write_fs_tree_materialize_report(
+    path: &Path,
+    report: &FsTreeMaterializeReport,
+) -> io::Result<()> {
+    let bytes = serde_json::to_vec(report).map_err(io::Error::other)?;
+    fs::write(path, bytes)
+}
+
+/// Read a structured fs-tree materialization success report from `path`.
+pub fn read_fs_tree_materialize_report(path: &Path) -> io::Result<FsTreeMaterializeReport> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 

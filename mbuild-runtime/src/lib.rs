@@ -27,6 +27,7 @@ mod idmap;
 mod initramfs_writer;
 mod local_helper;
 mod local_ownership;
+mod materialize;
 mod ownership;
 mod preflight;
 mod sandbox;
@@ -37,7 +38,9 @@ mod executor;
 pub use archive_writer::FsTreeArchiveInput;
 pub use error::{IdmapError, RuntimeError};
 pub use initramfs_writer::write_fs_tree_initramfs_in_ownership_namespace;
+pub use materialize::materialize_fs_tree_from_sources_in_ownership_namespace;
 pub use mbuild_core::FsTreeArchiveEntrySource;
+pub use mbuild_core::runtime_helper_protocol::FsTreeMaterializeReport;
 pub use ownership::apply_ownership_batch;
 #[cfg(unix)]
 pub use ownership::validate_fs_tree_file_attrs_in_ownership_namespace;

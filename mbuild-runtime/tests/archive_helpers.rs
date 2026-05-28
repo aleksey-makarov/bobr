@@ -3,6 +3,7 @@
 use mbuild_core::{FsTreeEntry, FsTreeManifest, InitramfsEntrySource, write_newc_initramfs};
 use mbuild_runtime::{
     FsTreeArchiveEntrySource, FsTreeArchiveInput, apply_ownership_batch,
+    materialize_fs_tree_from_sources_in_ownership_namespace,
     write_fs_tree_initramfs_in_ownership_namespace, write_fs_tree_tar_in_ownership_namespace,
 };
 use std::fs;
@@ -111,6 +112,71 @@ fn fs_tree_initramfs_helper_matches_core_writer() -> TestResult<()> {
         ],
     )?;
     assert_eq!(fs::read(&output_initramfs)?, expected);
+
+    Ok(())
+}
+
+#[test]
+fn fs_tree_materialize_helper_hardlinks_subuid_owned_file_under_restrictive_dir() -> TestResult<()>
+{
+    let _guard = runtime_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    init_tracing();
+    let temp = tempdir()?;
+    let input_root = temp.path().join("input/root");
+    let ownership_workspace = temp.path().join("ownership-workspace");
+    let materialize_workspace = temp.path().join("materialize-workspace");
+    let output_object_dir = temp.path().join("output.obj");
+    let output_tar = temp.path().join("materialized.tar");
+    fs::create_dir_all(input_root.join("secret"))?;
+    fs::create_dir(&ownership_workspace)?;
+    fs::create_dir(&materialize_workspace)?;
+    fs::write(input_root.join("secret/data"), b"payload\n")?;
+
+    let manifest = FsTreeManifest::from_entries(vec![
+        FsTreeEntry::directory("", 0, 0, 0o755),
+        FsTreeEntry::directory("secret", 1, 1, 0o500),
+        FsTreeEntry::file("secret/data", 1, 1, 0o400),
+    ])?;
+    apply_ownership_batch(&input_root, &manifest, &ownership_workspace)?;
+
+    let report = materialize_fs_tree_from_sources_in_ownership_namespace(
+        &[FsTreeArchiveInput {
+            root_dir: input_root.clone(),
+        }],
+        &manifest,
+        &[
+            FsTreeArchiveEntrySource::Directory,
+            FsTreeArchiveEntrySource::Directory,
+            FsTreeArchiveEntrySource::File {
+                input_index: 0,
+                path: "secret/data".to_string(),
+            },
+        ],
+        &output_object_dir,
+        &materialize_workspace,
+    )?;
+
+    assert_eq!(report.file_count, 1);
+    write_fs_tree_tar_in_ownership_namespace(
+        &[FsTreeArchiveInput {
+            root_dir: output_object_dir.join("root"),
+        }],
+        &manifest,
+        &[
+            FsTreeArchiveEntrySource::Directory,
+            FsTreeArchiveEntrySource::Directory,
+            FsTreeArchiveEntrySource::File {
+                input_index: 0,
+                path: "secret/data".to_string(),
+            },
+        ],
+        &output_tar,
+        &materialize_workspace,
+    )?;
+    let entries = read_tar_entries(&output_tar)?;
+    assert!(entries.contains(&("secret/data".to_string(), b"payload\n".to_vec())));
 
     Ok(())
 }

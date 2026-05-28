@@ -8,22 +8,20 @@ use mbuild_core::{
 };
 #[cfg(test)]
 use mbuild_core::{FsTreeOwnerMap, InitramfsEntrySource};
-use mbuild_runtime::{
-    FsTreeArchiveEntrySource, FsTreeArchiveInput,
-    validate_fs_tree_file_attrs_in_ownership_namespace,
-};
+use mbuild_runtime::{FsTreeArchiveEntrySource, FsTreeArchiveInput, FsTreeMaterializeReport};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
+#[cfg(test)]
 use std::io;
 #[cfg(test)]
 use std::io::Write;
 #[cfg(all(test, unix))]
 use std::os::unix::fs::MetadataExt;
 #[cfg(unix)]
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -174,6 +172,23 @@ struct TreeMergeStageStats {
     symlink_ms: u128,
 }
 
+impl From<FsTreeMaterializeReport> for TreeMergeStageStats {
+    fn from(report: FsTreeMaterializeReport) -> Self {
+        Self {
+            directory_count: report.directory_count,
+            file_count: report.file_count,
+            hardlinked_file_count: report.hardlinked_file_count,
+            copied_file_count: 0,
+            symlink_count: report.symlink_count,
+            directory_ms: report.directory_ms,
+            file_validate_ms: 0,
+            hardlink_ms: report.hardlink_ms,
+            copy_ms: 0,
+            symlink_ms: report.symlink_ms,
+        }
+    }
+}
+
 trait OwnershipMaterializer {
     fn materialize_and_validate(
         &self,
@@ -181,12 +196,6 @@ trait OwnershipMaterializer {
         object_dir: &Path,
         manifest: &FsTreeManifest,
         temp_dir: &Path,
-    ) -> Result<(), BuilderError>;
-
-    fn validate_hardlinked_file(
-        &self,
-        source: &Path,
-        manifest_entry: &FsTreeEntry,
     ) -> Result<(), BuilderError>;
 }
 
@@ -205,14 +214,44 @@ impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
         Ok(())
     }
+}
 
-    fn validate_hardlinked_file(
+trait FsTreeObjectMaterializer {
+    fn materialize_from_sources(
         &self,
-        source: &Path,
-        manifest_entry: &FsTreeEntry,
-    ) -> Result<(), BuilderError> {
-        validate_fs_tree_file_attrs_in_ownership_namespace(source, manifest_entry)
-            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))
+        inputs: &[FsTreeComposeInput],
+        composed: &ComposedFsTree,
+        output_object_dir: &Path,
+        workspace: &Path,
+    ) -> Result<FsTreeMaterializeReport, BuilderError>;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimeFsTreeObjectMaterializer;
+
+impl FsTreeObjectMaterializer for RuntimeFsTreeObjectMaterializer {
+    fn materialize_from_sources(
+        &self,
+        inputs: &[FsTreeComposeInput],
+        composed: &ComposedFsTree,
+        output_object_dir: &Path,
+        workspace: &Path,
+    ) -> Result<FsTreeMaterializeReport, BuilderError> {
+        let archive_inputs = inputs
+            .iter()
+            .map(|input| FsTreeArchiveInput {
+                root_dir: input.root_dir.clone(),
+            })
+            .collect::<Vec<_>>();
+        let sources = archive_sources("materialize", inputs, composed)?;
+        mbuild_runtime::materialize_fs_tree_from_sources_in_ownership_namespace(
+            &archive_inputs,
+            composed.manifest(),
+            &sources,
+            output_object_dir,
+            workspace,
+        )
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))
     }
 }
 
@@ -310,7 +349,7 @@ impl TypedBuilder for TreeMergeBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
-        build_tree_merge(config, inputs, cx, &RuntimeOwnershipMaterializer)
+        build_tree_merge(config, inputs, cx, &RuntimeFsTreeObjectMaterializer)
     }
 }
 
@@ -327,13 +366,7 @@ impl TypedBuilder for TreeSubsetBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
-        build_tree_subset(
-            config,
-            inputs,
-            cx,
-            &RuntimeOwnershipMaterializer,
-            &StdTreeSubsetLinker,
-        )
+        build_tree_subset(config, inputs, cx, &RuntimeFsTreeObjectMaterializer)
     }
 }
 
@@ -381,19 +414,6 @@ impl TypedBuilder for InitramfsBuilder {
 struct CompiledTreeSubsetPattern {
     pattern: String,
     matcher: GlobMatcher,
-}
-
-trait TreeSubsetLinker {
-    fn hard_link(&self, source: &Path, dst: &Path) -> io::Result<()>;
-}
-
-#[derive(Debug, Clone, Copy)]
-struct StdTreeSubsetLinker;
-
-impl TreeSubsetLinker for StdTreeSubsetLinker {
-    fn hard_link(&self, source: &Path, dst: &Path) -> io::Result<()> {
-        fs::hard_link(source, dst)
-    }
 }
 
 fn build_tree(
@@ -452,8 +472,7 @@ fn build_tree_subset(
     config: TreeSubsetConfig,
     inputs: BuilderInputs,
     cx: &mut BuildContext,
-    materializer: &impl OwnershipMaterializer,
-    linker: &impl TreeSubsetLinker,
+    materializer: &impl FsTreeObjectMaterializer,
 ) -> Result<StagedBuildResult, BuilderError> {
     let input = tree_subset_input(inputs.required("tree")?)?;
     let patterns = compile_tree_subset_patterns(&config.include)?;
@@ -490,12 +509,14 @@ fn build_tree_subset(
     );
 
     let temp_dir = cx.temp_dir.clone();
-    let object_hash = materialize_tree_subset_output(
+    let compose_inputs = [input.compose];
+    let object_hash = materialize_composed_tree_output(
+        "fs-tree subset",
         &output_path,
+        &compose_inputs,
         &composed,
         &temp_dir,
         materializer,
-        linker,
         cx,
     )?;
 
@@ -509,7 +530,7 @@ fn build_tree_merge(
     _config: TreeMergeConfig,
     inputs: BuilderInputs,
     cx: &mut BuildContext,
-    materializer: &impl OwnershipMaterializer,
+    materializer: &impl FsTreeObjectMaterializer,
 ) -> Result<StagedBuildResult, BuilderError> {
     let inputs = inputs.extras(&TREE_MERGE_SPEC).collect::<Vec<_>>();
     if inputs.len() < 2 {
@@ -531,6 +552,10 @@ fn build_tree_merge(
         .collect::<Result<Vec<_>, _>>()?;
     let composed =
         compose_rootfs_inputs_allowing_identical_leaf_overlap("TreeMerge", &merge_inputs)?;
+    let compose_inputs = merge_inputs
+        .iter()
+        .map(|input| input.compose.clone())
+        .collect::<Vec<_>>();
     let entry_count = composed.manifest().entries().len();
     cx.log_event_with_details(
         BuildLogLevel::Info,
@@ -556,8 +581,15 @@ fn build_tree_merge(
     );
 
     let temp_dir = cx.temp_dir.clone();
-    let object_hash =
-        materialize_tree_merge_output(&output_path, &composed, &temp_dir, materializer, cx)?;
+    let object_hash = materialize_composed_tree_output(
+        "merged fs-tree",
+        &output_path,
+        &compose_inputs,
+        &composed,
+        &temp_dir,
+        materializer,
+        cx,
+    )?;
 
     Ok(StagedBuildResult {
         staged_path: output_path,
@@ -1457,99 +1489,31 @@ fn load_fs_tree_compose_input(object_path: &Path) -> Result<FsTreeComposeInput, 
     })
 }
 
-fn materialize_tree_merge_output(
+fn materialize_composed_tree_output(
+    label: &str,
     output_path: &Path,
+    inputs: &[FsTreeComposeInput],
     composed: &ComposedFsTree,
     temp_dir: &Path,
-    materializer: &impl OwnershipMaterializer,
+    materializer: &impl FsTreeObjectMaterializer,
     cx: &mut BuildContext,
 ) -> Result<ObjectHash, BuilderError> {
-    let paths =
-        create_fs_tree_staging_dir(output_path, composed.manifest()).map_err(map_fs_tree_error)?;
-    let mut materialize_entries = Vec::new();
-    let mut stats = TreeMergeStageStats::default();
-
-    for (manifest_entry, composed_entry) in
-        composed.manifest().entries().iter().zip(composed.entries())
-    {
-        match (manifest_entry, composed_entry) {
-            (FsTreeEntry::Directory { path, .. }, ComposedFsTreeEntry::Directory) => {
-                let step_start = Instant::now();
-                if !path.is_empty() {
-                    fs::create_dir(paths.root_dir.join(path)).map_err(|error| {
-                        BuilderError::ExecutionFailed(format!(
-                            "failed to create merged fs-tree directory '{}': {error}",
-                            paths.root_dir.join(path).display()
-                        ))
-                    })?;
-                }
-                stats.directory_ms += elapsed_ms(step_start);
-                stats.directory_count += 1;
-                materialize_entries.push(manifest_entry.clone());
-            }
-            (FsTreeEntry::File { path, .. }, ComposedFsTreeEntry::File { source_path }) => {
-                let dst = paths.root_dir.join(path);
-                let result =
-                    link_or_copy_tree_merge_file(source_path, &dst, manifest_entry, materializer)?;
-                stats.file_count += 1;
-                stats.file_validate_ms += result.validate_ms;
-                stats.hardlink_ms += result.hardlink_ms;
-                stats.copy_ms += result.copy_ms;
-                match result.kind {
-                    TreeMergeFileMaterialization::Hardlinked => {
-                        stats.hardlinked_file_count += 1;
-                    }
-                    TreeMergeFileMaterialization::Copied => {
-                        stats.copied_file_count += 1;
-                    }
-                }
-                if result.kind == TreeMergeFileMaterialization::Copied {
-                    materialize_entries.push(manifest_entry.clone());
-                }
-            }
-            (
-                FsTreeEntry::Symlink { path, target, .. },
-                ComposedFsTreeEntry::Symlink { source_path },
-            ) => {
-                let dst = paths.root_dir.join(path);
-                let step_start = Instant::now();
-                create_tree_merge_symlink(source_path, &dst, target)?;
-                stats.symlink_ms += elapsed_ms(step_start);
-                stats.symlink_count += 1;
-                materialize_entries.push(manifest_entry.clone());
-            }
-            _ => {
-                return Err(BuilderError::ExecutionFailed(format!(
-                    "merged fs-tree entry for '{}' does not match manifest kind",
-                    manifest_entry.path()
-                )));
-            }
-        }
-    }
+    validate_composed_entry_sources(label, composed)?;
+    let report = materializer.materialize_from_sources(inputs, composed, output_path, temp_dir)?;
+    let stats = TreeMergeStageStats::from(report.clone());
 
     cx.log_event_with_details(
         BuildLogLevel::Info,
         "stage-done",
         format!(
-            "staged merged fs-tree with {} entries",
+            "materialized {label} with {} entries",
             composed.manifest().entries().len()
         ),
         None,
         None,
         tree_merge_stage_details(composed.manifest().entries().len(), &stats),
     );
-
-    let materialize_manifest =
-        FsTreeManifest::from_entries(materialize_entries).map_err(map_fs_tree_error)?;
-    let ownership_start = Instant::now();
-    materializer.materialize_and_validate(
-        &paths.root_dir,
-        &paths.object_dir,
-        &materialize_manifest,
-        temp_dir,
-    )?;
-    let ownership_host_ms = elapsed_ms(ownership_start);
-    log_tree_merge_ownership_events(cx, ownership_host_ms);
+    log_tree_merge_ownership_events(cx, report.ownership_ms);
 
     let hash_start = Instant::now();
     let object_hash = hash_tree_output_from_manifest(composed)?;
@@ -1557,195 +1521,26 @@ fn materialize_tree_merge_output(
     Ok(object_hash)
 }
 
-fn materialize_tree_subset_output(
-    output_path: &Path,
+fn validate_composed_entry_sources(
+    label: &str,
     composed: &ComposedFsTree,
-    temp_dir: &Path,
-    materializer: &impl OwnershipMaterializer,
-    linker: &impl TreeSubsetLinker,
-    cx: &mut BuildContext,
-) -> Result<ObjectHash, BuilderError> {
-    let paths =
-        create_fs_tree_staging_dir(output_path, composed.manifest()).map_err(map_fs_tree_error)?;
-    let mut materialize_entries = Vec::new();
-    let mut stats = TreeMergeStageStats::default();
-
+) -> Result<(), BuilderError> {
     for (manifest_entry, composed_entry) in
         composed.manifest().entries().iter().zip(composed.entries())
     {
         match (manifest_entry, composed_entry) {
-            (FsTreeEntry::Directory { path, .. }, ComposedFsTreeEntry::Directory) => {
-                let step_start = Instant::now();
-                if !path.is_empty() {
-                    fs::create_dir(paths.root_dir.join(path)).map_err(|error| {
-                        BuilderError::ExecutionFailed(format!(
-                            "failed to create fs-tree subset directory '{}': {error}",
-                            paths.root_dir.join(path).display()
-                        ))
-                    })?;
-                }
-                stats.directory_ms += elapsed_ms(step_start);
-                stats.directory_count += 1;
-                materialize_entries.push(manifest_entry.clone());
-            }
-            (FsTreeEntry::File { path, .. }, ComposedFsTreeEntry::File { source_path }) => {
-                let dst = paths.root_dir.join(path);
-                let result = hardlink_tree_subset_file(
-                    source_path,
-                    &dst,
-                    manifest_entry,
-                    materializer,
-                    linker,
-                )?;
-                stats.file_count += 1;
-                stats.file_validate_ms += result.validate_ms;
-                stats.hardlink_ms += result.hardlink_ms;
-                stats.hardlinked_file_count += 1;
-            }
-            (
-                FsTreeEntry::Symlink { path, target, .. },
-                ComposedFsTreeEntry::Symlink { source_path },
-            ) => {
-                let dst = paths.root_dir.join(path);
-                let step_start = Instant::now();
-                create_tree_merge_symlink(source_path, &dst, target)?;
-                stats.symlink_ms += elapsed_ms(step_start);
-                stats.symlink_count += 1;
-                materialize_entries.push(manifest_entry.clone());
-            }
+            (FsTreeEntry::Directory { .. }, ComposedFsTreeEntry::Directory)
+            | (FsTreeEntry::File { .. }, ComposedFsTreeEntry::File { .. })
+            | (FsTreeEntry::Symlink { .. }, ComposedFsTreeEntry::Symlink { .. }) => {}
             _ => {
                 return Err(BuilderError::ExecutionFailed(format!(
-                    "fs-tree subset entry for '{}' does not match manifest kind",
+                    "{label} entry for '{}' does not match manifest kind",
                     manifest_entry.path()
                 )));
             }
         }
     }
-
-    cx.log_event_with_details(
-        BuildLogLevel::Info,
-        "stage-done",
-        format!(
-            "staged fs-tree subset with {} entries",
-            composed.manifest().entries().len()
-        ),
-        None,
-        None,
-        tree_merge_stage_details(composed.manifest().entries().len(), &stats),
-    );
-
-    let materialize_manifest =
-        FsTreeManifest::from_entries(materialize_entries).map_err(map_fs_tree_error)?;
-    let ownership_start = Instant::now();
-    materializer.materialize_and_validate(
-        &paths.root_dir,
-        &paths.object_dir,
-        &materialize_manifest,
-        temp_dir,
-    )?;
-    let ownership_host_ms = elapsed_ms(ownership_start);
-    log_tree_merge_ownership_events(cx, ownership_host_ms);
-
-    let hash_start = Instant::now();
-    let object_hash = hash_tree_output_from_manifest(composed)?;
-    log_tree_merge_hash_event(cx, object_hash, elapsed_ms(hash_start), 0);
-    Ok(object_hash)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TreeMergeFileMaterialization {
-    Hardlinked,
-    Copied,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TreeMergeFileMaterializationResult {
-    kind: TreeMergeFileMaterialization,
-    validate_ms: u128,
-    hardlink_ms: u128,
-    copy_ms: u128,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TreeSubsetFileMaterializationResult {
-    validate_ms: u128,
-    hardlink_ms: u128,
-}
-
-fn hardlink_tree_subset_file(
-    source: &Path,
-    dst: &Path,
-    manifest_entry: &FsTreeEntry,
-    materializer: &impl OwnershipMaterializer,
-    linker: &impl TreeSubsetLinker,
-) -> Result<TreeSubsetFileMaterializationResult, BuilderError> {
-    let validate_start = Instant::now();
-    materializer.validate_hardlinked_file(source, manifest_entry)?;
-    let validate_ms = elapsed_ms(validate_start);
-    let hardlink_start = Instant::now();
-    linker.hard_link(source, dst).map_err(|error| {
-        BuilderError::ExecutionFailed(format!(
-            "failed to hardlink fs-tree subset file '{}' to '{}': {error}",
-            source.display(),
-            dst.display()
-        ))
-    })?;
-    Ok(TreeSubsetFileMaterializationResult {
-        validate_ms,
-        hardlink_ms: elapsed_ms(hardlink_start),
-    })
-}
-
-fn link_or_copy_tree_merge_file(
-    source: &Path,
-    dst: &Path,
-    manifest_entry: &FsTreeEntry,
-    materializer: &impl OwnershipMaterializer,
-) -> Result<TreeMergeFileMaterializationResult, BuilderError> {
-    let validate_start = Instant::now();
-    materializer.validate_hardlinked_file(source, manifest_entry)?;
-    let validate_ms = elapsed_ms(validate_start);
-    let hardlink_start = Instant::now();
-    match fs::hard_link(source, dst) {
-        Ok(()) => Ok(TreeMergeFileMaterializationResult {
-            kind: TreeMergeFileMaterialization::Hardlinked,
-            validate_ms,
-            hardlink_ms: elapsed_ms(hardlink_start),
-            copy_ms: 0,
-        }),
-        Err(error) if should_copy_after_link_error(error.kind()) => {
-            let hardlink_ms = elapsed_ms(hardlink_start);
-            let copy_start = Instant::now();
-            fs::copy(source, dst).map_err(|copy_error| {
-                BuilderError::ExecutionFailed(format!(
-                    "failed to copy merged fs-tree file '{}' to '{}': {copy_error}",
-                    source.display(),
-                    dst.display()
-                ))
-            })?;
-            Ok(TreeMergeFileMaterializationResult {
-                kind: TreeMergeFileMaterialization::Copied,
-                validate_ms,
-                hardlink_ms,
-                copy_ms: elapsed_ms(copy_start),
-            })
-        }
-        Err(error) => Err(BuilderError::ExecutionFailed(format!(
-            "failed to hardlink merged fs-tree file '{}' to '{}': {error}",
-            source.display(),
-            dst.display()
-        ))),
-    }
-}
-
-fn should_copy_after_link_error(kind: io::ErrorKind) -> bool {
-    matches!(
-        kind,
-        io::ErrorKind::CrossesDevices
-            | io::ErrorKind::PermissionDenied
-            | io::ErrorKind::Unsupported
-            | io::ErrorKind::TooManyLinks
-    )
+    Ok(())
 }
 
 fn hash_tree_output_from_manifest(composed: &ComposedFsTree) -> Result<ObjectHash, BuilderError> {
@@ -1943,51 +1738,6 @@ fn validate_tree_merge_file_attrs(
             manifest_entry.path()
         )))
     }
-}
-
-#[cfg(unix)]
-fn create_tree_merge_symlink(
-    source: &Path,
-    dst: &Path,
-    expected: &str,
-) -> Result<(), BuilderError> {
-    let target = fs::read_link(source).map_err(|error| {
-        BuilderError::ExecutionFailed(format!(
-            "failed to read merged fs-tree source symlink '{}': {error}",
-            source.display()
-        ))
-    })?;
-    let actual = target.to_str().ok_or_else(|| {
-        BuilderError::ExecutionFailed(format!(
-            "merged fs-tree source symlink '{}' has non-UTF-8 target",
-            source.display()
-        ))
-    })?;
-    if actual != expected {
-        return Err(BuilderError::ExecutionFailed(format!(
-            "merged fs-tree source symlink '{}' has target '{}', expected '{}'",
-            source.display(),
-            actual,
-            expected
-        )));
-    }
-    symlink(&target, dst).map_err(|error| {
-        BuilderError::ExecutionFailed(format!(
-            "failed to create merged fs-tree symlink '{}': {error}",
-            dst.display()
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn create_tree_merge_symlink(
-    _source: &Path,
-    _dst: &Path,
-    _expected: &str,
-) -> Result<(), BuilderError> {
-    Err(BuilderError::ExecutionFailed(
-        "TreeMerge symlink materialization is only supported on unix platforms".to_string(),
-    ))
 }
 
 fn normalize_entries(entries: Vec<TreeEntry>) -> Result<Vec<NormalizedEntry>, BuilderError> {
@@ -2525,8 +2275,8 @@ mod tests {
     }
 
     #[derive(Debug, Clone, Copy)]
-    struct FailingTreeSubsetLinker {
-        kind: io::ErrorKind,
+    struct HostFsTreeObjectMaterializer {
+        fail_hardlinks: bool,
     }
 
     #[derive(Debug, Default)]
@@ -2575,69 +2325,55 @@ mod tests {
             validate_fs_tree_object(object_dir, &owner_map).map_err(map_fs_tree_error)?;
             Ok(())
         }
+    }
 
-        fn validate_hardlinked_file(
+    impl FsTreeObjectMaterializer for HostFsTreeObjectMaterializer {
+        fn materialize_from_sources(
             &self,
-            source: &Path,
-            manifest_entry: &FsTreeEntry,
-        ) -> Result<(), BuilderError> {
-            let owner_map = current_owner_map(source)?;
-            validate_tree_merge_file_attrs(source, manifest_entry, &owner_map)
+            inputs: &[FsTreeComposeInput],
+            composed: &ComposedFsTree,
+            output_object_dir: &Path,
+            _workspace: &Path,
+        ) -> Result<FsTreeMaterializeReport, BuilderError> {
+            materialize_fs_tree_host_for_tests(
+                inputs,
+                composed,
+                output_object_dir,
+                self.fail_hardlinks,
+                true,
+            )
         }
     }
 
-    impl OwnershipMaterializer for FixedHashMaterializer {
-        fn materialize_and_validate(
+    impl FsTreeObjectMaterializer for FixedHashMaterializer {
+        fn materialize_from_sources(
             &self,
-            root_dir: &Path,
-            _object_dir: &Path,
-            manifest: &FsTreeManifest,
-            _temp_dir: &Path,
-        ) -> Result<(), BuilderError> {
-            apply_test_modes(manifest, root_dir)?;
-            Ok(())
-        }
-
-        fn validate_hardlinked_file(
-            &self,
-            _source: &Path,
-            _manifest_entry: &FsTreeEntry,
-        ) -> Result<(), BuilderError> {
-            Ok(())
+            inputs: &[FsTreeComposeInput],
+            composed: &ComposedFsTree,
+            output_object_dir: &Path,
+            _workspace: &Path,
+        ) -> Result<FsTreeMaterializeReport, BuilderError> {
+            materialize_fs_tree_host_for_tests(inputs, composed, output_object_dir, false, false)
         }
     }
 
-    impl OwnershipMaterializer for RecordingMaterializer {
-        fn materialize_and_validate(
+    impl FsTreeObjectMaterializer for RecordingMaterializer {
+        fn materialize_from_sources(
             &self,
-            _root_dir: &Path,
-            _object_dir: &Path,
-            manifest: &FsTreeManifest,
-            _temp_dir: &Path,
-        ) -> Result<(), BuilderError> {
+            inputs: &[FsTreeComposeInput],
+            composed: &ComposedFsTree,
+            output_object_dir: &Path,
+            _workspace: &Path,
+        ) -> Result<FsTreeMaterializeReport, BuilderError> {
             self.materialized_paths.replace(
-                manifest
+                composed
+                    .manifest()
                     .entries()
                     .iter()
                     .map(|entry| entry.path().to_string())
                     .collect(),
             );
-            Ok(())
-        }
-
-        fn validate_hardlinked_file(
-            &self,
-            source: &Path,
-            manifest_entry: &FsTreeEntry,
-        ) -> Result<(), BuilderError> {
-            let owner_map = current_owner_map(source)?;
-            validate_tree_merge_file_attrs(source, manifest_entry, &owner_map)
-        }
-    }
-
-    impl TreeSubsetLinker for FailingTreeSubsetLinker {
-        fn hard_link(&self, _source: &Path, _dst: &Path) -> io::Result<()> {
-            Err(io::Error::from(self.kind))
+            materialize_fs_tree_host_for_tests(inputs, composed, output_object_dir, false, true)
         }
     }
 
@@ -2691,8 +2427,9 @@ mod tests {
                 config,
                 inputs,
                 cx,
-                &CurrentOwnerMaterializer,
-                &StdTreeSubsetLinker,
+                &HostFsTreeObjectMaterializer {
+                    fail_hardlinks: false,
+                },
             )
         }
     }
@@ -2704,7 +2441,14 @@ mod tests {
             inputs: BuilderInputs,
             cx: &mut BuildContext,
         ) -> Result<StagedBuildResult, BuilderError> {
-            build_tree_merge(config, inputs, cx, &CurrentOwnerMaterializer)
+            build_tree_merge(
+                config,
+                inputs,
+                cx,
+                &HostFsTreeObjectMaterializer {
+                    fail_hardlinks: false,
+                },
+            )
         }
     }
 
@@ -2959,6 +2703,114 @@ mod tests {
         apply_directory_modes_post_order(manifest, root_dir)
     }
 
+    fn materialize_fs_tree_host_for_tests(
+        inputs: &[FsTreeComposeInput],
+        composed: &ComposedFsTree,
+        output_object_dir: &Path,
+        fail_hardlinks: bool,
+        validate_after: bool,
+    ) -> Result<FsTreeMaterializeReport, BuilderError> {
+        let existed_before = output_object_dir.exists() || output_object_dir.is_symlink();
+        let result = materialize_fs_tree_host_for_tests_inner(
+            inputs,
+            composed,
+            output_object_dir,
+            fail_hardlinks,
+            validate_after,
+        );
+        if result.is_err()
+            && !existed_before
+            && (output_object_dir.exists() || output_object_dir.is_symlink())
+        {
+            let _ = fs::remove_dir_all(output_object_dir);
+        }
+        result
+    }
+
+    fn materialize_fs_tree_host_for_tests_inner(
+        inputs: &[FsTreeComposeInput],
+        composed: &ComposedFsTree,
+        output_object_dir: &Path,
+        fail_hardlinks: bool,
+        validate_after: bool,
+    ) -> Result<FsTreeMaterializeReport, BuilderError> {
+        let paths = create_fs_tree_staging_dir(output_object_dir, composed.manifest())
+            .map_err(map_fs_tree_error)?;
+        let mut report = FsTreeMaterializeReport::default();
+
+        for (manifest_entry, composed_entry) in
+            composed.manifest().entries().iter().zip(composed.entries())
+        {
+            match (manifest_entry, composed_entry) {
+                (FsTreeEntry::Directory { path, .. }, ComposedFsTreeEntry::Directory) => {
+                    let start = Instant::now();
+                    if !path.is_empty() {
+                        fs::create_dir(paths.root_dir.join(path)).map_err(|error| {
+                            BuilderError::ExecutionFailed(format!(
+                                "failed to create test fs-tree directory '{}': {error}",
+                                paths.root_dir.join(path).display()
+                            ))
+                        })?;
+                    }
+                    report.directory_ms += elapsed_ms(start);
+                    report.directory_count += 1;
+                }
+                (FsTreeEntry::File { path, .. }, ComposedFsTreeEntry::File { source_path }) => {
+                    let start = Instant::now();
+                    if fail_hardlinks {
+                        return Err(BuilderError::ExecutionFailed(format!(
+                            "failed to hardlink fs-tree file '{}' to '{}': {}",
+                            source_path.display(),
+                            paths.root_dir.join(path).display(),
+                            io::Error::from(io::ErrorKind::PermissionDenied)
+                        )));
+                    }
+                    fs::hard_link(source_path, paths.root_dir.join(path)).map_err(|error| {
+                        BuilderError::ExecutionFailed(format!(
+                            "failed to hardlink fs-tree file '{}' to '{}': {error}",
+                            source_path.display(),
+                            paths.root_dir.join(path).display()
+                        ))
+                    })?;
+                    let owner_map = current_owner_map(&paths.root_dir.join(path))?;
+                    validate_tree_merge_file_attrs(
+                        &paths.root_dir.join(path),
+                        manifest_entry,
+                        &owner_map,
+                    )?;
+                    report.hardlink_ms += elapsed_ms(start);
+                    report.file_count += 1;
+                    report.hardlinked_file_count += 1;
+                }
+                (
+                    FsTreeEntry::Symlink { path, target, .. },
+                    ComposedFsTreeEntry::Symlink { .. },
+                ) => {
+                    let start = Instant::now();
+                    create_symlink(target, &paths.root_dir.join(path))?;
+                    report.symlink_ms += elapsed_ms(start);
+                    report.symlink_count += 1;
+                }
+                _ => {
+                    return Err(BuilderError::ExecutionFailed(format!(
+                        "test fs-tree entry for '{}' does not match manifest kind",
+                        manifest_entry.path()
+                    )));
+                }
+            }
+        }
+
+        let start = Instant::now();
+        apply_test_modes(composed.manifest(), &paths.root_dir)?;
+        report.ownership_ms = elapsed_ms(start);
+        if validate_after {
+            let owner_map = current_owner_map(&paths.root_dir)?;
+            validate_fs_tree_object(output_object_dir, &owner_map).map_err(map_fs_tree_error)?;
+        }
+        let _ = inputs;
+        Ok(report)
+    }
+
     #[cfg(unix)]
     fn current_owner_map(path: &Path) -> Result<CurrentOwnerMap, BuilderError> {
         let metadata = fs::symlink_metadata(path).map_err(|error| {
@@ -3181,9 +3033,8 @@ mod tests {
             tree_subset_config(&["lib/libfoo.so*"]),
             tree_merge_inputs(&[("tree", &input)]),
             &mut cx,
-            &CurrentOwnerMaterializer,
-            &FailingTreeSubsetLinker {
-                kind: io::ErrorKind::PermissionDenied,
+            &HostFsTreeObjectMaterializer {
+                fail_hardlinks: true,
             },
         )
         .unwrap_err();
@@ -3191,7 +3042,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("failed to hardlink fs-tree subset file")
+                .contains("failed to hardlink fs-tree file")
         );
     }
 
@@ -3952,7 +3803,9 @@ mod tests {
             TreeMergeConfig {},
             inputs,
             &mut cx,
-            &CurrentOwnerMaterializer,
+            &HostFsTreeObjectMaterializer {
+                fail_hardlinks: false,
+            },
         )
         .unwrap_err();
 
@@ -3969,7 +3822,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn tree_merge_excludes_hardlinked_files_from_materialize_manifest() {
+    fn tree_merge_materializes_complete_manifest() {
         let temp = tempdir().unwrap();
         let left = build_fs_tree_for_tests(
             temp.path(),
@@ -4012,9 +3865,9 @@ mod tests {
         assert!(materialized_paths.iter().any(|path| path.is_empty()));
         assert!(materialized_paths.iter().any(|path| path == "bin"));
         assert!(materialized_paths.iter().any(|path| path == "etc"));
-        assert!(!materialized_paths.iter().any(|path| path == "bin/left"));
+        assert!(materialized_paths.iter().any(|path| path == "bin/left"));
         assert!(
-            !materialized_paths
+            materialized_paths
                 .iter()
                 .any(|path| path == "etc/right.conf")
         );

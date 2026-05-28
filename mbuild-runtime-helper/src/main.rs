@@ -1,5 +1,6 @@
 mod helper;
 mod initramfs_writer;
+mod materialize;
 mod ownership;
 mod tar_writer;
 

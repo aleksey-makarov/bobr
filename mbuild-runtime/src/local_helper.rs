@@ -69,6 +69,18 @@ pub(crate) fn run_local_helper_operation<O>(
 where
     O: LocalHelperOperation,
 {
+    run_local_helper_operation_with_result(idmap, workspace, operation, |_| Ok(()))
+}
+
+pub(crate) fn run_local_helper_operation_with_result<O, R>(
+    idmap: &MbuildIdmap,
+    workspace: &Path,
+    operation: O,
+    read_result: impl FnOnce(&Path) -> Result<R, RuntimeError>,
+) -> Result<R, RuntimeError>
+where
+    O: LocalHelperOperation,
+{
     run_local_helper_with_config(
         idmap,
         workspace,
@@ -80,18 +92,21 @@ where
                 RuntimeError::Executor(format!("failed to serialize {}: {error}", O::CONFIG_LABEL))
             })
         },
+        read_result,
     )
 }
 
-fn run_local_helper_with_config<F>(
+fn run_local_helper_with_config<F, R>(
     idmap: &MbuildIdmap,
     workspace: &Path,
     operation: &str,
     config_file_name: &str,
     build_config: F,
-) -> Result<(), RuntimeError>
+    read_result: impl FnOnce(&Path) -> Result<R, RuntimeError>,
+) -> Result<R, RuntimeError>
 where
     F: FnOnce(&Path, &Path) -> Result<Vec<u8>, RuntimeError>,
+    R: Sized,
 {
     let tools = cached_local_helper_tools()?;
     let state_root = workspace.join("state");
@@ -112,7 +127,7 @@ where
 
     let lifecycle_result = launch_helper(&tools, idmap, operation, &config_path);
     resolve_helper_report(&error_report, lifecycle_result)?;
-    Ok(())
+    read_result(&run.dir)
 }
 
 pub(crate) fn write_helper_manifest(

@@ -41,9 +41,10 @@
 - it validates each input `root/` directory against its manifest
 - it merges manifest entries with strict conflict checking
 - it writes a new fs-tree directory object
-- regular files are hardlinked from input fs-trees when possible, with copy
-  fallback for filesystems that do not support the hardlink
-- symlinks are recreated with the same target
+- regular files are hardlinked from input fs-trees inside the ownership user
+  namespace; copying is not allowed
+- symlinks are recreated from manifest targets inside the ownership user
+  namespace
 
 `ErofsRootfs` is the image-producing counterpart to `TreeMerge`:
 
@@ -134,9 +135,8 @@ Current behavior:
 - `install` is rejected for file output and required for directory output
 - `install.rules` uses path selectors with partial field overrides
 - directory output consumes `install.rules` into `manifest.jsonl`
-- directory output currently supports only logical `uid=0,gid=0`; any
-  non-root `uid` or `gid` in `install.rules` is rejected until fs-tree owner
-  materialization is implemented
+- directory output supports logical owners that fit the configured runtime
+  idmap; out-of-range `uid` or `gid` values are rejected before helper launch
 - `symlink_mode` is accepted in `install.rules` for config compatibility, but
   symlink modes are not represented in the fs-tree manifest
 - authoring usually starts with one broad `**` rule carrying full defaults, then
@@ -181,11 +181,16 @@ Current behavior:
 
 Physical materialization:
 
-- directories are created as needed
-- regular files are hardlinked from their source fs-tree when possible
-- when hardlinking is not supported or not permitted, regular file bytes are copied
-- symlinks are recreated with the same target
-- ownership and modes are materialized and validated against the merged manifest
+- the runtime helper creates the fs-tree object, canonical manifest, and
+  `root/` tree inside the ownership user namespace
+- directories are created before children and receive final owner/mode metadata
+  after descendants are materialized
+- regular files are hardlinked from their source fs-tree; hardlink failure is a
+  build error and file bytes are not copied
+- hardlinked files are validated against manifest kind, owner, and mode inside
+  the ownership user namespace
+- symlinks are recreated from manifest targets, without reading source symlink
+  paths
 
 The realized result payload is one fs-tree directory object.
 
@@ -228,13 +233,16 @@ Current behavior:
 
 Physical materialization:
 
-- directories are created as needed
+- the runtime helper creates the fs-tree object, canonical manifest, and
+  `root/` tree inside the ownership user namespace
+- directories are created before children and receive final owner/mode metadata
+  after descendants are materialized
 - regular files are hardlinked from the input fs-tree
 - hardlink failure is a build error; `TreeSubset` does not copy file bytes
-- symlinks are recreated with the same target
-- ownership and modes are materialized and validated for directories and
-  symlinks; selected hardlinked files keep their already-validated input
-  metadata
+- hardlinked files are validated against manifest kind, owner, and mode inside
+  the ownership user namespace
+- symlinks are recreated from manifest targets, without reading source symlink
+  paths
 - the output object hash is computed from the selected manifest and selected
   manifest `h` leaf hashes instead of hashing the staged tree
 

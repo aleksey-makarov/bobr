@@ -23,6 +23,9 @@ enum HelperCommand {
     FsTreeInitramfs {
         config: PathBuf,
     },
+    FsTreeMaterialize {
+        config: PathBuf,
+    },
     WaitExec {
         wait_fd: RawFd,
         command: Vec<OsString>,
@@ -55,6 +58,7 @@ fn main_result(args: Vec<OsString>) -> Result<(), String> {
         HelperCommand::FsTreeInitramfs { config } => {
             crate::initramfs_writer::run_config_path(&config)
         }
+        HelperCommand::FsTreeMaterialize { config } => crate::materialize::run_config_path(&config),
         HelperCommand::WaitExec { wait_fd, command } => {
             wait_for_parent(wait_fd)?;
             exec_helper_command(command)
@@ -82,13 +86,18 @@ fn parse_args(args: Vec<OsString>) -> Result<HelperCommand, String> {
         return Ok(HelperCommand::FsTreeInitramfs { config });
     }
 
+    if args.first().is_some_and(|arg| arg == "fs-tree-materialize") {
+        let config = parse_config_args("fs-tree-materialize", &args[1..])?;
+        return Ok(HelperCommand::FsTreeMaterialize { config });
+    }
+
     if args.first().is_some_and(|arg| arg == "wait-exec") {
         let (wait_fd, command) = parse_wait_exec_args(&args[1..])?;
         return Ok(HelperCommand::WaitExec { wait_fd, command });
     }
 
     Err(format!(
-        "usage: {HELPER_BINARY_NAME} --protocol-info | ownership --config PATH | fs-tree-tar --config PATH | fs-tree-initramfs --config PATH | wait-exec --wait-fd FD -- COMMAND [ARGS...]"
+        "usage: {HELPER_BINARY_NAME} --protocol-info | ownership --config PATH | fs-tree-tar --config PATH | fs-tree-initramfs --config PATH | fs-tree-materialize --config PATH | wait-exec --wait-fd FD -- COMMAND [ARGS...]"
     ))
 }
 
@@ -225,6 +234,21 @@ mod tests {
             .unwrap(),
             HelperCommand::FsTreeInitramfs {
                 config: PathBuf::from("/tmp/initramfs.json"),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_fs_tree_materialize_command() {
+        assert_eq!(
+            parse_args(vec![
+                OsString::from("fs-tree-materialize"),
+                OsString::from("--config"),
+                OsString::from("/tmp/materialize.json"),
+            ])
+            .unwrap(),
+            HelperCommand::FsTreeMaterialize {
+                config: PathBuf::from("/tmp/materialize.json"),
             }
         );
     }
