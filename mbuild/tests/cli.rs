@@ -246,8 +246,7 @@ fn cli_reports_relative_local_path() {
                     "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
                     "origin": {
                         "type": "path",
-                        "path": "payload.txt",
-                        "mode": "direct"
+                        "path": "payload.txt"
                     },
                 }
             }
@@ -287,8 +286,7 @@ fn cli_reports_missing_local_only_when_source_path_materializes() {
                     "object_hash": "1111111111111111111111111111111111111111111111111111111111111111",
                     "origin": {
                         "type": "path",
-                        "path": "payload.txt",
-                        "mode": "direct"
+                        "path": "payload.txt"
                     },
                 }
             }

@@ -143,8 +143,8 @@ input targets and their normal `result-refs/` and `object-refs/` publications.
 In v1, `Source` supports three origins:
 
 - `origin.type = "path"`
-- `origin.mode = "direct" | "tar"`
 - `origin.path` must be a non-empty relative path without `..`
+- `origin.unpack` defaults to `false`; when true, the local path is treated as a tar archive
 - `origin.type = "http"`
 - `origin.url` is one HTTP(S) URL or an ordered fallback list
 - `origin.unpack` defaults to `false`

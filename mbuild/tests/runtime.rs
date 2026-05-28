@@ -85,7 +85,7 @@ fn group_root_builds_independent_inputs() {
     }
 }
 
-fn source_recipe_node(name: &str, object_hash: &str, origin_path: &str, mode: &str) -> Value {
+fn source_recipe_node(name: &str, object_hash: &str, origin_path: &str, unpack: bool) -> Value {
     json!({
         "name": name,
         "tag": "Source",
@@ -93,7 +93,7 @@ fn source_recipe_node(name: &str, object_hash: &str, origin_path: &str, mode: &s
         "origin": {
             "type": "path",
             "path": origin_path,
-            "mode": mode
+            "unpack": unpack
         },
     })
 }
@@ -684,7 +684,7 @@ fn source_path_file_materializes_known_object_without_build_handle() {
             "source-file",
             &object_hash.to_string(),
             "payload.txt",
-            "direct",
+            false,
         ),
     );
 
@@ -726,7 +726,7 @@ fn source_path_tar_materializes_unpacked_tree_without_build_handle() {
     let recipe_path = workspace.path().join("source-tar.json");
     write_recipe(
         &recipe_path,
-        &source_recipe_node("source-tar", &object_hash.to_string(), "payload.tar", "tar"),
+        &source_recipe_node("source-tar", &object_hash.to_string(), "payload.tar", true),
     );
 
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
@@ -897,7 +897,7 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
     let recipe_path = workspace.path().join("source-path-mismatch.json");
     write_recipe(
         &recipe_path,
-        &source_recipe_node("source-file", wrong_hash, "payload.txt", "direct"),
+        &source_recipe_node("source-file", wrong_hash, "payload.txt", false),
     );
 
     let error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
@@ -940,7 +940,7 @@ fn source_without_origin_reuses_existing_canonical_result() {
             "source-file",
             &object_hash.to_string(),
             "payload.txt",
-            "direct",
+            false,
         ),
     );
     let first = run_recipe_json_in_workspace(workspace.path(), &materialized_recipe_path).unwrap();
@@ -1001,7 +1001,7 @@ fn source_without_origin_republishes_existing_object() {
             "source-file",
             &object_hash.to_string(),
             "payload.txt",
-            "direct",
+            false,
         ),
     );
     let first = run_recipe_json_in_workspace(workspace.path(), &materialized_recipe_path).unwrap();

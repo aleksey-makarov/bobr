@@ -9,16 +9,10 @@ static PATH_ORIGIN_SPEC: OriginSpec = OriginSpec { tag: "path" };
 #[derive(Debug)]
 pub(super) struct PathOriginHandler;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SourcePathMode {
-    Direct,
-    Tar,
-}
-
 #[derive(Debug, Clone)]
 struct PathOrigin {
     path: PathBuf,
-    mode: SourcePathMode,
+    unpack: bool,
 }
 
 impl OriginHandler for PathOriginHandler {
@@ -35,15 +29,7 @@ impl OriginHandler for PathOriginHandler {
         debug_assert_eq!(kind, "path");
         let path_value = PathBuf::from(take_string(&mut object, field_path, "path")?);
         validate_relative_source_path(&path_value, &format!("{field_path}.path"))?;
-        let mode = match take_string(&mut object, field_path, "mode")?.as_str() {
-            "direct" => SourcePathMode::Direct,
-            "tar" => SourcePathMode::Tar,
-            other => {
-                return Err(format!(
-                    "{field_path}.mode: unsupported source path mode '{other}'"
-                ));
-            }
-        };
+        let unpack = take_optional_bool(&mut object, field_path, "unpack")?.unwrap_or(false);
         if !object.is_empty() {
             return Err(format!(
                 "{field_path}: unexpected fields: {}",
@@ -52,7 +38,7 @@ impl OriginHandler for PathOriginHandler {
         }
         Ok(Box::new(PathOrigin {
             path: path_value,
-            mode,
+            unpack,
         }))
     }
 }
@@ -63,13 +49,10 @@ impl ParsedOrigin for PathOrigin {
     }
 
     fn materialize(&self, cx: &OriginContext<'_>) -> Result<PathBuf, String> {
-        match self.mode {
-            SourcePathMode::Direct => {
-                materialize_path_source_direct(cx.temp_root, cx.local_root, &self.path)
-            }
-            SourcePathMode::Tar => {
-                materialize_path_source_tar(cx.temp_root, cx.local_root, &self.path)
-            }
+        if self.unpack {
+            materialize_path_source_tar(cx.temp_root, cx.local_root, &self.path)
+        } else {
+            materialize_path_source_direct(cx.temp_root, cx.local_root, &self.path)
         }
     }
 
@@ -86,6 +69,20 @@ fn take_string(object: &mut Map<String, Value>, path: &str, field: &str) -> Resu
         .as_str()
         .map(ToOwned::to_owned)
         .ok_or_else(|| format!("{path}.{field}: expected string"))
+}
+
+fn take_optional_bool(
+    object: &mut Map<String, Value>,
+    path: &str,
+    field: &str,
+) -> Result<Option<bool>, String> {
+    let Some(value) = object.remove(field) else {
+        return Ok(None);
+    };
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| format!("{path}.{field}: expected boolean"))
 }
 
 fn validate_relative_source_path(path: &PathBuf, field_path: &str) -> Result<(), String> {

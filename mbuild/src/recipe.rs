@@ -657,7 +657,7 @@ mod tests {
                 "origin": {
                     "type": "path",
                     "path": "source.tar",
-                    "mode": "tar"
+                    "unpack": true
                 }
             }
         });
@@ -676,7 +676,7 @@ mod tests {
                 "origin": {
                     "type": "path",
                     "path": "source.tar",
-                    "mode": "tar"
+                    "unpack": true
                 }
             }
         });
@@ -734,7 +734,7 @@ mod tests {
                 "origin": {
                     "type": "path",
                     "path": "/tmp/source.tar",
-                    "mode": "tar"
+                    "unpack": true
                 }
             }
         });
@@ -755,7 +755,7 @@ mod tests {
                 "origin": {
                     "type": "path",
                     "path": "../source.tar",
-                    "mode": "tar"
+                    "unpack": true
                 }
             }
         });

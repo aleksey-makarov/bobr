@@ -77,8 +77,8 @@ Children are always referenced by node id.
 In v1, `Source` supports:
 
 - `origin.type = "path"`
-- `origin.mode = "direct" | "tar"`
 - `origin.path` must be a non-empty relative path without `..`
+- `origin.unpack`, defaulting to `false`; when true, the local path is treated as a tar archive
 - `origin.type = "http"`
 - `origin.url` as one HTTP(S) URL or an ordered fallback list
 - `origin.unpack`, defaulting to `false`
