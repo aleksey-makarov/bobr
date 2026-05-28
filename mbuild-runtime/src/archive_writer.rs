@@ -17,7 +17,6 @@ pub(crate) fn validate_archive_request(
     sources: &[FsTreeArchiveEntrySource],
     output: &Path,
     workspace: &Path,
-    idmap: &MbuildIdmap,
 ) -> Result<(), RuntimeError> {
     if inputs.is_empty() {
         return Err(RuntimeError::InvalidInput(format!(
@@ -38,15 +37,6 @@ pub(crate) fn validate_archive_request(
                 input.root_dir.display()
             )));
         }
-    }
-    for entry in manifest.entries() {
-        let (uid, gid) = entry_owner(entry);
-        idmap.physical_uid(uid).map_err(|error| {
-            RuntimeError::InvalidInput(format!("fs-tree entry '{}': {error}", entry.path()))
-        })?;
-        idmap.physical_gid(gid).map_err(|error| {
-            RuntimeError::InvalidInput(format!("fs-tree entry '{}': {error}", entry.path()))
-        })?;
     }
     for (entry, source) in manifest.entries().iter().zip(sources) {
         match (entry, source) {
@@ -88,6 +78,22 @@ pub(crate) fn validate_archive_request(
             "{kind} output directory '{}' must exist and be a directory",
             output_dir.display()
         )));
+    }
+    Ok(())
+}
+
+pub(crate) fn precheck_archive_manifest_owners(
+    manifest: &FsTreeManifest,
+    idmap: &MbuildIdmap,
+) -> Result<(), RuntimeError> {
+    for entry in manifest.entries() {
+        let (uid, gid) = entry_owner(entry);
+        idmap.physical_uid(uid).map_err(|error| {
+            RuntimeError::InvalidInput(format!("fs-tree entry '{}': {error}", entry.path()))
+        })?;
+        idmap.physical_gid(gid).map_err(|error| {
+            RuntimeError::InvalidInput(format!("fs-tree entry '{}': {error}", entry.path()))
+        })?;
     }
     Ok(())
 }

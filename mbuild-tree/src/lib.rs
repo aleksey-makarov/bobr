@@ -1,14 +1,17 @@
 use fsobj_hash::{EntryKind, ObjectHash, hash_file_bytes, hash_path, hash_symlink_node};
 use globset::{Glob, GlobMatcher};
-#[cfg(test)]
-use mbuild_core::InitramfsEntrySource;
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     ComposedFsTree, ComposedFsTreeEntry, FsTreeComposeInput, FsTreeEntry, FsTreeManifest,
-    FsTreeOwnerMap, StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir,
-    fsutil, load_fs_tree_object,
+    StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir, fsutil,
+    load_fs_tree_object,
 };
-use mbuild_runtime::{FsTreeArchiveEntrySource, FsTreeArchiveInput};
+#[cfg(test)]
+use mbuild_core::{FsTreeOwnerMap, InitramfsEntrySource};
+use mbuild_runtime::{
+    FsTreeArchiveEntrySource, FsTreeArchiveInput,
+    validate_fs_tree_file_attrs_in_ownership_namespace,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,8 +20,10 @@ use std::fs;
 use std::io;
 #[cfg(test)]
 use std::io::Write;
+#[cfg(all(test, unix))]
+use std::os::unix::fs::MetadataExt;
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -196,9 +201,7 @@ impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
         manifest: &FsTreeManifest,
         temp_dir: &Path,
     ) -> Result<(), BuilderError> {
-        let idmap = mbuild_runtime::cached_host_idmap()
-            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-        mbuild_runtime::apply_ownership_batch(root_dir, manifest, idmap.as_ref(), temp_dir)
+        mbuild_runtime::apply_ownership_batch(root_dir, manifest, temp_dir)
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
         Ok(())
     }
@@ -208,9 +211,8 @@ impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
         source: &Path,
         manifest_entry: &FsTreeEntry,
     ) -> Result<(), BuilderError> {
-        let idmap = mbuild_runtime::cached_host_idmap()
-            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-        validate_tree_merge_file_attrs(source, manifest_entry, idmap.as_ref())
+        validate_fs_tree_file_attrs_in_ownership_namespace(source, manifest_entry)
+            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))
     }
 }
 
@@ -746,8 +748,6 @@ impl InitramfsWriter for RuntimeInitramfsWriter {
         output_initramfs: &Path,
         workspace: &Path,
     ) -> Result<(), BuilderError> {
-        let idmap = mbuild_runtime::cached_host_idmap()
-            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
         let archive_inputs = inputs
             .iter()
             .map(|input| FsTreeArchiveInput {
@@ -760,7 +760,6 @@ impl InitramfsWriter for RuntimeInitramfsWriter {
             composed.manifest(),
             &sources,
             output_initramfs,
-            idmap.as_ref(),
             workspace,
         )
         .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))
@@ -778,8 +777,6 @@ impl ErofsTarWriter for RuntimeErofsTarWriter {
         output_tar: &Path,
         workspace: &Path,
     ) -> Result<(), BuilderError> {
-        let idmap = mbuild_runtime::cached_host_idmap()
-            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
         let archive_inputs = inputs
             .iter()
             .map(|input| FsTreeArchiveInput {
@@ -792,7 +789,6 @@ impl ErofsTarWriter for RuntimeErofsTarWriter {
             composed.manifest(),
             &sources,
             output_tar,
-            idmap.as_ref(),
             workspace,
         )
         .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))
@@ -1870,7 +1866,7 @@ fn json_u128(value: u128) -> Value {
     Value::from(value.min(u64::MAX as u128) as u64)
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn validate_tree_merge_file_attrs(
     source: &Path,
     manifest_entry: &FsTreeEntry,
@@ -1932,7 +1928,7 @@ fn validate_tree_merge_file_attrs(
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(all(test, not(unix)))]
 fn validate_tree_merge_file_attrs(
     source: &Path,
     manifest_entry: &FsTreeEntry,

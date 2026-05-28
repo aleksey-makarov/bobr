@@ -3,10 +3,10 @@
 use crate::{
     archive_writer::{
         FsTreeArchiveInput, canonicalize_input_roots, canonicalize_output_path,
-        validate_archive_request,
+        precheck_archive_manifest_owners, validate_archive_request,
     },
     error::RuntimeError,
-    idmap::MbuildIdmap,
+    idmap::cached_runtime_idmap,
     local_helper::{
         LocalHelperOperation, preflight_local_helper_runtime, run_local_helper_operation,
         write_helper_manifest,
@@ -27,18 +27,17 @@ pub fn write_fs_tree_tar_in_ownership_namespace(
     manifest: &FsTreeManifest,
     sources: &[FsTreeArchiveEntrySource],
     output_tar: &Path,
-    idmap: &MbuildIdmap,
     workspace: &Path,
 ) -> Result<(), RuntimeError> {
-    validate_archive_request(
-        "tar", inputs, manifest, sources, output_tar, workspace, idmap,
-    )?;
-    preflight_local_helper_runtime(idmap)?;
+    validate_archive_request("tar", inputs, manifest, sources, output_tar, workspace)?;
+    let idmap = cached_runtime_idmap()?;
+    precheck_archive_manifest_owners(manifest, idmap.as_ref())?;
+    preflight_local_helper_runtime(idmap.as_ref())?;
     let output_tar = canonicalize_output_path(output_tar, "tar output path")?;
     let input_roots = canonicalize_input_roots(inputs)?;
 
     run_local_helper_operation(
-        idmap,
+        idmap.as_ref(),
         workspace,
         FsTreeTarOperation {
             input_roots,
@@ -95,8 +94,6 @@ mod tests {
         let output = temp.path().join("out.tar");
         let manifest =
             FsTreeManifest::from_entries(vec![FsTreeEntry::directory("", 0, 0, 0o755)]).unwrap();
-        let idmap = MbuildIdmap::for_tests(1000, 1000, 100000, 10, 200000, 10);
-
         let error = validate_archive_request(
             "tar",
             &[FsTreeArchiveInput { root_dir: input }],
@@ -104,7 +101,6 @@ mod tests {
             &[],
             &output,
             temp.path(),
-            &idmap,
         )
         .unwrap_err();
 

@@ -8,8 +8,7 @@
 //! The current public capabilities are fs-tree ownership materialization
 //! through [`apply_ownership_batch`], deterministic fs-tree tar and initramfs
 //! generation, and `Sandbox` execution through [`run_sandbox_build`].
-//! Ownership and archive helpers accept an explicit [`MbuildIdmap`]; sandbox
-//! execution resolves the cached host idmap internally.
+//! Runtime operations resolve the cached host idmap internally.
 //!
 //! The public `Sandbox` runtime capability accepts a prepared root filesystem
 //! directory through [`SandboxBuildConfig::root_dir`], mounts extra
@@ -37,10 +36,11 @@ mod executor;
 
 pub use archive_writer::FsTreeArchiveInput;
 pub use error::{IdmapError, RuntimeError};
-pub use idmap::{MbuildIdmap, cached_host_idmap};
 pub use initramfs_writer::write_fs_tree_initramfs_in_ownership_namespace;
 pub use mbuild_core::FsTreeArchiveEntrySource;
 pub use ownership::apply_ownership_batch;
+#[cfg(unix)]
+pub use ownership::validate_fs_tree_file_attrs_in_ownership_namespace;
 pub use sandbox::{
     SandboxBuildConfig, SandboxBuildOutcome, SandboxInput, SandboxRunAs, SandboxStep,
     SandboxStepReport, run_sandbox_build,

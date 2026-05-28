@@ -1,4 +1,4 @@
-use crate::error::IdmapError;
+use crate::error::{IdmapError, RuntimeError};
 use mbuild_core::{FsTreeObjectError, FsTreeOwnerMap};
 use nix::unistd::{Uid, User, getegid, geteuid};
 use std::fs;
@@ -16,7 +16,7 @@ static HOST_IDMAP: OnceLock<Result<Arc<MbuildIdmap>, Arc<IdmapError>>> = OnceLoc
 /// logical ids map into the first configured `/etc/subuid` or `/etc/subgid`
 /// range for the current user.
 #[derive(Debug, Clone)]
-pub struct MbuildIdmap {
+pub(crate) struct MbuildIdmap {
     current_uid: u32,
     current_gid: u32,
     subuid: SubidRange,
@@ -52,7 +52,7 @@ impl MbuildIdmap {
     /// This reads the effective uid/gid, resolves the current username through
     /// the system user database, and loads the first matching subuid and subgid
     /// ranges from `/etc/subuid` and `/etc/subgid`.
-    pub fn from_host_environment() -> Result<Self, IdmapError> {
+    pub(crate) fn from_host_environment() -> Result<Self, IdmapError> {
         let current_uid = geteuid().as_raw();
         let current_gid = getegid().as_raw();
         let username = current_username(current_uid)?;
@@ -68,42 +68,42 @@ impl MbuildIdmap {
     }
 
     /// Return the host uid used for logical uid `0`.
-    pub fn current_uid(&self) -> u32 {
+    pub(crate) fn current_uid(&self) -> u32 {
         self.current_uid
     }
 
     /// Return the host gid used for logical gid `0`.
-    pub fn current_gid(&self) -> u32 {
+    pub(crate) fn current_gid(&self) -> u32 {
         self.current_gid
     }
 
     /// Return the first host uid in the positive logical uid range.
-    pub fn subuid_base(&self) -> u32 {
+    pub(crate) fn subuid_base(&self) -> u32 {
         self.subuid.base
     }
 
     /// Return the number of host uids available for positive logical uids.
-    pub fn subuid_count(&self) -> u32 {
+    pub(crate) fn subuid_count(&self) -> u32 {
         self.subuid.count
     }
 
     /// Return the first host gid in the positive logical gid range.
-    pub fn subgid_base(&self) -> u32 {
+    pub(crate) fn subgid_base(&self) -> u32 {
         self.subgid.base
     }
 
     /// Return the number of host gids available for positive logical gids.
-    pub fn subgid_count(&self) -> u32 {
+    pub(crate) fn subgid_count(&self) -> u32 {
         self.subgid.count
     }
 
     /// Translate one logical uid into the corresponding host uid.
-    pub fn physical_uid(&self, logical: u32) -> Result<u32, IdmapError> {
+    pub(crate) fn physical_uid(&self, logical: u32) -> Result<u32, IdmapError> {
         translate_logical_id(logical, self.current_uid, self.subuid, LogicalIdKind::Uid)
     }
 
     /// Translate one logical gid into the corresponding host gid.
-    pub fn physical_gid(&self, logical: u32) -> Result<u32, IdmapError> {
+    pub(crate) fn physical_gid(&self, logical: u32) -> Result<u32, IdmapError> {
         translate_logical_id(logical, self.current_gid, self.subgid, LogicalIdKind::Gid)
     }
 }
@@ -125,7 +125,7 @@ impl FsTreeOwnerMap for MbuildIdmap {
 /// The first call reads the host environment through
 /// [`MbuildIdmap::from_host_environment`]. The result, including errors, is
 /// cached for the lifetime of the process.
-pub fn cached_host_idmap() -> Result<Arc<MbuildIdmap>, Arc<IdmapError>> {
+pub(crate) fn cached_host_idmap() -> Result<Arc<MbuildIdmap>, Arc<IdmapError>> {
     let result = HOST_IDMAP.get_or_init(|| {
         MbuildIdmap::from_host_environment()
             .map(Arc::new)
@@ -135,6 +135,11 @@ pub fn cached_host_idmap() -> Result<Arc<MbuildIdmap>, Arc<IdmapError>> {
         Ok(idmap) => Ok(Arc::clone(idmap)),
         Err(error) => Err(Arc::clone(error)),
     }
+}
+
+pub(crate) fn cached_runtime_idmap() -> Result<Arc<MbuildIdmap>, RuntimeError> {
+    cached_host_idmap()
+        .map_err(|error| RuntimeError::Preflight(format!("failed to load host idmap: {error}")))
 }
 
 fn current_username(current_uid: u32) -> Result<String, IdmapError> {

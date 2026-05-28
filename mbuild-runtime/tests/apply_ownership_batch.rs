@@ -1,7 +1,7 @@
 #![cfg(all(feature = "integration-tests", target_os = "linux"))]
 
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
-use mbuild_runtime::{MbuildIdmap, RuntimeError, apply_ownership_batch};
+use mbuild_runtime::{RuntimeError, apply_ownership_batch};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
@@ -17,7 +17,6 @@ fn apply_ownership_batch_materializes_logical_owners_and_modes() -> TestResult<(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     init_tracing();
-    let idmap = MbuildIdmap::from_host_environment()?;
     let temp = tempdir()?;
     let workspace = temp.path().join("workspace");
     let target = temp.path().join("target");
@@ -34,25 +33,21 @@ fn apply_ownership_batch_materializes_logical_owners_and_modes() -> TestResult<(
         FsTreeEntry::symlink("link", 1, 1, "target"),
     ])?;
 
-    apply_ownership_batch(&target, &manifest, &idmap, &workspace)?;
+    let root_metadata = fs::symlink_metadata(&target)?;
 
-    assert_owner_and_mode(&target, idmap.current_uid(), idmap.current_gid(), 0o755)?;
-    assert_owner_and_mode(
-        target.join("dir"),
-        idmap.physical_uid(1)?,
-        idmap.physical_gid(1)?,
-        0o700,
-    )?;
-    assert_owner_and_mode(
-        target.join("file"),
-        idmap.physical_uid(1)?,
-        idmap.physical_gid(1)?,
-        0o640,
-    )?;
+    apply_ownership_batch(&target, &manifest, &workspace)?;
+
+    assert_owner_and_mode(&target, root_metadata.uid(), root_metadata.gid(), 0o755)?;
+    let dir_metadata = assert_mode_and_read_owner(target.join("dir"), 0o700)?;
+    let file_metadata = assert_mode_and_read_owner(target.join("file"), 0o640)?;
+    assert_eq!(file_metadata.uid(), dir_metadata.uid());
+    assert_eq!(file_metadata.gid(), dir_metadata.gid());
+    assert_ne!(dir_metadata.uid(), root_metadata.uid());
+    assert_ne!(dir_metadata.gid(), root_metadata.gid());
     let link = fs::symlink_metadata(target.join("link"))?;
     assert!(link.file_type().is_symlink());
-    assert_eq!(link.uid(), idmap.physical_uid(1)?);
-    assert_eq!(link.gid(), idmap.physical_gid(1)?);
+    assert_eq!(link.uid(), dir_metadata.uid());
+    assert_eq!(link.gid(), dir_metadata.gid());
     assert_runtime_workspace_empty(&workspace)?;
 
     Ok(())
@@ -64,7 +59,6 @@ fn apply_ownership_batch_defers_parent_directory_until_descendants() -> TestResu
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     init_tracing();
-    let idmap = MbuildIdmap::from_host_environment()?;
     let temp = tempdir()?;
     let workspace = temp.path().join("workspace");
     let target = temp.path().join("target");
@@ -82,26 +76,15 @@ fn apply_ownership_batch_defers_parent_directory_until_descendants() -> TestResu
         FsTreeEntry::file("locked/nested/file", 1, 1, 0o600),
     ])?;
 
-    apply_ownership_batch(&target, &manifest, &idmap, &workspace)?;
+    apply_ownership_batch(&target, &manifest, &workspace)?;
 
-    assert_owner_and_mode(
-        target.join("locked"),
-        idmap.physical_uid(1)?,
-        idmap.physical_gid(1)?,
-        0o711,
-    )?;
-    assert_owner_and_mode(
-        target.join("locked/nested"),
-        idmap.physical_uid(1)?,
-        idmap.physical_gid(1)?,
-        0o711,
-    )?;
-    assert_owner_and_mode(
-        target.join("locked/nested/file"),
-        idmap.physical_uid(1)?,
-        idmap.physical_gid(1)?,
-        0o600,
-    )?;
+    let locked_metadata = assert_mode_and_read_owner(target.join("locked"), 0o711)?;
+    let nested_metadata = assert_mode_and_read_owner(target.join("locked/nested"), 0o711)?;
+    let file_metadata = assert_mode_and_read_owner(target.join("locked/nested/file"), 0o600)?;
+    assert_eq!(nested_metadata.uid(), locked_metadata.uid());
+    assert_eq!(nested_metadata.gid(), locked_metadata.gid());
+    assert_eq!(file_metadata.uid(), locked_metadata.uid());
+    assert_eq!(file_metadata.gid(), locked_metadata.gid());
     assert_runtime_workspace_empty(&workspace)?;
 
     Ok(())
@@ -113,7 +96,6 @@ fn apply_ownership_batch_returns_structured_executor_error() -> TestResult<()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     init_tracing();
-    let idmap = MbuildIdmap::from_host_environment()?;
     let temp = tempdir()?;
     let workspace = temp.path().join("workspace");
     let target = temp.path().join("target");
@@ -126,7 +108,7 @@ fn apply_ownership_batch_returns_structured_executor_error() -> TestResult<()> {
         FsTreeEntry::file("entry", 0, 0, 0o644),
     ])?;
 
-    let error = apply_ownership_batch(&target, &manifest, &idmap, &workspace)
+    let error = apply_ownership_batch(&target, &manifest, &workspace)
         .expect_err("kind mismatch should surface structured executor error");
 
     assert!(
@@ -151,6 +133,12 @@ fn assert_owner_and_mode(path: impl AsRef<Path>, uid: u32, gid: u32, mode: u32) 
     assert_eq!(metadata.gid(), gid);
     assert_eq!(metadata.permissions().mode() & 0o7777, mode);
     Ok(())
+}
+
+fn assert_mode_and_read_owner(path: impl AsRef<Path>, mode: u32) -> TestResult<fs::Metadata> {
+    let metadata = fs::symlink_metadata(path.as_ref())?;
+    assert_eq!(metadata.permissions().mode() & 0o7777, mode);
+    Ok(metadata)
 }
 
 fn assert_runtime_workspace_empty(workspace: &Path) -> TestResult<()> {

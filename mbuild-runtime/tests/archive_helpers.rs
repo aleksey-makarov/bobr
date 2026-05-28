@@ -2,7 +2,7 @@
 
 use mbuild_core::{FsTreeEntry, FsTreeManifest, InitramfsEntrySource, write_newc_initramfs};
 use mbuild_runtime::{
-    FsTreeArchiveEntrySource, FsTreeArchiveInput, MbuildIdmap, apply_ownership_batch,
+    FsTreeArchiveEntrySource, FsTreeArchiveInput, apply_ownership_batch,
     write_fs_tree_initramfs_in_ownership_namespace, write_fs_tree_tar_in_ownership_namespace,
 };
 use std::fs;
@@ -20,7 +20,6 @@ fn fs_tree_tar_helper_reads_subuid_owned_file() -> TestResult<()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     init_tracing();
-    let idmap = MbuildIdmap::from_host_environment()?;
     let temp = tempdir()?;
     let input_root = temp.path().join("input/root");
     let ownership_workspace = temp.path().join("ownership-workspace");
@@ -35,7 +34,7 @@ fn fs_tree_tar_helper_reads_subuid_owned_file() -> TestResult<()> {
         FsTreeEntry::directory("", 0, 0, 0o755),
         FsTreeEntry::file("data", 1, 1, 0o400),
     ])?;
-    apply_ownership_batch(&input_root, &manifest, &idmap, &ownership_workspace)?;
+    apply_ownership_batch(&input_root, &manifest, &ownership_workspace)?;
 
     write_fs_tree_tar_in_ownership_namespace(
         &[FsTreeArchiveInput {
@@ -50,7 +49,6 @@ fn fs_tree_tar_helper_reads_subuid_owned_file() -> TestResult<()> {
             },
         ],
         &output_tar,
-        &idmap,
         &tar_workspace,
     )?;
 
@@ -66,7 +64,6 @@ fn fs_tree_initramfs_helper_matches_core_writer() -> TestResult<()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     init_tracing();
-    let idmap = MbuildIdmap::from_host_environment()?;
     let temp = tempdir()?;
     let input_root = temp.path().join("input/root");
     let workspace = temp.path().join("workspace");
@@ -97,7 +94,6 @@ fn fs_tree_initramfs_helper_matches_core_writer() -> TestResult<()> {
             FsTreeArchiveEntrySource::Symlink,
         ],
         &output_initramfs,
-        &idmap,
         &workspace,
     )?;
 

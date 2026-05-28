@@ -173,9 +173,7 @@ impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
         manifest: &FsTreeManifest,
         workspace: &Path,
     ) -> Result<(), OciExtractError> {
-        let idmap = mbuild_runtime::cached_host_idmap()
-            .map_err(|error| OciExtractError::Runtime(error.to_string()))?;
-        mbuild_runtime::apply_ownership_batch(root_dir, manifest, &idmap, workspace)
+        mbuild_runtime::apply_ownership_batch(root_dir, manifest, workspace)
             .map_err(|error| OciExtractError::Runtime(error.to_string()))
     }
 }

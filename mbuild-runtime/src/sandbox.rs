@@ -7,7 +7,7 @@ mod reports;
 mod tools;
 
 use crate::error::RuntimeError;
-use crate::idmap::cached_host_idmap;
+use crate::idmap::cached_runtime_idmap;
 use lifecycle::SandboxLifecycle;
 use mounts::PreparedSandbox;
 use tracing::warn;
@@ -18,8 +18,7 @@ pub use reports::{SandboxBuildOutcome, SandboxStepReport};
 /// Execute a complete sandbox build and return the output hash.
 pub fn run_sandbox_build(config: SandboxBuildConfig) -> Result<SandboxBuildOutcome, RuntimeError> {
     config::validate_config(&config)?;
-    let idmap = cached_host_idmap()
-        .map_err(|error| RuntimeError::Preflight(format!("failed to load host idmap: {error}")))?;
+    let idmap = cached_runtime_idmap()?;
     crate::preflight::preflight_local_helper_runtime(idmap.as_ref())?;
     let tools = tools::cached_sandbox_tools()?;
 

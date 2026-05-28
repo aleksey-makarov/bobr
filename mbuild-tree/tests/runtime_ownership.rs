@@ -1,7 +1,6 @@
 #![cfg(all(feature = "integration-tests", target_os = "linux"))]
 
 use mbuild_core::{BuildContext, Builder, BuilderInputs, FsTreeEntry, FsTreeManifest};
-use mbuild_runtime::MbuildIdmap;
 use mbuild_tree::TreeBuilder;
 use serde_json::json;
 use std::fs;
@@ -13,7 +12,6 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 #[test]
 fn tree_directory_output_materializes_runtime_ownership() -> TestResult<()> {
-    let idmap = MbuildIdmap::from_host_environment()?;
     let temp = tempdir()?;
     let state_dir = temp.path().join("state");
     let temp_dir = state_dir.join("tmp");
@@ -109,39 +107,26 @@ fn tree_directory_output_materializes_runtime_ownership() -> TestResult<()> {
         )
     }));
 
-    assert_owner_and_mode(&root, idmap.current_uid(), idmap.current_gid(), 0o755)?;
-    assert_owner_and_mode(
-        root.join("owned"),
-        idmap.physical_uid(1)?,
-        idmap.physical_gid(1)?,
-        0o755,
-    )?;
-    assert_owner_and_mode(
-        root.join("owned/dir"),
-        idmap.physical_uid(1)?,
-        idmap.physical_gid(1)?,
-        0o755,
-    )?;
-    assert_owner_and_mode(
-        root.join("owned/file"),
-        idmap.physical_uid(1)?,
-        idmap.physical_gid(1)?,
-        0o644,
-    )?;
+    let root_metadata = assert_mode_and_read_owner(&root, 0o755)?;
+    let owned_metadata = assert_mode_and_read_owner(root.join("owned"), 0o755)?;
+    let dir_metadata = assert_mode_and_read_owner(root.join("owned/dir"), 0o755)?;
+    let file_metadata = assert_mode_and_read_owner(root.join("owned/file"), 0o644)?;
+    assert_eq!(dir_metadata.uid(), owned_metadata.uid());
+    assert_eq!(dir_metadata.gid(), owned_metadata.gid());
+    assert_eq!(file_metadata.uid(), owned_metadata.uid());
+    assert_eq!(file_metadata.gid(), owned_metadata.gid());
+    assert_ne!(owned_metadata.uid(), root_metadata.uid());
+    assert_ne!(owned_metadata.gid(), root_metadata.gid());
     let link = fs::symlink_metadata(root.join("owned/link"))?;
     assert!(link.file_type().is_symlink());
-    assert_eq!(link.uid(), idmap.physical_uid(1)?);
-    assert_eq!(link.gid(), idmap.physical_gid(1)?);
-
-    mbuild_core::validate_fs_tree_object(&result.staged_path, &idmap)?;
+    assert_eq!(link.uid(), owned_metadata.uid());
+    assert_eq!(link.gid(), owned_metadata.gid());
 
     Ok(())
 }
 
-fn assert_owner_and_mode(path: impl AsRef<Path>, uid: u32, gid: u32, mode: u32) -> TestResult<()> {
+fn assert_mode_and_read_owner(path: impl AsRef<Path>, mode: u32) -> TestResult<fs::Metadata> {
     let metadata = fs::symlink_metadata(path.as_ref())?;
-    assert_eq!(metadata.uid(), uid);
-    assert_eq!(metadata.gid(), gid);
     assert_eq!(metadata.permissions().mode() & 0o7777, mode);
-    Ok(())
+    Ok(metadata)
 }

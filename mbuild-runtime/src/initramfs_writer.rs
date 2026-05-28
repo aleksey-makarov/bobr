@@ -3,10 +3,10 @@
 use crate::{
     archive_writer::{
         FsTreeArchiveInput, canonicalize_input_roots, canonicalize_output_path,
-        validate_archive_request,
+        precheck_archive_manifest_owners, validate_archive_request,
     },
     error::RuntimeError,
-    idmap::MbuildIdmap,
+    idmap::cached_runtime_idmap,
     local_helper::{
         LocalHelperOperation, preflight_local_helper_runtime, run_local_helper_operation,
         write_helper_manifest,
@@ -27,7 +27,6 @@ pub fn write_fs_tree_initramfs_in_ownership_namespace(
     manifest: &FsTreeManifest,
     sources: &[FsTreeArchiveEntrySource],
     output_initramfs: &Path,
-    idmap: &MbuildIdmap,
     workspace: &Path,
 ) -> Result<(), RuntimeError> {
     validate_archive_request(
@@ -37,14 +36,15 @@ pub fn write_fs_tree_initramfs_in_ownership_namespace(
         sources,
         output_initramfs,
         workspace,
-        idmap,
     )?;
-    preflight_local_helper_runtime(idmap)?;
+    let idmap = cached_runtime_idmap()?;
+    precheck_archive_manifest_owners(manifest, idmap.as_ref())?;
+    preflight_local_helper_runtime(idmap.as_ref())?;
     let output_initramfs = canonicalize_output_path(output_initramfs, "initramfs output path")?;
     let input_roots = canonicalize_input_roots(inputs)?;
 
     run_local_helper_operation(
-        idmap,
+        idmap.as_ref(),
         workspace,
         FsTreeInitramfsOperation {
             input_roots,
