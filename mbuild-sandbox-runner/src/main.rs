@@ -10,7 +10,27 @@ use std::os::fd::{FromRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-const KEEP_CAPABILITIES: &[i32] = &[0, 1, 2, 3, 4, 6, 7, 8];
+const CAP_CHOWN: u32 = 0;
+const CAP_DAC_OVERRIDE: u32 = 1;
+const CAP_DAC_READ_SEARCH: u32 = 2;
+const CAP_FOWNER: u32 = 3;
+const CAP_FSETID: u32 = 4;
+const CAP_KILL: u32 = 5;
+const CAP_SETGID: u32 = 6;
+const CAP_SETUID: u32 = 7;
+const CAP_SETPCAP: u32 = 8;
+
+const KEEP_CAPABILITIES: &[u32] = &[
+    CAP_CHOWN,
+    CAP_DAC_OVERRIDE,
+    CAP_DAC_READ_SEARCH,
+    CAP_FOWNER,
+    CAP_FSETID,
+    CAP_KILL,
+    CAP_SETGID,
+    CAP_SETUID,
+    CAP_SETPCAP,
+];
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
 
 #[repr(C)]
@@ -349,17 +369,12 @@ fn set_no_new_privs() -> io::Result<()> {
 }
 
 fn drop_capabilities() -> io::Result<()> {
-    let mut mask = [0_u32; 2];
-    for cap in KEEP_CAPABILITIES {
-        let index = (*cap as usize) / 32;
-        let bit = (*cap as usize) % 32;
-        mask[index] |= 1_u32 << bit;
-    }
+    let mask = capability_mask(KEEP_CAPABILITIES);
 
-    for cap in 0..64 {
+    for cap in 0_u32..64 {
         if !KEEP_CAPABILITIES.contains(&cap) {
             unsafe {
-                libc::prctl(libc::PR_CAPBSET_DROP, cap, 0, 0, 0);
+                libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0);
             }
         }
     }
@@ -392,6 +407,16 @@ fn drop_capabilities() -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+fn capability_mask(capabilities: &[u32]) -> [u32; 2] {
+    let mut mask = [0_u32; 2];
+    for cap in capabilities {
+        let index = (cap / 32) as usize;
+        let bit = cap % 32;
+        mask[index] |= 1_u32 << bit;
+    }
+    mask
 }
 
 fn wait_for_child(pid: libc::pid_t) -> io::Result<i32> {
@@ -465,6 +490,14 @@ mod tests {
         ];
 
         assert!(parse_launch_args(&args).unwrap_err().contains("launch"));
+    }
+
+    #[test]
+    fn kept_capabilities_include_kill() {
+        assert!(KEEP_CAPABILITIES.contains(&CAP_KILL));
+
+        let mask = capability_mask(KEEP_CAPABILITIES);
+        assert_ne!(mask[0] & (1_u32 << CAP_KILL), 0);
     }
 
     #[test]
