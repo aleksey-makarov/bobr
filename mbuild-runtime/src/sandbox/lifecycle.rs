@@ -18,6 +18,8 @@ use std::process::Command;
 use std::thread;
 use tracing::warn;
 
+const RUNNER_WAIT_FD: RawFd = 3;
+
 pub(super) struct SandboxLifecycle {
     child: Option<LauncherChild>,
     run_dir: PathBuf,
@@ -165,7 +167,7 @@ fn fork_sandbox_runner(
         arg0,
         CString::new("launch").unwrap(),
         CString::new("--wait-fd").unwrap(),
-        CString::new(runner_start_read.to_string()).unwrap(),
+        CString::new(RUNNER_WAIT_FD.to_string()).unwrap(),
         CString::new("--config").unwrap(),
         path_cstring(launcher_config)?,
     ];
@@ -187,6 +189,7 @@ fn fork_sandbox_runner(
             stderr.write_raw(),
             userns_ready_write,
             idmap_ready_read,
+            runner_start_read,
         );
     }
 
@@ -241,6 +244,7 @@ fn child_exec_sandbox_runner(
     stderr_write: RawFd,
     child_ready_write: RawFd,
     exec_ready_read: RawFd,
+    runner_start_read: RawFd,
 ) -> ! {
     if child_setup_stdio(stderr_write).is_err() {
         unsafe { libc::_exit(127) };
@@ -259,9 +263,14 @@ fn child_exec_sandbox_runner(
         child_write_stderr(b"failed to wait for exec readiness\n");
         unsafe { libc::_exit(127) };
     }
+    if prepare_runner_wait_fd(runner_start_read).is_err() {
+        child_write_stderr(b"failed to prepare sandbox runner wait fd\n");
+        unsafe { libc::_exit(127) };
+    }
     unsafe {
-        libc::close(child_ready_write);
-        libc::close(exec_ready_read);
+        child_close_unless_runner_wait_fd(child_ready_write);
+        child_close_unless_runner_wait_fd(exec_ready_read);
+        child_close_unless_runner_wait_fd(runner_start_read);
         libc::execv(runner.as_ptr(), args.as_ptr());
     }
     child_write_stderr(b"failed to exec sandbox runner\n");
@@ -288,6 +297,39 @@ fn child_setup_stdio(stderr_write: RawFd) -> io::Result<()> {
         libc::close(stderr_write);
     }
     Ok(())
+}
+
+fn prepare_runner_wait_fd(fd: RawFd) -> io::Result<()> {
+    duplicate_runner_wait_fd(fd, RUNNER_WAIT_FD)
+}
+
+fn duplicate_runner_wait_fd(fd: RawFd, target_fd: RawFd) -> io::Result<()> {
+    if fd == target_fd {
+        clear_cloexec(fd)
+    } else if unsafe { libc::dup2(fd, target_fd) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn clear_cloexec(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn child_close_unless_runner_wait_fd(fd: RawFd) {
+    if fd != RUNNER_WAIT_FD {
+        unsafe {
+            libc::close(fd);
+        }
+    }
 }
 
 fn child_write_stderr(message: &'static [u8]) {
@@ -478,7 +520,7 @@ struct Pipe {
 impl Pipe {
     fn new() -> io::Result<Self> {
         let mut fds = [0; 2];
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(Self {
@@ -499,6 +541,46 @@ impl Pipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fd_flags(fd: RawFd) -> i32 {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert!(flags >= 0, "F_GETFD failed: {}", io::Error::last_os_error());
+        flags
+    }
+
+    fn cloexec_is_set(fd: RawFd) -> bool {
+        fd_flags(fd) & libc::FD_CLOEXEC != 0
+    }
+
+    #[test]
+    fn pipe_new_sets_cloexec_on_both_ends() {
+        let pipe = Pipe::new().unwrap();
+
+        assert!(cloexec_is_set(pipe.read_raw()));
+        assert!(cloexec_is_set(pipe.write_raw()));
+    }
+
+    #[test]
+    fn prepare_runner_wait_fd_duplicates_without_cloexec() {
+        let source = Pipe::new().unwrap();
+        let target = Pipe::new().unwrap();
+        let target_fd = target.write_raw();
+
+        duplicate_runner_wait_fd(source.read_raw(), target_fd).unwrap();
+
+        assert!(!cloexec_is_set(target_fd));
+    }
+
+    #[test]
+    fn prepare_runner_wait_fd_clears_cloexec_when_fd_already_matches() {
+        let pipe = Pipe::new().unwrap();
+        let fd = pipe.read_raw();
+        assert!(cloexec_is_set(fd));
+
+        duplicate_runner_wait_fd(fd, fd).unwrap();
+
+        assert!(!cloexec_is_set(fd));
+    }
 
     #[test]
     fn launcher_child_wait_with_output_drains_large_stderr() {
