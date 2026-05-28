@@ -1,10 +1,11 @@
 use crate::error::RuntimeError;
 use fsobj_hash::ObjectHash;
 use mbuild_core::FsTreeManifest;
-use serde::{Deserialize, Serialize};
+pub use mbuild_sandbox_runner_core::SandboxStepReport;
+use mbuild_sandbox_runner_core::{SandboxRunnerFailureReport, SandboxRunnerSuccessReport};
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitStatus;
 use std::str::FromStr;
 
@@ -17,63 +18,6 @@ pub struct SandboxBuildOutcome {
     pub manifest: FsTreeManifest,
     /// Structured per-step reports.
     pub steps: Vec<SandboxStepReport>,
-}
-
-/// Structured report for one sandbox step.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SandboxStepReport {
-    /// Step name.
-    pub name: String,
-    /// Step user identity.
-    pub run_as: String,
-    /// Process exit code.
-    pub exit_code: i32,
-    /// Step duration in milliseconds.
-    pub duration_ms: u128,
-    /// Host stdout log path.
-    pub stdout_path: PathBuf,
-    /// Host stderr log path.
-    pub stderr_path: PathBuf,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct SandboxRunnerSuccessReport {
-    object_hash: String,
-    manifest_jsonl: String,
-    steps: Vec<SandboxStepReport>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SandboxRunnerFailureReport {
-    label: String,
-    message: String,
-    exit_code: Option<i32>,
-    signal: Option<i32>,
-    duration_ms: Option<u128>,
-    stdout_path: Option<PathBuf>,
-    stderr_path: Option<PathBuf>,
-}
-
-impl SandboxRunnerFailureReport {
-    fn to_error_message(&self) -> String {
-        let mut message = format!("{}: {}", self.label, self.message);
-        if let Some(code) = self.exit_code {
-            message.push_str(&format!("; exit_status={code}"));
-        }
-        if let Some(signal) = self.signal {
-            message.push_str(&format!("; signal={signal}"));
-        }
-        if let Some(duration_ms) = self.duration_ms {
-            message.push_str(&format!("; duration_ms={duration_ms}"));
-        }
-        if let Some(stdout) = &self.stdout_path {
-            message.push_str(&format!("; stdout={}", stdout.display()));
-        }
-        if let Some(stderr) = &self.stderr_path {
-            message.push_str(&format!("; stderr={}", stderr.display()));
-        }
-        message
-    }
 }
 
 pub(super) fn read_sandbox_success_report(
@@ -169,6 +113,7 @@ mod tests {
     use super::*;
     use fsobj_hash::hash_fs_tree_object;
     use mbuild_core::FsTreeEntry;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     #[test]
