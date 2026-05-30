@@ -1,21 +1,30 @@
-//! Canonical `fs-tree manifest v2` parser, writer, and validation types.
+//! Canonical `fs-tree manifest v2` parser, writer, validation types, and
+//! local root-runner filesystem operations.
 //!
 //! This crate owns the future manifest-addressed fs-tree manifest format. It
-//! does not implement fs-file storage, fs-file hashing, tree scanning,
-//! materialization, or builder integration.
+//! does not implement builder integration or the legacy fs-tree object format.
 
 #![deny(missing_docs)]
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("mbuild-fs-tree requires Linux");
+
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::fmt;
 use std::fs;
-use std::path::Path;
+use std::io::{self, Read};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 const SCHEMA: &str = "mbuild-fs-tree-manifest-v2";
 const CANONICAL_SCHEMA_LINE: &[u8] = br#"{"schema":"mbuild-fs-tree-manifest-v2"}
 "#;
+const FS_FILE_HASH_TAG: &[u8] = b"mbuild:fs-file:v1\0";
 
 /// Canonical `fs-tree manifest v2`.
 ///
@@ -105,6 +114,48 @@ impl fmt::Display for FsTreeManifestError {
 }
 
 impl std::error::Error for FsTreeManifestError {}
+
+/// Error returned by filesystem scanning, fs-file storage, hashing, and
+/// materialization operations.
+#[derive(Debug)]
+pub enum FsTreeIoError {
+    /// The caller supplied an invalid path, mode, or manifest shape.
+    InvalidInput(String),
+    /// The requested operation is not supported by this platform or file type.
+    Unsupported(String),
+    /// A filesystem operation failed.
+    Io(String),
+    /// Manifest validation failed.
+    Manifest(FsTreeManifestError),
+}
+
+impl fmt::Display for FsTreeIoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInput(message)
+            | Self::Unsupported(message)
+            | Self::Io(message)
+            | Self::Manifest(FsTreeManifestError::Invalid(message))
+            | Self::Manifest(FsTreeManifestError::Parse(message))
+            | Self::Manifest(FsTreeManifestError::Io(message)) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for FsTreeIoError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Manifest(error) => Some(error),
+            Self::InvalidInput(_) | Self::Unsupported(_) | Self::Io(_) => None,
+        }
+    }
+}
+
+impl From<FsTreeManifestError> for FsTreeIoError {
+    fn from(error: FsTreeManifestError) -> Self {
+        Self::Manifest(error)
+    }
+}
 
 /// Error returned when parsing an [`FsFileHash`] from text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +392,392 @@ impl FromStr for FsFileHash {
         }
         Ok(Self(bytes))
     }
+}
+
+/// Returns the path of an fs-file object under an `fs-files` root.
+///
+/// The root path must be absolute. The layout is
+/// `<root>/<first-two-hex-digits>/<64-lowercase-hex-hash>`.
+fn fs_file_path(root: &Path, hash: FsFileHash) -> Result<PathBuf, FsTreeIoError> {
+    require_absolute(root, "fs-files root")?;
+    let hex = hash.to_hex();
+    Ok(root.join(&hex[..2]).join(hex))
+}
+
+/// Hashes a regular file at an absolute filesystem path.
+///
+/// The file is hashed using the fs-file hash algorithm with the file's current
+/// uid, gid, mode, size, and byte content. Symlinks and non-regular files are
+/// rejected.
+fn hash_fs_file_path(path: &Path) -> Result<FsFileHash, FsTreeIoError> {
+    require_absolute(path, "fs-file path")?;
+
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| map_io(path, "inspect fs-file", error))?;
+    if !metadata.file_type().is_file() {
+        return Err(FsTreeIoError::Unsupported(format!(
+            "fs-file path '{}' is not a regular file",
+            path.display()
+        )));
+    }
+
+    let mode = metadata.permissions().mode() & 0o7777;
+    let content_sha256 = sha256_file(path)?;
+    hash_fs_file_parts(
+        metadata.uid(),
+        metadata.gid(),
+        mode,
+        metadata.size(),
+        content_sha256,
+    )
+}
+
+/// Computes an fs-file hash from already-collected file metadata and content
+/// digest.
+///
+/// The hash algorithm is:
+///
+/// `sha256(b"mbuild:fs-file:v1\0" || uid:u32be || gid:u32be || mode:u32be ||
+/// size:u64be || sha256(file_bytes))`.
+fn hash_fs_file_parts(
+    uid: u32,
+    gid: u32,
+    mode: u32,
+    size: u64,
+    content_sha256: [u8; 32],
+) -> Result<FsFileHash, FsTreeIoError> {
+    validate_fs_file_mode(mode)?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(FS_FILE_HASH_TAG);
+    hasher.update(uid.to_be_bytes());
+    hasher.update(gid.to_be_bytes());
+    hasher.update(mode.to_be_bytes());
+    hasher.update(size.to_be_bytes());
+    hasher.update(content_sha256);
+
+    let mut bytes = [0_u8; 32];
+    bytes.copy_from_slice(&hasher.finalize());
+    Ok(FsFileHash(bytes))
+}
+
+/// Scans an immutable filesystem tree into a manifest and imports regular
+/// files into an `fs-files` directory using hardlinks.
+///
+/// Both paths must be absolute existing real directories, not symlinks. Regular
+/// files are hardlinked into `fs-files`; if the target object already exists,
+/// it is trusted as a cache hit. Shard directories are created lazily for
+/// objects that need to be imported.
+pub fn scan_fs_tree(
+    source_root: &Path,
+    fs_files_root: &Path,
+) -> Result<FsTreeManifest, FsTreeIoError> {
+    require_existing_directory(source_root, "source root")?;
+    require_existing_directory(fs_files_root, "fs-files root")?;
+
+    let mut entries = Vec::new();
+    scan_entry(source_root, source_root, fs_files_root, &mut entries)?;
+    FsTreeManifest::from_entries(entries).map_err(FsTreeIoError::Manifest)
+}
+
+/// Materializes a manifest from an `fs-files` directory into an empty output root.
+///
+/// Both paths must be absolute existing real directories, not symlinks.
+/// `output_root` must be empty. Regular files are hardlinked from `fs-files`,
+/// symlinks are recreated from manifest targets, and directory ownership and
+/// modes are applied after all children have been created. On error, partial
+/// output is left for the caller to inspect or remove.
+pub fn materialize_fs_tree(
+    manifest: &FsTreeManifest,
+    fs_files_root: &Path,
+    output_root: &Path,
+) -> Result<(), FsTreeIoError> {
+    require_existing_directory(fs_files_root, "fs-files root")?;
+    require_existing_empty_directory(output_root, "output root")?;
+
+    materialize_into_existing_root(manifest, fs_files_root, output_root)
+}
+
+fn require_absolute(path: &Path, label: &str) -> Result<(), FsTreeIoError> {
+    if path.is_absolute() {
+        Ok(())
+    } else {
+        Err(FsTreeIoError::InvalidInput(format!(
+            "{label} must be absolute: '{}'",
+            path.display()
+        )))
+    }
+}
+
+fn require_existing_directory(path: &Path, label: &str) -> Result<(), FsTreeIoError> {
+    require_absolute(path, label)?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            FsTreeIoError::InvalidInput(format!("{label} must exist: '{}'", path.display()))
+        } else {
+            map_io(path, &format!("inspect {label}"), error)
+        }
+    })?;
+    if metadata.file_type().is_dir() {
+        Ok(())
+    } else {
+        Err(FsTreeIoError::InvalidInput(format!(
+            "{label} must be an existing real directory: '{}'",
+            path.display()
+        )))
+    }
+}
+
+fn require_existing_empty_directory(path: &Path, label: &str) -> Result<(), FsTreeIoError> {
+    require_existing_directory(path, label)?;
+    match fs::read_dir(path)
+        .map_err(|error| map_io(path, &format!("read {label}"), error))?
+        .next()
+    {
+        Some(Ok(entry)) => Err(FsTreeIoError::InvalidInput(format!(
+            "{label} must be empty, found '{}'",
+            entry.path().display()
+        ))),
+        Some(Err(error)) => Err(map_io(path, &format!("read {label} entry"), error)),
+        None => Ok(()),
+    }
+}
+
+fn validate_fs_file_mode(mode: u32) -> Result<(), FsTreeIoError> {
+    if mode <= 0o7777 {
+        Ok(())
+    } else {
+        Err(FsTreeIoError::InvalidInput(format!(
+            "fs-file mode is out of range: {mode}"
+        )))
+    }
+}
+
+fn create_dir_all(path: &Path, label: &str) -> Result<(), FsTreeIoError> {
+    fs::create_dir_all(path).map_err(|error| {
+        FsTreeIoError::Io(format!(
+            "failed to create {label} '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn map_io(path: &Path, action: &str, error: io::Error) -> FsTreeIoError {
+    FsTreeIoError::Io(format!("failed to {action} '{}': {error}", path.display()))
+}
+
+fn scan_entry(
+    scan_root: &Path,
+    current_path: &Path,
+    fs_files_root: &Path,
+    entries: &mut Vec<FsTreeEntry>,
+) -> Result<(), FsTreeIoError> {
+    let metadata = fs::symlink_metadata(current_path)
+        .map_err(|error| map_io(current_path, "inspect", error))?;
+    let file_type = metadata.file_type();
+    let rel_path = manifest_relative_path(scan_root, current_path)?;
+    if file_type.is_dir() {
+        entries.push(FsTreeEntry::directory(
+            rel_path,
+            metadata.uid(),
+            metadata.gid(),
+            metadata.permissions().mode() & 0o7777,
+        ));
+        let mut children = fs::read_dir(current_path)
+            .map_err(|error| map_io(current_path, "read directory", error))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_io(current_path, "read directory entry", error))?;
+        children.sort_by(|left, right| left.as_os_str().cmp(right.as_os_str()));
+        for child in children {
+            scan_entry(scan_root, &child, fs_files_root, entries)?;
+        }
+    } else if file_type.is_symlink() {
+        let target = fs::read_link(current_path)
+            .map_err(|error| map_io(current_path, "read symlink", error))?;
+        let target = target.to_str().ok_or_else(|| {
+            FsTreeIoError::Unsupported(format!(
+                "symlink target for '{}' is not UTF-8",
+                current_path.display()
+            ))
+        })?;
+        entries.push(FsTreeEntry::symlink(
+            rel_path,
+            metadata.uid(),
+            metadata.gid(),
+            target,
+        ));
+    } else if file_type.is_file() {
+        let hash = hash_fs_file_path(current_path)?;
+        let object_path = fs_file_path(fs_files_root, hash)?;
+        match fs::symlink_metadata(&object_path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                create_fs_file_shard_dir(&object_path)?;
+                match fs::hard_link(current_path, &object_path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(map_io(
+                            &object_path,
+                            &format!("hardlink fs-file from '{}'", current_path.display()),
+                            error,
+                        ));
+                    }
+                }
+            }
+            Err(error) => return Err(map_io(&object_path, "inspect fs-file object", error)),
+        }
+        entries.push(FsTreeEntry::file(rel_path, hash));
+    } else {
+        return Err(FsTreeIoError::Unsupported(format!(
+            "unsupported filesystem entry kind at '{}'",
+            current_path.display()
+        )));
+    }
+    Ok(())
+}
+fn create_fs_file_shard_dir(object_path: &Path) -> Result<(), FsTreeIoError> {
+    let Some(shard_dir) = object_path.parent() else {
+        return Err(FsTreeIoError::InvalidInput(format!(
+            "fs-file object path has no parent directory: '{}'",
+            object_path.display()
+        )));
+    };
+    create_dir_all(shard_dir, "fs-files shard directory")
+}
+fn materialize_into_existing_root(
+    manifest: &FsTreeManifest,
+    fs_files_root: &Path,
+    output_root: &Path,
+) -> Result<(), FsTreeIoError> {
+    for entry in manifest.entries() {
+        match entry {
+            FsTreeEntry::Directory { path, .. } if path.is_empty() => {}
+            FsTreeEntry::Directory { path, .. } => {
+                let dst = output_root.join(path);
+                fs::create_dir(&dst).map_err(|error| map_io(&dst, "create directory", error))?;
+            }
+            FsTreeEntry::File { path, hash } => {
+                let src = fs_file_path(fs_files_root, *hash)?;
+                let dst = output_root.join(path);
+                fs::hard_link(&src, &dst).map_err(|error| {
+                    map_io(
+                        &dst,
+                        &format!("hardlink fs-tree file from '{}'", src.display()),
+                        error,
+                    )
+                })?;
+            }
+            FsTreeEntry::Symlink {
+                path,
+                uid,
+                gid,
+                target,
+            } => {
+                let dst = output_root.join(path);
+                symlink(target, &dst).map_err(|error| map_io(&dst, "create symlink", error))?;
+                lchown_if_needed(&dst, *uid, *gid)?;
+            }
+        }
+    }
+
+    for entry in manifest.entries().iter().rev() {
+        if let FsTreeEntry::Directory {
+            path,
+            uid,
+            gid,
+            mode,
+        } = entry
+        {
+            let dst = if path.is_empty() {
+                output_root.to_path_buf()
+            } else {
+                output_root.join(path)
+            };
+            chown_if_needed(&dst, *uid, *gid)?;
+            chmod(&dst, *mode)?;
+        }
+    }
+
+    Ok(())
+}
+fn manifest_relative_path(source_root: &Path, path: &Path) -> Result<String, FsTreeIoError> {
+    let relative = path.strip_prefix(source_root).map_err(|error| {
+        FsTreeIoError::InvalidInput(format!(
+            "failed to resolve '{}' relative to '{}': {error}",
+            path.display(),
+            source_root.display()
+        ))
+    })?;
+    if relative.as_os_str().is_empty() {
+        return Ok(String::new());
+    }
+    relative.to_str().map(str::to_string).ok_or_else(|| {
+        FsTreeIoError::Unsupported(format!("fs-tree path '{}' is not UTF-8", path.display()))
+    })
+}
+fn sha256_file(path: &Path) -> Result<[u8; 32], FsTreeIoError> {
+    let mut file = fs::File::open(path).map_err(|error| map_io(path, "open file", error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| map_io(path, "read file", error))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let mut bytes = [0_u8; 32];
+    bytes.copy_from_slice(&hasher.finalize());
+    Ok(bytes)
+}
+fn chown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), FsTreeIoError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| map_io(path, "inspect", error))?;
+    if metadata.uid() == uid && metadata.gid() == gid {
+        return Ok(());
+    }
+    chown(path, uid, gid)
+}
+fn lchown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), FsTreeIoError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| map_io(path, "inspect", error))?;
+    if metadata.uid() == uid && metadata.gid() == gid {
+        return Ok(());
+    }
+    lchown(path, uid, gid)
+}
+fn chown(path: &Path, uid: u32, gid: u32) -> Result<(), FsTreeIoError> {
+    let c_path = path_cstring(path)?;
+    let result = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(map_io(path, "chown", io::Error::last_os_error()))
+    }
+}
+fn lchown(path: &Path, uid: u32, gid: u32) -> Result<(), FsTreeIoError> {
+    let c_path = path_cstring(path)?;
+    let result = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(map_io(path, "lchown", io::Error::last_os_error()))
+    }
+}
+fn path_cstring(path: &Path) -> Result<CString, FsTreeIoError> {
+    CString::new(path.as_os_str().as_bytes()).map_err(|error| {
+        FsTreeIoError::InvalidInput(format!(
+            "path contains NUL byte '{}': {error}",
+            path.display()
+        ))
+    })
+}
+fn chmod(path: &Path, mode: u32) -> Result<(), FsTreeIoError> {
+    validate_fs_file_mode(mode)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+        .map_err(|error| map_io(path, "chmod", error))
 }
 
 fn validate_schema_header(raw_line: &str) -> Result<(), FsTreeManifestError> {
@@ -1033,5 +1470,332 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn fs_file_hash_vector_and_path_layout() {
+        let mut content = [0_u8; 32];
+        content.copy_from_slice(&Sha256::digest(b"hello\n"));
+        let hash = hash_fs_file_parts(1, 2, 0o644, 6, content).unwrap();
+        assert_eq!(
+            hash.to_hex(),
+            "dd7d9c9ca8f19d88b408764813ef7e3824ea544bc5e32973223f763d42d75ca9"
+        );
+
+        let root = Path::new("/tmp/fs-files");
+        assert_eq!(
+            fs_file_path(root, hash).unwrap(),
+            PathBuf::from(
+                "/tmp/fs-files/dd/dd7d9c9ca8f19d88b408764813ef7e3824ea544bc5e32973223f763d42d75ca9"
+            )
+        );
+        assert!(hash_fs_file_parts(0, 0, 0o10000, 0, [0; 32]).is_err());
+        assert!(fs_file_path(Path::new("relative"), hash).is_err());
+    }
+
+    #[test]
+    fn existing_directory_checks_reject_missing_paths_and_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let real = temp_dir.path().join("real");
+        let link = temp_dir.path().join("link");
+        fs::create_dir(&real).unwrap();
+        symlink(&real, &link).unwrap();
+
+        assert!(require_existing_directory(&real, "test root").is_ok());
+        assert!(matches!(
+            require_existing_directory(&temp_dir.path().join("missing"), "test root"),
+            Err(FsTreeIoError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            require_existing_directory(&link, "test root"),
+            Err(FsTreeIoError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn scan_rejects_missing_fs_files_root() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = temp_dir.path().join("source");
+        let fs_files = temp_dir.path().join("fs-files");
+        fs::create_dir(&source).unwrap();
+
+        assert!(matches!(
+            scan_fs_tree(&source, &fs_files),
+            Err(FsTreeIoError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn scan_creates_shards_lazily() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = temp_dir.path().join("source");
+        let fs_files = temp_dir.path().join("fs-files");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&fs_files).unwrap();
+        fs::write(source.join("file"), b"data").unwrap();
+
+        let hash = hash_fs_file_path(&source.join("file")).unwrap();
+        let object_path = fs_file_path(&fs_files, hash).unwrap();
+        assert!(!object_path.parent().unwrap().exists());
+
+        scan_fs_tree(&source, &fs_files).unwrap();
+
+        assert!(object_path.parent().unwrap().is_dir());
+        assert!(object_path.is_file());
+    }
+
+    #[test]
+    fn scan_imports_manifest_entries_and_reuses_fs_files() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = temp_dir.path().join("source");
+        let fs_files = temp_dir.path().join("fs-files");
+        fs::create_dir(&fs_files).unwrap();
+        fs::create_dir_all(source.join("bin")).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(source.join("bin"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(source.join("bin/tool"), b"tool\n").unwrap();
+        fs::set_permissions(source.join("bin/tool"), fs::Permissions::from_mode(0o640)).unwrap();
+        symlink("bin/tool", source.join("tool-link")).unwrap();
+
+        let owner = fs::symlink_metadata(&source).unwrap();
+        let manifest = scan_fs_tree(&source, &fs_files).unwrap();
+        let file_hash = hash_fs_file_path(&source.join("bin/tool")).unwrap();
+        let object_path = fs_file_path(&fs_files, file_hash).unwrap();
+
+        assert!(manifest.entries().contains(&FsTreeEntry::directory(
+            "",
+            owner.uid(),
+            owner.gid(),
+            0o755
+        )));
+        assert!(manifest.entries().contains(&FsTreeEntry::directory(
+            "bin",
+            owner.uid(),
+            owner.gid(),
+            0o700
+        )));
+        assert!(
+            manifest
+                .entries()
+                .contains(&FsTreeEntry::file("bin/tool", file_hash))
+        );
+        assert!(manifest.entries().contains(&FsTreeEntry::symlink(
+            "tool-link",
+            owner.uid(),
+            owner.gid(),
+            "bin/tool"
+        )));
+        assert_eq!(
+            fs::metadata(source.join("bin/tool")).unwrap().ino(),
+            fs::metadata(&object_path).unwrap().ino()
+        );
+
+        let first_inode = fs::metadata(&object_path).unwrap().ino();
+        let rescanned = scan_fs_tree(&source, &fs_files).unwrap();
+        assert_eq!(rescanned, manifest);
+        assert_eq!(fs::metadata(&object_path).unwrap().ino(), first_inode);
+    }
+    #[test]
+    fn materialize_recreates_tree_and_hardlinks_fs_files() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = temp_dir.path().join("source");
+        let fs_files = temp_dir.path().join("fs-files");
+        let output = temp_dir.path().join("output");
+        fs::create_dir(&fs_files).unwrap();
+        fs::create_dir(&output).unwrap();
+        fs::create_dir_all(source.join("locked")).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(source.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(source.join("locked/file"), b"data").unwrap();
+        fs::set_permissions(
+            source.join("locked/file"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        symlink("locked/file", source.join("link")).unwrap();
+
+        let manifest = scan_fs_tree(&source, &fs_files).unwrap();
+        let file_hash = hash_fs_file_path(&source.join("locked/file")).unwrap();
+        let object_path = fs_file_path(&fs_files, file_hash).unwrap();
+
+        materialize_fs_tree(&manifest, &fs_files, &output).unwrap();
+
+        assert_eq!(fs::read(output.join("locked/file")).unwrap(), b"data");
+        assert_eq!(
+            fs::read_link(output.join("link")).unwrap(),
+            PathBuf::from("locked/file")
+        );
+        assert_eq!(
+            fs::metadata(output.join("locked/file")).unwrap().ino(),
+            fs::metadata(&object_path).unwrap().ino()
+        );
+        assert_eq!(
+            fs::symlink_metadata(output.join("locked"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+        assert_eq!(
+            fs::symlink_metadata(&output).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn materialize_applies_restrictive_directory_modes_after_children() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fs_files = temp_dir.path().join("fs-files");
+        let source_file = temp_dir.path().join("source-file");
+        let output = temp_dir.path().join("output");
+        fs::create_dir(&fs_files).unwrap();
+        fs::create_dir(&output).unwrap();
+        fs::write(&source_file, b"secret").unwrap();
+        fs::set_permissions(&source_file, fs::Permissions::from_mode(0o600)).unwrap();
+        let source_meta = fs::symlink_metadata(&source_file).unwrap();
+        let hash = hash_fs_file_path(&source_file).unwrap();
+        let object_path = fs_file_path(&fs_files, hash).unwrap();
+        fs::create_dir_all(object_path.parent().unwrap()).unwrap();
+        fs::hard_link(&source_file, object_path).unwrap();
+        let manifest = manifest(vec![
+            FsTreeEntry::directory("", source_meta.uid(), source_meta.gid(), 0o755),
+            FsTreeEntry::directory("locked", source_meta.uid(), source_meta.gid(), 0o000),
+            FsTreeEntry::file("locked/file", hash),
+        ]);
+
+        materialize_fs_tree(&manifest, &fs_files, &output).unwrap();
+
+        assert_eq!(fs::metadata(&source_file).unwrap().nlink(), 3);
+        assert_eq!(
+            fs::symlink_metadata(output.join("locked"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o000
+        );
+        fs::set_permissions(output.join("locked"), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn scan_rejects_relative_root_root_symlink_non_utf8_and_special_files() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = temp_dir.path().join("source");
+        let fs_files = temp_dir.path().join("fs-files");
+        fs::create_dir(&source).unwrap();
+
+        assert!(matches!(
+            scan_fs_tree(Path::new("relative"), &fs_files),
+            Err(FsTreeIoError::InvalidInput(_))
+        ));
+
+        let root_link = temp_dir.path().join("source-link");
+        symlink(&source, &root_link).unwrap();
+        assert!(matches!(
+            scan_fs_tree(&root_link, &fs_files),
+            Err(FsTreeIoError::InvalidInput(_))
+        ));
+
+        fs::create_dir(&fs_files).unwrap();
+
+        let non_utf8_name = std::ffi::OsString::from_vec(vec![b'b', 0xff]);
+        fs::write(source.join(non_utf8_name), b"x").unwrap();
+        assert!(matches!(
+            scan_fs_tree(&source, &fs_files),
+            Err(FsTreeIoError::Unsupported(_))
+        ));
+        fs::remove_file(source.join(std::ffi::OsString::from_vec(vec![b'b', 0xff]))).unwrap();
+
+        symlink(
+            PathBuf::from(std::ffi::OsString::from_vec(vec![b't', 0xff])),
+            source.join("bad-link"),
+        )
+        .unwrap();
+        assert!(matches!(
+            scan_fs_tree(&source, &fs_files),
+            Err(FsTreeIoError::Unsupported(_))
+        ));
+        fs::remove_file(source.join("bad-link")).unwrap();
+
+        let fifo = source.join("fifo");
+        let c_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        let result = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+        assert_eq!(result, 0);
+        assert!(matches!(
+            scan_fs_tree(&source, &fs_files),
+            Err(FsTreeIoError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn materialize_rejects_missing_non_empty_and_symlink_output_roots() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fs_files = temp_dir.path().join("fs-files");
+        let missing_output = temp_dir.path().join("missing-output");
+        let non_empty_output = temp_dir.path().join("non-empty-output");
+        let real_output = temp_dir.path().join("real-output");
+        let symlink_output = temp_dir.path().join("symlink-output");
+        fs::create_dir(&fs_files).unwrap();
+        fs::create_dir(&non_empty_output).unwrap();
+        fs::write(non_empty_output.join("existing"), b"x").unwrap();
+        fs::create_dir(&real_output).unwrap();
+        symlink(&real_output, &symlink_output).unwrap();
+        let owner = fs::symlink_metadata(temp_dir.path()).unwrap();
+        let manifest = manifest(vec![FsTreeEntry::directory(
+            "",
+            owner.uid(),
+            owner.gid(),
+            0o755,
+        )]);
+
+        assert!(matches!(
+            materialize_fs_tree(&manifest, &fs_files, &missing_output),
+            Err(FsTreeIoError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            materialize_fs_tree(&manifest, &fs_files, &non_empty_output),
+            Err(FsTreeIoError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            materialize_fs_tree(&manifest, &fs_files, &symlink_output),
+            Err(FsTreeIoError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn materialize_keeps_partial_output_on_failure() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fs_files = temp_dir.path().join("fs-files");
+        let output = temp_dir.path().join("output");
+        fs::create_dir(&fs_files).unwrap();
+        fs::create_dir(&output).unwrap();
+        let owner = fs::symlink_metadata(temp_dir.path()).unwrap();
+        let missing_hash = hash();
+        let manifest = manifest(vec![
+            FsTreeEntry::directory("", owner.uid(), owner.gid(), 0o755),
+            FsTreeEntry::directory("partial", owner.uid(), owner.gid(), 0o755),
+            FsTreeEntry::file("partial/missing", missing_hash),
+        ]);
+
+        assert!(materialize_fs_tree(&manifest, &fs_files, &output).is_err());
+        assert!(output.exists());
+        assert!(output.join("partial").is_dir());
     }
 }

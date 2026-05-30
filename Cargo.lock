@@ -935,7 +935,9 @@ dependencies = [
 name = "mbuild-fs-tree"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
