@@ -8,4 +8,5 @@
 - [Split Outputs](SPLIT_OUTPUTS.md)
 - [Content-Addressed Store](CAS.md)
 - [Filesystem Object Hashing](FSOBJ_HASH.md)
+- [fs-tree Manifest v2](FS_TREE_MANIFEST_V2.md)
 - [Store and fs-tree Awareness](STORE_AND_FS_TREE_AWARENESS.md)

@@ -13,6 +13,7 @@ members = [
   "mbuild-sandbox-runner-core",
   "mbuild-text",
   "mbuild-tree",
+  "mbuild-fs-tree",
   "fsobj-hash",
 ]
 

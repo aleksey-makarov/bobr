@@ -932,6 +932,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mbuild-fs-tree"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "mbuild-group"
 version = "0.1.0"
 dependencies = [

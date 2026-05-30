@@ -25,6 +25,9 @@
 6. [Filesystem Object Hashing](./FSOBJ_HASH.md)
    Structural hashing rules shared by filesystem paths and tar archives.
 
-7. [Store and fs-tree Awareness](./STORE_AND_FS_TREE_AWARENESS.md)
+7. [fs-tree Manifest v2](./FS_TREE_MANIFEST_V2.md)
+   Canonical future manifest format for manifest-addressed fs-tree artifacts.
+
+8. [Store and fs-tree Awareness](./STORE_AND_FS_TREE_AWARENESS.md)
    Current behavior of builders and source origins with store objects,
    fs-tree manifests, logical ownership, and extended ids.
