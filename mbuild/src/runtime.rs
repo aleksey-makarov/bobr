@@ -1,7 +1,7 @@
 use crate::resolved_inputs::ResolvedInputs;
 use mbuild_core::{
     Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger,
-    Builder, BuilderError, CancellationToken, CasError, PublishedBuild, ResultInputIdentity,
+    Builder, BuilderError, CancellationToken, CasError, PublishedBuild, ReuseInputIdentity,
     StoreLayout, compute_reuse_key, fsutil, load_build_handle, load_reuse_record,
     materialize_build, object_path,
 };
@@ -84,7 +84,7 @@ pub(crate) fn execute_builder_node(
 
     check_cancelled(&cancellation)?;
     let inputs_identity = inputs
-        .ordered_input_identities(builder.spec())
+        .ordered_reuse_input_identities(builder.spec())
         .map_err(map_builder_error)?;
     let logger = run_logger.bind_node(builder.spec().tag, build_name, build_key);
     log_runtime_event(
@@ -216,7 +216,7 @@ pub(crate) fn lookup_canonical_result(
     layout: &StoreLayout,
     builder_tag: &str,
     config: &Value,
-    inputs: &[ResultInputIdentity],
+    inputs: &[ReuseInputIdentity],
     build_key: BuildKey,
 ) -> Result<Option<PublishedBuild>, RuntimeError> {
     let reuse_key = compute_reuse_key(builder_tag, config, inputs).map_err(map_store_error)?;
@@ -587,7 +587,7 @@ mod tests {
     use super::*;
     use mbuild_core::{
         BuildContext, BuildRunLogger, BuilderInputs, BuilderSpec, CancellationToken,
-        PublishOutputRequest, ResultInputIdentity, RunOptions, StagedBuildResult, TypedBuilder,
+        PublishOutputRequest, ReuseInputIdentity, RunOptions, StagedBuildResult, TypedBuilder,
         compute_build_key, publish_output,
     };
     use serde::Deserialize;
@@ -743,7 +743,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
-        let matching_inputs = vec![ResultInputIdentity {
+        let matching_inputs = vec![ReuseInputIdentity {
             object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
                 .parse()
                 .unwrap(),
@@ -782,7 +782,7 @@ mod tests {
         .expect("expected canonical result hit");
         assert_eq!(hit.build.build_key, lookup_build_key);
 
-        let mismatching_inputs = vec![ResultInputIdentity {
+        let mismatching_inputs = vec![ReuseInputIdentity {
             object_hash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                 .parse()
                 .unwrap(),

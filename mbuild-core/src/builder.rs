@@ -1,9 +1,8 @@
 use crate::BuilderError;
 use crate::cancellation::CancellationToken;
-use crate::cas::{BuildKey, ResultId, ReuseKey};
 use crate::logging::{BuildLogEvent, BuildLogLevel, BuildLogger, NoopBuildLogger};
 use fsobj_hash::ObjectHash;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -255,69 +254,6 @@ pub struct StagedBuildResult {
     pub object_hash: Option<ObjectHash>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResultInputIdentity {
-    pub object_hash: ObjectHash,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Build {
-    pub build_key: BuildKey,
-    pub result_id: ResultId,
-    #[serde(with = "serde_object_hash")]
-    pub object_hash: ObjectHash,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResultRecord {
-    pub result_id: ResultId,
-    pub object_hash: ObjectHash,
-    pub created_at: Option<String>,
-    pub inputs: Vec<ResultInputIdentity>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RealizedResult {
-    pub result_id: ResultId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub build_key: Option<BuildKey>,
-    #[serde(with = "serde_object_hash")]
-    pub object_hash: ObjectHash,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<String>,
-}
-
-mod serde_object_hash {
-    use fsobj_hash::ObjectHash;
-    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
-    use std::str::FromStr;
-
-    pub fn serialize<S>(value: &ObjectHash, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&value.to_string())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<ObjectHash, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        ObjectHash::from_str(&value).map_err(D::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct PublishedBuild {
-    pub build: Build,
-    pub reuse_key: ReuseKey,
-    pub result: ResultRecord,
-    pub object_path: PathBuf,
-}
-
 pub trait Builder {
     fn spec(&self) -> &'static BuilderSpec;
 
@@ -366,6 +302,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
+
     fn sample_builder_object() -> BuilderInputObject {
         BuilderInputObject {
             path: PathBuf::from("/tmp/object"),

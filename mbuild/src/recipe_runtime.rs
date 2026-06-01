@@ -11,7 +11,7 @@ use crate::runtime::{
 use fsobj_hash::hash_path;
 use mbuild_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, CancellationToken,
-    OriginContext, RealizedResult, ResultInputIdentity, ResultRecord, RunOptions, StoreLayout,
+    OriginContext, RealizedResult, ResultRecord, ReuseInputIdentity, RunOptions, StoreLayout,
     compute_result_id, fsutil, import_object, load_result_record, object_path, publish_result_refs,
     store_result_record,
 };
@@ -356,7 +356,7 @@ fn lookup_canonical_for_planned_node(
         return Ok(None);
     };
 
-    let mut input_identities = Vec::<ResultInputIdentity>::new();
+    let mut input_identities = Vec::<ReuseInputIdentity>::new();
     let mut all_reused = true;
     node.recipe.try_for_each_direct_dep(|dep| {
         let dep_node = nodes.get(&dep).ok_or_else(|| {
@@ -366,7 +366,7 @@ fn lookup_canonical_for_planned_node(
             ))
         })?;
         match &dep_node.state {
-            PlanningState::Reused { realized, .. } => input_identities.push(ResultInputIdentity {
+            PlanningState::Reused { realized, .. } => input_identities.push(ReuseInputIdentity {
                 object_hash: realized.object_hash,
             }),
             PlanningState::Unknown | PlanningState::NeedsBuild => all_reused = false,
@@ -1123,10 +1123,10 @@ mod tests {
         };
 
         let root_inputs = vec![
-            ResultInputIdentity {
+            ReuseInputIdentity {
                 object_hash: rootfs_realized.object_hash,
             },
-            ResultInputIdentity {
+            ReuseInputIdentity {
                 object_hash: script_realized.object_hash,
             },
         ];

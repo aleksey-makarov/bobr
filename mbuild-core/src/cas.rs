@@ -1,4 +1,4 @@
-use crate::builder::{Build, PublishedBuild, ResultInputIdentity, ResultRecord, StagedBuildResult};
+use crate::builder::StagedBuildResult;
 use crate::fsutil;
 use fsobj_hash::{ObjectHash, hash_path};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -316,6 +316,69 @@ impl StoreLayout {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReuseInputIdentity {
+    pub object_hash: ObjectHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Build {
+    pub build_key: BuildKey,
+    pub result_id: ResultId,
+    #[serde(with = "serde_object_hash")]
+    pub object_hash: ObjectHash,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultRecord {
+    pub result_id: ResultId,
+    pub object_hash: ObjectHash,
+    pub created_at: Option<String>,
+    pub inputs: Vec<ReuseInputIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealizedResult {
+    pub result_id: ResultId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_key: Option<BuildKey>,
+    #[serde(with = "serde_object_hash")]
+    pub object_hash: ObjectHash,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishedBuild {
+    pub build: Build,
+    pub reuse_key: ReuseKey,
+    pub result: ResultRecord,
+    pub object_path: PathBuf,
+}
+
+mod serde_object_hash {
+    use fsobj_hash::ObjectHash;
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
+    use std::str::FromStr;
+
+    pub fn serialize<S>(value: &ObjectHash, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<ObjectHash, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        ObjectHash::from_str(&value).map_err(D::Error::custom)
+    }
+}
+
 #[derive(Debug)]
 pub struct PublishOutputRequest {
     pub output_name: String,
@@ -323,7 +386,7 @@ pub struct PublishOutputRequest {
     pub reuse_key: ReuseKey,
     pub created_at: String,
     pub staged_path: PathBuf,
-    pub inputs: Vec<ResultInputIdentity>,
+    pub inputs: Vec<ReuseInputIdentity>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -422,7 +485,7 @@ pub fn compute_build_key(
 pub fn compute_reuse_key(
     builder_tag: &str,
     normalized_payload: &Value,
-    inputs: &[ResultInputIdentity],
+    inputs: &[ReuseInputIdentity],
 ) -> Result<ReuseKey, CasError> {
     let input_values = inputs
         .iter()
@@ -479,7 +542,7 @@ pub fn materialize_build(
     build_key: BuildKey,
     reuse_key: ReuseKey,
     created_at: &str,
-    inputs: Vec<ResultInputIdentity>,
+    inputs: Vec<ReuseInputIdentity>,
     staged: StagedBuildResult,
 ) -> Result<PublishedBuild, CasError> {
     let object_hash = import_object_with_hash(layout, &staged.staged_path, staged.object_hash)?;
@@ -781,7 +844,7 @@ fn result_json_value(
     result_id: ResultId,
     created_at: Option<&str>,
     object_hash: ObjectHash,
-    inputs: &[ResultInputIdentity],
+    inputs: &[ReuseInputIdentity],
 ) -> Value {
     let input_values = inputs
         .iter()
@@ -832,7 +895,7 @@ fn build_json_value(
     result_id: ResultId,
     created_at: Option<&str>,
     object_hash: ObjectHash,
-    inputs: &[ResultInputIdentity],
+    inputs: &[ReuseInputIdentity],
 ) -> Value {
     result_json_value(result_id, created_at, object_hash, inputs)
 }
@@ -900,7 +963,7 @@ fn parse_result_record_value(result_id: ResultId, value: &Value) -> Result<Resul
                     )
                 })
                 .and_then(parse_object_hash_result)?;
-            Ok(ResultInputIdentity { object_hash })
+            Ok(ReuseInputIdentity { object_hash })
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -1290,12 +1353,12 @@ mod tests {
     fn reuse_key_is_stable_for_identical_inputs() {
         let payload = json!({ "kind": "sandbox-script" });
         let inputs = vec![
-            ResultInputIdentity {
+            ReuseInputIdentity {
                 object_hash: parse_object_hash(
                     "1111111111111111111111111111111111111111111111111111111111111111",
                 ),
             },
-            ResultInputIdentity {
+            ReuseInputIdentity {
                 object_hash: parse_object_hash(
                     "2222222222222222222222222222222222222222222222222222222222222222",
                 ),
@@ -1480,12 +1543,12 @@ mod tests {
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
         let inputs = vec![
-            ResultInputIdentity {
+            ReuseInputIdentity {
                 object_hash: parse_object_hash(
                     "1111111111111111111111111111111111111111111111111111111111111111",
                 ),
             },
-            ResultInputIdentity {
+            ReuseInputIdentity {
                 object_hash: parse_object_hash(
                     "2222222222222222222222222222222222222222222222222222222222222222",
                 ),
@@ -2309,11 +2372,7 @@ mod tests {
         compute_build_key(builder_tag, &payload, input_build_keys).unwrap()
     }
 
-    fn reuse_key_for(
-        builder_tag: &str,
-        payload: Value,
-        inputs: &[ResultInputIdentity],
-    ) -> ReuseKey {
+    fn reuse_key_for(builder_tag: &str, payload: Value, inputs: &[ReuseInputIdentity]) -> ReuseKey {
         compute_reuse_key(builder_tag, &payload, inputs).unwrap()
     }
 }

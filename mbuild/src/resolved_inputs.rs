@@ -1,5 +1,5 @@
 use mbuild_core::{
-    BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec, ObjectHash, ResultInputIdentity,
+    BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec, ObjectHash, ReuseInputIdentity,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -77,14 +77,14 @@ impl ResolvedInputs {
         })
     }
 
-    pub(crate) fn ordered_input_identities(
+    pub(crate) fn ordered_reuse_input_identities(
         &self,
         spec: &BuilderSpec,
-    ) -> Result<Vec<ResultInputIdentity>, BuilderError> {
+    ) -> Result<Vec<ReuseInputIdentity>, BuilderError> {
         let mut ordered = Vec::new();
         for name in spec.ordered_present_input_names(&self.slots) {
             if let Some(object) = self.get(name) {
-                ordered.push(ResultInputIdentity {
+                ordered.push(ReuseInputIdentity {
                     object_hash: object.object_hash,
                 });
             }
@@ -216,7 +216,7 @@ mod tests {
     };
 
     #[test]
-    fn ordered_input_identities_follow_builder_spec_order() {
+    fn ordered_reuse_input_identities_follow_builder_spec_order() {
         let mut first = sample_object();
         first.object_hash = ObjectHash::from_str(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -245,29 +245,31 @@ mod tests {
             ("extra_a".to_string(), extra_a),
         ]));
 
-        let ordered = inputs.ordered_input_identities(&ORDERED_SPEC).unwrap();
+        let ordered = inputs
+            .ordered_reuse_input_identities(&ORDERED_SPEC)
+            .unwrap();
         assert_eq!(
             ordered,
             vec![
-                ResultInputIdentity {
+                ReuseInputIdentity {
                     object_hash: ObjectHash::from_str(
                         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     )
                     .unwrap(),
                 },
-                ResultInputIdentity {
+                ReuseInputIdentity {
                     object_hash: ObjectHash::from_str(
                         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                     )
                     .unwrap(),
                 },
-                ResultInputIdentity {
+                ReuseInputIdentity {
                     object_hash: ObjectHash::from_str(
                         "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                     )
                     .unwrap(),
                 },
-                ResultInputIdentity {
+                ReuseInputIdentity {
                     object_hash: ObjectHash::from_str(
                         "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
                     )
