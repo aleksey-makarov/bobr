@@ -189,7 +189,8 @@ pub(crate) fn execute_builder_node(
         reuse_key,
         created_at,
         inputs_identity,
-        staged,
+        &staged.staged_path,
+        staged.object_hash,
     )
     .map_err(|error| {
         log_runtime_event(

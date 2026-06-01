@@ -1,4 +1,3 @@
-use crate::builder::StagedBuildResult;
 use crate::fsutil;
 use fsobj_hash::{ObjectHash, hash_path};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -439,17 +438,14 @@ pub fn publish_output(
         });
     }
 
-    let staged = StagedBuildResult {
-        staged_path: request.staged_path,
-        object_hash: None,
-    };
     let published = materialize_build(
         layout,
         request.build_key,
         request.reuse_key,
         &request.created_at,
         request.inputs,
-        staged,
+        &request.staged_path,
+        None,
     )?;
     publish_result_refs(layout, &request.output_name, &published.result)?;
 
@@ -544,9 +540,10 @@ pub fn materialize_build(
     reuse_key: ReuseKey,
     created_at: &str,
     inputs: Vec<ReuseInputIdentity>,
-    staged: StagedBuildResult,
+    staged_path: &Path,
+    precomputed_object_hash: Option<ObjectHash>,
 ) -> Result<PublishedBuild, CasError> {
-    let object_hash = import_object_with_hash(layout, &staged.staged_path, staged.object_hash)?;
+    let object_hash = import_object_with_hash(layout, staged_path, precomputed_object_hash)?;
     let result_id = compute_result_id(object_hash)?;
     let result = ResultRecord {
         object_hash,
@@ -2068,10 +2065,8 @@ mod tests {
             reuse_key,
             sample_created_at(),
             vec![],
-            StagedBuildResult {
-                staged_path: stage_dir,
-                object_hash: Some(object_hash),
-            },
+            &stage_dir,
+            Some(object_hash),
         )
         .unwrap();
 
@@ -2193,10 +2188,8 @@ mod tests {
             reuse_key_for("CasTest", json!({ "kind": "first" }), &[]),
             sample_created_at(),
             vec![],
-            StagedBuildResult {
-                staged_path: first_stage,
-                object_hash: Some(object_hash),
-            },
+            &first_stage,
+            Some(object_hash),
         )
         .unwrap();
 
@@ -2209,10 +2202,8 @@ mod tests {
             reuse_key_for("CasTest", json!({ "kind": "second" }), &[]),
             sample_created_at(),
             vec![],
-            StagedBuildResult {
-                staged_path: second_stage,
-                object_hash: Some(object_hash),
-            },
+            &second_stage,
+            Some(object_hash),
         )
         .unwrap();
 
