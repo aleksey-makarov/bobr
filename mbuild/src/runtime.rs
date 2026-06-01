@@ -1,10 +1,9 @@
-use crate::logging::BuildRunLogger;
 use crate::resolved_inputs::ResolvedInputs;
 use mbuild_core::{
-    Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, Builder,
-    BuilderError, CancellationToken, CasError, PublishedBuild, ResultInputIdentity, StoreLayout,
-    compute_reuse_key, fsutil, load_build_handle, load_reuse_record, materialize_build,
-    object_path,
+    Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger,
+    Builder, BuilderError, CancellationToken, CasError, PublishedBuild, ResultInputIdentity,
+    StoreLayout, compute_reuse_key, fsutil, load_build_handle, load_reuse_record,
+    materialize_build, object_path,
 };
 use serde_json::{Value, json};
 use std::fmt;
@@ -586,10 +585,10 @@ fn write_quarantine_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::logging::{BuildRunLogger, RunOptions};
     use mbuild_core::{
-        BuildContext, BuilderInputs, BuilderSpec, CancellationToken, PublishOutputRequest,
-        ResultInputIdentity, StagedBuildResult, TypedBuilder, compute_build_key, publish_output,
+        BuildContext, BuildRunLogger, BuilderInputs, BuilderSpec, CancellationToken,
+        PublishOutputRequest, ResultInputIdentity, RunOptions, StagedBuildResult, TypedBuilder,
+        compute_build_key, publish_output,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};

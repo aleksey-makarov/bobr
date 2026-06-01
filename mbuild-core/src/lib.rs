@@ -8,6 +8,7 @@ pub mod fs_tree_manifest;
 pub mod fs_tree_object;
 pub mod fsutil;
 pub mod initramfs;
+pub mod logging;
 pub mod origin;
 #[doc(hidden)]
 pub mod runtime_helper_protocol;
@@ -20,6 +21,7 @@ pub use fs_tree_manifest::*;
 pub use fs_tree_object::*;
 pub use fsobj_hash::ObjectHash;
 pub use initramfs::*;
+pub use logging::*;
 pub use origin::*;
 pub use runtime_helper_protocol::FsTreeArchiveEntrySource;
 

@@ -1,6 +1,7 @@
 use crate::BuilderError;
 use crate::cancellation::CancellationToken;
 use crate::cas::{BuildKey, ResultId, ReuseKey};
+use crate::logging::{BuildLogEvent, BuildLogLevel, BuildLogger, NoopBuildLogger};
 use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value};
@@ -125,50 +126,6 @@ impl BuilderInputs {
                 Some((name.as_str(), object))
             }
         })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuildLogLevel {
-    Info,
-    Warn,
-    Error,
-}
-
-impl fmt::Display for BuildLogLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Info => f.write_str("info"),
-            Self::Warn => f.write_str("warn"),
-            Self::Error => f.write_str("error"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct BuildLogEvent {
-    pub level: BuildLogLevel,
-    pub phase: String,
-    pub message: String,
-    pub object_hash: Option<ObjectHash>,
-    pub raw_log_path: Option<PathBuf>,
-    pub details: Map<String, Value>,
-}
-
-pub trait BuildLogger: fmt::Debug + Send + Sync {
-    fn log_event(&self, event: BuildLogEvent);
-
-    fn allocate_raw_log_path(&self, label: &str) -> Result<PathBuf, String>;
-}
-
-#[derive(Debug, Default)]
-pub struct NoopBuildLogger;
-
-impl BuildLogger for NoopBuildLogger {
-    fn log_event(&self, _event: BuildLogEvent) {}
-
-    fn allocate_raw_log_path(&self, _label: &str) -> Result<PathBuf, String> {
-        Err("no build logger configured".to_string())
     }
 }
 
