@@ -107,6 +107,7 @@ pub(crate) fn execute_builder_node(
     let reuse_key = compute_reuse_key(builder.spec().tag, &config, &inputs_identity)
         .map_err(map_store_error)?;
     if let Some(result) = load_reuse_record(layout, reuse_key).map_err(map_store_error)? {
+        let result_id = result.result_id();
         let object_path = object_path(layout, result.object_hash);
         if !object_path.exists() {
             log_runtime_event(
@@ -120,11 +121,11 @@ pub(crate) fn execute_builder_node(
             );
             return Err(RuntimeError::Store(format!(
                 "result '{}' points to missing object '{}'",
-                result.result_id,
+                result_id,
                 object_path.display()
             )));
         }
-        mbuild_core::store_build_handle_ref(layout, build_key, result.result_id)
+        mbuild_core::store_build_handle_ref(layout, build_key, result_id)
             .map_err(map_store_error)?;
         log_runtime_event(
             logger.as_ref(),
@@ -135,7 +136,7 @@ pub(crate) fn execute_builder_node(
         return Ok(PublishedBuild {
             build: Build {
                 build_key,
-                result_id: result.result_id,
+                result_id,
                 object_hash: result.object_hash,
                 created_at: result.created_at.clone(),
             },
@@ -223,20 +224,20 @@ pub(crate) fn lookup_canonical_result(
     let Some(result) = load_reuse_record(layout, reuse_key).map_err(map_store_error)? else {
         return Ok(None);
     };
+    let result_id = result.result_id();
     let object_path = object_path(layout, result.object_hash);
     if !object_path.exists() {
         return Err(RuntimeError::Store(format!(
             "result '{}' points to missing object '{}'",
-            result.result_id,
+            result_id,
             object_path.display()
         )));
     }
-    mbuild_core::store_build_handle_ref(layout, build_key, result.result_id)
-        .map_err(map_store_error)?;
+    mbuild_core::store_build_handle_ref(layout, build_key, result_id).map_err(map_store_error)?;
     Ok(Some(PublishedBuild {
         build: Build {
             build_key,
-            result_id: result.result_id,
+            result_id,
             object_hash: result.object_hash,
             created_at: result.created_at.clone(),
         },

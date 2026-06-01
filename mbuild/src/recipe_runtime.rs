@@ -12,7 +12,7 @@ use fsobj_hash::hash_path;
 use mbuild_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, CancellationToken,
     OriginContext, RealizedResult, ResultRecord, ReuseInputIdentity, RunOptions, StoreLayout,
-    compute_result_id, fsutil, import_object, load_result_record, object_path, publish_result_refs,
+    fsutil, import_object, load_result_record, object_path, publish_result_refs,
     store_result_record,
 };
 use serde_json::{Map, Value, to_string_pretty};
@@ -263,11 +263,12 @@ fn ensure_planned(
             if let Some(result) =
                 load_result_record(layout, source.result_id).map_err(map_store_error)?
             {
+                let result_id = result.result_id();
                 let published_object = object_path(layout, result.object_hash);
                 if !published_object.exists() {
                     return Err(RuntimeError::Store(format!(
                         "result '{}' points to missing object '{}'",
-                        result.result_id,
+                        result_id,
                         published_object.display()
                     )));
                 }
@@ -814,6 +815,7 @@ fn execute_source_recipe(
     check_cancelled(&cancellation)?;
 
     if let Some(result) = load_result_record(layout, recipe.result_id).map_err(map_store_error)? {
+        let result_id = result.result_id();
         let object_path = object_path(layout, result.object_hash);
         if object_path.exists() {
             log_runtime_event(
@@ -829,7 +831,7 @@ fn execute_source_recipe(
         }
         return Err(RuntimeError::Store(format!(
             "result '{}' points to missing object '{}'",
-            result.result_id,
+            result_id,
             object_path.display()
         )));
     }
@@ -961,9 +963,7 @@ fn make_source_result_record(
     object_hash: fsobj_hash::ObjectHash,
     created_at: &str,
 ) -> Result<ResultRecord, RuntimeError> {
-    let result_id = compute_result_id(object_hash).map_err(map_store_error)?;
     Ok(ResultRecord {
-        result_id,
         object_hash,
         created_at: Some(created_at.to_string()),
         inputs: Vec::new(),
@@ -975,7 +975,7 @@ fn realized_result_from_record(
     result: &ResultRecord,
 ) -> RealizedResult {
     RealizedResult {
-        result_id: result.result_id,
+        result_id: result.result_id(),
         build_key,
         object_hash: result.object_hash,
         created_at: result.created_at.clone(),
@@ -988,7 +988,7 @@ mod tests {
     use crate::recipe::{ReuseOrigin, collect_graph};
     use mbuild_core::{
         CancellationToken, OriginContext, OriginSpec, ParsedOrigin, PublishOutputRequest,
-        compute_reuse_key, publish_output,
+        compute_result_id, compute_reuse_key, publish_output,
     };
     use serde_json::json;
     use std::collections::HashMap;

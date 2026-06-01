@@ -58,9 +58,9 @@ UTF-8-only because their manifest paths and symlink targets are JSON strings.
 
 `results/<result_id>.json` stores one canonical realized result record.
 
-Each result record contains:
+Each result record is addressed by `result_id`, which is derived from the
+record's `object_hash`. The record payload contains:
 
-- realized result identity: `result_id`
 - payload identity: `object_hash`
 - direct input identities under `inputs`, where each entry contains:
   - `object_hash`

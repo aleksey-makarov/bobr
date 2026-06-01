@@ -16,7 +16,7 @@ use time::UtcOffset;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 
-const RESULT_SCHEMA: &str = "mbuild-result-v4";
+const RESULT_SCHEMA: &str = "mbuild-result-v5";
 #[cfg(test)]
 const BUILD_SCHEMA: &str = RESULT_SCHEMA;
 const INVOCATION_SCHEMA: &str = "mbuild-build-invocation-v1";
@@ -333,10 +333,15 @@ pub struct Build {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultRecord {
-    pub result_id: ResultId,
     pub object_hash: ObjectHash,
     pub created_at: Option<String>,
     pub inputs: Vec<ReuseInputIdentity>,
+}
+
+impl ResultRecord {
+    pub fn result_id(&self) -> ResultId {
+        result_id_for_object_hash(self.object_hash)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,21 +411,22 @@ pub fn publish_output(
         return Ok(PublishedOutput {
             object_hash: published.build.object_hash,
             build_key: published.build.build_key,
-            result_id: published.result.result_id,
+            result_id: published.result.result_id(),
         });
     }
 
     if let Some(result) = load_reuse_record(layout, request.reuse_key)? {
+        let result_id = result.result_id();
         let object_path = object_path(layout, result.object_hash);
         if !object_path.exists() {
             return Err(CasError::Io(format!(
                 "result '{}' points to missing object '{}'",
-                result.result_id,
+                result_id,
                 object_path.display()
             )));
         }
         remove_path_force(&request.staged_path)?;
-        store_build_handle_ref(layout, request.build_key, result.result_id)?;
+        store_build_handle_ref(layout, request.build_key, result_id)?;
         let published = PublishedBuild {
             build: build_from_result(request.build_key, &result),
             reuse_key: request.reuse_key,
@@ -431,7 +437,7 @@ pub fn publish_output(
         return Ok(PublishedOutput {
             object_hash: published.build.object_hash,
             build_key: published.build.build_key,
-            result_id: published.result.result_id,
+            result_id,
         });
     }
 
@@ -452,7 +458,7 @@ pub fn publish_output(
     Ok(PublishedOutput {
         object_hash: published.build.object_hash,
         build_key: published.build.build_key,
-        result_id: published.result.result_id,
+        result_id: published.result.result_id(),
     })
 }
 
@@ -516,18 +522,15 @@ pub fn compute_reuse_key(
 }
 
 pub fn compute_result_id(object_hash: ObjectHash) -> Result<ResultId, CasError> {
-    let mut root = Map::new();
-    root.insert(
-        "schema".to_string(),
-        Value::String("mbuild-result-id-v2".to_string()),
-    );
-    root.insert(
-        "object_hash".to_string(),
-        Value::String(object_hash.to_string()),
-    );
+    Ok(result_id_for_object_hash(object_hash))
+}
 
-    let canonical = canonical_json_bytes(&Value::Object(root))?;
-    Ok(ResultId(Sha256::digest(&canonical).into()))
+fn result_id_for_object_hash(object_hash: ObjectHash) -> ResultId {
+    let canonical = format!(
+        "{{\"object_hash\":\"{}\",\"schema\":\"mbuild-result-id-v2\"}}",
+        object_hash
+    );
+    ResultId(Sha256::digest(canonical.as_bytes()).into())
 }
 
 pub fn load_public_build(
@@ -548,7 +551,6 @@ pub fn materialize_build(
     let object_hash = import_object_with_hash(layout, &staged.staged_path, staged.object_hash)?;
     let result_id = compute_result_id(object_hash)?;
     let result = ResultRecord {
-        result_id,
         object_hash,
         created_at: Some(created_at.to_string()),
         inputs,
@@ -574,9 +576,10 @@ pub fn publish_result_refs(
 
     let current_result_ref_path = layout.result_refs.join(format!("{output_name}.json"));
     let current_object_ref_path = layout.object_refs.join(output_name);
+    let result_id = result.result_id();
 
     if let Some(current) = load_current_publication(layout, output_name)?
-        && current.result.result_id != result.result_id
+        && current.result.result_id() != result_id
     {
         let generation_name =
             allocate_generation_name(layout, output_name, &generation_suffix(&current)?)?;
@@ -597,7 +600,7 @@ pub fn publish_result_refs(
 
     let result_ref_target = PathBuf::from("..")
         .join(RESULTS_DIR)
-        .join(format!("{}.json", result.result_id.to_hex()));
+        .join(format!("{}.json", result_id.to_hex()));
     replace_symlink(&result_ref_target, &current_result_ref_path)?;
     Ok(())
 }
@@ -697,7 +700,7 @@ pub fn load_build_handle(
     if !object_path.exists() {
         return Err(CasError::Io(format!(
             "result '{}' points to missing object '{}'",
-            result.result_id,
+            result_id,
             object_path.display()
         )));
     }
@@ -772,7 +775,7 @@ pub fn load_reuse_record(
 fn build_from_result(build_key: BuildKey, result: &ResultRecord) -> Build {
     Build {
         build_key,
-        result_id: result.result_id,
+        result_id: result.result_id(),
         object_hash: result.object_hash,
         created_at: result.created_at.clone(),
     }
@@ -823,7 +826,7 @@ fn import_object_with_hash(
 }
 
 pub fn store_result_record(layout: &StoreLayout, record: &ResultRecord) -> Result<(), CasError> {
-    let result_path = result_path(layout, record.result_id);
+    let result_path = result_path(layout, record.result_id());
     if result_path.exists() {
         return Ok(());
     }
@@ -841,7 +844,6 @@ pub fn store_result_record(layout: &StoreLayout, record: &ResultRecord) -> Resul
 }
 
 fn result_json_value(
-    result_id: ResultId,
     created_at: Option<&str>,
     object_hash: ObjectHash,
     inputs: &[ReuseInputIdentity],
@@ -863,10 +865,6 @@ fn result_json_value(
         "schema".to_string(),
         Value::String(RESULT_SCHEMA.to_string()),
     );
-    root.insert(
-        "result_id".to_string(),
-        Value::String(result_id.to_string()),
-    );
     if let Some(created_at) = created_at {
         root.insert(
             "created_at".to_string(),
@@ -883,7 +881,6 @@ fn result_json_value(
 
 fn result_record_json_value(record: &ResultRecord) -> Value {
     result_json_value(
-        record.result_id,
         record.created_at.as_deref(),
         record.object_hash,
         &record.inputs,
@@ -892,12 +889,11 @@ fn result_record_json_value(record: &ResultRecord) -> Value {
 
 #[cfg(test)]
 fn build_json_value(
-    result_id: ResultId,
     created_at: Option<&str>,
     object_hash: ObjectHash,
     inputs: &[ReuseInputIdentity],
 ) -> Value {
-    result_json_value(result_id, created_at, object_hash, inputs)
+    result_json_value(created_at, object_hash, inputs)
 }
 
 fn parse_result_record_value(result_id: ResultId, value: &Value) -> Result<ResultRecord, CasError> {
@@ -912,18 +908,6 @@ fn parse_result_record_value(result_id: ResultId, value: &Value) -> Result<Resul
     if schema != RESULT_SCHEMA {
         return Err(CasError::Serialization(format!(
             "unsupported result record schema '{schema}'"
-        )));
-    }
-
-    let encoded_result_id = object
-        .get("result_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| CasError::Serialization("result record is missing 'result_id'".to_string()))
-        .and_then(parse_result_id_result)?;
-    if encoded_result_id != result_id {
-        return Err(CasError::Serialization(format!(
-            "result record key mismatch: path key '{}' does not match encoded key '{}'",
-            result_id, encoded_result_id
         )));
     }
 
@@ -944,6 +928,14 @@ fn parse_result_record_value(result_id: ResultId, value: &Value) -> Result<Resul
             CasError::Serialization("result record is missing 'object_hash'".to_string())
         })
         .and_then(parse_object_hash_result)?;
+
+    let computed_result_id = compute_result_id(object_hash)?;
+    if computed_result_id != result_id {
+        return Err(CasError::Serialization(format!(
+            "result record key mismatch: path key '{}' does not match object hash '{}' computed key '{}'",
+            result_id, object_hash, computed_result_id
+        )));
+    }
 
     let inputs = object
         .get("inputs")
@@ -968,7 +960,6 @@ fn parse_result_record_value(result_id: ResultId, value: &Value) -> Result<Resul
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(ResultRecord {
-        result_id,
         object_hash,
         created_at,
         inputs,
@@ -1129,7 +1120,7 @@ fn load_current_publication(
     };
 
     Ok(Some(CurrentPublication {
-        result_path: result_path(layout, result.result_id),
+        result_path: result_path(layout, result.result_id()),
         result,
         result_target: Some(result_target),
         object_target,
@@ -1331,14 +1322,13 @@ mod tests {
     fn canonical_json_hash_is_stable_across_key_order() {
         let object_hash =
             parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
-        let result_id = compute_result_id(object_hash).unwrap();
         let left = json!({
             "z": 1,
             "a": true,
-            "result": build_json_value(result_id, Some(sample_created_at()), object_hash, &[]),
+            "result": build_json_value(Some(sample_created_at()), object_hash, &[]),
         });
         let right = json!({
-            "result": build_json_value(result_id, Some(sample_created_at()), object_hash, &[]),
+            "result": build_json_value(Some(sample_created_at()), object_hash, &[]),
             "a": true,
             "z": 1,
         });
@@ -1377,7 +1367,7 @@ mod tests {
             parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
         let result_id = compute_result_id(object_hash).unwrap();
         let value = json!({
-            "schema": "mbuild-result-v3",
+            "schema": "mbuild-result-v4",
             "result_id": result_id.to_string(),
             "object_hash": object_hash.to_string(),
             "inputs": [],
@@ -1386,7 +1376,28 @@ mod tests {
         assert!(matches!(
             parse_result_record_value(result_id, &value),
             Err(CasError::Serialization(message))
-                if message == "unsupported result record schema 'mbuild-result-v3'"
+                if message == "unsupported result record schema 'mbuild-result-v4'"
+        ));
+    }
+
+    #[test]
+    fn parse_result_record_rejects_mismatched_path_key() {
+        let object_hash =
+            parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
+        let mismatched_result_id = parse_result_id_result(
+            "2222222222222222222222222222222222222222222222222222222222222222",
+        )
+        .unwrap();
+        let value = json!({
+            "schema": RESULT_SCHEMA,
+            "object_hash": object_hash.to_string(),
+            "inputs": [],
+        });
+
+        assert!(matches!(
+            parse_result_record_value(mismatched_result_id, &value),
+            Err(CasError::Serialization(message))
+                if message.contains("does not match object hash")
         ));
     }
 
@@ -1509,10 +1520,7 @@ mod tests {
             build_json["schema"],
             Value::String(BUILD_SCHEMA.to_string())
         );
-        assert_eq!(
-            build_json["result_id"],
-            Value::String(published.result_id.to_string())
-        );
+        assert!(build_json.get("result_id").is_none());
         assert_eq!(
             build_json["created_at"],
             Value::String(sample_created_at().to_string())
