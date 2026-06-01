@@ -254,7 +254,7 @@ pub struct StagedBuildResult {
     pub object_hash: Option<ObjectHash>,
 }
 
-pub trait Builder {
+pub trait Builder: Send + Sync {
     fn spec(&self) -> &'static BuilderSpec;
 
     fn build_erased(
@@ -265,7 +265,7 @@ pub trait Builder {
     ) -> Result<StagedBuildResult, BuilderError>;
 }
 
-pub trait TypedBuilder {
+pub trait TypedBuilder: Send + Sync {
     type Config: DeserializeOwned;
 
     fn spec(&self) -> &'static BuilderSpec;
