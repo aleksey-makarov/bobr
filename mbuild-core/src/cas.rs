@@ -592,10 +592,8 @@ pub fn publish_result_refs(
     let object_ref_target = object_ref_target_for_result(result)?;
     replace_symlink(&object_ref_target, &current_object_ref_path)?;
 
-    let result_ref_target = PathBuf::from("..")
-        .join(RESULTS_DIR)
-        .join(format!("{}.json", result_id.to_hex()));
-    replace_symlink(&result_ref_target, &current_result_ref_path)?;
+    let target = result_ref_target(result_id);
+    replace_symlink(&target, &current_result_ref_path)?;
     Ok(())
 }
 
@@ -628,14 +626,60 @@ pub fn reuse_ref_path(layout: &StoreLayout, reuse_key: ReuseKey) -> PathBuf {
     layout.reuses.join(reuse_key.to_hex())
 }
 
+fn result_ref_target(result_id: ResultId) -> PathBuf {
+    PathBuf::from("..")
+        .join(RESULTS_DIR)
+        .join(format!("{}.json", result_id.to_hex()))
+}
+
+fn parse_result_ref_target(
+    ref_kind: &str,
+    ref_path: &Path,
+    target: &Path,
+) -> Result<ResultId, CasError> {
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            CasError::Serialization(format!(
+                "{ref_kind} ref '{}' points to invalid result target '{}'",
+                ref_path.display(),
+                target.display()
+            ))
+        })?;
+    let result_id_str = file_name.strip_suffix(".json").ok_or_else(|| {
+        CasError::Serialization(format!(
+            "{ref_kind} ref '{}' points to non-JSON result target '{}'",
+            ref_path.display(),
+            target.display()
+        ))
+    })?;
+    let result_id = result_id_str.parse::<ResultId>().map_err(|error| {
+        CasError::Serialization(format!(
+            "{ref_kind} ref '{}' points to invalid result id '{}' in target '{}': {error}",
+            ref_path.display(),
+            result_id_str,
+            target.display()
+        ))
+    })?;
+    let expected = result_ref_target(result_id);
+    if target != expected {
+        return Err(CasError::Serialization(format!(
+            "{ref_kind} ref '{}' points to non-canonical result target '{}'; expected '{}'",
+            ref_path.display(),
+            target.display(),
+            expected.display()
+        )));
+    }
+    Ok(result_id)
+}
+
 pub fn store_build_handle_ref(
     layout: &StoreLayout,
     build_key: BuildKey,
     result_id: ResultId,
 ) -> Result<(), CasError> {
-    let target = PathBuf::from("..")
-        .join(RESULTS_DIR)
-        .join(format!("{}.json", result_id.to_hex()));
+    let target = result_ref_target(result_id);
     replace_symlink(&target, &build_ref_path(layout, build_key))
 }
 
@@ -644,9 +688,7 @@ pub fn store_reuse_ref(
     reuse_key: ReuseKey,
     result_id: ResultId,
 ) -> Result<(), CasError> {
-    let target = PathBuf::from("..")
-        .join(RESULTS_DIR)
-        .join(format!("{}.json", result_id.to_hex()));
+    let target = result_ref_target(result_id);
     replace_symlink(&target, &reuse_ref_path(layout, reuse_key))
 }
 
@@ -665,24 +707,7 @@ pub fn load_build_handle(
             build_ref_path.display()
         ))
     })?;
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            CasError::Serialization(format!(
-                "build ref '{}' points to invalid target '{}'",
-                build_ref_path.display(),
-                target.display()
-            ))
-        })?;
-    let result_id_str = file_name.strip_suffix(".json").ok_or_else(|| {
-        CasError::Serialization(format!(
-            "build ref '{}' points to non-JSON result target '{}'",
-            build_ref_path.display(),
-            target.display()
-        ))
-    })?;
-    let result_id = parse_result_id_result(result_id_str)?;
+    let result_id = parse_result_ref_target("build", &build_ref_path, &target)?;
     let result = load_result_record(layout, result_id)?.ok_or_else(|| {
         CasError::Serialization(format!(
             "build ref '{}' points to missing result '{}'",
@@ -744,24 +769,7 @@ pub fn load_reuse_record(
             reuse_ref_path.display()
         ))
     })?;
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            CasError::Serialization(format!(
-                "reuse ref '{}' points to invalid target '{}'",
-                reuse_ref_path.display(),
-                target.display()
-            ))
-        })?;
-    let result_id_str = file_name.strip_suffix(".json").ok_or_else(|| {
-        CasError::Serialization(format!(
-            "reuse ref '{}' points to non-JSON result target '{}'",
-            reuse_ref_path.display(),
-            target.display()
-        ))
-    })?;
-    let result_id = parse_result_id_result(result_id_str)?;
+    let result_id = parse_result_ref_target("reuse", &reuse_ref_path, &target)?;
     load_result_record(layout, result_id)
 }
 
@@ -967,14 +975,6 @@ fn parse_object_hash_result(value: &str) -> Result<ObjectHash, CasError> {
     })
 }
 
-fn parse_result_id_result(value: &str) -> Result<ResultId, CasError> {
-    value.parse::<ResultId>().map_err(|error| {
-        CasError::Serialization(format!(
-            "invalid result id '{value}' in build record: {error}"
-        ))
-    })
-}
-
 fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, CasError> {
     let mut out = Vec::new();
     write_canonical_json(value, &mut out)?;
@@ -1074,24 +1074,7 @@ fn load_current_publication(
             result_ref_path.display()
         ))
     })?;
-    let result_file_name = result_target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            CasError::Serialization(format!(
-                "current result ref '{}' points to invalid target '{}'",
-                result_ref_path.display(),
-                result_target.display()
-            ))
-        })?;
-    let result_id_str = result_file_name.strip_suffix(".json").ok_or_else(|| {
-        CasError::Serialization(format!(
-            "current result ref '{}' points to invalid result target '{}'",
-            result_ref_path.display(),
-            result_target.display()
-        ))
-    })?;
-    let result_id = parse_result_id_result(result_id_str)?;
+    let result_id = parse_result_ref_target("current result", &result_ref_path, &result_target)?;
     let result = load_result_record(layout, result_id)?.ok_or_else(|| {
         CasError::Serialization(format!(
             "current result ref '{}' points to missing result '{}'",
@@ -1377,10 +1360,10 @@ mod tests {
     fn parse_result_record_rejects_mismatched_path_key() {
         let object_hash =
             parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
-        let mismatched_result_id = parse_result_id_result(
-            "2222222222222222222222222222222222222222222222222222222222222222",
-        )
-        .unwrap();
+        let mismatched_result_id =
+            "2222222222222222222222222222222222222222222222222222222222222222"
+                .parse::<ResultId>()
+                .unwrap();
         let value = json!({
             "schema": RESULT_SCHEMA,
             "object_hash": object_hash.to_string(),
@@ -1536,6 +1519,51 @@ mod tests {
                 .join(OBJECTS_DIR)
                 .join(published.object_hash.to_hex())
         );
+    }
+
+    #[test]
+    fn result_ref_loaders_reject_non_canonical_targets() {
+        let temp = tempdir().unwrap();
+        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+
+        let stage = temp.path().join("script.sh");
+        fs::write(&stage, b"echo hi\n").unwrap();
+        let build_key = build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]);
+        let reuse_key = reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]);
+        let published = publish_output(
+            &layout,
+            PublishOutputRequest {
+                output_name: "script".to_string(),
+                build_key,
+                reuse_key,
+                created_at: sample_created_at().to_string(),
+                staged_path: stage,
+                inputs: vec![],
+            },
+        )
+        .unwrap();
+        let non_canonical_target = PathBuf::from("..")
+            .join("not-results")
+            .join(format!("{}.json", published.result_id.to_hex()));
+
+        replace_symlink(&non_canonical_target, &build_ref_path(&layout, build_key)).unwrap();
+        let error = load_build_handle(&layout, build_key).unwrap_err();
+        assert!(error.to_string().contains("build ref"));
+        assert!(error.to_string().contains("non-canonical result target"));
+
+        replace_symlink(&non_canonical_target, &reuse_ref_path(&layout, reuse_key)).unwrap();
+        let error = load_reuse_record(&layout, reuse_key).unwrap_err();
+        assert!(error.to_string().contains("reuse ref"));
+        assert!(error.to_string().contains("non-canonical result target"));
+
+        replace_symlink(
+            &non_canonical_target,
+            &layout.result_refs.join("script.json"),
+        )
+        .unwrap();
+        let error = load_current_publication(&layout, "script").unwrap_err();
+        assert!(error.to_string().contains("current result ref"));
+        assert!(error.to_string().contains("non-canonical result target"));
     }
 
     #[test]
