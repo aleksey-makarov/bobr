@@ -64,8 +64,7 @@ impl BuilderSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderInputObject {
-    pub object_path: PathBuf,
-    pub object_hash: ObjectHash,
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -410,15 +409,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::str::FromStr;
-
     fn sample_builder_object() -> BuilderInputObject {
         BuilderInputObject {
-            object_path: PathBuf::from("/tmp/object"),
-            object_hash: ObjectHash::from_str(
-                "0000000000000000000000000000000000000000000000000000000000000000",
-            )
-            .unwrap(),
+            path: PathBuf::from("/tmp/object"),
         }
     }
 
@@ -437,10 +430,7 @@ mod tests {
             allow_extra_inputs: true,
         };
 
-        assert_eq!(
-            inputs.required("script").unwrap().object_path,
-            object.object_path
-        );
+        assert_eq!(inputs.required("script").unwrap().path, object.path);
         assert!(inputs.optional("base").is_none());
         assert!(inputs.extra(&spec, "source").is_some());
         assert_eq!(inputs.extras(&spec).count(), 3);

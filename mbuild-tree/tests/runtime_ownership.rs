@@ -1,6 +1,5 @@
 #![cfg(all(feature = "integration-tests", target_os = "linux"))]
 
-use fsobj_hash::hash_path;
 use mbuild_core::{
     BuildContext, Builder, BuilderInputObject, BuilderInputs, FsTreeEntry, FsTreeManifest,
 };
@@ -169,8 +168,7 @@ fn tree_merge_materializes_subuid_owned_file_under_restrictive_dir() -> TestResu
     inputs.insert(
         "right",
         BuilderInputObject {
-            object_path: right.staged_path.clone(),
-            object_hash: right.object_hash.unwrap(),
+            path: right.staged_path.clone(),
         },
     );
 
@@ -284,10 +282,7 @@ fn single_tree_input(name: &'static str, result: &mbuild_core::StagedBuildResult
     inputs.insert(
         name,
         BuilderInputObject {
-            object_path: result.staged_path.clone(),
-            object_hash: result
-                .object_hash
-                .unwrap_or_else(|| hash_path(&result.staged_path).unwrap()),
+            path: result.staged_path.clone(),
         },
     );
     inputs

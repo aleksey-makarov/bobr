@@ -98,8 +98,7 @@ impl ResolvedInputs {
             .into_iter()
             .map(|(name, value)| {
                 let value = BuilderInputObject {
-                    object_path: value.object_path,
-                    object_hash: value.object_hash,
+                    path: value.object_path,
                 };
                 (name, value)
             })
@@ -206,7 +205,7 @@ mod tests {
 
         let builder_inputs = inputs.into_builder_inputs();
         let resolved = builder_inputs.required("script").unwrap();
-        assert_eq!(resolved.object_path, object.object_path);
+        assert_eq!(resolved.path, object.object_path);
     }
 
     static ORDERED_SPEC: BuilderSpec = BuilderSpec {

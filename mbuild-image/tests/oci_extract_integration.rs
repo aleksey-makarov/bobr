@@ -22,13 +22,7 @@ fn oci_extract_materializes_runtime_ownership() -> TestResult<()> {
     let oci = create_oci_layout(temp.path())?;
     let mut cx = build_context(temp.path())?;
     let mut inputs = BuilderInputs::empty();
-    inputs.insert(
-        "image",
-        BuilderInputObject {
-            object_hash: fsobj_hash::hash_path(&oci)?,
-            object_path: oci,
-        },
-    );
+    inputs.insert("image", BuilderInputObject { path: oci });
 
     let result = OciExtractBuilder.build_typed(OciExtractConfig {}, inputs, &mut cx)?;
     assert!(result.staged_path.join("manifest.jsonl").is_file());

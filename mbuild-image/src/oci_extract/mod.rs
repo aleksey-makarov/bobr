@@ -82,7 +82,7 @@ impl OciExtractBuilder {
         cx.log_event(
             BuildLogLevel::Info,
             "extract",
-            format!("extracting OCI image '{}'", image.object_path.display()),
+            format!("extracting OCI image '{}'", image.path.display()),
         );
 
         fs::create_dir(&extract_root).map_err(|error| {
@@ -92,11 +92,10 @@ impl OciExtractBuilder {
             )))
         })?;
 
-        let records =
-            extract_oci_image_layers(&image.object_path, &extract_root).map_err(map_error)?;
+        let records = extract_oci_image_layers(&image.path, &extract_root).map_err(map_error)?;
         let manifest =
             build_manifest_from_tar_records(&records, &extract_root).map_err(map_error)?;
-        let config_bytes = read_oci_config_bytes(&image.object_path).map_err(map_error)?;
+        let config_bytes = read_oci_config_bytes(&image.path).map_err(map_error)?;
         let paths =
             create_oci_fs_tree_staging_dir(&staged, &manifest, &config_bytes).map_err(map_error)?;
 
@@ -128,14 +127,14 @@ impl OciExtractBuilder {
 }
 
 fn validate_oci_layout_input(image: &BuilderInputObject) -> Result<(), OciExtractError> {
-    if !image.object_path.is_dir() {
+    if !image.path.is_dir() {
         return Err(OciExtractError::InvalidInput(format!(
             "image input must resolve to an OCI layout directory: {}",
-            image.object_path.display()
+            image.path.display()
         )));
     }
     for name in ["oci-layout", "index.json"] {
-        let path = image.object_path.join(name);
+        let path = image.path.join(name);
         if !path.is_file() {
             return Err(OciExtractError::InvalidInput(format!(
                 "image input is missing OCI layout file '{}'",
@@ -143,14 +142,14 @@ fn validate_oci_layout_input(image: &BuilderInputObject) -> Result<(), OciExtrac
             )));
         }
     }
-    let blobs = image.object_path.join("blobs").join("sha256");
+    let blobs = image.path.join("blobs").join("sha256");
     if !blobs.is_dir() {
         return Err(OciExtractError::InvalidInput(format!(
             "image input is missing OCI blobs directory '{}'",
             blobs.display()
         )));
     }
-    oci::read_oci_manifest(&image.object_path)
+    oci::read_oci_manifest(&image.path)
         .map_err(|error| OciExtractError::InvalidInput(error.to_string()))?;
     Ok(())
 }
@@ -1204,13 +1203,7 @@ mod tests {
         let tar = make_tar(|builder| append_file(builder, "bin/tool", b"tool", 0, 0, 0o755));
         let oci = create_oci_layout(temp.path(), vec![(oci::MEDIA_TYPE_OCI_LAYER, gzip(&tar))]);
         let mut inputs = BuilderInputs::empty();
-        inputs.insert(
-            "image",
-            BuilderInputObject {
-                object_hash: fsobj_hash::hash_path(&oci).unwrap(),
-                object_path: oci,
-            },
-        );
+        inputs.insert("image", BuilderInputObject { path: oci });
 
         let result = OciExtractBuilder
             .build_with_materializer(
@@ -1236,13 +1229,7 @@ mod tests {
         let tar = make_tar(|builder| append_dir(builder, "private", 0, 0, 0o000));
         let oci = create_oci_layout(temp.path(), vec![(oci::MEDIA_TYPE_OCI_LAYER, gzip(&tar))]);
         let mut inputs = BuilderInputs::empty();
-        inputs.insert(
-            "image",
-            BuilderInputObject {
-                object_hash: fsobj_hash::hash_path(&oci).unwrap(),
-                object_path: oci,
-            },
-        );
+        inputs.insert("image", BuilderInputObject { path: oci });
 
         let result = OciExtractBuilder
             .build_with_materializer(
@@ -1266,13 +1253,7 @@ mod tests {
         let mut cx = build_context(temp.path());
         let mut inputs = BuilderInputs::empty();
         let image = create_oci_layout(temp.path(), vec![]);
-        inputs.insert(
-            "image",
-            BuilderInputObject {
-                object_hash: fsobj_hash::hash_path(&image).unwrap(),
-                object_path: image,
-            },
-        );
+        inputs.insert("image", BuilderInputObject { path: image });
 
         let error = OciExtractBuilder
             .build_erased(serde_json::json!({ "unexpected": true }), inputs, &mut cx)

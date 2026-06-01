@@ -727,12 +727,11 @@ fn erofs_rootfs_input(
     name: &str,
     object: &BuilderInputObject,
 ) -> Result<IndexedTreeMergeInput, BuilderError> {
-    let compose = load_fs_tree_compose_input(&object.object_path).map_err(|error| {
+    let compose = load_fs_tree_compose_input(&object.path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
             "ErofsRootfs input '{name}' is not a valid fs-tree object: {error}"
         ))
     })?;
-    let _ = object;
     Ok(IndexedTreeMergeInput { compose })
 }
 
@@ -740,12 +739,11 @@ fn initramfs_input(
     name: &str,
     object: &BuilderInputObject,
 ) -> Result<IndexedTreeMergeInput, BuilderError> {
-    let compose = load_fs_tree_compose_input(&object.object_path).map_err(|error| {
+    let compose = load_fs_tree_compose_input(&object.path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
             "Initramfs input '{name}' is not a valid fs-tree object: {error}"
         ))
     })?;
-    let _ = object;
     Ok(IndexedTreeMergeInput { compose })
 }
 
@@ -1214,22 +1212,20 @@ fn tree_merge_input(
     name: &str,
     object: &BuilderInputObject,
 ) -> Result<IndexedTreeMergeInput, BuilderError> {
-    let compose = load_fs_tree_compose_input(&object.object_path).map_err(|error| {
+    let compose = load_fs_tree_compose_input(&object.path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
             "TreeMerge input '{name}' is not a valid fs-tree object: {error}"
         ))
     })?;
-    let _ = object;
     Ok(IndexedTreeMergeInput { compose })
 }
 
 fn tree_subset_input(object: &BuilderInputObject) -> Result<IndexedTreeMergeInput, BuilderError> {
-    let compose = load_fs_tree_compose_input(&object.object_path).map_err(|error| {
+    let compose = load_fs_tree_compose_input(&object.path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
             "TreeSubset input 'tree' is not a valid fs-tree object: {error}"
         ))
     })?;
-    let _ = object;
     Ok(IndexedTreeMergeInput { compose })
 }
 
@@ -2640,10 +2636,7 @@ mod tests {
             builder_inputs.insert(
                 *name,
                 BuilderInputObject {
-                    object_path: result.staged_path.clone(),
-                    object_hash: result
-                        .object_hash
-                        .unwrap_or_else(|| hash_path(&result.staged_path).unwrap()),
+                    path: result.staged_path.clone(),
                 },
             );
         }
@@ -2686,12 +2679,6 @@ mod tests {
         TreeSubsetConfig {
             include: patterns.iter().map(|pattern| pattern.to_string()).collect(),
         }
-    }
-
-    fn fixed_object_hash() -> ObjectHash {
-        "1111111111111111111111111111111111111111111111111111111111111111"
-            .parse()
-            .unwrap()
     }
 
     fn apply_test_modes(manifest: &FsTreeManifest, root_dir: &Path) -> Result<(), BuilderError> {
@@ -3000,13 +2987,7 @@ mod tests {
         let not_tree = temp.path().join("not-tree");
         fs::write(&not_tree, b"not a tree").unwrap();
         let mut inputs = BuilderInputs::empty();
-        inputs.insert(
-            "tree",
-            BuilderInputObject {
-                object_hash: hash_path(&not_tree).unwrap(),
-                object_path: not_tree,
-            },
-        );
+        inputs.insert("tree", BuilderInputObject { path: not_tree });
         let mut cx = build_context(&temp.path().join("not-tree-cx"));
         let error = builder
             .build_typed_for_tests(tree_subset_config(&["lib/*"]), inputs, &mut cx)
@@ -3068,13 +3049,7 @@ mod tests {
         .unwrap();
 
         let mut inputs = BuilderInputs::empty();
-        inputs.insert(
-            "tree",
-            BuilderInputObject {
-                object_hash: hash_path(&object_dir).unwrap(),
-                object_path: object_dir,
-            },
-        );
+        inputs.insert("tree", BuilderInputObject { path: object_dir });
         let mut cx = build_context(&temp.path().join("subset"));
 
         let result = builder
@@ -3555,13 +3530,7 @@ mod tests {
         let not_tree = temp.path().join("not-tree");
         fs::write(&not_tree, b"not a tree").unwrap();
         let mut inputs = tree_merge_inputs(&[("left", &left)]);
-        inputs.insert(
-            "bad",
-            BuilderInputObject {
-                object_hash: hash_path(&not_tree).unwrap(),
-                object_path: not_tree,
-            },
-        );
+        inputs.insert("bad", BuilderInputObject { path: not_tree });
         let mut cx = build_context(&temp.path().join("merge"));
 
         let error = builder
@@ -3724,13 +3693,7 @@ mod tests {
             sample_install(),
         );
         let mut inputs = tree_merge_inputs(&[("right", &right)]);
-        inputs.insert(
-            "base",
-            BuilderInputObject {
-                object_hash: fixed_object_hash(),
-                object_path: base_object,
-            },
-        );
+        inputs.insert("base", BuilderInputObject { path: base_object });
         let mut cx = build_context(&temp.path().join("merge"));
 
         let result =
@@ -3790,13 +3753,7 @@ mod tests {
             sample_install(),
         );
         let mut inputs = tree_merge_inputs(&[("right", &right)]);
-        inputs.insert(
-            "base",
-            BuilderInputObject {
-                object_hash: hash_path(&base_object).unwrap(),
-                object_path: base_object,
-            },
-        );
+        inputs.insert("base", BuilderInputObject { path: base_object });
         let mut cx = build_context(&temp.path().join("merge"));
 
         let error = build_tree_merge(
@@ -4910,8 +4867,7 @@ mod tests {
         inputs.insert(
             "unexpected",
             BuilderInputObject {
-                object_path: std::path::PathBuf::from("/tmp/unexpected"),
-                object_hash: fixed_object_hash(),
+                path: std::path::PathBuf::from("/tmp/unexpected"),
             },
         );
 

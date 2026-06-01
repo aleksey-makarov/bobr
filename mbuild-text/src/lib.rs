@@ -183,10 +183,7 @@ mod tests {
         inputs.insert(
             "script",
             mbuild_core::BuilderInputObject {
-                object_path: temp.path().join("dummy"),
-                object_hash: "0000000000000000000000000000000000000000000000000000000000000000"
-                    .parse()
-                    .unwrap(),
+                path: temp.path().join("dummy"),
             },
         );
 

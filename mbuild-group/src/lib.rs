@@ -83,7 +83,6 @@ mod tests {
     use mbuild_core::{Builder, BuilderInputObject};
     use std::collections::BTreeMap;
     use std::path::Path;
-    use std::str::FromStr;
     use tempfile::tempdir;
 
     fn build_context(root: &Path) -> BuildContext {
@@ -96,11 +95,7 @@ mod tests {
 
     fn sample_input() -> BuilderInputObject {
         BuilderInputObject {
-            object_path: std::path::PathBuf::from("/tmp/object"),
-            object_hash: mbuild_core::ObjectHash::from_str(
-                "1111111111111111111111111111111111111111111111111111111111111111",
-            )
-            .unwrap(),
+            path: std::path::PathBuf::from("/tmp/object"),
         }
     }
 

@@ -382,12 +382,12 @@ fn validate_sandbox_config(config: &SandboxConfig) -> BResult<()> {
 
 /// Ensure the required `rootfs` input is a valid fs-tree object.
 fn validate_rootfs(rootfs: &BuilderInputObject) -> BResult<PathBuf> {
-    load_fs_tree_object(&rootfs.object_path)
+    load_fs_tree_object(&rootfs.path)
         .map(|loaded| loaded.paths.root_dir)
         .map_err(|error| {
             SandboxError::InputResolutionFailed(format!(
                 "rootfs input must be a valid fs-tree object '{}': {error}",
-                rootfs.object_path.display()
+                rootfs.path.display()
             ))
         })
 }
@@ -505,7 +505,7 @@ fn input_mount_path(name: &str) -> String {
 /// Extra inputs are mounted as complete store objects. They do not interpret
 /// fs-tree layout files such as `manifest.jsonl` or `root/`.
 fn build_sandbox_input(name: &str, input: &BuilderInputObject) -> BResult<SandboxInput> {
-    let host_path = input.object_path.clone();
+    let host_path = input.path.clone();
     if !host_path.is_dir() && !host_path.is_file() {
         return Err(SandboxError::InputResolutionFailed(format!(
             "sandbox input must resolve to a file or directory: {}",
@@ -909,12 +909,7 @@ mod tests {
     }
 
     fn input_object(object_path: PathBuf) -> BuilderInputObject {
-        BuilderInputObject {
-            object_path,
-            object_hash: "0000000000000000000000000000000000000000000000000000000000000000"
-                .parse()
-                .unwrap(),
-        }
+        BuilderInputObject { path: object_path }
     }
 
     #[cfg(unix)]
@@ -1121,19 +1116,13 @@ mod tests {
             (
                 "script".to_string(),
                 BuilderInputObject {
-                    object_path: temp.path().join("script"),
-                    object_hash: "0000000000000000000000000000000000000000000000000000000000000000"
-                        .parse()
-                        .unwrap(),
+                    path: temp.path().join("script"),
                 },
             ),
             (
                 "source".to_string(),
                 BuilderInputObject {
-                    object_path: temp.path().join("source"),
-                    object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
-                        .parse()
-                        .unwrap(),
+                    path: temp.path().join("source"),
                 },
             ),
         ];
