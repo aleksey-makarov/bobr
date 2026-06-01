@@ -358,7 +358,6 @@ pub struct RealizedResult {
 #[derive(Debug, Clone)]
 pub struct PublishedBuild {
     pub build: Build,
-    pub reuse_key: ReuseKey,
     pub result: ResultRecord,
     pub object_path: PathBuf,
 }
@@ -429,7 +428,6 @@ pub fn publish_output(
         store_build_handle_ref(layout, request.build_key, result_id)?;
         let published = PublishedBuild {
             build: build_from_result(request.build_key, &result),
-            reuse_key: request.reuse_key,
             result,
             object_path,
         };
@@ -562,7 +560,6 @@ pub fn materialize_build(
     Ok(PublishedBuild {
         object_path: layout.objects.join(object_hash.to_hex()),
         build: build_from_result(build_key, &result),
-        reuse_key,
         result,
     })
 }
@@ -706,7 +703,6 @@ pub fn load_build_handle(
     }
     Ok(Some(PublishedBuild {
         build: build_from_result(build_key, &result),
-        reuse_key: ReuseKey(*build_key.as_bytes()),
         result,
         object_path,
     }))

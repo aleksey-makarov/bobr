@@ -140,7 +140,6 @@ pub(crate) fn execute_builder_node(
                 object_hash: result.object_hash,
                 created_at: result.created_at.clone(),
             },
-            reuse_key,
             result,
             object_path,
         });
@@ -241,7 +240,6 @@ pub(crate) fn lookup_canonical_result(
             object_hash: result.object_hash,
             created_at: result.created_at.clone(),
         },
-        reuse_key,
         result,
         object_path,
     }))
