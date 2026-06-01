@@ -599,9 +599,31 @@ mod tests {
         Ok((graph, nodes))
     }
 
+    fn tree_config(path: &str, text: &str, executable: bool) -> Value {
+        json!({
+            "tree": {
+                "entries": [{
+                    "type": "file",
+                    "path": path,
+                    "text": text,
+                    "executable": executable
+                }]
+            }
+        })
+    }
+
+    fn tree_recipe(name: &str, path: &str, text: &str, executable: bool) -> Value {
+        json!({
+            "name": name,
+            "tag": "Tree",
+            "config": tree_config(path, text, executable),
+            "inputs": {}
+        })
+    }
+
     #[test]
     fn recipe_requires_top_level_root_node() {
-        let error = parse_request_value(json!({"kind":"Text"}), "$").unwrap_err();
+        let error = parse_request_value(json!({"kind":"Legacy"}), "$").unwrap_err();
         assert!(
             error
                 .to_string()
@@ -751,17 +773,12 @@ mod tests {
     fn extra_input_slot_is_rejected() {
         let request = json!({
             "root": {
-                "name": "text",
-                "tag": "Text",
-                "config": { "source": "hello", "executable": false },
+                "name": "tree",
+                "tag": "Tree",
+                "config": tree_config("hello.txt", "hello", false),
                 "inputs": { "unexpected": "dep" }
             },
-            "dep": {
-                "name": "dep",
-                "tag": "Text",
-                "config": { "source": "dep", "executable": false },
-                "inputs": {}
-            }
+            "dep": tree_recipe("dep", "dep.txt", "dep", false)
         });
         let error = collect_one(&request).unwrap_err();
         assert!(
@@ -781,12 +798,7 @@ mod tests {
                 "config": {},
                 "inputs": { "script": "script" }
             },
-            "script": {
-                "name": "script",
-                "tag": "Text",
-                "config": { "source": "#!/bin/sh\n", "executable": true },
-                "inputs": {}
-            }
+            "script": tree_recipe("script", "script.sh", "#!/bin/sh\n", true)
         });
         let error = collect_one(&request).unwrap_err();
         assert!(
@@ -822,17 +834,14 @@ mod tests {
     fn build_key_order_follows_builder_spec_not_json_field_order() {
         let rootfs = json!({
             "name": "rootfs",
-            "tag": "Text",
-            "config": { "source": "rootfs", "executable": false },
+            "tag": "Tree",
+            "config": tree_config("rootfs.txt", "rootfs", false),
             "inputs": {}
         });
         let script = json!({
             "name": "script",
-            "tag": "Text",
-            "config": {
-                "source": "#!/bin/sh\nexit 0\n",
-                "executable": true
-            },
+            "tag": "Tree",
+            "config": tree_config("script.sh", "#!/bin/sh\nexit 0\n", true),
             "inputs": {}
         });
         let source = json!({
@@ -862,8 +871,8 @@ mod tests {
         });
 
         let (graph, _) = collect_one(&request).unwrap();
-        let rootfs_key = compute_build_key("Text", &rootfs["config"], &[]).unwrap();
-        let script_key = compute_build_key("Text", &script["config"], &[]).unwrap();
+        let rootfs_key = compute_build_key("Tree", &rootfs["config"], &[]).unwrap();
+        let script_key = compute_build_key("Tree", &script["config"], &[]).unwrap();
         let source_key = source_planning_key(
             compute_result_id(
                 "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -895,18 +904,8 @@ mod tests {
                     "in000": "binary-a"
                 }
             },
-            "binary-a": {
-                "name": "binary-a",
-                "tag": "Text",
-                "config": { "source": "same", "executable": false },
-                "inputs": {}
-            },
-            "binary-b": {
-                "name": "binary-b",
-                "tag": "Text",
-                "config": { "source": "same", "executable": false },
-                "inputs": {}
-            }
+            "binary-a": tree_recipe("binary-a", "same.txt", "same", false),
+            "binary-b": tree_recipe("binary-b", "same.txt", "same", false)
         });
 
         let (graph, nodes) = collect_one(&request).unwrap();
@@ -930,12 +929,7 @@ mod tests {
                     "script": "script"
                 }
             },
-            "script": {
-                "name": "script",
-                "tag": "Text",
-                "config": { "source": "#!/bin/sh\n", "executable": true },
-                "inputs": {}
-            }
+            "script": tree_recipe("script", "script.sh", "#!/bin/sh\n", true)
         });
 
         let error = collect_one(&request).unwrap_err();
@@ -954,12 +948,7 @@ mod tests {
                     "script": "script"
                 }
             },
-            "script": {
-                "name": "script",
-                "tag": "Text",
-                "config": { "source": "#!/bin/sh\n", "executable": true },
-                "inputs": {}
-            }
+            "script": tree_recipe("script", "script.sh", "#!/bin/sh\n", true)
         });
 
         let error = collect_one(&request).unwrap_err();
@@ -975,8 +964,8 @@ mod tests {
     fn old_nested_root_shape_is_rejected() {
         let old_shape = json!({
             "name": "hello",
-            "tag": "Text",
-            "config": { "source": "hi", "executable": false },
+            "tag": "Tree",
+            "config": tree_config("hello.txt", "hi", false),
             "inputs": {}
         });
 

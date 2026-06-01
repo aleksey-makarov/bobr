@@ -1303,8 +1303,8 @@ mod tests {
         ];
 
         assert_eq!(
-            compute_reuse_key("Text", &payload, &inputs).unwrap(),
-            compute_reuse_key("Text", &payload, &inputs).unwrap()
+            compute_reuse_key("CasTest", &payload, &inputs).unwrap(),
+            compute_reuse_key("CasTest", &payload, &inputs).unwrap()
         );
     }
 
@@ -1333,7 +1333,7 @@ mod tests {
         let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
 
         let reuse_key =
-            compute_reuse_key("Text", &json!({ "kind": "sandbox-script" }), &[]).unwrap();
+            compute_reuse_key("CasTest", &json!({ "kind": "sandbox-script" }), &[]).unwrap();
         let first_stage = temp.path().join("first.txt");
         fs::write(&first_stage, b"hello").unwrap();
         let first = publish_output(
@@ -1341,7 +1341,7 @@ mod tests {
             PublishOutputRequest {
                 output_name: "hello".to_string(),
                 build_key: build_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "hello-1" }),
                     &[],
                 ),
@@ -1360,7 +1360,7 @@ mod tests {
             PublishOutputRequest {
                 output_name: "hello-copy".to_string(),
                 build_key: build_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "hello-2" }),
                     &[],
                 ),
@@ -1409,14 +1409,14 @@ mod tests {
             PublishOutputRequest {
                 output_name: "script".to_string(),
                 build_key: build_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
                     &[parse_build_key(
                         "1111111111111111111111111111111111111111111111111111111111111111",
                     )],
                 ),
                 reuse_key: compute_reuse_key(
-                    "Text",
+                    "CasTest",
                     &json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
                     &[],
                 )
@@ -1492,7 +1492,7 @@ mod tests {
             },
         ];
         let reuse_key = compute_reuse_key(
-            "Text",
+            "CasTest",
             &json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
             &inputs,
         )
@@ -1505,7 +1505,7 @@ mod tests {
             PublishOutputRequest {
                 output_name: "script".to_string(),
                 build_key: build_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
                     &[],
                 ),
@@ -1536,12 +1536,12 @@ mod tests {
             PublishOutputRequest {
                 output_name: "first".to_string(),
                 build_key: build_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "hello" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "hello" }),
                     &[],
                 ),
@@ -1559,12 +1559,12 @@ mod tests {
             PublishOutputRequest {
                 output_name: "second".to_string(),
                 build_key: build_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "source-tree", "source": "hello" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "source-tree", "source": "hello" }),
                     &[],
                 ),
@@ -1590,8 +1590,8 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "kind-a".to_string(),
-                build_key: build_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
-                reuse_key: reuse_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
+                build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+                reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
@@ -1605,8 +1605,8 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "kind-b".to_string(),
-                build_key: build_key_for("Text", json!({ "kind": "source-tree" }), &[]),
-                reuse_key: reuse_key_for("Text", json!({ "kind": "source-tree" }), &[]),
+                build_key: build_key_for("CasTest", json!({ "kind": "source-tree" }), &[]),
+                reuse_key: reuse_key_for("CasTest", json!({ "kind": "source-tree" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
@@ -1629,8 +1629,8 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "producer-a".to_string(),
-                build_key: build_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
-                reuse_key: reuse_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
+                build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+                reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
@@ -1669,12 +1669,12 @@ mod tests {
             PublishOutputRequest {
                 output_name: "shared".to_string(),
                 build_key: build_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "hello" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "hello" }),
                     &[],
                 ),
@@ -1692,12 +1692,12 @@ mod tests {
             PublishOutputRequest {
                 output_name: "shared".to_string(),
                 build_key: build_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "hello world" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "hello world" }),
                     &[],
                 ),
@@ -1745,12 +1745,12 @@ mod tests {
         let first_stage = temp.path().join("first.txt");
         fs::write(&first_stage, b"hello").unwrap();
         let build_key = build_key_for(
-            "Text",
+            "CasTest",
             json!({ "kind": "sandbox-script", "source": "hello" }),
             &[],
         );
         let reuse_key = reuse_key_for(
-            "Text",
+            "CasTest",
             json!({ "kind": "sandbox-script", "source": "hello" }),
             &[],
         );
@@ -1806,12 +1806,12 @@ mod tests {
             PublishOutputRequest {
                 output_name: "shared".to_string(),
                 build_key: build_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "one" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "one" }),
                     &[],
                 ),
@@ -1829,12 +1829,12 @@ mod tests {
             PublishOutputRequest {
                 output_name: "shared".to_string(),
                 build_key: build_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "two" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "two" }),
                     &[],
                 ),
@@ -1852,12 +1852,12 @@ mod tests {
             PublishOutputRequest {
                 output_name: "shared".to_string(),
                 build_key: build_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "three" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "three" }),
                     &[],
                 ),
@@ -1940,8 +1940,8 @@ mod tests {
                 &layout,
                 PublishOutputRequest {
                     output_name: invalid_name.to_string(),
-                    build_key: build_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
-                    reuse_key: reuse_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
+                    build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+                    reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
                     created_at: sample_created_at().to_string(),
                     staged_path: stage,
                     inputs: vec![],
@@ -2084,8 +2084,8 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "first".to_string(),
-                build_key: build_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
-                reuse_key: reuse_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
+                build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+                reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: first_stage,
                 inputs: vec![],
@@ -2100,8 +2100,8 @@ mod tests {
             &layout,
             PublishOutputRequest {
                 output_name: "second".to_string(),
-                build_key: build_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
-                reuse_key: reuse_key_for("Text", json!({ "kind": "sandbox-script" }), &[]),
+                build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+                reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
                 created_at: sample_created_at().to_string(),
                 staged_path: second_stage,
                 inputs: vec![],
@@ -2122,8 +2122,8 @@ mod tests {
         let object_hash = hash_path(&first_stage).unwrap();
         materialize_build(
             &layout,
-            build_key_for("Text", json!({ "kind": "first" }), &[]),
-            reuse_key_for("Text", json!({ "kind": "first" }), &[]),
+            build_key_for("CasTest", json!({ "kind": "first" }), &[]),
+            reuse_key_for("CasTest", json!({ "kind": "first" }), &[]),
             sample_created_at(),
             vec![],
             StagedBuildResult {
@@ -2138,8 +2138,8 @@ mod tests {
         let second_stage_path = second_stage.clone();
         materialize_build(
             &layout,
-            build_key_for("Text", json!({ "kind": "second" }), &[]),
-            reuse_key_for("Text", json!({ "kind": "second" }), &[]),
+            build_key_for("CasTest", json!({ "kind": "second" }), &[]),
+            reuse_key_for("CasTest", json!({ "kind": "second" }), &[]),
             sample_created_at(),
             vec![],
             StagedBuildResult {
@@ -2248,12 +2248,12 @@ mod tests {
             PublishOutputRequest {
                 output_name: "plain".to_string(),
                 build_key: build_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "hello", "variant": "plain" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "hello", "variant": "plain" }),
                     &[],
                 ),
@@ -2273,12 +2273,12 @@ mod tests {
             PublishOutputRequest {
                 output_name: "exec".to_string(),
                 build_key: build_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "hello", "variant": "exec" }),
                     &[],
                 ),
                 reuse_key: reuse_key_for(
-                    "Text",
+                    "CasTest",
                     json!({ "kind": "sandbox-script", "source": "hello", "variant": "exec" }),
                     &[],
                 ),

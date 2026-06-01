@@ -2,14 +2,14 @@ mod support;
 
 use mbuild::recipe_runtime::run_recipe_json_in_workspace;
 use std::fs;
-use support::{build_ref_path, store_root, text_recipe, write_recipe};
+use support::{build_ref_path, store_root, tree_file_recipe, write_recipe};
 use tempfile::tempdir;
 
 #[test]
 fn second_run_reuses_existing_root_build_handle() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("recipe.json");
-    let recipe = text_recipe("hello", "hi\n", false);
+    let recipe = tree_file_recipe("hello", "hello.txt", "hi\n", false);
     write_recipe(&recipe_path, &recipe);
 
     let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
@@ -32,7 +32,7 @@ fn second_run_reuses_existing_root_build_handle() {
 fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("recipe.json");
-    let recipe = text_recipe("hello", "hi\n", false);
+    let recipe = tree_file_recipe("hello", "hello.txt", "hi\n", false);
     write_recipe(&recipe_path, &recipe);
 
     let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();

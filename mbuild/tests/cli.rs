@@ -4,7 +4,7 @@ use mbuild_core::RealizedResult;
 use serde_json::json;
 use std::fs;
 use std::process::{Command, Stdio};
-use support::{recipe_node, store_root, text_recipe, write_recipe, write_recipe_with_options};
+use support::{recipe_node, store_root, tree_file_recipe, write_recipe, write_recipe_with_options};
 use tempfile::tempdir;
 
 #[test]
@@ -13,7 +13,7 @@ fn cli_reads_recipe_from_stdin_when_path_is_omitted() {
     let recipe_path = workspace.path().join("stdin.json");
     write_recipe(
         &recipe_path,
-        &text_recipe("stdin-recipe", "hello stdin", false),
+        &tree_file_recipe("stdin-recipe", "stdin.txt", "hello stdin", false),
     );
     let recipe_bytes = fs::read(&recipe_path).unwrap();
 
@@ -34,8 +34,8 @@ fn cli_reads_recipe_from_stdin_when_path_is_omitted() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
     let _build: RealizedResult = serde_json::from_str(&stdout).unwrap();
-    assert!(stderr.contains("[start] Text stdin-recipe"), "{stderr}");
-    assert!(stderr.contains("[done] Text stdin-recipe"), "{stderr}");
+    assert!(stderr.contains("[start] Tree stdin-recipe"), "{stderr}");
+    assert!(stderr.contains("[done] Tree stdin-recipe"), "{stderr}");
 }
 
 #[test]
@@ -44,7 +44,7 @@ fn cli_accepts_explicit_recipe_path() {
     let recipe_path = workspace.path().join("custom.json");
     write_recipe(
         &recipe_path,
-        &text_recipe("custom-recipe", "hello custom", false),
+        &tree_file_recipe("custom-recipe", "custom.txt", "hello custom", false),
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
@@ -57,7 +57,7 @@ fn cli_accepts_explicit_recipe_path() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
     let _build: RealizedResult = serde_json::from_str(&stdout).unwrap();
-    assert!(stderr.contains("[start] Text custom-recipe"), "{stderr}");
+    assert!(stderr.contains("[start] Tree custom-recipe"), "{stderr}");
 }
 
 #[test]
@@ -66,7 +66,7 @@ fn cli_quiet_suppresses_live_progress() {
     let recipe_path = workspace.path().join("quiet.json");
     write_recipe(
         &recipe_path,
-        &text_recipe("quiet-recipe", "hello quiet", false),
+        &tree_file_recipe("quiet-recipe", "quiet.txt", "hello quiet", false),
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
@@ -88,7 +88,7 @@ fn cli_flags_override_recipe_options() {
     let recipe_path = workspace.path().join("override-options.json");
     write_recipe_with_options(
         &recipe_path,
-        &text_recipe("override-recipe", "hello override", false),
+        &tree_file_recipe("override-recipe", "override.txt", "hello override", false),
         &json!({
             "quiet": false,
             "jobs": 0,
@@ -105,7 +105,7 @@ fn cli_flags_override_recipe_options() {
 
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("[start] Text override-recipe"), "{stderr}");
+    assert!(stderr.contains("[start] Tree override-recipe"), "{stderr}");
 }
 
 #[test]
@@ -114,7 +114,7 @@ fn recipe_options_apply_when_cli_flags_are_absent() {
     let recipe_path = workspace.path().join("recipe-options.json");
     write_recipe_with_options(
         &recipe_path,
-        &text_recipe("recipe-quiet", "hello recipe quiet", false),
+        &tree_file_recipe("recipe-quiet", "quiet.txt", "hello recipe quiet", false),
         &json!({
             "quiet": true,
         }),
@@ -198,11 +198,17 @@ fn cli_reports_relative_store_path() {
             "paths": { "store": "relative/store" },
             "nodes": {
                 "root": {
-                    "name": "text",
-                    "tag": "Text",
+                    "name": "tree",
+                    "tag": "Tree",
                     "config": {
-                        "source": "hello",
-                        "executable": false
+                        "tree": {
+                            "entries": [{
+                                "type": "file",
+                                "path": "hello.txt",
+                                "text": "hello",
+                                "executable": false
+                            }]
+                        }
                     },
                     "inputs": {}
                 }
@@ -321,11 +327,17 @@ fn cli_reports_missing_store_directory() {
             "paths": { "store": missing_store.to_string_lossy() },
             "nodes": {
                 "root": {
-                    "name": "text",
-                    "tag": "Text",
+                    "name": "tree",
+                    "tag": "Tree",
                     "config": {
-                        "source": "hello",
-                        "executable": false
+                        "tree": {
+                            "entries": [{
+                                "type": "file",
+                                "path": "hello.txt",
+                                "text": "hello",
+                                "executable": false
+                            }]
+                        }
                     },
                     "inputs": {}
                 }
@@ -355,14 +367,20 @@ fn cli_reports_unknown_input_slot() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("unknown-slot.json");
     let recipe = recipe_node(
-        "text",
-        "Text",
+        "tree",
+        "Tree",
         json!({
-            "source": "hello",
-            "executable": false
+            "tree": {
+                "entries": [{
+                    "type": "file",
+                    "path": "hello.txt",
+                    "text": "hello",
+                    "executable": false
+                }]
+            }
         }),
         json!({
-            "unexpected": text_recipe("dep", "hello", false)
+            "unexpected": tree_file_recipe("dep", "dep.txt", "hello", false)
         }),
     );
     write_recipe(&recipe_path, &recipe);

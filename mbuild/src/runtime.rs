@@ -750,7 +750,7 @@ mod tests {
                 .unwrap(),
         }];
         let payload = json!({ "source": "echo hi\n", "executable": true });
-        let reuse_key = compute_reuse_key("Text", &payload, &matching_inputs).unwrap();
+        let reuse_key = compute_reuse_key("RuntimeLookupTest", &payload, &matching_inputs).unwrap();
         let build_key_for_result =
             BuildKey::from_str("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
                 .unwrap();
@@ -774,7 +774,7 @@ mod tests {
 
         let hit = lookup_canonical_result(
             &layout,
-            "Text",
+            "RuntimeLookupTest",
             &payload,
             &matching_inputs,
             lookup_build_key,
@@ -791,7 +791,7 @@ mod tests {
         assert!(
             lookup_canonical_result(
                 &layout,
-                "Text",
+                "RuntimeLookupTest",
                 &payload,
                 &mismatching_inputs,
                 lookup_build_key,

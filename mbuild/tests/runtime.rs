@@ -17,7 +17,7 @@ use std::time::Duration;
 use std::time::Instant;
 use support::{
     base_image_recipe, build_ref_path, group_recipe, recipe_node, source_recipe,
-    spawn_test_oci_registry, store_root, text_recipe, tree_file_recipe, write_recipe,
+    spawn_test_oci_registry, store_root, tree_file_recipe, write_recipe,
 };
 #[cfg(feature = "integration-tests")]
 use support::{tree_directory_recipe, tree_symlink_recipe};
@@ -27,7 +27,6 @@ use tempfile::tempdir;
 fn registered_builders_include_current_tags_only() {
     let tags = mbuild::builders::supported_builder_tags();
     for tag in [
-        "Text",
         "Group",
         "Tree",
         "TreeSubset",
@@ -39,7 +38,14 @@ fn registered_builders_include_current_tags_only() {
     ] {
         assert!(tags.contains(&tag), "missing registered builder tag {tag}");
     }
-    for tag in ["Binary", "Container", "Rootfs", "Ext4Rootfs", "Image"] {
+    for tag in [
+        "Text",
+        "Binary",
+        "Container",
+        "Rootfs",
+        "Ext4Rootfs",
+        "Image",
+    ] {
         assert!(
             !tags.contains(&tag),
             "unsupported builder tag {tag} is still registered"
@@ -55,8 +61,8 @@ fn group_root_builds_independent_inputs() {
         "Group",
         json!({}),
         json!({
-            "first": text_recipe("first-target", "first\n", false),
-            "second": text_recipe("second-target", "second\n", false),
+            "first": tree_file_recipe("first-target", "first.txt", "first\n", false),
+            "second": tree_file_recipe("second-target", "second.txt", "second\n", false),
         }),
     );
     let recipe_path = workspace.path().join("group.json");

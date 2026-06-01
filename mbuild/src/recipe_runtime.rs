@@ -1053,19 +1053,31 @@ mod tests {
                     },
                     "rootfs": {
                         "name": "rootfs",
-                        "tag": "Text",
+                        "tag": "Tree",
                         "config": {
-                            "source": "rootfs",
-                            "executable": false
+                            "tree": {
+                                "entries": [{
+                                    "type": "file",
+                                    "path": "rootfs.txt",
+                                    "text": "rootfs",
+                                    "executable": false
+                                }]
+                            }
                         },
                         "inputs": {}
                     },
                     "script": {
                         "name": "script",
-                        "tag": "Text",
+                        "tag": "Tree",
                         "config": {
-                            "source": "#!/bin/sh\nexit 0\n",
-                            "executable": true
+                            "tree": {
+                                "entries": [{
+                                    "type": "file",
+                                    "path": "script.sh",
+                                    "text": "#!/bin/sh\nexit 0\n",
+                                    "executable": true
+                                }]
+                            }
                         },
                         "inputs": {}
                     }

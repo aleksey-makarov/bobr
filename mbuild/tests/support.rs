@@ -133,18 +133,6 @@ pub fn recipe_node(name: &str, tag: &str, config: Value, inputs: Value) -> Value
     })
 }
 
-pub fn text_recipe(name: &str, source: &str, executable: bool) -> Value {
-    recipe_node(
-        name,
-        "Text",
-        json!({
-            "source": source,
-            "executable": executable,
-        }),
-        json!({}),
-    )
-}
-
 pub fn tree_file_recipe(name: &str, path: &str, text: &str, executable: bool) -> Value {
     recipe_node(
         name,
@@ -323,10 +311,6 @@ pub fn base_image_recipe(image: &str, digest: &str, object_hash: &str) -> Value 
             "digest": digest,
         }
     })
-}
-
-pub fn script_recipe() -> Value {
-    text_recipe("script", "#!/bin/sh\nexit 0\n", true)
 }
 
 pub fn source_recipe(url: &str, source_hash: &str) -> Value {

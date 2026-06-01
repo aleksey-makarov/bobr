@@ -906,7 +906,6 @@ dependencies = [
  "mbuild-origin-http",
  "mbuild-origin-oci-registry",
  "mbuild-sandbox",
- "mbuild-text",
  "mbuild-tree",
  "mockito",
  "serde",
@@ -1060,16 +1059,6 @@ dependencies = [
  "libc",
  "mbuild-core",
  "nix",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "mbuild-text"
-version = "0.1.0"
-dependencies = [
- "mbuild-core",
  "serde",
  "serde_json",
  "tempfile",
