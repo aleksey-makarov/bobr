@@ -970,7 +970,7 @@ fn parse_result_record_value(result_id: ResultId, value: &Value) -> Result<Resul
 fn parse_object_hash_result(value: &str) -> Result<ObjectHash, CasError> {
     value.parse::<ObjectHash>().map_err(|error| {
         CasError::Serialization(format!(
-            "invalid object hash '{value}' in build record: {error}"
+            "invalid object hash '{value}' in result record: {error}"
         ))
     })
 }
@@ -1129,7 +1129,7 @@ fn generation_suffix(current: &CurrentPublication) -> Result<String, CasError> {
 fn human_timestamp_from_rfc3339(value: &str) -> Result<String, CasError> {
     let parsed = OffsetDateTime::parse(value, &Rfc3339).map_err(|error| {
         CasError::Serialization(format!(
-            "invalid build record created_at '{value}': {error}"
+            "invalid result record created_at '{value}': {error}"
         ))
     })?;
     human_timestamp_from_datetime(parsed)
