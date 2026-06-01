@@ -28,6 +28,13 @@ pub fn registered_builders() -> [&'static dyn Builder; 8] {
     ]
 }
 
+pub fn validate_registered_builders() -> Result<(), String> {
+    for builder in registered_builders() {
+        builder.spec().validate()?;
+    }
+    Ok(())
+}
+
 pub fn get_builder(tag: &str) -> Option<&'static dyn Builder> {
     registered_builders()
         .iter()
@@ -40,4 +47,14 @@ pub fn supported_builder_tags() -> Vec<&'static str> {
         .iter()
         .map(|builder| builder.spec().tag)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registered_builder_specs_are_valid() {
+        validate_registered_builders().unwrap();
+    }
 }

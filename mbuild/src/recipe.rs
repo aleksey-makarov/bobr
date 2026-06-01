@@ -187,6 +187,8 @@ pub(crate) fn collect_graph(
     node_id: &str,
     nodes: &mut HashMap<BuildKey, PlannedNode>,
 ) -> Result<CollectedGraph, RuntimeError> {
+    builders::validate_registered_builders().map_err(RuntimeError::InvalidRequest)?;
+
     let mut stack = BTreeSet::new();
     let mut node_keys = HashMap::new();
     let mut topo_order = Vec::new();

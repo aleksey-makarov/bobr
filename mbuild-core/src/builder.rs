@@ -4,7 +4,7 @@ use crate::logging::{BuildLogEvent, BuildLogLevel, BuildLogger, NoopBuildLogger}
 use fsobj_hash::ObjectHash;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use std::path::PathBuf;
@@ -19,6 +19,36 @@ pub struct BuilderSpec {
 }
 
 impl BuilderSpec {
+    pub fn validate(&self) -> Result<(), String> {
+        let mut required = BTreeSet::new();
+        for name in self.required_inputs {
+            if !required.insert(*name) {
+                return Err(format!(
+                    "builder '{}' declares duplicate required input '{}'",
+                    self.tag, name
+                ));
+            }
+        }
+
+        let mut optional = BTreeSet::new();
+        for name in self.optional_inputs {
+            if !optional.insert(*name) {
+                return Err(format!(
+                    "builder '{}' declares duplicate optional input '{}'",
+                    self.tag, name
+                ));
+            }
+            if required.contains(name) {
+                return Err(format!(
+                    "builder '{}' declares input '{}' as both required and optional",
+                    self.tag, name
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn reserved_input_names(&self) -> impl Iterator<Item = &'static str> {
         self.required_inputs
             .iter()
@@ -308,6 +338,63 @@ mod tests {
         BuilderInputObject {
             path: PathBuf::from("/tmp/object"),
         }
+    }
+
+    #[test]
+    fn builder_spec_validate_accepts_distinct_inputs() {
+        let spec = BuilderSpec {
+            tag: "Test",
+            required_inputs: &["rootfs", "toolchain"],
+            optional_inputs: &["source"],
+            allow_extra_inputs: true,
+        };
+
+        spec.validate().unwrap();
+    }
+
+    #[test]
+    fn builder_spec_validate_rejects_duplicate_required_inputs() {
+        let spec = BuilderSpec {
+            tag: "Test",
+            required_inputs: &["rootfs", "rootfs"],
+            optional_inputs: &[],
+            allow_extra_inputs: true,
+        };
+
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "builder 'Test' declares duplicate required input 'rootfs'"
+        );
+    }
+
+    #[test]
+    fn builder_spec_validate_rejects_duplicate_optional_inputs() {
+        let spec = BuilderSpec {
+            tag: "Test",
+            required_inputs: &[],
+            optional_inputs: &["source", "source"],
+            allow_extra_inputs: true,
+        };
+
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "builder 'Test' declares duplicate optional input 'source'"
+        );
+    }
+
+    #[test]
+    fn builder_spec_validate_rejects_required_optional_overlap() {
+        let spec = BuilderSpec {
+            tag: "Test",
+            required_inputs: &["rootfs"],
+            optional_inputs: &["rootfs"],
+            allow_extra_inputs: true,
+        };
+
+        assert_eq!(
+            spec.validate().unwrap_err(),
+            "builder 'Test' declares input 'rootfs' as both required and optional"
+        );
     }
 
     #[test]
