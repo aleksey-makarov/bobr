@@ -1,44 +1,23 @@
-use std::env;
 use std::fmt;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
-pub enum FsUtilError {
+pub(crate) enum FsUtilError {
     Io(String),
-    InvalidInput(String),
 }
 
 impl fmt::Display for FsUtilError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(message) | Self::InvalidInput(message) => write!(f, "{message}"),
+            Self::Io(message) => write!(f, "{message}"),
         }
     }
 }
 
-pub fn temp_root_dir(root_dir: &str) -> Result<PathBuf, FsUtilError> {
-    if root_dir.is_empty() {
-        return Err(FsUtilError::InvalidInput(
-            "root_dir must not be empty".to_string(),
-        ));
-    }
-
-    let cwd = env::current_dir()
-        .map_err(|error| FsUtilError::Io(format!("failed to get current directory: {error}")))?;
-    let path = cwd.join(root_dir).join("tmp");
-    fs::create_dir_all(&path).map_err(|error| {
-        FsUtilError::Io(format!(
-            "failed to create temp root directory '{}': {error}",
-            path.display()
-        ))
-    })?;
-    Ok(path)
-}
-
-pub fn recreate_empty_dir_force(path: &Path) -> Result<(), FsUtilError> {
+pub(crate) fn recreate_empty_dir_force(path: &Path) -> Result<(), FsUtilError> {
     if path.exists() {
         if path.is_dir() {
             remove_dir_force(path)?;
@@ -60,34 +39,7 @@ pub fn recreate_empty_dir_force(path: &Path) -> Result<(), FsUtilError> {
     })
 }
 
-pub fn recreate_empty_dir(path: &Path) -> Result<(), FsUtilError> {
-    if path.exists() {
-        if path.is_dir() {
-            fs::remove_dir_all(path).map_err(|error| {
-                FsUtilError::Io(format!(
-                    "failed to remove previous directory '{}': {error}",
-                    path.display()
-                ))
-            })?;
-        } else {
-            fs::remove_file(path).map_err(|error| {
-                FsUtilError::Io(format!(
-                    "failed to remove previous file '{}': {error}",
-                    path.display()
-                ))
-            })?;
-        }
-    }
-
-    fs::create_dir_all(path).map_err(|error| {
-        FsUtilError::Io(format!(
-            "failed to create directory '{}': {error}",
-            path.display()
-        ))
-    })
-}
-
-pub fn remove_dir_force(path: &Path) -> Result<(), FsUtilError> {
+pub(crate) fn remove_dir_force(path: &Path) -> Result<(), FsUtilError> {
     if !path.exists() {
         return Ok(());
     }
@@ -100,7 +52,7 @@ pub fn remove_dir_force(path: &Path) -> Result<(), FsUtilError> {
     })
 }
 
-pub fn write_atomic(path: &Path, content: &str) -> Result<(), FsUtilError> {
+pub(crate) fn write_atomic(path: &Path, content: &str) -> Result<(), FsUtilError> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -134,7 +86,7 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<(), FsUtilError> {
     })
 }
 
-pub fn current_epoch_nanos() -> Result<u128, FsUtilError> {
+fn current_epoch_nanos() -> Result<u128, FsUtilError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())

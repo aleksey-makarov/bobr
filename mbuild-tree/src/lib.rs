@@ -3,7 +3,7 @@ use globset::{Glob, GlobMatcher};
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
     ComposedFsTree, ComposedFsTreeEntry, FsTreeComposeInput, FsTreeEntry, FsTreeManifest,
-    StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir, fsutil,
+    StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir,
     load_fs_tree_object,
 };
 #[cfg(test)]
@@ -24,7 +24,7 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -432,8 +432,7 @@ fn build_tree(
     let output_kind = determine_output_kind(&normalized);
     validate_install(output_kind, config.install.as_ref())?;
 
-    let now_nanos = fsutil::current_epoch_nanos()
-        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+    let now_nanos = current_epoch_nanos()?;
     let output_path = cx.temp_dir.join(format!("tree-{now_nanos}.obj"));
 
     cx.log_event(
@@ -498,8 +497,7 @@ fn build_tree_subset(
         tree_subset_compose_details(patterns.len(), entry_count, elapsed_ms(compose_start)),
     );
 
-    let now_nanos = fsutil::current_epoch_nanos()
-        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+    let now_nanos = current_epoch_nanos()?;
     let output_path = cx.temp_dir.join(format!("tree-subset-{now_nanos}.obj"));
 
     cx.log_event(
@@ -570,8 +568,7 @@ fn build_tree_merge(
         tree_merge_compose_details(inputs.len(), entry_count, elapsed_ms(compose_start)),
     );
 
-    let now_nanos = fsutil::current_epoch_nanos()
-        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+    let now_nanos = current_epoch_nanos()?;
     let output_path = cx.temp_dir.join(format!("tree-merge-{now_nanos}.obj"));
 
     cx.log_event(
@@ -631,8 +628,7 @@ fn build_erofs_rootfs(
     let composed =
         compose_rootfs_inputs_allowing_identical_leaf_overlap("ErofsRootfs", &merge_inputs)?;
 
-    let now_nanos = fsutil::current_epoch_nanos()
-        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+    let now_nanos = current_epoch_nanos()?;
     let tar_path = cx.temp_dir.join(format!("erofs-rootfs-{now_nanos}.tar"));
     let output_path = cx.temp_dir.join(format!("erofs-rootfs-{now_nanos}.erofs"));
 
@@ -689,8 +685,7 @@ fn build_initramfs(
     let composed =
         compose_rootfs_inputs_allowing_identical_leaf_overlap("Initramfs", &merge_inputs)?;
 
-    let now_nanos = fsutil::current_epoch_nanos()
-        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+    let now_nanos = current_epoch_nanos()?;
     let output_path = cx.temp_dir.join(format!("initramfs-{now_nanos}.img"));
 
     cx.log_event(
@@ -1649,6 +1644,15 @@ fn elapsed_ms(start: Instant) -> u128 {
     start.elapsed().as_millis()
 }
 
+fn current_epoch_nanos() -> Result<u128, BuilderError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .map_err(|error| {
+            BuilderError::ExecutionFailed(format!("system time before UNIX_EPOCH: {error}"))
+        })
+}
+
 fn json_usize(value: usize) -> Value {
     Value::from(value as u64)
 }
@@ -2532,8 +2536,8 @@ mod tests {
     fn build_context(root: &std::path::Path) -> BuildContext {
         let state_dir = root.join("tree");
         let temp_dir = state_dir.join("tmp");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        mbuild_core::fsutil::recreate_empty_dir_force(&temp_dir).unwrap();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
         BuildContext::with_noop_logger(state_dir, temp_dir)
     }
 

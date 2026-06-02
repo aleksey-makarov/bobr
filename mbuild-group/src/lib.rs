@@ -88,8 +88,8 @@ mod tests {
     fn build_context(root: &Path) -> BuildContext {
         let state_dir = root.join("group");
         let temp_dir = state_dir.join("tmp");
-        std::fs::create_dir_all(&state_dir).unwrap();
-        mbuild_core::fsutil::recreate_empty_dir_force(&temp_dir).unwrap();
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
         BuildContext::with_noop_logger(state_dir, temp_dir)
     }
 

@@ -12,8 +12,8 @@ use fsobj_hash::hash_path;
 use mbuild_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, CancellationToken,
     OriginContext, RealizedResult, ResultRecord, ReuseInputIdentity, RunOptions, StoreLayout,
-    fsutil, import_object, load_result_record, object_path, publish_result_refs,
-    store_result_record,
+    import_object, load_result_record, object_path, publish_result_refs,
+    recreate_store_temp_dir_force, remove_store_temp_dir_force, store_result_record,
 };
 use serde_json::{Map, Value, to_string_pretty};
 use std::collections::{HashMap, VecDeque};
@@ -866,14 +866,14 @@ fn execute_source_recipe(
         .join("source-state")
         .join("tmp")
         .join(key.to_hex());
-    fsutil::recreate_empty_dir_force(&temp_root).map_err(|error| {
+    recreate_store_temp_dir_force(layout, &temp_root).map_err(|error| {
         RuntimeError::Store(format!(
             "failed to prepare source temp dir '{}': {error}",
             temp_root.display()
         ))
     })?;
     if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
         return Err(error);
     }
     let staged_path = match recipe
@@ -885,7 +885,7 @@ fn execute_source_recipe(
         }) {
         Ok(path) => path,
         Err(error) => {
-            cleanup_source_temp_dir(&temp_root, logger.as_ref());
+            cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
             log_runtime_event(
                 logger.as_ref(),
                 BuildLogLevel::Error,
@@ -896,7 +896,7 @@ fn execute_source_recipe(
         }
     };
     if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
         return Err(error);
     }
     log_runtime_event(
@@ -907,25 +907,25 @@ fn execute_source_recipe(
     );
 
     let actual_hash = hash_path(&staged_path).map_err(|error| {
-        cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
         RuntimeError::Build(format!(
             "failed to hash materialized source '{}': {error}",
             staged_path.display()
         ))
     })?;
     if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
         return Err(error);
     }
     let imported_hash = import_object(layout, &staged_path).map_err(|error| {
-        cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
         map_store_error(error)
     })?;
     if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_source_temp_dir(&temp_root, logger.as_ref());
+        cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
         return Err(error);
     }
-    cleanup_source_temp_dir(&temp_root, logger.as_ref());
+    cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
     debug_assert_eq!(imported_hash, actual_hash);
 
     if actual_hash != recipe.object_hash {
@@ -945,8 +945,8 @@ fn execute_source_recipe(
     })
 }
 
-fn cleanup_source_temp_dir(temp_dir: &Path, logger: &dyn BuildLogger) {
-    if let Err(error) = fsutil::remove_dir_force(temp_dir) {
+fn cleanup_source_temp_dir(layout: &StoreLayout, temp_dir: &Path, logger: &dyn BuildLogger) {
+    if let Err(error) = remove_store_temp_dir_force(layout, temp_dir) {
         log_runtime_event(
             logger,
             BuildLogLevel::Warn,

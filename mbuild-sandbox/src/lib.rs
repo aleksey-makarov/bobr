@@ -20,7 +20,7 @@
 
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
-    StagedBuildResult, TypedBuilder, fsutil, load_fs_tree_object,
+    StagedBuildResult, TypedBuilder, load_fs_tree_object,
 };
 use mbuild_runtime::{
     SandboxBuildConfig, SandboxInput, SandboxRunAs, SandboxStep, run_sandbox_build,
@@ -33,6 +33,7 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fmt;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// Builder implementation registered for recipe nodes tagged `Sandbox`.
@@ -149,13 +150,9 @@ impl TypedBuilder for SandboxBuilder {
         validate_step_interpolations(&config.steps, &extra_inputs).map_err(map_error)?;
 
         let output_path = cx.temp_dir.join(OUTPUT_DIR_NAME);
-        fsutil::recreate_empty_dir_force(&output_path)
-            .map_err(map_fsutil_error)
-            .map_err(map_error)?;
+        recreate_empty_dir_force(&output_path).map_err(map_error)?;
         let config_path = cx.temp_dir.join(CONFIG_DIR_NAME);
-        fsutil::recreate_empty_dir_force(&config_path)
-            .map_err(map_fsutil_error)
-            .map_err(map_error)?;
+        recreate_empty_dir_force(&config_path).map_err(map_error)?;
         write_script_config(&config_path, config.script_config.as_ref()).map_err(map_error)?;
 
         let sandbox_inputs = extra_inputs
@@ -225,7 +222,7 @@ fn stage_fs_tree_output(
     manifest: &mbuild_core::FsTreeManifest,
 ) -> BResult<PathBuf> {
     let staged_path = cx.temp_dir.join(FS_TREE_OBJECT_DIR_NAME);
-    fsutil::recreate_empty_dir_force(&staged_path).map_err(map_fsutil_error)?;
+    recreate_empty_dir_force(&staged_path)?;
     let manifest_path = staged_path.join("manifest.jsonl");
     manifest.write_canonical(&manifest_path).map_err(|error| {
         SandboxError::BuildFailed(format!(
@@ -696,9 +693,109 @@ fn validate_step_interpolations(
     Ok(())
 }
 
-/// Convert fsutil errors into sandbox-local filesystem errors.
-fn map_fsutil_error(error: fsutil::FsUtilError) -> SandboxError {
-    SandboxError::FsFailed(error.to_string())
+fn recreate_empty_dir_force(path: &Path) -> BResult<()> {
+    if fs::symlink_metadata(path).is_ok() {
+        if path.is_dir() && !path.is_symlink() {
+            remove_dir_force(path)?;
+        } else {
+            fs::remove_file(path).map_err(|error| {
+                SandboxError::FsFailed(format!(
+                    "failed to remove previous file '{}': {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+
+    fs::create_dir_all(path).map_err(|error| {
+        SandboxError::FsFailed(format!(
+            "failed to create directory '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn recreate_empty_dir(path: &Path) -> BResult<()> {
+    if fs::symlink_metadata(path).is_ok() {
+        if path.is_dir() && !path.is_symlink() {
+            fs::remove_dir_all(path).map_err(|error| {
+                SandboxError::FsFailed(format!(
+                    "failed to remove previous directory '{}': {error}",
+                    path.display()
+                ))
+            })?;
+        } else {
+            fs::remove_file(path).map_err(|error| {
+                SandboxError::FsFailed(format!(
+                    "failed to remove previous file '{}': {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+
+    fs::create_dir_all(path).map_err(|error| {
+        SandboxError::FsFailed(format!(
+            "failed to create directory '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn remove_dir_force(path: &Path) -> BResult<()> {
+    if fs::symlink_metadata(path).is_err() {
+        return Ok(());
+    }
+    make_tree_writable(path)?;
+    fs::remove_dir_all(path).map_err(|error| {
+        SandboxError::FsFailed(format!(
+            "failed to remove directory '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn make_tree_writable(path: &Path) -> BResult<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        SandboxError::FsFailed(format!(
+            "failed to inspect path '{}': {error}",
+            path.display()
+        ))
+    })?;
+
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    if metadata.is_dir() {
+        let mode = metadata.permissions().mode();
+        let desired = mode | 0o700;
+        if desired != mode {
+            fs::set_permissions(path, fs::Permissions::from_mode(desired)).map_err(|error| {
+                SandboxError::FsFailed(format!(
+                    "failed to adjust permissions for '{}': {error}",
+                    path.display()
+                ))
+            })?;
+        }
+
+        for entry in fs::read_dir(path).map_err(|error| {
+            SandboxError::FsFailed(format!(
+                "failed to read directory '{}': {error}",
+                path.display()
+            ))
+        })? {
+            let entry = entry.map_err(|error| {
+                SandboxError::FsFailed(format!(
+                    "failed to read directory entry in '{}': {error}",
+                    path.display()
+                ))
+            })?;
+            make_tree_writable(&entry.path())?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Map sandbox-local errors to the recipe runtime error categories.
@@ -782,7 +879,7 @@ fn write_script_config_node(path: &Path, value: &Value, debug_path: &str) -> BRe
             ))
         }),
         Value::Array(items) => {
-            fsutil::recreate_empty_dir(path).map_err(map_fsutil_error)?;
+            recreate_empty_dir(path)?;
             for (index, item) in items.iter().enumerate() {
                 let child_path = path.join(format!("{index:08}"));
                 write_script_config_node(&child_path, item, &format!("{debug_path}[{index}]"))?;
@@ -790,7 +887,7 @@ fn write_script_config_node(path: &Path, value: &Value, debug_path: &str) -> BRe
             Ok(())
         }
         Value::Object(map) => {
-            fsutil::recreate_empty_dir(path).map_err(map_fsutil_error)?;
+            recreate_empty_dir(path)?;
             for (key, item) in map {
                 let child_path = path.join(key);
                 write_script_config_node(&child_path, item, &format!("{debug_path}.{key}"))?;

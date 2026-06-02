@@ -1,5 +1,7 @@
 use super::CasError;
+use crate::fsutil as private_fs;
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -69,4 +71,39 @@ fn ensure_dir(path: &Path, label: &str) -> Result<(), CasError> {
             path.display()
         ))
     })
+}
+
+pub fn recreate_store_temp_dir_force(
+    layout: &StoreLayout,
+    temp_dir: &Path,
+) -> Result<(), CasError> {
+    validate_store_temp_dir(layout, temp_dir)?;
+    private_fs::recreate_empty_dir_force(temp_dir).map_err(super::error::map_fsutil_error)
+}
+
+pub fn remove_store_temp_dir_force(layout: &StoreLayout, temp_dir: &Path) -> Result<(), CasError> {
+    validate_store_temp_dir(layout, temp_dir)?;
+    private_fs::remove_dir_force(temp_dir).map_err(super::error::map_fsutil_error)
+}
+
+fn validate_store_temp_dir(layout: &StoreLayout, temp_dir: &Path) -> Result<(), CasError> {
+    if temp_dir == layout.root || !temp_dir.starts_with(&layout.root) {
+        return Err(CasError::InvalidInput(format!(
+            "store temp directory '{}' must be under store root '{}'",
+            temp_dir.display(),
+            layout.root.display()
+        )));
+    }
+
+    if !temp_dir
+        .components()
+        .any(|component| component.as_os_str() == OsStr::new("tmp"))
+    {
+        return Err(CasError::InvalidInput(format!(
+            "store temp directory '{}' must include a 'tmp' path component",
+            temp_dir.display()
+        )));
+    }
+
+    Ok(())
 }

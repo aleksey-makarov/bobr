@@ -1,4 +1,4 @@
-use crate::{BuildKey, ObjectHash, fsutil};
+use crate::{BuildKey, ObjectHash};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -351,8 +351,7 @@ fn sanitize_component(value: &str) -> String {
 }
 
 fn current_timestamp_utc() -> OffsetDateTime {
-    OffsetDateTime::from_unix_timestamp_nanos(fsutil::current_epoch_nanos().unwrap_or(0) as i128)
-        .unwrap_or_else(|_| OffsetDateTime::now_utc())
+    OffsetDateTime::now_utc()
 }
 
 fn current_human_timestamp() -> String {

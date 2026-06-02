@@ -1,4 +1,4 @@
-use crate::fsutil;
+use crate::fsutil as private_fs;
 use std::fmt;
 
 #[derive(Debug)]
@@ -22,6 +22,6 @@ impl fmt::Display for CasError {
 
 impl std::error::Error for CasError {}
 
-pub(crate) fn map_fsutil_error(error: fsutil::FsUtilError) -> CasError {
+pub(crate) fn map_fsutil_error(error: private_fs::FsUtilError) -> CasError {
     CasError::Io(error.to_string())
 }

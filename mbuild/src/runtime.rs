@@ -2,14 +2,15 @@ use crate::resolved_inputs::ResolvedInputs;
 use mbuild_core::{
     Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger,
     Builder, BuilderError, CancellationToken, CasError, PublishedBuild, ReuseInputIdentity,
-    StoreLayout, compute_reuse_key, fsutil, load_build_handle, load_reuse_record,
-    materialize_build, object_path,
+    StoreLayout, compute_reuse_key, load_build_handle, load_reuse_record, materialize_build,
+    object_path, recreate_store_temp_dir_force, remove_store_temp_dir_force,
 };
 use serde_json::{Value, json};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
@@ -331,7 +332,7 @@ fn recreate_empty_temp_dir_with_quarantine(
         });
     }
 
-    match fsutil::recreate_empty_dir_force(temp_dir) {
+    match recreate_store_temp_dir_force(&cleanup.layout, temp_dir) {
         Ok(()) => return Ok(()),
         Err(error) if fs::symlink_metadata(temp_dir).is_ok() => {
             quarantine_temp_path(temp_dir, cleanup, logger, error.to_string())
@@ -356,6 +357,7 @@ enum TempCleanupMode {
 
 #[derive(Debug)]
 struct TempCleanupContext {
+    layout: StoreLayout,
     quarantine_dir: PathBuf,
     builder_tag: String,
     build_key: BuildKey,
@@ -365,6 +367,7 @@ struct TempCleanupContext {
 impl TempCleanupContext {
     fn new(layout: &StoreLayout, builder_tag: &str, build_key: BuildKey) -> Self {
         Self {
+            layout: layout.clone(),
             quarantine_dir: layout.root.join("quarantine"),
             builder_tag: builder_tag.to_string(),
             build_key,
@@ -408,7 +411,7 @@ fn cleanup_temp_dir(temp_dir: &Path, cleanup: &TempCleanupContext, logger: &dyn 
         return;
     }
 
-    if let Err(error) = fsutil::remove_dir_force(temp_dir) {
+    if let Err(error) = remove_store_temp_dir_force(&cleanup.layout, temp_dir) {
         if fs::symlink_metadata(temp_dir).is_ok() {
             match quarantine_temp_path(temp_dir, cleanup, logger, error.to_string()) {
                 Ok(_) => return,
@@ -456,7 +459,7 @@ fn quarantine_temp_path(
             quarantine_dir.display()
         )
     })?;
-    let stamp = fsutil::current_epoch_nanos().map_err(|error| error.to_string())?;
+    let stamp = current_epoch_nanos()?;
     let timestamp = human_quarantine_timestamp(stamp)?;
 
     for counter in 1..1000 {
@@ -521,6 +524,13 @@ fn human_quarantine_timestamp(stamp: u128) -> Result<String, String> {
     local
         .format(&format)
         .map_err(|error| format!("failed to format quarantine timestamp: {error}"))
+}
+
+fn current_epoch_nanos() -> Result<u128, String> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .map_err(|error| format!("system time before UNIX_EPOCH: {error}"))
 }
 
 fn safe_quarantine_component(value: &str) -> String {

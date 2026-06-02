@@ -6,9 +6,10 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
 pub struct BuilderSpec {
@@ -265,7 +266,7 @@ impl BuildContext {
             return None;
         }
 
-        if let Err(error) = crate::fsutil::write_atomic(&path, content) {
+        if let Err(error) = write_raw_log_atomic(&path, content) {
             self.log_event(
                 BuildLogLevel::Warn,
                 "log-warning",
@@ -276,6 +277,36 @@ impl BuildContext {
 
         Some(path)
     }
+}
+
+fn write_raw_log_atomic(path: &Path, content: &str) -> Result<(), String> {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("invalid file name for raw log path '{}'", path.display()))?;
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system time before UNIX_EPOCH: {error}"))?
+        .as_nanos();
+    let tmp_path = path.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        now_nanos
+    ));
+
+    fs::write(&tmp_path, content).map_err(|error| {
+        format!(
+            "failed to write temporary raw log '{}': {error}",
+            tmp_path.display()
+        )
+    })?;
+    fs::rename(&tmp_path, path).map_err(|error| {
+        format!(
+            "failed to move temporary raw log '{}' to '{}': {error}",
+            tmp_path.display(),
+            path.display()
+        )
+    })
 }
 
 #[derive(Debug, Clone)]

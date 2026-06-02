@@ -11,7 +11,7 @@ mod refs;
 pub use error::CasError;
 pub use id::{BuildKey, ParseBuildKeyError, ResultId, ReuseKey};
 pub use key::{compute_build_key, compute_result_id, compute_reuse_key};
-pub use layout::StoreLayout;
+pub use layout::{StoreLayout, recreate_store_temp_dir_force, remove_store_temp_dir_force};
 pub use object::{import_object, object_path};
 pub use publish::{PublishOutputRequest, PublishedOutput, materialize_build, publish_output};
 pub use record::{

@@ -1,5 +1,5 @@
 use super::{BuildKey, CasError, ResultId, StoreLayout};
-use crate::fsutil;
+use crate::fsutil as private_fs;
 use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -87,7 +87,7 @@ pub fn store_result_record(layout: &StoreLayout, record: &ResultRecord) -> Resul
     }
     let result_value = result_record_json_value(record);
     let canonical = super::json::canonical_json_bytes(&result_value)?;
-    fsutil::write_atomic(
+    private_fs::write_atomic(
         &result_path,
         std::str::from_utf8(&canonical).map_err(|error| {
             CasError::Serialization(format!(

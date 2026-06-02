@@ -1,6 +1,6 @@
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
-use mbuild_core::{OriginContext, OriginHandler, OriginSpec, ParsedOrigin, fsutil};
+use mbuild_core::{OriginContext, OriginHandler, OriginSpec, ParsedOrigin};
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use serde_json::{Map, Value};
@@ -153,7 +153,7 @@ fn materialize_http_origin(temp_root: &Path, origin: &HttpOrigin) -> HResult<Pat
         &origin.urls,
     )?;
     let staged_dir = temp_root.join("staged");
-    fsutil::recreate_empty_dir_force(&staged_dir).map_err(map_fsutil_error)?;
+    recreate_empty_dir_force(&staged_dir)?;
     extract_archive(&downloaded_blob, format, &staged_dir)?;
     let _ = normalize_extracted_root(&staged_dir)?;
     Ok(staged_dir)
@@ -600,8 +600,82 @@ fn normalize_extracted_root(directory: &Path) -> HResult<bool> {
     Ok(true)
 }
 
-fn map_fsutil_error(error: fsutil::FsUtilError) -> HttpOriginError {
-    HttpOriginError::FsFailed(error.to_string())
+fn recreate_empty_dir_force(path: &Path) -> HResult<()> {
+    if fs::symlink_metadata(path).is_ok() {
+        if path.is_dir() && !path.is_symlink() {
+            remove_dir_force(path)?;
+        } else {
+            fs::remove_file(path).map_err(|error| {
+                HttpOriginError::FsFailed(format!(
+                    "failed to remove previous file '{}': {error}",
+                    path.display()
+                ))
+            })?;
+        }
+    }
+
+    fs::create_dir_all(path).map_err(|error| {
+        HttpOriginError::FsFailed(format!(
+            "failed to create directory '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn remove_dir_force(path: &Path) -> HResult<()> {
+    if fs::symlink_metadata(path).is_err() {
+        return Ok(());
+    }
+    make_tree_writable(path)?;
+    fs::remove_dir_all(path).map_err(|error| {
+        HttpOriginError::FsFailed(format!(
+            "failed to remove directory '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn make_tree_writable(path: &Path) -> HResult<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        HttpOriginError::FsFailed(format!(
+            "failed to inspect path '{}': {error}",
+            path.display()
+        ))
+    })?;
+
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    if metadata.is_dir() {
+        let mode = metadata.permissions().mode();
+        let desired = mode | 0o700;
+        if desired != mode {
+            fs::set_permissions(path, fs::Permissions::from_mode(desired)).map_err(|error| {
+                HttpOriginError::FsFailed(format!(
+                    "failed to adjust permissions for '{}': {error}",
+                    path.display()
+                ))
+            })?;
+        }
+
+        for entry in fs::read_dir(path).map_err(|error| {
+            HttpOriginError::FsFailed(format!(
+                "failed to read directory '{}': {error}",
+                path.display()
+            ))
+        })? {
+            let entry = entry.map_err(|error| {
+                HttpOriginError::FsFailed(format!(
+                    "failed to read directory entry in '{}': {error}",
+                    path.display()
+                ))
+            })?;
+            make_tree_writable(&entry.path())?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

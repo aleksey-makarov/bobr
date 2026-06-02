@@ -1,5 +1,5 @@
 use super::{CasError, StoreLayout};
-use crate::fsutil;
+use crate::fsutil as private_fs;
 use fsobj_hash::{ObjectHash, hash_path};
 use std::fs;
 use std::path::Path;
@@ -63,7 +63,7 @@ pub(crate) fn remove_path_force(path: &Path) -> Result<(), CasError> {
         ))
     })?;
     if metadata.file_type().is_dir() {
-        fsutil::remove_dir_force(path).map_err(super::error::map_fsutil_error)
+        private_fs::remove_dir_force(path).map_err(super::error::map_fsutil_error)
     } else {
         fs::remove_file(path).map_err(|error| {
             CasError::Io(format!(

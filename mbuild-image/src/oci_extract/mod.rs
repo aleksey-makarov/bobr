@@ -1341,8 +1341,8 @@ mod tests {
     fn build_context(root: &Path) -> BuildContext {
         let state_dir = root.join("builder");
         let temp_dir = root.join("tmp");
-        fs::create_dir_all(&state_dir).unwrap();
-        mbuild_core::fsutil::recreate_empty_dir_force(&temp_dir).unwrap();
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
         BuildContext::with_noop_logger(state_dir, temp_dir)
     }
 
