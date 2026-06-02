@@ -1,4 +1,4 @@
-use crate::{BuildKey, ObjectHash};
+use crate::ObjectHash;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -145,13 +145,13 @@ impl BuildRunLogger {
         self: &Arc<Self>,
         builder: impl Into<String>,
         name: impl Into<String>,
-        build_key: BuildKey,
+        build_key: impl fmt::Display,
     ) -> Arc<dyn BuildLogger> {
         Arc::new(BoundBuildLogger {
             inner: self.clone(),
             builder: builder.into(),
             name: name.into(),
-            build_key,
+            build_key: build_key.to_string(),
         })
     }
 
@@ -159,7 +159,7 @@ impl BuildRunLogger {
         &self,
         builder: &str,
         name: &str,
-        build_key: BuildKey,
+        build_key: &str,
         event: &BuildLogEvent,
     ) -> Result<(), String> {
         let mut writer = self.writer.lock().map_err(|error| error.to_string())?;
@@ -178,13 +178,7 @@ impl BuildRunLogger {
             })
     }
 
-    fn log_bound_event(
-        &self,
-        builder: &str,
-        name: &str,
-        build_key: BuildKey,
-        event: &BuildLogEvent,
-    ) {
+    fn log_bound_event(&self, builder: &str, name: &str, build_key: &str, event: &BuildLogEvent) {
         if self.emit_progress {
             eprintln!("{}", format_progress_line(builder, name, build_key, event));
         }
@@ -198,7 +192,7 @@ impl BuildRunLogger {
         &self,
         builder: &str,
         name: &str,
-        build_key: BuildKey,
+        build_key: &str,
         label: &str,
     ) -> Result<PathBuf, String> {
         let logs_dir = self
@@ -230,18 +224,18 @@ struct BoundBuildLogger {
     inner: Arc<BuildRunLogger>,
     builder: String,
     name: String,
-    build_key: BuildKey,
+    build_key: String,
 }
 
 impl BuildLogger for BoundBuildLogger {
     fn log_event(&self, event: BuildLogEvent) {
         self.inner
-            .log_bound_event(&self.builder, &self.name, self.build_key, &event);
+            .log_bound_event(&self.builder, &self.name, &self.build_key, &event);
     }
 
     fn allocate_raw_log_path(&self, label: &str) -> Result<PathBuf, String> {
         self.inner
-            .allocate_node_raw_log_path(&self.builder, &self.name, self.build_key, label)
+            .allocate_node_raw_log_path(&self.builder, &self.name, &self.build_key, label)
     }
 }
 
@@ -263,7 +257,7 @@ struct EventLogRecord {
 }
 
 impl EventLogRecord {
-    fn from_event(builder: &str, name: &str, build_key: BuildKey, event: &BuildLogEvent) -> Self {
+    fn from_event(builder: &str, name: &str, build_key: &str, event: &BuildLogEvent) -> Self {
         let mut details = event.details.clone();
         details.insert(
             "full_build_key".to_string(),
@@ -297,7 +291,7 @@ impl EventLogRecord {
 fn format_progress_line(
     builder: &str,
     name: &str,
-    build_key: BuildKey,
+    build_key: &str,
     event: &BuildLogEvent,
 ) -> String {
     let mut line = format!(
@@ -327,8 +321,8 @@ fn format_progress_line(
     line
 }
 
-fn short_build_key(build_key: BuildKey) -> String {
-    build_key.to_hex().chars().take(12).collect()
+fn short_build_key(build_key: &str) -> String {
+    build_key.chars().take(12).collect()
 }
 
 fn short_object_hash(object_hash: ObjectHash) -> String {
@@ -420,16 +414,13 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use std::fs;
-    use std::str::FromStr;
     use tempfile::tempdir;
 
     #[test]
     fn bound_logger_writes_builder_identity_to_event_log() {
         let temp = tempdir().unwrap();
         let logger = Arc::new(BuildRunLogger::new(temp.path(), RunOptions::default()).unwrap());
-        let build_key =
-            BuildKey::from_str("1111111111111111111111111111111111111111111111111111111111111111")
-                .unwrap();
+        let build_key = "1111111111111111111111111111111111111111111111111111111111111111";
         let node_logger = logger.bind_node("Sandbox", "bash", build_key);
 
         node_logger.log_event(BuildLogEvent {
@@ -460,9 +451,7 @@ mod tests {
     fn bound_logger_allocates_raw_logs_under_sanitized_build_name() {
         let temp = tempdir().unwrap();
         let logger = Arc::new(BuildRunLogger::new(temp.path(), RunOptions::default()).unwrap());
-        let build_key =
-            BuildKey::from_str("2222222222222222222222222222222222222222222222222222222222222222")
-                .unwrap();
+        let build_key = "2222222222222222222222222222222222222222222222222222222222222222";
         let node_logger = logger.bind_node("Sandbox", "bash debug/test", build_key);
 
         let path = node_logger.allocate_raw_log_path("podman/run").unwrap();

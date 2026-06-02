@@ -3,7 +3,7 @@ mod support;
 use mbuild::recipe_runtime::{
     BuildRunOptions, run_recipe_json_in_workspace, run_recipe_json_in_workspace_with_options,
 };
-use mbuild_core::{StoreLayout, compute_result_id, load_build_handle, load_result_record};
+use mbuild_store::{StoreLayout, compute_result_id, load_build_handle, load_result_record};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Cursor, Read, Write};

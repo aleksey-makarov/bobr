@@ -1,9 +1,8 @@
 use crate::builders;
 use crate::origins;
 use crate::runtime::{RuntimeError, map_store_error};
-use mbuild_core::{
-    BuildKey, BuilderSpec, ObjectHash, ParsedOrigin, ResultId, compute_build_key, compute_result_id,
-};
+use mbuild_core::{BuilderSpec, ObjectHash, ParsedOrigin};
+use mbuild_store::{BuildKey, RealizedResult, ResultId, compute_build_key, compute_result_id};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -162,7 +161,7 @@ impl PlannedNode {
 pub(crate) enum PlanningState {
     Unknown,
     Reused {
-        realized: mbuild_core::RealizedResult,
+        realized: RealizedResult,
         origin: ReuseOrigin,
     },
     NeedsBuild,

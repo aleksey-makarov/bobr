@@ -1,9 +1,12 @@
 use crate::resolved_inputs::ResolvedInputs;
 use mbuild_core::{
-    Build, BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger,
-    Builder, BuilderError, CancellationToken, CasError, PublishedBuild, ReuseInputIdentity,
-    StoreLayout, compute_reuse_key, load_build_handle, load_reuse_record, materialize_build,
-    object_path, recreate_store_temp_dir_force, remove_store_temp_dir_force,
+    BuildContext, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderError,
+    CancellationToken,
+};
+use mbuild_store::{
+    Build, BuildKey, CasError, PublishedBuild, ReuseInputIdentity, StoreLayout, compute_reuse_key,
+    load_build_handle, load_reuse_record, materialize_build, object_path,
+    recreate_store_temp_dir_force, remove_store_temp_dir_force, store_build_handle_ref,
 };
 use serde_json::{Value, json};
 use std::fmt;
@@ -126,8 +129,7 @@ pub(crate) fn execute_builder_node(
                 object_path.display()
             )));
         }
-        mbuild_core::store_build_handle_ref(layout, build_key, result_id)
-            .map_err(map_store_error)?;
+        store_build_handle_ref(layout, build_key, result_id).map_err(map_store_error)?;
         log_runtime_event(
             logger.as_ref(),
             BuildLogLevel::Info,
@@ -234,7 +236,7 @@ pub(crate) fn lookup_canonical_result(
             object_path.display()
         )));
     }
-    mbuild_core::store_build_handle_ref(layout, build_key, result_id).map_err(map_store_error)?;
+    store_build_handle_ref(layout, build_key, result_id).map_err(map_store_error)?;
     Ok(Some(PublishedBuild {
         build: Build {
             build_key,
@@ -596,9 +598,11 @@ fn write_quarantine_metadata(
 mod tests {
     use super::*;
     use mbuild_core::{
-        BuildContext, BuildRunLogger, BuilderInputs, BuilderSpec, CancellationToken,
-        PublishOutputRequest, ReuseInputIdentity, RunOptions, StagedBuildResult, TypedBuilder,
-        compute_build_key, publish_output,
+        BuildContext, BuildRunLogger, BuilderInputs, BuilderSpec, CancellationToken, RunOptions,
+        StagedBuildResult, TypedBuilder,
+    };
+    use mbuild_store::{
+        PublishOutputRequest, ReuseInputIdentity, compute_build_key, publish_output,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};

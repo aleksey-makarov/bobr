@@ -906,6 +906,7 @@ dependencies = [
  "mbuild-origin-http",
  "mbuild-origin-oci-registry",
  "mbuild-sandbox",
+ "mbuild-store",
  "mbuild-tree",
  "mockito",
  "serde",
@@ -923,7 +924,6 @@ version = "0.1.0"
 dependencies = [
  "fsobj-hash",
  "libc",
- "mbuild-store",
  "serde",
  "serde_json",
  "sha2",
