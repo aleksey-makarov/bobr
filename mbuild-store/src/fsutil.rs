@@ -1,7 +1,6 @@
 use std::env;
 use std::fmt;
 use std::fs;
-#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -142,7 +141,6 @@ pub fn current_epoch_nanos() -> Result<u128, FsUtilError> {
         .map_err(|error| FsUtilError::Io(format!("system time before UNIX_EPOCH: {error}")))
 }
 
-#[cfg(unix)]
 fn make_tree_writable(path: &Path) -> Result<(), FsUtilError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         FsUtilError::Io(format!(
@@ -186,14 +184,7 @@ fn make_tree_writable(path: &Path) -> Result<(), FsUtilError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn make_tree_writable(path: &Path) -> Result<(), FsUtilError> {
-    let _ = path;
-    Ok(())
-}
-
 #[cfg(test)]
-#[cfg(unix)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

@@ -6,9 +6,6 @@
 
 #![deny(missing_docs)]
 
-#[cfg(not(target_os = "linux"))]
-compile_error!("mbuild-fs-tree requires Linux");
-
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;

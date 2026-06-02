@@ -923,21 +923,12 @@ version = "0.1.0"
 dependencies = [
  "fsobj-hash",
  "libc",
+ "mbuild-store",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "time",
-]
-
-[[package]]
-name = "mbuild-fs-tree"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde_json",
- "sha2",
- "tempfile",
 ]
 
 [[package]]
@@ -1062,6 +1053,19 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "mbuild-store"
+version = "0.1.0"
+dependencies = [
+ "fsobj-hash",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "time",
 ]
 
 [[package]]
