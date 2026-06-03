@@ -42,10 +42,9 @@ pub struct Build {
 
 /// Store record for a realized result object.
 ///
-/// Result records are stored as canonical JSON under
-/// [`Store::results_dir`](crate::Store::results_dir). The record id is
-/// derived from [`ResultRecord::object_hash`], not from the build key that first
-/// produced it.
+/// Result records are stored as canonical JSON under the store's result record
+/// directory. The record id is derived from [`ResultRecord::object_hash`], not
+/// from the build key that first produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultRecord {
     /// Hash of the output object this record describes.
@@ -214,8 +213,8 @@ pub(crate) fn stored_result_from_record(
 
 /// Stores a result record if it is not already present.
 ///
-/// The record is written as canonical JSON under [`Store::results_dir`]. The
-/// operation is idempotent for an already-existing record path.
+/// The record is written as canonical JSON under the store's result record
+/// directory. The operation is idempotent for an already-existing record path.
 pub(crate) fn store_result_record(store: &Store, record: &ResultRecord) -> Result<(), StoreError> {
     let result_path = store.result_record_path(record.result_id());
     if result_path.exists() {

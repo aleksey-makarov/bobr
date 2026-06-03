@@ -3,7 +3,10 @@ mod support;
 use mbuild::recipe_runtime::run_recipe_json_in_workspace;
 use mbuild_store::{Store, load_build_handle};
 use std::fs;
-use support::{build_ref_count, remove_build_ref, store_root, tree_file_recipe, write_recipe};
+use support::{
+    build_ref_count, remove_build_ref, result_record_count, store_root, tree_file_recipe,
+    write_recipe,
+};
 use tempfile::tempdir;
 
 #[test]
@@ -42,9 +45,7 @@ fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
 
     let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
     let build_key = first.build_key.expect("builder root");
-    let results_after_first = fs::read_dir(store_root(workspace.path()).join("results"))
-        .unwrap()
-        .count();
+    let results_after_first = result_record_count(workspace.path());
     let objects_after_first = fs::read_dir(store_root(workspace.path()).join("objects"))
         .unwrap()
         .count();
@@ -52,9 +53,7 @@ fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
     remove_build_ref(workspace.path(), build_key);
 
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-    let results_after_second = fs::read_dir(store_root(workspace.path()).join("results"))
-        .unwrap()
-        .count();
+    let results_after_second = result_record_count(workspace.path());
     let objects_after_second = fs::read_dir(store_root(workspace.path()).join("objects"))
         .unwrap()
         .count();

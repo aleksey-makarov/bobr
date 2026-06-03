@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use mbuild_origin_oci_registry::fetch_image_authenticated;
+use mbuild_store::ResultId;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -120,8 +121,20 @@ fn build_ref_path(root: &Path, build_key: impl ToString) -> PathBuf {
     store_root(root).join("builds").join(build_key.to_string())
 }
 
+fn result_record_file_path(root: &Path, result_id: ResultId) -> PathBuf {
+    store_root(root)
+        .join("results")
+        .join(format!("{}.json", result_id.to_hex()))
+}
+
 pub fn build_ref_count(root: &Path) -> usize {
     fs::read_dir(store_root(root).join("builds"))
+        .unwrap()
+        .count()
+}
+
+pub fn result_record_count(root: &Path) -> usize {
+    fs::read_dir(store_root(root).join("results"))
         .unwrap()
         .count()
 }
@@ -130,6 +143,12 @@ pub fn remove_build_ref(root: &Path, build_key: impl ToString) {
     let build_ref = build_ref_path(root, build_key);
     fs::remove_file(&build_ref).unwrap();
     assert!(!build_ref.exists());
+}
+
+pub fn remove_result_record(root: &Path, result_id: ResultId) {
+    let result_path = result_record_file_path(root, result_id);
+    fs::remove_file(&result_path).unwrap();
+    assert!(!result_path.exists());
 }
 
 pub fn store_root(root: &Path) -> PathBuf {

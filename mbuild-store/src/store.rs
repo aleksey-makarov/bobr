@@ -60,12 +60,12 @@ impl Store {
     }
 
     /// Returns the reuse-key reference directory.
-    pub fn reuses_dir(&self) -> PathBuf {
+    pub(crate) fn reuses_dir(&self) -> PathBuf {
         self.root.join(REUSES_DIR)
     }
 
     /// Returns the JSON result record directory.
-    pub fn results_dir(&self) -> PathBuf {
+    pub(crate) fn results_dir(&self) -> PathBuf {
         self.root.join(RESULTS_DIR)
     }
 
@@ -106,16 +106,16 @@ impl Store {
 
     /// Returns the path of the reuse reference for `reuse_key`.
     ///
-    /// The path is under [`Store::reuses_dir`] and may or may not exist.
-    pub fn reuse_ref_path(&self, reuse_key: ReuseKey) -> PathBuf {
+    /// The path is under the reuse-key reference directory and may or may not exist.
+    pub(crate) fn reuse_ref_path(&self, reuse_key: ReuseKey) -> PathBuf {
         self.reuses_dir().join(reuse_key.to_hex())
     }
 
     /// Returns the path of the JSON result record for `result_id`.
     ///
-    /// The path is under [`Store::results_dir`] and has a `.json` suffix. The
+    /// The path is under the JSON result record directory and has a `.json` suffix. The
     /// function does not check whether the record currently exists.
-    pub fn result_record_path(&self, result_id: ResultId) -> PathBuf {
+    pub(crate) fn result_record_path(&self, result_id: ResultId) -> PathBuf {
         self.results_dir()
             .join(format!("{}.json", result_id.to_hex()))
     }
