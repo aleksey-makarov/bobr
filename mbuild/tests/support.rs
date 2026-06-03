@@ -116,8 +116,20 @@ fn normalize_request(recipe: &Value) -> Value {
     Value::Object(nodes)
 }
 
-pub fn build_ref_path(root: &Path, build_key: impl ToString) -> PathBuf {
+fn build_ref_path(root: &Path, build_key: impl ToString) -> PathBuf {
     store_root(root).join("builds").join(build_key.to_string())
+}
+
+pub fn build_ref_count(root: &Path) -> usize {
+    fs::read_dir(store_root(root).join("builds"))
+        .unwrap()
+        .count()
+}
+
+pub fn remove_build_ref(root: &Path, build_key: impl ToString) {
+    let build_ref = build_ref_path(root, build_key);
+    fs::remove_file(&build_ref).unwrap();
+    assert!(!build_ref.exists());
 }
 
 pub fn store_root(root: &Path) -> PathBuf {

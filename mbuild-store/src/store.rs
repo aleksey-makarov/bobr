@@ -55,7 +55,7 @@ impl Store {
     }
 
     /// Returns the build-key reference directory.
-    pub fn builds_dir(&self) -> PathBuf {
+    pub(crate) fn builds_dir(&self) -> PathBuf {
         self.root.join(BUILDS_DIR)
     }
 
@@ -99,8 +99,8 @@ impl Store {
 
     /// Returns the path of the build reference for `build_key`.
     ///
-    /// The path is under [`Store::builds_dir`] and may or may not exist.
-    pub fn build_ref_path(&self, build_key: BuildKey) -> PathBuf {
+    /// The path is under the build-key reference directory and may or may not exist.
+    pub(crate) fn build_ref_path(&self, build_key: BuildKey) -> PathBuf {
         self.builds_dir().join(build_key.to_hex())
     }
 

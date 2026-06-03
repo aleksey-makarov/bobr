@@ -17,7 +17,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use support::{
-    base_image_recipe, build_ref_path, group_recipe, recipe_node, source_recipe,
+    base_image_recipe, build_ref_count, group_recipe, recipe_node, source_recipe,
     spawn_test_oci_registry, store_root, tree_file_recipe, write_recipe,
 };
 #[cfg(feature = "integration-tests")]
@@ -362,9 +362,8 @@ fn json_recipe_executes_source_and_group_graph() {
         );
     }
 
-    let builds_dir = store_root(workspace.path()).join("builds");
     let objects_dir = store_root(workspace.path()).join("objects");
-    assert_eq!(fs::read_dir(&builds_dir).unwrap().count(), 1);
+    assert_eq!(build_ref_count(workspace.path()), 1);
     assert_eq!(fs::read_dir(&objects_dir).unwrap().count(), 3);
     drop(oci_server);
 }
@@ -411,15 +410,9 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
             .unwrap()
             .is_some()
     );
-    assert_eq!(
-        fs::read_dir(store_root(workspace.path()).join("builds"))
-            .unwrap()
-            .count(),
-        1
-    );
+    assert_eq!(build_ref_count(workspace.path()), 1);
     assert!(load_public_output(&layout, "source-a").unwrap().is_some());
     assert!(load_public_output(&layout, "source-b").unwrap().is_none());
-    assert!(build_ref_path(workspace.path(), build.build_key.expect("builder root")).exists());
 }
 
 #[test]
@@ -679,12 +672,7 @@ fn source_path_file_materializes_known_object_without_build_handle() {
         .unwrap()
         .expect("expected source result record");
     assert_eq!(result.object_hash, object_hash);
-    assert_eq!(
-        fs::read_dir(store_root(workspace.path()).join("builds"))
-            .unwrap()
-            .count(),
-        0
-    );
+    assert_eq!(build_ref_count(workspace.path()), 0);
 }
 
 #[test]

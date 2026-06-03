@@ -1,8 +1,9 @@
 mod support;
 
 use mbuild::recipe_runtime::run_recipe_json_in_workspace;
+use mbuild_store::{Store, load_build_handle};
 use std::fs;
-use support::{build_ref_path, store_root, tree_file_recipe, write_recipe};
+use support::{build_ref_count, remove_build_ref, store_root, tree_file_recipe, write_recipe};
 use tempfile::tempdir;
 
 #[test]
@@ -13,17 +14,21 @@ fn second_run_reuses_existing_root_build_handle() {
     write_recipe(&recipe_path, &recipe);
 
     let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-    let builds_after_first = fs::read_dir(store_root(workspace.path()).join("builds"))
-        .unwrap()
-        .count();
+    let builds_after_first = build_ref_count(workspace.path());
 
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-    let builds_after_second = fs::read_dir(store_root(workspace.path()).join("builds"))
-        .unwrap()
-        .count();
+    let builds_after_second = build_ref_count(workspace.path());
 
     assert_eq!(first.build_key, second.build_key);
     assert_eq!(first.object_hash, second.object_hash);
+    assert!(
+        load_build_handle(
+            &Store::create(&store_root(workspace.path())).unwrap(),
+            first.build_key.expect("builder root"),
+        )
+        .unwrap()
+        .is_some()
+    );
     assert_eq!(builds_after_first, 1);
     assert_eq!(builds_after_second, 1);
 }
@@ -36,7 +41,7 @@ fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
     write_recipe(&recipe_path, &recipe);
 
     let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-    let build_ref = build_ref_path(workspace.path(), first.build_key.expect("builder root"));
+    let build_key = first.build_key.expect("builder root");
     let results_after_first = fs::read_dir(store_root(workspace.path()).join("results"))
         .unwrap()
         .count();
@@ -44,8 +49,7 @@ fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
         .unwrap()
         .count();
 
-    fs::remove_file(&build_ref).unwrap();
-    assert!(!build_ref.exists());
+    remove_build_ref(workspace.path(), build_key);
 
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
     let results_after_second = fs::read_dir(store_root(workspace.path()).join("results"))
@@ -54,9 +58,7 @@ fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
     let objects_after_second = fs::read_dir(store_root(workspace.path()).join("objects"))
         .unwrap()
         .count();
-    let builds_after_second = fs::read_dir(store_root(workspace.path()).join("builds"))
-        .unwrap()
-        .count();
+    let builds_after_second = build_ref_count(workspace.path());
 
     assert_eq!(first.build_key, second.build_key);
     assert_eq!(first.object_hash, second.object_hash);
@@ -65,5 +67,12 @@ fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
     assert_eq!(objects_after_first, 1);
     assert_eq!(objects_after_second, 1);
     assert_eq!(builds_after_second, 1);
-    assert!(build_ref.exists());
+    assert!(
+        load_build_handle(
+            &Store::create(&store_root(workspace.path())).unwrap(),
+            build_key
+        )
+        .unwrap()
+        .is_some()
+    );
 }
