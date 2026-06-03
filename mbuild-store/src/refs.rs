@@ -1,4 +1,7 @@
-use crate::{Build, BuildKey, PublishedBuild, ResultId, ResultRecord, ReuseKey, Store, StoreError};
+use crate::{
+    Build, BuildKey, PublishedBuild, ResultId, ResultRecord, ReuseKey, Store, StoreError,
+    StoredResult,
+};
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
@@ -59,7 +62,7 @@ fn parse_result_ref_target(
 /// Build refs are symlinks pointing to result records through canonical
 /// relative targets. The replacement is performed through a temporary symlink
 /// and rename.
-pub fn store_build_handle_ref(
+pub(crate) fn store_build_handle_ref(
     store: &Store,
     build_key: BuildKey,
     result_id: ResultId,
@@ -73,7 +76,7 @@ pub fn store_build_handle_ref(
 /// Reuse refs are symlinks pointing to result records through canonical
 /// relative targets. The replacement is performed through a temporary symlink
 /// and rename.
-pub fn store_reuse_ref(
+pub(crate) fn store_reuse_ref(
     store: &Store,
     reuse_key: ReuseKey,
     result_id: ResultId,
@@ -103,25 +106,17 @@ pub fn load_build_handle(
         ))
     })?;
     let result_id = parse_result_ref_target("build", &build_ref_path, &target)?;
-    let result = crate::record::load_result_record(store, result_id)?.ok_or_else(|| {
+    let stored = crate::record::load_stored_result(store, result_id)?.ok_or_else(|| {
         StoreError::InvalidData(format!(
             "build ref '{}' points to missing result '{}'",
             build_ref_path.display(),
             result_id
         ))
     })?;
-    let object_path = store.object_path(result.object_hash);
-    if !object_path.exists() {
-        return Err(StoreError::Io(format!(
-            "result '{}' points to missing object '{}'",
-            result_id,
-            object_path.display()
-        )));
-    }
     Ok(Some(PublishedBuild {
-        build: crate::record::build_from_result(build_key, &result),
-        result,
-        object_path,
+        build: crate::record::build_from_result(build_key, &stored.result),
+        result: stored.result,
+        object_path: stored.object_path,
     }))
 }
 
@@ -129,7 +124,7 @@ pub fn load_build_handle(
 ///
 /// Returns `Ok(None)` when the reuse ref does not exist. Existing refs must be
 /// canonical symlinks to result records.
-pub fn load_reuse_record(
+pub(crate) fn load_reuse_record(
     store: &Store,
     reuse_key: ReuseKey,
 ) -> Result<Option<ResultRecord>, StoreError> {
@@ -145,7 +140,36 @@ pub fn load_reuse_record(
         ))
     })?;
     let result_id = parse_result_ref_target("reuse", &reuse_ref_path, &target)?;
-    crate::record::load_result_record(store, result_id)
+    let result = crate::record::load_result_record(store, result_id)?.ok_or_else(|| {
+        StoreError::InvalidData(format!(
+            "reuse ref '{}' points to missing result '{}'",
+            reuse_ref_path.display(),
+            result_id
+        ))
+    })?;
+    Ok(Some(result))
+}
+
+/// Resolves a reusable result and repairs the build handle for `build_key`.
+///
+/// Returns `Ok(None)` when the reuse ref does not exist. Existing reuse refs
+/// must point to an existing result record whose object exists in the store.
+pub fn resolve_reuse_for_build(
+    store: &Store,
+    build_key: BuildKey,
+    reuse_key: ReuseKey,
+) -> Result<Option<PublishedBuild>, StoreError> {
+    let Some(result) = load_reuse_record(store, reuse_key)? else {
+        return Ok(None);
+    };
+    let stored = crate::record::stored_result_from_record(store, result)?;
+    let result_id = stored.result_id();
+    store_build_handle_ref(store, build_key, result_id)?;
+    Ok(Some(PublishedBuild {
+        build: crate::record::build_from_result(build_key, &stored.result),
+        result: stored.result,
+        object_path: stored.object_path,
+    }))
 }
 
 /// Loads the public build handle for `build_key`.
@@ -154,6 +178,23 @@ pub fn load_reuse_record(
 /// serializable [`Build`] value.
 pub fn load_public_build(store: &Store, build_key: BuildKey) -> Result<Option<Build>, StoreError> {
     Ok(load_build_handle(store, build_key)?.map(|published| published.build))
+}
+
+/// Publishes a stored result under a public output name.
+///
+/// The result record must already exist and must point to an existing object in
+/// the store. The checked result is returned to callers that need the resolved
+/// record and object path.
+pub fn publish_result(
+    store: &Store,
+    output_name: &str,
+    result_id: ResultId,
+) -> Result<StoredResult, StoreError> {
+    let stored = crate::record::load_stored_result(store, result_id)?.ok_or_else(|| {
+        StoreError::InvalidData(format!("cannot publish missing result '{}'", result_id))
+    })?;
+    publish_result_refs(store, output_name, &stored.result)?;
+    Ok(stored)
 }
 
 /// Publishes a result under a public output name.
@@ -165,7 +206,7 @@ pub fn load_public_build(store: &Store, build_key: BuildKey) -> Result<Option<Bu
 ///
 /// Output names must be non-empty and contain only ASCII letters, digits, `.`,
 /// `_`, or `-`.
-pub fn publish_result_refs(
+pub(crate) fn publish_result_refs(
     store: &Store,
     output_name: &str,
     result: &ResultRecord,
@@ -201,17 +242,6 @@ pub fn publish_result_refs(
     let target = result_ref_target(result_id);
     replace_symlink(&target, &current_result_ref_path)?;
     Ok(())
-}
-
-/// Publishes the result contained in a fully resolved build.
-///
-/// This is a convenience wrapper around [`publish_result_refs`].
-pub fn publish_refs(
-    store: &Store,
-    output_name: &str,
-    published: &PublishedBuild,
-) -> Result<(), StoreError> {
-    publish_result_refs(store, output_name, &published.result)
 }
 
 fn object_ref_target_for_result(result: &ResultRecord) -> Result<PathBuf, StoreError> {

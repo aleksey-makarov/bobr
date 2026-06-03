@@ -15,8 +15,8 @@ use mbuild_core::{
 };
 use mbuild_store::{
     BuildKey, RealizedResult, ResultRecord, ReuseInputIdentity, Store, import_object,
-    load_result_record, publish_result_refs, recreate_store_temp_dir_force,
-    remove_store_temp_dir_force, store_result_record,
+    load_stored_result, publish_result, record_existing_source_result,
+    recreate_store_temp_dir_force, remove_store_temp_dir_force,
 };
 use serde_json::{Map, Value, to_string_pretty};
 use std::collections::{HashMap, VecDeque};
@@ -46,7 +46,6 @@ impl Default for BuildRunOptions {
 #[derive(Debug, Clone)]
 struct ExecutedNode {
     realized: RealizedResult,
-    result: ResultRecord,
 }
 
 pub fn run_recipe_json_in_workspace(
@@ -263,23 +262,14 @@ fn ensure_planned(
             }
         }
         PlannedRecipe::Source(source) => {
-            if let Some(result) =
-                load_result_record(layout, source.result_id).map_err(map_store_error)?
+            if let Some(stored) =
+                load_stored_result(layout, source.result_id).map_err(map_store_error)?
             {
-                let result_id = result.result_id();
-                let published_object = layout.object_path(result.object_hash);
-                if !published_object.exists() {
-                    return Err(RuntimeError::Store(format!(
-                        "result '{}' points to missing object '{}'",
-                        result_id,
-                        published_object.display()
-                    )));
-                }
                 let node = nodes.get_mut(&key).ok_or_else(|| {
                     RuntimeError::Store(format!("missing planned node for key '{}'", key))
                 })?;
                 node.state = PlanningState::Reused {
-                    realized: realized_result_from_record(None, &result),
+                    realized: realized_result_from_record(None, &stored.result),
                     origin: ReuseOrigin::CanonicalResult,
                 };
             } else {
@@ -303,14 +293,6 @@ fn publish_reused_root(
     realized: &RealizedResult,
     origin: ReuseOrigin,
 ) -> Result<(), RuntimeError> {
-    let result = load_result_record(layout, realized.result_id)
-        .map_err(map_store_error)?
-        .ok_or_else(|| {
-            RuntimeError::Store(format!(
-                "missing result '{}' for reused root '{}'",
-                realized.result_id, root_name
-            ))
-        })?;
     let node_logger = logger.bind_node(root_tag, root_name, key);
     log_runtime_event(
         node_logger.as_ref(),
@@ -330,7 +312,7 @@ fn publish_reused_root(
             ReuseOrigin::CanonicalResult => "reusing existing canonical result",
         },
     );
-    publish_result_refs(layout, root_name, &result).map_err(map_store_error)?;
+    publish_result(layout, root_name, realized.result_id).map_err(map_store_error)?;
     log_runtime_event(
         node_logger.as_ref(),
         BuildLogLevel::Info,
@@ -549,7 +531,7 @@ fn execute_misses(
             RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
         let node_logger = logger.bind_node(node.recipe.tag(), &node.publish_name, key);
-        publish_result_refs(layout, &node.publish_name, &executed.result)
+        publish_result(layout, &node.publish_name, executed.realized.result_id)
             .map_err(map_store_error)?;
         log_runtime_event(
             node_logger.as_ref(),
@@ -791,7 +773,6 @@ fn execute_builder_recipe(
     })?;
     Ok(ExecutedNode {
         realized: realized_result_from_record(Some(key), &published.result),
-        result: published.result,
     })
 }
 
@@ -817,26 +798,16 @@ fn execute_source_recipe(
     );
     check_cancelled(&cancellation)?;
 
-    if let Some(result) = load_result_record(layout, recipe.result_id).map_err(map_store_error)? {
-        let result_id = result.result_id();
-        let object_path = layout.object_path(result.object_hash);
-        if object_path.exists() {
-            log_runtime_event(
-                logger.as_ref(),
-                BuildLogLevel::Info,
-                "result-hit",
-                "reusing existing canonical result",
-            );
-            return Ok(ExecutedNode {
-                realized: realized_result_from_record(None, &result),
-                result,
-            });
-        }
-        return Err(RuntimeError::Store(format!(
-            "result '{}' points to missing object '{}'",
-            result_id,
-            object_path.display()
-        )));
+    if let Some(stored) = load_stored_result(layout, recipe.result_id).map_err(map_store_error)? {
+        log_runtime_event(
+            logger.as_ref(),
+            BuildLogLevel::Info,
+            "result-hit",
+            "reusing existing canonical result",
+        );
+        return Ok(ExecutedNode {
+            realized: realized_result_from_record(None, &stored.result),
+        });
     }
 
     let existing_object_path = layout.object_path(recipe.object_hash);
@@ -847,11 +818,11 @@ fn execute_source_recipe(
             "run",
             "reusing existing object and publishing source result",
         );
-        let result = make_source_result_record(recipe.object_hash, run_logger.created_at())?;
-        store_result_record(layout, &result).map_err(map_store_error)?;
+        let stored =
+            record_existing_source_result(layout, recipe.object_hash, run_logger.created_at())
+                .map_err(map_store_error)?;
         return Ok(ExecutedNode {
-            realized: realized_result_from_record(None, &result),
-            result,
+            realized: realized_result_from_record(None, &stored.result),
         });
     }
 
@@ -940,11 +911,10 @@ fn execute_source_recipe(
         return Err(RuntimeError::Build(message));
     }
 
-    let result = make_source_result_record(recipe.object_hash, run_logger.created_at())?;
-    store_result_record(layout, &result).map_err(map_store_error)?;
+    let stored = record_existing_source_result(layout, recipe.object_hash, run_logger.created_at())
+        .map_err(map_store_error)?;
     Ok(ExecutedNode {
-        realized: realized_result_from_record(None, &result),
-        result,
+        realized: realized_result_from_record(None, &stored.result),
     })
 }
 
@@ -960,17 +930,6 @@ fn cleanup_source_temp_dir(layout: &Store, temp_dir: &Path, logger: &dyn BuildLo
             ),
         );
     }
-}
-
-fn make_source_result_record(
-    object_hash: fsobj_hash::ObjectHash,
-    created_at: &str,
-) -> Result<ResultRecord, RuntimeError> {
-    Ok(ResultRecord {
-        object_hash,
-        created_at: Some(created_at.to_string()),
-        inputs: Vec::new(),
-    })
 }
 
 fn realized_result_from_record(

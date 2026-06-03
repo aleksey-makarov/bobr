@@ -99,6 +99,25 @@ pub struct PublishedBuild {
     pub object_path: PathBuf,
 }
 
+/// Result record resolved to an existing object in the local store.
+///
+/// A `StoredResult` is stronger than a raw [`ResultRecord`]: loading it checks
+/// that the record exists and that its object path exists in the store.
+#[derive(Debug, Clone)]
+pub struct StoredResult {
+    /// Result record loaded from the store.
+    pub result: ResultRecord,
+    /// Local path of the result object in the store.
+    pub object_path: PathBuf,
+}
+
+impl StoredResult {
+    /// Returns the deterministic id of the stored result.
+    pub fn result_id(&self) -> ResultId {
+        self.result.result_id()
+    }
+}
+
 /// Loads a result record by id.
 ///
 /// Returns `Ok(None)` when the record file does not exist. Existing files are
@@ -128,11 +147,76 @@ pub fn load_result_record(
     Ok(Some(parse_result_record_value(result_id, &value)?))
 }
 
+/// Loads a result record and verifies that its object exists in the store.
+///
+/// Returns `Ok(None)` when the record file does not exist. Existing records are
+/// parsed as canonical result JSON and must point to an existing object.
+pub fn load_stored_result(
+    store: &Store,
+    result_id: ResultId,
+) -> Result<Option<StoredResult>, StoreError> {
+    let Some(result) = load_result_record(store, result_id)? else {
+        return Ok(None);
+    };
+    Ok(Some(stored_result_from_record(store, result)?))
+}
+
+/// Records a source result for an object already present in the store.
+///
+/// The object path for `object_hash` must exist. The result record is written
+/// idempotently and then reloaded as a checked [`StoredResult`].
+pub fn record_existing_source_result(
+    store: &Store,
+    object_hash: ObjectHash,
+    created_at: &str,
+) -> Result<StoredResult, StoreError> {
+    let object_path = store.object_path(object_hash);
+    if !object_path.exists() {
+        return Err(StoreError::Io(format!(
+            "source object '{}' is missing from store at '{}'",
+            object_hash,
+            object_path.display()
+        )));
+    }
+
+    let result = ResultRecord {
+        object_hash,
+        created_at: Some(created_at.to_string()),
+        inputs: Vec::new(),
+    };
+    store_result_record(store, &result)?;
+    load_stored_result(store, result.result_id())?.ok_or_else(|| {
+        StoreError::InvalidData(format!(
+            "source result '{}' was not stored",
+            result.result_id()
+        ))
+    })
+}
+
+pub(crate) fn stored_result_from_record(
+    store: &Store,
+    result: ResultRecord,
+) -> Result<StoredResult, StoreError> {
+    let result_id = result.result_id();
+    let object_path = store.object_path(result.object_hash);
+    if !object_path.exists() {
+        return Err(StoreError::Io(format!(
+            "result '{}' points to missing object '{}'",
+            result_id,
+            object_path.display()
+        )));
+    }
+    Ok(StoredResult {
+        result,
+        object_path,
+    })
+}
+
 /// Stores a result record if it is not already present.
 ///
 /// The record is written as canonical JSON under [`Store::results_dir`]. The
 /// operation is idempotent for an already-existing record path.
-pub fn store_result_record(store: &Store, record: &ResultRecord) -> Result<(), StoreError> {
+pub(crate) fn store_result_record(store: &Store, record: &ResultRecord) -> Result<(), StoreError> {
     let result_path = store.result_record_path(record.result_id());
     if result_path.exists() {
         return Ok(());

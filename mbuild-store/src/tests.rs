@@ -334,6 +334,45 @@ fn result_record_round_trips_inputs() {
 }
 
 #[test]
+fn record_existing_source_result_requires_existing_object() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+    let object_hash =
+        parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
+
+    let error =
+        record_existing_source_result(&layout, object_hash, sample_created_at()).unwrap_err();
+
+    assert!(matches!(error, StoreError::Io(message) if message.contains("source object")));
+    assert!(
+        !layout
+            .result_record_path(compute_result_id(object_hash).unwrap())
+            .exists()
+    );
+}
+
+#[test]
+fn publish_result_rejects_result_with_missing_object_without_refs() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+    let object_hash =
+        parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
+    let result = ResultRecord {
+        object_hash,
+        created_at: Some(sample_created_at().to_string()),
+        inputs: Vec::new(),
+    };
+    let result_id = result.result_id();
+    crate::record::store_result_record(&layout, &result).unwrap();
+
+    let error = publish_result(&layout, "missing", result_id).unwrap_err();
+
+    assert!(matches!(error, StoreError::Io(message) if message.contains("missing object")));
+    assert!(!layout.object_refs_dir().join("missing").exists());
+    assert!(!layout.result_refs_dir().join("missing.json").exists());
+}
+
+#[test]
 fn same_object_different_payload_produces_different_build_key() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());

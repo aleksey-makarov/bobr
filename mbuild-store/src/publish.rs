@@ -57,7 +57,7 @@ pub fn publish_output(
 ) -> Result<PublishedOutput, StoreError> {
     if let Some(published) = crate::refs::load_build_handle(store, request.build_key)? {
         crate::object::remove_path_force(&request.staged_path)?;
-        crate::refs::publish_result_refs(store, &request.output_name, &published.result)?;
+        crate::refs::publish_result(store, &request.output_name, published.result.result_id())?;
         return Ok(PublishedOutput {
             object_hash: published.build.object_hash,
             build_key: published.build.build_key,
@@ -65,24 +65,12 @@ pub fn publish_output(
         });
     }
 
-    if let Some(result) = crate::refs::load_reuse_record(store, request.reuse_key)? {
-        let result_id = result.result_id();
-        let object_path = store.object_path(result.object_hash);
-        if !object_path.exists() {
-            return Err(StoreError::Io(format!(
-                "result '{}' points to missing object '{}'",
-                result_id,
-                object_path.display()
-            )));
-        }
+    if let Some(published) =
+        crate::refs::resolve_reuse_for_build(store, request.build_key, request.reuse_key)?
+    {
+        let result_id = published.result.result_id();
         crate::object::remove_path_force(&request.staged_path)?;
-        crate::refs::store_build_handle_ref(store, request.build_key, result_id)?;
-        let published = PublishedBuild {
-            build: crate::record::build_from_result(request.build_key, &result),
-            result,
-            object_path,
-        };
-        crate::refs::publish_result_refs(store, &request.output_name, &published.result)?;
+        crate::refs::publish_result(store, &request.output_name, result_id)?;
         return Ok(PublishedOutput {
             object_hash: published.build.object_hash,
             build_key: published.build.build_key,
@@ -99,7 +87,7 @@ pub fn publish_output(
         &request.staged_path,
         None,
     )?;
-    crate::refs::publish_result_refs(store, &request.output_name, &published.result)?;
+    crate::refs::publish_result(store, &request.output_name, published.result.result_id())?;
 
     Ok(PublishedOutput {
         object_hash: published.build.object_hash,

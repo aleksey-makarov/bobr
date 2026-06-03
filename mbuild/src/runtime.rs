@@ -4,9 +4,9 @@ use mbuild_core::{
     CancellationToken,
 };
 use mbuild_store::{
-    Build, BuildKey, PublishedBuild, ReuseInputIdentity, Store, StoreError, compute_reuse_key,
-    load_build_handle, load_reuse_record, materialize_build, recreate_store_temp_dir_force,
-    remove_store_temp_dir_force, store_build_handle_ref,
+    BuildKey, PublishedBuild, ReuseInputIdentity, Store, StoreError, compute_reuse_key,
+    load_build_handle, materialize_build, recreate_store_temp_dir_force,
+    remove_store_temp_dir_force, resolve_reuse_for_build,
 };
 use serde_json::{Value, json};
 use std::fmt;
@@ -110,42 +110,16 @@ pub(crate) fn execute_builder_node(
 
     let reuse_key = compute_reuse_key(builder.spec().tag, &config, &inputs_identity)
         .map_err(map_store_error)?;
-    if let Some(result) = load_reuse_record(layout, reuse_key).map_err(map_store_error)? {
-        let result_id = result.result_id();
-        let object_path = layout.object_path(result.object_hash);
-        if !object_path.exists() {
-            log_runtime_event(
-                logger.as_ref(),
-                BuildLogLevel::Error,
-                "fail",
-                format!(
-                    "result points to missing object '{}'",
-                    object_path.display()
-                ),
-            );
-            return Err(RuntimeError::Store(format!(
-                "result '{}' points to missing object '{}'",
-                result_id,
-                object_path.display()
-            )));
-        }
-        store_build_handle_ref(layout, build_key, result_id).map_err(map_store_error)?;
+    if let Some(published) =
+        resolve_reuse_for_build(layout, build_key, reuse_key).map_err(map_store_error)?
+    {
         log_runtime_event(
             logger.as_ref(),
             BuildLogLevel::Info,
             "result-hit",
             "reusing existing canonical result",
         );
-        return Ok(PublishedBuild {
-            build: Build {
-                build_key,
-                result_id,
-                object_hash: result.object_hash,
-                created_at: result.created_at.clone(),
-            },
-            result,
-            object_path,
-        });
+        return Ok(published);
     }
 
     log_runtime_event(
@@ -224,29 +198,7 @@ pub(crate) fn lookup_canonical_result(
     build_key: BuildKey,
 ) -> Result<Option<PublishedBuild>, RuntimeError> {
     let reuse_key = compute_reuse_key(builder_tag, config, inputs).map_err(map_store_error)?;
-    let Some(result) = load_reuse_record(layout, reuse_key).map_err(map_store_error)? else {
-        return Ok(None);
-    };
-    let result_id = result.result_id();
-    let object_path = layout.object_path(result.object_hash);
-    if !object_path.exists() {
-        return Err(RuntimeError::Store(format!(
-            "result '{}' points to missing object '{}'",
-            result_id,
-            object_path.display()
-        )));
-    }
-    store_build_handle_ref(layout, build_key, result_id).map_err(map_store_error)?;
-    Ok(Some(PublishedBuild {
-        build: Build {
-            build_key,
-            result_id,
-            object_hash: result.object_hash,
-            created_at: result.created_at.clone(),
-        },
-        result,
-        object_path,
-    }))
+    resolve_reuse_for_build(layout, build_key, reuse_key).map_err(map_store_error)
 }
 
 pub(crate) fn build_context(

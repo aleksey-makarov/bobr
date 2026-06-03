@@ -7,8 +7,8 @@
 //!
 //! The crate intentionally does not provide general-purpose filesystem
 //! utilities. Public functions are expressed in store terms: importing an
-//! object, computing a store key, storing a result record, publishing refs, or
-//! scanning/materializing an `fs-tree`.
+//! object, computing a store key, publishing checked results, resolving reuse,
+//! or scanning/materializing an `fs-tree`.
 //!
 //! Most fallible store operations return [`StoreError`]. Pure string parsing
 //! for value types keeps narrow parse errors such as [`ParseBuildKeyError`] and
@@ -38,13 +38,10 @@ pub use key::{compute_build_key, compute_result_id, compute_reuse_key};
 pub use object::import_object;
 pub use publish::{PublishOutputRequest, PublishedOutput, materialize_build, publish_output};
 pub use record::{
-    Build, PublishedBuild, RealizedResult, ResultRecord, ReuseInputIdentity, load_result_record,
-    store_result_record,
+    Build, PublishedBuild, RealizedResult, ResultRecord, ReuseInputIdentity, StoredResult,
+    load_result_record, load_stored_result, record_existing_source_result,
 };
-pub use refs::{
-    load_build_handle, load_public_build, load_reuse_record, publish_refs, publish_result_refs,
-    store_build_handle_ref, store_reuse_ref,
-};
+pub use refs::{load_build_handle, load_public_build, publish_result, resolve_reuse_for_build};
 pub use store::{Store, recreate_store_temp_dir_force, remove_store_temp_dir_force};
 
 #[cfg(test)]
@@ -52,7 +49,9 @@ pub(crate) use json::canonical_json_bytes;
 #[cfg(test)]
 pub(crate) use record::{BUILD_SCHEMA, RESULT_SCHEMA, build_json_value, parse_result_record_value};
 #[cfg(test)]
-pub(crate) use refs::{human_timestamp_from_rfc3339, load_current_publication, replace_symlink};
+pub(crate) use refs::{
+    human_timestamp_from_rfc3339, load_current_publication, load_reuse_record, replace_symlink,
+};
 #[cfg(test)]
 pub(crate) use store::{OBJECTS_DIR, RESULTS_DIR};
 
