@@ -1,3 +1,21 @@
+//! Store ownership, object publication, and store metadata for `mbuild`.
+//!
+//! This crate is the public boundary for operations that create, inspect, or
+//! mutate an `mbuild` store. It owns store layout discovery, object import,
+//! build/result/reuse identifiers, result records, publication references, and
+//! the future manifest-addressed `fs-tree` storage API.
+//!
+//! The crate intentionally does not provide general-purpose filesystem
+//! utilities. Public functions are expressed in store terms: importing an
+//! object, computing a store key, storing a result record, publishing refs, or
+//! scanning/materializing an `fs-tree`.
+//!
+//! Most fallible store operations return [`StoreError`]. Pure string parsing
+//! for value types keeps narrow parse errors such as [`ParseBuildKeyError`] and
+//! [`fs_tree::ParseFsFileHashError`].
+
+#![deny(missing_docs)]
+
 #[cfg(not(target_os = "linux"))]
 compile_error!("mbuild requires Linux");
 

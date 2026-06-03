@@ -4,10 +4,23 @@ use fsobj_hash::{ObjectHash, hash_path};
 use std::fs;
 use std::path::Path;
 
+/// Returns the canonical path of an imported legacy object.
+///
+/// The path is `<layout.objects>/<64-lowercase-object-hash>`. The function does
+/// not check whether the object currently exists.
 pub fn object_path(layout: &StoreLayout, object_hash: ObjectHash) -> std::path::PathBuf {
     layout.objects.join(object_hash.to_hex())
 }
 
+/// Imports a staged filesystem object into the store.
+///
+/// The object hash is computed from `staged_path`, then the staged path is
+/// renamed into the store's legacy object directory. If an object with the same
+/// hash already exists, the staged path is removed and the existing object is
+/// reused.
+///
+/// `staged_path` is consumed on success. It may also be removed when the store
+/// already contains the object.
 pub fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectHash, StoreError> {
     import_object_with_hash(layout, staged_path, None)
 }

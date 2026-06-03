@@ -8,14 +8,24 @@ use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
+/// Returns the path of the build reference for `build_key`.
+///
+/// The path is under [`StoreLayout::builds`] and may or may not exist.
 pub fn build_ref_path(layout: &StoreLayout, build_key: BuildKey) -> PathBuf {
     layout.builds.join(build_key.to_hex())
 }
 
+/// Returns the path of the JSON result record for `result_id`.
+///
+/// The path is under [`StoreLayout::results`] and has a `.json` suffix. The
+/// function does not check whether the record currently exists.
 pub fn result_path(layout: &StoreLayout, result_id: ResultId) -> PathBuf {
     layout.results.join(format!("{}.json", result_id.to_hex()))
 }
 
+/// Returns the path of the reuse reference for `reuse_key`.
+///
+/// The path is under [`StoreLayout::reuses`] and may or may not exist.
 pub fn reuse_ref_path(layout: &StoreLayout, reuse_key: ReuseKey) -> PathBuf {
     layout.reuses.join(reuse_key.to_hex())
 }
@@ -68,6 +78,11 @@ fn parse_result_ref_target(
     Ok(result_id)
 }
 
+/// Stores or replaces the build reference for `build_key`.
+///
+/// Build refs are symlinks pointing to result records through canonical
+/// relative targets. The replacement is performed through a temporary symlink
+/// and rename.
 pub fn store_build_handle_ref(
     layout: &StoreLayout,
     build_key: BuildKey,
@@ -77,6 +92,11 @@ pub fn store_build_handle_ref(
     replace_symlink(&target, &build_ref_path(layout, build_key))
 }
 
+/// Stores or replaces the reuse reference for `reuse_key`.
+///
+/// Reuse refs are symlinks pointing to result records through canonical
+/// relative targets. The replacement is performed through a temporary symlink
+/// and rename.
 pub fn store_reuse_ref(
     layout: &StoreLayout,
     reuse_key: ReuseKey,
@@ -86,6 +106,11 @@ pub fn store_reuse_ref(
     replace_symlink(&target, &reuse_ref_path(layout, reuse_key))
 }
 
+/// Loads the published build reached by a build key.
+///
+/// Returns `Ok(None)` when the build ref does not exist. Existing refs must be
+/// canonical symlinks to result records, and the referenced result must point to
+/// an existing object in the store.
 pub fn load_build_handle(
     layout: &StoreLayout,
     build_key: BuildKey,
@@ -124,6 +149,10 @@ pub fn load_build_handle(
     }))
 }
 
+/// Loads the reusable result reached by a reuse key.
+///
+/// Returns `Ok(None)` when the reuse ref does not exist. Existing refs must be
+/// canonical symlinks to result records.
 pub fn load_reuse_record(
     layout: &StoreLayout,
     reuse_key: ReuseKey,
@@ -143,6 +172,10 @@ pub fn load_reuse_record(
     crate::record::load_result_record(layout, result_id)
 }
 
+/// Loads the public build handle for `build_key`.
+///
+/// This is a narrower view of [`load_build_handle`] that returns only the
+/// serializable [`Build`] value.
 pub fn load_public_build(
     layout: &StoreLayout,
     build_key: BuildKey,
@@ -150,6 +183,15 @@ pub fn load_public_build(
     Ok(load_build_handle(layout, build_key)?.map(|published| published.build))
 }
 
+/// Publishes a result under a public output name.
+///
+/// The current object and result refs for `output_name` are replaced with refs
+/// to `result`. If the output name already points at a different result, the
+/// previous refs are preserved as timestamped generation refs before the
+/// current refs are updated.
+///
+/// Output names must be non-empty and contain only ASCII letters, digits, `.`,
+/// `_`, or `-`.
 pub fn publish_result_refs(
     layout: &StoreLayout,
     output_name: &str,
@@ -186,6 +228,9 @@ pub fn publish_result_refs(
     Ok(())
 }
 
+/// Publishes the result contained in a fully resolved build.
+///
+/// This is a convenience wrapper around [`publish_result_refs`].
 pub fn publish_refs(
     layout: &StoreLayout,
     output_name: &str,

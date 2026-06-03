@@ -2,6 +2,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::str::FromStr;
 
+/// Stable key for a normalized build invocation.
+///
+/// A build key is the SHA-256 digest produced by [`crate::compute_build_key`].
+/// It identifies the builder tag, normalized payload, and input build keys,
+/// independent of whether the corresponding result has already been published.
+///
+/// The textual representation is exactly 64 lowercase hexadecimal characters.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BuildKey([u8; 32]);
 
@@ -10,15 +17,24 @@ impl BuildKey {
         Self(bytes)
     }
 
+    /// Returns the raw 32-byte digest.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
+    /// Formats the key as 64 lowercase hexadecimal characters.
     pub fn to_hex(&self) -> String {
         hex_encode(self.0)
     }
 }
 
+/// Stable identifier for a realized result object.
+///
+/// Result ids are derived from the result object's [`fsobj_hash::ObjectHash`]
+/// by [`crate::compute_result_id`]. A result id names the JSON result record
+/// stored under the store's `results` directory.
+///
+/// The textual representation is exactly 64 lowercase hexadecimal characters.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResultId([u8; 32]);
 
@@ -27,15 +43,24 @@ impl ResultId {
         Self(bytes)
     }
 
+    /// Returns the raw 32-byte digest.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
+    /// Formats the id as 64 lowercase hexadecimal characters.
     pub fn to_hex(&self) -> String {
         hex_encode(self.0)
     }
 }
 
+/// Stable key used to reuse an existing result across equivalent inputs.
+///
+/// A reuse key is produced by [`crate::compute_reuse_key`] from the builder tag,
+/// normalized payload, and input object identities. It maps to a [`ResultId`]
+/// through the store's `reuses` references.
+///
+/// The textual representation is exactly 64 lowercase hexadecimal characters.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReuseKey([u8; 32]);
 
@@ -44,10 +69,12 @@ impl ReuseKey {
         Self(bytes)
     }
 
+    /// Returns the raw 32-byte digest.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
+    /// Formats the key as 64 lowercase hexadecimal characters.
     pub fn to_hex(&self) -> String {
         hex_encode(self.0)
     }
@@ -146,9 +173,16 @@ impl<'de> Deserialize<'de> for ReuseKey {
     }
 }
 
+/// Error returned when parsing a 32-byte store id from text.
+///
+/// This error is used by [`BuildKey`], [`ResultId`], and [`ReuseKey`]. The name
+/// is historical: all three value types share the same 64-character lowercase
+/// hex encoding and therefore the same parser.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseBuildKeyError {
+    /// The input length is not exactly 64 bytes.
     InvalidLength,
+    /// The input contains a byte outside `[0-9a-f]`.
     InvalidHex,
 }
 

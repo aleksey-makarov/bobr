@@ -6,6 +6,12 @@ use sha2::{Digest, Sha256};
 const INVOCATION_SCHEMA: &str = "mbuild-build-invocation-v1";
 const RESULT_INVOCATION_SCHEMA: &str = "mbuild-build-result-invocation-v3";
 
+/// Computes the stable key for a normalized build invocation.
+///
+/// The key covers the builder tag, the normalized JSON payload, and the ordered
+/// list of input build keys. The payload is serialized with the store's
+/// canonical JSON encoder before hashing, so callers must pass the already
+/// normalized semantic payload rather than arbitrary user input.
 pub fn compute_build_key(
     builder_tag: &str,
     normalized_payload: &Value,
@@ -32,6 +38,11 @@ pub fn compute_build_key(
     Ok(BuildKey::from_bytes(Sha256::digest(&canonical).into()))
 }
 
+/// Computes the stable reuse key for a normalized result invocation.
+///
+/// The key covers the builder tag, the normalized JSON payload, and the ordered
+/// list of realized input object identities. Runtime code uses this key to find
+/// a reusable result even when the current build key has not been seen before.
 pub fn compute_reuse_key(
     builder_tag: &str,
     normalized_payload: &Value,
@@ -65,6 +76,11 @@ pub fn compute_reuse_key(
     Ok(ReuseKey::from_bytes(Sha256::digest(&canonical).into()))
 }
 
+/// Computes the stable result id for an imported object hash.
+///
+/// The result id is the key under which the result record is stored. It is
+/// derived only from the output object's [`ObjectHash`], so equivalent output
+/// objects share the same result record.
 pub fn compute_result_id(object_hash: ObjectHash) -> Result<ResultId, StoreError> {
     Ok(result_id_for_object_hash(object_hash))
 }

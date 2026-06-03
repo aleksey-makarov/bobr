@@ -10,52 +10,100 @@ pub(crate) const RESULT_SCHEMA: &str = "mbuild-result-v5";
 #[cfg(test)]
 pub(crate) const BUILD_SCHEMA: &str = RESULT_SCHEMA;
 
+/// Identity of an input result used by reuse-key computation and result records.
+///
+/// Reuse is based on realized input object identities rather than only on input
+/// build keys. This lets equivalent input objects participate in reuse even
+/// when they were produced through different build keys.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReuseInputIdentity {
+    /// Hash of the realized input object.
     pub object_hash: ObjectHash,
 }
 
+/// Public build handle resolved from a build key.
+///
+/// A build handle connects a [`BuildKey`] to the [`ResultId`] and object hash of
+/// the realized output. It is the deserializable public view returned when a
+/// stored build reference is resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Build {
+    /// Build invocation key that was requested.
     pub build_key: BuildKey,
+    /// Result record id reached by the build reference.
     pub result_id: ResultId,
+    /// Hash of the output object recorded by the result.
     #[serde(with = "serde_object_hash")]
     pub object_hash: ObjectHash,
+    /// Optional RFC 3339 creation timestamp copied from the result record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
 }
 
+/// Store record for a realized result object.
+///
+/// Result records are stored as canonical JSON under
+/// [`StoreLayout::results`](crate::StoreLayout::results). The record id is
+/// derived from [`ResultRecord::object_hash`], not from the build key that first
+/// produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultRecord {
+    /// Hash of the output object this record describes.
     pub object_hash: ObjectHash,
+    /// Optional RFC 3339 timestamp for when the result was created.
     pub created_at: Option<String>,
+    /// Realized input object identities used for reuse accounting.
     pub inputs: Vec<ReuseInputIdentity>,
 }
 
 impl ResultRecord {
+    /// Returns the deterministic id for this result record.
+    ///
+    /// The id is computed from [`ResultRecord::object_hash`] and therefore does
+    /// not depend on the build or reuse key that points to the result.
     pub fn result_id(&self) -> ResultId {
         crate::key::result_id_for_object_hash(self.object_hash)
     }
 }
 
+/// Result information returned to runtime code after resolving or publishing.
+///
+/// This is the serializable representation used when the runtime needs both
+/// the object identity and, optionally, the build key that led to the result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RealizedResult {
+    /// Result record id.
     pub result_id: ResultId,
+    /// Build key that resolved to the result, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_key: Option<BuildKey>,
+    /// Hash of the output object.
     #[serde(with = "serde_object_hash")]
     pub object_hash: ObjectHash,
+    /// Optional RFC 3339 creation timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
 }
 
+/// Fully resolved build publication inside the local store.
+///
+/// This combines the public build handle, the underlying result record, and the
+/// local filesystem path of the imported output object.
 #[derive(Debug, Clone)]
 pub struct PublishedBuild {
+    /// Build handle resolved from the build reference.
     pub build: Build,
+    /// Result record reached by the build handle.
     pub result: ResultRecord,
+    /// Local path of the imported output object in the store.
     pub object_path: PathBuf,
 }
 
+/// Loads a result record by id.
+///
+/// Returns `Ok(None)` when the record file does not exist. Existing files are
+/// parsed as the current canonical result schema and are validated against the
+/// requested `result_id`.
 pub fn load_result_record(
     layout: &StoreLayout,
     result_id: ResultId,
@@ -80,6 +128,10 @@ pub fn load_result_record(
     Ok(Some(parse_result_record_value(result_id, &value)?))
 }
 
+/// Stores a result record if it is not already present.
+///
+/// The record is written as canonical JSON under [`StoreLayout::results`]. The
+/// operation is idempotent for an already-existing record path.
 pub fn store_result_record(layout: &StoreLayout, record: &ResultRecord) -> Result<(), StoreError> {
     let result_path = crate::refs::result_path(layout, record.result_id());
     if result_path.exists() {
