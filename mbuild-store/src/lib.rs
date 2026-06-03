@@ -64,7 +64,7 @@ pub(crate) use refs::{
     human_timestamp_from_rfc3339, load_current_publication, load_reuse_record, replace_symlink,
 };
 #[cfg(test)]
-pub(crate) use store::{LOGS_DIR, OBJECTS_DIR, RESULTS_DIR};
+pub(crate) use store::{LOGS_DIR, OBJECTS_DIR, RESULTS_DIR, TMP_DIR};
 
 #[cfg(test)]
 mod tests;

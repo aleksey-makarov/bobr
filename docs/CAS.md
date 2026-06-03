@@ -42,7 +42,9 @@ envelope. `mbuild` does not add an implicit `.mbuild/` directory.
         meta.json
         events.jsonl
         raw/
-        tmp/
+  tmp/
+    <YYMMDDhhmmss>[.N]/
+      <00000000>-<tag>[-<name>]/
 ```
 
 `objects/<object_hash>` is the payload itself, either a file or a directory.
@@ -60,6 +62,12 @@ still be imported and addressed by `object_hash`. Fs-tree objects are
 UTF-8-only because their manifest paths and symlink targets are JSON strings.
 
 `results/<result_id>.json` stores one canonical realized result record.
+
+`logs/<run-id>/<serial>-<tag>[-<name>]/raw/` stores raw per-subject log
+files such as captured tool output. `tmp/<run-id>/<serial>-<tag>[-<name>]/`
+is the matching per-subject scratch directory. Runtime may remove or
+quarantine scratch directories after execution; they are not part of the log
+record.
 
 Each result record is addressed by `result_id`, which is derived from the
 record's `object_hash`. The record payload contains:

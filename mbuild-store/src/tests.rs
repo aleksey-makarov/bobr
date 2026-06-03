@@ -1294,38 +1294,59 @@ fn store_create_creates_full_layout() {
     assert!(layout.fs_files_dir().is_dir());
     assert!(layout.fs_trees_dir().is_dir());
     assert!(temp.path().join(LOGS_DIR).is_dir());
+    assert!(temp.path().join(TMP_DIR).is_dir());
     assert!(layout.run_log_dir().is_dir());
+    assert!(layout.run_tmp_dir().is_dir());
     assert!(layout.run_log_dir().starts_with(temp.path().join(LOGS_DIR)));
+    assert!(layout.run_tmp_dir().starts_with(temp.path().join(TMP_DIR)));
 }
 
 #[test]
-fn store_create_allocates_unique_run_log_directories() {
+fn store_create_allocates_unique_run_directories() {
     let temp = tempdir().unwrap();
 
     let first = Store::create(temp.path()).unwrap();
     let second = Store::create(temp.path()).unwrap();
 
     assert_ne!(first.run_log_dir(), second.run_log_dir());
+    assert_ne!(first.run_tmp_dir(), second.run_tmp_dir());
     assert!(first.run_log_dir().is_dir());
     assert!(second.run_log_dir().is_dir());
+    assert!(first.run_tmp_dir().is_dir());
+    assert!(second.run_tmp_dir().is_dir());
+    assert_eq!(
+        first.run_log_dir().file_name().unwrap(),
+        first.run_tmp_dir().file_name().unwrap()
+    );
+    assert_eq!(
+        second.run_log_dir().file_name().unwrap(),
+        second.run_tmp_dir().file_name().unwrap()
+    );
 }
 
 #[test]
-fn run_log_dir_allocation_uses_numeric_disambiguation() {
+fn run_dir_allocation_uses_numeric_disambiguation_across_logs_and_tmp() {
     let temp = tempdir().unwrap();
     let logs_dir = temp.path().join(LOGS_DIR);
+    let tmp_dir = temp.path().join(TMP_DIR);
     fs::create_dir_all(&logs_dir).unwrap();
+    fs::create_dir_all(&tmp_dir).unwrap();
     fs::create_dir(logs_dir.join("260603123456")).unwrap();
-    fs::create_dir(logs_dir.join("260603123456.1")).unwrap();
+    fs::create_dir(tmp_dir.join("260603123456.1")).unwrap();
 
-    let allocated = crate::store::create_run_log_dir(&logs_dir, "260603123456").unwrap();
+    let (allocated_logs, allocated_tmp) =
+        crate::store::create_run_dirs(&logs_dir, &tmp_dir, "260603123456").unwrap();
 
-    assert_eq!(allocated.file_name().unwrap(), "260603123456.2");
-    assert!(allocated.is_dir());
+    assert_eq!(allocated_logs.file_name().unwrap(), "260603123456.2");
+    assert_eq!(allocated_tmp.file_name().unwrap(), "260603123456.2");
+    assert!(allocated_logs.is_dir());
+    assert!(allocated_tmp.is_dir());
+    assert!(!logs_dir.join("260603123456.1").exists());
+    assert!(tmp_dir.join("260603123456.1").is_dir());
 }
 
 #[test]
-fn store_clone_shares_run_log_directory_and_serial_counter() {
+fn store_clone_shares_run_directories_and_serial_counter() {
     let temp = tempdir().unwrap();
     let layout = Store::create(temp.path()).unwrap();
     let clone = layout.clone();
@@ -1343,12 +1364,22 @@ fn store_clone_shares_run_log_directory_and_serial_counter() {
 
     assert!(first.log_dir().starts_with(layout.run_log_dir()));
     assert!(second.log_dir().starts_with(layout.run_log_dir()));
+    assert!(first.temp_dir().starts_with(layout.run_tmp_dir()));
+    assert!(second.temp_dir().starts_with(layout.run_tmp_dir()));
     assert_eq!(
         first.log_dir().file_name().unwrap().to_str().unwrap(),
         "00000000-Tree-left"
     );
     assert_eq!(
         second.log_dir().file_name().unwrap().to_str().unwrap(),
+        "00000001-Tree-right"
+    );
+    assert_eq!(
+        first.temp_dir().file_name().unwrap().to_str().unwrap(),
+        "00000000-Tree-left"
+    );
+    assert_eq!(
+        second.temp_dir().file_name().unwrap().to_str().unwrap(),
         "00000001-Tree-right"
     );
 }
@@ -1377,6 +1408,14 @@ fn workspace_allocation_writes_metadata_index_and_sanitized_paths() {
     );
     assert!(workspace.raw_log_dir().is_dir());
     assert!(workspace.temp_dir().is_dir());
+    assert!(workspace.log_dir().starts_with(layout.run_log_dir()));
+    assert!(workspace.raw_log_dir().starts_with(workspace.log_dir()));
+    assert!(workspace.temp_dir().starts_with(layout.run_tmp_dir()));
+    assert!(!workspace.temp_dir().starts_with(workspace.log_dir()));
+    assert_eq!(
+        workspace.log_dir().file_name().unwrap(),
+        workspace.temp_dir().file_name().unwrap()
+    );
     let metadata: Value =
         serde_json::from_slice(&fs::read(workspace.log_dir().join("meta.json")).unwrap()).unwrap();
     assert_eq!(metadata["schema"], "mbuild-workspace-v1");
@@ -1403,6 +1442,26 @@ fn workspace_allocation_writes_metadata_index_and_sanitized_paths() {
     assert_eq!(record["serial"], 0);
     assert_eq!(record["tag"], "Source Builder");
     assert_eq!(record["recipe_name"], "name / demo");
+}
+
+#[test]
+fn store_temp_force_helpers_reject_paths_outside_store_tmp_root() {
+    let temp = tempdir().unwrap();
+    let layout = Store::create(temp.path()).unwrap();
+    let old_log_tmp = layout.run_log_dir().join("00000000-Tree-demo").join("tmp");
+
+    assert!(matches!(
+        remove_store_temp_dir_force(&layout, &old_log_tmp),
+        Err(StoreError::InvalidInput(message))
+            if message.contains("must be under store temp root")
+    ));
+
+    let traversal = layout.run_tmp_dir().join("..").join("logs").join("oops");
+    assert!(matches!(
+        remove_store_temp_dir_force(&layout, &traversal),
+        Err(StoreError::InvalidInput(message))
+            if message.contains("must not contain '..'")
+    ));
 }
 
 #[test]

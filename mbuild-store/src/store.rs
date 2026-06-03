@@ -4,10 +4,9 @@ use crate::{BuildKey, ResultId, ReuseKey};
 use fsobj_hash::ObjectHash;
 use mbuild_core::{BuildRunLogger, RunOptions, RunTimestamp, Workspace};
 use serde_json::{Map, Value, json};
-use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,6 +23,7 @@ pub(crate) const FS_FILES_DIR: &str = "fs-files";
 pub(crate) const FS_TREES_DIR: &str = "fs-trees";
 pub(crate) const QUARANTINE_DIR: &str = "quarantine";
 pub(crate) const LOGS_DIR: &str = "logs";
+pub(crate) const TMP_DIR: &str = "tmp";
 
 /// Request for allocating a store-owned workspace for one run subject.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,10 +80,11 @@ pub struct QuarantinedStoreTemp {
 ///
 /// `Store` is the primary public interface for paths and operations that belong
 /// to a store. It also represents one runtime session: creating a `Store`
-/// allocates a unique run log directory under `<store>/logs`.
+/// allocates matching unique run directories under `<store>/logs` and
+/// `<store>/tmp`.
 ///
 /// A `Store` is cloneable and thread-safe. Cloning shares the same run log
-/// directory and serial counter.
+/// directory, run temporary directory, and serial counter.
 #[derive(Debug, Clone)]
 pub struct Store {
     inner: Arc<StoreInner>,
@@ -93,6 +94,7 @@ pub struct Store {
 struct StoreInner {
     root: PathBuf,
     run_log_dir: PathBuf,
+    run_tmp_dir: PathBuf,
     created_at: String,
     next_serial: AtomicU64,
     index_lock: Mutex<()>,
@@ -110,11 +112,13 @@ impl Store {
         ensure_store_layout(root)?;
         let timestamp = RunTimestamp::now();
         let logs_dir = root.join(LOGS_DIR);
-        let run_log_dir = create_run_log_dir(&logs_dir, timestamp.human())?;
+        let tmp_dir = root.join(TMP_DIR);
+        let (run_log_dir, run_tmp_dir) = create_run_dirs(&logs_dir, &tmp_dir, timestamp.human())?;
         Ok(Self {
             inner: Arc::new(StoreInner {
                 root: root.to_path_buf(),
                 run_log_dir,
+                run_tmp_dir,
                 created_at: timestamp.rfc3339_utc().to_string(),
                 next_serial: AtomicU64::new(0),
                 index_lock: Mutex::new(()),
@@ -128,6 +132,10 @@ impl Store {
 
     pub(crate) fn run_log_dir(&self) -> &Path {
         &self.inner.run_log_dir
+    }
+
+    pub(crate) fn run_tmp_dir(&self) -> &Path {
+        &self.inner.run_tmp_dir
     }
 
     /// Returns the creation timestamp of this store session.
@@ -226,7 +234,8 @@ pub fn create_workspace(store: &Store, request: WorkspaceRequest) -> Result<Work
     let serial = store.inner.next_serial.fetch_add(1, Ordering::SeqCst);
     let directory_name =
         workspace_directory_name(serial, &request.tag, request.recipe_name.as_deref());
-    let log_dir = store.run_log_dir().join(directory_name);
+    let log_dir = store.run_log_dir().join(&directory_name);
+    let temp_dir = store.run_tmp_dir().join(&directory_name);
     fs::create_dir(&log_dir).map_err(|error| {
         StoreError::Io(format!(
             "failed to create workspace log directory '{}': {error}",
@@ -234,7 +243,6 @@ pub fn create_workspace(store: &Store, request: WorkspaceRequest) -> Result<Work
         ))
     })?;
     let raw_log_dir = log_dir.join("raw");
-    let temp_dir = log_dir.join("tmp");
     fs::create_dir(&raw_log_dir).map_err(|error| {
         StoreError::Io(format!(
             "failed to create workspace raw log directory '{}': {error}",
@@ -411,32 +419,66 @@ fn ensure_store_layout(root: &Path) -> Result<(), StoreError> {
     ensure_store_dir(&root.join(FS_FILES_DIR), "fs-files")?;
     ensure_store_dir(&root.join(FS_TREES_DIR), "fs-trees")?;
     ensure_store_dir(&root.join(LOGS_DIR), "logs")?;
+    ensure_store_dir(&root.join(TMP_DIR), "tmp")?;
     Ok(())
 }
 
-pub(crate) fn create_run_log_dir(logs_dir: &Path, run_id: &str) -> Result<PathBuf, StoreError> {
+pub(crate) fn create_run_dirs(
+    logs_dir: &Path,
+    tmp_dir: &Path,
+    run_id: &str,
+) -> Result<(PathBuf, PathBuf), StoreError> {
     for attempt in 0..1000 {
         let name = if attempt == 0 {
             run_id.to_string()
         } else {
             format!("{run_id}.{attempt}")
         };
-        let path = logs_dir.join(name);
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
+        let log_path = logs_dir.join(&name);
+        let tmp_path = tmp_dir.join(&name);
+        match fs::create_dir(&log_path) {
+            Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
                 return Err(StoreError::Io(format!(
                     "failed to create run log directory '{}': {error}",
-                    path.display()
+                    log_path.display()
+                )));
+            }
+        }
+
+        match fs::create_dir(&tmp_path) {
+            Ok(()) => return Ok((log_path, tmp_path)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                fs::remove_dir(&log_path).map_err(|cleanup_error| {
+                    StoreError::Io(format!(
+                        "failed to remove unused run log directory '{}' after temp directory collision at '{}': {cleanup_error}",
+                        log_path.display(),
+                        tmp_path.display()
+                    ))
+                })?;
+                continue;
+            }
+            Err(error) => {
+                fs::remove_dir(&log_path).map_err(|cleanup_error| {
+                    StoreError::Io(format!(
+                        "failed to remove unused run log directory '{}' after temp directory allocation failed at '{}': {cleanup_error}",
+                        log_path.display(),
+                        tmp_path.display()
+                    ))
+                })?;
+                return Err(StoreError::Io(format!(
+                    "failed to create run temp directory '{}': {error}",
+                    tmp_path.display()
                 )));
             }
         }
     }
 
     Err(StoreError::Io(format!(
-        "failed to allocate unique run log directory under '{}'",
-        logs_dir.display()
+        "failed to allocate unique run directories under '{}' and '{}'",
+        logs_dir.display(),
+        tmp_dir.display()
     )))
 }
 
@@ -572,9 +614,9 @@ fn append_workspace_index(
 
 /// Removes and recreates a store-owned temporary directory.
 ///
-/// The directory must be below the store root and include a `tmp` path
-/// component. This guard keeps force-removal scoped to temporary directories
-/// that belong to the store. The resulting directory exists and is empty.
+/// The directory must be below the store temporary root. This guard keeps
+/// force-removal scoped to temporary directories that belong to the store.
+/// The resulting directory exists and is empty.
 pub fn recreate_store_temp_dir_force(store: &Store, temp_dir: &Path) -> Result<(), StoreError> {
     validate_store_temp_dir(store, temp_dir)?;
     private_fs::recreate_empty_dir_force(temp_dir).map_err(crate::error::map_fsutil_error)
@@ -582,29 +624,30 @@ pub fn recreate_store_temp_dir_force(store: &Store, temp_dir: &Path) -> Result<(
 
 /// Removes a store-owned temporary directory if it exists.
 ///
-/// The directory must be below the store root and include a `tmp` path
-/// component. Missing directories are treated as success.
+/// The directory must be below the store temporary root. Missing directories are
+/// treated as success.
 pub fn remove_store_temp_dir_force(store: &Store, temp_dir: &Path) -> Result<(), StoreError> {
     validate_store_temp_dir(store, temp_dir)?;
     private_fs::remove_dir_force(temp_dir).map_err(crate::error::map_fsutil_error)
 }
 
 fn validate_store_temp_dir(store: &Store, temp_dir: &Path) -> Result<(), StoreError> {
-    if temp_dir == store.root() || !temp_dir.starts_with(store.root()) {
+    if temp_dir
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
         return Err(StoreError::InvalidInput(format!(
-            "store temp directory '{}' must be under store root '{}'",
-            temp_dir.display(),
-            store.root().display()
+            "store temp directory '{}' must not contain '..' path components",
+            temp_dir.display()
         )));
     }
 
-    if !temp_dir
-        .components()
-        .any(|component| component.as_os_str() == OsStr::new("tmp"))
-    {
+    let store_tmp_dir = store.root().join(TMP_DIR);
+    if temp_dir == store_tmp_dir || !temp_dir.starts_with(&store_tmp_dir) {
         return Err(StoreError::InvalidInput(format!(
-            "store temp directory '{}' must include a 'tmp' path component",
-            temp_dir.display()
+            "store temp directory '{}' must be under store temp root '{}'",
+            temp_dir.display(),
+            store_tmp_dir.display()
         )));
     }
 

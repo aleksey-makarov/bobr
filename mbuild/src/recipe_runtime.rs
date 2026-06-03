@@ -341,7 +341,7 @@ fn publish_reused_root(
         raw_log_path: None,
         details: serde_json::Map::new(),
     });
-    cleanup_source_temp_dir(layout, root_run.temp_dir(), node_logger.as_ref());
+    cleanup_workspace_temp_dir(layout, root_run.temp_dir(), node_logger.as_ref());
     Ok(())
 }
 
@@ -440,6 +440,7 @@ fn execute_misses(
     let scheduler_logger = logger
         .bind_builder(&scheduler_run)
         .map_err(RuntimeError::Store)?;
+    cleanup_workspace_temp_dir(layout, scheduler_run.temp_dir(), scheduler_logger.as_ref());
 
     while !completed.contains_key(&root_key) {
         if first_error.is_none() && cancellation.is_cancelled() {
@@ -832,7 +833,10 @@ fn execute_source_recipe(
         "start",
         "starting builder node",
     );
-    check_cancelled(&cancellation)?;
+    if let Err(error) = check_cancelled(&cancellation) {
+        cleanup_workspace_temp_dir(layout, source_builder.temp_dir(), logger.as_ref());
+        return Err(error);
+    }
 
     match lookup_source_result(
         layout,
@@ -848,7 +852,7 @@ fn execute_source_recipe(
                 "result-hit",
                 "reusing existing source result",
             );
-            cleanup_source_temp_dir(layout, source_builder.temp_dir(), logger.as_ref());
+            cleanup_workspace_temp_dir(layout, source_builder.temp_dir(), logger.as_ref());
             return Ok(ExecutedNode {
                 realized: realized_result_from_record(None, &stored.result),
                 logger,
@@ -870,12 +874,13 @@ fn execute_source_recipe(
             source_builder.declared_object_hash()
         );
         log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
+        cleanup_workspace_temp_dir(layout, source_builder.temp_dir(), logger.as_ref());
         return Err(RuntimeError::Build(message));
     }
 
     let temp_root = source_builder.temp_dir().to_path_buf();
     if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
+        cleanup_workspace_temp_dir(layout, &temp_root, logger.as_ref());
         return Err(error);
     }
     let staged_path = match source_builder
@@ -886,7 +891,7 @@ fn execute_source_recipe(
         }) {
         Ok(path) => path,
         Err(error) => {
-            cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
+            cleanup_workspace_temp_dir(layout, &temp_root, logger.as_ref());
             log_runtime_event(
                 logger.as_ref(),
                 BuildLogLevel::Error,
@@ -897,7 +902,7 @@ fn execute_source_recipe(
         }
     };
     if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
+        cleanup_workspace_temp_dir(layout, &temp_root, logger.as_ref());
         return Err(error);
     }
     log_runtime_event(
@@ -914,14 +919,14 @@ fn execute_source_recipe(
         layout.created_at(),
     )
     .map_err(|error| {
-        cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
+        cleanup_workspace_temp_dir(layout, &temp_root, logger.as_ref());
         map_store_error(error)
     })?;
     if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
+        cleanup_workspace_temp_dir(layout, &temp_root, logger.as_ref());
         return Err(error);
     }
-    cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
+    cleanup_workspace_temp_dir(layout, &temp_root, logger.as_ref());
 
     match import_outcome {
         SourceImportOutcome::Matched(stored) => Ok(ExecutedNode {
@@ -941,7 +946,7 @@ fn execute_source_recipe(
     }
 }
 
-fn cleanup_source_temp_dir(layout: &Store, temp_dir: &Path, logger: &dyn BuildLogger) {
+fn cleanup_workspace_temp_dir(layout: &Store, temp_dir: &Path, logger: &dyn BuildLogger) {
     if let Err(error) = remove_store_temp_dir_force(layout, temp_dir) {
         log_runtime_event(
             logger,
