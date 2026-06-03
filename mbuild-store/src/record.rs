@@ -1,5 +1,5 @@
 use crate::fsutil as private_fs;
-use crate::{BuildKey, ResultId, StoreError, StoreLayout};
+use crate::{BuildKey, ResultId, Store, StoreError};
 use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -43,7 +43,7 @@ pub struct Build {
 /// Store record for a realized result object.
 ///
 /// Result records are stored as canonical JSON under
-/// [`StoreLayout::results`](crate::StoreLayout::results). The record id is
+/// [`Store::results_dir`](crate::Store::results_dir). The record id is
 /// derived from [`ResultRecord::object_hash`], not from the build key that first
 /// produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,10 +105,10 @@ pub struct PublishedBuild {
 /// parsed as the current canonical result schema and are validated against the
 /// requested `result_id`.
 pub fn load_result_record(
-    layout: &StoreLayout,
+    store: &Store,
     result_id: ResultId,
 ) -> Result<Option<ResultRecord>, StoreError> {
-    let result_path = crate::refs::result_path(layout, result_id);
+    let result_path = store.result_record_path(result_id);
     if !result_path.exists() {
         return Ok(None);
     }
@@ -130,10 +130,10 @@ pub fn load_result_record(
 
 /// Stores a result record if it is not already present.
 ///
-/// The record is written as canonical JSON under [`StoreLayout::results`]. The
+/// The record is written as canonical JSON under [`Store::results_dir`]. The
 /// operation is idempotent for an already-existing record path.
-pub fn store_result_record(layout: &StoreLayout, record: &ResultRecord) -> Result<(), StoreError> {
-    let result_path = crate::refs::result_path(layout, record.result_id());
+pub fn store_result_record(store: &Store, record: &ResultRecord) -> Result<(), StoreError> {
+    let result_path = store.result_record_path(record.result_id());
     if result_path.exists() {
         return Ok(());
     }

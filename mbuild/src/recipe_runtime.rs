@@ -14,8 +14,8 @@ use mbuild_core::{
     RunOptions,
 };
 use mbuild_store::{
-    BuildKey, RealizedResult, ResultRecord, ReuseInputIdentity, StoreLayout, import_object,
-    load_result_record, object_path, publish_result_refs, recreate_store_temp_dir_force,
+    BuildKey, RealizedResult, ResultRecord, ReuseInputIdentity, Store, import_object,
+    load_result_record, publish_result_refs, recreate_store_temp_dir_force,
     remove_store_temp_dir_force, store_result_record,
 };
 use serde_json::{Map, Value, to_string_pretty};
@@ -119,10 +119,10 @@ pub fn run_recipe_request_in_store_with_options(
     check_cancelled(&options.cancellation)?;
     validate_runtime_paths(paths)?;
 
-    let layout = StoreLayout::discover(&paths.store).map_err(map_store_error)?;
+    let layout = Store::create(&paths.store).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> = Arc::new(
         BuildRunLogger::new(
-            &layout.root,
+            layout.root(),
             RunOptions {
                 emit_progress: options.emit_progress,
             },
@@ -208,7 +208,7 @@ fn validate_existing_dir(path: &Path, label: &str) -> Result<(), RuntimeError> {
 }
 
 fn ensure_planned(
-    layout: &StoreLayout,
+    layout: &Store,
     nodes: &mut HashMap<BuildKey, PlannedNode>,
     key: BuildKey,
 ) -> Result<(), RuntimeError> {
@@ -267,7 +267,7 @@ fn ensure_planned(
                 load_result_record(layout, source.result_id).map_err(map_store_error)?
             {
                 let result_id = result.result_id();
-                let published_object = object_path(layout, result.object_hash);
+                let published_object = layout.object_path(result.object_hash);
                 if !published_object.exists() {
                     return Err(RuntimeError::Store(format!(
                         "result '{}' points to missing object '{}'",
@@ -295,7 +295,7 @@ fn ensure_planned(
 }
 
 fn publish_reused_root(
-    layout: &StoreLayout,
+    layout: &Store,
     logger: &Arc<BuildRunLogger>,
     key: BuildKey,
     root_tag: &str,
@@ -349,7 +349,7 @@ fn publish_reused_root(
 }
 
 fn lookup_canonical_for_planned_node(
-    layout: &StoreLayout,
+    layout: &Store,
     nodes: &HashMap<BuildKey, PlannedNode>,
     key: BuildKey,
 ) -> Result<Option<RealizedResult>, RuntimeError> {
@@ -388,7 +388,7 @@ fn lookup_canonical_for_planned_node(
 }
 
 fn execute_misses(
-    layout: &StoreLayout,
+    layout: &Store,
     logger: Arc<BuildRunLogger>,
     nodes: &HashMap<BuildKey, PlannedNode>,
     completed: &mut HashMap<BuildKey, RealizedResult>,
@@ -728,7 +728,7 @@ fn short_build_key(key: BuildKey) -> String {
 }
 
 fn build_resolved_inputs(
-    layout: &StoreLayout,
+    layout: &Store,
     recipe: &PlannedBuilderRecipe,
     completed: &HashMap<BuildKey, RealizedResult>,
 ) -> Result<ResolvedInputs, RuntimeError> {
@@ -747,7 +747,7 @@ fn build_resolved_inputs(
 }
 
 fn resolved_dependency_from_completed(
-    layout: &StoreLayout,
+    layout: &Store,
     completed: &HashMap<BuildKey, RealizedResult>,
     key: BuildKey,
 ) -> Result<ResolvedDependency, RuntimeError> {
@@ -759,12 +759,12 @@ fn resolved_dependency_from_completed(
     })?;
     Ok(ResolvedDependency {
         object_hash: realized.object_hash,
-        object_path: object_path(layout, realized.object_hash),
+        object_path: layout.object_path(realized.object_hash),
     })
 }
 
 fn execute_builder_recipe(
-    layout: &StoreLayout,
+    layout: &Store,
     logger: Arc<BuildRunLogger>,
     key: BuildKey,
     recipe: PlannedBuilderRecipe,
@@ -796,7 +796,7 @@ fn execute_builder_recipe(
 }
 
 fn execute_source_recipe(
-    layout: &StoreLayout,
+    layout: &Store,
     run_logger: Arc<BuildRunLogger>,
     key: BuildKey,
     cancellation: CancellationToken,
@@ -819,7 +819,7 @@ fn execute_source_recipe(
 
     if let Some(result) = load_result_record(layout, recipe.result_id).map_err(map_store_error)? {
         let result_id = result.result_id();
-        let object_path = object_path(layout, result.object_hash);
+        let object_path = layout.object_path(result.object_hash);
         if object_path.exists() {
             log_runtime_event(
                 logger.as_ref(),
@@ -839,7 +839,7 @@ fn execute_source_recipe(
         )));
     }
 
-    let existing_object_path = object_path(layout, recipe.object_hash);
+    let existing_object_path = layout.object_path(recipe.object_hash);
     if existing_object_path.exists() {
         log_runtime_event(
             logger.as_ref(),
@@ -865,7 +865,7 @@ fn execute_source_recipe(
     }
 
     let temp_root = layout
-        .root
+        .root()
         .join("source-state")
         .join("tmp")
         .join(key.to_hex());
@@ -948,7 +948,7 @@ fn execute_source_recipe(
     })
 }
 
-fn cleanup_source_temp_dir(layout: &StoreLayout, temp_dir: &Path, logger: &dyn BuildLogger) {
+fn cleanup_source_temp_dir(layout: &Store, temp_dir: &Path, logger: &dyn BuildLogger) {
     if let Err(error) = remove_store_temp_dir_force(layout, temp_dir) {
         log_runtime_event(
             logger,
@@ -995,9 +995,17 @@ mod tests {
     };
     use serde_json::json;
     use std::collections::HashMap;
+    use std::fs;
+    use std::path::Path;
     use std::str::FromStr;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    fn create_test_store(root: &Path) -> Store {
+        let store_root = root.join(".mbuild");
+        fs::create_dir_all(&store_root).unwrap();
+        Store::create(&store_root).unwrap()
+    }
 
     #[derive(Debug, Clone)]
     struct CancellingOrigin {
@@ -1038,7 +1046,7 @@ mod tests {
     #[test]
     fn lookup_canonical_for_planned_node_uses_dependency_object_hashes() {
         let temp = tempdir().unwrap();
-        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let layout = create_test_store(temp.path());
         let request = RecipeEnvelope::parse_json(
             br##"{
                 "paths": {
@@ -1159,8 +1167,8 @@ mod tests {
     #[test]
     fn source_temp_dir_is_removed_when_cancelled_after_materialize() {
         let temp = tempdir().unwrap();
-        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
-        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let layout = create_test_store(temp.path());
+        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
         let cancellation = CancellationToken::new();
         let object_hash = "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
@@ -1184,7 +1192,7 @@ mod tests {
         assert_eq!(error.class(), "cancelled");
         assert!(
             !layout
-                .root
+                .root()
                 .join("source-state")
                 .join("tmp")
                 .join(key.to_hex())

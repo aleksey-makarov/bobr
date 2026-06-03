@@ -1,6 +1,4 @@
-use crate::{
-    Build, BuildKey, PublishedBuild, ResultId, ResultRecord, ReuseKey, StoreError, StoreLayout,
-};
+use crate::{Build, BuildKey, PublishedBuild, ResultId, ResultRecord, ReuseKey, Store, StoreError};
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
@@ -8,31 +6,9 @@ use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
-/// Returns the path of the build reference for `build_key`.
-///
-/// The path is under [`StoreLayout::builds`] and may or may not exist.
-pub fn build_ref_path(layout: &StoreLayout, build_key: BuildKey) -> PathBuf {
-    layout.builds.join(build_key.to_hex())
-}
-
-/// Returns the path of the JSON result record for `result_id`.
-///
-/// The path is under [`StoreLayout::results`] and has a `.json` suffix. The
-/// function does not check whether the record currently exists.
-pub fn result_path(layout: &StoreLayout, result_id: ResultId) -> PathBuf {
-    layout.results.join(format!("{}.json", result_id.to_hex()))
-}
-
-/// Returns the path of the reuse reference for `reuse_key`.
-///
-/// The path is under [`StoreLayout::reuses`] and may or may not exist.
-pub fn reuse_ref_path(layout: &StoreLayout, reuse_key: ReuseKey) -> PathBuf {
-    layout.reuses.join(reuse_key.to_hex())
-}
-
 fn result_ref_target(result_id: ResultId) -> PathBuf {
     PathBuf::from("..")
-        .join(crate::layout::RESULTS_DIR)
+        .join(crate::store::RESULTS_DIR)
         .join(format!("{}.json", result_id.to_hex()))
 }
 
@@ -84,12 +60,12 @@ fn parse_result_ref_target(
 /// relative targets. The replacement is performed through a temporary symlink
 /// and rename.
 pub fn store_build_handle_ref(
-    layout: &StoreLayout,
+    store: &Store,
     build_key: BuildKey,
     result_id: ResultId,
 ) -> Result<(), StoreError> {
     let target = result_ref_target(result_id);
-    replace_symlink(&target, &build_ref_path(layout, build_key))
+    replace_symlink(&target, &store.build_ref_path(build_key))
 }
 
 /// Stores or replaces the reuse reference for `reuse_key`.
@@ -98,12 +74,12 @@ pub fn store_build_handle_ref(
 /// relative targets. The replacement is performed through a temporary symlink
 /// and rename.
 pub fn store_reuse_ref(
-    layout: &StoreLayout,
+    store: &Store,
     reuse_key: ReuseKey,
     result_id: ResultId,
 ) -> Result<(), StoreError> {
     let target = result_ref_target(result_id);
-    replace_symlink(&target, &reuse_ref_path(layout, reuse_key))
+    replace_symlink(&target, &store.reuse_ref_path(reuse_key))
 }
 
 /// Loads the published build reached by a build key.
@@ -112,10 +88,10 @@ pub fn store_reuse_ref(
 /// canonical symlinks to result records, and the referenced result must point to
 /// an existing object in the store.
 pub fn load_build_handle(
-    layout: &StoreLayout,
+    store: &Store,
     build_key: BuildKey,
 ) -> Result<Option<PublishedBuild>, StoreError> {
-    let build_ref_path = build_ref_path(layout, build_key);
+    let build_ref_path = store.build_ref_path(build_key);
     if !build_ref_path.exists() && !build_ref_path.is_symlink() {
         return Ok(None);
     }
@@ -127,14 +103,14 @@ pub fn load_build_handle(
         ))
     })?;
     let result_id = parse_result_ref_target("build", &build_ref_path, &target)?;
-    let result = crate::record::load_result_record(layout, result_id)?.ok_or_else(|| {
+    let result = crate::record::load_result_record(store, result_id)?.ok_or_else(|| {
         StoreError::InvalidData(format!(
             "build ref '{}' points to missing result '{}'",
             build_ref_path.display(),
             result_id
         ))
     })?;
-    let object_path = crate::object::object_path(layout, result.object_hash);
+    let object_path = store.object_path(result.object_hash);
     if !object_path.exists() {
         return Err(StoreError::Io(format!(
             "result '{}' points to missing object '{}'",
@@ -154,10 +130,10 @@ pub fn load_build_handle(
 /// Returns `Ok(None)` when the reuse ref does not exist. Existing refs must be
 /// canonical symlinks to result records.
 pub fn load_reuse_record(
-    layout: &StoreLayout,
+    store: &Store,
     reuse_key: ReuseKey,
 ) -> Result<Option<ResultRecord>, StoreError> {
-    let reuse_ref_path = reuse_ref_path(layout, reuse_key);
+    let reuse_ref_path = store.reuse_ref_path(reuse_key);
     if !reuse_ref_path.exists() && !reuse_ref_path.is_symlink() {
         return Ok(None);
     }
@@ -169,18 +145,15 @@ pub fn load_reuse_record(
         ))
     })?;
     let result_id = parse_result_ref_target("reuse", &reuse_ref_path, &target)?;
-    crate::record::load_result_record(layout, result_id)
+    crate::record::load_result_record(store, result_id)
 }
 
 /// Loads the public build handle for `build_key`.
 ///
 /// This is a narrower view of [`load_build_handle`] that returns only the
 /// serializable [`Build`] value.
-pub fn load_public_build(
-    layout: &StoreLayout,
-    build_key: BuildKey,
-) -> Result<Option<Build>, StoreError> {
-    Ok(load_build_handle(layout, build_key)?.map(|published| published.build))
+pub fn load_public_build(store: &Store, build_key: BuildKey) -> Result<Option<Build>, StoreError> {
+    Ok(load_build_handle(store, build_key)?.map(|published| published.build))
 }
 
 /// Publishes a result under a public output name.
@@ -193,30 +166,32 @@ pub fn load_public_build(
 /// Output names must be non-empty and contain only ASCII letters, digits, `.`,
 /// `_`, or `-`.
 pub fn publish_result_refs(
-    layout: &StoreLayout,
+    store: &Store,
     output_name: &str,
     result: &ResultRecord,
 ) -> Result<(), StoreError> {
     validate_output_name(output_name)?;
 
-    let current_result_ref_path = layout.result_refs.join(format!("{output_name}.json"));
-    let current_object_ref_path = layout.object_refs.join(output_name);
+    let current_result_ref_path = store.result_refs_dir().join(format!("{output_name}.json"));
+    let current_object_ref_path = store.object_refs_dir().join(output_name);
     let result_id = result.result_id();
 
-    if let Some(current) = load_current_publication(layout, output_name)?
+    if let Some(current) = load_current_publication(store, output_name)?
         && current.result.result_id() != result_id
     {
         let generation_name =
-            allocate_generation_name(layout, output_name, &generation_suffix(&current)?)?;
+            allocate_generation_name(store, output_name, &generation_suffix(&current)?)?;
 
         if let Some(target) = current.result_target {
             create_generation_ref(
                 &target,
-                &layout.result_refs.join(format!("{generation_name}.json")),
+                &store
+                    .result_refs_dir()
+                    .join(format!("{generation_name}.json")),
             )?;
         }
         if let Some(target) = current.object_target {
-            create_generation_ref(&target, &layout.object_refs.join(&generation_name))?;
+            create_generation_ref(&target, &store.object_refs_dir().join(&generation_name))?;
         }
     }
 
@@ -232,17 +207,17 @@ pub fn publish_result_refs(
 ///
 /// This is a convenience wrapper around [`publish_result_refs`].
 pub fn publish_refs(
-    layout: &StoreLayout,
+    store: &Store,
     output_name: &str,
     published: &PublishedBuild,
 ) -> Result<(), StoreError> {
-    publish_result_refs(layout, output_name, &published.result)
+    publish_result_refs(store, output_name, &published.result)
 }
 
 fn object_ref_target_for_result(result: &ResultRecord) -> Result<PathBuf, StoreError> {
     let object_hash = result.object_hash.to_hex();
     Ok(PathBuf::from("..")
-        .join(crate::layout::OBJECTS_DIR)
+        .join(crate::store::OBJECTS_DIR)
         .join(&object_hash))
 }
 
@@ -278,10 +253,10 @@ pub(crate) struct CurrentPublication {
 }
 
 pub(crate) fn load_current_publication(
-    layout: &StoreLayout,
+    store: &Store,
     output_name: &str,
 ) -> Result<Option<CurrentPublication>, StoreError> {
-    let result_ref_path = layout.result_refs.join(format!("{output_name}.json"));
+    let result_ref_path = store.result_refs_dir().join(format!("{output_name}.json"));
     if !result_ref_path.exists() && !result_ref_path.is_symlink() {
         return Ok(None);
     }
@@ -293,7 +268,7 @@ pub(crate) fn load_current_publication(
         ))
     })?;
     let result_id = parse_result_ref_target("current result", &result_ref_path, &result_target)?;
-    let result = crate::record::load_result_record(layout, result_id)?.ok_or_else(|| {
+    let result = crate::record::load_result_record(store, result_id)?.ok_or_else(|| {
         StoreError::InvalidData(format!(
             "current result ref '{}' points to missing result '{}'",
             result_ref_path.display(),
@@ -301,7 +276,7 @@ pub(crate) fn load_current_publication(
         ))
     })?;
 
-    let object_ref_path = layout.object_refs.join(output_name);
+    let object_ref_path = store.object_refs_dir().join(output_name);
     let object_target = if object_ref_path.exists() || object_ref_path.is_symlink() {
         Some(fs::read_link(&object_ref_path).map_err(|error| {
             StoreError::Io(format!(
@@ -314,7 +289,7 @@ pub(crate) fn load_current_publication(
     };
 
     Ok(Some(CurrentPublication {
-        result_path: result_path(layout, result.result_id()),
+        result_path: store.result_record_path(result.result_id()),
         result,
         result_target: Some(result_target),
         object_target,
@@ -363,7 +338,7 @@ fn human_timestamp_from_datetime(parsed: OffsetDateTime) -> Result<String, Store
 }
 
 fn allocate_generation_name(
-    layout: &StoreLayout,
+    store: &Store,
     output_name: &str,
     suffix: &str,
 ) -> Result<String, StoreError> {
@@ -373,8 +348,8 @@ fn allocate_generation_name(
         } else {
             format!("{output_name}.{suffix}.{counter}")
         };
-        let result_path = layout.result_refs.join(format!("{candidate}.json"));
-        let object_path = layout.object_refs.join(&candidate);
+        let result_path = store.result_refs_dir().join(format!("{candidate}.json"));
+        let object_path = store.object_refs_dir().join(&candidate);
         if !(result_path.exists()
             || result_path.is_symlink()
             || object_path.exists()

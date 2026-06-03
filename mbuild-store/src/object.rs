@@ -1,16 +1,8 @@
 use crate::fsutil as private_fs;
-use crate::{StoreError, StoreLayout};
+use crate::{Store, StoreError};
 use fsobj_hash::{ObjectHash, hash_path};
 use std::fs;
 use std::path::Path;
-
-/// Returns the canonical path of an imported legacy object.
-///
-/// The path is `<layout.objects>/<64-lowercase-object-hash>`. The function does
-/// not check whether the object currently exists.
-pub fn object_path(layout: &StoreLayout, object_hash: ObjectHash) -> std::path::PathBuf {
-    layout.objects.join(object_hash.to_hex())
-}
 
 /// Imports a staged filesystem object into the store.
 ///
@@ -21,12 +13,12 @@ pub fn object_path(layout: &StoreLayout, object_hash: ObjectHash) -> std::path::
 ///
 /// `staged_path` is consumed on success. It may also be removed when the store
 /// already contains the object.
-pub fn import_object(layout: &StoreLayout, staged_path: &Path) -> Result<ObjectHash, StoreError> {
-    import_object_with_hash(layout, staged_path, None)
+pub fn import_object(store: &Store, staged_path: &Path) -> Result<ObjectHash, StoreError> {
+    import_object_with_hash(store, staged_path, None)
 }
 
 pub(crate) fn import_object_with_hash(
-    layout: &StoreLayout,
+    store: &Store,
     staged_path: &Path,
     object_hash: Option<ObjectHash>,
 ) -> Result<ObjectHash, StoreError> {
@@ -40,7 +32,7 @@ pub(crate) fn import_object_with_hash(
             ))
         })?,
     };
-    let destination = layout.objects.join(object_hash.to_hex());
+    let destination = store.object_path(object_hash);
     if destination.exists() {
         if !precomputed {
             remove_path_force(staged_path)?;

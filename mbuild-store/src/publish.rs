@@ -1,6 +1,6 @@
 use crate::{
-    BuildKey, PublishedBuild, ResultId, ResultRecord, ReuseInputIdentity, ReuseKey, StoreError,
-    StoreLayout,
+    BuildKey, PublishedBuild, ResultId, ResultRecord, ReuseInputIdentity, ReuseKey, Store,
+    StoreError,
 };
 use fsobj_hash::ObjectHash;
 use std::path::{Path, PathBuf};
@@ -52,12 +52,12 @@ pub struct PublishedOutput {
 /// [`PublishOutputRequest::output_name`] are updated to the selected result.
 /// If the staged object is not needed because reuse succeeded, it is removed.
 pub fn publish_output(
-    layout: &StoreLayout,
+    store: &Store,
     request: PublishOutputRequest,
 ) -> Result<PublishedOutput, StoreError> {
-    if let Some(published) = crate::refs::load_build_handle(layout, request.build_key)? {
+    if let Some(published) = crate::refs::load_build_handle(store, request.build_key)? {
         crate::object::remove_path_force(&request.staged_path)?;
-        crate::refs::publish_result_refs(layout, &request.output_name, &published.result)?;
+        crate::refs::publish_result_refs(store, &request.output_name, &published.result)?;
         return Ok(PublishedOutput {
             object_hash: published.build.object_hash,
             build_key: published.build.build_key,
@@ -65,9 +65,9 @@ pub fn publish_output(
         });
     }
 
-    if let Some(result) = crate::refs::load_reuse_record(layout, request.reuse_key)? {
+    if let Some(result) = crate::refs::load_reuse_record(store, request.reuse_key)? {
         let result_id = result.result_id();
-        let object_path = crate::object::object_path(layout, result.object_hash);
+        let object_path = store.object_path(result.object_hash);
         if !object_path.exists() {
             return Err(StoreError::Io(format!(
                 "result '{}' points to missing object '{}'",
@@ -76,13 +76,13 @@ pub fn publish_output(
             )));
         }
         crate::object::remove_path_force(&request.staged_path)?;
-        crate::refs::store_build_handle_ref(layout, request.build_key, result_id)?;
+        crate::refs::store_build_handle_ref(store, request.build_key, result_id)?;
         let published = PublishedBuild {
             build: crate::record::build_from_result(request.build_key, &result),
             result,
             object_path,
         };
-        crate::refs::publish_result_refs(layout, &request.output_name, &published.result)?;
+        crate::refs::publish_result_refs(store, &request.output_name, &published.result)?;
         return Ok(PublishedOutput {
             object_hash: published.build.object_hash,
             build_key: published.build.build_key,
@@ -91,7 +91,7 @@ pub fn publish_output(
     }
 
     let published = materialize_build(
-        layout,
+        store,
         request.build_key,
         request.reuse_key,
         &request.created_at,
@@ -99,7 +99,7 @@ pub fn publish_output(
         &request.staged_path,
         None,
     )?;
-    crate::refs::publish_result_refs(layout, &request.output_name, &published.result)?;
+    crate::refs::publish_result_refs(store, &request.output_name, &published.result)?;
 
     Ok(PublishedOutput {
         object_hash: published.build.object_hash,
@@ -118,7 +118,7 @@ pub fn publish_output(
 /// When `precomputed_object_hash` is supplied, the staged object is imported
 /// under that hash without hashing it again.
 pub fn materialize_build(
-    layout: &StoreLayout,
+    store: &Store,
     build_key: BuildKey,
     reuse_key: ReuseKey,
     created_at: &str,
@@ -127,19 +127,19 @@ pub fn materialize_build(
     precomputed_object_hash: Option<ObjectHash>,
 ) -> Result<PublishedBuild, StoreError> {
     let object_hash =
-        crate::object::import_object_with_hash(layout, staged_path, precomputed_object_hash)?;
+        crate::object::import_object_with_hash(store, staged_path, precomputed_object_hash)?;
     let result_id = crate::key::compute_result_id(object_hash)?;
     let result = ResultRecord {
         object_hash,
         created_at: Some(created_at.to_string()),
         inputs,
     };
-    crate::record::store_result_record(layout, &result)?;
-    crate::refs::store_reuse_ref(layout, reuse_key, result_id)?;
-    crate::refs::store_build_handle_ref(layout, build_key, result_id)?;
+    crate::record::store_result_record(store, &result)?;
+    crate::refs::store_reuse_ref(store, reuse_key, result_id)?;
+    crate::refs::store_build_handle_ref(store, build_key, result_id)?;
 
     Ok(PublishedBuild {
-        object_path: layout.objects.join(object_hash.to_hex()),
+        object_path: store.object_path(object_hash),
         build: crate::record::build_from_result(build_key, &result),
         result,
     })

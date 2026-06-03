@@ -8,6 +8,12 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tempfile::tempdir;
 
+fn create_test_store(root: &Path) -> Store {
+    let store_root = root.join(".mbuild");
+    fs::create_dir_all(&store_root).unwrap();
+    Store::create(&store_root).unwrap()
+}
+
 #[test]
 fn canonical_json_hash_is_stable_across_key_order() {
     let object_hash =
@@ -93,7 +99,7 @@ fn parse_result_record_rejects_mismatched_path_key() {
 #[test]
 fn publish_output_reuses_existing_result_via_new_build_handle_ref() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let reuse_key =
         compute_reuse_key("CasTest", &json!({ "kind": "sandbox-script" }), &[]).unwrap();
@@ -138,22 +144,22 @@ fn publish_output_reuses_existing_result_via_new_build_handle_ref() {
     assert_eq!(first.object_hash, second.object_hash);
     assert_ne!(first.build_key, second.build_key);
     assert_eq!(first.result_id, second.result_id);
-    assert!(layout.objects.join(first.object_hash.to_hex()).exists());
+    assert!(layout.object_path(first.object_hash).exists());
     assert_eq!(
-        fs::read_link(layout.builds.join(first.build_key.to_hex())).unwrap(),
+        fs::read_link(layout.build_ref_path(first.build_key)).unwrap(),
         PathBuf::from("..")
             .join(RESULTS_DIR)
             .join(format!("{}.json", first.result_id.to_hex()))
     );
-    assert!(layout.builds.join(second.build_key.to_hex()).exists());
+    assert!(layout.build_ref_path(second.build_key).exists());
     assert_eq!(
-        fs::read_link(layout.builds.join(second.build_key.to_hex())).unwrap(),
+        fs::read_link(layout.build_ref_path(second.build_key)).unwrap(),
         PathBuf::from("..")
             .join(RESULTS_DIR)
             .join(format!("{}.json", second.result_id.to_hex()))
     );
     assert_eq!(
-        fs::read_link(layout.result_refs.join("hello-copy.json")).unwrap(),
+        fs::read_link(layout.result_refs_dir().join("hello-copy.json")).unwrap(),
         PathBuf::from("..")
             .join(RESULTS_DIR)
             .join(format!("{}.json", second.result_id.to_hex()))
@@ -163,7 +169,7 @@ fn publish_output_reuses_existing_result_via_new_build_handle_ref() {
 #[test]
 fn publish_output_writes_build_record_and_refs() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let stage = temp.path().join("script.sh");
     fs::write(&stage, b"echo hi\n").unwrap();
@@ -191,10 +197,8 @@ fn publish_output_writes_build_record_and_refs() {
     )
     .unwrap();
 
-    let build_ref_path = layout.builds.join(published.build_key.to_hex());
-    let result_path = layout
-        .results
-        .join(format!("{}.json", published.result_id.to_hex()));
+    let build_ref_path = layout.build_ref_path(published.build_key);
+    let result_path = layout.result_record_path(published.result_id);
     assert!(build_ref_path.exists());
     assert!(result_path.exists());
     assert_eq!(
@@ -221,13 +225,13 @@ fn publish_output_writes_build_record_and_refs() {
     assert_eq!(build_json["inputs"], Value::Array(vec![]));
 
     assert_eq!(
-        fs::read_link(layout.result_refs.join("script.json")).unwrap(),
+        fs::read_link(layout.result_refs_dir().join("script.json")).unwrap(),
         PathBuf::from("..")
             .join(RESULTS_DIR)
             .join(format!("{}.json", published.result_id.to_hex()))
     );
     assert_eq!(
-        fs::read_link(layout.object_refs.join("script")).unwrap(),
+        fs::read_link(layout.object_refs_dir().join("script")).unwrap(),
         PathBuf::from("..")
             .join(OBJECTS_DIR)
             .join(published.object_hash.to_hex())
@@ -237,7 +241,7 @@ fn publish_output_writes_build_record_and_refs() {
 #[test]
 fn result_ref_loaders_reject_non_canonical_targets() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let stage = temp.path().join("script.sh");
     fs::write(&stage, b"echo hi\n").unwrap();
@@ -259,19 +263,19 @@ fn result_ref_loaders_reject_non_canonical_targets() {
         .join("not-results")
         .join(format!("{}.json", published.result_id.to_hex()));
 
-    replace_symlink(&non_canonical_target, &build_ref_path(&layout, build_key)).unwrap();
+    replace_symlink(&non_canonical_target, &layout.build_ref_path(build_key)).unwrap();
     let error = load_build_handle(&layout, build_key).unwrap_err();
     assert!(error.to_string().contains("build ref"));
     assert!(error.to_string().contains("non-canonical result target"));
 
-    replace_symlink(&non_canonical_target, &reuse_ref_path(&layout, reuse_key)).unwrap();
+    replace_symlink(&non_canonical_target, &layout.reuse_ref_path(reuse_key)).unwrap();
     let error = load_reuse_record(&layout, reuse_key).unwrap_err();
     assert!(error.to_string().contains("reuse ref"));
     assert!(error.to_string().contains("non-canonical result target"));
 
     replace_symlink(
         &non_canonical_target,
-        &layout.result_refs.join("script.json"),
+        &layout.result_refs_dir().join("script.json"),
     )
     .unwrap();
     let error = load_current_publication(&layout, "script").unwrap_err();
@@ -282,7 +286,7 @@ fn result_ref_loaders_reject_non_canonical_targets() {
 #[test]
 fn result_record_round_trips_inputs() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let inputs = vec![
         ReuseInputIdentity {
@@ -332,7 +336,7 @@ fn result_record_round_trips_inputs() {
 #[test]
 fn same_object_different_payload_produces_different_build_key() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
@@ -387,7 +391,7 @@ fn same_object_different_payload_produces_different_build_key() {
 #[test]
 fn build_key_changes_when_kind_changes() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
@@ -426,7 +430,7 @@ fn build_key_changes_when_kind_changes() {
 #[test]
 fn build_key_changes_when_builder_tag_changes() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
@@ -465,7 +469,7 @@ fn build_key_changes_when_builder_tag_changes() {
 #[test]
 fn publish_output_rotates_existing_refs_into_generations() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
@@ -517,25 +521,30 @@ fn publish_output_rotates_existing_refs_into_generations() {
     assert_ne!(first.object_hash, second.object_hash);
     assert_ne!(first.build_key, second.build_key);
     assert_eq!(
-        fs::read_link(layout.object_refs.join("shared")).unwrap(),
+        fs::read_link(layout.object_refs_dir().join("shared")).unwrap(),
         PathBuf::from("..")
             .join(OBJECTS_DIR)
             .join(second.object_hash.to_hex())
     );
     assert_eq!(
-        fs::read_link(layout.result_refs.join("shared.json")).unwrap(),
+        fs::read_link(layout.result_refs_dir().join("shared.json")).unwrap(),
         PathBuf::from("..")
             .join(RESULTS_DIR)
             .join(format!("{}.json", second.result_id.to_hex()))
     );
     assert_eq!(
-        fs::read_link(layout.object_refs.join(format!("shared.{suffix}"))).unwrap(),
+        fs::read_link(layout.object_refs_dir().join(format!("shared.{suffix}"))).unwrap(),
         PathBuf::from("..")
             .join(OBJECTS_DIR)
             .join(first.object_hash.to_hex())
     );
     assert_eq!(
-        fs::read_link(layout.result_refs.join(format!("shared.{suffix}.json"))).unwrap(),
+        fs::read_link(
+            layout
+                .result_refs_dir()
+                .join(format!("shared.{suffix}.json"))
+        )
+        .unwrap(),
         PathBuf::from("..")
             .join(RESULTS_DIR)
             .join(format!("{}.json", first.result_id.to_hex()))
@@ -545,7 +554,7 @@ fn publish_output_rotates_existing_refs_into_generations() {
 #[test]
 fn publish_output_same_build_key_does_not_create_generation_refs() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
@@ -590,10 +599,15 @@ fn publish_output_same_build_key_does_not_create_generation_refs() {
     assert_eq!(first.build_key, second.build_key);
     assert_eq!(first.object_hash, second.object_hash);
     let suffix = human_timestamp_from_rfc3339("2026-03-24T12:34:56.123456789Z").unwrap();
-    assert!(!layout.object_refs.join(format!("shared.{suffix}")).exists());
     assert!(
         !layout
-            .result_refs
+            .object_refs_dir()
+            .join(format!("shared.{suffix}"))
+            .exists()
+    );
+    assert!(
+        !layout
+            .result_refs_dir()
             .join(format!("shared.{suffix}.json"))
             .exists()
     );
@@ -602,7 +616,7 @@ fn publish_output_same_build_key_does_not_create_generation_refs() {
 #[test]
 fn publish_output_generation_suffix_collisions_get_numeric_suffixes() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"one").unwrap();
@@ -675,19 +689,19 @@ fn publish_output_generation_suffix_collisions_get_numeric_suffixes() {
 
     let suffix = human_timestamp_from_rfc3339("2026-03-24T12:34:56.100000000Z").unwrap();
     assert_eq!(
-        fs::read_link(layout.object_refs.join(format!("shared.{suffix}"))).unwrap(),
+        fs::read_link(layout.object_refs_dir().join(format!("shared.{suffix}"))).unwrap(),
         PathBuf::from("..")
             .join(OBJECTS_DIR)
             .join(first.object_hash.to_hex())
     );
     assert_eq!(
-        fs::read_link(layout.object_refs.join(format!("shared.{suffix}.2"))).unwrap(),
+        fs::read_link(layout.object_refs_dir().join(format!("shared.{suffix}.2"))).unwrap(),
         PathBuf::from("..")
             .join(OBJECTS_DIR)
             .join(second.object_hash.to_hex())
     );
     assert_eq!(
-        fs::read_link(layout.object_refs.join("shared")).unwrap(),
+        fs::read_link(layout.object_refs_dir().join("shared")).unwrap(),
         PathBuf::from("..")
             .join(OBJECTS_DIR)
             .join(third.object_hash.to_hex())
@@ -730,7 +744,7 @@ fn replace_symlink_temp_names_do_not_conflict_on_repeated_replace() {
 #[test]
 fn invalid_output_name_is_rejected() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     for invalid_name in ["", ".", "..", "bad/name", "bad name"] {
         let stage = temp.path().join(format!(
@@ -759,7 +773,7 @@ fn invalid_output_name_is_rejected() {
 #[test]
 fn publish_output_accepts_directory_objects() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let stage_dir = temp.path().join("tree");
     fs::create_dir_all(stage_dir.join("bin")).unwrap();
@@ -778,16 +792,16 @@ fn publish_output_accepts_directory_objects() {
     )
     .unwrap();
 
-    let object_path = layout.objects.join(published.object_hash.to_hex());
+    let object_path = layout.object_path(published.object_hash);
     assert!(object_path.is_dir());
     assert!(object_path.join("bin").join("tool").exists());
-    assert!(layout.builds.join(published.build_key.to_hex()).exists());
+    assert!(layout.build_ref_path(published.build_key).exists());
 }
 
 #[test]
 fn materialize_build_accepts_precomputed_hash_for_unreadable_object() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let stage_dir = temp.path().join("tree");
     fs::create_dir_all(stage_dir.join("private")).unwrap();
@@ -809,7 +823,7 @@ fn materialize_build_accepts_precomputed_hash_for_unreadable_object() {
     .unwrap();
 
     assert_eq!(published.build.object_hash, object_hash);
-    let object_path = layout.objects.join(object_hash.to_hex());
+    let object_path = layout.object_path(object_hash);
     assert!(object_path.join("private").exists());
 
     fs::set_permissions(
@@ -822,7 +836,7 @@ fn materialize_build_accepts_precomputed_hash_for_unreadable_object() {
 #[test]
 fn publish_output_points_fs_tree_object_ref_at_object_root() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let stage_dir = temp.path().join("fs-tree");
     fs::create_dir(&stage_dir).unwrap();
@@ -843,12 +857,12 @@ fn publish_output_points_fs_tree_object_ref_at_object_root() {
     .unwrap();
 
     assert_eq!(
-        fs::read_link(layout.object_refs.join("tree")).unwrap(),
+        fs::read_link(layout.object_refs_dir().join("tree")).unwrap(),
         PathBuf::from("..")
             .join(OBJECTS_DIR)
             .join(published.object_hash.to_hex())
     );
-    let object_path = layout.objects.join(published.object_hash.to_hex());
+    let object_path = layout.object_path(published.object_hash);
     assert!(object_path.join("manifest.jsonl").is_file());
     assert!(object_path.join("root").is_dir());
 }
@@ -856,27 +870,27 @@ fn publish_output_points_fs_tree_object_ref_at_object_root() {
 #[test]
 fn store_layout_does_not_create_object_indexes_dir() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
-    assert!(!layout.root.join("object-indexes").exists());
+    let layout = create_test_store(temp.path());
+    assert!(!layout.root().join("object-indexes").exists());
 }
 
 #[test]
 fn import_object_does_not_write_leaf_index_when_hashing_staged_path() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
     let stage_dir = temp.path().join("stage");
     fs::create_dir(&stage_dir).unwrap();
     fs::write(stage_dir.join("payload"), b"hello\n").unwrap();
 
     import_object(&layout, &stage_dir).unwrap();
 
-    assert!(!layout.root.join("object-indexes").exists());
+    assert!(!layout.root().join("object-indexes").exists());
 }
 
 #[test]
 fn existing_object_reuse_removes_staged_path() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
@@ -915,7 +929,7 @@ fn existing_object_reuse_removes_staged_path() {
 #[test]
 fn existing_precomputed_object_reuse_leaves_staged_path_for_runtime_cleanup() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
@@ -951,7 +965,7 @@ fn existing_precomputed_object_reuse_leaves_staged_path_for_runtime_cleanup() {
 #[test]
 fn build_key_changes_when_input_build_key_order_changes() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
     let key_a = parse_build_key("1111111111111111111111111111111111111111111111111111111111111111");
     let key_b = parse_build_key("2222222222222222222222222222222222222222222222222222222222222222");
 
@@ -998,22 +1012,54 @@ fn build_key_changes_when_input_build_key_order_changes() {
 }
 
 #[test]
-fn discover_in_cwd_creates_full_layout() {
+fn store_create_creates_full_layout() {
     let temp = tempdir().unwrap();
-    let old_cwd = std::env::current_dir().unwrap();
-    std::env::set_current_dir(temp.path()).unwrap();
 
-    let layout = StoreLayout::discover_in_cwd().unwrap();
+    let layout = Store::create(temp.path()).unwrap();
 
-    std::env::set_current_dir(old_cwd).unwrap();
+    assert_eq!(layout.root(), temp.path());
+    assert!(layout.objects_dir().is_dir());
+    assert!(layout.builds_dir().is_dir());
+    assert!(layout.result_refs_dir().is_dir());
+    assert!(layout.object_refs_dir().is_dir());
+    assert!(layout.fs_files_dir().is_dir());
+    assert!(layout.fs_trees_dir().is_dir());
+}
 
-    assert_eq!(layout.root, temp.path());
-    assert!(layout.objects.is_dir());
-    assert!(layout.builds.is_dir());
-    assert!(layout.result_refs.is_dir());
-    assert!(layout.object_refs.is_dir());
-    assert!(layout.fs_files.is_dir());
-    assert!(layout.fs_trees.is_dir());
+#[test]
+fn store_handle_is_send_sync_and_clone() {
+    fn assert_send_sync_clone<T: Send + Sync + Clone>() {}
+
+    assert_send_sync_clone::<Store>();
+}
+
+#[test]
+fn store_create_requires_existing_absolute_root() {
+    let temp = tempdir().unwrap();
+    let missing = temp.path().join("missing-store");
+
+    assert!(matches!(
+        Store::create(Path::new("relative-store")),
+        Err(StoreError::InvalidInput(message))
+            if message.contains("store root must be absolute")
+    ));
+    assert!(matches!(
+        Store::create(&missing),
+        Err(StoreError::InvalidInput(message))
+            if message.contains("store root must exist")
+    ));
+}
+
+#[test]
+fn store_create_rejects_non_directory_layout_entry() {
+    let temp = tempdir().unwrap();
+    fs::write(temp.path().join(OBJECTS_DIR), b"not a directory").unwrap();
+
+    assert!(matches!(
+        Store::create(temp.path()),
+        Err(StoreError::InvalidData(message))
+            if message.contains("store objects path")
+    ));
 }
 
 #[test]
@@ -1035,7 +1081,7 @@ fn build_key_display_and_parse_roundtrip() {
 #[test]
 fn executable_bit_changes_object_hash_for_distinct_invocations() {
     let temp = tempdir().unwrap();
-    let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+    let layout = create_test_store(temp.path());
 
     let first_stage = temp.path().join("plain.txt");
     fs::write(&first_stage, b"hello").unwrap();

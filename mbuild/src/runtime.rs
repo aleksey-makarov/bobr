@@ -4,9 +4,9 @@ use mbuild_core::{
     CancellationToken,
 };
 use mbuild_store::{
-    Build, BuildKey, PublishedBuild, ReuseInputIdentity, StoreError, StoreLayout,
-    compute_reuse_key, load_build_handle, load_reuse_record, materialize_build, object_path,
-    recreate_store_temp_dir_force, remove_store_temp_dir_force, store_build_handle_ref,
+    Build, BuildKey, PublishedBuild, ReuseInputIdentity, Store, StoreError, compute_reuse_key,
+    load_build_handle, load_reuse_record, materialize_build, recreate_store_temp_dir_force,
+    remove_store_temp_dir_force, store_build_handle_ref,
 };
 use serde_json::{Value, json};
 use std::fmt;
@@ -60,7 +60,7 @@ impl fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {}
 
 pub(crate) struct ExecuteBuilderNodeRequest<'a> {
-    pub(crate) layout: &'a StoreLayout,
+    pub(crate) layout: &'a Store,
     pub(crate) builder: &'static dyn Builder,
     pub(crate) build_key: BuildKey,
     pub(crate) build_name: &'a str,
@@ -112,7 +112,7 @@ pub(crate) fn execute_builder_node(
         .map_err(map_store_error)?;
     if let Some(result) = load_reuse_record(layout, reuse_key).map_err(map_store_error)? {
         let result_id = result.result_id();
-        let object_path = object_path(layout, result.object_hash);
+        let object_path = layout.object_path(result.object_hash);
         if !object_path.exists() {
             log_runtime_event(
                 logger.as_ref(),
@@ -210,14 +210,14 @@ pub(crate) fn execute_builder_node(
 }
 
 pub(crate) fn lookup_build_handle(
-    layout: &StoreLayout,
+    layout: &Store,
     build_key: BuildKey,
 ) -> Result<Option<PublishedBuild>, RuntimeError> {
     load_build_handle(layout, build_key).map_err(map_store_error)
 }
 
 pub(crate) fn lookup_canonical_result(
-    layout: &StoreLayout,
+    layout: &Store,
     builder_tag: &str,
     config: &Value,
     inputs: &[ReuseInputIdentity],
@@ -228,7 +228,7 @@ pub(crate) fn lookup_canonical_result(
         return Ok(None);
     };
     let result_id = result.result_id();
-    let object_path = object_path(layout, result.object_hash);
+    let object_path = layout.object_path(result.object_hash);
     if !object_path.exists() {
         return Err(RuntimeError::Store(format!(
             "result '{}' points to missing object '{}'",
@@ -250,14 +250,14 @@ pub(crate) fn lookup_canonical_result(
 }
 
 pub(crate) fn build_context(
-    layout: &StoreLayout,
+    layout: &Store,
     builder_tag: &str,
     build_key: BuildKey,
     logger: Arc<dyn BuildLogger>,
     cancellation: CancellationToken,
 ) -> Result<BuildContext, RuntimeError> {
     let state_dir = layout
-        .root
+        .root()
         .join("builder-state")
         .join(builder_tag.to_ascii_lowercase());
     let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
@@ -359,7 +359,7 @@ enum TempCleanupMode {
 
 #[derive(Debug)]
 struct TempCleanupContext {
-    layout: StoreLayout,
+    layout: Store,
     quarantine_dir: PathBuf,
     builder_tag: String,
     build_key: BuildKey,
@@ -367,10 +367,10 @@ struct TempCleanupContext {
 }
 
 impl TempCleanupContext {
-    fn new(layout: &StoreLayout, builder_tag: &str, build_key: BuildKey) -> Self {
+    fn new(layout: &Store, builder_tag: &str, build_key: BuildKey) -> Self {
         Self {
             layout: layout.clone(),
-            quarantine_dir: layout.root.join("quarantine"),
+            quarantine_dir: layout.root().join("quarantine"),
             builder_tag: builder_tag.to_string(),
             build_key,
             mode: cleanup_mode_for_builder(builder_tag),
@@ -611,6 +611,12 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
+    fn create_test_store(root: &Path) -> Store {
+        let store_root = root.join(".mbuild");
+        fs::create_dir_all(&store_root).unwrap();
+        Store::create(&store_root).unwrap()
+    }
+
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct RuntimeTestConfig {}
@@ -755,7 +761,7 @@ mod tests {
     #[test]
     fn lookup_canonical_result_depends_on_input_object_hash() {
         let temp = tempdir().unwrap();
-        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let layout = create_test_store(temp.path());
 
         let matching_inputs = vec![ReuseInputIdentity {
             object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
@@ -817,12 +823,12 @@ mod tests {
     #[test]
     fn execute_builder_node_prepares_dirs_and_cleans_temp_on_success() {
         let temp = tempdir().unwrap();
-        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
-        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let layout = create_test_store(temp.path());
+        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
-        let state_dir = layout.root.join("builder-state").join("runtimetest");
+        let state_dir = layout.root().join("builder-state").join("runtimetest");
         let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
         fs::create_dir_all(&temp_dir).unwrap();
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
@@ -852,13 +858,13 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let temp = tempdir().unwrap();
-        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let layout = create_test_store(temp.path());
         let config = json!({});
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
         let run_logger =
-            Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+            Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
         let logger = run_logger.bind_node("RuntimeTest", "runtime-test", build_key);
-        let state_dir = layout.root.join("builder-state").join("runtimetest");
+        let state_dir = layout.root().join("builder-state").join("runtimetest");
         let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
         fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
         let stale_target = temp.path().join("missing-stale-target");
@@ -894,12 +900,12 @@ mod tests {
     #[test]
     fn execute_sandbox_builder_quarantines_temp_without_removing_it() {
         let temp = tempdir().unwrap();
-        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
-        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let layout = create_test_store(temp.path());
+        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("Sandbox", &config, &[]).unwrap();
-        let state_dir = layout.root.join("builder-state").join("sandbox");
+        let state_dir = layout.root().join("builder-state").join("sandbox");
         let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
 
         let published = execute_builder_node(ExecuteBuilderNodeRequest {
@@ -926,12 +932,12 @@ mod tests {
     #[test]
     fn execute_sandbox_builder_quarantines_stale_temp_before_recreate() {
         let temp = tempdir().unwrap();
-        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
-        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let layout = create_test_store(temp.path());
+        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("Sandbox", &config, &[]).unwrap();
-        let state_dir = layout.root.join("builder-state").join("sandbox");
+        let state_dir = layout.root().join("builder-state").join("sandbox");
         let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
         fs::create_dir_all(&temp_dir).unwrap();
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
@@ -963,13 +969,13 @@ mod tests {
     #[test]
     fn execute_builder_node_cleans_temp_on_failure() {
         let temp = tempdir().unwrap();
-        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
-        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let layout = create_test_store(temp.path());
+        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
         let config = Value::Object(Map::new());
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
         let temp_dir = layout
-            .root
+            .root()
             .join("builder-state")
             .join("runtimetest")
             .join("tmp")
@@ -998,15 +1004,15 @@ mod tests {
     #[test]
     fn cleanup_temp_dir_quarantines_when_remove_fails() {
         let temp = tempdir().unwrap();
-        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
+        let layout = create_test_store(temp.path());
         let run_logger =
-            Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+            Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
         let logger = run_logger.bind_node(
             "RuntimeTest",
             "runtime-test",
             compute_build_key("RuntimeTest", &json!({}), &[]).unwrap(),
         );
-        let state_dir = layout.root.join("builder-state").join("runtimetest");
+        let state_dir = layout.root().join("builder-state").join("runtimetest");
         let temp_dir = state_dir.join("tmp").join("stale");
         fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
         fs::write(&temp_dir, b"not a directory\n").unwrap();
@@ -1032,13 +1038,13 @@ mod tests {
     #[test]
     fn execute_builder_node_cleans_temp_on_materialize_failure() {
         let temp = tempdir().unwrap();
-        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
-        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let layout = create_test_store(temp.path());
+        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
         let temp_dir = layout
-            .root
+            .root()
             .join("builder-state")
             .join("runtimetest")
             .join("tmp")
@@ -1064,8 +1070,8 @@ mod tests {
     #[test]
     fn execute_builder_node_pre_cancelled_does_not_start_builder() {
         let temp = tempdir().unwrap();
-        let layout = StoreLayout::discover(&temp.path().join(".mbuild")).unwrap();
-        let logger = Arc::new(BuildRunLogger::new(&layout.root, RunOptions::default()).unwrap());
+        let layout = create_test_store(temp.path());
+        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
@@ -1088,7 +1094,7 @@ mod tests {
         assert_eq!(error.class(), "cancelled");
         assert!(
             !layout
-                .root
+                .root()
                 .join("builder-state")
                 .join("runtimetest")
                 .join("tmp")
@@ -1097,8 +1103,8 @@ mod tests {
         );
     }
 
-    fn quarantine_entries(layout: &StoreLayout) -> Vec<PathBuf> {
-        let mut entries = fs::read_dir(layout.root.join("quarantine"))
+    fn quarantine_entries(layout: &Store) -> Vec<PathBuf> {
+        let mut entries = fs::read_dir(layout.root().join("quarantine"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .filter(|path| path.extension().and_then(|ext| ext.to_str()) != Some("json"))

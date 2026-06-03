@@ -3,7 +3,7 @@ mod support;
 use mbuild::recipe_runtime::{
     BuildRunOptions, run_recipe_json_in_workspace, run_recipe_json_in_workspace_with_options,
 };
-use mbuild_store::{StoreLayout, compute_result_id, load_build_handle, load_result_record};
+use mbuild_store::{Store, compute_result_id, load_build_handle, load_result_record};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -341,7 +341,7 @@ fn json_recipe_executes_source_and_group_graph() {
     let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
     handle.join().unwrap();
 
-    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected final Build to exist in store");
@@ -406,7 +406,7 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
     let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
     handle.join().unwrap();
 
-    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(
         load_build_handle(&layout, build.build_key.expect("builder root"))
             .unwrap()
@@ -466,7 +466,7 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
 
     assert!(
         load_build_handle(
-            &StoreLayout::discover(&store_root(workspace.path())).unwrap(),
+            &Store::create(&store_root(workspace.path())).unwrap(),
             first.build_key.expect("builder root"),
         )
         .unwrap()
@@ -574,7 +574,7 @@ fn identical_fetch_sources_are_deduped_by_result_id() {
     .unwrap();
     handle.join().unwrap();
 
-    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Group Build to exist in store");
@@ -592,7 +592,7 @@ fn tree_file_recipe_builds_successfully_via_runtime() {
 
     let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
-    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Tree Build to exist in store");
@@ -615,7 +615,7 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
 
     let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
-    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Tree Build to exist in store");
@@ -623,7 +623,7 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
     assert!(published.object_path.is_dir());
     assert!(published.object_path.join("manifest.jsonl").is_file());
     assert_eq!(
-        fs::read_link(layout.object_refs.join("runtime-tree")).unwrap(),
+        fs::read_link(layout.object_refs_dir().join("runtime-tree")).unwrap(),
         Path::new("..")
             .join("objects")
             .join(published.build.object_hash.to_string())
@@ -649,7 +649,7 @@ fn tree_symlink_recipe_builds_successfully_via_runtime() {
 
     let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
-    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Tree Build to exist in store");
@@ -686,7 +686,7 @@ fn source_path_file_materializes_known_object_without_build_handle() {
 
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
-    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(realized.build_key.is_none());
     assert_eq!(realized.object_hash, object_hash);
     assert!(object_path_exists(&layout, object_hash));
@@ -732,7 +732,7 @@ fn source_path_tar_materializes_unpacked_tree_without_build_handle() {
 
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
-    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     let object_path = store_root(workspace.path())
         .join("objects")
         .join(object_hash.to_hex());
@@ -781,7 +781,7 @@ fn source_http_mismatch_imports_actual_object_without_canonical_result() {
     let message = error.to_string();
     assert!(message.contains(&actual_hash), "{message}");
 
-    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(object_path_exists(&layout, actual_hash.parse().unwrap()));
     let wrong_result_id = compute_result_id(wrong_hash.parse().unwrap()).unwrap();
     assert!(
@@ -806,7 +806,7 @@ fn source_oci_registry_mismatch_imports_actual_object_without_canonical_result()
     let message = error.to_string();
     assert!(message.contains(&actual_hash), "{message}");
 
-    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(object_path_exists(&layout, actual_hash.parse().unwrap()));
     let wrong_result_id = compute_result_id(wrong_hash.parse().unwrap()).unwrap();
     assert!(
@@ -912,7 +912,7 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
         "{error}"
     );
 
-    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(object_path_exists(&layout, actual_hash));
     let wrong_result_id = compute_result_id(wrong_hash.parse().unwrap()).unwrap();
     assert!(
@@ -1012,8 +1012,8 @@ fn source_without_origin_republishes_existing_object() {
     );
     let first = run_recipe_json_in_workspace(workspace.path(), &materialized_recipe_path).unwrap();
 
-    let layout = StoreLayout::discover(&store_root(workspace.path())).unwrap();
-    let result_path = layout.results.join(format!("{}.json", first.result_id));
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
+    let result_path = layout.result_record_path(first.result_id);
     fs::remove_file(&result_path).unwrap();
 
     let recipe_path = workspace.path().join("source-cutoff-missing-result.json");
@@ -1053,6 +1053,6 @@ fn source_without_origin_requires_existing_object_or_result() {
     );
 }
 
-fn object_path_exists(layout: &StoreLayout, object_hash: fsobj_hash::ObjectHash) -> bool {
-    layout.objects.join(object_hash.to_hex()).exists()
+fn object_path_exists(layout: &Store, object_hash: fsobj_hash::ObjectHash) -> bool {
+    layout.object_path(object_hash).exists()
 }
