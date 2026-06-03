@@ -103,7 +103,6 @@ pub(crate) struct PlannedSourceRecipe {
     pub(crate) name: String,
     pub(crate) object_hash: ObjectHash,
     pub(crate) origin: Option<Box<dyn ParsedOrigin>>,
-    pub(crate) result_id: ResultId,
 }
 
 impl PlannedRecipe {
@@ -236,7 +235,6 @@ fn collect_graph_inner(
                 name: recipe.name.clone(),
                 object_hash: recipe.object_hash,
                 origin: recipe.origin.clone(),
-                result_id,
             });
             (key, planned)
         }

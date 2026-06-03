@@ -29,6 +29,7 @@ mod object;
 mod publish;
 mod record;
 mod refs;
+mod source;
 mod store;
 
 pub use error::StoreError;
@@ -41,9 +42,10 @@ pub use publish::materialize_build_with_trusted_hash;
 pub use publish::{PublishOutputRequest, PublishedOutput, materialize_build, publish_output};
 pub use record::{
     Build, PublishedBuild, RealizedResult, ResultRecord, ReuseInputIdentity, StoredResult,
-    load_result_record, load_stored_result, record_existing_source_result,
+    load_result_record, load_stored_result,
 };
 pub use refs::{load_build_handle, load_public_build, publish_result, resolve_reuse_for_build};
+pub use source::{SourceImportOutcome, SourceLookup, import_source_result, lookup_source_result};
 pub use store::{Store, recreate_store_temp_dir_force, remove_store_temp_dir_force};
 
 #[cfg(test)]

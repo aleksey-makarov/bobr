@@ -165,7 +165,7 @@ pub fn load_stored_result(
 ///
 /// The object path for `object_hash` must exist. The result record is written
 /// idempotently and then reloaded as a checked [`StoredResult`].
-pub fn record_existing_source_result(
+pub(crate) fn record_existing_source_result(
     store: &Store,
     object_hash: ObjectHash,
     created_at: &str,

@@ -8,14 +8,13 @@ use crate::runtime::{
     ExecuteBuilderNodeRequest, RuntimeError, check_cancelled, execute_builder_node,
     log_runtime_event, lookup_build_handle, lookup_canonical_result, map_store_error,
 };
-use fsobj_hash::hash_path;
 use mbuild_core::{
     BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, CancellationToken, OriginContext,
     RunOptions,
 };
 use mbuild_store::{
-    BuildKey, RealizedResult, ResultRecord, ReuseInputIdentity, Store, import_object,
-    load_stored_result, publish_result, record_existing_source_result,
+    BuildKey, RealizedResult, ResultRecord, ReuseInputIdentity, SourceImportOutcome, SourceLookup,
+    Store, import_source_result, lookup_source_result, publish_result,
     recreate_store_temp_dir_force, remove_store_temp_dir_force,
 };
 use serde_json::{Map, Value, to_string_pretty};
@@ -135,7 +134,7 @@ pub fn run_recipe_request_in_store_with_options(
     let root_recipe = request.node("root")?;
     let root_name = root_recipe.name().to_string();
     let root_tag = root_recipe.tag().to_string();
-    ensure_planned(&layout, &mut nodes, root_key)?;
+    ensure_planned(&layout, &mut nodes, root_key, logger.created_at())?;
 
     let mut completed = HashMap::new();
     for (key, node) in &nodes {
@@ -210,6 +209,7 @@ fn ensure_planned(
     layout: &Store,
     nodes: &mut HashMap<BuildKey, PlannedNode>,
     key: BuildKey,
+    created_at: &str,
 ) -> Result<(), RuntimeError> {
     let recipe = {
         let node = nodes.get(&key).ok_or_else(|| {
@@ -243,7 +243,7 @@ fn ensure_planned(
                 Ok::<_, RuntimeError>(())
             })?;
             for dep in deps {
-                ensure_planned(layout, nodes, dep)?;
+                ensure_planned(layout, nodes, dep, created_at)?;
             }
 
             if let Some(realized) = lookup_canonical_for_planned_node(layout, nodes, key)? {
@@ -262,21 +262,21 @@ fn ensure_planned(
             }
         }
         PlannedRecipe::Source(source) => {
-            if let Some(stored) =
-                load_stored_result(layout, source.result_id).map_err(map_store_error)?
+            let node = nodes.get_mut(&key).ok_or_else(|| {
+                RuntimeError::Store(format!("missing planned node for key '{}'", key))
+            })?;
+            match lookup_source_result(layout, source.object_hash, created_at)
+                .map_err(map_store_error)?
             {
-                let node = nodes.get_mut(&key).ok_or_else(|| {
-                    RuntimeError::Store(format!("missing planned node for key '{}'", key))
-                })?;
-                node.state = PlanningState::Reused {
-                    realized: realized_result_from_record(None, &stored.result),
-                    origin: ReuseOrigin::CanonicalResult,
-                };
-            } else {
-                let node = nodes.get_mut(&key).ok_or_else(|| {
-                    RuntimeError::Store(format!("missing planned node for key '{}'", key))
-                })?;
-                node.state = PlanningState::NeedsBuild;
+                SourceLookup::Hit(stored) => {
+                    node.state = PlanningState::Reused {
+                        realized: realized_result_from_record(None, &stored.result),
+                        origin: ReuseOrigin::CanonicalResult,
+                    };
+                }
+                SourceLookup::Missing => {
+                    node.state = PlanningState::NeedsBuild;
+                }
             }
         }
     }
@@ -798,32 +798,21 @@ fn execute_source_recipe(
     );
     check_cancelled(&cancellation)?;
 
-    if let Some(stored) = load_stored_result(layout, recipe.result_id).map_err(map_store_error)? {
-        log_runtime_event(
-            logger.as_ref(),
-            BuildLogLevel::Info,
-            "result-hit",
-            "reusing existing canonical result",
-        );
-        return Ok(ExecutedNode {
-            realized: realized_result_from_record(None, &stored.result),
-        });
-    }
-
-    let existing_object_path = layout.object_path(recipe.object_hash);
-    if existing_object_path.exists() {
-        log_runtime_event(
-            logger.as_ref(),
-            BuildLogLevel::Info,
-            "run",
-            "reusing existing object and publishing source result",
-        );
-        let stored =
-            record_existing_source_result(layout, recipe.object_hash, run_logger.created_at())
-                .map_err(map_store_error)?;
-        return Ok(ExecutedNode {
-            realized: realized_result_from_record(None, &stored.result),
-        });
+    match lookup_source_result(layout, recipe.object_hash, run_logger.created_at())
+        .map_err(map_store_error)?
+    {
+        SourceLookup::Hit(stored) => {
+            log_runtime_event(
+                logger.as_ref(),
+                BuildLogLevel::Info,
+                "result-hit",
+                "reusing existing source result",
+            );
+            return Ok(ExecutedNode {
+                realized: realized_result_from_record(None, &stored.result),
+            });
+        }
+        SourceLookup::Missing => {}
     }
 
     if recipe.origin.is_none() {
@@ -880,18 +869,13 @@ fn execute_source_recipe(
         "materializing source origin",
     );
 
-    let actual_hash = hash_path(&staged_path).map_err(|error| {
-        cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
-        RuntimeError::Build(format!(
-            "failed to hash materialized source '{}': {error}",
-            staged_path.display()
-        ))
-    })?;
-    if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
-        return Err(error);
-    }
-    let imported_hash = import_object(layout, &staged_path).map_err(|error| {
+    let import_outcome = import_source_result(
+        layout,
+        recipe.object_hash,
+        &staged_path,
+        run_logger.created_at(),
+    )
+    .map_err(|error| {
         cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
         map_store_error(error)
     })?;
@@ -900,22 +884,20 @@ fn execute_source_recipe(
         return Err(error);
     }
     cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
-    debug_assert_eq!(imported_hash, actual_hash);
 
-    if actual_hash != recipe.object_hash {
-        let message = format!(
-            "source '{}' materialized unexpected object hash: expected {}, got {}",
-            recipe.name, recipe.object_hash, actual_hash
-        );
-        log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
-        return Err(RuntimeError::Build(message));
+    match import_outcome {
+        SourceImportOutcome::Matched(stored) => Ok(ExecutedNode {
+            realized: realized_result_from_record(None, &stored.result),
+        }),
+        SourceImportOutcome::Mismatched { actual_hash } => {
+            let message = format!(
+                "source '{}' materialized unexpected object hash: expected {}, got {}",
+                recipe.name, recipe.object_hash, actual_hash
+            );
+            log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
+            Err(RuntimeError::Build(message))
+        }
     }
-
-    let stored = record_existing_source_result(layout, recipe.object_hash, run_logger.created_at())
-        .map_err(map_store_error)?;
-    Ok(ExecutedNode {
-        realized: realized_result_from_record(None, &stored.result),
-    })
 }
 
 fn cleanup_source_temp_dir(layout: &Store, temp_dir: &Path, logger: &dyn BuildLogger) {
@@ -1132,7 +1114,6 @@ mod tests {
         let object_hash = "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
             .unwrap();
-        let result_id = compute_result_id(object_hash).unwrap();
         let key =
             BuildKey::from_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                 .unwrap();
@@ -1142,7 +1123,6 @@ mod tests {
             origin: Some(Box::new(CancellingOrigin {
                 cancellation: cancellation.clone(),
             })),
-            result_id,
         };
 
         let error = execute_source_recipe(&layout, logger, key, cancellation, recipe)

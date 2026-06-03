@@ -341,7 +341,8 @@ fn record_existing_source_result_requires_existing_object() {
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
 
     let error =
-        record_existing_source_result(&layout, object_hash, sample_created_at()).unwrap_err();
+        crate::record::record_existing_source_result(&layout, object_hash, sample_created_at())
+            .unwrap_err();
 
     assert!(matches!(error, StoreError::Io(message) if message.contains("source object")));
     assert!(
@@ -349,6 +350,133 @@ fn record_existing_source_result_requires_existing_object() {
             .result_record_path(compute_result_id(object_hash).unwrap())
             .exists()
     );
+}
+
+#[test]
+fn lookup_source_result_returns_missing_when_result_and_object_absent() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+    let object_hash =
+        parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
+
+    let lookup = lookup_source_result(&layout, object_hash, sample_created_at()).unwrap();
+
+    assert!(matches!(lookup, SourceLookup::Missing));
+    assert!(
+        !layout
+            .result_record_path(compute_result_id(object_hash).unwrap())
+            .exists()
+    );
+}
+
+#[test]
+fn lookup_source_result_reuses_canonical_result() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+    let stage = temp.path().join("source.txt");
+    fs::write(&stage, b"hello").unwrap();
+    let object_hash = import_object(&layout, &stage).unwrap();
+    let stored = crate::record::record_existing_source_result(
+        &layout,
+        object_hash,
+        "2026-03-24T13:00:00.000000000Z",
+    )
+    .unwrap();
+
+    let lookup =
+        lookup_source_result(&layout, object_hash, "2026-03-24T14:00:00.000000000Z").unwrap();
+
+    let SourceLookup::Hit(hit) = lookup else {
+        panic!("expected source hit");
+    };
+    assert_eq!(hit.result_id(), stored.result_id());
+    assert_eq!(
+        hit.result.created_at.as_deref(),
+        Some("2026-03-24T13:00:00.000000000Z")
+    );
+}
+
+#[test]
+fn lookup_source_result_records_existing_object_as_source_result() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+    let stage = temp.path().join("source.txt");
+    fs::write(&stage, b"hello").unwrap();
+    let object_hash = import_object(&layout, &stage).unwrap();
+    let result_path = layout.result_record_path(compute_result_id(object_hash).unwrap());
+    assert!(!result_path.exists());
+
+    let lookup = lookup_source_result(&layout, object_hash, sample_created_at()).unwrap();
+
+    let SourceLookup::Hit(hit) = lookup else {
+        panic!("expected source hit");
+    };
+    assert_eq!(hit.result.object_hash, object_hash);
+    assert_eq!(hit.result.inputs, Vec::new());
+    assert_eq!(hit.result.created_at.as_deref(), Some(sample_created_at()));
+    assert!(result_path.exists());
+}
+
+#[test]
+fn import_source_result_on_match_imports_object_and_writes_canonical_result() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+    let stage = temp.path().join("source.txt");
+    fs::write(&stage, b"hello").unwrap();
+    let object_hash = hash_path(&stage).unwrap();
+
+    let outcome = import_source_result(&layout, object_hash, &stage, sample_created_at()).unwrap();
+
+    let SourceImportOutcome::Matched(stored) = outcome else {
+        panic!("expected source import match");
+    };
+    assert_eq!(stored.result.object_hash, object_hash);
+    assert_eq!(
+        stored.result.created_at.as_deref(),
+        Some(sample_created_at())
+    );
+    assert!(layout.object_path(object_hash).exists());
+    assert!(
+        layout
+            .result_record_path(compute_result_id(object_hash).unwrap())
+            .exists()
+    );
+    assert!(!stage.exists());
+}
+
+#[test]
+fn import_source_result_on_mismatch_imports_actual_object_without_declared_result() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+    let stage = temp.path().join("source.txt");
+    fs::write(&stage, b"hello").unwrap();
+    let actual_hash = hash_path(&stage).unwrap();
+    let declared_hash =
+        parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
+    assert_ne!(actual_hash, declared_hash);
+
+    let outcome =
+        import_source_result(&layout, declared_hash, &stage, sample_created_at()).unwrap();
+
+    let SourceImportOutcome::Mismatched {
+        actual_hash: imported_hash,
+    } = outcome
+    else {
+        panic!("expected source import mismatch");
+    };
+    assert_eq!(imported_hash, actual_hash);
+    assert!(layout.object_path(actual_hash).exists());
+    assert!(
+        !layout
+            .result_record_path(compute_result_id(declared_hash).unwrap())
+            .exists()
+    );
+    assert!(
+        !layout
+            .result_record_path(compute_result_id(actual_hash).unwrap())
+            .exists()
+    );
+    assert!(!stage.exists());
 }
 
 #[test]
