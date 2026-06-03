@@ -1,4 +1,4 @@
-use super::{
+use crate::{
     Build, BuildKey, CasError, PublishedBuild, ResultId, ResultRecord, ReuseKey, StoreLayout,
 };
 use std::fs;
@@ -22,7 +22,7 @@ pub fn reuse_ref_path(layout: &StoreLayout, reuse_key: ReuseKey) -> PathBuf {
 
 fn result_ref_target(result_id: ResultId) -> PathBuf {
     PathBuf::from("..")
-        .join(super::layout::RESULTS_DIR)
+        .join(crate::layout::RESULTS_DIR)
         .join(format!("{}.json", result_id.to_hex()))
 }
 
@@ -102,14 +102,14 @@ pub fn load_build_handle(
         ))
     })?;
     let result_id = parse_result_ref_target("build", &build_ref_path, &target)?;
-    let result = super::record::load_result_record(layout, result_id)?.ok_or_else(|| {
+    let result = crate::record::load_result_record(layout, result_id)?.ok_or_else(|| {
         CasError::Serialization(format!(
             "build ref '{}' points to missing result '{}'",
             build_ref_path.display(),
             result_id
         ))
     })?;
-    let object_path = super::object::object_path(layout, result.object_hash);
+    let object_path = crate::object::object_path(layout, result.object_hash);
     if !object_path.exists() {
         return Err(CasError::Io(format!(
             "result '{}' points to missing object '{}'",
@@ -118,7 +118,7 @@ pub fn load_build_handle(
         )));
     }
     Ok(Some(PublishedBuild {
-        build: super::record::build_from_result(build_key, &result),
+        build: crate::record::build_from_result(build_key, &result),
         result,
         object_path,
     }))
@@ -140,7 +140,7 @@ pub fn load_reuse_record(
         ))
     })?;
     let result_id = parse_result_ref_target("reuse", &reuse_ref_path, &target)?;
-    super::record::load_result_record(layout, result_id)
+    crate::record::load_result_record(layout, result_id)
 }
 
 pub fn load_public_build(
@@ -197,7 +197,7 @@ pub fn publish_refs(
 fn object_ref_target_for_result(result: &ResultRecord) -> Result<PathBuf, CasError> {
     let object_hash = result.object_hash.to_hex();
     Ok(PathBuf::from("..")
-        .join(super::layout::OBJECTS_DIR)
+        .join(crate::layout::OBJECTS_DIR)
         .join(&object_hash))
 }
 
@@ -248,7 +248,7 @@ pub(crate) fn load_current_publication(
         ))
     })?;
     let result_id = parse_result_ref_target("current result", &result_ref_path, &result_target)?;
-    let result = super::record::load_result_record(layout, result_id)?.ok_or_else(|| {
+    let result = crate::record::load_result_record(layout, result_id)?.ok_or_else(|| {
         CasError::Serialization(format!(
             "current result ref '{}' points to missing result '{}'",
             result_ref_path.display(),

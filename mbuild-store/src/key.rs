@@ -1,4 +1,4 @@
-use super::{BuildKey, CasError, ResultId, ReuseInputIdentity, ReuseKey};
+use crate::{BuildKey, CasError, ResultId, ReuseInputIdentity, ReuseKey};
 use fsobj_hash::ObjectHash;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -28,7 +28,7 @@ pub fn compute_build_key(
     root.insert("payload".to_string(), normalized_payload.clone());
     root.insert("input_build_keys".to_string(), Value::Array(input_keys));
 
-    let canonical = super::json::canonical_json_bytes(&Value::Object(root))?;
+    let canonical = crate::json::canonical_json_bytes(&Value::Object(root))?;
     Ok(BuildKey::from_bytes(Sha256::digest(&canonical).into()))
 }
 
@@ -61,7 +61,7 @@ pub fn compute_reuse_key(
     root.insert("payload".to_string(), normalized_payload.clone());
     root.insert("inputs".to_string(), Value::Array(input_values));
 
-    let canonical = super::json::canonical_json_bytes(&Value::Object(root))?;
+    let canonical = crate::json::canonical_json_bytes(&Value::Object(root))?;
     Ok(ReuseKey::from_bytes(Sha256::digest(&canonical).into()))
 }
 

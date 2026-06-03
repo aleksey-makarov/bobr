@@ -1,5 +1,5 @@
-use super::{BuildKey, CasError, ResultId, StoreLayout};
 use crate::fsutil as private_fs;
+use crate::{BuildKey, CasError, ResultId, StoreLayout};
 use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -34,7 +34,7 @@ pub struct ResultRecord {
 
 impl ResultRecord {
     pub fn result_id(&self) -> ResultId {
-        super::key::result_id_for_object_hash(self.object_hash)
+        crate::key::result_id_for_object_hash(self.object_hash)
     }
 }
 
@@ -60,7 +60,7 @@ pub fn load_result_record(
     layout: &StoreLayout,
     result_id: ResultId,
 ) -> Result<Option<ResultRecord>, CasError> {
-    let result_path = super::refs::result_path(layout, result_id);
+    let result_path = crate::refs::result_path(layout, result_id);
     if !result_path.exists() {
         return Ok(None);
     }
@@ -81,12 +81,12 @@ pub fn load_result_record(
 }
 
 pub fn store_result_record(layout: &StoreLayout, record: &ResultRecord) -> Result<(), CasError> {
-    let result_path = super::refs::result_path(layout, record.result_id());
+    let result_path = crate::refs::result_path(layout, record.result_id());
     if result_path.exists() {
         return Ok(());
     }
     let result_value = result_record_json_value(record);
-    let canonical = super::json::canonical_json_bytes(&result_value)?;
+    let canonical = crate::json::canonical_json_bytes(&result_value)?;
     private_fs::write_atomic(
         &result_path,
         std::str::from_utf8(&canonical).map_err(|error| {
@@ -95,7 +95,7 @@ pub fn store_result_record(layout: &StoreLayout, record: &ResultRecord) -> Resul
             ))
         })?,
     )
-    .map_err(super::error::map_fsutil_error)
+    .map_err(crate::error::map_fsutil_error)
 }
 
 pub(crate) fn build_from_result(build_key: BuildKey, result: &ResultRecord) -> Build {
@@ -196,7 +196,7 @@ pub(crate) fn parse_result_record_value(
         })
         .and_then(parse_object_hash_result)?;
 
-    let computed_result_id = super::key::compute_result_id(object_hash)?;
+    let computed_result_id = crate::key::compute_result_id(object_hash)?;
     if computed_result_id != result_id {
         return Err(CasError::Serialization(format!(
             "result record key mismatch: path key '{}' does not match object hash '{}' computed key '{}'",

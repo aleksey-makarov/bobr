@@ -1,4 +1,4 @@
-use super::CasError;
+use crate::CasError;
 use crate::fsutil as private_fs;
 use std::env;
 use std::ffi::OsStr;
@@ -78,12 +78,12 @@ pub fn recreate_store_temp_dir_force(
     temp_dir: &Path,
 ) -> Result<(), CasError> {
     validate_store_temp_dir(layout, temp_dir)?;
-    private_fs::recreate_empty_dir_force(temp_dir).map_err(super::error::map_fsutil_error)
+    private_fs::recreate_empty_dir_force(temp_dir).map_err(crate::error::map_fsutil_error)
 }
 
 pub fn remove_store_temp_dir_force(layout: &StoreLayout, temp_dir: &Path) -> Result<(), CasError> {
     validate_store_temp_dir(layout, temp_dir)?;
-    private_fs::remove_dir_force(temp_dir).map_err(super::error::map_fsutil_error)
+    private_fs::remove_dir_force(temp_dir).map_err(crate::error::map_fsutil_error)
 }
 
 fn validate_store_temp_dir(layout: &StoreLayout, temp_dir: &Path) -> Result<(), CasError> {

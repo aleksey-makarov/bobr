@@ -1,4 +1,4 @@
-use super::{
+use crate::{
     BuildKey, CasError, PublishedBuild, ResultId, ResultRecord, ReuseInputIdentity, ReuseKey,
     StoreLayout,
 };
@@ -26,9 +26,9 @@ pub fn publish_output(
     layout: &StoreLayout,
     request: PublishOutputRequest,
 ) -> Result<PublishedOutput, CasError> {
-    if let Some(published) = super::refs::load_build_handle(layout, request.build_key)? {
-        super::object::remove_path_force(&request.staged_path)?;
-        super::refs::publish_result_refs(layout, &request.output_name, &published.result)?;
+    if let Some(published) = crate::refs::load_build_handle(layout, request.build_key)? {
+        crate::object::remove_path_force(&request.staged_path)?;
+        crate::refs::publish_result_refs(layout, &request.output_name, &published.result)?;
         return Ok(PublishedOutput {
             object_hash: published.build.object_hash,
             build_key: published.build.build_key,
@@ -36,9 +36,9 @@ pub fn publish_output(
         });
     }
 
-    if let Some(result) = super::refs::load_reuse_record(layout, request.reuse_key)? {
+    if let Some(result) = crate::refs::load_reuse_record(layout, request.reuse_key)? {
         let result_id = result.result_id();
-        let object_path = super::object::object_path(layout, result.object_hash);
+        let object_path = crate::object::object_path(layout, result.object_hash);
         if !object_path.exists() {
             return Err(CasError::Io(format!(
                 "result '{}' points to missing object '{}'",
@@ -46,14 +46,14 @@ pub fn publish_output(
                 object_path.display()
             )));
         }
-        super::object::remove_path_force(&request.staged_path)?;
-        super::refs::store_build_handle_ref(layout, request.build_key, result_id)?;
+        crate::object::remove_path_force(&request.staged_path)?;
+        crate::refs::store_build_handle_ref(layout, request.build_key, result_id)?;
         let published = PublishedBuild {
-            build: super::record::build_from_result(request.build_key, &result),
+            build: crate::record::build_from_result(request.build_key, &result),
             result,
             object_path,
         };
-        super::refs::publish_result_refs(layout, &request.output_name, &published.result)?;
+        crate::refs::publish_result_refs(layout, &request.output_name, &published.result)?;
         return Ok(PublishedOutput {
             object_hash: published.build.object_hash,
             build_key: published.build.build_key,
@@ -70,7 +70,7 @@ pub fn publish_output(
         &request.staged_path,
         None,
     )?;
-    super::refs::publish_result_refs(layout, &request.output_name, &published.result)?;
+    crate::refs::publish_result_refs(layout, &request.output_name, &published.result)?;
 
     Ok(PublishedOutput {
         object_hash: published.build.object_hash,
@@ -89,20 +89,20 @@ pub fn materialize_build(
     precomputed_object_hash: Option<ObjectHash>,
 ) -> Result<PublishedBuild, CasError> {
     let object_hash =
-        super::object::import_object_with_hash(layout, staged_path, precomputed_object_hash)?;
-    let result_id = super::key::compute_result_id(object_hash)?;
+        crate::object::import_object_with_hash(layout, staged_path, precomputed_object_hash)?;
+    let result_id = crate::key::compute_result_id(object_hash)?;
     let result = ResultRecord {
         object_hash,
         created_at: Some(created_at.to_string()),
         inputs,
     };
-    super::record::store_result_record(layout, &result)?;
-    super::refs::store_reuse_ref(layout, reuse_key, result_id)?;
-    super::refs::store_build_handle_ref(layout, build_key, result_id)?;
+    crate::record::store_result_record(layout, &result)?;
+    crate::refs::store_reuse_ref(layout, reuse_key, result_id)?;
+    crate::refs::store_build_handle_ref(layout, build_key, result_id)?;
 
     Ok(PublishedBuild {
         object_path: layout.objects.join(object_hash.to_hex()),
-        build: super::record::build_from_result(build_key, &result),
+        build: crate::record::build_from_result(build_key, &result),
         result,
     })
 }

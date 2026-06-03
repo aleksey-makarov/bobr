@@ -1,4 +1,4 @@
-use super::CasError;
+use crate::CasError;
 use serde_json::Value;
 
 pub(crate) fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, CasError> {
