@@ -1,5 +1,5 @@
 use crate::{
-    BuildKey, CasError, PublishedBuild, ResultId, ResultRecord, ReuseInputIdentity, ReuseKey,
+    BuildKey, PublishedBuild, ResultId, ResultRecord, ReuseInputIdentity, ReuseKey, StoreError,
     StoreLayout,
 };
 use fsobj_hash::ObjectHash;
@@ -25,7 +25,7 @@ pub struct PublishedOutput {
 pub fn publish_output(
     layout: &StoreLayout,
     request: PublishOutputRequest,
-) -> Result<PublishedOutput, CasError> {
+) -> Result<PublishedOutput, StoreError> {
     if let Some(published) = crate::refs::load_build_handle(layout, request.build_key)? {
         crate::object::remove_path_force(&request.staged_path)?;
         crate::refs::publish_result_refs(layout, &request.output_name, &published.result)?;
@@ -40,7 +40,7 @@ pub fn publish_output(
         let result_id = result.result_id();
         let object_path = crate::object::object_path(layout, result.object_hash);
         if !object_path.exists() {
-            return Err(CasError::Io(format!(
+            return Err(StoreError::Io(format!(
                 "result '{}' points to missing object '{}'",
                 result_id,
                 object_path.display()
@@ -87,7 +87,7 @@ pub fn materialize_build(
     inputs: Vec<ReuseInputIdentity>,
     staged_path: &Path,
     precomputed_object_hash: Option<ObjectHash>,
-) -> Result<PublishedBuild, CasError> {
+) -> Result<PublishedBuild, StoreError> {
     let object_hash =
         crate::object::import_object_with_hash(layout, staged_path, precomputed_object_hash)?;
     let result_id = crate::key::compute_result_id(object_hash)?;

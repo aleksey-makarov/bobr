@@ -65,7 +65,7 @@ fn parse_result_record_rejects_old_schema() {
 
     assert!(matches!(
         parse_result_record_value(result_id, &value),
-        Err(CasError::Serialization(message))
+        Err(StoreError::InvalidData(message))
             if message == "unsupported result record schema 'mbuild-result-v4'"
     ));
 }
@@ -85,7 +85,7 @@ fn parse_result_record_rejects_mismatched_path_key() {
 
     assert!(matches!(
         parse_result_record_value(mismatched_result_id, &value),
-        Err(CasError::Serialization(message))
+        Err(StoreError::InvalidData(message))
             if message.contains("does not match object hash")
     ));
 }
@@ -752,7 +752,7 @@ fn invalid_output_name_is_rejected() {
         )
         .unwrap_err();
 
-        assert!(matches!(error, CasError::InvalidInput(_)));
+        assert!(matches!(error, StoreError::InvalidInput(_)));
     }
 }
 

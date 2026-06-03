@@ -1,5 +1,5 @@
 use crate::fsutil as private_fs;
-use crate::{BuildKey, CasError, ResultId, StoreLayout};
+use crate::{BuildKey, ResultId, StoreError, StoreLayout};
 use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -59,20 +59,20 @@ pub struct PublishedBuild {
 pub fn load_result_record(
     layout: &StoreLayout,
     result_id: ResultId,
-) -> Result<Option<ResultRecord>, CasError> {
+) -> Result<Option<ResultRecord>, StoreError> {
     let result_path = crate::refs::result_path(layout, result_id);
     if !result_path.exists() {
         return Ok(None);
     }
 
     let bytes = fs::read(&result_path).map_err(|error| {
-        CasError::Io(format!(
+        StoreError::Io(format!(
             "failed to read result record '{}': {error}",
             result_path.display()
         ))
     })?;
     let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
-        CasError::Serialization(format!(
+        StoreError::InvalidData(format!(
             "failed to parse result record '{}': {error}",
             result_path.display()
         ))
@@ -80,7 +80,7 @@ pub fn load_result_record(
     Ok(Some(parse_result_record_value(result_id, &value)?))
 }
 
-pub fn store_result_record(layout: &StoreLayout, record: &ResultRecord) -> Result<(), CasError> {
+pub fn store_result_record(layout: &StoreLayout, record: &ResultRecord) -> Result<(), StoreError> {
     let result_path = crate::refs::result_path(layout, record.result_id());
     if result_path.exists() {
         return Ok(());
@@ -90,7 +90,7 @@ pub fn store_result_record(layout: &StoreLayout, record: &ResultRecord) -> Resul
     private_fs::write_atomic(
         &result_path,
         std::str::from_utf8(&canonical).map_err(|error| {
-            CasError::Serialization(format!(
+            StoreError::InvalidData(format!(
                 "failed to encode canonical result JSON as UTF-8: {error}"
             ))
         })?,
@@ -163,17 +163,17 @@ pub(crate) fn build_json_value(
 pub(crate) fn parse_result_record_value(
     result_id: ResultId,
     value: &Value,
-) -> Result<ResultRecord, CasError> {
+) -> Result<ResultRecord, StoreError> {
     let object = value.as_object().ok_or_else(|| {
-        CasError::Serialization("result record root must be a JSON object".to_string())
+        StoreError::InvalidData("result record root must be a JSON object".to_string())
     })?;
 
     let schema = object
         .get("schema")
         .and_then(Value::as_str)
-        .ok_or_else(|| CasError::Serialization("result record is missing 'schema'".to_string()))?;
+        .ok_or_else(|| StoreError::InvalidData("result record is missing 'schema'".to_string()))?;
     if schema != RESULT_SCHEMA {
-        return Err(CasError::Serialization(format!(
+        return Err(StoreError::InvalidData(format!(
             "unsupported result record schema '{schema}'"
         )));
     }
@@ -182,7 +182,7 @@ pub(crate) fn parse_result_record_value(
         .get("created_at")
         .map(|value| {
             value.as_str().ok_or_else(|| {
-                CasError::Serialization("result record created_at must be a string".to_string())
+                StoreError::InvalidData("result record created_at must be a string".to_string())
             })
         })
         .transpose()?
@@ -192,13 +192,13 @@ pub(crate) fn parse_result_record_value(
         .get("object_hash")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            CasError::Serialization("result record is missing 'object_hash'".to_string())
+            StoreError::InvalidData("result record is missing 'object_hash'".to_string())
         })
         .and_then(parse_object_hash_result)?;
 
     let computed_result_id = crate::key::compute_result_id(object_hash)?;
     if computed_result_id != result_id {
-        return Err(CasError::Serialization(format!(
+        return Err(StoreError::InvalidData(format!(
             "result record key mismatch: path key '{}' does not match object hash '{}' computed key '{}'",
             result_id, object_hash, computed_result_id
         )));
@@ -207,17 +207,17 @@ pub(crate) fn parse_result_record_value(
     let inputs = object
         .get("inputs")
         .and_then(Value::as_array)
-        .ok_or_else(|| CasError::Serialization("result record is missing 'inputs'".to_string()))?
+        .ok_or_else(|| StoreError::InvalidData("result record is missing 'inputs'".to_string()))?
         .iter()
         .map(|value| {
             let object = value.as_object().ok_or_else(|| {
-                CasError::Serialization("result record inputs must contain objects".to_string())
+                StoreError::InvalidData("result record inputs must contain objects".to_string())
             })?;
             let object_hash = object
                 .get("object_hash")
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
-                    CasError::Serialization(
+                    StoreError::InvalidData(
                         "result record input is missing 'object_hash'".to_string(),
                     )
                 })
@@ -233,9 +233,9 @@ pub(crate) fn parse_result_record_value(
     })
 }
 
-fn parse_object_hash_result(value: &str) -> Result<ObjectHash, CasError> {
+fn parse_object_hash_result(value: &str) -> Result<ObjectHash, StoreError> {
     value.parse::<ObjectHash>().map_err(|error| {
-        CasError::Serialization(format!(
+        StoreError::InvalidData(format!(
             "invalid object hash '{value}' in result record: {error}"
         ))
     })

@@ -1,4 +1,4 @@
-use crate::CasError;
+use crate::StoreError;
 use crate::fsutil as private_fs;
 use std::env;
 use std::ffi::OsStr;
@@ -28,7 +28,7 @@ pub struct StoreLayout {
 }
 
 impl StoreLayout {
-    pub fn discover(root: &Path) -> Result<Self, CasError> {
+    pub fn discover(root: &Path) -> Result<Self, StoreError> {
         let layout = Self {
             root: root.to_path_buf(),
             objects: root.join(OBJECTS_DIR),
@@ -44,13 +44,13 @@ impl StoreLayout {
         Ok(layout)
     }
 
-    pub fn discover_in_cwd() -> Result<Self, CasError> {
+    pub fn discover_in_cwd() -> Result<Self, StoreError> {
         let cwd = env::current_dir()
-            .map_err(|error| CasError::Io(format!("failed to get current directory: {error}")))?;
+            .map_err(|error| StoreError::Io(format!("failed to get current directory: {error}")))?;
         Self::discover(&cwd)
     }
 
-    fn ensure(&self) -> Result<(), CasError> {
+    fn ensure(&self) -> Result<(), StoreError> {
         ensure_dir(&self.root, "mbuild root")?;
         ensure_dir(&self.objects, "objects")?;
         ensure_dir(&self.builds, "builds")?;
@@ -64,9 +64,9 @@ impl StoreLayout {
     }
 }
 
-fn ensure_dir(path: &Path, label: &str) -> Result<(), CasError> {
+fn ensure_dir(path: &Path, label: &str) -> Result<(), StoreError> {
     fs::create_dir_all(path).map_err(|error| {
-        CasError::Io(format!(
+        StoreError::Io(format!(
             "failed to create or access {label} directory '{}': {error}",
             path.display()
         ))
@@ -76,19 +76,22 @@ fn ensure_dir(path: &Path, label: &str) -> Result<(), CasError> {
 pub fn recreate_store_temp_dir_force(
     layout: &StoreLayout,
     temp_dir: &Path,
-) -> Result<(), CasError> {
+) -> Result<(), StoreError> {
     validate_store_temp_dir(layout, temp_dir)?;
     private_fs::recreate_empty_dir_force(temp_dir).map_err(crate::error::map_fsutil_error)
 }
 
-pub fn remove_store_temp_dir_force(layout: &StoreLayout, temp_dir: &Path) -> Result<(), CasError> {
+pub fn remove_store_temp_dir_force(
+    layout: &StoreLayout,
+    temp_dir: &Path,
+) -> Result<(), StoreError> {
     validate_store_temp_dir(layout, temp_dir)?;
     private_fs::remove_dir_force(temp_dir).map_err(crate::error::map_fsutil_error)
 }
 
-fn validate_store_temp_dir(layout: &StoreLayout, temp_dir: &Path) -> Result<(), CasError> {
+fn validate_store_temp_dir(layout: &StoreLayout, temp_dir: &Path) -> Result<(), StoreError> {
     if temp_dir == layout.root || !temp_dir.starts_with(&layout.root) {
-        return Err(CasError::InvalidInput(format!(
+        return Err(StoreError::InvalidInput(format!(
             "store temp directory '{}' must be under store root '{}'",
             temp_dir.display(),
             layout.root.display()
@@ -99,7 +102,7 @@ fn validate_store_temp_dir(layout: &StoreLayout, temp_dir: &Path) -> Result<(), 
         .components()
         .any(|component| component.as_os_str() == OsStr::new("tmp"))
     {
-        return Err(CasError::InvalidInput(format!(
+        return Err(StoreError::InvalidInput(format!(
             "store temp directory '{}' must include a 'tmp' path component",
             temp_dir.display()
         )));

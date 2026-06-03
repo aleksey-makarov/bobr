@@ -1,5 +1,5 @@
 use crate::{
-    Build, BuildKey, CasError, PublishedBuild, ResultId, ResultRecord, ReuseKey, StoreLayout,
+    Build, BuildKey, PublishedBuild, ResultId, ResultRecord, ReuseKey, StoreError, StoreLayout,
 };
 use std::fs;
 use std::os::unix::fs as unix_fs;
@@ -30,26 +30,26 @@ fn parse_result_ref_target(
     ref_kind: &str,
     ref_path: &Path,
     target: &Path,
-) -> Result<ResultId, CasError> {
+) -> Result<ResultId, StoreError> {
     let file_name = target
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
-            CasError::Serialization(format!(
+            StoreError::InvalidData(format!(
                 "{ref_kind} ref '{}' points to invalid result target '{}'",
                 ref_path.display(),
                 target.display()
             ))
         })?;
     let result_id_str = file_name.strip_suffix(".json").ok_or_else(|| {
-        CasError::Serialization(format!(
+        StoreError::InvalidData(format!(
             "{ref_kind} ref '{}' points to non-JSON result target '{}'",
             ref_path.display(),
             target.display()
         ))
     })?;
     let result_id = result_id_str.parse::<ResultId>().map_err(|error| {
-        CasError::Serialization(format!(
+        StoreError::InvalidData(format!(
             "{ref_kind} ref '{}' points to invalid result id '{}' in target '{}': {error}",
             ref_path.display(),
             result_id_str,
@@ -58,7 +58,7 @@ fn parse_result_ref_target(
     })?;
     let expected = result_ref_target(result_id);
     if target != expected {
-        return Err(CasError::Serialization(format!(
+        return Err(StoreError::InvalidData(format!(
             "{ref_kind} ref '{}' points to non-canonical result target '{}'; expected '{}'",
             ref_path.display(),
             target.display(),
@@ -72,7 +72,7 @@ pub fn store_build_handle_ref(
     layout: &StoreLayout,
     build_key: BuildKey,
     result_id: ResultId,
-) -> Result<(), CasError> {
+) -> Result<(), StoreError> {
     let target = result_ref_target(result_id);
     replace_symlink(&target, &build_ref_path(layout, build_key))
 }
@@ -81,7 +81,7 @@ pub fn store_reuse_ref(
     layout: &StoreLayout,
     reuse_key: ReuseKey,
     result_id: ResultId,
-) -> Result<(), CasError> {
+) -> Result<(), StoreError> {
     let target = result_ref_target(result_id);
     replace_symlink(&target, &reuse_ref_path(layout, reuse_key))
 }
@@ -89,21 +89,21 @@ pub fn store_reuse_ref(
 pub fn load_build_handle(
     layout: &StoreLayout,
     build_key: BuildKey,
-) -> Result<Option<PublishedBuild>, CasError> {
+) -> Result<Option<PublishedBuild>, StoreError> {
     let build_ref_path = build_ref_path(layout, build_key);
     if !build_ref_path.exists() && !build_ref_path.is_symlink() {
         return Ok(None);
     }
 
     let target = fs::read_link(&build_ref_path).map_err(|error| {
-        CasError::Io(format!(
+        StoreError::Io(format!(
             "failed to read build ref '{}': {error}",
             build_ref_path.display()
         ))
     })?;
     let result_id = parse_result_ref_target("build", &build_ref_path, &target)?;
     let result = crate::record::load_result_record(layout, result_id)?.ok_or_else(|| {
-        CasError::Serialization(format!(
+        StoreError::InvalidData(format!(
             "build ref '{}' points to missing result '{}'",
             build_ref_path.display(),
             result_id
@@ -111,7 +111,7 @@ pub fn load_build_handle(
     })?;
     let object_path = crate::object::object_path(layout, result.object_hash);
     if !object_path.exists() {
-        return Err(CasError::Io(format!(
+        return Err(StoreError::Io(format!(
             "result '{}' points to missing object '{}'",
             result_id,
             object_path.display()
@@ -127,14 +127,14 @@ pub fn load_build_handle(
 pub fn load_reuse_record(
     layout: &StoreLayout,
     reuse_key: ReuseKey,
-) -> Result<Option<ResultRecord>, CasError> {
+) -> Result<Option<ResultRecord>, StoreError> {
     let reuse_ref_path = reuse_ref_path(layout, reuse_key);
     if !reuse_ref_path.exists() && !reuse_ref_path.is_symlink() {
         return Ok(None);
     }
 
     let target = fs::read_link(&reuse_ref_path).map_err(|error| {
-        CasError::Io(format!(
+        StoreError::Io(format!(
             "failed to read reuse ref '{}': {error}",
             reuse_ref_path.display()
         ))
@@ -146,7 +146,7 @@ pub fn load_reuse_record(
 pub fn load_public_build(
     layout: &StoreLayout,
     build_key: BuildKey,
-) -> Result<Option<Build>, CasError> {
+) -> Result<Option<Build>, StoreError> {
     Ok(load_build_handle(layout, build_key)?.map(|published| published.build))
 }
 
@@ -154,7 +154,7 @@ pub fn publish_result_refs(
     layout: &StoreLayout,
     output_name: &str,
     result: &ResultRecord,
-) -> Result<(), CasError> {
+) -> Result<(), StoreError> {
     validate_output_name(output_name)?;
 
     let current_result_ref_path = layout.result_refs.join(format!("{output_name}.json"));
@@ -190,25 +190,25 @@ pub fn publish_refs(
     layout: &StoreLayout,
     output_name: &str,
     published: &PublishedBuild,
-) -> Result<(), CasError> {
+) -> Result<(), StoreError> {
     publish_result_refs(layout, output_name, &published.result)
 }
 
-fn object_ref_target_for_result(result: &ResultRecord) -> Result<PathBuf, CasError> {
+fn object_ref_target_for_result(result: &ResultRecord) -> Result<PathBuf, StoreError> {
     let object_hash = result.object_hash.to_hex();
     Ok(PathBuf::from("..")
         .join(crate::layout::OBJECTS_DIR)
         .join(&object_hash))
 }
 
-fn validate_output_name(name: &str) -> Result<(), CasError> {
+fn validate_output_name(name: &str) -> Result<(), StoreError> {
     if name.is_empty() {
-        return Err(CasError::InvalidInput(
+        return Err(StoreError::InvalidInput(
             "output name must not be empty".to_string(),
         ));
     }
     if name == "." || name == ".." {
-        return Err(CasError::InvalidInput(format!(
+        return Err(StoreError::InvalidInput(format!(
             "invalid output name '{name}'"
         )));
     }
@@ -216,7 +216,7 @@ fn validate_output_name(name: &str) -> Result<(), CasError> {
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
     {
-        return Err(CasError::InvalidInput(format!(
+        return Err(StoreError::InvalidInput(format!(
             "invalid output name '{}'; allowed chars: [A-Za-z0-9._-]",
             name
         )));
@@ -235,21 +235,21 @@ pub(crate) struct CurrentPublication {
 pub(crate) fn load_current_publication(
     layout: &StoreLayout,
     output_name: &str,
-) -> Result<Option<CurrentPublication>, CasError> {
+) -> Result<Option<CurrentPublication>, StoreError> {
     let result_ref_path = layout.result_refs.join(format!("{output_name}.json"));
     if !result_ref_path.exists() && !result_ref_path.is_symlink() {
         return Ok(None);
     }
 
     let result_target = fs::read_link(&result_ref_path).map_err(|error| {
-        CasError::Io(format!(
+        StoreError::Io(format!(
             "failed to read current result ref '{}': {error}",
             result_ref_path.display()
         ))
     })?;
     let result_id = parse_result_ref_target("current result", &result_ref_path, &result_target)?;
     let result = crate::record::load_result_record(layout, result_id)?.ok_or_else(|| {
-        CasError::Serialization(format!(
+        StoreError::InvalidData(format!(
             "current result ref '{}' points to missing result '{}'",
             result_ref_path.display(),
             result_id
@@ -259,7 +259,7 @@ pub(crate) fn load_current_publication(
     let object_ref_path = layout.object_refs.join(output_name);
     let object_target = if object_ref_path.exists() || object_ref_path.is_symlink() {
         Some(fs::read_link(&object_ref_path).map_err(|error| {
-            CasError::Io(format!(
+            StoreError::Io(format!(
                 "failed to read current object ref '{}': {error}",
                 object_ref_path.display()
             ))
@@ -276,21 +276,21 @@ pub(crate) fn load_current_publication(
     }))
 }
 
-pub(crate) fn generation_suffix(current: &CurrentPublication) -> Result<String, CasError> {
+pub(crate) fn generation_suffix(current: &CurrentPublication) -> Result<String, StoreError> {
     if let Some(created_at) = &current.result.created_at {
         return human_timestamp_from_rfc3339(created_at);
     }
 
     let modified = fs::metadata(&current.result_path)
         .map_err(|error| {
-            CasError::Io(format!(
+            StoreError::Io(format!(
                 "failed to stat result record '{}' for generation timestamp: {error}",
                 current.result_path.display()
             ))
         })?
         .modified()
         .map_err(|error| {
-            CasError::Io(format!(
+            StoreError::Io(format!(
                 "failed to read mtime for result record '{}': {error}",
                 current.result_path.display()
             ))
@@ -299,21 +299,21 @@ pub(crate) fn generation_suffix(current: &CurrentPublication) -> Result<String, 
     human_timestamp_from_datetime(parsed)
 }
 
-pub(crate) fn human_timestamp_from_rfc3339(value: &str) -> Result<String, CasError> {
+pub(crate) fn human_timestamp_from_rfc3339(value: &str) -> Result<String, StoreError> {
     let parsed = OffsetDateTime::parse(value, &Rfc3339).map_err(|error| {
-        CasError::Serialization(format!(
+        StoreError::InvalidData(format!(
             "invalid result record created_at '{value}': {error}"
         ))
     })?;
     human_timestamp_from_datetime(parsed)
 }
 
-fn human_timestamp_from_datetime(parsed: OffsetDateTime) -> Result<String, CasError> {
+fn human_timestamp_from_datetime(parsed: OffsetDateTime) -> Result<String, StoreError> {
     let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
     let local = parsed.to_offset(offset);
     let format = format_description!("[year repr:last_two][month][day][hour][minute][second]");
     local.format(&format).map_err(|error| {
-        CasError::Serialization(format!("failed to format generation suffix: {error}"))
+        StoreError::InvalidData(format!("failed to format generation suffix: {error}"))
     })
 }
 
@@ -321,7 +321,7 @@ fn allocate_generation_name(
     layout: &StoreLayout,
     output_name: &str,
     suffix: &str,
-) -> Result<String, CasError> {
+) -> Result<String, StoreError> {
     for counter in 1..1000 {
         let candidate = if counter == 1 {
             format!("{output_name}.{suffix}")
@@ -339,14 +339,14 @@ fn allocate_generation_name(
         }
     }
 
-    Err(CasError::Io(format!(
+    Err(StoreError::Io(format!(
         "failed to allocate generation ref name for '{output_name}.{suffix}'"
     )))
 }
 
-fn create_generation_ref(target: &Path, link_path: &Path) -> Result<(), CasError> {
+fn create_generation_ref(target: &Path, link_path: &Path) -> Result<(), StoreError> {
     if link_path.exists() || link_path.is_symlink() {
-        return Err(CasError::Io(format!(
+        return Err(StoreError::Io(format!(
             "ref generation collision at '{}'",
             link_path.display()
         )));
@@ -354,17 +354,17 @@ fn create_generation_ref(target: &Path, link_path: &Path) -> Result<(), CasError
     create_symlink(target, link_path)
 }
 
-pub(crate) fn replace_symlink(target: &Path, link_path: &Path) -> Result<(), CasError> {
+pub(crate) fn replace_symlink(target: &Path, link_path: &Path) -> Result<(), StoreError> {
     if link_path.exists() || link_path.is_symlink() {
         let metadata = fs::symlink_metadata(link_path).map_err(|error| {
-            CasError::Io(format!(
+            StoreError::Io(format!(
                 "failed to inspect existing ref '{}': {error}",
                 link_path.display()
             ))
         })?;
         if metadata.file_type().is_dir() {
             fs::remove_dir_all(link_path).map_err(|error| {
-                CasError::Io(format!(
+                StoreError::Io(format!(
                     "failed to remove existing ref directory '{}': {error}",
                     link_path.display()
                 ))
@@ -373,13 +373,13 @@ pub(crate) fn replace_symlink(target: &Path, link_path: &Path) -> Result<(), Cas
     }
 
     let parent = link_path.parent().ok_or_else(|| {
-        CasError::Io(format!(
+        StoreError::Io(format!(
             "ref path '{}' has no parent directory",
             link_path.display()
         ))
     })?;
     let file_name = link_path.file_name().ok_or_else(|| {
-        CasError::Io(format!(
+        StoreError::Io(format!(
             "ref path '{}' has no file name",
             link_path.display()
         ))
@@ -397,7 +397,7 @@ pub(crate) fn replace_symlink(target: &Path, link_path: &Path) -> Result<(), Cas
             Ok(()) => return Ok(()),
             Err(error) => {
                 let _ = fs::remove_file(&temp_path);
-                return Err(CasError::Io(format!(
+                return Err(StoreError::Io(format!(
                     "failed to replace ref '{}' with temporary symlink '{}': {error}",
                     link_path.display(),
                     temp_path.display()
@@ -406,15 +406,15 @@ pub(crate) fn replace_symlink(target: &Path, link_path: &Path) -> Result<(), Cas
         }
     }
 
-    Err(CasError::Io(format!(
+    Err(StoreError::Io(format!(
         "failed to allocate temporary ref symlink for '{}'",
         link_path.display()
     )))
 }
 
-fn create_symlink(target: &Path, link_path: &Path) -> Result<(), CasError> {
+fn create_symlink(target: &Path, link_path: &Path) -> Result<(), StoreError> {
     unix_fs::symlink(target, link_path).map_err(|error| {
-        CasError::Io(format!(
+        StoreError::Io(format!(
             "failed to create ref symlink '{}' -> '{}': {error}",
             link_path.display(),
             target.display()

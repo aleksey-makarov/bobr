@@ -1,27 +1,28 @@
-use crate::fsutil as private_fs;
 use std::fmt;
 
-#[derive(Debug)]
-pub enum CasError {
-    Io(String),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreError {
     InvalidInput(String),
+    InvalidData(String),
+    Unsupported(String),
+    Io(String),
     Hashing(String),
-    Serialization(String),
 }
 
-impl fmt::Display for CasError {
+impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(message)
-            | Self::InvalidInput(message)
-            | Self::Hashing(message)
-            | Self::Serialization(message) => write!(f, "{message}"),
+            Self::InvalidInput(message)
+            | Self::InvalidData(message)
+            | Self::Unsupported(message)
+            | Self::Io(message)
+            | Self::Hashing(message) => write!(f, "{message}"),
         }
     }
 }
 
-impl std::error::Error for CasError {}
+impl std::error::Error for StoreError {}
 
-pub(crate) fn map_fsutil_error(error: private_fs::FsUtilError) -> CasError {
-    CasError::Io(error.to_string())
+pub(crate) fn map_fsutil_error(error: crate::fsutil::FsUtilError) -> StoreError {
+    StoreError::Io(error.to_string())
 }

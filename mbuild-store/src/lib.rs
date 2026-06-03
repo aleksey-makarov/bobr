@@ -13,7 +13,7 @@ mod publish;
 mod record;
 mod refs;
 
-pub use error::CasError;
+pub use error::StoreError;
 pub use fsobj_hash::ObjectHash;
 pub use id::{BuildKey, ParseBuildKeyError, ResultId, ReuseKey};
 pub use key::{compute_build_key, compute_result_id, compute_reuse_key};

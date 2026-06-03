@@ -1,4 +1,4 @@
-use crate::{BuildKey, CasError, ResultId, ReuseInputIdentity, ReuseKey};
+use crate::{BuildKey, ResultId, ReuseInputIdentity, ReuseKey, StoreError};
 use fsobj_hash::ObjectHash;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -10,7 +10,7 @@ pub fn compute_build_key(
     builder_tag: &str,
     normalized_payload: &Value,
     input_build_keys: &[BuildKey],
-) -> Result<BuildKey, CasError> {
+) -> Result<BuildKey, StoreError> {
     let input_keys = input_build_keys
         .iter()
         .map(|key| Value::String(key.to_string()))
@@ -36,7 +36,7 @@ pub fn compute_reuse_key(
     builder_tag: &str,
     normalized_payload: &Value,
     inputs: &[ReuseInputIdentity],
-) -> Result<ReuseKey, CasError> {
+) -> Result<ReuseKey, StoreError> {
     let input_values = inputs
         .iter()
         .map(|input| {
@@ -65,7 +65,7 @@ pub fn compute_reuse_key(
     Ok(ReuseKey::from_bytes(Sha256::digest(&canonical).into()))
 }
 
-pub fn compute_result_id(object_hash: ObjectHash) -> Result<ResultId, CasError> {
+pub fn compute_result_id(object_hash: ObjectHash) -> Result<ResultId, StoreError> {
     Ok(result_id_for_object_hash(object_hash))
 }
 

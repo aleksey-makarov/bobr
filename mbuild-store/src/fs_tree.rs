@@ -6,6 +6,7 @@
 
 #![deny(missing_docs)]
 
+use crate::StoreError;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -89,71 +90,6 @@ pub enum FsTreeEntryKind {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FsFileHash([u8; 32]);
 
-/// Error returned by manifest parsing, validation, and file I/O operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FsTreeManifestError {
-    /// Entry values or tree shape are invalid.
-    Invalid(String),
-    /// Canonical manifest bytes are malformed or non-canonical.
-    Parse(String),
-    /// Reading or writing a manifest failed.
-    Io(String),
-}
-
-impl fmt::Display for FsTreeManifestError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Invalid(message) | Self::Parse(message) | Self::Io(message) => {
-                f.write_str(message)
-            }
-        }
-    }
-}
-
-impl std::error::Error for FsTreeManifestError {}
-
-/// Error returned by filesystem scanning, fs-file storage, hashing, and
-/// materialization operations.
-#[derive(Debug)]
-pub enum FsTreeIoError {
-    /// The caller supplied an invalid path, mode, or manifest shape.
-    InvalidInput(String),
-    /// The requested operation is not supported by this platform or file type.
-    Unsupported(String),
-    /// A filesystem operation failed.
-    Io(String),
-    /// Manifest validation failed.
-    Manifest(FsTreeManifestError),
-}
-
-impl fmt::Display for FsTreeIoError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidInput(message)
-            | Self::Unsupported(message)
-            | Self::Io(message)
-            | Self::Manifest(FsTreeManifestError::Invalid(message))
-            | Self::Manifest(FsTreeManifestError::Parse(message))
-            | Self::Manifest(FsTreeManifestError::Io(message)) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for FsTreeIoError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Manifest(error) => Some(error),
-            Self::InvalidInput(_) | Self::Unsupported(_) | Self::Io(_) => None,
-        }
-    }
-}
-
-impl From<FsTreeManifestError> for FsTreeIoError {
-    fn from(error: FsTreeManifestError) -> Self {
-        Self::Manifest(error)
-    }
-}
-
 /// Error returned when parsing an [`FsFileHash`] from text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseFsFileHashError {
@@ -180,7 +116,7 @@ impl FsTreeManifest {
     /// Entries are sorted by path bytes before validation. The resulting
     /// manifest must contain a root directory entry, must not contain duplicate
     /// paths, and every non-root entry must have an explicit directory parent.
-    pub fn from_entries(mut entries: Vec<FsTreeEntry>) -> Result<Self, FsTreeManifestError> {
+    pub fn from_entries(mut entries: Vec<FsTreeEntry>) -> Result<Self, StoreError> {
         entries.sort_by(|left, right| left.path().as_bytes().cmp(right.path().as_bytes()));
         validate_entries(&entries)?;
         Ok(Self { entries })
@@ -192,25 +128,25 @@ impl FsTreeManifest {
     /// [`FsTreeManifest::to_canonical_bytes`]. Non-canonical JSON whitespace,
     /// alternate field order, missing final newline, unknown fields, duplicate
     /// paths, malformed paths, and missing parent directories are rejected.
-    pub fn parse_canonical_bytes(bytes: &[u8]) -> Result<Self, FsTreeManifestError> {
+    pub fn parse_canonical_bytes(bytes: &[u8]) -> Result<Self, StoreError> {
         if bytes.is_empty() {
-            return Err(FsTreeManifestError::Parse(
+            return Err(StoreError::InvalidData(
                 "fs-tree manifest must not be empty".to_string(),
             ));
         }
         if !bytes.ends_with(b"\n") {
-            return Err(FsTreeManifestError::Parse(
+            return Err(StoreError::InvalidData(
                 "fs-tree manifest must end with a newline".to_string(),
             ));
         }
 
         let text = std::str::from_utf8(bytes).map_err(|error| {
-            FsTreeManifestError::Parse(format!("fs-tree manifest is not UTF-8: {error}"))
+            StoreError::InvalidData(format!("fs-tree manifest is not UTF-8: {error}"))
         })?;
 
         let mut lines = text.split_inclusive('\n');
         let Some(schema_line) = lines.next() else {
-            return Err(FsTreeManifestError::Parse(
+            return Err(StoreError::InvalidData(
                 "fs-tree manifest is missing schema header".to_string(),
             ));
         };
@@ -221,7 +157,7 @@ impl FsTreeManifest {
             let line_number = index + 2;
             let line = raw_line.strip_suffix('\n').expect("split line has suffix");
             if line.is_empty() {
-                return Err(FsTreeManifestError::Parse(format!(
+                return Err(StoreError::InvalidData(format!(
                     "fs-tree manifest line {line_number} is empty"
                 )));
             }
@@ -229,17 +165,18 @@ impl FsTreeManifest {
             let entry = parse_entry_line(line, line_number)?;
             let canonical = canonical_entry_bytes(&entry)?;
             if canonical.as_slice() != raw_line.as_bytes() {
-                return Err(FsTreeManifestError::Parse(format!(
+                return Err(StoreError::InvalidData(format!(
                     "fs-tree manifest line {line_number} is not canonical"
                 )));
             }
             entries.push(entry);
         }
 
-        let manifest = Self::from_entries(entries)?;
+        let manifest = Self::from_entries(entries)
+            .map_err(|error| StoreError::InvalidData(error.to_string()))?;
         let canonical = manifest.to_canonical_bytes()?;
         if canonical.as_slice() != bytes {
-            return Err(FsTreeManifestError::Parse(
+            return Err(StoreError::InvalidData(
                 "fs-tree manifest entries are not in canonical order".to_string(),
             ));
         }
@@ -247,9 +184,9 @@ impl FsTreeManifest {
     }
 
     /// Reads and parses a canonical manifest v2 file.
-    pub fn read_canonical(path: &Path) -> Result<Self, FsTreeManifestError> {
+    pub fn read_canonical(path: &Path) -> Result<Self, StoreError> {
         let bytes = fs::read(path).map_err(|error| {
-            FsTreeManifestError::Io(format!(
+            StoreError::Io(format!(
                 "failed to read fs-tree manifest '{}': {error}",
                 path.display()
             ))
@@ -260,7 +197,7 @@ impl FsTreeManifest {
     /// Serializes this manifest to canonical JSONL bytes.
     ///
     /// The output always includes the schema header and a final newline.
-    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, FsTreeManifestError> {
+    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, StoreError> {
         validate_entries(&self.entries)?;
         let mut out = Vec::new();
         out.extend_from_slice(CANONICAL_SCHEMA_LINE);
@@ -271,10 +208,10 @@ impl FsTreeManifest {
     }
 
     /// Writes this manifest as canonical JSONL bytes.
-    pub fn write_canonical(&self, path: &Path) -> Result<(), FsTreeManifestError> {
+    pub fn write_canonical(&self, path: &Path) -> Result<(), StoreError> {
         let bytes = self.to_canonical_bytes()?;
         fs::write(path, bytes).map_err(|error| {
-            FsTreeManifestError::Io(format!(
+            StoreError::Io(format!(
                 "failed to write fs-tree manifest '{}': {error}",
                 path.display()
             ))
@@ -395,7 +332,7 @@ impl FromStr for FsFileHash {
 ///
 /// The root path must be absolute. The layout is
 /// `<root>/<first-two-hex-digits>/<64-lowercase-hex-hash>`.
-fn fs_file_path(root: &Path, hash: FsFileHash) -> Result<PathBuf, FsTreeIoError> {
+fn fs_file_path(root: &Path, hash: FsFileHash) -> Result<PathBuf, StoreError> {
     require_absolute(root, "fs-files root")?;
     let hex = hash.to_hex();
     Ok(root.join(&hex[..2]).join(hex))
@@ -406,13 +343,13 @@ fn fs_file_path(root: &Path, hash: FsFileHash) -> Result<PathBuf, FsTreeIoError>
 /// The file is hashed using the fs-file hash algorithm with the file's current
 /// uid, gid, mode, size, and byte content. Symlinks and non-regular files are
 /// rejected.
-fn hash_fs_file_path(path: &Path) -> Result<FsFileHash, FsTreeIoError> {
+fn hash_fs_file_path(path: &Path) -> Result<FsFileHash, StoreError> {
     require_absolute(path, "fs-file path")?;
 
     let metadata =
         fs::symlink_metadata(path).map_err(|error| map_io(path, "inspect fs-file", error))?;
     if !metadata.file_type().is_file() {
-        return Err(FsTreeIoError::Unsupported(format!(
+        return Err(StoreError::Unsupported(format!(
             "fs-file path '{}' is not a regular file",
             path.display()
         )));
@@ -442,7 +379,7 @@ fn hash_fs_file_parts(
     mode: u32,
     size: u64,
     content_sha256: [u8; 32],
-) -> Result<FsFileHash, FsTreeIoError> {
+) -> Result<FsFileHash, StoreError> {
     validate_fs_file_mode(mode)?;
 
     let mut hasher = Sha256::new();
@@ -468,13 +405,14 @@ fn hash_fs_file_parts(
 pub fn scan_fs_tree(
     source_root: &Path,
     fs_files_root: &Path,
-) -> Result<FsTreeManifest, FsTreeIoError> {
+) -> Result<FsTreeManifest, StoreError> {
     require_existing_directory(source_root, "source root")?;
     require_existing_directory(fs_files_root, "fs-files root")?;
 
     let mut entries = Vec::new();
     scan_entry(source_root, source_root, fs_files_root, &mut entries)?;
-    FsTreeManifest::from_entries(entries).map_err(FsTreeIoError::Manifest)
+    FsTreeManifest::from_entries(entries)
+        .map_err(|error| StoreError::InvalidData(error.to_string()))
 }
 
 /// Materializes a manifest from an `fs-files` directory into an empty output root.
@@ -488,29 +426,29 @@ pub fn materialize_fs_tree(
     manifest: &FsTreeManifest,
     fs_files_root: &Path,
     output_root: &Path,
-) -> Result<(), FsTreeIoError> {
+) -> Result<(), StoreError> {
     require_existing_directory(fs_files_root, "fs-files root")?;
     require_existing_empty_directory(output_root, "output root")?;
 
     materialize_into_existing_root(manifest, fs_files_root, output_root)
 }
 
-fn require_absolute(path: &Path, label: &str) -> Result<(), FsTreeIoError> {
+fn require_absolute(path: &Path, label: &str) -> Result<(), StoreError> {
     if path.is_absolute() {
         Ok(())
     } else {
-        Err(FsTreeIoError::InvalidInput(format!(
+        Err(StoreError::InvalidInput(format!(
             "{label} must be absolute: '{}'",
             path.display()
         )))
     }
 }
 
-fn require_existing_directory(path: &Path, label: &str) -> Result<(), FsTreeIoError> {
+fn require_existing_directory(path: &Path, label: &str) -> Result<(), StoreError> {
     require_absolute(path, label)?;
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
-            FsTreeIoError::InvalidInput(format!("{label} must exist: '{}'", path.display()))
+            StoreError::InvalidInput(format!("{label} must exist: '{}'", path.display()))
         } else {
             map_io(path, &format!("inspect {label}"), error)
         }
@@ -518,20 +456,20 @@ fn require_existing_directory(path: &Path, label: &str) -> Result<(), FsTreeIoEr
     if metadata.file_type().is_dir() {
         Ok(())
     } else {
-        Err(FsTreeIoError::InvalidInput(format!(
+        Err(StoreError::InvalidInput(format!(
             "{label} must be an existing real directory: '{}'",
             path.display()
         )))
     }
 }
 
-fn require_existing_empty_directory(path: &Path, label: &str) -> Result<(), FsTreeIoError> {
+fn require_existing_empty_directory(path: &Path, label: &str) -> Result<(), StoreError> {
     require_existing_directory(path, label)?;
     match fs::read_dir(path)
         .map_err(|error| map_io(path, &format!("read {label}"), error))?
         .next()
     {
-        Some(Ok(entry)) => Err(FsTreeIoError::InvalidInput(format!(
+        Some(Ok(entry)) => Err(StoreError::InvalidInput(format!(
             "{label} must be empty, found '{}'",
             entry.path().display()
         ))),
@@ -540,27 +478,27 @@ fn require_existing_empty_directory(path: &Path, label: &str) -> Result<(), FsTr
     }
 }
 
-fn validate_fs_file_mode(mode: u32) -> Result<(), FsTreeIoError> {
+fn validate_fs_file_mode(mode: u32) -> Result<(), StoreError> {
     if mode <= 0o7777 {
         Ok(())
     } else {
-        Err(FsTreeIoError::InvalidInput(format!(
+        Err(StoreError::InvalidInput(format!(
             "fs-file mode is out of range: {mode}"
         )))
     }
 }
 
-fn create_dir_all(path: &Path, label: &str) -> Result<(), FsTreeIoError> {
+fn create_dir_all(path: &Path, label: &str) -> Result<(), StoreError> {
     fs::create_dir_all(path).map_err(|error| {
-        FsTreeIoError::Io(format!(
+        StoreError::Io(format!(
             "failed to create {label} '{}': {error}",
             path.display()
         ))
     })
 }
 
-fn map_io(path: &Path, action: &str, error: io::Error) -> FsTreeIoError {
-    FsTreeIoError::Io(format!("failed to {action} '{}': {error}", path.display()))
+fn map_io(path: &Path, action: &str, error: io::Error) -> StoreError {
+    StoreError::Io(format!("failed to {action} '{}': {error}", path.display()))
 }
 
 fn scan_entry(
@@ -568,7 +506,7 @@ fn scan_entry(
     current_path: &Path,
     fs_files_root: &Path,
     entries: &mut Vec<FsTreeEntry>,
-) -> Result<(), FsTreeIoError> {
+) -> Result<(), StoreError> {
     let metadata = fs::symlink_metadata(current_path)
         .map_err(|error| map_io(current_path, "inspect", error))?;
     let file_type = metadata.file_type();
@@ -593,7 +531,7 @@ fn scan_entry(
         let target = fs::read_link(current_path)
             .map_err(|error| map_io(current_path, "read symlink", error))?;
         let target = target.to_str().ok_or_else(|| {
-            FsTreeIoError::Unsupported(format!(
+            StoreError::Unsupported(format!(
                 "symlink target for '{}' is not UTF-8",
                 current_path.display()
             ))
@@ -627,16 +565,16 @@ fn scan_entry(
         }
         entries.push(FsTreeEntry::file(rel_path, hash));
     } else {
-        return Err(FsTreeIoError::Unsupported(format!(
+        return Err(StoreError::Unsupported(format!(
             "unsupported filesystem entry kind at '{}'",
             current_path.display()
         )));
     }
     Ok(())
 }
-fn create_fs_file_shard_dir(object_path: &Path) -> Result<(), FsTreeIoError> {
+fn create_fs_file_shard_dir(object_path: &Path) -> Result<(), StoreError> {
     let Some(shard_dir) = object_path.parent() else {
-        return Err(FsTreeIoError::InvalidInput(format!(
+        return Err(StoreError::InvalidInput(format!(
             "fs-file object path has no parent directory: '{}'",
             object_path.display()
         )));
@@ -647,7 +585,7 @@ fn materialize_into_existing_root(
     manifest: &FsTreeManifest,
     fs_files_root: &Path,
     output_root: &Path,
-) -> Result<(), FsTreeIoError> {
+) -> Result<(), StoreError> {
     for entry in manifest.entries() {
         match entry {
             FsTreeEntry::Directory { path, .. } if path.is_empty() => {}
@@ -699,9 +637,9 @@ fn materialize_into_existing_root(
 
     Ok(())
 }
-fn manifest_relative_path(source_root: &Path, path: &Path) -> Result<String, FsTreeIoError> {
+fn manifest_relative_path(source_root: &Path, path: &Path) -> Result<String, StoreError> {
     let relative = path.strip_prefix(source_root).map_err(|error| {
-        FsTreeIoError::InvalidInput(format!(
+        StoreError::InvalidInput(format!(
             "failed to resolve '{}' relative to '{}': {error}",
             path.display(),
             source_root.display()
@@ -711,10 +649,10 @@ fn manifest_relative_path(source_root: &Path, path: &Path) -> Result<String, FsT
         return Ok(String::new());
     }
     relative.to_str().map(str::to_string).ok_or_else(|| {
-        FsTreeIoError::Unsupported(format!("fs-tree path '{}' is not UTF-8", path.display()))
+        StoreError::Unsupported(format!("fs-tree path '{}' is not UTF-8", path.display()))
     })
 }
-fn sha256_file(path: &Path) -> Result<[u8; 32], FsTreeIoError> {
+fn sha256_file(path: &Path) -> Result<[u8; 32], StoreError> {
     let mut file = fs::File::open(path).map_err(|error| map_io(path, "open file", error))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
@@ -731,21 +669,21 @@ fn sha256_file(path: &Path) -> Result<[u8; 32], FsTreeIoError> {
     bytes.copy_from_slice(&hasher.finalize());
     Ok(bytes)
 }
-fn chown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), FsTreeIoError> {
+fn chown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), StoreError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| map_io(path, "inspect", error))?;
     if metadata.uid() == uid && metadata.gid() == gid {
         return Ok(());
     }
     chown(path, uid, gid)
 }
-fn lchown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), FsTreeIoError> {
+fn lchown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), StoreError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| map_io(path, "inspect", error))?;
     if metadata.uid() == uid && metadata.gid() == gid {
         return Ok(());
     }
     lchown(path, uid, gid)
 }
-fn chown(path: &Path, uid: u32, gid: u32) -> Result<(), FsTreeIoError> {
+fn chown(path: &Path, uid: u32, gid: u32) -> Result<(), StoreError> {
     let c_path = path_cstring(path)?;
     let result = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
     if result == 0 {
@@ -754,7 +692,7 @@ fn chown(path: &Path, uid: u32, gid: u32) -> Result<(), FsTreeIoError> {
         Err(map_io(path, "chown", io::Error::last_os_error()))
     }
 }
-fn lchown(path: &Path, uid: u32, gid: u32) -> Result<(), FsTreeIoError> {
+fn lchown(path: &Path, uid: u32, gid: u32) -> Result<(), StoreError> {
     let c_path = path_cstring(path)?;
     let result = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
     if result == 0 {
@@ -763,47 +701,47 @@ fn lchown(path: &Path, uid: u32, gid: u32) -> Result<(), FsTreeIoError> {
         Err(map_io(path, "lchown", io::Error::last_os_error()))
     }
 }
-fn path_cstring(path: &Path) -> Result<CString, FsTreeIoError> {
+fn path_cstring(path: &Path) -> Result<CString, StoreError> {
     CString::new(path.as_os_str().as_bytes()).map_err(|error| {
-        FsTreeIoError::InvalidInput(format!(
+        StoreError::InvalidInput(format!(
             "path contains NUL byte '{}': {error}",
             path.display()
         ))
     })
 }
-fn chmod(path: &Path, mode: u32) -> Result<(), FsTreeIoError> {
+fn chmod(path: &Path, mode: u32) -> Result<(), StoreError> {
     validate_fs_file_mode(mode)?;
     fs::set_permissions(path, fs::Permissions::from_mode(mode))
         .map_err(|error| map_io(path, "chmod", error))
 }
 
-fn validate_schema_header(raw_line: &str) -> Result<(), FsTreeManifestError> {
+fn validate_schema_header(raw_line: &str) -> Result<(), StoreError> {
     if raw_line.as_bytes() == CANONICAL_SCHEMA_LINE {
         return Ok(());
     }
 
     let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
     let value = serde_json::from_str::<Value>(line).map_err(|error| {
-        FsTreeManifestError::Parse(format!("failed to parse fs-tree schema header: {error}"))
+        StoreError::InvalidData(format!("failed to parse fs-tree schema header: {error}"))
     })?;
     let object = value.as_object().ok_or_else(|| {
-        FsTreeManifestError::Parse("fs-tree schema header must be an object".to_string())
+        StoreError::InvalidData("fs-tree schema header must be an object".to_string())
     })?;
     require_exact_keys(object, &["schema"], 1)?;
     let schema = required_string(object, "schema", 1)?;
     if schema != SCHEMA {
-        return Err(FsTreeManifestError::Parse(format!(
+        return Err(StoreError::InvalidData(format!(
             "unsupported fs-tree manifest schema '{schema}'"
         )));
     }
-    Err(FsTreeManifestError::Parse(
+    Err(StoreError::InvalidData(
         "fs-tree schema header is not canonical".to_string(),
     ))
 }
 
-fn validate_entries(entries: &[FsTreeEntry]) -> Result<(), FsTreeManifestError> {
+fn validate_entries(entries: &[FsTreeEntry]) -> Result<(), StoreError> {
     if entries.is_empty() {
-        return Err(FsTreeManifestError::Invalid(
+        return Err(StoreError::InvalidInput(
             "fs-tree manifest must contain at least the root directory".to_string(),
         ));
     }
@@ -819,7 +757,7 @@ fn validate_entries(entries: &[FsTreeEntry]) -> Result<(), FsTreeManifestError> 
         if let Some(previous_path) = previous_path
             && previous_path == entry.path()
         {
-            return Err(FsTreeManifestError::Invalid(format!(
+            return Err(StoreError::InvalidInput(format!(
                 "duplicate fs-tree path '{}'",
                 entry.path()
             )));
@@ -831,12 +769,12 @@ fn validate_entries(entries: &[FsTreeEntry]) -> Result<(), FsTreeManifestError> 
     match entries.first() {
         Some(FsTreeEntry::Directory { path, .. }) if path.is_empty() => {}
         Some(entry) if entry.path().is_empty() => {
-            return Err(FsTreeManifestError::Invalid(
+            return Err(StoreError::InvalidInput(
                 "fs-tree root path must be a directory".to_string(),
             ));
         }
         _ => {
-            return Err(FsTreeManifestError::Invalid(
+            return Err(StoreError::InvalidInput(
                 "fs-tree manifest must contain the root directory".to_string(),
             ));
         }
@@ -852,13 +790,13 @@ fn validate_entries(entries: &[FsTreeEntry]) -> Result<(), FsTreeManifestError> 
         match kinds.get(parent) {
             Some(FsTreeEntryKind::Directory) => {}
             Some(_) => {
-                return Err(FsTreeManifestError::Invalid(format!(
+                return Err(StoreError::InvalidInput(format!(
                     "parent '{}' for fs-tree path '{}' is not a directory",
                     parent, path
                 )));
             }
             None => {
-                return Err(FsTreeManifestError::Invalid(format!(
+                return Err(StoreError::InvalidInput(format!(
                     "missing parent directory '{}' for fs-tree path '{}'",
                     parent, path
                 )));
@@ -869,16 +807,16 @@ fn validate_entries(entries: &[FsTreeEntry]) -> Result<(), FsTreeManifestError> 
     Ok(())
 }
 
-fn validate_entry_strings(entry: &FsTreeEntry) -> Result<(), FsTreeManifestError> {
+fn validate_entry_strings(entry: &FsTreeEntry) -> Result<(), StoreError> {
     if let FsTreeEntry::Symlink { target, .. } = entry {
         validate_canonical_string("fs-tree symlink target", target)?;
     }
     Ok(())
 }
 
-fn validate_canonical_string(label: &str, value: &str) -> Result<(), FsTreeManifestError> {
+fn validate_canonical_string(label: &str, value: &str) -> Result<(), StoreError> {
     if value.chars().any(char::is_control) {
-        return Err(FsTreeManifestError::Invalid(format!(
+        return Err(StoreError::InvalidInput(format!(
             "{label} contains a control character: '{}'",
             printable_path(value)
         )));
@@ -886,9 +824,9 @@ fn validate_canonical_string(label: &str, value: &str) -> Result<(), FsTreeManif
     Ok(())
 }
 
-fn validate_path(path: &str) -> Result<(), FsTreeManifestError> {
+fn validate_path(path: &str) -> Result<(), StoreError> {
     if path.chars().any(char::is_control) {
-        return Err(FsTreeManifestError::Invalid(format!(
+        return Err(StoreError::InvalidInput(format!(
             "fs-tree path contains a control character: '{}'",
             printable_path(path)
         )));
@@ -897,12 +835,12 @@ fn validate_path(path: &str) -> Result<(), FsTreeManifestError> {
         return Ok(());
     }
     if path.starts_with('/') {
-        return Err(FsTreeManifestError::Invalid(format!(
+        return Err(StoreError::InvalidInput(format!(
             "fs-tree path must be relative: '{path}'"
         )));
     }
     if path.ends_with('/') {
-        return Err(FsTreeManifestError::Invalid(format!(
+        return Err(StoreError::InvalidInput(format!(
             "fs-tree path must not end with '/': '{path}'"
         )));
     }
@@ -910,12 +848,12 @@ fn validate_path(path: &str) -> Result<(), FsTreeManifestError> {
     for component in path.split('/') {
         match component {
             "" => {
-                return Err(FsTreeManifestError::Invalid(format!(
+                return Err(StoreError::InvalidInput(format!(
                     "fs-tree path contains an empty component: '{path}'"
                 )));
             }
             "." | ".." => {
-                return Err(FsTreeManifestError::Invalid(format!(
+                return Err(StoreError::InvalidInput(format!(
                     "fs-tree path contains forbidden component '{component}': '{path}'"
                 )));
             }
@@ -926,13 +864,13 @@ fn validate_path(path: &str) -> Result<(), FsTreeManifestError> {
     Ok(())
 }
 
-fn validate_entry_numbers(entry: &FsTreeEntry) -> Result<(), FsTreeManifestError> {
+fn validate_entry_numbers(entry: &FsTreeEntry) -> Result<(), StoreError> {
     let mode = match entry {
         FsTreeEntry::Directory { mode, .. } => *mode,
         FsTreeEntry::File { .. } | FsTreeEntry::Symlink { .. } => return Ok(()),
     };
     if mode > 0o7777 {
-        return Err(FsTreeManifestError::Invalid(format!(
+        return Err(StoreError::InvalidInput(format!(
             "fs-tree mode for '{}' is out of range: {mode}",
             entry.path()
         )));
@@ -947,12 +885,12 @@ fn parent_path(path: &str) -> &str {
     }
 }
 
-fn parse_entry_line(line: &str, line_number: usize) -> Result<FsTreeEntry, FsTreeManifestError> {
+fn parse_entry_line(line: &str, line_number: usize) -> Result<FsTreeEntry, StoreError> {
     let value = serde_json::from_str::<Value>(line).map_err(|error| {
-        FsTreeManifestError::Parse(format!("failed to parse line {line_number}: {error}"))
+        StoreError::InvalidData(format!("failed to parse line {line_number}: {error}"))
     })?;
     let object = value.as_object().ok_or_else(|| {
-        FsTreeManifestError::Parse(format!(
+        StoreError::InvalidData(format!(
             "fs-tree manifest line {line_number} is not an object"
         ))
     })?;
@@ -985,7 +923,7 @@ fn parse_entry_line(line: &str, line_number: usize) -> Result<FsTreeEntry, FsTre
                 target: required_string(object, "x", line_number)?.to_string(),
             })
         }
-        _ => Err(FsTreeManifestError::Parse(format!(
+        _ => Err(StoreError::InvalidData(format!(
             "invalid fs-tree entry type on line {line_number}: '{entry_type}'"
         ))),
     }
@@ -995,23 +933,23 @@ fn require_exact_keys(
     object: &Map<String, Value>,
     expected: &[&str],
     line_number: usize,
-) -> Result<(), FsTreeManifestError> {
+) -> Result<(), StoreError> {
     for key in expected {
         if !object.contains_key(*key) {
-            return Err(FsTreeManifestError::Parse(format!(
+            return Err(StoreError::InvalidData(format!(
                 "missing key '{key}' on fs-tree manifest line {line_number}"
             )));
         }
     }
     for key in object.keys() {
         if !expected.contains(&key.as_str()) {
-            return Err(FsTreeManifestError::Parse(format!(
+            return Err(StoreError::InvalidData(format!(
                 "unknown key '{key}' on fs-tree manifest line {line_number}"
             )));
         }
     }
     if object.len() != expected.len() {
-        return Err(FsTreeManifestError::Parse(format!(
+        return Err(StoreError::InvalidData(format!(
             "invalid field set on fs-tree manifest line {line_number}"
         )));
     }
@@ -1022,9 +960,9 @@ fn required_string<'a>(
     object: &'a Map<String, Value>,
     key: &str,
     line_number: usize,
-) -> Result<&'a str, FsTreeManifestError> {
+) -> Result<&'a str, StoreError> {
     object.get(key).and_then(Value::as_str).ok_or_else(|| {
-        FsTreeManifestError::Parse(format!(
+        StoreError::InvalidData(format!(
             "key '{key}' on fs-tree manifest line {line_number} must be a string"
         ))
     })
@@ -1034,10 +972,10 @@ fn required_u32(
     object: &Map<String, Value>,
     key: &str,
     line_number: usize,
-) -> Result<u32, FsTreeManifestError> {
+) -> Result<u32, StoreError> {
     let raw = required_u64(object, key, line_number)?;
     u32::try_from(raw).map_err(|_| {
-        FsTreeManifestError::Parse(format!(
+        StoreError::InvalidData(format!(
             "key '{key}' on fs-tree manifest line {line_number} is out of u32 range"
         ))
     })
@@ -1047,10 +985,10 @@ fn required_mode(
     object: &Map<String, Value>,
     key: &str,
     line_number: usize,
-) -> Result<u32, FsTreeManifestError> {
+) -> Result<u32, StoreError> {
     let mode = required_u64(object, key, line_number)?;
     if mode > 0o7777 {
-        return Err(FsTreeManifestError::Parse(format!(
+        return Err(StoreError::InvalidData(format!(
             "key '{key}' on fs-tree manifest line {line_number} is out of mode range"
         )));
     }
@@ -1061,10 +999,10 @@ fn required_file_hash(
     object: &Map<String, Value>,
     key: &str,
     line_number: usize,
-) -> Result<FsFileHash, FsTreeManifestError> {
+) -> Result<FsFileHash, StoreError> {
     let raw = required_string(object, key, line_number)?;
     FsFileHash::from_str(raw).map_err(|error| {
-        FsTreeManifestError::Parse(format!(
+        StoreError::InvalidData(format!(
             "key '{key}' on fs-tree manifest line {line_number} must be a lowercase fs-file hash: {error}"
         ))
     })
@@ -1074,24 +1012,21 @@ fn required_u64(
     object: &Map<String, Value>,
     key: &str,
     line_number: usize,
-) -> Result<u64, FsTreeManifestError> {
+) -> Result<u64, StoreError> {
     object.get(key).and_then(Value::as_u64).ok_or_else(|| {
-        FsTreeManifestError::Parse(format!(
+        StoreError::InvalidData(format!(
             "key '{key}' on fs-tree manifest line {line_number} must be an unsigned integer"
         ))
     })
 }
 
-fn canonical_entry_bytes(entry: &FsTreeEntry) -> Result<Vec<u8>, FsTreeManifestError> {
+fn canonical_entry_bytes(entry: &FsTreeEntry) -> Result<Vec<u8>, StoreError> {
     let mut out = Vec::new();
     write_canonical_entry(entry, &mut out)?;
     Ok(out)
 }
 
-fn write_canonical_entry(
-    entry: &FsTreeEntry,
-    out: &mut Vec<u8>,
-) -> Result<(), FsTreeManifestError> {
+fn write_canonical_entry(entry: &FsTreeEntry, out: &mut Vec<u8>) -> Result<(), StoreError> {
     match entry {
         FsTreeEntry::File { path, hash } => {
             out.extend_from_slice(br#"{"p":""#);
@@ -1137,9 +1072,9 @@ fn write_canonical_entry(
     Ok(())
 }
 
-fn write_canonical_string(value: &str, out: &mut Vec<u8>) -> Result<(), FsTreeManifestError> {
+fn write_canonical_string(value: &str, out: &mut Vec<u8>) -> Result<(), StoreError> {
     if value.chars().any(char::is_control) {
-        return Err(FsTreeManifestError::Invalid(format!(
+        return Err(StoreError::InvalidInput(format!(
             "fs-tree string contains a control character: '{}'",
             printable_path(value)
         )));
@@ -1503,11 +1438,11 @@ mod tests {
         assert!(require_existing_directory(&real, "test root").is_ok());
         assert!(matches!(
             require_existing_directory(&temp_dir.path().join("missing"), "test root"),
-            Err(FsTreeIoError::InvalidInput(_))
+            Err(StoreError::InvalidInput(_))
         ));
         assert!(matches!(
             require_existing_directory(&link, "test root"),
-            Err(FsTreeIoError::InvalidInput(_))
+            Err(StoreError::InvalidInput(_))
         ));
     }
 
@@ -1520,7 +1455,7 @@ mod tests {
 
         assert!(matches!(
             scan_fs_tree(&source, &fs_files),
-            Err(FsTreeIoError::InvalidInput(_))
+            Err(StoreError::InvalidInput(_))
         ));
     }
 
@@ -1696,14 +1631,14 @@ mod tests {
 
         assert!(matches!(
             scan_fs_tree(Path::new("relative"), &fs_files),
-            Err(FsTreeIoError::InvalidInput(_))
+            Err(StoreError::InvalidInput(_))
         ));
 
         let root_link = temp_dir.path().join("source-link");
         symlink(&source, &root_link).unwrap();
         assert!(matches!(
             scan_fs_tree(&root_link, &fs_files),
-            Err(FsTreeIoError::InvalidInput(_))
+            Err(StoreError::InvalidInput(_))
         ));
 
         fs::create_dir(&fs_files).unwrap();
@@ -1712,7 +1647,7 @@ mod tests {
         fs::write(source.join(non_utf8_name), b"x").unwrap();
         assert!(matches!(
             scan_fs_tree(&source, &fs_files),
-            Err(FsTreeIoError::Unsupported(_))
+            Err(StoreError::Unsupported(_))
         ));
         fs::remove_file(source.join(std::ffi::OsString::from_vec(vec![b'b', 0xff]))).unwrap();
 
@@ -1723,7 +1658,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             scan_fs_tree(&source, &fs_files),
-            Err(FsTreeIoError::Unsupported(_))
+            Err(StoreError::Unsupported(_))
         ));
         fs::remove_file(source.join("bad-link")).unwrap();
 
@@ -1733,7 +1668,7 @@ mod tests {
         assert_eq!(result, 0);
         assert!(matches!(
             scan_fs_tree(&source, &fs_files),
-            Err(FsTreeIoError::Unsupported(_))
+            Err(StoreError::Unsupported(_))
         ));
     }
 
@@ -1762,15 +1697,15 @@ mod tests {
 
         assert!(matches!(
             materialize_fs_tree(&manifest, &fs_files, &missing_output),
-            Err(FsTreeIoError::InvalidInput(_))
+            Err(StoreError::InvalidInput(_))
         ));
         assert!(matches!(
             materialize_fs_tree(&manifest, &fs_files, &non_empty_output),
-            Err(FsTreeIoError::InvalidInput(_))
+            Err(StoreError::InvalidInput(_))
         ));
         assert!(matches!(
             materialize_fs_tree(&manifest, &fs_files, &symlink_output),
-            Err(FsTreeIoError::InvalidInput(_))
+            Err(StoreError::InvalidInput(_))
         ));
     }
 

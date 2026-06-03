@@ -4,8 +4,8 @@ use mbuild_core::{
     CancellationToken,
 };
 use mbuild_store::{
-    Build, BuildKey, CasError, PublishedBuild, ReuseInputIdentity, StoreLayout, compute_reuse_key,
-    load_build_handle, load_reuse_record, materialize_build, object_path,
+    Build, BuildKey, PublishedBuild, ReuseInputIdentity, StoreError, StoreLayout,
+    compute_reuse_key, load_build_handle, load_reuse_record, materialize_build, object_path,
     recreate_store_temp_dir_force, remove_store_temp_dir_force, store_build_handle_ref,
 };
 use serde_json::{Value, json};
@@ -281,7 +281,7 @@ pub(crate) fn map_builder_error(error: BuilderError) -> RuntimeError {
     }
 }
 
-pub(crate) fn map_store_error(error: CasError) -> RuntimeError {
+pub(crate) fn map_store_error(error: StoreError) -> RuntimeError {
     RuntimeError::Store(error.to_string())
 }
 
