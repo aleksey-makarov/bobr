@@ -44,7 +44,10 @@ pub use record::{
     Build, PublishedBuild, RealizedResult, ResultRecord, ReuseInputIdentity, StoredResult,
     load_result_record, load_stored_result,
 };
-pub use refs::{load_build_handle, load_public_build, publish_result, resolve_reuse_for_build};
+pub use refs::{
+    load_build_handle, load_public_build, load_public_output, publish_result,
+    resolve_reuse_for_build,
+};
 pub use source::{SourceImportOutcome, SourceLookup, import_source_result, lookup_source_result};
 pub use store::{Store, recreate_store_temp_dir_force, remove_store_temp_dir_force};
 

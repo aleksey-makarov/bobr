@@ -1,6 +1,6 @@
 use crate::{
-    Build, BuildKey, PublishedBuild, ResultId, ResultRecord, ReuseKey, Store, StoreError,
-    StoredResult,
+    Build, BuildKey, ObjectHash, PublishedBuild, ResultId, ResultRecord, ReuseKey, Store,
+    StoreError, StoredResult,
 };
 use std::fs;
 use std::os::unix::fs as unix_fs;
@@ -13,6 +13,12 @@ fn result_ref_target(result_id: ResultId) -> PathBuf {
     PathBuf::from("..")
         .join(crate::store::RESULTS_DIR)
         .join(format!("{}.json", result_id.to_hex()))
+}
+
+fn object_ref_target(object_hash: ObjectHash) -> PathBuf {
+    PathBuf::from("..")
+        .join(crate::store::OBJECTS_DIR)
+        .join(object_hash.to_hex())
 }
 
 fn parse_result_ref_target(
@@ -55,6 +61,41 @@ fn parse_result_ref_target(
         )));
     }
     Ok(result_id)
+}
+
+fn parse_object_ref_target(
+    ref_kind: &str,
+    ref_path: &Path,
+    target: &Path,
+) -> Result<ObjectHash, StoreError> {
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            StoreError::InvalidData(format!(
+                "{ref_kind} ref '{}' points to invalid object target '{}'",
+                ref_path.display(),
+                target.display()
+            ))
+        })?;
+    let object_hash = file_name.parse::<ObjectHash>().map_err(|error| {
+        StoreError::InvalidData(format!(
+            "{ref_kind} ref '{}' points to invalid object hash '{}' in target '{}': {error}",
+            ref_path.display(),
+            file_name,
+            target.display()
+        ))
+    })?;
+    let expected = object_ref_target(object_hash);
+    if target != expected {
+        return Err(StoreError::InvalidData(format!(
+            "{ref_kind} ref '{}' points to non-canonical object target '{}'; expected '{}'",
+            ref_path.display(),
+            target.display(),
+            expected.display()
+        )));
+    }
+    Ok(object_hash)
 }
 
 /// Stores or replaces the build reference for `build_key`.
@@ -180,6 +221,74 @@ pub fn load_public_build(store: &Store, build_key: BuildKey) -> Result<Option<Bu
     Ok(load_build_handle(store, build_key)?.map(|published| published.build))
 }
 
+/// Loads a public output by its publication name.
+///
+/// Returns `Ok(None)` when neither public ref exists for `output_name`. Existing
+/// public outputs must have both result and object refs, both refs must use
+/// canonical targets, and the object ref must point to the same object recorded
+/// by the result.
+pub fn load_public_output(
+    store: &Store,
+    output_name: &str,
+) -> Result<Option<StoredResult>, StoreError> {
+    validate_output_name(output_name)?;
+
+    let result_ref_path = store.result_refs_dir().join(format!("{output_name}.json"));
+    let object_ref_path = store.object_refs_dir().join(output_name);
+    let result_ref_exists = result_ref_path.exists() || result_ref_path.is_symlink();
+    let object_ref_exists = object_ref_path.exists() || object_ref_path.is_symlink();
+
+    match (result_ref_exists, object_ref_exists) {
+        (false, false) => return Ok(None),
+        (true, false) => {
+            return Err(StoreError::InvalidData(format!(
+                "public output '{output_name}' has result ref '{}' but missing object ref '{}'",
+                result_ref_path.display(),
+                object_ref_path.display()
+            )));
+        }
+        (false, true) => {
+            return Err(StoreError::InvalidData(format!(
+                "public output '{output_name}' has object ref '{}' but missing result ref '{}'",
+                object_ref_path.display(),
+                result_ref_path.display()
+            )));
+        }
+        (true, true) => {}
+    }
+
+    let result_target = fs::read_link(&result_ref_path).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to read public result ref '{}': {error}",
+            result_ref_path.display()
+        ))
+    })?;
+    let result_id = parse_result_ref_target("public result", &result_ref_path, &result_target)?;
+    let stored = crate::record::load_stored_result(store, result_id)?.ok_or_else(|| {
+        StoreError::InvalidData(format!(
+            "public result ref '{}' points to missing result '{}'",
+            result_ref_path.display(),
+            result_id
+        ))
+    })?;
+
+    let object_target = fs::read_link(&object_ref_path).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to read public object ref '{}': {error}",
+            object_ref_path.display()
+        ))
+    })?;
+    let object_hash = parse_object_ref_target("public object", &object_ref_path, &object_target)?;
+    if object_hash != stored.result.object_hash {
+        return Err(StoreError::InvalidData(format!(
+            "public output '{output_name}' object ref points to '{}' but result '{}' records '{}'",
+            object_hash, result_id, stored.result.object_hash
+        )));
+    }
+
+    Ok(Some(stored))
+}
+
 /// Publishes a stored result under a public output name.
 ///
 /// The result record must already exist and must point to an existing object in
@@ -245,10 +354,7 @@ pub(crate) fn publish_result_refs(
 }
 
 fn object_ref_target_for_result(result: &ResultRecord) -> Result<PathBuf, StoreError> {
-    let object_hash = result.object_hash.to_hex();
-    Ok(PathBuf::from("..")
-        .join(crate::store::OBJECTS_DIR)
-        .join(&object_hash))
+    Ok(object_ref_target(result.object_hash))
 }
 
 fn validate_output_name(name: &str) -> Result<(), StoreError> {

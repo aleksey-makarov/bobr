@@ -3,12 +3,13 @@ mod support;
 use mbuild::recipe_runtime::{
     BuildRunOptions, run_recipe_json_in_workspace, run_recipe_json_in_workspace_with_options,
 };
-use mbuild_store::{Store, compute_result_id, load_build_handle, load_result_record};
+use mbuild_store::{
+    Store, compute_result_id, load_build_handle, load_public_output, load_result_record,
+};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::net::{TcpListener, TcpStream};
-#[cfg(feature = "integration-tests")]
 use std::path::Path;
 #[cfg(feature = "integration-tests")]
 use std::sync::{Mutex, OnceLock};
@@ -75,19 +76,25 @@ fn group_root_builds_independent_inputs() {
         .join(realized.object_hash.to_string());
     assert_eq!(fs::read(object_path).unwrap(), b"");
 
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     for name in ["all-targets", "first-target", "second-target"] {
         assert!(
-            store_root(workspace.path())
-                .join("result-refs")
-                .join(format!("{name}.json"))
-                .exists()
+            load_public_output(&layout, name).unwrap().is_some(),
+            "missing public output {name}"
         );
-        assert!(
-            store_root(workspace.path())
-                .join("object-refs")
-                .join(name)
-                .exists()
-        );
+    }
+}
+
+fn remove_public_output_refs(workspace_root: &Path, name: &str) {
+    let store = store_root(workspace_root);
+    let refs = [
+        store.join("result-refs").join(format!("{name}.json")),
+        store.join("object-refs").join(name),
+    ];
+    for path in refs {
+        if path.exists() || path.is_symlink() {
+            fs::remove_file(path).unwrap();
+        }
     }
 }
 
@@ -350,16 +357,8 @@ fn json_recipe_executes_source_and_group_graph() {
 
     for name in ["source", "base-image", "final-group"] {
         assert!(
-            store_root(workspace.path())
-                .join("result-refs")
-                .join(format!("{name}.json"))
-                .exists()
-        );
-        assert!(
-            store_root(workspace.path())
-                .join("object-refs")
-                .join(name)
-                .exists()
+            load_public_output(&layout, name).unwrap().is_some(),
+            "missing public output {name}"
         );
     }
 
@@ -418,18 +417,8 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
             .count(),
         1
     );
-    assert!(
-        store_root(workspace.path())
-            .join("result-refs")
-            .join("source-a.json")
-            .exists()
-    );
-    assert!(
-        !store_root(workspace.path())
-            .join("result-refs")
-            .join("source-b.json")
-            .exists()
-    );
+    assert!(load_public_output(&layout, "source-a").unwrap().is_some());
+    assert!(load_public_output(&layout, "source-b").unwrap().is_none());
     assert!(build_ref_path(workspace.path(), build.build_key.expect("builder root")).exists());
 }
 
@@ -473,26 +462,20 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
         .is_some()
     );
 
-    let result_refs = store_root(workspace.path()).join("result-refs");
-    let object_refs = store_root(workspace.path()).join("object-refs");
     for name in ["source", "final-group"] {
-        let result_ref = result_refs.join(format!("{name}.json"));
-        let object_ref = object_refs.join(name);
-        if result_ref.exists() {
-            fs::remove_file(&result_ref).unwrap();
-        }
-        if object_ref.exists() {
-            fs::remove_file(&object_ref).unwrap();
-        }
+        remove_public_output_refs(workspace.path(), name);
     }
 
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
     assert_eq!(first.build_key, second.build_key);
-    assert!(result_refs.join("final-group.json").exists());
-    assert!(object_refs.join("final-group").exists());
-    assert!(!result_refs.join("source.json").exists());
-    assert!(!object_refs.join("source").exists());
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
+    assert!(
+        load_public_output(&layout, "final-group")
+            .unwrap()
+            .is_some()
+    );
+    assert!(load_public_output(&layout, "source").unwrap().is_none());
 }
 
 #[test]
@@ -622,12 +605,14 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
 
     assert!(published.object_path.is_dir());
     assert!(published.object_path.join("manifest.jsonl").is_file());
+    let public_output = load_public_output(&layout, "runtime-tree")
+        .unwrap()
+        .expect("expected public output");
     assert_eq!(
-        fs::read_link(layout.object_refs_dir().join("runtime-tree")).unwrap(),
-        Path::new("..")
-            .join("objects")
-            .join(published.build.object_hash.to_string())
+        public_output.result.object_hash,
+        published.build.object_hash
     );
+    assert_eq!(public_output.object_path, published.object_path);
     let root = published.object_path.join("root");
     assert!(root.is_dir());
     assert!(root.join("dev").is_dir());

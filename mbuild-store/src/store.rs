@@ -70,12 +70,12 @@ impl Store {
     }
 
     /// Returns the public object reference directory.
-    pub fn object_refs_dir(&self) -> PathBuf {
+    pub(crate) fn object_refs_dir(&self) -> PathBuf {
         self.root.join(OBJECT_REFS_DIR)
     }
 
     /// Returns the public result reference directory.
-    pub fn result_refs_dir(&self) -> PathBuf {
+    pub(crate) fn result_refs_dir(&self) -> PathBuf {
         self.root.join(RESULT_REFS_DIR)
     }
 

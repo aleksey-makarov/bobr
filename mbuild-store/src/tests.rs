@@ -501,6 +501,106 @@ fn publish_result_rejects_result_with_missing_object_without_refs() {
 }
 
 #[test]
+fn load_public_output_returns_none_when_refs_are_absent() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+
+    assert!(load_public_output(&layout, "missing").unwrap().is_none());
+}
+
+#[test]
+fn load_public_output_loads_published_output() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+    let published = publish_text_output(&layout, temp.path(), "script", "hello");
+
+    let loaded = load_public_output(&layout, "script")
+        .unwrap()
+        .expect("expected public output");
+
+    assert_eq!(loaded.result_id(), published.result_id);
+    assert_eq!(loaded.result.object_hash, published.object_hash);
+    assert!(loaded.object_path.exists());
+}
+
+#[test]
+fn load_public_output_rejects_missing_object_ref() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+    publish_text_output(&layout, temp.path(), "script", "hello");
+    fs::remove_file(layout.object_refs_dir().join("script")).unwrap();
+
+    let error = load_public_output(&layout, "script").unwrap_err();
+
+    assert!(matches!(
+        error,
+        StoreError::InvalidData(message)
+            if message.contains("public output 'script'")
+                && message.contains("missing object ref")
+    ));
+}
+
+#[test]
+fn load_public_output_rejects_object_ref_hash_mismatch() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+    let published = publish_text_output(&layout, temp.path(), "script", "hello");
+    let other_stage = temp.path().join("other.txt");
+    fs::write(&other_stage, b"other").unwrap();
+    let other_hash = import_object(&layout, &other_stage).unwrap();
+    assert_ne!(published.object_hash, other_hash);
+
+    replace_symlink(
+        &PathBuf::from("..")
+            .join(OBJECTS_DIR)
+            .join(other_hash.to_hex()),
+        &layout.object_refs_dir().join("script"),
+    )
+    .unwrap();
+
+    let error = load_public_output(&layout, "script").unwrap_err();
+
+    assert!(matches!(
+        error,
+        StoreError::InvalidData(message)
+            if message.contains("object ref points to")
+                && message.contains("records")
+    ));
+}
+
+#[test]
+fn load_public_output_rejects_non_canonical_result_and_object_refs() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+    let published = publish_text_output(&layout, temp.path(), "script", "hello");
+    let result_ref_path = layout.result_refs_dir().join("script.json");
+    let object_ref_path = layout.object_refs_dir().join("script");
+
+    let non_canonical_result = PathBuf::from("..")
+        .join("not-results")
+        .join(format!("{}.json", published.result_id.to_hex()));
+    replace_symlink(&non_canonical_result, &result_ref_path).unwrap();
+    let error = load_public_output(&layout, "script").unwrap_err();
+    assert!(error.to_string().contains("public result ref"));
+    assert!(error.to_string().contains("non-canonical result target"));
+
+    replace_symlink(
+        &PathBuf::from("..")
+            .join(RESULTS_DIR)
+            .join(format!("{}.json", published.result_id.to_hex())),
+        &result_ref_path,
+    )
+    .unwrap();
+    let non_canonical_object = PathBuf::from("..")
+        .join("not-objects")
+        .join(published.object_hash.to_hex());
+    replace_symlink(&non_canonical_object, &object_ref_path).unwrap();
+    let error = load_public_output(&layout, "script").unwrap_err();
+    assert!(error.to_string().contains("public object ref"));
+    assert!(error.to_string().contains("non-canonical object target"));
+}
+
+#[test]
 fn same_object_different_payload_produces_different_build_key() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
@@ -1299,6 +1399,33 @@ fn executable_bit_changes_object_hash_for_distinct_invocations() {
 
     assert_ne!(first.object_hash, second.object_hash);
     assert_ne!(first.build_key, second.build_key);
+}
+
+fn publish_text_output(
+    layout: &Store,
+    temp_root: &Path,
+    output_name: &str,
+    text: &str,
+) -> PublishedOutput {
+    let stage = temp_root.join(format!("{output_name}.txt"));
+    fs::write(&stage, text.as_bytes()).unwrap();
+    let payload = json!({
+        "kind": "text-output",
+        "name": output_name,
+        "text": text,
+    });
+    publish_output(
+        layout,
+        PublishOutputRequest {
+            output_name: output_name.to_string(),
+            build_key: build_key_for("CasTest", payload.clone(), &[]),
+            reuse_key: reuse_key_for("CasTest", payload, &[]),
+            created_at: sample_created_at().to_string(),
+            staged_path: stage,
+            inputs: vec![],
+        },
+    )
+    .unwrap()
 }
 
 fn parse_object_hash(value: &str) -> ObjectHash {
