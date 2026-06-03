@@ -9,13 +9,13 @@ use crate::runtime::{
     log_runtime_event, lookup_build_handle, lookup_canonical_result, map_store_error,
 };
 use mbuild_core::{
-    BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, CancellationToken, OriginContext,
-    RunOptions,
+    BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderRun, CancellationToken,
+    OriginContext, RunOptions, SourceBuilder,
 };
 use mbuild_store::{
     BuildKey, RealizedResult, ResultRecord, ReuseInputIdentity, SourceImportOutcome, SourceLookup,
-    Store, import_source_result, lookup_source_result, prepare_source_workspace, publish_result,
-    remove_store_temp_dir_force, run_log_locations,
+    Store, WorkspaceRequest, create_run_logger, create_workspace, import_source_result,
+    lookup_source_result, publish_result, remove_store_temp_dir_force,
 };
 use serde_json::{Map, Value, to_string_pretty};
 use std::collections::{HashMap, VecDeque};
@@ -45,6 +45,7 @@ impl Default for BuildRunOptions {
 #[derive(Debug, Clone)]
 struct ExecutedNode {
     realized: RealizedResult,
+    logger: Arc<dyn BuildLogger>,
 }
 
 pub fn run_recipe_json_in_workspace(
@@ -118,16 +119,14 @@ pub fn run_recipe_request_in_store_with_options(
     validate_runtime_paths(paths)?;
 
     let layout = Store::create(&paths.store).map_err(map_store_error)?;
-    let log_locations = run_log_locations(&layout);
     let logger: Arc<BuildRunLogger> = Arc::new(
-        BuildRunLogger::new(
-            &log_locations.event_logs_dir,
-            &log_locations.builder_state_dir,
+        create_run_logger(
+            &layout,
             RunOptions {
                 emit_progress: options.emit_progress,
             },
         )
-        .map_err(RuntimeError::Store)?,
+        .map_err(map_store_error)?,
     );
 
     let mut nodes = HashMap::new();
@@ -136,7 +135,7 @@ pub fn run_recipe_request_in_store_with_options(
     let root_recipe = request.node("root")?;
     let root_name = root_recipe.name().to_string();
     let root_tag = root_recipe.tag().to_string();
-    ensure_planned(&layout, &mut nodes, root_key, logger.created_at())?;
+    ensure_planned(&layout, &mut nodes, root_key, layout.created_at())?;
 
     let mut completed = HashMap::new();
     for (key, node) in &nodes {
@@ -295,7 +294,20 @@ fn publish_reused_root(
     realized: &RealizedResult,
     origin: ReuseOrigin,
 ) -> Result<(), RuntimeError> {
-    let node_logger = logger.bind_node(root_tag, root_name, key);
+    let workspace = create_workspace(
+        layout,
+        WorkspaceRequest::new(root_tag, Some(root_name.to_string()), key.to_string()),
+    )
+    .map_err(map_store_error)?;
+    let root_run = BuilderRun::new(
+        root_tag.to_string(),
+        Some(root_name.to_string()),
+        key.to_string(),
+        workspace,
+    );
+    let node_logger = logger
+        .bind_builder(&root_run)
+        .map_err(RuntimeError::Store)?;
     log_runtime_event(
         node_logger.as_ref(),
         BuildLogLevel::Info,
@@ -329,6 +341,7 @@ fn publish_reused_root(
         raw_log_path: None,
         details: serde_json::Map::new(),
     });
+    cleanup_source_temp_dir(layout, root_run.temp_dir(), node_logger.as_ref());
     Ok(())
 }
 
@@ -409,6 +422,24 @@ fn execute_misses(
     let (tx, rx) = mpsc::channel::<(BuildKey, Result<ExecutedNode, RuntimeError>)>();
     let mut in_flight = HashMap::<BuildKey, JoinHandle<()>>::new();
     let mut last_wait_log: Option<Instant> = None;
+    let scheduler_workspace = create_workspace(
+        layout,
+        WorkspaceRequest::new(
+            "Scheduler",
+            Some("executor".to_string()),
+            root_key.to_string(),
+        ),
+    )
+    .map_err(map_store_error)?;
+    let scheduler_run = BuilderRun::new(
+        "Scheduler",
+        Some("executor".to_string()),
+        root_key.to_string(),
+        scheduler_workspace,
+    );
+    let scheduler_logger = logger
+        .bind_builder(&scheduler_run)
+        .map_err(RuntimeError::Store)?;
 
     while !completed.contains_key(&root_key) {
         if first_error.is_none() && cancellation.is_cancelled() {
@@ -486,8 +517,7 @@ fn execute_misses(
                         let details =
                             scheduler_wait_details(nodes, completed, &ready, &in_flight, error);
                         log_scheduler_event(
-                            &logger,
-                            root_key,
+                            scheduler_logger.as_ref(),
                             BuildLogLevel::Warn,
                             "scheduler-wait",
                             "first error recorded; waiting for in-flight jobs to finish",
@@ -516,8 +546,7 @@ fn execute_misses(
                         nodes, completed, &ready, &in_flight, key, &error,
                     );
                     log_scheduler_event(
-                        &logger,
-                        root_key,
+                        scheduler_logger.as_ref(),
                         BuildLogLevel::Error,
                         "scheduler-error",
                         "worker returned first error; running jobs remain in flight",
@@ -532,11 +561,10 @@ fn execute_misses(
         let node = nodes.get(&key).ok_or_else(|| {
             RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
-        let node_logger = logger.bind_node(node.recipe.tag(), &node.publish_name, key);
         publish_result(layout, &node.publish_name, executed.realized.result_id)
             .map_err(map_store_error)?;
         log_runtime_event(
-            node_logger.as_ref(),
+            executed.logger.as_ref(),
             BuildLogLevel::Info,
             "publish",
             format!(
@@ -544,7 +572,7 @@ fn execute_misses(
                 node.publish_name, executed.realized.object_hash
             ),
         );
-        node_logger.log_event(BuildLogEvent {
+        executed.logger.log_event(BuildLogEvent {
             level: BuildLogLevel::Info,
             phase: "done".to_string(),
             message: "builder node completed".to_string(),
@@ -589,23 +617,20 @@ fn should_log_scheduler_wait(last_wait_log: Option<Instant>) -> bool {
 }
 
 fn log_scheduler_event(
-    logger: &Arc<BuildRunLogger>,
-    root_key: BuildKey,
+    logger: &dyn BuildLogger,
     level: BuildLogLevel,
     phase: &str,
     message: impl Into<String>,
     details: Map<String, Value>,
 ) {
-    logger
-        .bind_node("Scheduler", "executor", root_key)
-        .log_event(BuildLogEvent {
-            level,
-            phase: phase.to_string(),
-            message: message.into(),
-            object_hash: None,
-            raw_log_path: None,
-            details,
-        });
+    logger.log_event(BuildLogEvent {
+        level,
+        phase: phase.to_string(),
+        message: message.into(),
+        object_hash: None,
+        raw_log_path: None,
+        details,
+    });
 }
 
 fn scheduler_first_error_details(
@@ -755,8 +780,7 @@ fn execute_builder_recipe(
     cancellation: CancellationToken,
     inputs: ResolvedInputs,
 ) -> Result<ExecutedNode, RuntimeError> {
-    let created_at = logger.created_at().to_string();
-    let published = execute_builder_node(ExecuteBuilderNodeRequest {
+    let executed = execute_builder_node(ExecuteBuilderNodeRequest {
         layout,
         builder: builders::get_builder(recipe.spec.tag).ok_or_else(|| {
             RuntimeError::UnknownBuilder(format!(
@@ -767,14 +791,14 @@ fn execute_builder_recipe(
         })?,
         build_key: key,
         build_name: &recipe.name,
-        created_at: &created_at,
         run_logger: logger,
         cancellation,
         config: recipe.config,
         inputs,
     })?;
     Ok(ExecutedNode {
-        realized: realized_result_from_record(Some(key), &published.result),
+        realized: realized_result_from_record(Some(key), &executed.published.result),
+        logger: executed.logger,
     })
 }
 
@@ -785,23 +809,37 @@ fn execute_source_recipe(
     cancellation: CancellationToken,
     recipe: PlannedSourceRecipe,
 ) -> Result<ExecutedNode, RuntimeError> {
-    let logger = run_logger.bind_node("Source", &recipe.name, key);
+    let mut workspace_request =
+        WorkspaceRequest::new("Source", Some(recipe.name.clone()), key.to_string());
+    workspace_request.metadata.insert(
+        "declared_object_hash".to_string(),
+        Value::String(recipe.object_hash.to_string()),
+    );
+    let workspace = create_workspace(layout, workspace_request).map_err(map_store_error)?;
+    let source_builder = SourceBuilder::new(
+        recipe.name,
+        key.to_string(),
+        recipe.object_hash,
+        recipe.origin,
+        workspace,
+    );
+    let logger = run_logger
+        .bind_source(&source_builder)
+        .map_err(RuntimeError::Store)?;
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
         "start",
         "starting builder node",
     );
-    log_runtime_event(
-        logger.as_ref(),
-        BuildLogLevel::Info,
-        "cache-miss",
-        "materializing source",
-    );
     check_cancelled(&cancellation)?;
 
-    match lookup_source_result(layout, recipe.object_hash, run_logger.created_at())
-        .map_err(map_store_error)?
+    match lookup_source_result(
+        layout,
+        source_builder.declared_object_hash(),
+        layout.created_at(),
+    )
+    .map_err(map_store_error)?
     {
         SourceLookup::Hit(stored) => {
             log_runtime_event(
@@ -810,31 +848,38 @@ fn execute_source_recipe(
                 "result-hit",
                 "reusing existing source result",
             );
+            cleanup_source_temp_dir(layout, source_builder.temp_dir(), logger.as_ref());
             return Ok(ExecutedNode {
                 realized: realized_result_from_record(None, &stored.result),
+                logger,
             });
         }
         SourceLookup::Missing => {}
     }
+    log_runtime_event(
+        logger.as_ref(),
+        BuildLogLevel::Info,
+        "cache-miss",
+        "materializing source",
+    );
 
-    if recipe.origin.is_none() {
+    if source_builder.origin().is_none() {
         let message = format!(
             "source '{}' has no origin and object '{}' is not present in store",
-            recipe.name, recipe.object_hash
+            source_builder.recipe_name(),
+            source_builder.declared_object_hash()
         );
         log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
         return Err(RuntimeError::Build(message));
     }
 
-    let workspace = prepare_source_workspace(layout, key).map_err(map_store_error)?;
-    let temp_root = workspace.temp_dir;
+    let temp_root = source_builder.temp_dir().to_path_buf();
     if let Err(error) = check_cancelled(&cancellation) {
         cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
         return Err(error);
     }
-    let staged_path = match recipe
-        .origin
-        .as_ref()
+    let staged_path = match source_builder
+        .origin()
         .expect("origin checked above")
         .materialize(&OriginContext {
             temp_root: temp_root.as_path(),
@@ -864,9 +909,9 @@ fn execute_source_recipe(
 
     let import_outcome = import_source_result(
         layout,
-        recipe.object_hash,
+        source_builder.declared_object_hash(),
         &staged_path,
-        run_logger.created_at(),
+        layout.created_at(),
     )
     .map_err(|error| {
         cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
@@ -881,11 +926,14 @@ fn execute_source_recipe(
     match import_outcome {
         SourceImportOutcome::Matched(stored) => Ok(ExecutedNode {
             realized: realized_result_from_record(None, &stored.result),
+            logger,
         }),
         SourceImportOutcome::Mismatched { actual_hash } => {
             let message = format!(
                 "source '{}' materialized unexpected object hash: expected {}, got {}",
-                recipe.name, recipe.object_hash, actual_hash
+                source_builder.recipe_name(),
+                source_builder.declared_object_hash(),
+                actual_hash
             );
             log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
             Err(RuntimeError::Build(message))
@@ -925,13 +973,13 @@ mod tests {
     use crate::recipe::{ReuseOrigin, collect_graph};
     use mbuild_core::{CancellationToken, OriginContext, OriginSpec, ParsedOrigin};
     use mbuild_store::{
-        PublishOutputRequest, compute_result_id, compute_reuse_key, publish_output,
-        run_log_locations, source_workspace,
+        PublishOutputRequest, compute_result_id, compute_reuse_key, create_run_logger,
+        publish_output,
     };
     use serde_json::json;
     use std::collections::HashMap;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::str::FromStr;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -943,15 +991,32 @@ mod tests {
     }
 
     fn create_test_logger(layout: &Store) -> Arc<BuildRunLogger> {
-        let locations = run_log_locations(layout);
-        Arc::new(
-            BuildRunLogger::new(
-                &locations.event_logs_dir,
-                &locations.builder_state_dir,
-                RunOptions::default(),
-            )
-            .unwrap(),
-        )
+        Arc::new(create_run_logger(layout, RunOptions::default()).unwrap())
+    }
+
+    fn workspace_metadata(root: &Path, tag: &str, name: &str) -> serde_json::Value {
+        let logs_root = root.join(".mbuild").join("logs");
+        let mut run_dirs = fs::read_dir(&logs_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        run_dirs.sort();
+        for run_dir in run_dirs {
+            for entry in fs::read_dir(run_dir).unwrap() {
+                let path = entry.unwrap().path();
+                let meta_path = path.join("meta.json");
+                if !meta_path.is_file() {
+                    continue;
+                }
+                let metadata: serde_json::Value =
+                    serde_json::from_slice(&fs::read(meta_path).unwrap()).unwrap();
+                if metadata["tag"] == tag && metadata["recipe_name"] == name {
+                    return metadata;
+                }
+            }
+        }
+        panic!("missing workspace metadata for {tag}/{name}");
     }
 
     #[derive(Debug, Clone)]
@@ -1135,6 +1200,8 @@ mod tests {
             .expect_err("expected cancellation");
 
         assert_eq!(error.class(), "cancelled");
-        assert!(!source_workspace(&layout, key).temp_dir.exists());
+        let metadata = workspace_metadata(temp.path(), "Source", "cancel-source");
+        let temp_dir = PathBuf::from(metadata["temp_dir"].as_str().unwrap());
+        assert!(!temp_dir.exists());
     }
 }

@@ -1,12 +1,12 @@
 use crate::resolved_inputs::ResolvedInputs;
 use mbuild_core::{
     BuildContext, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderError,
-    CancellationToken,
+    BuilderRun, CancellationToken,
 };
 use mbuild_store::{
     BuildKey, PublishedBuild, ReuseInputIdentity, Store, StoreError, StoreTempQuarantineRequest,
-    compute_reuse_key, load_build_handle, materialize_build, materialize_build_with_trusted_hash,
-    prepare_builder_workspace, quarantine_store_temp, recreate_store_temp_dir_force,
+    WorkspaceRequest, compute_reuse_key, create_workspace, load_build_handle, materialize_build,
+    materialize_build_with_trusted_hash, quarantine_store_temp, recreate_store_temp_dir_force,
     remove_store_temp_dir_force, resolve_reuse_for_build,
 };
 use serde_json::Value;
@@ -62,22 +62,26 @@ pub(crate) struct ExecuteBuilderNodeRequest<'a> {
     pub(crate) builder: &'static dyn Builder,
     pub(crate) build_key: BuildKey,
     pub(crate) build_name: &'a str,
-    pub(crate) created_at: &'a str,
     pub(crate) run_logger: Arc<BuildRunLogger>,
     pub(crate) cancellation: CancellationToken,
     pub(crate) config: Value,
     pub(crate) inputs: ResolvedInputs,
 }
 
+#[derive(Debug)]
+pub(crate) struct ExecutedBuilderNode {
+    pub(crate) published: PublishedBuild,
+    pub(crate) logger: Arc<dyn BuildLogger>,
+}
+
 pub(crate) fn execute_builder_node(
     request: ExecuteBuilderNodeRequest<'_>,
-) -> Result<PublishedBuild, RuntimeError> {
+) -> Result<ExecutedBuilderNode, RuntimeError> {
     let ExecuteBuilderNodeRequest {
         layout,
         builder,
         build_key,
         build_name,
-        created_at,
         run_logger,
         cancellation,
         config,
@@ -88,7 +92,23 @@ pub(crate) fn execute_builder_node(
     let inputs_identity = inputs
         .ordered_reuse_input_identities(builder.spec())
         .map_err(map_builder_error)?;
-    let logger = run_logger.bind_node(builder.spec().tag, build_name, build_key);
+    let workspace = create_workspace(
+        layout,
+        WorkspaceRequest::new(
+            builder.spec().tag,
+            Some(build_name.to_string()),
+            build_key.to_string(),
+        ),
+    )
+    .map_err(map_store_error)?;
+    let builder_run = builder.create_run(
+        Some(build_name.to_string()),
+        build_key.to_string(),
+        workspace,
+    );
+    let logger = run_logger
+        .bind_builder(&builder_run)
+        .map_err(RuntimeError::Store)?;
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
@@ -103,7 +123,12 @@ pub(crate) fn execute_builder_node(
             "cache-hit",
             "reusing existing build ref",
         );
-        return Ok(published);
+        cleanup_temp_dir(
+            builder_run.temp_dir(),
+            &TempCleanupContext::new(layout, builder.spec().tag, build_key),
+            logger.as_ref(),
+        );
+        return Ok(ExecutedBuilderNode { published, logger });
     }
 
     let reuse_key = compute_reuse_key(builder.spec().tag, &config, &inputs_identity)
@@ -117,7 +142,12 @@ pub(crate) fn execute_builder_node(
             "result-hit",
             "reusing existing canonical result",
         );
-        return Ok(published);
+        cleanup_temp_dir(
+            builder_run.temp_dir(),
+            &TempCleanupContext::new(layout, builder.spec().tag, build_key),
+            logger.as_ref(),
+        );
+        return Ok(ExecutedBuilderNode { published, logger });
     }
 
     log_runtime_event(
@@ -130,7 +160,7 @@ pub(crate) fn execute_builder_node(
     let cleanup = TempCleanupContext::new(layout, builder.spec().tag, build_key);
     let mut context = build_context(
         layout,
-        builder.spec().tag,
+        &builder_run,
         build_key,
         logger.clone(),
         cancellation.clone(),
@@ -163,7 +193,7 @@ pub(crate) fn execute_builder_node(
             layout,
             build_key,
             reuse_key,
-            created_at,
+            layout.created_at(),
             inputs_identity,
             &staged.staged_path,
             object_hash,
@@ -172,7 +202,7 @@ pub(crate) fn execute_builder_node(
             layout,
             build_key,
             reuse_key,
-            created_at,
+            layout.created_at(),
             inputs_identity,
             &staged.staged_path,
         ),
@@ -188,7 +218,7 @@ pub(crate) fn execute_builder_node(
     });
     cleanup_temp_dir(&context.temp_dir, &cleanup, logger.as_ref());
     let published = published?;
-    Ok(published)
+    Ok(ExecutedBuilderNode { published, logger })
 }
 
 pub(crate) fn lookup_build_handle(
@@ -211,17 +241,15 @@ pub(crate) fn lookup_canonical_result(
 
 pub(crate) fn build_context(
     layout: &Store,
-    builder_tag: &str,
+    builder_run: &BuilderRun,
     build_key: BuildKey,
     logger: Arc<dyn BuildLogger>,
     cancellation: CancellationToken,
 ) -> Result<BuildContext, RuntimeError> {
-    let workspace =
-        prepare_builder_workspace(layout, builder_tag, build_key).map_err(map_store_error)?;
-    let cleanup = TempCleanupContext::new(layout, builder_tag, build_key);
-    recreate_empty_temp_dir_with_quarantine(&workspace.temp_dir, &cleanup, logger.as_ref())?;
+    let cleanup = TempCleanupContext::new(layout, builder_run.tag(), build_key);
+    recreate_empty_temp_dir_with_quarantine(builder_run.temp_dir(), &cleanup, logger.as_ref())?;
     Ok(
-        BuildContext::with_noop_logger(workspace.state_dir, workspace.temp_dir)
+        BuildContext::with_noop_logger(builder_run.temp_dir().to_path_buf())
             .with_logger(logger)
             .with_cancellation_token(cancellation),
     )
@@ -270,7 +298,7 @@ fn recreate_empty_temp_dir_with_quarantine(
     logger: &dyn BuildLogger,
 ) -> Result<(), RuntimeError> {
     if cleanup.mode == TempCleanupMode::DirectQuarantine {
-        if fs::symlink_metadata(temp_dir).is_ok() {
+        if fs::symlink_metadata(temp_dir).is_ok() && !is_empty_directory(temp_dir) {
             quarantine_temp_path(
                 temp_dir,
                 cleanup,
@@ -302,6 +330,18 @@ fn recreate_empty_temp_dir_with_quarantine(
             temp_dir.display()
         ))
     })
+}
+
+fn is_empty_directory(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_dir() {
+        return false;
+    }
+    fs::read_dir(path)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -340,6 +380,20 @@ fn cleanup_mode_for_builder(builder_tag: &str) -> TempCleanupMode {
 fn cleanup_temp_dir(temp_dir: &Path, cleanup: &TempCleanupContext, logger: &dyn BuildLogger) {
     if cleanup.mode == TempCleanupMode::DirectQuarantine {
         if fs::symlink_metadata(temp_dir).is_ok() {
+            if is_empty_directory(temp_dir) {
+                if let Err(error) = remove_store_temp_dir_force(&cleanup.layout, temp_dir) {
+                    log_runtime_event(
+                        logger,
+                        BuildLogLevel::Warn,
+                        "cleanup-warning",
+                        format!(
+                            "failed to remove empty sandbox temp dir '{}': {error}",
+                            temp_dir.display()
+                        ),
+                    );
+                }
+                return;
+            }
             match quarantine_temp_path(
                 temp_dir,
                 cleanup,
@@ -440,12 +494,12 @@ fn quarantine_temp_path(
 mod tests {
     use super::*;
     use mbuild_core::{
-        BuildContext, BuildRunLogger, BuilderInputs, BuilderSpec, CancellationToken, RunOptions,
-        StagedBuildResult, TypedBuilder,
+        BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, BuilderRun, BuilderSpec,
+        CancellationToken, RunOptions, StagedBuildResult, TypedBuilder,
     };
     use mbuild_store::{
-        PublishOutputRequest, ReuseInputIdentity, builder_workspace, compute_build_key,
-        list_quarantined_temps, publish_output, run_log_locations,
+        PublishOutputRequest, ReuseInputIdentity, WorkspaceRequest, compute_build_key,
+        create_run_logger, create_workspace, list_quarantined_temps, publish_output,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
@@ -461,15 +515,69 @@ mod tests {
     }
 
     fn create_test_logger(layout: &Store) -> Arc<BuildRunLogger> {
-        let locations = run_log_locations(layout);
-        Arc::new(
-            BuildRunLogger::new(
-                &locations.event_logs_dir,
-                &locations.builder_state_dir,
-                RunOptions::default(),
-            )
-            .unwrap(),
+        Arc::new(create_run_logger(layout, RunOptions::default()).unwrap())
+    }
+
+    fn create_test_builder_run(
+        layout: &Store,
+        run_logger: &Arc<BuildRunLogger>,
+        tag: &str,
+        name: &str,
+        build_key: BuildKey,
+    ) -> (BuilderRun, Arc<dyn BuildLogger>) {
+        let workspace = create_workspace(
+            layout,
+            WorkspaceRequest::new(tag, Some(name.to_string()), build_key.to_string()),
         )
+        .unwrap();
+        let builder_run = BuilderRun::new(
+            tag.to_string(),
+            Some(name.to_string()),
+            build_key.to_string(),
+            workspace,
+        );
+        let logger = run_logger.bind_builder(&builder_run).unwrap();
+        (builder_run, logger)
+    }
+
+    fn workspace_metadata(root: &Path, tag: &str, name: &str) -> Value {
+        let logs_root = root.join(".mbuild").join("logs");
+        let mut run_dirs = fs::read_dir(&logs_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        run_dirs.sort();
+        for run_dir in run_dirs {
+            for entry in fs::read_dir(run_dir).unwrap() {
+                let path = entry.unwrap().path();
+                let meta_path = path.join("meta.json");
+                if !meta_path.is_file() {
+                    continue;
+                }
+                let metadata: Value =
+                    serde_json::from_slice(&fs::read(meta_path).unwrap()).unwrap();
+                if metadata["tag"] == tag && metadata["recipe_name"] == name {
+                    return metadata;
+                }
+            }
+        }
+        panic!("missing workspace metadata for {tag}/{name}");
+    }
+
+    fn metadata_temp_dir(metadata: &Value) -> PathBuf {
+        PathBuf::from(metadata["temp_dir"].as_str().unwrap())
+    }
+
+    fn workspace_count(root: &Path) -> usize {
+        let logs_root = root.join(".mbuild").join("logs");
+        fs::read_dir(&logs_root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.is_dir())
+            .flat_map(|run_dir| fs::read_dir(run_dir).unwrap())
+            .filter(|entry| entry.as_ref().unwrap().path().join("meta.json").is_file())
+            .count()
     }
 
     #[derive(Debug, Deserialize)]
@@ -501,7 +609,6 @@ mod tests {
             cx: &mut BuildContext,
         ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
             assert!(inputs.is_empty());
-            assert!(cx.state_dir.is_dir());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
 
@@ -540,7 +647,6 @@ mod tests {
             cx: &mut BuildContext,
         ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
             assert!(inputs.is_empty());
-            assert!(cx.state_dir.is_dir());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
 
@@ -573,7 +679,6 @@ mod tests {
             cx: &mut BuildContext,
         ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
             assert!(inputs.is_empty());
-            assert!(cx.state_dir.is_dir());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
             fs::write(cx.temp_dir.join("scratch"), b"temp\n").unwrap();
@@ -601,7 +706,6 @@ mod tests {
             cx: &mut BuildContext,
         ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
             assert!(inputs.is_empty());
-            assert!(cx.state_dir.is_dir());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
             fs::write(cx.temp_dir.join("scratch"), b"temp\n").unwrap();
@@ -683,18 +787,12 @@ mod tests {
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
-        let workspace = builder_workspace(&layout, "RuntimeTest", build_key);
-        let state_dir = workspace.state_dir;
-        let temp_dir = workspace.temp_dir;
-        fs::create_dir_all(&temp_dir).unwrap();
-        fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
-        let published = execute_builder_node(ExecuteBuilderNodeRequest {
+        let executed = execute_builder_node(ExecuteBuilderNodeRequest {
             layout: &layout,
             builder: &RUNTIME_TEST_BUILDER,
             build_key,
             build_name: "runtime-test",
-            created_at: "2026-04-05T12:00:00.000000000Z",
             run_logger: logger,
             cancellation: CancellationToken::new(),
             config,
@@ -702,10 +800,11 @@ mod tests {
         })
         .unwrap();
 
-        assert!(state_dir.is_dir());
+        let metadata = workspace_metadata(temp.path(), "RuntimeTest", "runtime-test");
+        let temp_dir = metadata_temp_dir(&metadata);
         assert!(!temp_dir.exists());
-        assert!(published.object_path.is_dir());
-        assert!(published.object_path.join("payload").is_file());
+        assert!(executed.published.object_path.is_dir());
+        assert!(executed.published.object_path.join("payload").is_file());
     }
 
     #[cfg(unix)]
@@ -718,16 +817,21 @@ mod tests {
         let config = json!({});
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
         let run_logger = create_test_logger(&layout);
-        let logger = run_logger.bind_node("RuntimeTest", "runtime-test", build_key);
-        let workspace = builder_workspace(&layout, "RuntimeTest", build_key);
-        let temp_dir = workspace.temp_dir;
-        fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
+        let (builder_run, logger) = create_test_builder_run(
+            &layout,
+            &run_logger,
+            "RuntimeTest",
+            "runtime-test",
+            build_key,
+        );
+        let temp_dir = builder_run.temp_dir().to_path_buf();
+        fs::remove_dir_all(&temp_dir).unwrap();
         let stale_target = temp.path().join("missing-stale-target");
         symlink(&stale_target, &temp_dir).unwrap();
 
         let context = build_context(
             &layout,
-            "RuntimeTest",
+            &builder_run,
             build_key,
             logger,
             CancellationToken::new(),
@@ -760,14 +864,12 @@ mod tests {
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("Sandbox", &config, &[]).unwrap();
-        let temp_dir = builder_workspace(&layout, "Sandbox", build_key).temp_dir;
 
-        let published = execute_builder_node(ExecuteBuilderNodeRequest {
+        let executed = execute_builder_node(ExecuteBuilderNodeRequest {
             layout: &layout,
             builder: &SANDBOX_RUNTIME_TEST_BUILDER,
             build_key,
             build_name: "sandbox-runtime-test",
-            created_at: "2026-04-05T12:00:00.000000000Z",
             run_logger: logger,
             cancellation: CancellationToken::new(),
             config,
@@ -775,8 +877,10 @@ mod tests {
         })
         .unwrap();
 
+        let metadata = workspace_metadata(temp.path(), "Sandbox", "sandbox-runtime-test");
+        let temp_dir = metadata_temp_dir(&metadata);
         assert!(!temp_dir.exists());
-        assert!(published.object_path.join("payload").is_file());
+        assert!(executed.published.object_path.join("payload").is_file());
         let quarantined = quarantine_entries(&layout);
         assert_eq!(quarantined.len(), 1);
         assert!(quarantined[0].join("sandbox-scratch").is_file());
@@ -784,39 +888,37 @@ mod tests {
     }
 
     #[test]
-    fn execute_sandbox_builder_quarantines_stale_temp_before_recreate() {
+    fn build_context_quarantines_stale_sandbox_temp_before_recreate() {
         let temp = tempdir().unwrap();
         let layout = create_test_store(temp.path());
-        let logger = create_test_logger(&layout);
+        let run_logger = create_test_logger(&layout);
         let config = json!({});
-        let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("Sandbox", &config, &[]).unwrap();
-        let temp_dir = builder_workspace(&layout, "Sandbox", build_key).temp_dir;
+        let (builder_run, logger) = create_test_builder_run(
+            &layout,
+            &run_logger,
+            "Sandbox",
+            "sandbox-runtime-test",
+            build_key,
+        );
+        let temp_dir = builder_run.temp_dir().to_path_buf();
+        fs::remove_dir_all(&temp_dir).unwrap();
         fs::create_dir_all(&temp_dir).unwrap();
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
-        execute_builder_node(ExecuteBuilderNodeRequest {
-            layout: &layout,
-            builder: &SANDBOX_RUNTIME_TEST_BUILDER,
+        let context = build_context(
+            &layout,
+            &builder_run,
             build_key,
-            build_name: "sandbox-runtime-test",
-            created_at: "2026-04-05T12:00:00.000000000Z",
-            run_logger: logger,
-            cancellation: CancellationToken::new(),
-            config,
-            inputs,
-        })
+            logger,
+            CancellationToken::new(),
+        )
         .unwrap();
 
-        assert!(!temp_dir.exists());
+        assert!(context.temp_dir.is_dir());
         let quarantined = quarantine_entries(&layout);
-        assert_eq!(quarantined.len(), 2);
-        assert!(quarantined.iter().any(|path| path.join("stale").is_file()));
-        assert!(
-            quarantined
-                .iter()
-                .any(|path| path.join("sandbox-scratch").is_file())
-        );
+        assert_eq!(quarantined.len(), 1);
+        assert!(quarantined[0].join("stale").is_file());
     }
 
     #[test]
@@ -827,16 +929,12 @@ mod tests {
         let config = Value::Object(Map::new());
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
-        let temp_dir = builder_workspace(&layout, "RuntimeTest", build_key).temp_dir;
-        fs::create_dir_all(&temp_dir).unwrap();
-        fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
         let error = execute_builder_node(ExecuteBuilderNodeRequest {
             layout: &layout,
             builder: &RUNTIME_FAIL_BUILDER,
             build_key,
             build_name: "runtime-fail",
-            created_at: "2026-04-05T12:00:00.000000000Z",
             run_logger: logger,
             cancellation: CancellationToken::new(),
             config,
@@ -845,6 +943,8 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.class(), "build");
+        let metadata = workspace_metadata(temp.path(), "RuntimeTest", "runtime-fail");
+        let temp_dir = metadata_temp_dir(&metadata);
         assert!(!temp_dir.exists());
     }
 
@@ -854,27 +954,19 @@ mod tests {
         let temp = tempdir().unwrap();
         let layout = create_test_store(temp.path());
         let run_logger = create_test_logger(&layout);
-        let logger = run_logger.bind_node(
+        let build_key = compute_build_key("RuntimeTest", &json!({}), &[]).unwrap();
+        let (builder_run, logger) = create_test_builder_run(
+            &layout,
+            &run_logger,
             "RuntimeTest",
             "runtime-test",
-            compute_build_key("RuntimeTest", &json!({}), &[]).unwrap(),
+            build_key,
         );
-        let temp_dir = builder_workspace(
-            &layout,
-            "RuntimeTest",
-            compute_build_key("RuntimeTest", &json!({}), &[]).unwrap(),
-        )
-        .state_dir
-        .join("tmp")
-        .join("stale");
+        let temp_dir = builder_run.temp_dir().join("stale");
         fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
         fs::write(&temp_dir, b"not a directory\n").unwrap();
 
-        let cleanup = TempCleanupContext::new(
-            &layout,
-            "RuntimeTest",
-            compute_build_key("RuntimeTest", &json!({}), &[]).unwrap(),
-        );
+        let cleanup = TempCleanupContext::new(&layout, "RuntimeTest", build_key);
         cleanup_temp_dir(&temp_dir, &cleanup, logger.as_ref());
 
         assert!(fs::symlink_metadata(&temp_dir).is_err());
@@ -896,14 +988,12 @@ mod tests {
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
-        let temp_dir = builder_workspace(&layout, "RuntimeTest", build_key).temp_dir;
 
         let error = execute_builder_node(ExecuteBuilderNodeRequest {
             layout: &layout,
             builder: &RUNTIME_BROKEN_STAGE_BUILDER,
             build_key,
             build_name: "runtime-broken-stage",
-            created_at: "2026-04-05T12:00:00.000000000Z",
             run_logger: logger,
             cancellation: CancellationToken::new(),
             config,
@@ -912,6 +1002,8 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.class(), "store");
+        let metadata = workspace_metadata(temp.path(), "RuntimeTest", "runtime-broken-stage");
+        let temp_dir = metadata_temp_dir(&metadata);
         assert!(!temp_dir.exists());
     }
 
@@ -931,7 +1023,6 @@ mod tests {
             builder: &RUNTIME_TEST_BUILDER,
             build_key,
             build_name: "runtime-test",
-            created_at: "2026-04-05T12:00:00.000000000Z",
             run_logger: logger,
             cancellation,
             config,
@@ -940,11 +1031,7 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.class(), "cancelled");
-        assert!(
-            !builder_workspace(&layout, "RuntimeTest", build_key)
-                .temp_dir
-                .exists()
-        );
+        assert_eq!(workspace_count(temp.path()), 0);
     }
 
     fn quarantine_entries(layout: &Store) -> Vec<PathBuf> {

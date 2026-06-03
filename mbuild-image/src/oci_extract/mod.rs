@@ -1339,11 +1339,10 @@ mod tests {
     }
 
     fn build_context(root: &Path) -> BuildContext {
-        let state_dir = root.join("builder");
         let temp_dir = root.join("tmp");
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(&temp_dir).unwrap();
-        BuildContext::with_noop_logger(state_dir, temp_dir)
+        BuildContext::with_noop_logger(temp_dir)
     }
 
     fn create_oci_layout(root: &Path, layers: Vec<(&str, Vec<u8>)>) -> PathBuf {

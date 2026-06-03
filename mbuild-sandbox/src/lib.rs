@@ -919,9 +919,7 @@ mod tests {
     #[test]
     fn sandbox_builder_rejects_missing_rootfs() {
         let temp = tempdir().unwrap();
-        let mut cx =
-            BuildContext::with_noop_logger(temp.path().join("state"), temp.path().join("tmp"));
-        std::fs::create_dir_all(&cx.state_dir).unwrap();
+        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
         std::fs::create_dir_all(&cx.temp_dir).unwrap();
 
         let config = json!({
@@ -943,9 +941,7 @@ mod tests {
     #[test]
     fn sandbox_builder_rejects_install_config() {
         let temp = tempdir().unwrap();
-        let mut cx =
-            BuildContext::with_noop_logger(temp.path().join("state"), temp.path().join("tmp"));
-        std::fs::create_dir_all(&cx.state_dir).unwrap();
+        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
         std::fs::create_dir_all(&cx.temp_dir).unwrap();
 
         let config = json!({
@@ -980,7 +976,7 @@ mod tests {
     #[test]
     fn stage_fs_tree_output_writes_manifest_and_moves_raw_output_to_root() {
         let temp = tempdir().unwrap();
-        let cx = BuildContext::with_noop_logger(temp.path().join("state"), temp.path().join("tmp"));
+        let cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
         std::fs::create_dir_all(&cx.temp_dir).unwrap();
         let output = cx.temp_dir.join("out");
         std::fs::create_dir(&output).unwrap();

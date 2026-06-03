@@ -2534,11 +2534,10 @@ mod tests {
     }
 
     fn build_context(root: &std::path::Path) -> BuildContext {
-        let state_dir = root.join("tree");
-        let temp_dir = state_dir.join("tmp");
+        let temp_dir = root.join("tree").join("tmp");
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
-        BuildContext::with_noop_logger(state_dir, temp_dir)
+        BuildContext::with_noop_logger(temp_dir)
     }
 
     fn build_context_with_recording_logger(

@@ -35,11 +35,14 @@ envelope. `mbuild` does not add an implicit `.mbuild/` directory.
   object-refs/
     <name> -> ../objects/<object_hash>
   logs/
-    runs/
-      <YYMMDDHHMMSS>-<pid>.jsonl
-  builder-state/
-    <builder>/
-      logs/
+    <YYMMDDhhmmss>[.N]/
+      events.jsonl
+      index.jsonl
+      <00000000>-<tag>[-<name>]/
+        meta.json
+        events.jsonl
+        raw/
+        tmp/
 ```
 
 `objects/<object_hash>` is the payload itself, either a file or a directory.
@@ -123,10 +126,19 @@ current refs are rotated into timestamp-suffixed history refs.
 
 Each `mbuild` invocation writes:
 
-- one structured event log under `<store>/logs/runs/<YYMMDDHHMMSS>-<pid>.jsonl`
-- raw builder logs under `<store>/builder-state/<builder>/logs/<name>/`
+- one run-level structured event log under `<store>/logs/<run-id>/events.jsonl`
+- one workspace index under `<store>/logs/<run-id>/index.jsonl`
+- per-subject logs under
+  `<store>/logs/<run-id>/<00000000>-<tag>[-<name>]/`
 
-The event log records lifecycle events such as:
+`run-id` uses the local `<YYMMDDhhmmss>` timestamp. If another run has already
+claimed that directory, `.1`, `.2`, and so on are appended. Each builder,
+source, or scheduler subject gets a store-allocated serial number for its log
+directory name. The serial is an internal allocation detail; the full original
+tag, recipe name, build key, and workspace paths are stored in that subject's
+`meta.json`.
+
+The run-level event log records lifecycle events such as:
 
 - `start`
 - `cache-hit`
@@ -136,3 +148,6 @@ The event log records lifecycle events such as:
 - `publish`
 - `done`
 - `fail`
+
+Subject events are also written to the subject's own `events.jsonl`. Raw logs
+created by builders are written under the subject's `raw/` directory.

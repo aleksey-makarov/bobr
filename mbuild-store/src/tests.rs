@@ -2,10 +2,12 @@ use super::*;
 use fsobj_hash::ObjectHash;
 use fsobj_hash::hash_path;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::thread;
 use tempfile::tempdir;
 
 fn create_test_store(root: &Path) -> Store {
@@ -1291,6 +1293,154 @@ fn store_create_creates_full_layout() {
     assert!(layout.object_refs_dir().is_dir());
     assert!(layout.fs_files_dir().is_dir());
     assert!(layout.fs_trees_dir().is_dir());
+    assert!(temp.path().join(LOGS_DIR).is_dir());
+    assert!(layout.run_log_dir().is_dir());
+    assert!(layout.run_log_dir().starts_with(temp.path().join(LOGS_DIR)));
+}
+
+#[test]
+fn store_create_allocates_unique_run_log_directories() {
+    let temp = tempdir().unwrap();
+
+    let first = Store::create(temp.path()).unwrap();
+    let second = Store::create(temp.path()).unwrap();
+
+    assert_ne!(first.run_log_dir(), second.run_log_dir());
+    assert!(first.run_log_dir().is_dir());
+    assert!(second.run_log_dir().is_dir());
+}
+
+#[test]
+fn run_log_dir_allocation_uses_numeric_disambiguation() {
+    let temp = tempdir().unwrap();
+    let logs_dir = temp.path().join(LOGS_DIR);
+    fs::create_dir_all(&logs_dir).unwrap();
+    fs::create_dir(logs_dir.join("260603123456")).unwrap();
+    fs::create_dir(logs_dir.join("260603123456.1")).unwrap();
+
+    let allocated = crate::store::create_run_log_dir(&logs_dir, "260603123456").unwrap();
+
+    assert_eq!(allocated.file_name().unwrap(), "260603123456.2");
+    assert!(allocated.is_dir());
+}
+
+#[test]
+fn store_clone_shares_run_log_directory_and_serial_counter() {
+    let temp = tempdir().unwrap();
+    let layout = Store::create(temp.path()).unwrap();
+    let clone = layout.clone();
+
+    let first = create_workspace(
+        &layout,
+        WorkspaceRequest::new("Tree", Some("left".to_string()), "build-left"),
+    )
+    .unwrap();
+    let second = create_workspace(
+        &clone,
+        WorkspaceRequest::new("Tree", Some("right".to_string()), "build-right"),
+    )
+    .unwrap();
+
+    assert!(first.log_dir().starts_with(layout.run_log_dir()));
+    assert!(second.log_dir().starts_with(layout.run_log_dir()));
+    assert_eq!(
+        first.log_dir().file_name().unwrap().to_str().unwrap(),
+        "00000000-Tree-left"
+    );
+    assert_eq!(
+        second.log_dir().file_name().unwrap().to_str().unwrap(),
+        "00000001-Tree-right"
+    );
+}
+
+#[test]
+fn workspace_allocation_writes_metadata_index_and_sanitized_paths() {
+    let temp = tempdir().unwrap();
+    let layout = Store::create(temp.path()).unwrap();
+    let mut request = WorkspaceRequest::new(
+        "Source Builder",
+        Some("name / demo".to_string()),
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    request.metadata.insert(
+        "declared_object_hash".to_string(),
+        Value::String(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        ),
+    );
+
+    let workspace = create_workspace(&layout, request).unwrap();
+
+    assert_eq!(
+        workspace.log_dir().file_name().unwrap().to_str().unwrap(),
+        "00000000-Source_Builder-name___demo"
+    );
+    assert!(workspace.raw_log_dir().is_dir());
+    assert!(workspace.temp_dir().is_dir());
+    let metadata: Value =
+        serde_json::from_slice(&fs::read(workspace.log_dir().join("meta.json")).unwrap()).unwrap();
+    assert_eq!(metadata["schema"], "mbuild-workspace-v1");
+    assert_eq!(metadata["serial"], 0);
+    assert_eq!(metadata["tag"], "Source Builder");
+    assert_eq!(metadata["recipe_name"], "name / demo");
+    assert_eq!(
+        metadata["build_key"],
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    );
+    assert_eq!(
+        metadata["declared_object_hash"],
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    );
+    assert_eq!(
+        metadata["temp_dir"],
+        workspace.temp_dir().display().to_string()
+    );
+
+    let index = fs::read_to_string(layout.run_log_dir().join("index.jsonl")).unwrap();
+    let records = index.lines().collect::<Vec<_>>();
+    assert_eq!(records.len(), 1);
+    let record: Value = serde_json::from_str(records[0]).unwrap();
+    assert_eq!(record["serial"], 0);
+    assert_eq!(record["tag"], "Source Builder");
+    assert_eq!(record["recipe_name"], "name / demo");
+}
+
+#[test]
+fn parallel_workspace_allocation_does_not_reuse_serials() {
+    let temp = tempdir().unwrap();
+    let layout = Store::create(temp.path()).unwrap();
+    let mut handles = Vec::new();
+
+    for index in 0..8 {
+        let layout = layout.clone();
+        handles.push(thread::spawn(move || {
+            create_workspace(
+                &layout,
+                WorkspaceRequest::new(
+                    "Tree",
+                    Some(format!("node-{index}")),
+                    format!("build-{index}"),
+                ),
+            )
+            .unwrap()
+            .log_dir()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
+        }));
+    }
+
+    let names = handles
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(names.len(), 8);
+    for serial in 0..8 {
+        let prefix = format!("{serial:08}-Tree-node-");
+        assert!(names.iter().any(|name| name.starts_with(&prefix)));
+    }
 }
 
 #[test]

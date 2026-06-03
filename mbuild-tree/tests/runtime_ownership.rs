@@ -19,11 +19,9 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 #[test]
 fn tree_directory_output_materializes_runtime_ownership() -> TestResult<()> {
     let temp = tempdir()?;
-    let state_dir = temp.path().join("state");
-    let temp_dir = state_dir.join("tmp");
-    fs::create_dir_all(&state_dir)?;
+    let temp_dir = temp.path().join("tmp");
     fs::create_dir(&temp_dir)?;
-    let mut cx = BuildContext::with_noop_logger(state_dir, temp_dir);
+    let mut cx = BuildContext::with_noop_logger(temp_dir);
 
     let result = TreeBuilder.build_erased(
         json!({
@@ -135,11 +133,9 @@ fn tree_directory_output_materializes_runtime_ownership() -> TestResult<()> {
 fn tree_subset_materializes_subuid_owned_file_under_restrictive_dir() -> TestResult<()> {
     let temp = tempdir()?;
     let input = build_restrictive_tree(temp.path(), "input")?;
-    let state_dir = temp.path().join("subset-state");
-    let temp_dir = state_dir.join("tmp");
-    fs::create_dir_all(&state_dir)?;
+    let temp_dir = temp.path().join("subset-tmp");
     fs::create_dir(&temp_dir)?;
-    let mut cx = BuildContext::with_noop_logger(state_dir, temp_dir);
+    let mut cx = BuildContext::with_noop_logger(temp_dir);
 
     let result = TreeSubsetBuilder.build_erased(
         json!({ "include": ["owned/file"] }),
@@ -159,11 +155,9 @@ fn tree_merge_materializes_subuid_owned_file_under_restrictive_dir() -> TestResu
     let temp = tempdir()?;
     let left = build_restrictive_tree(temp.path(), "left")?;
     let right = build_simple_tree(temp.path(), "right")?;
-    let state_dir = temp.path().join("merge-state");
-    let temp_dir = state_dir.join("tmp");
-    fs::create_dir_all(&state_dir)?;
+    let temp_dir = temp.path().join("merge-tmp");
     fs::create_dir(&temp_dir)?;
-    let mut cx = BuildContext::with_noop_logger(state_dir, temp_dir);
+    let mut cx = BuildContext::with_noop_logger(temp_dir);
     let mut inputs = single_tree_input("left", &left);
     inputs.insert(
         "right",
@@ -269,11 +263,9 @@ fn build_tree(
     name: &str,
     config: serde_json::Value,
 ) -> TestResult<mbuild_core::StagedBuildResult> {
-    let state_dir = root.join(format!("{name}-state"));
-    let temp_dir = state_dir.join("tmp");
-    fs::create_dir_all(&state_dir)?;
+    let temp_dir = root.join(format!("{name}-tmp"));
     fs::create_dir(&temp_dir)?;
-    let mut cx = BuildContext::with_noop_logger(state_dir, temp_dir);
+    let mut cx = BuildContext::with_noop_logger(temp_dir);
     Ok(TreeBuilder.build_erased(config, BuilderInputs::empty(), &mut cx)?)
 }
 

@@ -50,11 +50,9 @@ pub use refs::{
 };
 pub use source::{SourceImportOutcome, SourceLookup, import_source_result, lookup_source_result};
 pub use store::{
-    QuarantinedStoreTemp, Store, StoreBuilderWorkspace, StoreRunLogLocations, StoreSourceWorkspace,
-    StoreTempQuarantineRequest, builder_workspace, list_quarantined_temps,
-    prepare_builder_workspace, prepare_source_workspace, quarantine_store_temp,
-    recreate_store_temp_dir_force, remove_store_temp_dir_force, run_log_locations,
-    source_workspace,
+    QuarantinedStoreTemp, Store, StoreTempQuarantineRequest, WorkspaceRequest, create_run_logger,
+    create_workspace, list_quarantined_temps, quarantine_store_temp, recreate_store_temp_dir_force,
+    remove_store_temp_dir_force,
 };
 
 #[cfg(test)]
@@ -66,7 +64,7 @@ pub(crate) use refs::{
     human_timestamp_from_rfc3339, load_current_publication, load_reuse_record, replace_symlink,
 };
 #[cfg(test)]
-pub(crate) use store::{OBJECTS_DIR, RESULTS_DIR};
+pub(crate) use store::{LOGS_DIR, OBJECTS_DIR, RESULTS_DIR};
 
 #[cfg(test)]
 mod tests;

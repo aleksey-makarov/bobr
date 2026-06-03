@@ -47,11 +47,10 @@ fn oci_extract_materializes_runtime_ownership() -> TestResult<()> {
 }
 
 fn build_context(root: &Path) -> TestResult<BuildContext> {
-    let state_dir = root.join("builder");
     let temp_dir = root.join("tmp");
     let _ = fs::remove_dir_all(&temp_dir);
     fs::create_dir_all(&temp_dir)?;
-    Ok(BuildContext::with_noop_logger(state_dir, temp_dir))
+    Ok(BuildContext::with_noop_logger(temp_dir))
 }
 
 fn create_oci_layout(root: &Path) -> TestResult<PathBuf> {

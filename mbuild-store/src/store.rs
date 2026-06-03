@@ -2,10 +2,14 @@ use crate::StoreError;
 use crate::fsutil as private_fs;
 use crate::{BuildKey, ResultId, ReuseKey};
 use fsobj_hash::ObjectHash;
-use serde_json::json;
+use mbuild_core::{BuildRunLogger, RunOptions, RunTimestamp, Workspace};
+use serde_json::{Map, Value, json};
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
@@ -18,35 +22,36 @@ pub(crate) const OBJECT_REFS_DIR: &str = "object-refs";
 pub(crate) const RESULT_REFS_DIR: &str = "result-refs";
 pub(crate) const FS_FILES_DIR: &str = "fs-files";
 pub(crate) const FS_TREES_DIR: &str = "fs-trees";
-pub(crate) const BUILDER_STATE_DIR: &str = "builder-state";
-pub(crate) const SOURCE_STATE_DIR: &str = "source-state";
 pub(crate) const QUARANTINE_DIR: &str = "quarantine";
 pub(crate) const LOGS_DIR: &str = "logs";
-pub(crate) const RUNS_DIR: &str = "runs";
 
-/// Store-owned directories used by a build run logger.
+/// Request for allocating a store-owned workspace for one run subject.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoreRunLogLocations {
-    /// Directory where event log files for complete build runs are created.
-    pub event_logs_dir: PathBuf,
-    /// Root directory for builder state and per-builder raw logs.
-    pub builder_state_dir: PathBuf,
+pub struct WorkspaceRequest {
+    /// Builder/source/scheduler tag used in log records and directory names.
+    pub tag: String,
+    /// Optional recipe or subject name used in log records and directory names.
+    pub recipe_name: Option<String>,
+    /// Full build key string associated with this subject.
+    pub build_key: String,
+    /// Additional metadata fields written to `meta.json`.
+    pub metadata: Map<String, Value>,
 }
 
-/// Store-owned workspace paths for a builder invocation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoreBuilderWorkspace {
-    /// Persistent state directory for this builder tag.
-    pub state_dir: PathBuf,
-    /// Temporary directory for this concrete build key.
-    pub temp_dir: PathBuf,
-}
-
-/// Store-owned workspace paths for source origin materialization.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoreSourceWorkspace {
-    /// Temporary root passed to the source origin implementation.
-    pub temp_dir: PathBuf,
+impl WorkspaceRequest {
+    /// Creates a request without additional metadata fields.
+    pub fn new(
+        tag: impl Into<String>,
+        recipe_name: Option<String>,
+        build_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            tag: tag.into(),
+            recipe_name,
+            build_key: build_key.into(),
+            metadata: Map::new(),
+        }
+    }
 }
 
 /// Request to move a store-owned temporary path into quarantine.
@@ -74,14 +79,23 @@ pub struct QuarantinedStoreTemp {
 /// Immutable handle to an `mbuild` store.
 ///
 /// `Store` is the primary public interface for paths and operations that belong
-/// to a store. It stores only the root path; all layout paths are derived from
-/// the root through methods, so callers cannot mutate the store layout fields.
+/// to a store. It also represents one runtime session: creating a `Store`
+/// allocates a unique run log directory under `<store>/logs`.
 ///
-/// A `Store` is cloneable and thread-safe. Cloning copies the root path handle,
-/// not store data.
+/// A `Store` is cloneable and thread-safe. Cloning shares the same run log
+/// directory and serial counter.
 #[derive(Debug, Clone)]
 pub struct Store {
+    inner: Arc<StoreInner>,
+}
+
+#[derive(Debug)]
+struct StoreInner {
     root: PathBuf,
+    run_log_dir: PathBuf,
+    created_at: String,
+    next_serial: AtomicU64,
+    index_lock: Mutex<()>,
 }
 
 impl Store {
@@ -93,71 +107,76 @@ impl Store {
     /// references inside those directories.
     pub fn create(root: &Path) -> Result<Self, StoreError> {
         validate_root(root)?;
-        let store = Self {
-            root: root.to_path_buf(),
-        };
-        store.ensure()?;
-        Ok(store)
+        ensure_store_layout(root)?;
+        let timestamp = RunTimestamp::now();
+        let logs_dir = root.join(LOGS_DIR);
+        let run_log_dir = create_run_log_dir(&logs_dir, timestamp.human())?;
+        Ok(Self {
+            inner: Arc::new(StoreInner {
+                root: root.to_path_buf(),
+                run_log_dir,
+                created_at: timestamp.rfc3339_utc().to_string(),
+                next_serial: AtomicU64::new(0),
+                index_lock: Mutex::new(()),
+            }),
+        })
     }
 
     pub(crate) fn root(&self) -> &Path {
-        &self.root
+        &self.inner.root
+    }
+
+    pub(crate) fn run_log_dir(&self) -> &Path {
+        &self.inner.run_log_dir
+    }
+
+    /// Returns the creation timestamp of this store session.
+    pub fn created_at(&self) -> &str {
+        &self.inner.created_at
     }
 
     /// Returns the content-addressed legacy object directory.
     pub(crate) fn objects_dir(&self) -> PathBuf {
-        self.root.join(OBJECTS_DIR)
+        self.root().join(OBJECTS_DIR)
     }
 
     /// Returns the build-key reference directory.
     pub(crate) fn builds_dir(&self) -> PathBuf {
-        self.root.join(BUILDS_DIR)
+        self.root().join(BUILDS_DIR)
     }
 
     /// Returns the reuse-key reference directory.
     pub(crate) fn reuses_dir(&self) -> PathBuf {
-        self.root.join(REUSES_DIR)
+        self.root().join(REUSES_DIR)
     }
 
     /// Returns the JSON result record directory.
     pub(crate) fn results_dir(&self) -> PathBuf {
-        self.root.join(RESULTS_DIR)
+        self.root().join(RESULTS_DIR)
     }
 
     /// Returns the public object reference directory.
     pub(crate) fn object_refs_dir(&self) -> PathBuf {
-        self.root.join(OBJECT_REFS_DIR)
+        self.root().join(OBJECT_REFS_DIR)
     }
 
     /// Returns the public result reference directory.
     pub(crate) fn result_refs_dir(&self) -> PathBuf {
-        self.root.join(RESULT_REFS_DIR)
+        self.root().join(RESULT_REFS_DIR)
     }
 
     /// Returns the content-addressed future fs-file object directory.
     pub fn fs_files_dir(&self) -> PathBuf {
-        self.root.join(FS_FILES_DIR)
+        self.root().join(FS_FILES_DIR)
     }
 
     /// Returns the future fs-tree manifest directory.
     pub fn fs_trees_dir(&self) -> PathBuf {
-        self.root.join(FS_TREES_DIR)
-    }
-
-    fn builder_state_dir(&self) -> PathBuf {
-        self.root.join(BUILDER_STATE_DIR)
-    }
-
-    fn source_state_dir(&self) -> PathBuf {
-        self.root.join(SOURCE_STATE_DIR)
+        self.root().join(FS_TREES_DIR)
     }
 
     fn quarantine_dir(&self) -> PathBuf {
-        self.root.join(QUARANTINE_DIR)
-    }
-
-    fn run_logs_dir(&self) -> PathBuf {
-        self.root.join(LOGS_DIR).join(RUNS_DIR)
+        self.root().join(QUARANTINE_DIR)
     }
 
     /// Returns the canonical path of an imported legacy object.
@@ -190,78 +209,49 @@ impl Store {
         self.results_dir()
             .join(format!("{}.json", result_id.to_hex()))
     }
-
-    fn ensure(&self) -> Result<(), StoreError> {
-        ensure_store_dir(&self.objects_dir(), "objects")?;
-        ensure_store_dir(&self.builds_dir(), "builds")?;
-        ensure_store_dir(&self.reuses_dir(), "reuses")?;
-        ensure_store_dir(&self.results_dir(), "results")?;
-        ensure_store_dir(&self.object_refs_dir(), "object-refs")?;
-        ensure_store_dir(&self.result_refs_dir(), "result-refs")?;
-        ensure_store_dir(&self.fs_files_dir(), "fs-files")?;
-        ensure_store_dir(&self.fs_trees_dir(), "fs-trees")?;
-        Ok(())
-    }
 }
 
-/// Returns store-owned directories needed by a build run logger.
-pub fn run_log_locations(store: &Store) -> StoreRunLogLocations {
-    StoreRunLogLocations {
-        event_logs_dir: store.run_logs_dir(),
-        builder_state_dir: store.builder_state_dir(),
-    }
-}
-
-/// Returns store-owned workspace paths for a builder invocation.
-pub fn builder_workspace(
-    store: &Store,
-    builder_tag: &str,
-    build_key: BuildKey,
-) -> StoreBuilderWorkspace {
-    let state_dir = store
-        .builder_state_dir()
-        .join(builder_tag.to_ascii_lowercase());
-    let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
-    StoreBuilderWorkspace {
-        state_dir,
-        temp_dir,
-    }
-}
-
-/// Creates the builder state directory and returns builder workspace paths.
-///
-/// The temporary directory itself is not recreated here because runtime cleanup
-/// policy may quarantine stale sandbox temp directories before creating it.
-pub fn prepare_builder_workspace(
-    store: &Store,
-    builder_tag: &str,
-    build_key: BuildKey,
-) -> Result<StoreBuilderWorkspace, StoreError> {
-    let workspace = builder_workspace(store, builder_tag, build_key);
-    fs::create_dir_all(&workspace.state_dir).map_err(|error| {
+/// Creates a build run logger for this store session.
+pub fn create_run_logger(store: &Store, options: RunOptions) -> Result<BuildRunLogger, StoreError> {
+    BuildRunLogger::new(store.run_log_dir(), store.created_at(), options).map_err(|error| {
         StoreError::Io(format!(
-            "failed to create builder state directory '{}': {error}",
-            workspace.state_dir.display()
+            "failed to create run logger under '{}': {error}",
+            store.run_log_dir().display()
+        ))
+    })
+}
+
+/// Allocates store-owned paths for one concrete builder/source/scheduler run.
+pub fn create_workspace(store: &Store, request: WorkspaceRequest) -> Result<Workspace, StoreError> {
+    let serial = store.inner.next_serial.fetch_add(1, Ordering::SeqCst);
+    let directory_name =
+        workspace_directory_name(serial, &request.tag, request.recipe_name.as_deref());
+    let log_dir = store.run_log_dir().join(directory_name);
+    fs::create_dir(&log_dir).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to create workspace log directory '{}': {error}",
+            log_dir.display()
         ))
     })?;
-    Ok(workspace)
-}
+    let raw_log_dir = log_dir.join("raw");
+    let temp_dir = log_dir.join("tmp");
+    fs::create_dir(&raw_log_dir).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to create workspace raw log directory '{}': {error}",
+            raw_log_dir.display()
+        ))
+    })?;
+    fs::create_dir(&temp_dir).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to create workspace temp directory '{}': {error}",
+            temp_dir.display()
+        ))
+    })?;
 
-/// Returns store-owned workspace paths for source origin materialization.
-pub fn source_workspace(store: &Store, key: BuildKey) -> StoreSourceWorkspace {
-    StoreSourceWorkspace {
-        temp_dir: store.source_state_dir().join("tmp").join(key.to_hex()),
-    }
-}
+    write_workspace_metadata(store, serial, &request, &log_dir, &raw_log_dir, &temp_dir)?;
+    append_workspace_index(store, serial, &request, &log_dir)?;
 
-/// Recreates the source origin temporary directory and returns its paths.
-pub fn prepare_source_workspace(
-    store: &Store,
-    key: BuildKey,
-) -> Result<StoreSourceWorkspace, StoreError> {
-    let workspace = source_workspace(store, key);
-    recreate_store_temp_dir_force(store, &workspace.temp_dir)?;
-    Ok(workspace)
+    Ok(Workspace::new(log_dir, raw_log_dir, temp_dir))
 }
 
 /// Moves a store-owned temporary path into the store quarantine directory.
@@ -409,6 +399,175 @@ fn ensure_store_dir(path: &Path, label: &str) -> Result<(), StoreError> {
             path.display()
         ))
     })
+}
+
+fn ensure_store_layout(root: &Path) -> Result<(), StoreError> {
+    ensure_store_dir(&root.join(OBJECTS_DIR), "objects")?;
+    ensure_store_dir(&root.join(BUILDS_DIR), "builds")?;
+    ensure_store_dir(&root.join(REUSES_DIR), "reuses")?;
+    ensure_store_dir(&root.join(RESULTS_DIR), "results")?;
+    ensure_store_dir(&root.join(OBJECT_REFS_DIR), "object-refs")?;
+    ensure_store_dir(&root.join(RESULT_REFS_DIR), "result-refs")?;
+    ensure_store_dir(&root.join(FS_FILES_DIR), "fs-files")?;
+    ensure_store_dir(&root.join(FS_TREES_DIR), "fs-trees")?;
+    ensure_store_dir(&root.join(LOGS_DIR), "logs")?;
+    Ok(())
+}
+
+pub(crate) fn create_run_log_dir(logs_dir: &Path, run_id: &str) -> Result<PathBuf, StoreError> {
+    for attempt in 0..1000 {
+        let name = if attempt == 0 {
+            run_id.to_string()
+        } else {
+            format!("{run_id}.{attempt}")
+        };
+        let path = logs_dir.join(name);
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(StoreError::Io(format!(
+                    "failed to create run log directory '{}': {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    Err(StoreError::Io(format!(
+        "failed to allocate unique run log directory under '{}'",
+        logs_dir.display()
+    )))
+}
+
+fn workspace_directory_name(serial: u64, tag: &str, recipe_name: Option<&str>) -> String {
+    let mut name = format!("{serial:08}-{}", safe_log_component_or(tag, "Builder"));
+    if let Some(recipe_name) = recipe_name {
+        let recipe_name = safe_log_component(recipe_name);
+        if !recipe_name.is_empty() {
+            name.push('-');
+            name.push_str(&recipe_name);
+        }
+    }
+    name
+}
+
+fn safe_log_component_or(value: &str, fallback: &str) -> String {
+    let component = safe_log_component(value);
+    if component.is_empty() {
+        fallback.to_string()
+    } else {
+        component
+    }
+}
+
+fn safe_log_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| match ch {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '_' | '-' => ch,
+            _ => '_',
+        })
+        .collect()
+}
+
+fn write_workspace_metadata(
+    store: &Store,
+    serial: u64,
+    request: &WorkspaceRequest,
+    log_dir: &Path,
+    raw_log_dir: &Path,
+    temp_dir: &Path,
+) -> Result<(), StoreError> {
+    let mut metadata = Map::new();
+    metadata.insert(
+        "schema".to_string(),
+        Value::String("mbuild-workspace-v1".to_string()),
+    );
+    metadata.insert("serial".to_string(), Value::Number(serial.into()));
+    metadata.insert("tag".to_string(), Value::String(request.tag.clone()));
+    if let Some(recipe_name) = &request.recipe_name {
+        metadata.insert(
+            "recipe_name".to_string(),
+            Value::String(recipe_name.clone()),
+        );
+    }
+    metadata.insert(
+        "build_key".to_string(),
+        Value::String(request.build_key.clone()),
+    );
+    metadata.insert(
+        "created_at".to_string(),
+        Value::String(store.created_at().to_string()),
+    );
+    metadata.insert(
+        "log_dir".to_string(),
+        Value::String(log_dir.display().to_string()),
+    );
+    metadata.insert(
+        "raw_log_dir".to_string(),
+        Value::String(raw_log_dir.display().to_string()),
+    );
+    metadata.insert(
+        "temp_dir".to_string(),
+        Value::String(temp_dir.display().to_string()),
+    );
+    for (key, value) in &request.metadata {
+        metadata.insert(key.clone(), value.clone());
+    }
+
+    let path = log_dir.join("meta.json");
+    let bytes = serde_json::to_vec_pretty(&Value::Object(metadata)).map_err(|error| {
+        StoreError::InvalidData(format!("failed to encode workspace metadata: {error}"))
+    })?;
+    fs::write(&path, bytes).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to write workspace metadata '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn append_workspace_index(
+    store: &Store,
+    serial: u64,
+    request: &WorkspaceRequest,
+    log_dir: &Path,
+) -> Result<(), StoreError> {
+    let _guard = store
+        .inner
+        .index_lock
+        .lock()
+        .map_err(|error| StoreError::Io(format!("failed to lock workspace index: {error}")))?;
+    let path = store.run_log_dir().join("index.jsonl");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| {
+            StoreError::Io(format!(
+                "failed to open workspace index '{}': {error}",
+                path.display()
+            ))
+        })?;
+    let record = json!({
+        "serial": serial,
+        "tag": &request.tag,
+        "recipe_name": &request.recipe_name,
+        "build_key": &request.build_key,
+        "log_dir": log_dir.display().to_string(),
+    });
+    let line = serde_json::to_string(&record).map_err(|error| {
+        StoreError::InvalidData(format!("failed to encode workspace index record: {error}"))
+    })?;
+    file.write_all(line.as_bytes())
+        .and_then(|_| file.write_all(b"\n"))
+        .map_err(|error| {
+            StoreError::Io(format!(
+                "failed to append workspace index '{}': {error}",
+                path.display()
+            ))
+        })
 }
 
 /// Removes and recreates a store-owned temporary directory.
