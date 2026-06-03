@@ -49,7 +49,13 @@ pub use refs::{
     resolve_reuse_for_build,
 };
 pub use source::{SourceImportOutcome, SourceLookup, import_source_result, lookup_source_result};
-pub use store::{Store, recreate_store_temp_dir_force, remove_store_temp_dir_force};
+pub use store::{
+    QuarantinedStoreTemp, Store, StoreBuilderWorkspace, StoreRunLogLocations, StoreSourceWorkspace,
+    StoreTempQuarantineRequest, builder_workspace, list_quarantined_temps,
+    prepare_builder_workspace, prepare_source_workspace, quarantine_store_temp,
+    recreate_store_temp_dir_force, remove_store_temp_dir_force, run_log_locations,
+    source_workspace,
+};
 
 #[cfg(test)]
 pub(crate) use json::canonical_json_bytes;

@@ -14,8 +14,8 @@ use mbuild_core::{
 };
 use mbuild_store::{
     BuildKey, RealizedResult, ResultRecord, ReuseInputIdentity, SourceImportOutcome, SourceLookup,
-    Store, import_source_result, lookup_source_result, publish_result,
-    recreate_store_temp_dir_force, remove_store_temp_dir_force,
+    Store, import_source_result, lookup_source_result, prepare_source_workspace, publish_result,
+    remove_store_temp_dir_force, run_log_locations,
 };
 use serde_json::{Map, Value, to_string_pretty};
 use std::collections::{HashMap, VecDeque};
@@ -118,9 +118,11 @@ pub fn run_recipe_request_in_store_with_options(
     validate_runtime_paths(paths)?;
 
     let layout = Store::create(&paths.store).map_err(map_store_error)?;
+    let log_locations = run_log_locations(&layout);
     let logger: Arc<BuildRunLogger> = Arc::new(
         BuildRunLogger::new(
-            layout.root(),
+            &log_locations.event_logs_dir,
+            &log_locations.builder_state_dir,
             RunOptions {
                 emit_progress: options.emit_progress,
             },
@@ -824,17 +826,8 @@ fn execute_source_recipe(
         return Err(RuntimeError::Build(message));
     }
 
-    let temp_root = layout
-        .root()
-        .join("source-state")
-        .join("tmp")
-        .join(key.to_hex());
-    recreate_store_temp_dir_force(layout, &temp_root).map_err(|error| {
-        RuntimeError::Store(format!(
-            "failed to prepare source temp dir '{}': {error}",
-            temp_root.display()
-        ))
-    })?;
+    let workspace = prepare_source_workspace(layout, key).map_err(map_store_error)?;
+    let temp_root = workspace.temp_dir;
     if let Err(error) = check_cancelled(&cancellation) {
         cleanup_source_temp_dir(layout, &temp_root, logger.as_ref());
         return Err(error);
@@ -933,6 +926,7 @@ mod tests {
     use mbuild_core::{CancellationToken, OriginContext, OriginSpec, ParsedOrigin};
     use mbuild_store::{
         PublishOutputRequest, compute_result_id, compute_reuse_key, publish_output,
+        run_log_locations, source_workspace,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -946,6 +940,18 @@ mod tests {
         let store_root = root.join(".mbuild");
         fs::create_dir_all(&store_root).unwrap();
         Store::create(&store_root).unwrap()
+    }
+
+    fn create_test_logger(layout: &Store) -> Arc<BuildRunLogger> {
+        let locations = run_log_locations(layout);
+        Arc::new(
+            BuildRunLogger::new(
+                &locations.event_logs_dir,
+                &locations.builder_state_dir,
+                RunOptions::default(),
+            )
+            .unwrap(),
+        )
     }
 
     #[derive(Debug, Clone)]
@@ -1109,7 +1115,7 @@ mod tests {
     fn source_temp_dir_is_removed_when_cancelled_after_materialize() {
         let temp = tempdir().unwrap();
         let layout = create_test_store(temp.path());
-        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
+        let logger = create_test_logger(&layout);
         let cancellation = CancellationToken::new();
         let object_hash = "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
@@ -1129,13 +1135,6 @@ mod tests {
             .expect_err("expected cancellation");
 
         assert_eq!(error.class(), "cancelled");
-        assert!(
-            !layout
-                .root()
-                .join("source-state")
-                .join("tmp")
-                .join(key.to_hex())
-                .exists()
-        );
+        assert!(!source_workspace(&layout, key).temp_dir.exists());
     }
 }

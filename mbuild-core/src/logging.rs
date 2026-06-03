@@ -97,7 +97,7 @@ pub struct RunOptions {
 
 #[derive(Debug)]
 pub struct BuildRunLogger {
-    store_root: PathBuf,
+    builder_state_dir: PathBuf,
     event_log_path: PathBuf,
     emit_progress: bool,
     run_timestamp: RunTimestamp,
@@ -106,29 +106,31 @@ pub struct BuildRunLogger {
 }
 
 impl BuildRunLogger {
-    pub fn new(store_root: &Path, options: RunOptions) -> Result<Self, String> {
-        let runs_dir = store_root.join("logs").join("runs");
-        fs::create_dir_all(&runs_dir).map_err(|error| {
+    pub fn new(
+        event_logs_dir: &Path,
+        builder_state_dir: &Path,
+        options: RunOptions,
+    ) -> Result<Self, String> {
+        fs::create_dir_all(event_logs_dir).map_err(|error| {
             format!(
                 "failed to create run logs directory '{}': {error}",
-                runs_dir.display()
+                event_logs_dir.display()
             )
         })?;
 
         let run_timestamp = RunTimestamp::now();
         let pid = std::process::id();
         let (event_log_path, file) =
-            create_run_log_file(&runs_dir, &format!("{}-{pid}", run_timestamp.human())).map_err(
-                |error| {
+            create_run_log_file(event_logs_dir, &format!("{}-{pid}", run_timestamp.human()))
+                .map_err(|error| {
                     format!(
                         "failed to create event log under '{}': {error}",
-                        runs_dir.display()
+                        event_logs_dir.display()
                     )
-                },
-            )?;
+                })?;
 
         Ok(Self {
-            store_root: store_root.to_path_buf(),
+            builder_state_dir: builder_state_dir.to_path_buf(),
             event_log_path,
             emit_progress: options.emit_progress,
             run_timestamp,
@@ -196,8 +198,7 @@ impl BuildRunLogger {
         label: &str,
     ) -> Result<PathBuf, String> {
         let logs_dir = self
-            .store_root
-            .join("builder-state")
+            .builder_state_dir
             .join(builder.to_ascii_lowercase())
             .join("logs")
             .join(sanitize_component(name));
@@ -419,7 +420,12 @@ mod tests {
     #[test]
     fn bound_logger_writes_builder_identity_to_event_log() {
         let temp = tempdir().unwrap();
-        let logger = Arc::new(BuildRunLogger::new(temp.path(), RunOptions::default()).unwrap());
+        let event_logs_dir = temp.path().join("logs").join("runs");
+        let builder_state_dir = temp.path().join("builder-state");
+        let logger = Arc::new(
+            BuildRunLogger::new(&event_logs_dir, &builder_state_dir, RunOptions::default())
+                .unwrap(),
+        );
         let build_key = "1111111111111111111111111111111111111111111111111111111111111111";
         let node_logger = logger.bind_node("Sandbox", "bash", build_key);
 
@@ -450,14 +456,17 @@ mod tests {
     #[test]
     fn bound_logger_allocates_raw_logs_under_sanitized_build_name() {
         let temp = tempdir().unwrap();
-        let logger = Arc::new(BuildRunLogger::new(temp.path(), RunOptions::default()).unwrap());
+        let event_logs_dir = temp.path().join("logs").join("runs");
+        let builder_state_dir = temp.path().join("builder-state");
+        let logger = Arc::new(
+            BuildRunLogger::new(&event_logs_dir, &builder_state_dir, RunOptions::default())
+                .unwrap(),
+        );
         let build_key = "2222222222222222222222222222222222222222222222222222222222222222";
         let node_logger = logger.bind_node("Sandbox", "bash debug/test", build_key);
 
         let path = node_logger.allocate_raw_log_path("podman/run").unwrap();
-        let expected_dir = temp
-            .path()
-            .join("builder-state")
+        let expected_dir = builder_state_dir
             .join("sandbox")
             .join("logs")
             .join("bash_debug_test");

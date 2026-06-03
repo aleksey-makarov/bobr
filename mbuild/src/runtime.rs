@@ -4,18 +4,16 @@ use mbuild_core::{
     CancellationToken,
 };
 use mbuild_store::{
-    BuildKey, PublishedBuild, ReuseInputIdentity, Store, StoreError, compute_reuse_key,
-    load_build_handle, materialize_build, materialize_build_with_trusted_hash,
-    recreate_store_temp_dir_force, remove_store_temp_dir_force, resolve_reuse_for_build,
+    BuildKey, PublishedBuild, ReuseInputIdentity, Store, StoreError, StoreTempQuarantineRequest,
+    compute_reuse_key, load_build_handle, materialize_build, materialize_build_with_trusted_hash,
+    prepare_builder_workspace, quarantine_store_temp, recreate_store_temp_dir_force,
+    remove_store_temp_dir_force, resolve_reuse_for_build,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use time::macros::format_description;
-use time::{OffsetDateTime, UtcOffset};
 
 #[derive(Debug)]
 pub enum RuntimeError {
@@ -218,22 +216,15 @@ pub(crate) fn build_context(
     logger: Arc<dyn BuildLogger>,
     cancellation: CancellationToken,
 ) -> Result<BuildContext, RuntimeError> {
-    let state_dir = layout
-        .root()
-        .join("builder-state")
-        .join(builder_tag.to_ascii_lowercase());
-    let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
-    fs::create_dir_all(&state_dir).map_err(|error| {
-        RuntimeError::Store(format!(
-            "failed to create builder state directory '{}': {error}",
-            state_dir.display()
-        ))
-    })?;
+    let workspace =
+        prepare_builder_workspace(layout, builder_tag, build_key).map_err(map_store_error)?;
     let cleanup = TempCleanupContext::new(layout, builder_tag, build_key);
-    recreate_empty_temp_dir_with_quarantine(&temp_dir, &cleanup, logger.as_ref())?;
-    Ok(BuildContext::with_noop_logger(state_dir, temp_dir)
-        .with_logger(logger)
-        .with_cancellation_token(cancellation))
+    recreate_empty_temp_dir_with_quarantine(&workspace.temp_dir, &cleanup, logger.as_ref())?;
+    Ok(
+        BuildContext::with_noop_logger(workspace.state_dir, workspace.temp_dir)
+            .with_logger(logger)
+            .with_cancellation_token(cancellation),
+    )
 }
 
 pub(crate) fn map_builder_error(error: BuilderError) -> RuntimeError {
@@ -322,7 +313,6 @@ enum TempCleanupMode {
 #[derive(Debug)]
 struct TempCleanupContext {
     layout: Store,
-    quarantine_dir: PathBuf,
     builder_tag: String,
     build_key: BuildKey,
     mode: TempCleanupMode,
@@ -332,7 +322,6 @@ impl TempCleanupContext {
     fn new(layout: &Store, builder_tag: &str, build_key: BuildKey) -> Self {
         Self {
             layout: layout.clone(),
-            quarantine_dir: layout.root().join("quarantine"),
             builder_tag: builder_tag.to_string(),
             build_key,
             mode: cleanup_mode_for_builder(builder_tag),
@@ -412,148 +401,39 @@ fn quarantine_temp_path(
     logger: &dyn BuildLogger,
     reason: String,
 ) -> Result<PathBuf, String> {
-    let name = temp_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| format!("invalid temp dir path '{}'", temp_dir.display()))?;
-    let quarantine_dir = &cleanup.quarantine_dir;
-    fs::create_dir_all(quarantine_dir).map_err(|error| {
+    let quarantined = quarantine_store_temp(
+        &cleanup.layout,
+        StoreTempQuarantineRequest {
+            temp_path: temp_dir.to_path_buf(),
+            builder_tag: cleanup.builder_tag.clone(),
+            build_key: cleanup.build_key,
+            reason: reason.clone(),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let target = quarantined.path;
+    log_runtime_event(
+        logger,
+        match cleanup.mode {
+            TempCleanupMode::DirectQuarantine => BuildLogLevel::Info,
+            TempCleanupMode::RemoveThenQuarantine => BuildLogLevel::Warn,
+        },
+        "temp-quarantine",
         format!(
-            "failed to create quarantine directory '{}': {error}",
-            quarantine_dir.display()
-        )
-    })?;
-    let stamp = current_epoch_nanos()?;
-    let timestamp = human_quarantine_timestamp(stamp)?;
-
-    for counter in 1..1000 {
-        let suffix = if counter == 1 {
-            timestamp.clone()
-        } else {
-            format!("{timestamp}.{counter}")
-        };
-        let target = quarantine_dir.join(format!(
-            "{}-{}-{}-{name}",
-            suffix,
-            safe_quarantine_component(&cleanup.builder_tag),
-            cleanup.build_key.to_hex(),
-        ));
-        if target.exists() || target.is_symlink() {
-            continue;
-        }
-        match fs::rename(temp_dir, &target) {
-            Ok(()) => {
-                write_quarantine_metadata(&target, temp_dir, cleanup, &reason, stamp, logger);
-                log_runtime_event(
-                    logger,
-                    match cleanup.mode {
-                        TempCleanupMode::DirectQuarantine => BuildLogLevel::Info,
-                        TempCleanupMode::RemoveThenQuarantine => BuildLogLevel::Warn,
-                    },
-                    "temp-quarantine",
-                    format!(
-                        "moved temp dir '{}' to global quarantine '{}': {reason}",
-                        temp_dir.display(),
-                        target.display()
-                    ),
-                );
-                return Ok(target);
-            }
-            Err(_) if target.exists() || target.is_symlink() => continue,
-            Err(error) => {
-                return Err(format!(
-                    "failed to move temp dir '{}' to '{}': {error}",
-                    temp_dir.display(),
-                    target.display()
-                ));
-            }
-        }
+            "moved temp dir '{}' to global quarantine '{}': {reason}",
+            temp_dir.display(),
+            target.display()
+        ),
+    );
+    if let Some(metadata_error) = quarantined.metadata_error {
+        log_runtime_event(
+            logger,
+            BuildLogLevel::Warn,
+            "cleanup-warning",
+            metadata_error,
+        );
     }
-
-    Err(format!(
-        "failed to find quarantine target for temp dir '{}' under '{}'",
-        temp_dir.display(),
-        quarantine_dir.display()
-    ))
-}
-
-fn human_quarantine_timestamp(stamp: u128) -> Result<String, String> {
-    let nanos = i128::try_from(stamp)
-        .map_err(|_| format!("quarantine timestamp is out of range: {stamp}"))?;
-    let parsed = OffsetDateTime::from_unix_timestamp_nanos(nanos)
-        .map_err(|error| format!("failed to parse quarantine timestamp {stamp}: {error}"))?;
-    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    let local = parsed.to_offset(offset);
-    let format = format_description!("[year repr:last_two][month][day][hour][minute][second]");
-    local
-        .format(&format)
-        .map_err(|error| format!("failed to format quarantine timestamp: {error}"))
-}
-
-fn current_epoch_nanos() -> Result<u128, String> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .map_err(|error| format!("system time before UNIX_EPOCH: {error}"))
-}
-
-fn safe_quarantine_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-fn write_quarantine_metadata(
-    target: &Path,
-    original_path: &Path,
-    cleanup: &TempCleanupContext,
-    reason: &str,
-    stamp: u128,
-    logger: &dyn BuildLogger,
-) {
-    let Some(file_name) = target.file_name().and_then(|name| name.to_str()) else {
-        return;
-    };
-    let metadata_path = target.with_file_name(format!("{file_name}.json"));
-    let metadata = json!({
-        "schema": "mbuild-quarantine-v1",
-        "builder_tag": &cleanup.builder_tag,
-        "build_key": cleanup.build_key.to_hex(),
-        "original_path": original_path.display().to_string(),
-        "quarantine_path": target.display().to_string(),
-        "reason": reason,
-        "created_at_unix_nanos": stamp.to_string(),
-    });
-    match serde_json::to_vec_pretty(&metadata) {
-        Ok(bytes) => {
-            if let Err(error) = fs::write(&metadata_path, bytes) {
-                log_runtime_event(
-                    logger,
-                    BuildLogLevel::Warn,
-                    "cleanup-warning",
-                    format!(
-                        "failed to write quarantine metadata '{}': {error}",
-                        metadata_path.display()
-                    ),
-                );
-            }
-        }
-        Err(error) => {
-            log_runtime_event(
-                logger,
-                BuildLogLevel::Warn,
-                "cleanup-warning",
-                format!("failed to encode quarantine metadata: {error}"),
-            );
-        }
-    }
+    Ok(target)
 }
 
 #[cfg(test)]
@@ -564,7 +444,8 @@ mod tests {
         StagedBuildResult, TypedBuilder,
     };
     use mbuild_store::{
-        PublishOutputRequest, ReuseInputIdentity, compute_build_key, publish_output,
+        PublishOutputRequest, ReuseInputIdentity, builder_workspace, compute_build_key,
+        list_quarantined_temps, publish_output, run_log_locations,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
@@ -577,6 +458,18 @@ mod tests {
         let store_root = root.join(".mbuild");
         fs::create_dir_all(&store_root).unwrap();
         Store::create(&store_root).unwrap()
+    }
+
+    fn create_test_logger(layout: &Store) -> Arc<BuildRunLogger> {
+        let locations = run_log_locations(layout);
+        Arc::new(
+            BuildRunLogger::new(
+                &locations.event_logs_dir,
+                &locations.builder_state_dir,
+                RunOptions::default(),
+            )
+            .unwrap(),
+        )
     }
 
     #[derive(Debug, Deserialize)]
@@ -786,12 +679,13 @@ mod tests {
     fn execute_builder_node_prepares_dirs_and_cleans_temp_on_success() {
         let temp = tempdir().unwrap();
         let layout = create_test_store(temp.path());
-        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
+        let logger = create_test_logger(&layout);
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
-        let state_dir = layout.root().join("builder-state").join("runtimetest");
-        let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
+        let workspace = builder_workspace(&layout, "RuntimeTest", build_key);
+        let state_dir = workspace.state_dir;
+        let temp_dir = workspace.temp_dir;
         fs::create_dir_all(&temp_dir).unwrap();
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
@@ -823,11 +717,10 @@ mod tests {
         let layout = create_test_store(temp.path());
         let config = json!({});
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
-        let run_logger =
-            Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
+        let run_logger = create_test_logger(&layout);
         let logger = run_logger.bind_node("RuntimeTest", "runtime-test", build_key);
-        let state_dir = layout.root().join("builder-state").join("runtimetest");
-        let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
+        let workspace = builder_workspace(&layout, "RuntimeTest", build_key);
+        let temp_dir = workspace.temp_dir;
         fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
         let stale_target = temp.path().join("missing-stale-target");
         symlink(&stale_target, &temp_dir).unwrap();
@@ -863,12 +756,11 @@ mod tests {
     fn execute_sandbox_builder_quarantines_temp_without_removing_it() {
         let temp = tempdir().unwrap();
         let layout = create_test_store(temp.path());
-        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
+        let logger = create_test_logger(&layout);
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("Sandbox", &config, &[]).unwrap();
-        let state_dir = layout.root().join("builder-state").join("sandbox");
-        let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
+        let temp_dir = builder_workspace(&layout, "Sandbox", build_key).temp_dir;
 
         let published = execute_builder_node(ExecuteBuilderNodeRequest {
             layout: &layout,
@@ -895,12 +787,11 @@ mod tests {
     fn execute_sandbox_builder_quarantines_stale_temp_before_recreate() {
         let temp = tempdir().unwrap();
         let layout = create_test_store(temp.path());
-        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
+        let logger = create_test_logger(&layout);
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("Sandbox", &config, &[]).unwrap();
-        let state_dir = layout.root().join("builder-state").join("sandbox");
-        let temp_dir = state_dir.join("tmp").join(build_key.to_hex());
+        let temp_dir = builder_workspace(&layout, "Sandbox", build_key).temp_dir;
         fs::create_dir_all(&temp_dir).unwrap();
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
@@ -932,16 +823,11 @@ mod tests {
     fn execute_builder_node_cleans_temp_on_failure() {
         let temp = tempdir().unwrap();
         let layout = create_test_store(temp.path());
-        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
+        let logger = create_test_logger(&layout);
         let config = Value::Object(Map::new());
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
-        let temp_dir = layout
-            .root()
-            .join("builder-state")
-            .join("runtimetest")
-            .join("tmp")
-            .join(build_key.to_hex());
+        let temp_dir = builder_workspace(&layout, "RuntimeTest", build_key).temp_dir;
         fs::create_dir_all(&temp_dir).unwrap();
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
@@ -967,15 +853,20 @@ mod tests {
     fn cleanup_temp_dir_quarantines_when_remove_fails() {
         let temp = tempdir().unwrap();
         let layout = create_test_store(temp.path());
-        let run_logger =
-            Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
+        let run_logger = create_test_logger(&layout);
         let logger = run_logger.bind_node(
             "RuntimeTest",
             "runtime-test",
             compute_build_key("RuntimeTest", &json!({}), &[]).unwrap(),
         );
-        let state_dir = layout.root().join("builder-state").join("runtimetest");
-        let temp_dir = state_dir.join("tmp").join("stale");
+        let temp_dir = builder_workspace(
+            &layout,
+            "RuntimeTest",
+            compute_build_key("RuntimeTest", &json!({}), &[]).unwrap(),
+        )
+        .state_dir
+        .join("tmp")
+        .join("stale");
         fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
         fs::write(&temp_dir, b"not a directory\n").unwrap();
 
@@ -1001,16 +892,11 @@ mod tests {
     fn execute_builder_node_cleans_temp_on_materialize_failure() {
         let temp = tempdir().unwrap();
         let layout = create_test_store(temp.path());
-        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
+        let logger = create_test_logger(&layout);
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
-        let temp_dir = layout
-            .root()
-            .join("builder-state")
-            .join("runtimetest")
-            .join("tmp")
-            .join(build_key.to_hex());
+        let temp_dir = builder_workspace(&layout, "RuntimeTest", build_key).temp_dir;
 
         let error = execute_builder_node(ExecuteBuilderNodeRequest {
             layout: &layout,
@@ -1033,7 +919,7 @@ mod tests {
     fn execute_builder_node_pre_cancelled_does_not_start_builder() {
         let temp = tempdir().unwrap();
         let layout = create_test_store(temp.path());
-        let logger = Arc::new(BuildRunLogger::new(layout.root(), RunOptions::default()).unwrap());
+        let logger = create_test_logger(&layout);
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
@@ -1055,24 +941,14 @@ mod tests {
 
         assert_eq!(error.class(), "cancelled");
         assert!(
-            !layout
-                .root()
-                .join("builder-state")
-                .join("runtimetest")
-                .join("tmp")
-                .join(build_key.to_hex())
+            !builder_workspace(&layout, "RuntimeTest", build_key)
+                .temp_dir
                 .exists()
         );
     }
 
     fn quarantine_entries(layout: &Store) -> Vec<PathBuf> {
-        let mut entries = fs::read_dir(layout.root().join("quarantine"))
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) != Some("json"))
-            .collect::<Vec<_>>();
-        entries.sort();
-        entries
+        list_quarantined_temps(layout).unwrap()
     }
 
     fn assert_quarantine_metadata(path: &Path, builder_tag: &str, build_key: BuildKey) {
@@ -1101,9 +977,6 @@ mod tests {
             .unwrap()
             .parse::<u128>()
             .unwrap();
-        assert_eq!(
-            name_timestamp,
-            human_quarantine_timestamp(created_at).unwrap()
-        );
+        assert!(created_at > 0);
     }
 }
