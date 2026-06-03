@@ -70,13 +70,13 @@ fn group_root_builds_independent_inputs() {
     write_recipe(&recipe_path, &recipe);
 
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-
-    let object_path = store_root(workspace.path())
-        .join("objects")
-        .join(realized.object_hash.to_string());
-    assert_eq!(fs::read(object_path).unwrap(), b"");
-
     let layout = Store::create(&store_root(workspace.path())).unwrap();
+    let root_output = load_public_output(&layout, "all-targets")
+        .unwrap()
+        .expect("expected root public output");
+    assert_eq!(root_output.result.object_hash, realized.object_hash);
+    assert_eq!(fs::read(&root_output.object_path).unwrap(), b"");
+
     for name in ["all-targets", "first-target", "second-target"] {
         assert!(
             load_public_output(&layout, name).unwrap().is_some(),
@@ -718,11 +718,13 @@ fn source_path_tar_materializes_unpacked_tree_without_build_handle() {
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let object_path = store_root(workspace.path())
-        .join("objects")
-        .join(object_hash.to_hex());
+    let public_output = load_public_output(&layout, "source-tar")
+        .unwrap()
+        .expect("expected public output");
+    let object_path = public_output.object_path;
     assert!(realized.build_key.is_none());
     assert_eq!(realized.object_hash, object_hash);
+    assert_eq!(public_output.result.object_hash, object_hash);
     assert!(object_path.is_dir());
     assert_eq!(
         fs::read_to_string(object_path.join("pkg/README.txt")).unwrap(),

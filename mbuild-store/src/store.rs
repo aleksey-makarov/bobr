@@ -50,7 +50,7 @@ impl Store {
     }
 
     /// Returns the content-addressed legacy object directory.
-    pub fn objects_dir(&self) -> PathBuf {
+    pub(crate) fn objects_dir(&self) -> PathBuf {
         self.root.join(OBJECTS_DIR)
     }
 
