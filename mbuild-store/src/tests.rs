@@ -838,7 +838,7 @@ fn publish_output_accepts_directory_objects() {
 }
 
 #[test]
-fn materialize_build_accepts_precomputed_hash_for_unreadable_object() {
+fn materialize_build_trusted_hash_accepts_unreadable_object() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -850,14 +850,14 @@ fn materialize_build_accepts_precomputed_hash_for_unreadable_object() {
 
     let build_key = build_key_for("Tree", json!({ "kind": "private-tree" }), &[]);
     let reuse_key = reuse_key_for("Tree", json!({ "kind": "private-tree" }), &[]);
-    let published = materialize_build(
+    let published = materialize_build_with_trusted_hash(
         &layout,
         build_key,
         reuse_key,
         sample_created_at(),
         vec![],
         &stage_dir,
-        Some(object_hash),
+        object_hash,
     )
     .unwrap();
 
@@ -966,35 +966,35 @@ fn existing_object_reuse_removes_staged_path() {
 }
 
 #[test]
-fn existing_precomputed_object_reuse_leaves_staged_path_for_runtime_cleanup() {
+fn existing_trusted_object_reuse_leaves_staged_path_for_runtime_cleanup() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
     let object_hash = hash_path(&first_stage).unwrap();
-    materialize_build(
+    materialize_build_with_trusted_hash(
         &layout,
         build_key_for("CasTest", json!({ "kind": "first" }), &[]),
         reuse_key_for("CasTest", json!({ "kind": "first" }), &[]),
         sample_created_at(),
         vec![],
         &first_stage,
-        Some(object_hash),
+        object_hash,
     )
     .unwrap();
 
     let second_stage = temp.path().join("second.txt");
     fs::write(&second_stage, b"hello").unwrap();
     let second_stage_path = second_stage.clone();
-    materialize_build(
+    materialize_build_with_trusted_hash(
         &layout,
         build_key_for("CasTest", json!({ "kind": "second" }), &[]),
         reuse_key_for("CasTest", json!({ "kind": "second" }), &[]),
         sample_created_at(),
         vec![],
         &second_stage,
-        Some(object_hash),
+        object_hash,
     )
     .unwrap();
 

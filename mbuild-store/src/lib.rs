@@ -36,6 +36,8 @@ pub use fsobj_hash::ObjectHash;
 pub use id::{BuildKey, ParseBuildKeyError, ResultId, ReuseKey};
 pub use key::{compute_build_key, compute_result_id, compute_reuse_key};
 pub use object::import_object;
+#[doc(hidden)]
+pub use publish::materialize_build_with_trusted_hash;
 pub use publish::{PublishOutputRequest, PublishedOutput, materialize_build, publish_output};
 pub use record::{
     Build, PublishedBuild, RealizedResult, ResultRecord, ReuseInputIdentity, StoredResult,

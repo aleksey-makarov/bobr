@@ -85,7 +85,6 @@ pub fn publish_output(
         &request.created_at,
         request.inputs,
         &request.staged_path,
-        None,
     )?;
     crate::refs::publish_result(store, &request.output_name, published.result.result_id())?;
 
@@ -102,9 +101,6 @@ pub fn publish_output(
 /// `staged_path`, stores the result record, writes the reuse ref, and writes the
 /// build handle ref. Call [`publish_output`] when the caller also needs to
 /// update an output name under `object-refs` and `result-refs`.
-///
-/// When `precomputed_object_hash` is supplied, the staged object is imported
-/// under that hash without hashing it again.
 pub fn materialize_build(
     store: &Store,
     build_key: BuildKey,
@@ -112,10 +108,54 @@ pub fn materialize_build(
     created_at: &str,
     inputs: Vec<ReuseInputIdentity>,
     staged_path: &Path,
-    precomputed_object_hash: Option<ObjectHash>,
 ) -> Result<PublishedBuild, StoreError> {
-    let object_hash =
-        crate::object::import_object_with_hash(store, staged_path, precomputed_object_hash)?;
+    materialize_build_impl(
+        store,
+        build_key,
+        reuse_key,
+        created_at,
+        inputs,
+        staged_path,
+        None,
+    )
+}
+
+/// Imports a staged object under a trusted precomputed hash.
+///
+/// This is a workspace-internal fast path for builders that have already
+/// validated the staged output against a canonical model. Normal callers should
+/// use [`materialize_build`], which hashes `staged_path` inside the store API.
+#[doc(hidden)]
+pub fn materialize_build_with_trusted_hash(
+    store: &Store,
+    build_key: BuildKey,
+    reuse_key: ReuseKey,
+    created_at: &str,
+    inputs: Vec<ReuseInputIdentity>,
+    staged_path: &Path,
+    trusted_object_hash: ObjectHash,
+) -> Result<PublishedBuild, StoreError> {
+    materialize_build_impl(
+        store,
+        build_key,
+        reuse_key,
+        created_at,
+        inputs,
+        staged_path,
+        Some(trusted_object_hash),
+    )
+}
+
+fn materialize_build_impl(
+    store: &Store,
+    build_key: BuildKey,
+    reuse_key: ReuseKey,
+    created_at: &str,
+    inputs: Vec<ReuseInputIdentity>,
+    staged_path: &Path,
+    object_hash: Option<ObjectHash>,
+) -> Result<PublishedBuild, StoreError> {
+    let object_hash = crate::object::import_object_with_hash(store, staged_path, object_hash)?;
     let result_id = crate::key::compute_result_id(object_hash)?;
     let result = ResultRecord {
         object_hash,

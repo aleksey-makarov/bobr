@@ -5,8 +5,8 @@ use mbuild_core::{
 };
 use mbuild_store::{
     BuildKey, PublishedBuild, ReuseInputIdentity, Store, StoreError, compute_reuse_key,
-    load_build_handle, materialize_build, recreate_store_temp_dir_force,
-    remove_store_temp_dir_force, resolve_reuse_for_build,
+    load_build_handle, materialize_build, materialize_build_with_trusted_hash,
+    recreate_store_temp_dir_force, remove_store_temp_dir_force, resolve_reuse_for_build,
 };
 use serde_json::{Value, json};
 use std::fmt;
@@ -160,15 +160,25 @@ pub(crate) fn execute_builder_node(
         cleanup_temp_dir(&context.temp_dir, &cleanup, logger.as_ref());
         return Err(error);
     }
-    let published = materialize_build(
-        layout,
-        build_key,
-        reuse_key,
-        created_at,
-        inputs_identity,
-        &staged.staged_path,
-        staged.object_hash,
-    )
+    let published = match staged.object_hash {
+        Some(object_hash) => materialize_build_with_trusted_hash(
+            layout,
+            build_key,
+            reuse_key,
+            created_at,
+            inputs_identity,
+            &staged.staged_path,
+            object_hash,
+        ),
+        None => materialize_build(
+            layout,
+            build_key,
+            reuse_key,
+            created_at,
+            inputs_identity,
+            &staged.staged_path,
+        ),
+    }
     .map_err(|error| {
         log_runtime_event(
             logger.as_ref(),
