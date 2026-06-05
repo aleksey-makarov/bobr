@@ -1,12 +1,12 @@
 mod checked_divide;
 mod runtime;
-mod runtime_child;
+mod runtime_ns;
 mod runtime_plain;
 mod uppercase;
 
 use crate::runtime::{Runtime, RuntimeFunction, RuntimeResult, TypedRuntimeFunction};
 use checked_divide::{CheckedDivide, DivideInput};
-use runtime_child::ChildRuntime;
+use runtime_ns::NsRuntime;
 use runtime_plain::PlainRuntime;
 use std::process::ExitCode;
 use uppercase::{Uppercase, UppercaseInput};
@@ -22,15 +22,15 @@ fn main() -> ExitCode {
 }
 
 fn real_main() -> RuntimeResult<()> {
-    if std::env::args().nth(1).as_deref() == Some("--child-runtime-worker") {
-        return runtime_child::run_worker(example_functions());
+    if std::env::args().nth(1).as_deref() == Some("--ns-runtime-worker") {
+        return runtime_ns::run_worker(example_functions());
     }
 
     let uppercase = Uppercase;
     let divide = CheckedDivide;
 
     let mut plain = PlainRuntime::new();
-    let mut child = ChildRuntime::new()?;
+    let mut namespace = NsRuntime::new()?;
 
     run_example(
         "plain",
@@ -50,16 +50,16 @@ fn real_main() -> RuntimeResult<()> {
         },
     )?;
     run_example(
-        "child",
-        &mut child,
+        "namespace",
+        &mut namespace,
         &uppercase,
         UppercaseInput {
-            text: "hello from child runtime".to_string(),
+            text: "hello from namespace runtime".to_string(),
         },
     )?;
     run_example(
-        "child",
-        &mut child,
+        "namespace",
+        &mut namespace,
         &divide,
         DivideInput {
             dividend: 42,
