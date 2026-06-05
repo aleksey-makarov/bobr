@@ -1,18 +1,13 @@
-#[path = "checked-divide.rs"]
 mod checked_divide;
 mod runtime;
-#[path = "runtime-child.rs"]
 mod runtime_child;
-#[path = "runtime-plain.rs"]
 mod runtime_plain;
-#[path = "uppercase.rs"]
 mod uppercase;
 
 use crate::runtime::{Runtime, RuntimeFunction, RuntimeResult, TypedRuntimeFunction};
 use checked_divide::{CheckedDivide, DivideInput};
 use runtime_child::ChildRuntime;
 use runtime_plain::PlainRuntime;
-use serde::Serialize;
 use std::process::ExitCode;
 use uppercase::{Uppercase, UppercaseInput};
 
@@ -35,6 +30,8 @@ fn real_main() -> RuntimeResult<()> {
     let divide = CheckedDivide;
 
     let mut plain = PlainRuntime::new();
+    let mut child = ChildRuntime::new()?;
+
     run_example(
         "plain",
         &mut plain,
@@ -52,8 +49,6 @@ fn real_main() -> RuntimeResult<()> {
             divisor: 5,
         },
     )?;
-
-    let mut child = ChildRuntime::spawn_current_exe()?;
     run_example(
         "child",
         &mut child,
@@ -84,7 +79,6 @@ fn run_example<R, F>(
 where
     R: Runtime,
     F: TypedRuntimeFunction,
-    F::Output: Serialize,
 {
     let output = runtime.run(function, input)?;
     println!(

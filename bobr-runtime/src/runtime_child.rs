@@ -14,7 +14,7 @@ pub struct ChildRuntime {
 }
 
 impl ChildRuntime {
-    pub fn spawn_current_exe() -> RuntimeResult<Self> {
+    pub fn new() -> RuntimeResult<Self> {
         let executable = env::current_exe().map_err(|error| {
             RuntimeError::new(format!("failed to locate current executable: {error}"))
         })?;
