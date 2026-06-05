@@ -10,11 +10,10 @@ impl PlainRuntime {
 }
 
 impl Runtime for PlainRuntime {
-    fn run_erased(
-        &mut self,
-        function: &dyn RuntimeFunction,
-        input: Vec<u8>,
-    ) -> Result<Vec<u8>, RuntimeError> {
-        function.call_erased(&input)
+    fn run<F>(&mut self, function: &F, input: F::Input) -> Result<F::Output, RuntimeError>
+    where
+        F: RuntimeFunction,
+    {
+        function.call(input)
     }
 }

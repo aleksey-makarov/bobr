@@ -1,4 +1,4 @@
-use crate::runtime::{RuntimeError, TypedRuntimeFunction};
+use crate::runtime::{RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy)]
@@ -19,7 +19,7 @@ pub struct DivideOutput {
     pub pid: u32,
 }
 
-impl TypedRuntimeFunction for CheckedDivide {
+impl RuntimeFunction for CheckedDivide {
     type Input = DivideInput;
     type Output = DivideOutput;
 
@@ -27,7 +27,7 @@ impl TypedRuntimeFunction for CheckedDivide {
         "checked-divide"
     }
 
-    fn call_typed(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {
+    fn call(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {
         if input.divisor == 0 {
             return Err(RuntimeError::new("division by zero"));
         }

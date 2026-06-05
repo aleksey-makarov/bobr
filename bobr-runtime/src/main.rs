@@ -4,9 +4,9 @@ mod runtime_ns;
 mod runtime_plain;
 mod uppercase;
 
-use crate::runtime::{Runtime, RuntimeFunction, RuntimeResult, TypedRuntimeFunction};
+use crate::runtime::{Runtime, RuntimeFunction, RuntimeResult};
 use checked_divide::{CheckedDivide, DivideInput};
-use runtime_ns::NsRuntime;
+use runtime_ns::{NsFunction, NsRuntime};
 use runtime_plain::PlainRuntime;
 use std::process::ExitCode;
 use uppercase::{Uppercase, UppercaseInput};
@@ -78,19 +78,17 @@ fn run_example<R, F>(
 ) -> RuntimeResult<()>
 where
     R: Runtime,
-    F: TypedRuntimeFunction,
+    F: RuntimeFunction,
 {
     let output = runtime.run(function, input)?;
-    println!(
-        "{} via {runtime_name}: {}",
-        function.name(),
-        serde_json::to_string_pretty(&output)?
-    );
+    let output = serde_json::to_string_pretty(&output)
+        .map_err(|error| crate::runtime::RuntimeError::new(error.to_string()))?;
+    println!("{} via {runtime_name}: {}", function.name(), output);
     Ok(())
 }
 
-fn example_functions() -> Vec<Box<dyn RuntimeFunction>> {
-    vec![Box::new(Uppercase), Box::new(CheckedDivide)]
+fn example_functions() -> Vec<NsFunction> {
+    vec![NsFunction::new(Uppercase), NsFunction::new(CheckedDivide)]
 }
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use crate::runtime::{RuntimeError, TypedRuntimeFunction};
+use crate::runtime::{RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy)]
@@ -17,7 +17,7 @@ pub struct UppercaseOutput {
     pub pid: u32,
 }
 
-impl TypedRuntimeFunction for Uppercase {
+impl RuntimeFunction for Uppercase {
     type Input = UppercaseInput;
     type Output = UppercaseOutput;
 
@@ -25,7 +25,7 @@ impl TypedRuntimeFunction for Uppercase {
         "uppercase"
     }
 
-    fn call_typed(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {
+    fn call(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {
         Ok(UppercaseOutput {
             text: input.text.to_uppercase(),
             pid: std::process::id(),

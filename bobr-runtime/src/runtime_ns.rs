@@ -1,10 +1,12 @@
-use crate::runtime::{JsonCodec, Runtime, RuntimeError, RuntimeFunction, RuntimeResult, WireCodec};
+use crate::runtime::{Runtime, RuntimeError, RuntimeFunction, RuntimeResult};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
 use std::ffi::{CStr, CString};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::marker::PhantomData;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
@@ -17,19 +19,51 @@ const WORKER_ARG: &str = "--ns-runtime-worker";
 const SUBUID_PATH: &str = "/etc/subuid";
 const SUBGID_PATH: &str = "/etc/subgid";
 
-pub struct NsRuntime {
+pub trait WireCodec {
+    fn encode<T: Serialize>(value: &T) -> RuntimeResult<Vec<u8>>;
+
+    fn decode<T: DeserializeOwned>(bytes: &[u8]) -> RuntimeResult<T>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct JsonCodec;
+
+impl WireCodec for JsonCodec {
+    fn encode<T: Serialize>(value: &T) -> RuntimeResult<Vec<u8>> {
+        serde_json::to_vec(value).map_err(|error| RuntimeError::new(error.to_string()))
+    }
+
+    fn decode<T: DeserializeOwned>(bytes: &[u8]) -> RuntimeResult<T> {
+        serde_json::from_slice(bytes).map_err(|error| RuntimeError::new(error.to_string()))
+    }
+}
+
+pub struct NsRuntime<C = JsonCodec> {
     child: Option<NsChild>,
     stdin: Option<BufWriter<File>>,
     stdout: BufReader<File>,
     stderr_forwarder: Option<JoinHandle<()>>,
+    shutdown_request: Vec<u8>,
     next_id: u64,
+    _codec: PhantomData<C>,
 }
 
-impl NsRuntime {
+impl NsRuntime<JsonCodec> {
     pub fn new() -> RuntimeResult<Self> {
+        Self::new_with_codec()
+    }
+}
+
+impl<C> NsRuntime<C>
+where
+    C: WireCodec,
+{
+    pub fn new_with_codec() -> RuntimeResult<Self> {
         let executable = env::current_exe().map_err(|error| {
             RuntimeError::new(format!("failed to locate current executable: {error}"))
         })?;
+        let shutdown_request = C::encode(&ParentToChild::Shutdown)
+            .map_err(|error| RuntimeError::new(format!("failed to encode shutdown: {error}")))?;
         let idmap = HostIdmap::from_host_environment()?;
         let tools = NsTools::resolve()?;
         let launch = fork_ns_worker(&executable)?;
@@ -50,36 +84,53 @@ impl NsRuntime {
             stdin: Some(launch.stdin),
             stdout: launch.stdout,
             stderr_forwarder: Some(launch.stderr_forwarder),
+            shutdown_request,
             next_id: 0,
+            _codec: PhantomData,
         })
     }
 }
 
-impl Runtime for NsRuntime {
-    fn run_erased(
-        &mut self,
-        function: &dyn RuntimeFunction,
-        input: Vec<u8>,
-    ) -> Result<Vec<u8>, RuntimeError> {
+impl<C> Runtime for NsRuntime<C>
+where
+    C: WireCodec,
+{
+    fn run<F>(&mut self, function: &F, input: F::Input) -> Result<F::Output, RuntimeError>
+    where
+        F: RuntimeFunction,
+    {
+        let input = C::encode(&input)
+            .map_err(|error| RuntimeError::new(format!("failed to encode input: {error}")))?;
+        let output = self.call_erased(function.name(), input)?;
+        C::decode(&output)
+            .map_err(|error| RuntimeError::new(format!("failed to decode output: {error}")))
+    }
+}
+
+impl<C> NsRuntime<C>
+where
+    C: WireCodec,
+{
+    fn call_erased(&mut self, function_name: &str, input: Vec<u8>) -> RuntimeResult<Vec<u8>> {
         let id = self.next_id;
         self.next_id += 1;
 
         let request = ParentToChild::Call {
             id,
-            function: function.name().to_string(),
+            function: function_name.to_string(),
         };
         let stdin = self
             .stdin
             .as_mut()
             .ok_or_else(|| RuntimeError::new("namespace runtime stdin is closed"))?;
-        let request = <JsonCodec as WireCodec>::encode(&request)?;
+        let request = C::encode(&request)?;
         write_frame(stdin, &request)?;
         write_frame(stdin, &input)?;
         stdin.flush()?;
 
         let response = read_frame(&mut self.stdout)?
             .ok_or_else(|| RuntimeError::new("namespace runtime exited without response"))?;
-        match <JsonCodec as WireCodec>::decode::<ChildToParent>(&response)? {
+        match C::decode::<ChildToParent>(&response)? {
             ChildToParent::Ok { id: response_id } if response_id == id => {
                 read_frame(&mut self.stdout)?.ok_or_else(|| {
                     RuntimeError::new("namespace runtime exited without output frame")
@@ -90,7 +141,7 @@ impl Runtime for NsRuntime {
                 message,
             } if response_id == id => Err(RuntimeError::new(format!(
                 "namespace runtime failed while running '{}': {message}",
-                function.name()
+                function_name
             ))),
             response => Err(RuntimeError::new(format!(
                 "namespace runtime returned response for the wrong call: expected id {id}, got id {}",
@@ -100,12 +151,10 @@ impl Runtime for NsRuntime {
     }
 }
 
-impl Drop for NsRuntime {
+impl<C> Drop for NsRuntime<C> {
     fn drop(&mut self) {
         if let Some(mut stdin) = self.stdin.take() {
-            if let Ok(request) = <JsonCodec as WireCodec>::encode(&ParentToChild::Shutdown) {
-                let _ = write_frame(&mut stdin, &request);
-            }
+            let _ = write_frame(&mut stdin, &self.shutdown_request);
             let _ = stdin.flush();
         }
         if let Some(child) = self.child.take() {
@@ -117,8 +166,53 @@ impl Drop for NsRuntime {
     }
 }
 
-pub fn run_worker(functions: Vec<Box<dyn RuntimeFunction>>) -> RuntimeResult<()> {
-    let mut registry = BTreeMap::<String, Box<dyn RuntimeFunction>>::new();
+pub struct NsFunction<C = JsonCodec> {
+    name: &'static str,
+    call: Box<dyn Fn(&[u8]) -> RuntimeResult<Vec<u8>> + Send + Sync + 'static>,
+    _codec: PhantomData<C>,
+}
+
+impl<C> NsFunction<C>
+where
+    C: WireCodec + 'static,
+{
+    pub fn new<F>(function: F) -> Self
+    where
+        F: RuntimeFunction + 'static,
+    {
+        let name = function.name();
+        let call = Box::new(move |input: &[u8]| {
+            let input = C::decode::<F::Input>(input).map_err(|error| {
+                RuntimeError::new(format!("invalid input for '{name}': {error}"))
+            })?;
+            let output = function.call(input)?;
+            C::encode(&output).map_err(|error| {
+                RuntimeError::new(format!("invalid output from '{name}': {error}"))
+            })
+        });
+        Self {
+            name,
+            call,
+            _codec: PhantomData,
+        }
+    }
+}
+
+impl<C> NsFunction<C> {
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn call_erased(&self, input: &[u8]) -> RuntimeResult<Vec<u8>> {
+        (self.call)(input)
+    }
+}
+
+pub fn run_worker<C>(functions: Vec<NsFunction<C>>) -> RuntimeResult<()>
+where
+    C: WireCodec,
+{
+    let mut registry = BTreeMap::<String, NsFunction<C>>::new();
     for function in functions {
         let name = function.name().to_string();
         if registry.insert(name.clone(), function).is_some() {
@@ -133,7 +227,7 @@ pub fn run_worker(functions: Vec<Box<dyn RuntimeFunction>>) -> RuntimeResult<()>
     let mut stdout = std::io::stdout().lock();
 
     while let Some(request) = read_frame(&mut stdin)? {
-        match <JsonCodec as WireCodec>::decode::<ParentToChild>(&request)? {
+        match C::decode::<ParentToChild>(&request)? {
             ParentToChild::Call { id, function } => {
                 let input = read_frame(&mut stdin)?.ok_or_else(|| {
                     RuntimeError::new(format!("missing input frame for call id {id}"))
@@ -141,13 +235,12 @@ pub fn run_worker(functions: Vec<Box<dyn RuntimeFunction>>) -> RuntimeResult<()>
                 match registry.get(&function) {
                     Some(function) => match function.call_erased(&input) {
                         Ok(output) => {
-                            let response =
-                                <JsonCodec as WireCodec>::encode(&ChildToParent::Ok { id })?;
+                            let response = C::encode(&ChildToParent::Ok { id })?;
                             write_frame(&mut stdout, &response)?;
                             write_frame(&mut stdout, &output)?;
                         }
                         Err(error) => {
-                            let response = <JsonCodec as WireCodec>::encode(&ChildToParent::Err {
+                            let response = C::encode(&ChildToParent::Err {
                                 id,
                                 message: error.to_string(),
                             })?;
@@ -155,7 +248,7 @@ pub fn run_worker(functions: Vec<Box<dyn RuntimeFunction>>) -> RuntimeResult<()>
                         }
                     },
                     None => {
-                        let response = <JsonCodec as WireCodec>::encode(&ChildToParent::Err {
+                        let response = C::encode(&ChildToParent::Err {
                             id,
                             message: format!("unknown function '{function}'"),
                         })?;
@@ -914,6 +1007,24 @@ mod tests {
                 .to_string()
                 .contains("exceeds limit")
         );
+    }
+
+    #[test]
+    fn ns_function_adapts_typed_function_to_erased_json_call() {
+        use crate::uppercase::{Uppercase, UppercaseInput, UppercaseOutput};
+
+        let function = NsFunction::<JsonCodec>::new(Uppercase);
+        let input = <JsonCodec as WireCodec>::encode(&UppercaseInput {
+            text: "abc".to_string(),
+        })
+        .unwrap();
+
+        let output = function.call_erased(&input).unwrap();
+        let output = <JsonCodec as WireCodec>::decode::<UppercaseOutput>(&output).unwrap();
+
+        assert_eq!(function.name(), "uppercase");
+        assert_eq!(output.text, "ABC");
+        assert_eq!(output.pid, std::process::id());
     }
 
     #[test]
