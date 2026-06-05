@@ -1,4 +1,4 @@
-use crate::runtime::{FunctionSpec, RuntimeError, TypedRuntimeFunction};
+use crate::runtime::{RuntimeError, TypedRuntimeFunction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy)]
@@ -17,14 +17,12 @@ pub struct UppercaseOutput {
     pub pid: u32,
 }
 
-static SPEC: FunctionSpec = FunctionSpec { name: "uppercase" };
-
 impl TypedRuntimeFunction for Uppercase {
     type Input = UppercaseInput;
     type Output = UppercaseOutput;
 
-    fn spec(&self) -> &'static FunctionSpec {
-        &SPEC
+    fn name(&self) -> &'static str {
+        "uppercase"
     }
 
     fn call_typed(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {

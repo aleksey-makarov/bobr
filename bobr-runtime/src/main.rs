@@ -83,7 +83,7 @@ where
     let output = runtime.run(function, input)?;
     println!(
         "{} via {runtime_name}: {}",
-        function.spec().name,
+        function.name(),
         serde_json::to_string_pretty(&output)?
     );
     Ok(())

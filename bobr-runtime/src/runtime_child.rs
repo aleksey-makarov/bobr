@@ -58,7 +58,7 @@ impl Runtime for ChildRuntime {
 
         let request = ParentToChild::Call {
             id,
-            function: function.spec().name.to_string(),
+            function: function.name().to_string(),
         };
         let stdin = self
             .stdin
@@ -81,7 +81,7 @@ impl Runtime for ChildRuntime {
                 message,
             } if response_id == id => Err(RuntimeError::new(format!(
                 "child failed while running '{}': {message}",
-                function.spec().name
+                function.name()
             ))),
             response => Err(RuntimeError::new(format!(
                 "child returned response for the wrong call: expected id {id}, got id {}",
@@ -106,7 +106,7 @@ impl Drop for ChildRuntime {
 pub fn run_worker(functions: Vec<Box<dyn RuntimeFunction>>) -> RuntimeResult<()> {
     let mut registry = BTreeMap::<String, Box<dyn RuntimeFunction>>::new();
     for function in functions {
-        let name = function.spec().name.to_string();
+        let name = function.name().to_string();
         if registry.insert(name.clone(), function).is_some() {
             return Err(RuntimeError::new(format!(
                 "duplicate child runtime function '{name}'"

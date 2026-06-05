@@ -3,11 +3,6 @@ use serde::de::DeserializeOwned;
 use std::error::Error;
 use std::fmt;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FunctionSpec {
-    pub name: &'static str,
-}
-
 pub trait WireCodec {
     fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, RuntimeError>;
 
@@ -48,7 +43,7 @@ pub trait Runtime {
 }
 
 pub trait RuntimeFunction: Send + Sync {
-    fn spec(&self) -> &'static FunctionSpec;
+    fn name(&self) -> &'static str;
 
     fn call_erased(&self, input: &[u8]) -> Result<Vec<u8>, RuntimeError>;
 }
@@ -57,7 +52,7 @@ pub trait TypedRuntimeFunction: Send + Sync {
     type Input: Serialize + DeserializeOwned;
     type Output: Serialize + DeserializeOwned;
 
-    fn spec(&self) -> &'static FunctionSpec;
+    fn name(&self) -> &'static str;
 
     fn call_typed(&self, input: Self::Input) -> Result<Self::Output, RuntimeError>;
 }
@@ -66,22 +61,22 @@ impl<T> RuntimeFunction for T
 where
     T: TypedRuntimeFunction,
 {
-    fn spec(&self) -> &'static FunctionSpec {
-        <T as TypedRuntimeFunction>::spec(self)
+    fn name(&self) -> &'static str {
+        <T as TypedRuntimeFunction>::name(self)
     }
 
     fn call_erased(&self, input: &[u8]) -> Result<Vec<u8>, RuntimeError> {
         let input = <JsonCodec as WireCodec>::decode(input).map_err(|error| {
             RuntimeError::new(format!(
                 "invalid input for '{}': {error}",
-                <T as TypedRuntimeFunction>::spec(self).name
+                <T as TypedRuntimeFunction>::name(self)
             ))
         })?;
         let output = self.call_typed(input)?;
         <JsonCodec as WireCodec>::encode(&output).map_err(|error| {
             RuntimeError::new(format!(
                 "invalid output from '{}': {error}",
-                <T as TypedRuntimeFunction>::spec(self).name
+                <T as TypedRuntimeFunction>::name(self)
             ))
         })
     }

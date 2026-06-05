@@ -1,4 +1,4 @@
-use crate::runtime::{FunctionSpec, RuntimeError, TypedRuntimeFunction};
+use crate::runtime::{RuntimeError, TypedRuntimeFunction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy)]
@@ -19,16 +19,12 @@ pub struct DivideOutput {
     pub pid: u32,
 }
 
-static SPEC: FunctionSpec = FunctionSpec {
-    name: "checked-divide",
-};
-
 impl TypedRuntimeFunction for CheckedDivide {
     type Input = DivideInput;
     type Output = DivideOutput;
 
-    fn spec(&self) -> &'static FunctionSpec {
-        &SPEC
+    fn name(&self) -> &'static str {
+        "checked-divide"
     }
 
     fn call_typed(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {
