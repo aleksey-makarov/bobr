@@ -1,13 +1,13 @@
 use crate::resolved_inputs::ResolvedInputs;
 use mbuild_core::{
     BuildContext, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderError,
-    BuilderRun, CancellationToken,
+    BuilderRun, CancellationToken, Workspace,
 };
 use mbuild_store::{
     BuildKey, PublishedBuild, ReuseInputIdentity, Store, StoreError, StoreTempQuarantineRequest,
-    WorkspaceRequest, compute_reuse_key, create_workspace, load_build_handle, materialize_build,
-    materialize_build_with_trusted_hash, quarantine_store_temp, recreate_store_temp_dir_force,
-    remove_store_temp_dir_force, resolve_reuse_for_build,
+    StoreWorkspace, WorkspaceRequest, compute_reuse_key, create_workspace, load_build_handle,
+    materialize_build, materialize_build_with_trusted_hash, quarantine_store_temp,
+    recreate_store_temp_dir_force, remove_store_temp_dir_force, resolve_reuse_for_build,
 };
 use serde_json::Value;
 use std::fmt;
@@ -100,6 +100,7 @@ pub(crate) fn execute_builder_node(
             build_key.to_string(),
         ),
     )
+    .map(core_workspace)
     .map_err(map_store_error)?;
     let builder_run = builder.create_run(
         Some(build_name.to_string()),
@@ -219,6 +220,14 @@ pub(crate) fn execute_builder_node(
     cleanup_temp_dir(&context.temp_dir, &cleanup, logger.as_ref());
     let published = published?;
     Ok(ExecutedBuilderNode { published, logger })
+}
+
+fn core_workspace(workspace: StoreWorkspace) -> Workspace {
+    Workspace::new(
+        workspace.log_dir().to_path_buf(),
+        workspace.raw_log_dir().to_path_buf(),
+        workspace.temp_dir().to_path_buf(),
+    )
 }
 
 pub(crate) fn lookup_build_handle(
@@ -499,7 +508,7 @@ mod tests {
     };
     use mbuild_store::{
         PublishOutputRequest, ReuseInputIdentity, WorkspaceRequest, compute_build_key,
-        create_run_logger, create_workspace, list_quarantined_temps, publish_output,
+        create_workspace, list_quarantined_temps, publish_output,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
@@ -515,7 +524,15 @@ mod tests {
     }
 
     fn create_test_logger(layout: &Store) -> Arc<BuildRunLogger> {
-        Arc::new(create_run_logger(layout, RunOptions::default()).unwrap())
+        let locations = layout.run_log_locations();
+        Arc::new(
+            BuildRunLogger::new(
+                locations.run_log_dir(),
+                locations.created_at(),
+                RunOptions::default(),
+            )
+            .unwrap(),
+        )
     }
 
     fn create_test_builder_run(
@@ -529,6 +546,7 @@ mod tests {
             layout,
             WorkspaceRequest::new(tag, Some(name.to_string()), build_key.to_string()),
         )
+        .map(core_workspace)
         .unwrap();
         let builder_run = BuilderRun::new(
             tag.to_string(),

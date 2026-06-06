@@ -10,11 +10,11 @@ use crate::runtime::{
 };
 use mbuild_core::{
     BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderRun, CancellationToken,
-    OriginContext, RunOptions, SourceBuilder,
+    OriginContext, RunOptions, SourceBuilder, Workspace,
 };
 use mbuild_store::{
     BuildKey, RealizedResult, ResultRecord, ReuseInputIdentity, SourceImportOutcome, SourceLookup,
-    Store, WorkspaceRequest, create_run_logger, create_workspace, import_source_result,
+    Store, StoreWorkspace, WorkspaceRequest, create_workspace, import_source_result,
     lookup_source_result, publish_result, remove_store_temp_dir_force,
 };
 use serde_json::{Map, Value, to_string_pretty};
@@ -120,13 +120,13 @@ pub fn run_recipe_request_in_store_with_options(
 
     let layout = Store::create(&paths.store).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> = Arc::new(
-        create_run_logger(
+        build_run_logger_for_store(
             &layout,
             RunOptions {
                 emit_progress: options.emit_progress,
             },
         )
-        .map_err(map_store_error)?,
+        .map_err(RuntimeError::Store)?,
     );
 
     let mut nodes = HashMap::new();
@@ -298,6 +298,7 @@ fn publish_reused_root(
         layout,
         WorkspaceRequest::new(root_tag, Some(root_name.to_string()), key.to_string()),
     )
+    .map(core_workspace)
     .map_err(map_store_error)?;
     let root_run = BuilderRun::new(
         root_tag.to_string(),
@@ -430,6 +431,7 @@ fn execute_misses(
             root_key.to_string(),
         ),
     )
+    .map(core_workspace)
     .map_err(map_store_error)?;
     let scheduler_run = BuilderRun::new(
         "Scheduler",
@@ -817,6 +819,7 @@ fn execute_source_recipe(
         Value::String(recipe.object_hash.to_string()),
     );
     let workspace = create_workspace(layout, workspace_request).map_err(map_store_error)?;
+    let workspace = core_workspace(workspace);
     let source_builder = SourceBuilder::new(
         recipe.name,
         key.to_string(),
@@ -946,6 +949,22 @@ fn execute_source_recipe(
     }
 }
 
+fn build_run_logger_for_store(
+    layout: &Store,
+    options: RunOptions,
+) -> Result<BuildRunLogger, String> {
+    let locations = layout.run_log_locations();
+    BuildRunLogger::new(locations.run_log_dir(), locations.created_at(), options)
+}
+
+fn core_workspace(workspace: StoreWorkspace) -> Workspace {
+    Workspace::new(
+        workspace.log_dir().to_path_buf(),
+        workspace.raw_log_dir().to_path_buf(),
+        workspace.temp_dir().to_path_buf(),
+    )
+}
+
 fn cleanup_workspace_temp_dir(layout: &Store, temp_dir: &Path, logger: &dyn BuildLogger) {
     if let Err(error) = remove_store_temp_dir_force(layout, temp_dir) {
         log_runtime_event(
@@ -978,8 +997,7 @@ mod tests {
     use crate::recipe::{ReuseOrigin, collect_graph};
     use mbuild_core::{CancellationToken, OriginContext, OriginSpec, ParsedOrigin};
     use mbuild_store::{
-        PublishOutputRequest, compute_result_id, compute_reuse_key, create_run_logger,
-        publish_output,
+        PublishOutputRequest, compute_result_id, compute_reuse_key, publish_output,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -996,7 +1014,7 @@ mod tests {
     }
 
     fn create_test_logger(layout: &Store) -> Arc<BuildRunLogger> {
-        Arc::new(create_run_logger(layout, RunOptions::default()).unwrap())
+        Arc::new(build_run_logger_for_store(layout, RunOptions::default()).unwrap())
     }
 
     fn workspace_metadata(root: &Path, tag: &str, name: &str) -> serde_json::Value {

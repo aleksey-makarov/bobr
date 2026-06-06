@@ -2,7 +2,6 @@ use crate::StoreError;
 use crate::fsutil as private_fs;
 use crate::{BuildKey, ResultId, ReuseKey};
 use fsobj_hash::ObjectHash;
-use mbuild_core::{BuildRunLogger, RunOptions, RunTimestamp, Workspace};
 use serde_json::{Map, Value, json};
 use std::fs;
 use std::io::Write;
@@ -24,6 +23,58 @@ pub(crate) const FS_TREES_DIR: &str = "fs-trees";
 pub(crate) const QUARANTINE_DIR: &str = "quarantine";
 pub(crate) const LOGS_DIR: &str = "logs";
 pub(crate) const TMP_DIR: &str = "tmp";
+
+/// Store-owned run log locations for the current store session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreRunLogLocations {
+    run_log_dir: PathBuf,
+    created_at: String,
+}
+
+impl StoreRunLogLocations {
+    /// Returns the run-level log directory.
+    pub fn run_log_dir(&self) -> &Path {
+        &self.run_log_dir
+    }
+
+    /// Returns the store session creation timestamp.
+    pub fn created_at(&self) -> &str {
+        &self.created_at
+    }
+}
+
+/// Store-owned paths allocated for one run subject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreWorkspace {
+    log_dir: PathBuf,
+    raw_log_dir: PathBuf,
+    temp_dir: PathBuf,
+}
+
+impl StoreWorkspace {
+    fn new(log_dir: PathBuf, raw_log_dir: PathBuf, temp_dir: PathBuf) -> Self {
+        Self {
+            log_dir,
+            raw_log_dir,
+            temp_dir,
+        }
+    }
+
+    /// Returns the per-subject log directory.
+    pub fn log_dir(&self) -> &Path {
+        &self.log_dir
+    }
+
+    /// Returns the per-subject raw log directory.
+    pub fn raw_log_dir(&self) -> &Path {
+        &self.raw_log_dir
+    }
+
+    /// Returns the per-subject temporary directory.
+    pub fn temp_dir(&self) -> &Path {
+        &self.temp_dir
+    }
+}
 
 /// Request for allocating a store-owned workspace for one run subject.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,16 +161,16 @@ impl Store {
     pub fn create(root: &Path) -> Result<Self, StoreError> {
         validate_root(root)?;
         ensure_store_layout(root)?;
-        let timestamp = RunTimestamp::now();
+        let timestamp = current_run_timestamp();
         let logs_dir = root.join(LOGS_DIR);
         let tmp_dir = root.join(TMP_DIR);
-        let (run_log_dir, run_tmp_dir) = create_run_dirs(&logs_dir, &tmp_dir, timestamp.human())?;
+        let (run_log_dir, run_tmp_dir) = create_run_dirs(&logs_dir, &tmp_dir, &timestamp.run_id)?;
         Ok(Self {
             inner: Arc::new(StoreInner {
                 root: root.to_path_buf(),
                 run_log_dir,
                 run_tmp_dir,
-                created_at: timestamp.rfc3339_utc().to_string(),
+                created_at: timestamp.created_at,
                 next_serial: AtomicU64::new(0),
                 index_lock: Mutex::new(()),
             }),
@@ -141,6 +192,14 @@ impl Store {
     /// Returns the creation timestamp of this store session.
     pub fn created_at(&self) -> &str {
         &self.inner.created_at
+    }
+
+    /// Returns the run log locations allocated for this store session.
+    pub fn run_log_locations(&self) -> StoreRunLogLocations {
+        StoreRunLogLocations {
+            run_log_dir: self.inner.run_log_dir.clone(),
+            created_at: self.inner.created_at.clone(),
+        }
     }
 
     /// Returns the content-addressed legacy object directory.
@@ -219,18 +278,11 @@ impl Store {
     }
 }
 
-/// Creates a build run logger for this store session.
-pub fn create_run_logger(store: &Store, options: RunOptions) -> Result<BuildRunLogger, StoreError> {
-    BuildRunLogger::new(store.run_log_dir(), store.created_at(), options).map_err(|error| {
-        StoreError::Io(format!(
-            "failed to create run logger under '{}': {error}",
-            store.run_log_dir().display()
-        ))
-    })
-}
-
 /// Allocates store-owned paths for one concrete builder/source/scheduler run.
-pub fn create_workspace(store: &Store, request: WorkspaceRequest) -> Result<Workspace, StoreError> {
+pub fn create_workspace(
+    store: &Store,
+    request: WorkspaceRequest,
+) -> Result<StoreWorkspace, StoreError> {
     let serial = store.inner.next_serial.fetch_add(1, Ordering::SeqCst);
     let directory_name =
         workspace_directory_name(serial, &request.tag, request.recipe_name.as_deref());
@@ -259,7 +311,7 @@ pub fn create_workspace(store: &Store, request: WorkspaceRequest) -> Result<Work
     write_workspace_metadata(store, serial, &request, &log_dir, &raw_log_dir, &temp_dir)?;
     append_workspace_index(store, serial, &request, &log_dir)?;
 
-    Ok(Workspace::new(log_dir, raw_log_dir, temp_dir))
+    Ok(StoreWorkspace::new(log_dir, raw_log_dir, temp_dir))
 }
 
 /// Moves a store-owned temporary path into the store quarantine directory.
@@ -382,6 +434,30 @@ fn validate_root(root: &Path) -> Result<(), StoreError> {
         )));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StoreRunTimestamp {
+    run_id: String,
+    created_at: String,
+}
+
+fn current_run_timestamp() -> StoreRunTimestamp {
+    let now = OffsetDateTime::now_utc();
+    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    let local = now.to_offset(offset);
+    let run_id_format =
+        format_description!("[year repr:last_two][month][day][hour][minute][second]");
+    let created_at_format =
+        format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z");
+    StoreRunTimestamp {
+        run_id: local
+            .format(&run_id_format)
+            .unwrap_or_else(|_| "000000000000".to_string()),
+        created_at: now
+            .format(&created_at_format)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00.000000000Z".to_string()),
+    }
 }
 
 fn ensure_store_dir(path: &Path, label: &str) -> Result<(), StoreError> {

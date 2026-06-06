@@ -12,12 +12,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Store-created paths for one concrete builder run.
+/// Workspace paths assigned to one concrete builder run.
 ///
 /// A workspace belongs to a single per-run builder object. It contains the
 /// subject log directory, the raw-log subdirectory, and a per-run temporary
-/// directory. The store uses an internal serial when creating these paths, but
-/// the serial is not part of this public type.
+/// directory. Allocation is handled outside `mbuild-core`; this type is the
+/// builder-facing value object passed to per-run builders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
     log_dir: PathBuf,
@@ -26,7 +26,7 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Creates a workspace from already allocated store-owned paths.
+    /// Creates a workspace from already allocated paths.
     pub fn new(log_dir: PathBuf, raw_log_dir: PathBuf, temp_dir: PathBuf) -> Self {
         Self {
             log_dir,

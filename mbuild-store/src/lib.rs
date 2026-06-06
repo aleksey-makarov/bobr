@@ -50,9 +50,9 @@ pub use refs::{
 };
 pub use source::{SourceImportOutcome, SourceLookup, import_source_result, lookup_source_result};
 pub use store::{
-    QuarantinedStoreTemp, Store, StoreTempQuarantineRequest, WorkspaceRequest, create_run_logger,
-    create_workspace, list_quarantined_temps, quarantine_store_temp, recreate_store_temp_dir_force,
-    remove_store_temp_dir_force,
+    QuarantinedStoreTemp, Store, StoreRunLogLocations, StoreTempQuarantineRequest, StoreWorkspace,
+    WorkspaceRequest, create_workspace, list_quarantined_temps, quarantine_store_temp,
+    recreate_store_temp_dir_force, remove_store_temp_dir_force,
 };
 
 #[cfg(test)]

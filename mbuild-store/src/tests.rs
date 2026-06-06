@@ -1346,6 +1346,17 @@ fn run_dir_allocation_uses_numeric_disambiguation_across_logs_and_tmp() {
 }
 
 #[test]
+fn store_exposes_run_log_locations() {
+    let temp = tempdir().unwrap();
+    let layout = Store::create(temp.path()).unwrap();
+    let locations = layout.run_log_locations();
+
+    assert_eq!(locations.run_log_dir(), layout.run_log_dir());
+    assert_eq!(locations.created_at(), layout.created_at());
+    assert!(locations.run_log_dir().is_dir());
+}
+
+#[test]
 fn store_clone_shares_run_directories_and_serial_counter() {
     let temp = tempdir().unwrap();
     let layout = Store::create(temp.path()).unwrap();
