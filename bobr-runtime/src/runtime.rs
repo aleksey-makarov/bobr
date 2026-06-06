@@ -22,7 +22,7 @@ pub trait Runtime {
     /// Implementations may run the function directly or forward it to another
     /// execution environment, but they must preserve the function's typed input
     /// and output contract.
-    fn run<F>(&mut self, function: &F, input: F::Input) -> Result<F::Output, RuntimeError>
+    fn run<F>(&self, function: &F, input: F::Input) -> Result<F::Output, RuntimeError>
     where
         F: RuntimeFunction;
 }

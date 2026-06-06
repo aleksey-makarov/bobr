@@ -25,7 +25,7 @@ impl HostRuntime {
     /// ```
     /// use rust_test::runtime_host::HostRuntime;
     ///
-    /// let mut runtime = HostRuntime::new();
+    /// let runtime = HostRuntime::new();
     /// ```
     ///
     /// The returned runtime executes functions in the current process and
@@ -36,7 +36,7 @@ impl HostRuntime {
 }
 
 impl Runtime for HostRuntime {
-    fn run<F>(&mut self, function: &F, input: F::Input) -> Result<F::Output, RuntimeError>
+    fn run<F>(&self, function: &F, input: F::Input) -> Result<F::Output, RuntimeError>
     where
         F: RuntimeFunction,
     {

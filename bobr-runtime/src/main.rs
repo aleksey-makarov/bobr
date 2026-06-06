@@ -30,12 +30,12 @@ fn real_main() -> RuntimeResult<()> {
     let divide = CheckedDivide;
     let identity = NamespaceIdentity;
 
-    let mut host = HostRuntime::new();
-    let mut namespace = NsRuntime::new()?.with_call_timeout(Duration::from_secs(30));
+    let host = HostRuntime::new();
+    let namespace = NsRuntime::new()?.with_call_timeout(Duration::from_secs(30));
 
     run_example(
         "host",
-        &mut host,
+        &host,
         &uppercase,
         UppercaseInput {
             text: "hello from runtime".to_string(),
@@ -43,17 +43,17 @@ fn real_main() -> RuntimeResult<()> {
     )?;
     run_example(
         "host",
-        &mut host,
+        &host,
         &divide,
         DivideInput {
             dividend: 42,
             divisor: 5,
         },
     )?;
-    run_example("host", &mut host, &identity, NamespaceIdentityInput)?;
+    run_example("host", &host, &identity, NamespaceIdentityInput)?;
     run_example(
         "namespace",
-        &mut namespace,
+        &namespace,
         &uppercase,
         UppercaseInput {
             text: "hello from namespace runtime".to_string(),
@@ -61,26 +61,21 @@ fn real_main() -> RuntimeResult<()> {
     )?;
     run_example(
         "namespace",
-        &mut namespace,
+        &namespace,
         &divide,
         DivideInput {
             dividend: 42,
             divisor: 5,
         },
     )?;
-    run_example(
-        "namespace",
-        &mut namespace,
-        &identity,
-        NamespaceIdentityInput,
-    )?;
+    run_example("namespace", &namespace, &identity, NamespaceIdentityInput)?;
 
     Ok(())
 }
 
 fn run_example<R, F>(
     runtime_name: &str,
-    runtime: &mut R,
+    runtime: &R,
     function: &F,
     input: F::Input,
 ) -> RuntimeResult<()>
@@ -110,7 +105,7 @@ mod tests {
 
     #[test]
     fn plain_runtime_calls_typed_function_through_runtime_trait() {
-        let mut runtime = HostRuntime::new();
+        let runtime = HostRuntime::new();
 
         let output = runtime
             .run(
@@ -127,7 +122,7 @@ mod tests {
 
     #[test]
     fn typed_adapter_returns_function_errors() {
-        let mut runtime = HostRuntime::new();
+        let runtime = HostRuntime::new();
 
         let error = runtime
             .run(
@@ -158,7 +153,7 @@ mod tests {
 
     #[test]
     fn namespace_identity_reports_current_process_maps() {
-        let mut runtime = HostRuntime::new();
+        let runtime = HostRuntime::new();
 
         let output = runtime
             .run(&NamespaceIdentity, NamespaceIdentityInput)

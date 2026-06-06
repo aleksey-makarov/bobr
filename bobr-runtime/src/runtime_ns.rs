@@ -25,6 +25,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -93,9 +94,9 @@ pub struct NsRuntime<C = JsonCodec> {
     executable: File,
     idmap: HostIdmap,
     tools: NsTools,
-    next_id: u64,
+    next_id: AtomicU64,
     call_timeout: Option<Duration>,
-    _codec: PhantomData<C>,
+    _codec: PhantomData<fn() -> C>,
 }
 
 impl NsRuntime<JsonCodec> {
@@ -144,7 +145,7 @@ where
             executable,
             idmap,
             tools,
-            next_id: 0,
+            next_id: AtomicU64::new(0),
             call_timeout: None,
             _codec: PhantomData,
         })
@@ -184,7 +185,7 @@ impl<C> Runtime for NsRuntime<C>
 where
     C: WireCodec,
 {
-    fn run<F>(&mut self, function: &F, input: F::Input) -> Result<F::Output, RuntimeError>
+    fn run<F>(&self, function: &F, input: F::Input) -> Result<F::Output, RuntimeError>
     where
         F: RuntimeFunction,
     {
@@ -200,9 +201,8 @@ impl<C> NsRuntime<C>
 where
     C: WireCodec,
 {
-    fn call_erased(&mut self, function_name: &str, input: Vec<u8>) -> RuntimeResult<Vec<u8>> {
-        let id = self.next_id;
-        self.next_id += 1;
+    fn call_erased(&self, function_name: &str, input: Vec<u8>) -> RuntimeResult<Vec<u8>> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let deadline = CallDeadline::new(function_name, self.call_timeout);
         deadline.ensure("starting call")?;
 
@@ -312,7 +312,7 @@ where
 pub struct NsFunction<C = JsonCodec> {
     name: &'static str,
     call: Box<ErasedNsCall>,
-    _codec: PhantomData<C>,
+    _codec: PhantomData<fn() -> C>,
 }
 
 type ErasedNsCall = dyn Fn(&[u8]) -> RuntimeResult<Vec<u8>> + Send + Sync + 'static;
@@ -1571,16 +1571,18 @@ fn parse_first_subid_range(
             continue;
         }
 
-        let parts = line.split(':').collect::<Vec<_>>();
-        if parts.len() != 3 {
+        let mut parts = line.split(':');
+        let (Some(_parsed_owner), Some(base), Some(count), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
             return Err(RuntimeError::new(format!(
                 "malformed {} line {line_number} in {source}: expected <username>:<base>:<count>",
                 kind.subid_name()
             )));
-        }
+        };
 
-        let base = parse_u32_field(parts[1], "base", kind, source, line_number)?;
-        let count = parse_u32_field(parts[2], "count", kind, source, line_number)?;
+        let base = parse_u32_field(base, "base", kind, source, line_number)?;
+        let count = parse_u32_field(count, "count", kind, source, line_number)?;
         if count == 0 {
             return Err(RuntimeError::new(format!(
                 "{} line {line_number} in {source} has zero count",
@@ -1906,7 +1908,7 @@ mod tests {
                 newuidmap: PathBuf::new(),
                 newgidmap: PathBuf::new(),
             },
-            next_id: 0,
+            next_id: AtomicU64::new(0),
             call_timeout: None,
             _codec: PhantomData,
         }
@@ -1921,6 +1923,13 @@ mod tests {
 
         let runtime = runtime.without_call_timeout();
         assert_eq!(runtime.call_timeout(), None);
+    }
+
+    #[test]
+    fn namespace_runtime_handle_can_be_shared_between_threads() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<NsRuntime>();
     }
 
     #[test]
