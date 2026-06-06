@@ -21,7 +21,6 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::marker::PhantomData;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -34,6 +33,7 @@ const MAX_IDMAP_HELPER_STDERR_LEN: usize = 64 * 1024;
 const WORKER_ARG: &str = "--ns-runtime-worker";
 const WORKER_PROTOCOL_READ_ARG: &str = "--ns-runtime-protocol-read-fd";
 const WORKER_PROTOCOL_WRITE_ARG: &str = "--ns-runtime-protocol-write-fd";
+const SELF_EXE_PATH: &str = "/proc/self/exe";
 const SUBUID_PATH: &str = "/etc/subuid";
 const SUBGID_PATH: &str = "/etc/subgid";
 
@@ -72,11 +72,15 @@ impl WireCodec for JsonCodec {
 /// one framed response, waits for the process to exit, and decodes the typed
 /// output.
 ///
-/// The worker process is started from the current executable, so applications
-/// using this runtime must route the worker invocation through
+/// The worker process is started from an executable file descriptor captured
+/// from `/proc/self/exe` when this runtime is constructed, so applications using
+/// this runtime must route the worker invocation through
 /// [`worker_invocation_from_env`] and [`run_worker`].
 ///
 /// Worker standard input, output, and error are redirected to `/dev/null`.
+/// Worker environment is empty; variables from the parent process, including
+/// `PATH`, are not inherited.
+///
 /// Runtime functions must return data through their typed result, not through
 /// process stdio. If a runtime function starts subprocesses and needs their
 /// output for diagnostics or results, the function implementation must capture
@@ -86,7 +90,7 @@ impl WireCodec for JsonCodec {
 /// Calls do not have a timeout by default. Use
 /// [`NsRuntime::with_call_timeout`] to bound each `Runtime::run` call.
 pub struct NsRuntime<C = JsonCodec> {
-    executable: PathBuf,
+    executable: File,
     idmap: HostIdmap,
     tools: NsTools,
     next_id: u64,
@@ -101,9 +105,9 @@ impl NsRuntime<JsonCodec> {
     /// both control messages and function payloads. It is equivalent to
     /// [`NsRuntime::<JsonCodec>::new_with_codec`].
     ///
-    /// Construction resolves the current executable, the host uid/gid mapping,
-    /// and the `newuidmap`/`newgidmap` helper paths. The worker process itself
-    /// is started separately for each [`Runtime::run`] call.
+    /// Construction opens `/proc/self/exe`, resolves the host uid/gid mapping,
+    /// and resolves the `newuidmap`/`newgidmap` helper paths. The worker
+    /// process itself is started separately for each [`Runtime::run`] call.
     ///
     /// The application must route the worker invocation through
     /// [`worker_invocation_from_env`] and [`run_worker`] before running normal
@@ -127,14 +131,12 @@ where
     /// - the child-side [`run_worker::<C>`] call.
     ///
     /// This constructor resolves all host-side prerequisites. It can fail if
-    /// the current executable cannot be resolved, `/etc/subuid` or
+    /// `/proc/self/exe` cannot be opened, `/etc/subuid` or
     /// `/etc/subgid` does not contain a usable range for the current user, or
     /// `newuidmap`/`newgidmap` are missing. Per-call namespace setup failures
     /// are reported by [`Runtime::run`].
     pub fn new_with_codec() -> RuntimeResult<Self> {
-        let executable = env::current_exe().map_err(|error| {
-            RuntimeError::new(format!("failed to locate current executable: {error}"))
-        })?;
+        let executable = open_current_executable()?;
         let idmap = HostIdmap::from_host_environment()?;
         let tools = NsTools::resolve()?;
 
@@ -720,6 +722,32 @@ impl NsTools {
     }
 }
 
+fn open_current_executable() -> RuntimeResult<File> {
+    let executable = File::open(SELF_EXE_PATH)
+        .map_err(|error| RuntimeError::new(format!("failed to open {SELF_EXE_PATH}: {error}")))?;
+    let executable = move_file_fd_out_of_stdio(executable).map_err(|error| {
+        RuntimeError::new(format!(
+            "failed to move {SELF_EXE_PATH} fd out of stdio range: {error}"
+        ))
+    })?;
+    set_fd_cloexec(executable.as_raw_fd(), true)?;
+    Ok(executable)
+}
+
+fn move_file_fd_out_of_stdio(file: File) -> io::Result<File> {
+    if file.as_raw_fd() > libc::STDERR_FILENO {
+        return Ok(file);
+    }
+
+    let duplicated = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicated < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        drop(file);
+        Ok(unsafe { File::from_raw_fd(duplicated) })
+    }
+}
+
 #[derive(Debug)]
 struct HostIdmap {
     current_uid: u32,
@@ -794,7 +822,7 @@ impl SubidKind {
     }
 }
 
-fn fork_ns_worker(executable: &Path) -> RuntimeResult<NsLaunch> {
+fn fork_ns_worker(executable: &File) -> RuntimeResult<NsLaunch> {
     let Pipe {
         read: protocol_request_read,
         write: protocol_request_write,
@@ -832,8 +860,8 @@ fn fork_ns_worker(executable: &Path) -> RuntimeResult<NsLaunch> {
         })?;
     let userns_ready = Pipe::new()?;
     let idmap_ready = Pipe::new()?;
-    let executable = path_cstring(executable)?;
-    let arg0 = executable.clone();
+    let executable_fd = executable.as_raw_fd();
+    let arg0 = CString::new("ns-runtime-worker").unwrap();
     let worker_arg = CString::new(WORKER_ARG).unwrap();
     let protocol_read_arg = CString::new(WORKER_PROTOCOL_READ_ARG).unwrap();
     let protocol_read_fd_arg = CString::new(protocol_request_read.as_raw_fd().to_string()).unwrap();
@@ -850,6 +878,7 @@ fn fork_ns_worker(executable: &Path) -> RuntimeResult<NsLaunch> {
     ];
     let mut arg_ptrs = args.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
     arg_ptrs.push(std::ptr::null());
+    let env_ptrs = empty_worker_envp();
 
     // Everything above this point runs in the parent before fork, so normal
     // Rust code is fine: allocating Vec/CString values, resolving paths, and
@@ -870,8 +899,9 @@ fn fork_ns_worker(executable: &Path) -> RuntimeResult<NsLaunch> {
     }
     if pid == 0 {
         child_exec_ns_worker(
-            &executable,
+            executable_fd,
             &arg_ptrs,
+            &env_ptrs,
             ChildExecFds {
                 stdin_read: worker_stdin.as_raw_fd(),
                 stdout_write: worker_stdout.as_raw_fd(),
@@ -916,6 +946,10 @@ fn fork_ns_worker(executable: &Path) -> RuntimeResult<NsLaunch> {
     })
 }
 
+fn empty_worker_envp() -> [*const libc::c_char; 1] {
+    [std::ptr::null()]
+}
+
 fn move_fd_out_of_stdio(fd: OwnedFd) -> io::Result<OwnedFd> {
     if fd.as_raw_fd() > libc::STDERR_FILENO {
         return Ok(fd);
@@ -954,8 +988,9 @@ fn complete_namespace_setup(
 // _exit() is important: std::process::exit would run Rust/atexit cleanup in
 // this fragile process state.
 fn child_exec_ns_worker(
-    executable: &CString,
+    executable_fd: RawFd,
     args: &[*const libc::c_char],
+    env: &[*const libc::c_char],
     fds: ChildExecFds,
 ) -> ! {
     if !child_setup_stdio(fds.stdin_read, fds.stdout_write, fds.stderr_write) {
@@ -992,13 +1027,13 @@ fn child_exec_ns_worker(
     unsafe {
         child_close_fd(fds.userns_ready_write);
         child_close_fd(fds.idmap_ready_read);
-        libc::execv(executable.as_ptr(), args.as_ptr());
+        libc::fexecve(executable_fd, args.as_ptr(), env.as_ptr());
     }
     child_write_stderr(b"failed to exec namespace runtime worker\n");
     unsafe { libc::_exit(127) };
 }
 
-// The helpers below are used by child_exec_ns_worker() before execv(). Keep
+// The helpers below are used by child_exec_ns_worker() before fexecve(). Keep
 // their implementation within the same restricted syscall-only discipline.
 fn child_setup_stdio(stdin_read: RawFd, stdout_write: RawFd, stderr_write: RawFd) -> bool {
     child_duplicate_stdio_fd(stdin_read, libc::STDIN_FILENO)
@@ -1607,15 +1642,6 @@ fn is_executable_file(path: &Path) -> bool {
     metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
 }
 
-fn path_cstring(path: &Path) -> RuntimeResult<CString> {
-    CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        RuntimeError::new(format!(
-            "path '{}' contains an interior NUL byte",
-            path.display()
-        ))
-    })
-}
-
 fn write_frame(writer: &mut impl Write, payload: &[u8]) -> RuntimeResult<()> {
     if payload.len() > MAX_FRAME_LEN {
         return Err(RuntimeError::new(format!(
@@ -1869,7 +1895,7 @@ mod tests {
 
     fn test_ns_runtime() -> NsRuntime {
         NsRuntime {
-            executable: PathBuf::new(),
+            executable: open_current_executable().unwrap(),
             idmap: HostIdmap {
                 current_uid: 0,
                 current_gid: 0,
@@ -1895,6 +1921,60 @@ mod tests {
 
         let runtime = runtime.without_call_timeout();
         assert_eq!(runtime.call_timeout(), None);
+    }
+
+    #[test]
+    fn worker_environment_is_empty() {
+        let env = empty_worker_envp();
+
+        assert_eq!(env.len(), 1);
+        assert!(env[0].is_null());
+    }
+
+    #[test]
+    fn current_executable_fd_is_not_stdio_and_is_close_on_exec() {
+        let executable = open_current_executable().unwrap();
+
+        assert!(executable.as_raw_fd() > libc::STDERR_FILENO);
+        let flags = unsafe { libc::fcntl(executable.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+    }
+
+    #[test]
+    fn current_executable_fd_can_be_fexecved_with_empty_environment() {
+        let executable = open_current_executable().unwrap();
+        let dev_null_read = File::open("/dev/null").unwrap();
+        let dev_null_write = File::options().write(true).open("/dev/null").unwrap();
+        let arg0 = CString::new("fexecve-smoke-test").unwrap();
+        let arg1 = CString::new("--list").unwrap();
+        let args = [arg0.as_ptr(), arg1.as_ptr(), std::ptr::null()];
+        let env = empty_worker_envp();
+
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            unsafe {
+                if libc::dup2(dev_null_read.as_raw_fd(), libc::STDIN_FILENO) < 0 {
+                    libc::_exit(127);
+                }
+                if libc::dup2(dev_null_write.as_raw_fd(), libc::STDOUT_FILENO) < 0 {
+                    libc::_exit(127);
+                }
+                if libc::dup2(dev_null_write.as_raw_fd(), libc::STDERR_FILENO) < 0 {
+                    libc::_exit(127);
+                }
+                libc::fexecve(executable.as_raw_fd(), args.as_ptr(), env.as_ptr());
+                libc::_exit(127);
+            }
+        }
+
+        let status = wait_for_pid(pid).unwrap();
+        assert!(
+            raw_wait_status_success(status),
+            "fexecve smoke test exited with {}",
+            raw_wait_status_message(status)
+        );
     }
 
     #[test]
