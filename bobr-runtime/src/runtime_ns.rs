@@ -1,8 +1,9 @@
 //! Namespace runtime implementation.
 //!
-//! [`crate::runtime_ns::NsRuntime`] executes typed runtime functions in a long-lived child process
-//! that enters a Linux user namespace before starting the worker loop. Calls are
-//! marshalled over length-prefixed frames using a [`crate::runtime_ns::WireCodec`].
+//! [`crate::runtime_ns::NsRuntime`] executes each typed runtime function call in
+//! a fresh child process that enters a Linux user namespace before running the
+//! worker entrypoint. Calls are marshalled over length-prefixed frames using a
+//! [`crate::runtime_ns::WireCodec`].
 //!
 //! The parent side constructs [`crate::runtime_ns::NsRuntime`]. The child side
 //! must detect [`crate::runtime_ns::worker_invocation_from_env`] and call
@@ -22,6 +23,7 @@ use std::marker::PhantomData;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
@@ -62,9 +64,10 @@ impl WireCodec for JsonCodec {
 
 /// Runtime that executes functions in a child Linux user namespace.
 ///
-/// `NsRuntime` owns a single long-lived worker process. Each call to
-/// [`Runtime::run`] encodes the typed input, sends a framed request to that
-/// worker, waits for a framed response, and decodes the typed output.
+/// Each call to [`Runtime::run`] starts a fresh worker process, configures a
+/// Linux user namespace for that process, sends one framed request, waits for
+/// one framed response, waits for the process to exit, and decodes the typed
+/// output.
 ///
 /// The worker process is started from the current executable, so applications
 /// using this runtime must route the worker invocation through
@@ -77,10 +80,9 @@ impl WireCodec for JsonCodec {
 /// that output explicitly, for example by using `Command::output` or piped
 /// `Stdio`; inherited subprocess stdout and stderr are discarded.
 pub struct NsRuntime<C = JsonCodec> {
-    child: Option<NsChild>,
-    protocol_writer: Option<BufWriter<File>>,
-    protocol_reader: BufReader<File>,
-    shutdown_request: Vec<u8>,
+    executable: PathBuf,
+    idmap: HostIdmap,
+    tools: NsTools,
     next_id: u64,
     _codec: PhantomData<C>,
 }
@@ -92,10 +94,9 @@ impl NsRuntime<JsonCodec> {
     /// both control messages and function payloads. It is equivalent to
     /// [`NsRuntime::<JsonCodec>::new_with_codec`].
     ///
-    /// Construction starts the current executable as a worker process, waits
-    /// for the child to enter a Linux user namespace, configures the uid/gid
-    /// maps through `newuidmap` and `newgidmap`, and keeps the child alive for
-    /// later [`Runtime::run`] calls.
+    /// Construction resolves the current executable, the host uid/gid mapping,
+    /// and the `newuidmap`/`newgidmap` helper paths. The worker process itself
+    /// is started separately for each [`Runtime::run`] call.
     ///
     /// The application must route the worker invocation through
     /// [`worker_invocation_from_env`] and [`run_worker`] before running normal
@@ -118,36 +119,22 @@ where
     /// - every worker-side [`NsFunction<C>`],
     /// - the child-side [`run_worker::<C>`] call.
     ///
-    /// This constructor performs all namespace setup immediately. It can fail
-    /// if the current executable cannot be resolved, `/etc/subuid` or
-    /// `/etc/subgid` does not contain a usable range for the current user,
-    /// `newuidmap` or `newgidmap` is missing, user namespaces are unavailable,
-    /// or the child process exits during setup.
+    /// This constructor resolves all host-side prerequisites. It can fail if
+    /// the current executable cannot be resolved, `/etc/subuid` or
+    /// `/etc/subgid` does not contain a usable range for the current user, or
+    /// `newuidmap`/`newgidmap` are missing. Per-call namespace setup failures
+    /// are reported by [`Runtime::run`].
     pub fn new_with_codec() -> RuntimeResult<Self> {
         let executable = env::current_exe().map_err(|error| {
             RuntimeError::new(format!("failed to locate current executable: {error}"))
         })?;
-        let shutdown_request = C::encode(&ParentToChild::Shutdown)
-            .map_err(|error| RuntimeError::new(format!("failed to encode shutdown: {error}")))?;
         let idmap = HostIdmap::from_host_environment()?;
         let tools = NsTools::resolve()?;
-        let launch = fork_ns_worker(&executable)?;
-
-        if let Err(error) =
-            complete_namespace_setup(&launch.child, &launch.handshake, &tools, &idmap)
-        {
-            terminate_child(launch.child);
-            drop(launch.handshake);
-            drop(launch.protocol_writer);
-            drop(launch.protocol_reader);
-            return Err(error);
-        }
 
         Ok(Self {
-            child: Some(launch.child),
-            protocol_writer: Some(launch.protocol_writer),
-            protocol_reader: launch.protocol_reader,
-            shutdown_request,
+            executable,
+            idmap,
+            tools,
             next_id: 0,
             _codec: PhantomData,
         })
@@ -178,51 +165,92 @@ where
         let id = self.next_id;
         self.next_id += 1;
 
-        let request = ParentToChild::Call {
-            id,
-            function: function_name.to_string(),
-        };
-        let protocol_writer = self
-            .protocol_writer
-            .as_mut()
-            .ok_or_else(|| RuntimeError::new("namespace runtime protocol writer is closed"))?;
-        let request = C::encode(&request)?;
-        write_frame(protocol_writer, &request)?;
-        write_frame(protocol_writer, &input)?;
-        protocol_writer.flush()?;
+        let launch = fork_ns_worker(&self.executable)?;
+        if let Err(error) =
+            complete_namespace_setup(&launch.child, &launch.handshake, &self.tools, &self.idmap)
+        {
+            terminate_child(launch.child);
+            drop(launch.handshake);
+            drop(launch.protocol_writer);
+            drop(launch.protocol_reader);
+            return Err(error);
+        }
 
-        let response = read_frame(&mut self.protocol_reader)?
-            .ok_or_else(|| RuntimeError::new("namespace runtime exited without response"))?;
-        match C::decode::<ChildToParent>(&response)? {
-            ChildToParent::Ok { id: response_id } if response_id == id => {
-                read_frame(&mut self.protocol_reader)?.ok_or_else(|| {
-                    RuntimeError::new("namespace runtime exited without output frame")
-                })
+        self.call_worker(function_name, id, input, launch)
+    }
+
+    fn call_worker(
+        &self,
+        function_name: &str,
+        id: u64,
+        input: Vec<u8>,
+        launch: NsLaunch,
+    ) -> RuntimeResult<Vec<u8>> {
+        let NsLaunch {
+            child,
+            handshake,
+            mut protocol_writer,
+            mut protocol_reader,
+        } = launch;
+        drop(handshake);
+
+        let call_result = send_call_and_read_response::<C>(
+            function_name,
+            id,
+            input,
+            &mut protocol_writer,
+            &mut protocol_reader,
+        );
+        drop(protocol_writer);
+        drop(protocol_reader);
+
+        let wait_result = wait_for_child(child);
+        match (call_result, wait_result) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Ok(_), Err(wait_error)) => Err(wait_error),
+            (Err(call_error), Ok(())) => Err(call_error),
+            (Err(call_error), Err(wait_error)) => {
+                Err(RuntimeError::new(format!("{call_error}; {wait_error}")))
             }
-            ChildToParent::Err {
-                id: response_id,
-                message,
-            } if response_id == id => Err(RuntimeError::new(format!(
-                "namespace runtime failed while running '{}': {message}",
-                function_name
-            ))),
-            response => Err(RuntimeError::new(format!(
-                "namespace runtime returned response for the wrong call: expected id {id}, got id {}",
-                response.id()
-            ))),
         }
     }
 }
 
-impl<C> Drop for NsRuntime<C> {
-    fn drop(&mut self) {
-        if let Some(mut protocol_writer) = self.protocol_writer.take() {
-            let _ = write_frame(&mut protocol_writer, &self.shutdown_request);
-            let _ = protocol_writer.flush();
-        }
-        if let Some(child) = self.child.take() {
-            let _ = wait_for_child(child);
-        }
+fn send_call_and_read_response<C>(
+    function_name: &str,
+    id: u64,
+    input: Vec<u8>,
+    protocol_writer: &mut impl Write,
+    protocol_reader: &mut impl Read,
+) -> RuntimeResult<Vec<u8>>
+where
+    C: WireCodec,
+{
+    let request = ParentToChild::Call {
+        id,
+        function: function_name.to_string(),
+    };
+    let request = C::encode(&request)?;
+    write_frame(protocol_writer, &request)?;
+    write_frame(protocol_writer, &input)?;
+    protocol_writer.flush()?;
+
+    let response = read_frame(protocol_reader)?
+        .ok_or_else(|| RuntimeError::new("namespace runtime exited without response"))?;
+    match C::decode::<ChildToParent>(&response)? {
+        ChildToParent::Ok { id: response_id } if response_id == id => read_frame(protocol_reader)?
+            .ok_or_else(|| RuntimeError::new("namespace runtime exited without output frame")),
+        ChildToParent::Err {
+            id: response_id,
+            message,
+        } if response_id == id => Err(RuntimeError::new(format!(
+            "namespace runtime failed while running '{}': {message}",
+            function_name
+        ))),
+        response => Err(RuntimeError::new(format!(
+            "namespace runtime returned response for the wrong call: expected id {id}, got id {}",
+            response.id()
+        ))),
     }
 }
 
@@ -406,7 +434,7 @@ fn parse_worker_fd_arg(value: OsString) -> RuntimeResult<RawFd> {
     })
 }
 
-/// Run the namespace worker loop.
+/// Run one namespace worker call.
 ///
 /// The worker reads framed requests from the private protocol fd encoded in
 /// `invocation`, dispatches calls by function name through `functions`, and
@@ -417,6 +445,10 @@ fn parse_worker_fd_arg(value: OsString) -> RuntimeResult<RawFd> {
 /// and capture those commands' stdout and stderr themselves if the output is
 /// needed; inherited command output is discarded.
 ///
+/// This function handles one call and exits. It catches ordinary unwinding
+/// panics from runtime functions and returns them as framed errors, but it
+/// cannot catch aborts, process exits, or signals.
+///
 /// `functions` must contain at most one entry for each function name.
 pub fn run_worker<C>(
     invocation: WorkerInvocation,
@@ -426,7 +458,7 @@ where
     C: WireCodec,
 {
     let mut protocol = open_worker_protocol(invocation)?;
-    run_worker_loop::<C, _, _>(&mut protocol.reader, &mut protocol.writer, functions)
+    run_worker_once::<C, _, _>(&mut protocol.reader, &mut protocol.writer, functions)
 }
 
 struct WorkerProtocol {
@@ -447,7 +479,7 @@ fn open_worker_protocol(invocation: WorkerInvocation) -> RuntimeResult<WorkerPro
     })
 }
 
-fn run_worker_loop<C, R, W>(
+fn run_worker_once<C, R, W>(
     reader: &mut R,
     writer: &mut W,
     functions: Vec<NsFunction<C>>,
@@ -467,49 +499,63 @@ where
         }
     }
 
-    while let Some(request) = read_frame(reader)? {
-        match C::decode::<ParentToChild>(&request)? {
-            ParentToChild::Call { id, function } => {
-                let input = read_frame(reader)?.ok_or_else(|| {
-                    RuntimeError::new(format!("missing input frame for call id {id}"))
-                })?;
-                match registry.get(&function) {
-                    Some(function) => match function.call_erased(&input) {
-                        Ok(output) => {
-                            let response = C::encode(&ChildToParent::Ok { id })?;
-                            write_frame(writer, &response)?;
-                            write_frame(writer, &output)?;
-                        }
-                        Err(error) => {
-                            let response = C::encode(&ChildToParent::Err {
-                                id,
-                                message: error.to_string(),
-                            })?;
-                            write_frame(writer, &response)?;
-                        }
-                    },
-                    None => {
-                        let response = C::encode(&ChildToParent::Err {
-                            id,
-                            message: format!("unknown function '{function}'"),
-                        })?;
-                        write_frame(writer, &response)?;
-                    }
+    let request = read_frame(reader)?
+        .ok_or_else(|| RuntimeError::new("namespace runtime worker received no request"))?;
+    let ParentToChild::Call { id, function } = C::decode::<ParentToChild>(&request)?;
+    let input = read_frame(reader)?
+        .ok_or_else(|| RuntimeError::new(format!("missing input frame for call id {id}")))?;
+
+    match registry.get(&function) {
+        Some(function_impl) => {
+            match panic::catch_unwind(AssertUnwindSafe(|| function_impl.call_erased(&input))) {
+                Ok(Ok(output)) => {
+                    let response = C::encode(&ChildToParent::Ok { id })?;
+                    write_frame(writer, &response)?;
+                    write_frame(writer, &output)?;
                 }
-                writer.flush()?;
+                Ok(Err(error)) => {
+                    let response = C::encode(&ChildToParent::Err {
+                        id,
+                        message: error.to_string(),
+                    })?;
+                    write_frame(writer, &response)?;
+                }
+                Err(payload) => {
+                    let response = C::encode(&ChildToParent::Err {
+                        id,
+                        message: panic_error_message(&function, payload.as_ref()),
+                    })?;
+                    write_frame(writer, &response)?;
+                }
             }
-            ParentToChild::Shutdown => break,
+        }
+        None => {
+            let response = C::encode(&ChildToParent::Err {
+                id,
+                message: format!("unknown function '{function}'"),
+            })?;
+            write_frame(writer, &response)?;
         }
     }
+    writer.flush()?;
 
     Ok(())
+}
+
+fn panic_error_message(function: &str, payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        format!("function '{function}' panicked: {message}")
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        format!("function '{function}' panicked: {message}")
+    } else {
+        format!("function '{function}' panicked with non-string payload")
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ParentToChild {
     Call { id: u64, function: String },
-    Shutdown,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1448,15 +1494,10 @@ mod tests {
             &JsonCodec::encode(&NoisyInput).unwrap(),
         )
         .unwrap();
-        write_frame(
-            &mut request_stream,
-            &JsonCodec::encode(&ParentToChild::Shutdown).unwrap(),
-        )
-        .unwrap();
 
         let mut reader = Cursor::new(request_stream);
         let mut response_stream = Vec::new();
-        run_worker_loop::<JsonCodec, _, _>(
+        run_worker_once::<JsonCodec, _, _>(
             &mut reader,
             &mut response_stream,
             vec![NsFunction::new(NoisyFunction)],
@@ -1472,6 +1513,198 @@ mod tests {
         let output = read_frame(&mut response_reader).unwrap().unwrap();
         let output = JsonCodec::decode::<NoisyOutput>(&output).unwrap();
         assert_eq!(output.value, "ok");
+        assert_eq!(read_frame(&mut response_reader).unwrap(), None);
+    }
+
+    #[test]
+    fn worker_processes_only_one_call() {
+        use crate::runtime::RuntimeFunction;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, Copy)]
+        struct OneShotFunction;
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct OneShotInput {
+            value: String,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct OneShotOutput {
+            value: String,
+        }
+
+        impl RuntimeFunction for OneShotFunction {
+            type Input = OneShotInput;
+            type Output = OneShotOutput;
+
+            fn name(&self) -> &'static str {
+                "one-shot"
+            }
+
+            fn call(&self, input: Self::Input) -> RuntimeResult<Self::Output> {
+                Ok(OneShotOutput { value: input.value })
+            }
+        }
+
+        let mut request_stream = Vec::new();
+        write_frame(
+            &mut request_stream,
+            &JsonCodec::encode(&ParentToChild::Call {
+                id: 1,
+                function: "one-shot".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        write_frame(
+            &mut request_stream,
+            &JsonCodec::encode(&OneShotInput {
+                value: "first".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        write_frame(
+            &mut request_stream,
+            &JsonCodec::encode(&ParentToChild::Call {
+                id: 2,
+                function: "one-shot".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        write_frame(
+            &mut request_stream,
+            &JsonCodec::encode(&OneShotInput {
+                value: "second".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let request_len = request_stream.len();
+        let mut reader = Cursor::new(request_stream);
+        let mut response_stream = Vec::new();
+        run_worker_once::<JsonCodec, _, _>(
+            &mut reader,
+            &mut response_stream,
+            vec![NsFunction::new(OneShotFunction)],
+        )
+        .unwrap();
+
+        assert!((reader.position() as usize) < request_len);
+        let mut response_reader = Cursor::new(response_stream);
+        let response = read_frame(&mut response_reader).unwrap().unwrap();
+        assert!(matches!(
+            JsonCodec::decode::<ChildToParent>(&response).unwrap(),
+            ChildToParent::Ok { id: 1 }
+        ));
+        let output = read_frame(&mut response_reader).unwrap().unwrap();
+        let output = JsonCodec::decode::<OneShotOutput>(&output).unwrap();
+        assert_eq!(output.value, "first");
+        assert_eq!(read_frame(&mut response_reader).unwrap(), None);
+    }
+
+    #[test]
+    fn worker_returns_error_for_unknown_function() {
+        let mut request_stream = Vec::new();
+        write_frame(
+            &mut request_stream,
+            &JsonCodec::encode(&ParentToChild::Call {
+                id: 3,
+                function: "missing".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        write_frame(
+            &mut request_stream,
+            &JsonCodec::encode(&serde_json::json!({})).unwrap(),
+        )
+        .unwrap();
+
+        let mut reader = Cursor::new(request_stream);
+        let mut response_stream = Vec::new();
+        run_worker_once::<JsonCodec, _, _>(&mut reader, &mut response_stream, Vec::new()).unwrap();
+
+        let mut response_reader = Cursor::new(response_stream);
+        let response = read_frame(&mut response_reader).unwrap().unwrap();
+        match JsonCodec::decode::<ChildToParent>(&response).unwrap() {
+            ChildToParent::Err { id, message } => {
+                assert_eq!(id, 3);
+                assert_eq!(message, "unknown function 'missing'");
+            }
+            response => panic!("expected error response, got {response:?}"),
+        }
+        assert_eq!(read_frame(&mut response_reader).unwrap(), None);
+    }
+
+    #[test]
+    fn worker_returns_error_for_function_panic() {
+        use crate::runtime::RuntimeFunction;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, Copy)]
+        struct PanicFunction;
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PanicInput;
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PanicOutput;
+
+        impl RuntimeFunction for PanicFunction {
+            type Input = PanicInput;
+            type Output = PanicOutput;
+
+            fn name(&self) -> &'static str {
+                "panic-function"
+            }
+
+            fn call(&self, _input: Self::Input) -> RuntimeResult<Self::Output> {
+                panic!("boom")
+            }
+        }
+
+        let mut request_stream = Vec::new();
+        write_frame(
+            &mut request_stream,
+            &JsonCodec::encode(&ParentToChild::Call {
+                id: 4,
+                function: "panic-function".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        write_frame(
+            &mut request_stream,
+            &JsonCodec::encode(&PanicInput).unwrap(),
+        )
+        .unwrap();
+
+        let mut reader = Cursor::new(request_stream);
+        let mut response_stream = Vec::new();
+        run_worker_once::<JsonCodec, _, _>(
+            &mut reader,
+            &mut response_stream,
+            vec![NsFunction::new(PanicFunction)],
+        )
+        .unwrap();
+
+        let mut response_reader = Cursor::new(response_stream);
+        let response = read_frame(&mut response_reader).unwrap().unwrap();
+        match JsonCodec::decode::<ChildToParent>(&response).unwrap() {
+            ChildToParent::Err { id, message } => {
+                assert_eq!(id, 4);
+                assert_eq!(message, "function 'panic-function' panicked: boom");
+            }
+            response => panic!("expected error response, got {response:?}"),
+        }
         assert_eq!(read_frame(&mut response_reader).unwrap(), None);
     }
 
