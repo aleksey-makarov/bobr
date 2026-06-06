@@ -1,15 +1,12 @@
 mod checked_divide;
 mod namespace_identity;
-mod runtime;
-mod runtime_ns;
-mod runtime_plain;
 mod uppercase;
 
-use crate::runtime::{Runtime, RuntimeFunction, RuntimeResult};
 use checked_divide::{CheckedDivide, DivideInput};
 use namespace_identity::{NamespaceIdentity, NamespaceIdentityInput};
-use runtime_ns::{NsFunction, NsRuntime};
-use runtime_plain::PlainRuntime;
+use rust_test::runtime::{Runtime, RuntimeError, RuntimeFunction, RuntimeResult};
+use rust_test::runtime_host::HostRuntime;
+use rust_test::runtime_ns::{NsFunction, NsRuntime};
 use std::process::ExitCode;
 use uppercase::{Uppercase, UppercaseInput};
 
@@ -25,34 +22,34 @@ fn main() -> ExitCode {
 
 fn real_main() -> RuntimeResult<()> {
     if std::env::args().nth(1).as_deref() == Some("--ns-runtime-worker") {
-        return runtime_ns::run_worker(example_functions());
+        return rust_test::runtime_ns::run_worker(example_functions());
     }
 
     let uppercase = Uppercase;
     let divide = CheckedDivide;
     let identity = NamespaceIdentity;
 
-    let mut plain = PlainRuntime::new();
+    let mut host = HostRuntime::new();
     let mut namespace = NsRuntime::new()?;
 
     run_example(
-        "plain",
-        &mut plain,
+        "host",
+        &mut host,
         &uppercase,
         UppercaseInput {
             text: "hello from runtime".to_string(),
         },
     )?;
     run_example(
-        "plain",
-        &mut plain,
+        "host",
+        &mut host,
         &divide,
         DivideInput {
             dividend: 42,
             divisor: 5,
         },
     )?;
-    run_example("plain", &mut plain, &identity, NamespaceIdentityInput)?;
+    run_example("host", &mut host, &identity, NamespaceIdentityInput)?;
     run_example(
         "namespace",
         &mut namespace,
@@ -92,7 +89,7 @@ where
 {
     let output = runtime.run(function, input)?;
     let output = serde_json::to_string_pretty(&output)
-        .map_err(|error| crate::runtime::RuntimeError::new(error.to_string()))?;
+        .map_err(|error| RuntimeError::new(error.to_string()))?;
     println!("{} via {runtime_name}: {}", function.name(), output);
     Ok(())
 }
@@ -112,7 +109,7 @@ mod tests {
 
     #[test]
     fn plain_runtime_calls_typed_function_through_runtime_trait() {
-        let mut runtime = PlainRuntime::new();
+        let mut runtime = HostRuntime::new();
 
         let output = runtime
             .run(
@@ -129,7 +126,7 @@ mod tests {
 
     #[test]
     fn typed_adapter_returns_function_errors() {
-        let mut runtime = PlainRuntime::new();
+        let mut runtime = HostRuntime::new();
 
         let error = runtime
             .run(
@@ -160,7 +157,7 @@ mod tests {
 
     #[test]
     fn namespace_identity_reports_current_process_maps() {
-        let mut runtime = PlainRuntime::new();
+        let mut runtime = HostRuntime::new();
 
         let output = runtime
             .run(&NamespaceIdentity, NamespaceIdentityInput)

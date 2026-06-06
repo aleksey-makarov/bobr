@@ -1,4 +1,4 @@
-use crate::runtime::{RuntimeError, RuntimeFunction};
+use rust_test::runtime::{RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy)]

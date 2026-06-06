@@ -1011,20 +1011,50 @@ mod tests {
 
     #[test]
     fn ns_function_adapts_typed_function_to_erased_json_call() {
-        use crate::uppercase::{Uppercase, UppercaseInput, UppercaseOutput};
+        use crate::runtime::RuntimeFunction;
+        use serde::{Deserialize, Serialize};
 
-        let function = NsFunction::<JsonCodec>::new(Uppercase);
-        let input = <JsonCodec as WireCodec>::encode(&UppercaseInput {
+        #[derive(Debug, Clone, Copy)]
+        struct TestUppercase;
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct TestInput {
+            text: String,
+        }
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct TestOutput {
+            text: String,
+        }
+
+        impl RuntimeFunction for TestUppercase {
+            type Input = TestInput;
+            type Output = TestOutput;
+
+            fn name(&self) -> &'static str {
+                "test-uppercase"
+            }
+
+            fn call(&self, input: Self::Input) -> RuntimeResult<Self::Output> {
+                Ok(TestOutput {
+                    text: input.text.to_uppercase(),
+                })
+            }
+        }
+
+        let function = NsFunction::<JsonCodec>::new(TestUppercase);
+        let input = <JsonCodec as WireCodec>::encode(&TestInput {
             text: "abc".to_string(),
         })
         .unwrap();
 
         let output = function.call_erased(&input).unwrap();
-        let output = <JsonCodec as WireCodec>::decode::<UppercaseOutput>(&output).unwrap();
+        let output = <JsonCodec as WireCodec>::decode::<TestOutput>(&output).unwrap();
 
-        assert_eq!(function.name(), "uppercase");
+        assert_eq!(function.name(), "test-uppercase");
         assert_eq!(output.text, "ABC");
-        assert_eq!(output.pid, std::process::id());
     }
 
     #[test]
