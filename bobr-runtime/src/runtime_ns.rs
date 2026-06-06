@@ -1,3 +1,13 @@
+//! Namespace runtime implementation.
+//!
+//! [`crate::runtime_ns::NsRuntime`] executes typed runtime functions in a long-lived child process
+//! that enters a Linux user namespace before starting the worker loop. Calls are
+//! marshalled over length-prefixed frames using a [`crate::runtime_ns::WireCodec`].
+//!
+//! The parent side constructs [`crate::runtime_ns::NsRuntime`]. The child side must call
+//! [`crate::runtime_ns::run_worker`] with a registry of [`crate::runtime_ns::NsFunction`] values when the current
+//! executable is launched in worker mode.
+
 use crate::runtime::{Runtime, RuntimeError, RuntimeFunction, RuntimeResult};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -19,12 +29,21 @@ const WORKER_ARG: &str = "--ns-runtime-worker";
 const SUBUID_PATH: &str = "/etc/subuid";
 const SUBGID_PATH: &str = "/etc/subgid";
 
+/// Codec used by the namespace runtime wire protocol.
+///
+/// A codec encodes both control messages and runtime function payloads. The
+/// framing layer treats encoded values as opaque byte payloads.
 pub trait WireCodec {
+    /// Encode a serializable value into a byte payload.
     fn encode<T: Serialize>(value: &T) -> RuntimeResult<Vec<u8>>;
 
+    /// Decode a value from a byte payload.
     fn decode<T: DeserializeOwned>(bytes: &[u8]) -> RuntimeResult<T>;
 }
 
+/// JSON implementation of [`WireCodec`].
+///
+/// This is the default codec used by [`NsRuntime`] and [`NsFunction`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JsonCodec;
 
@@ -38,6 +57,14 @@ impl WireCodec for JsonCodec {
     }
 }
 
+/// Runtime that executes functions in a child Linux user namespace.
+///
+/// `NsRuntime` owns a single long-lived worker process. Each call to
+/// [`Runtime::run`] encodes the typed input, sends a framed request to that
+/// worker, waits for a framed response, and decodes the typed output.
+///
+/// The worker process is started from the current executable, so applications
+/// using this runtime must route the worker invocation to [`run_worker`].
 pub struct NsRuntime<C = JsonCodec> {
     child: Option<NsChild>,
     stdin: Option<BufWriter<File>>,
@@ -49,6 +76,20 @@ pub struct NsRuntime<C = JsonCodec> {
 }
 
 impl NsRuntime<JsonCodec> {
+    /// Start a namespace runtime using the default [`JsonCodec`].
+    ///
+    /// This is a convenience constructor for applications that use JSON for
+    /// both control messages and function payloads. It is equivalent to
+    /// [`NsRuntime::<JsonCodec>::new_with_codec`].
+    ///
+    /// Construction starts the current executable as a worker process, waits
+    /// for the child to enter a Linux user namespace, configures the uid/gid
+    /// maps through `newuidmap` and `newgidmap`, and keeps the child alive for
+    /// later [`Runtime::run`] calls.
+    ///
+    /// The application must route the worker invocation to [`run_worker`], for
+    /// example by checking the worker command-line flag before running normal
+    /// application logic.
     pub fn new() -> RuntimeResult<Self> {
         Self::new_with_codec()
     }
@@ -58,6 +99,20 @@ impl<C> NsRuntime<C>
 where
     C: WireCodec,
 {
+    /// Start a namespace runtime using codec `C`.
+    ///
+    /// Use this constructor when parent and worker should communicate with a
+    /// codec other than [`JsonCodec`]. The same codec type must be used for:
+    ///
+    /// - the parent-side [`NsRuntime<C>`],
+    /// - every worker-side [`NsFunction<C>`],
+    /// - the child-side [`run_worker::<C>`] call.
+    ///
+    /// This constructor performs all namespace setup immediately. It can fail
+    /// if the current executable cannot be resolved, `/etc/subuid` or
+    /// `/etc/subgid` does not contain a usable range for the current user,
+    /// `newuidmap` or `newgidmap` is missing, user namespaces are unavailable,
+    /// or the child process exits during setup.
     pub fn new_with_codec() -> RuntimeResult<Self> {
         let executable = env::current_exe().map_err(|error| {
             RuntimeError::new(format!("failed to locate current executable: {error}"))
@@ -166,6 +221,12 @@ impl<C> Drop for NsRuntime<C> {
     }
 }
 
+/// Worker-side erased wrapper around a typed [`RuntimeFunction`].
+///
+/// `NsFunction` is used only by the namespace worker registry. Parent-side
+/// callers keep using typed function values directly through [`Runtime::run`].
+/// The wrapper exists so a single worker registry can store functions with
+/// different input and output types.
 pub struct NsFunction<C = JsonCodec> {
     name: &'static str,
     call: Box<dyn Fn(&[u8]) -> RuntimeResult<Vec<u8>> + Send + Sync + 'static>,
@@ -176,6 +237,20 @@ impl<C> NsFunction<C>
 where
     C: WireCodec + 'static,
 {
+    /// Wrap a typed [`RuntimeFunction`] for use by a namespace worker.
+    ///
+    /// The parent side can call typed functions directly through
+    /// [`NsRuntime::run`], but the worker side needs a single registry that can
+    /// store functions with different input and output types. `NsFunction`
+    /// performs that type erasure.
+    ///
+    /// The wrapper stores the function's [`RuntimeFunction::name`] and an
+    /// erased closure. When a request arrives, the closure decodes the input
+    /// bytes with `C`, calls [`RuntimeFunction::call`], and encodes the typed
+    /// output with `C`.
+    ///
+    /// The wrapped function must be `'static` because it is stored in the
+    /// worker registry for the lifetime of the worker loop.
     pub fn new<F>(function: F) -> Self
     where
         F: RuntimeFunction + 'static,
@@ -199,6 +274,7 @@ where
 }
 
 impl<C> NsFunction<C> {
+    /// Return the stable function name registered in the worker.
     pub fn name(&self) -> &'static str {
         self.name
     }
@@ -208,6 +284,14 @@ impl<C> NsFunction<C> {
     }
 }
 
+/// Run the namespace worker loop.
+///
+/// The worker reads framed requests from standard input, dispatches calls by
+/// function name through `functions`, and writes framed responses to standard
+/// output. The parent side expects the current executable to enter this worker
+/// path when started by [`NsRuntime`].
+///
+/// `functions` must contain at most one entry for each function name.
 pub fn run_worker<C>(functions: Vec<NsFunction<C>>) -> RuntimeResult<()>
 where
     C: WireCodec,
