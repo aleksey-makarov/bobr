@@ -23,7 +23,7 @@ impl HostRuntime {
     /// implementations through an explicit `new` method:
     ///
     /// ```
-    /// use rust_test::runtime_host::HostRuntime;
+    /// use bobr_runtime::runtime_host::HostRuntime;
     ///
     /// let runtime = HostRuntime::new();
     /// ```

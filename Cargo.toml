@@ -14,6 +14,7 @@ members = [
   "mbuild-tree",
   "mbuild-store",
   "fsobj-hash",
+  "bobr-runtime",
 ]
 
 resolver = "3"

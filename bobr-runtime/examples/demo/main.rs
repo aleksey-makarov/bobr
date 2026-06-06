@@ -2,11 +2,11 @@ mod checked_divide;
 mod namespace_identity;
 mod uppercase;
 
+use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction, RuntimeResult};
+use bobr_runtime::runtime_host::HostRuntime;
+use bobr_runtime::runtime_ns::{NsFunction, NsRuntime, worker_invocation_from_env};
 use checked_divide::{CheckedDivide, DivideInput};
 use namespace_identity::{NamespaceIdentity, NamespaceIdentityInput};
-use rust_test::runtime::{Runtime, RuntimeError, RuntimeFunction, RuntimeResult};
-use rust_test::runtime_host::HostRuntime;
-use rust_test::runtime_ns::{NsFunction, NsRuntime, worker_invocation_from_env};
 use std::process::ExitCode;
 use std::time::Duration;
 use uppercase::{Uppercase, UppercaseInput};
@@ -23,7 +23,7 @@ fn main() -> ExitCode {
 
 fn real_main() -> RuntimeResult<()> {
     if let Some(invocation) = worker_invocation_from_env()? {
-        return rust_test::runtime_ns::run_worker(invocation, example_functions());
+        return bobr_runtime::runtime_ns::run_worker(invocation, example_functions());
     }
 
     let uppercase = Uppercase;

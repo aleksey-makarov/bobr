@@ -1,4 +1,4 @@
-use rust_test::runtime::{RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy)]
