@@ -6,7 +6,7 @@ use checked_divide::{CheckedDivide, DivideInput};
 use namespace_identity::{NamespaceIdentity, NamespaceIdentityInput};
 use rust_test::runtime::{Runtime, RuntimeError, RuntimeFunction, RuntimeResult};
 use rust_test::runtime_host::HostRuntime;
-use rust_test::runtime_ns::{NsFunction, NsRuntime};
+use rust_test::runtime_ns::{NsFunction, NsRuntime, worker_invocation_from_env};
 use std::process::ExitCode;
 use uppercase::{Uppercase, UppercaseInput};
 
@@ -21,8 +21,8 @@ fn main() -> ExitCode {
 }
 
 fn real_main() -> RuntimeResult<()> {
-    if std::env::args().nth(1).as_deref() == Some("--ns-runtime-worker") {
-        return rust_test::runtime_ns::run_worker(example_functions());
+    if let Some(invocation) = worker_invocation_from_env()? {
+        return rust_test::runtime_ns::run_worker(invocation, example_functions());
     }
 
     let uppercase = Uppercase;

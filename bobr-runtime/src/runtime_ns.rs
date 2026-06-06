@@ -4,16 +4,18 @@
 //! that enters a Linux user namespace before starting the worker loop. Calls are
 //! marshalled over length-prefixed frames using a [`crate::runtime_ns::WireCodec`].
 //!
-//! The parent side constructs [`crate::runtime_ns::NsRuntime`]. The child side must call
-//! [`crate::runtime_ns::run_worker`] with a registry of [`crate::runtime_ns::NsFunction`] values when the current
-//! executable is launched in worker mode.
+//! The parent side constructs [`crate::runtime_ns::NsRuntime`]. The child side
+//! must detect [`crate::runtime_ns::worker_invocation_from_env`] and call
+//! [`crate::runtime_ns::run_worker`] with a registry of
+//! [`crate::runtime_ns::NsFunction`] values when the current executable is
+//! launched in worker mode.
 
 use crate::runtime::{Runtime, RuntimeError, RuntimeFunction, RuntimeResult};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::marker::PhantomData;
@@ -22,10 +24,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
-use std::thread::{self, JoinHandle};
 
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 const WORKER_ARG: &str = "--ns-runtime-worker";
+const WORKER_PROTOCOL_READ_ARG: &str = "--ns-runtime-protocol-read-fd";
+const WORKER_PROTOCOL_WRITE_ARG: &str = "--ns-runtime-protocol-write-fd";
 const SUBUID_PATH: &str = "/etc/subuid";
 const SUBGID_PATH: &str = "/etc/subgid";
 
@@ -64,12 +67,16 @@ impl WireCodec for JsonCodec {
 /// worker, waits for a framed response, and decodes the typed output.
 ///
 /// The worker process is started from the current executable, so applications
-/// using this runtime must route the worker invocation to [`run_worker`].
+/// using this runtime must route the worker invocation through
+/// [`worker_invocation_from_env`] and [`run_worker`].
+///
+/// Worker standard input, output, and error are redirected to `/dev/null`.
+/// Runtime functions must return data through their typed result, not through
+/// process stdio.
 pub struct NsRuntime<C = JsonCodec> {
     child: Option<NsChild>,
-    stdin: Option<BufWriter<File>>,
-    stdout: BufReader<File>,
-    stderr_forwarder: Option<JoinHandle<()>>,
+    protocol_writer: Option<BufWriter<File>>,
+    protocol_reader: BufReader<File>,
     shutdown_request: Vec<u8>,
     next_id: u64,
     _codec: PhantomData<C>,
@@ -87,8 +94,8 @@ impl NsRuntime<JsonCodec> {
     /// maps through `newuidmap` and `newgidmap`, and keeps the child alive for
     /// later [`Runtime::run`] calls.
     ///
-    /// The application must route the worker invocation to [`run_worker`], for
-    /// example by checking the worker command-line flag before running normal
+    /// The application must route the worker invocation through
+    /// [`worker_invocation_from_env`] and [`run_worker`] before running normal
     /// application logic.
     pub fn new() -> RuntimeResult<Self> {
         Self::new_with_codec()
@@ -128,17 +135,15 @@ where
         {
             terminate_child(launch.child);
             drop(launch.handshake);
-            drop(launch.stdin);
-            drop(launch.stdout);
-            let _ = launch.stderr_forwarder.join();
+            drop(launch.protocol_writer);
+            drop(launch.protocol_reader);
             return Err(error);
         }
 
         Ok(Self {
             child: Some(launch.child),
-            stdin: Some(launch.stdin),
-            stdout: launch.stdout,
-            stderr_forwarder: Some(launch.stderr_forwarder),
+            protocol_writer: Some(launch.protocol_writer),
+            protocol_reader: launch.protocol_reader,
             shutdown_request,
             next_id: 0,
             _codec: PhantomData,
@@ -174,20 +179,20 @@ where
             id,
             function: function_name.to_string(),
         };
-        let stdin = self
-            .stdin
+        let protocol_writer = self
+            .protocol_writer
             .as_mut()
-            .ok_or_else(|| RuntimeError::new("namespace runtime stdin is closed"))?;
+            .ok_or_else(|| RuntimeError::new("namespace runtime protocol writer is closed"))?;
         let request = C::encode(&request)?;
-        write_frame(stdin, &request)?;
-        write_frame(stdin, &input)?;
-        stdin.flush()?;
+        write_frame(protocol_writer, &request)?;
+        write_frame(protocol_writer, &input)?;
+        protocol_writer.flush()?;
 
-        let response = read_frame(&mut self.stdout)?
+        let response = read_frame(&mut self.protocol_reader)?
             .ok_or_else(|| RuntimeError::new("namespace runtime exited without response"))?;
         match C::decode::<ChildToParent>(&response)? {
             ChildToParent::Ok { id: response_id } if response_id == id => {
-                read_frame(&mut self.stdout)?.ok_or_else(|| {
+                read_frame(&mut self.protocol_reader)?.ok_or_else(|| {
                     RuntimeError::new("namespace runtime exited without output frame")
                 })
             }
@@ -208,15 +213,12 @@ where
 
 impl<C> Drop for NsRuntime<C> {
     fn drop(&mut self) {
-        if let Some(mut stdin) = self.stdin.take() {
-            let _ = write_frame(&mut stdin, &self.shutdown_request);
-            let _ = stdin.flush();
+        if let Some(mut protocol_writer) = self.protocol_writer.take() {
+            let _ = write_frame(&mut protocol_writer, &self.shutdown_request);
+            let _ = protocol_writer.flush();
         }
         if let Some(child) = self.child.take() {
             let _ = wait_for_child(child);
-        }
-        if let Some(forwarder) = self.stderr_forwarder.take() {
-            let _ = forwarder.join();
         }
     }
 }
@@ -284,17 +286,169 @@ impl<C> NsFunction<C> {
     }
 }
 
+/// Worker-mode protocol descriptor passed to [`run_worker`].
+///
+/// Applications do not construct this value directly. Call
+/// [`worker_invocation_from_env`] at program startup; if it returns `Some`,
+/// pass the invocation to [`run_worker`] with the worker registry.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkerInvocation {
+    protocol_read_fd: RawFd,
+    protocol_write_fd: RawFd,
+}
+
+impl WorkerInvocation {
+    fn new(protocol_read_fd: RawFd, protocol_write_fd: RawFd) -> RuntimeResult<Self> {
+        if protocol_read_fd <= libc::STDERR_FILENO {
+            return Err(RuntimeError::new(format!(
+                "namespace runtime protocol read fd {protocol_read_fd} must not be stdio"
+            )));
+        }
+        if protocol_write_fd <= libc::STDERR_FILENO {
+            return Err(RuntimeError::new(format!(
+                "namespace runtime protocol write fd {protocol_write_fd} must not be stdio"
+            )));
+        }
+        if protocol_read_fd == protocol_write_fd {
+            return Err(RuntimeError::new(format!(
+                "namespace runtime protocol read and write fd are both {protocol_read_fd}"
+            )));
+        }
+        Ok(Self {
+            protocol_read_fd,
+            protocol_write_fd,
+        })
+    }
+}
+
+/// Return the namespace worker invocation encoded in this process's arguments.
+///
+/// Parent processes get `Ok(None)` and should continue normal application
+/// startup. A namespace worker process gets `Ok(Some(...))` and should
+/// immediately call [`run_worker`]. Malformed worker arguments are reported as
+/// [`RuntimeError`] values.
+pub fn worker_invocation_from_env() -> RuntimeResult<Option<WorkerInvocation>> {
+    worker_invocation_from_args(env::args_os())
+}
+
+fn worker_invocation_from_args<I>(args: I) -> RuntimeResult<Option<WorkerInvocation>>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    let mut args = args.into_iter();
+    let _arg0 = args.next();
+    let Some(mode) = args.next() else {
+        return Ok(None);
+    };
+    if mode.as_os_str() != OsStr::new(WORKER_ARG) {
+        return Ok(None);
+    }
+
+    expect_worker_arg(&mut args, WORKER_PROTOCOL_READ_ARG)?;
+    let protocol_read_fd =
+        parse_worker_fd_arg(next_worker_arg(&mut args, WORKER_PROTOCOL_READ_ARG)?)?;
+    expect_worker_arg(&mut args, WORKER_PROTOCOL_WRITE_ARG)?;
+    let protocol_write_fd =
+        parse_worker_fd_arg(next_worker_arg(&mut args, WORKER_PROTOCOL_WRITE_ARG)?)?;
+
+    if let Some(extra) = args.next() {
+        return Err(RuntimeError::new(format!(
+            "unexpected namespace runtime worker argument '{}'",
+            extra.to_string_lossy()
+        )));
+    }
+
+    WorkerInvocation::new(protocol_read_fd, protocol_write_fd).map(Some)
+}
+
+fn expect_worker_arg(
+    args: &mut impl Iterator<Item = OsString>,
+    expected: &'static str,
+) -> RuntimeResult<()> {
+    let actual = next_worker_arg(args, expected)?;
+    if actual.as_os_str() == OsStr::new(expected) {
+        Ok(())
+    } else {
+        Err(RuntimeError::new(format!(
+            "expected namespace runtime worker argument {expected}, got '{}'",
+            actual.to_string_lossy()
+        )))
+    }
+}
+
+fn next_worker_arg(
+    args: &mut impl Iterator<Item = OsString>,
+    expected: &'static str,
+) -> RuntimeResult<OsString> {
+    args.next().ok_or_else(|| {
+        RuntimeError::new(format!(
+            "missing namespace runtime worker argument {expected}"
+        ))
+    })
+}
+
+fn parse_worker_fd_arg(value: OsString) -> RuntimeResult<RawFd> {
+    let value = value.into_string().map_err(|value| {
+        RuntimeError::new(format!(
+            "namespace runtime worker fd '{}' is not valid UTF-8",
+            value.to_string_lossy()
+        ))
+    })?;
+    value.parse::<RawFd>().map_err(|error| {
+        RuntimeError::new(format!(
+            "namespace runtime worker fd '{value}' is not an integer: {error}"
+        ))
+    })
+}
+
 /// Run the namespace worker loop.
 ///
-/// The worker reads framed requests from standard input, dispatches calls by
-/// function name through `functions`, and writes framed responses to standard
-/// output. The parent side expects the current executable to enter this worker
-/// path when started by [`NsRuntime`].
+/// The worker reads framed requests from the private protocol fd encoded in
+/// `invocation`, dispatches calls by function name through `functions`, and
+/// writes framed responses to the private protocol response fd. Standard
+/// output and standard error are not protocol streams. When the worker is
+/// launched by [`NsRuntime`], all three standard descriptors are redirected to
+/// `/dev/null`.
 ///
 /// `functions` must contain at most one entry for each function name.
-pub fn run_worker<C>(functions: Vec<NsFunction<C>>) -> RuntimeResult<()>
+pub fn run_worker<C>(
+    invocation: WorkerInvocation,
+    functions: Vec<NsFunction<C>>,
+) -> RuntimeResult<()>
 where
     C: WireCodec,
+{
+    let mut protocol = open_worker_protocol(invocation)?;
+    run_worker_loop::<C, _, _>(&mut protocol.reader, &mut protocol.writer, functions)
+}
+
+struct WorkerProtocol {
+    reader: BufReader<File>,
+    writer: BufWriter<File>,
+}
+
+fn open_worker_protocol(invocation: WorkerInvocation) -> RuntimeResult<WorkerProtocol> {
+    set_fd_cloexec(invocation.protocol_read_fd, true)?;
+    set_fd_cloexec(invocation.protocol_write_fd, true)?;
+
+    let reader = unsafe { File::from_raw_fd(invocation.protocol_read_fd) };
+    let writer = unsafe { File::from_raw_fd(invocation.protocol_write_fd) };
+
+    Ok(WorkerProtocol {
+        reader: BufReader::new(reader),
+        writer: BufWriter::new(writer),
+    })
+}
+
+fn run_worker_loop<C, R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    functions: Vec<NsFunction<C>>,
+) -> RuntimeResult<()>
+where
+    C: WireCodec,
+    R: Read,
+    W: Write,
 {
     let mut registry = BTreeMap::<String, NsFunction<C>>::new();
     for function in functions {
@@ -306,29 +460,25 @@ where
         }
     }
 
-    let stdin = std::io::stdin();
-    let mut stdin = BufReader::new(stdin.lock());
-    let mut stdout = std::io::stdout().lock();
-
-    while let Some(request) = read_frame(&mut stdin)? {
+    while let Some(request) = read_frame(reader)? {
         match C::decode::<ParentToChild>(&request)? {
             ParentToChild::Call { id, function } => {
-                let input = read_frame(&mut stdin)?.ok_or_else(|| {
+                let input = read_frame(reader)?.ok_or_else(|| {
                     RuntimeError::new(format!("missing input frame for call id {id}"))
                 })?;
                 match registry.get(&function) {
                     Some(function) => match function.call_erased(&input) {
                         Ok(output) => {
                             let response = C::encode(&ChildToParent::Ok { id })?;
-                            write_frame(&mut stdout, &response)?;
-                            write_frame(&mut stdout, &output)?;
+                            write_frame(writer, &response)?;
+                            write_frame(writer, &output)?;
                         }
                         Err(error) => {
                             let response = C::encode(&ChildToParent::Err {
                                 id,
                                 message: error.to_string(),
                             })?;
-                            write_frame(&mut stdout, &response)?;
+                            write_frame(writer, &response)?;
                         }
                     },
                     None => {
@@ -336,10 +486,10 @@ where
                             id,
                             message: format!("unknown function '{function}'"),
                         })?;
-                        write_frame(&mut stdout, &response)?;
+                        write_frame(writer, &response)?;
                     }
                 }
-                stdout.flush()?;
+                writer.flush()?;
             }
             ParentToChild::Shutdown => break,
         }
@@ -373,9 +523,8 @@ impl ChildToParent {
 struct NsLaunch {
     child: NsChild,
     handshake: NsHandshake,
-    stdin: BufWriter<File>,
-    stdout: BufReader<File>,
-    stderr_forwarder: JoinHandle<()>,
+    protocol_writer: BufWriter<File>,
+    protocol_reader: BufReader<File>,
 }
 
 #[derive(Debug)]
@@ -456,15 +605,59 @@ impl SubidKind {
 }
 
 fn fork_ns_worker(executable: &Path) -> RuntimeResult<NsLaunch> {
-    let protocol_stdin = Pipe::new()?;
-    let protocol_stdout = Pipe::new()?;
-    let protocol_stderr = Pipe::new()?;
+    let Pipe {
+        read: protocol_request_read,
+        write: protocol_request_write,
+    } = Pipe::new()?;
+    let protocol_request_read = move_fd_out_of_stdio(protocol_request_read)?;
+    let protocol_request_write = move_fd_out_of_stdio(protocol_request_write)?;
+
+    let Pipe {
+        read: protocol_response_read,
+        write: protocol_response_write,
+    } = Pipe::new()?;
+    let protocol_response_read = move_fd_out_of_stdio(protocol_response_read)?;
+    let protocol_response_write = move_fd_out_of_stdio(protocol_response_write)?;
+
+    let worker_stdin = File::open("/dev/null").map_err(|error| {
+        RuntimeError::new(format!(
+            "failed to open /dev/null for worker stdin: {error}"
+        ))
+    })?;
+    let worker_stdout = File::options()
+        .write(true)
+        .open("/dev/null")
+        .map_err(|error| {
+            RuntimeError::new(format!(
+                "failed to open /dev/null for worker stdout: {error}"
+            ))
+        })?;
+    let worker_stderr = File::options()
+        .write(true)
+        .open("/dev/null")
+        .map_err(|error| {
+            RuntimeError::new(format!(
+                "failed to open /dev/null for worker stderr: {error}"
+            ))
+        })?;
     let userns_ready = Pipe::new()?;
     let idmap_ready = Pipe::new()?;
     let executable = path_cstring(executable)?;
     let arg0 = executable.clone();
     let worker_arg = CString::new(WORKER_ARG).unwrap();
-    let args = [arg0, worker_arg];
+    let protocol_read_arg = CString::new(WORKER_PROTOCOL_READ_ARG).unwrap();
+    let protocol_read_fd_arg = CString::new(protocol_request_read.as_raw_fd().to_string()).unwrap();
+    let protocol_write_arg = CString::new(WORKER_PROTOCOL_WRITE_ARG).unwrap();
+    let protocol_write_fd_arg =
+        CString::new(protocol_response_write.as_raw_fd().to_string()).unwrap();
+    let args = [
+        arg0,
+        worker_arg,
+        protocol_read_arg,
+        protocol_read_fd_arg,
+        protocol_write_arg,
+        protocol_write_fd_arg,
+    ];
     let mut arg_ptrs = args.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
     arg_ptrs.push(std::ptr::null());
 
@@ -489,26 +682,16 @@ fn fork_ns_worker(executable: &Path) -> RuntimeResult<NsLaunch> {
         child_exec_ns_worker(
             &executable,
             &arg_ptrs,
-            protocol_stdin.read_raw(),
-            protocol_stdout.write_raw(),
-            protocol_stderr.write_raw(),
+            worker_stdin.as_raw_fd(),
+            worker_stdout.as_raw_fd(),
+            worker_stderr.as_raw_fd(),
+            protocol_request_read.as_raw_fd(),
+            protocol_response_write.as_raw_fd(),
             userns_ready.write_raw(),
             idmap_ready.read_raw(),
         );
     }
 
-    let Pipe {
-        read: protocol_stdin_read,
-        write: protocol_stdin_write,
-    } = protocol_stdin;
-    let Pipe {
-        read: protocol_stdout_read,
-        write: protocol_stdout_write,
-    } = protocol_stdout;
-    let Pipe {
-        read: protocol_stderr_read,
-        write: protocol_stderr_write,
-    } = protocol_stderr;
     let Pipe {
         read: userns_ready_read,
         write: userns_ready_write,
@@ -518,9 +701,11 @@ fn fork_ns_worker(executable: &Path) -> RuntimeResult<NsLaunch> {
         write: idmap_ready_write,
     } = idmap_ready;
 
-    drop(protocol_stdin_read);
-    drop(protocol_stdout_write);
-    drop(protocol_stderr_write);
+    drop(protocol_request_read);
+    drop(protocol_response_write);
+    drop(worker_stdin);
+    drop(worker_stdout);
+    drop(worker_stderr);
     drop(userns_ready_write);
     drop(idmap_ready_read);
 
@@ -530,10 +715,22 @@ fn fork_ns_worker(executable: &Path) -> RuntimeResult<NsLaunch> {
             userns_ready_read,
             idmap_ready_write,
         },
-        stdin: BufWriter::new(File::from(protocol_stdin_write)),
-        stdout: BufReader::new(File::from(protocol_stdout_read)),
-        stderr_forwarder: spawn_stderr_forwarder(File::from(protocol_stderr_read)),
+        protocol_writer: BufWriter::new(File::from(protocol_request_write)),
+        protocol_reader: BufReader::new(File::from(protocol_response_read)),
     })
+}
+
+fn move_fd_out_of_stdio(fd: OwnedFd) -> io::Result<OwnedFd> {
+    if fd.as_raw_fd() > libc::STDERR_FILENO {
+        return Ok(fd);
+    }
+
+    let duplicated = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+    if duplicated < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
+    }
 }
 
 fn complete_namespace_setup(
@@ -565,10 +762,16 @@ fn child_exec_ns_worker(
     stdin_read: RawFd,
     stdout_write: RawFd,
     stderr_write: RawFd,
+    protocol_read_fd: RawFd,
+    protocol_write_fd: RawFd,
     userns_ready_write: RawFd,
     idmap_ready_read: RawFd,
 ) -> ! {
     if !child_setup_stdio(stdin_read, stdout_write, stderr_write) {
+        unsafe { libc::_exit(127) };
+    }
+    if !child_clear_cloexec(protocol_read_fd) || !child_clear_cloexec(protocol_write_fd) {
+        child_write_stderr(b"failed to preserve namespace runtime protocol fds\n");
         unsafe { libc::_exit(127) };
     }
     if unsafe { libc::unshare(libc::CLONE_NEWUSER) } != 0 {
@@ -628,6 +831,30 @@ fn child_clear_cloexec(fd: RawFd) -> bool {
         return false;
     }
     true
+}
+
+fn set_fd_cloexec(fd: RawFd, close_on_exec: bool) -> RuntimeResult<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags < 0 {
+        return Err(RuntimeError::new(format!(
+            "failed to read flags for fd {fd}: {}",
+            io::Error::last_os_error()
+        )));
+    }
+
+    let flags = if close_on_exec {
+        flags | libc::FD_CLOEXEC
+    } else {
+        flags & !libc::FD_CLOEXEC
+    };
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags) } < 0 {
+        return Err(RuntimeError::new(format!(
+            "failed to set close-on-exec flag for fd {fd}: {}",
+            io::Error::last_os_error()
+        )));
+    }
+
+    Ok(())
 }
 
 fn child_close_fd(fd: RawFd) {
@@ -759,13 +986,6 @@ fn write_setgroups_deny(pid: u32) -> RuntimeResult<()> {
             path.display()
         ))),
     }
-}
-
-fn spawn_stderr_forwarder(mut stderr: File) -> JoinHandle<()> {
-    thread::spawn(move || {
-        let mut parent_stderr = std::io::stderr().lock();
-        let _ = io::copy(&mut stderr, &mut parent_stderr);
-    })
 }
 
 fn terminate_child(child: NsChild) {
@@ -1163,6 +1383,108 @@ mod tests {
 
         assert_eq!(function.name(), "test-uppercase");
         assert_eq!(output.text, "ABC");
+    }
+
+    #[test]
+    fn worker_protocol_is_not_stdout() {
+        use crate::runtime::RuntimeFunction;
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, Copy)]
+        struct NoisyFunction;
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct NoisyInput;
+
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct NoisyOutput {
+            value: String,
+        }
+
+        impl RuntimeFunction for NoisyFunction {
+            type Input = NoisyInput;
+            type Output = NoisyOutput;
+
+            fn name(&self) -> &'static str {
+                "noisy"
+            }
+
+            fn call(&self, _input: Self::Input) -> RuntimeResult<Self::Output> {
+                println!("this stdout line must not enter the protocol stream");
+                Ok(NoisyOutput {
+                    value: "ok".to_string(),
+                })
+            }
+        }
+
+        let mut request_stream = Vec::new();
+        write_frame(
+            &mut request_stream,
+            &JsonCodec::encode(&ParentToChild::Call {
+                id: 7,
+                function: "noisy".to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        write_frame(
+            &mut request_stream,
+            &JsonCodec::encode(&NoisyInput).unwrap(),
+        )
+        .unwrap();
+        write_frame(
+            &mut request_stream,
+            &JsonCodec::encode(&ParentToChild::Shutdown).unwrap(),
+        )
+        .unwrap();
+
+        let mut reader = Cursor::new(request_stream);
+        let mut response_stream = Vec::new();
+        run_worker_loop::<JsonCodec, _, _>(
+            &mut reader,
+            &mut response_stream,
+            vec![NsFunction::new(NoisyFunction)],
+        )
+        .unwrap();
+
+        let mut response_reader = Cursor::new(response_stream);
+        let response = read_frame(&mut response_reader).unwrap().unwrap();
+        assert!(matches!(
+            JsonCodec::decode::<ChildToParent>(&response).unwrap(),
+            ChildToParent::Ok { id: 7 }
+        ));
+        let output = read_frame(&mut response_reader).unwrap().unwrap();
+        let output = JsonCodec::decode::<NoisyOutput>(&output).unwrap();
+        assert_eq!(output.value, "ok");
+        assert_eq!(read_frame(&mut response_reader).unwrap(), None);
+    }
+
+    #[test]
+    fn worker_invocation_parser_recognizes_worker_arguments() {
+        let invocation = worker_invocation_from_args([
+            OsString::from("binary"),
+            OsString::from(WORKER_ARG),
+            OsString::from(WORKER_PROTOCOL_READ_ARG),
+            OsString::from("3"),
+            OsString::from(WORKER_PROTOCOL_WRITE_ARG),
+            OsString::from("4"),
+        ])
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(invocation.protocol_read_fd, 3);
+        assert_eq!(invocation.protocol_write_fd, 4);
+    }
+
+    #[test]
+    fn worker_invocation_parser_ignores_normal_arguments() {
+        assert!(
+            worker_invocation_from_args([OsString::from("binary"), OsString::from("--normal")])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
