@@ -468,6 +468,16 @@ fn fork_ns_worker(executable: &Path) -> RuntimeResult<NsLaunch> {
     let mut arg_ptrs = args.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
     arg_ptrs.push(std::ptr::null());
 
+    // Everything above this point runs in the parent before fork, so normal
+    // Rust code is fine: allocating Vec/CString values, resolving paths, and
+    // constructing rich RuntimeError messages are all safe here.
+    //
+    // If fork succeeds, the child must immediately enter child_exec_ns_worker().
+    // That function runs in the post-fork/pre-exec window, where only the
+    // calling thread exists. Locks held by other parent threads at fork time may
+    // remain permanently locked in the child, so child-side setup must avoid
+    // allocation, formatting, stdio, logging, mutexes, and other Rust runtime
+    // conveniences.
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         return Err(RuntimeError::new(format!(
@@ -537,6 +547,18 @@ fn complete_namespace_setup(
     signal_child_ready(handshake.idmap_ready_write.as_raw_fd())
 }
 
+// Child-only post-fork/pre-exec setup.
+//
+// Keep this function and the child_* helpers below restricted to simple libc
+// calls and fixed byte strings. Do not use format!, String, Vec, Box, PathBuf,
+// std::fs, std::env, Command, println/eprintln, tracing/logging, locks,
+// channels, panics, or std::process::exit here. Those operations can allocate
+// or acquire locks that may have been held by vanished parent threads when
+// fork() happened, which can deadlock the child before it reaches exec().
+//
+// On failure, write a fixed diagnostic to stderr and terminate with _exit().
+// _exit() is important: std::process::exit would run Rust/atexit cleanup in
+// this fragile process state.
 fn child_exec_ns_worker(
     executable: &CString,
     args: &[*const libc::c_char],
@@ -578,6 +600,8 @@ fn child_exec_ns_worker(
     unsafe { libc::_exit(127) };
 }
 
+// The helpers below are used by child_exec_ns_worker() before execv(). Keep
+// their implementation within the same restricted syscall-only discipline.
 fn child_setup_stdio(stdin_read: RawFd, stdout_write: RawFd, stderr_write: RawFd) -> bool {
     child_duplicate_stdio_fd(stdin_read, libc::STDIN_FILENO)
         && child_duplicate_stdio_fd(stdout_write, libc::STDOUT_FILENO)
