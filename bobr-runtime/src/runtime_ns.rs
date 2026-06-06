@@ -634,9 +634,9 @@ impl HostIdmap {
     fn from_host_environment() -> RuntimeResult<Self> {
         let current_uid = unsafe { libc::geteuid() };
         let current_gid = unsafe { libc::getegid() };
-        let username = current_username(current_uid)?;
-        let subuid = read_first_subid_range(Path::new(SUBUID_PATH), &username, SubidKind::Uid)?;
-        let subgid = read_first_subid_range(Path::new(SUBGID_PATH), &username, SubidKind::Gid)?;
+        let owner = SubidOwner::new(current_uid, current_username(current_uid)?);
+        let subuid = read_first_subid_range(Path::new(SUBUID_PATH), &owner, SubidKind::Uid)?;
+        let subgid = read_first_subid_range(Path::new(SUBGID_PATH), &owner, SubidKind::Gid)?;
 
         Ok(Self {
             current_uid,
@@ -651,6 +651,34 @@ impl HostIdmap {
 struct SubidRange {
     base: u32,
     count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubidOwner {
+    uid: u32,
+    uid_text: String,
+    username: Option<String>,
+}
+
+impl SubidOwner {
+    fn new(uid: u32, username: Option<String>) -> Self {
+        Self {
+            uid,
+            uid_text: uid.to_string(),
+            username,
+        }
+    }
+
+    fn matches(&self, owner: &str) -> bool {
+        self.username.as_deref() == Some(owner) || owner == self.uid_text
+    }
+
+    fn display_keys(&self) -> String {
+        match &self.username {
+            Some(username) => format!("{username} or uid {}", self.uid),
+            None => format!("uid {}", self.uid),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1114,36 +1142,48 @@ fn command_context(stderr: &[u8]) -> String {
     }
 }
 
-fn current_username(current_uid: u32) -> RuntimeResult<String> {
-    let mut password = unsafe { std::mem::zeroed::<libc::passwd>() };
-    let mut result = std::ptr::null_mut();
-    let mut buffer = vec![0_u8; passwd_buffer_size()];
-    let status = unsafe {
-        libc::getpwuid_r(
-            current_uid,
-            &mut password,
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-            &mut result,
-        )
-    };
-    if status != 0 {
+fn current_username(current_uid: u32) -> RuntimeResult<Option<String>> {
+    let mut buffer_len = passwd_buffer_size();
+
+    loop {
+        let mut password = unsafe { std::mem::zeroed::<libc::passwd>() };
+        let mut result = std::ptr::null_mut();
+        let mut buffer = vec![0_u8; buffer_len];
+        let status = unsafe {
+            libc::getpwuid_r(
+                current_uid,
+                &mut password,
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+
+        if status == 0 {
+            if result.is_null() {
+                return Ok(None);
+            }
+            let name = unsafe { CStr::from_ptr(password.pw_name) };
+            return name
+                .to_str()
+                .map(|name| Some(name.to_string()))
+                .map_err(|error| {
+                    RuntimeError::new(format!(
+                        "passwd entry name for euid {current_uid} is not valid UTF-8: {error}"
+                    ))
+                });
+        }
+
+        if status == libc::ERANGE && buffer_len < max_passwd_buffer_size() {
+            buffer_len = buffer_len.saturating_mul(2).min(max_passwd_buffer_size());
+            continue;
+        }
+
         return Err(RuntimeError::new(format!(
             "failed to look up passwd entry for euid {current_uid}: {}",
             io::Error::from_raw_os_error(status)
         )));
     }
-    if result.is_null() {
-        return Err(RuntimeError::new(format!(
-            "current euid {current_uid} has no passwd entry"
-        )));
-    }
-    let name = unsafe { CStr::from_ptr(password.pw_name) };
-    name.to_str().map(str::to_string).map_err(|error| {
-        RuntimeError::new(format!(
-            "passwd entry name for euid {current_uid} is not valid UTF-8: {error}"
-        ))
-    })
 }
 
 fn passwd_buffer_size() -> usize {
@@ -1151,9 +1191,13 @@ fn passwd_buffer_size() -> usize {
     if size > 0 { size as usize } else { 16 * 1024 }
 }
 
+fn max_passwd_buffer_size() -> usize {
+    1024 * 1024
+}
+
 fn read_first_subid_range(
     path: &Path,
-    username: &str,
+    owner: &SubidOwner,
     kind: SubidKind,
 ) -> RuntimeResult<SubidRange> {
     let content = fs::read_to_string(path).map_err(|error| {
@@ -1163,12 +1207,12 @@ fn read_first_subid_range(
             path.display()
         ))
     })?;
-    parse_first_subid_range(&content, username, kind, &path.display().to_string())
+    parse_first_subid_range(&content, owner, kind, &path.display().to_string())
 }
 
 fn parse_first_subid_range(
     content: &str,
-    username: &str,
+    owner: &SubidOwner,
     kind: SubidKind,
     source: &str,
 ) -> RuntimeResult<SubidRange> {
@@ -1178,6 +1222,11 @@ fn parse_first_subid_range(
         let line_number = index + 1;
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let line_owner = line.split_once(':').map_or(line, |(owner, _)| owner);
+        if !owner.matches(line_owner) {
             continue;
         }
 
@@ -1204,15 +1253,16 @@ fn parse_first_subid_range(
             ))
         })?;
 
-        if parts[0] == username && first_match.is_none() {
+        if first_match.is_none() {
             first_match = Some(SubidRange { base, count });
         }
     }
 
     first_match.ok_or_else(|| {
         RuntimeError::new(format!(
-            "{} not configured for user {username} in {source}",
-            kind.subid_name()
+            "{} not configured for {} in {source}",
+            kind.subid_name(),
+            owner.display_keys()
         ))
     })
 }
@@ -1734,11 +1784,33 @@ mod tests {
         );
     }
 
+    fn subid_owner(username: Option<&str>) -> SubidOwner {
+        SubidOwner::new(1001, username.map(str::to_string))
+    }
+
+    #[test]
+    fn subid_owner_matches_username_and_numeric_uid() {
+        let owner = subid_owner(Some("alice"));
+
+        assert!(owner.matches("alice"));
+        assert!(owner.matches("1001"));
+        assert!(!owner.matches("bob"));
+        assert!(!owner.matches("1002"));
+    }
+
+    #[test]
+    fn subid_owner_without_username_matches_numeric_uid_only() {
+        let owner = subid_owner(None);
+
+        assert!(owner.matches("1001"));
+        assert!(!owner.matches("alice"));
+    }
+
     #[test]
     fn parser_skips_comments_and_empty_lines() {
         let range = parse_first_subid_range(
             "\n# comment\nalice:100000:65536\n",
-            "alice",
+            &subid_owner(Some("alice")),
             SubidKind::Uid,
             "/etc/subuid",
         )
@@ -1754,10 +1826,29 @@ mod tests {
     }
 
     #[test]
-    fn parser_uses_first_matching_entry() {
+    fn parser_accepts_numeric_uid_owner() {
         let range = parse_first_subid_range(
-            "alice:100000:10\nalice:200000:20\n",
-            "alice",
+            "1001:100000:65536\n",
+            &subid_owner(None),
+            SubidKind::Uid,
+            "/etc/subuid",
+        )
+        .unwrap();
+
+        assert_eq!(
+            range,
+            SubidRange {
+                base: 100_000,
+                count: 65_536
+            }
+        );
+    }
+
+    #[test]
+    fn parser_uses_first_matching_entry_across_username_and_uid() {
+        let range = parse_first_subid_range(
+            "1001:100000:10\nalice:200000:20\n",
+            &subid_owner(Some("alice")),
             SubidKind::Uid,
             "/etc/subuid",
         )
@@ -1774,35 +1865,94 @@ mod tests {
 
     #[test]
     fn parser_rejects_missing_entry() {
-        let error =
-            parse_first_subid_range("bob:100000:10\n", "alice", SubidKind::Uid, "/etc/subuid")
-                .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("subuid not configured for user alice")
-        );
-    }
-
-    #[test]
-    fn parser_rejects_malformed_line_anywhere() {
         let error = parse_first_subid_range(
-            "alice:100000:10\nmalformed\n",
-            "alice",
+            "bob:100000:10\n",
+            &subid_owner(Some("alice")),
             SubidKind::Uid,
             "/etc/subuid",
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("malformed subuid line 2"));
+        assert!(
+            error
+                .to_string()
+                .contains("subuid not configured for alice or uid 1001")
+        );
     }
 
     #[test]
-    fn parser_rejects_invalid_number_anywhere() {
+    fn parser_rejects_missing_entry_for_uid_only_owner() {
         let error = parse_first_subid_range(
-            "alice:100000:10\nbob:not-a-number:10\n",
-            "alice",
+            "bob:100000:10\n",
+            &subid_owner(None),
+            SubidKind::Uid,
+            "/etc/subuid",
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("subuid not configured for uid 1001")
+        );
+    }
+
+    #[test]
+    fn parser_ignores_malformed_non_matching_line() {
+        let range = parse_first_subid_range(
+            "malformed\nalice:100000:10\n",
+            &subid_owner(Some("alice")),
+            SubidKind::Uid,
+            "/etc/subuid",
+        )
+        .unwrap();
+
+        assert_eq!(
+            range,
+            SubidRange {
+                base: 100_000,
+                count: 10
+            }
+        );
+    }
+
+    #[test]
+    fn parser_ignores_invalid_number_for_non_matching_owner() {
+        let range = parse_first_subid_range(
+            "bob:not-a-number:10\nalice:100000:10\n",
+            &subid_owner(Some("alice")),
+            SubidKind::Uid,
+            "/etc/subuid",
+        )
+        .unwrap();
+
+        assert_eq!(
+            range,
+            SubidRange {
+                base: 100_000,
+                count: 10
+            }
+        );
+    }
+
+    #[test]
+    fn parser_rejects_malformed_matching_line() {
+        let error = parse_first_subid_range(
+            "alice\n",
+            &subid_owner(Some("alice")),
+            SubidKind::Uid,
+            "/etc/subuid",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("malformed subuid line 1"));
+    }
+
+    #[test]
+    fn parser_rejects_invalid_number_for_matching_owner() {
+        let error = parse_first_subid_range(
+            "alice:not-a-number:10\n",
+            &subid_owner(Some("alice")),
             SubidKind::Uid,
             "/etc/subuid",
         )
@@ -1813,9 +1963,13 @@ mod tests {
 
     #[test]
     fn parser_rejects_zero_count() {
-        let error =
-            parse_first_subid_range("alice:100000:0\n", "alice", SubidKind::Uid, "/etc/subuid")
-                .unwrap_err();
+        let error = parse_first_subid_range(
+            "alice:100000:0\n",
+            &subid_owner(Some("alice")),
+            SubidKind::Uid,
+            "/etc/subuid",
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("zero count"));
     }
@@ -1824,7 +1978,7 @@ mod tests {
     fn parser_rejects_range_overflow() {
         let error = parse_first_subid_range(
             "alice:4294967295:2\n",
-            "alice",
+            &subid_owner(Some("alice")),
             SubidKind::Uid,
             "/etc/subuid",
         )
