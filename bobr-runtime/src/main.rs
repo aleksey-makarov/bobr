@@ -8,6 +8,7 @@ use rust_test::runtime::{Runtime, RuntimeError, RuntimeFunction, RuntimeResult};
 use rust_test::runtime_host::HostRuntime;
 use rust_test::runtime_ns::{NsFunction, NsRuntime, worker_invocation_from_env};
 use std::process::ExitCode;
+use std::time::Duration;
 use uppercase::{Uppercase, UppercaseInput};
 
 fn main() -> ExitCode {
@@ -30,7 +31,7 @@ fn real_main() -> RuntimeResult<()> {
     let identity = NamespaceIdentity;
 
     let mut host = HostRuntime::new();
-    let mut namespace = NsRuntime::new()?;
+    let mut namespace = NsRuntime::new()?.with_call_timeout(Duration::from_secs(30));
 
     run_example(
         "host",

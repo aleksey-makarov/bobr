@@ -2,8 +2,8 @@
 //!
 //! The crate exposes a small typed [`runtime::Runtime`] interface, a host
 //! implementation that calls functions in the current process, and a namespace
-//! implementation that marshals calls to a long-lived child process running in
-//! a Linux user namespace.
+//! implementation that marshals each call to a fresh child process running in a
+//! Linux user namespace.
 //!
 //! Application crates define their own [`runtime::RuntimeFunction`] values and
 //! can execute the same typed function through either runtime implementation.
