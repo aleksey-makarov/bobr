@@ -72,7 +72,10 @@ impl WireCodec for JsonCodec {
 ///
 /// Worker standard input, output, and error are redirected to `/dev/null`.
 /// Runtime functions must return data through their typed result, not through
-/// process stdio.
+/// process stdio. If a runtime function starts subprocesses and needs their
+/// output for diagnostics or results, the function implementation must capture
+/// that output explicitly, for example by using `Command::output` or piped
+/// `Stdio`; inherited subprocess stdout and stderr are discarded.
 pub struct NsRuntime<C = JsonCodec> {
     child: Option<NsChild>,
     protocol_writer: Option<BufWriter<File>>,
@@ -410,7 +413,9 @@ fn parse_worker_fd_arg(value: OsString) -> RuntimeResult<RawFd> {
 /// writes framed responses to the private protocol response fd. Standard
 /// output and standard error are not protocol streams. When the worker is
 /// launched by [`NsRuntime`], all three standard descriptors are redirected to
-/// `/dev/null`.
+/// `/dev/null`. Function implementations that launch commands must configure
+/// and capture those commands' stdout and stderr themselves if the output is
+/// needed; inherited command output is discarded.
 ///
 /// `functions` must contain at most one entry for each function name.
 pub fn run_worker<C>(
