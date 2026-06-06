@@ -3,8 +3,8 @@ use fsobj_hash::ObjectHash;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-const INVOCATION_SCHEMA: &str = "mbuild-build-invocation-v1";
-const RESULT_INVOCATION_SCHEMA: &str = "mbuild-build-result-invocation-v3";
+const INVOCATION_SCHEMA: &str = "bobr-build-invocation-v1";
+const RESULT_INVOCATION_SCHEMA: &str = "bobr-build-result-invocation-v3";
 
 /// Computes the stable key for a normalized build invocation.
 ///
@@ -87,7 +87,7 @@ pub fn compute_result_id(object_hash: ObjectHash) -> Result<ResultId, StoreError
 
 pub(crate) fn result_id_for_object_hash(object_hash: ObjectHash) -> ResultId {
     let canonical = format!(
-        "{{\"object_hash\":\"{}\",\"schema\":\"mbuild-result-id-v2\"}}",
+        "{{\"object_hash\":\"{}\",\"schema\":\"bobr-result-id-v2\"}}",
         object_hash
     );
     ResultId::from_bytes(Sha256::digest(canonical.as_bytes()).into())

@@ -11,7 +11,7 @@ use std::thread;
 use tempfile::tempdir;
 
 fn create_test_store(root: &Path) -> Store {
-    let store_root = root.join(".mbuild");
+    let store_root = root.join(".bobr");
     fs::create_dir_all(&store_root).unwrap();
     Store::create(&store_root).unwrap()
 }
@@ -65,7 +65,7 @@ fn parse_result_record_rejects_old_schema() {
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
     let result_id = compute_result_id(object_hash).unwrap();
     let value = json!({
-        "schema": "mbuild-result-v4",
+        "schema": "bobr-result-v4",
         "result_id": result_id.to_string(),
         "object_hash": object_hash.to_string(),
         "inputs": [],
@@ -74,7 +74,7 @@ fn parse_result_record_rejects_old_schema() {
     assert!(matches!(
         parse_result_record_value(result_id, &value),
         Err(StoreError::InvalidData(message))
-            if message == "unsupported result record schema 'mbuild-result-v4'"
+            if message == "unsupported result record schema 'bobr-result-v4'"
     ));
 }
 
@@ -1429,7 +1429,7 @@ fn workspace_allocation_writes_metadata_index_and_sanitized_paths() {
     );
     let metadata: Value =
         serde_json::from_slice(&fs::read(workspace.log_dir().join("meta.json")).unwrap()).unwrap();
-    assert_eq!(metadata["schema"], "mbuild-workspace-v1");
+    assert_eq!(metadata["schema"], "bobr-workspace-v1");
     assert_eq!(metadata["serial"], 0);
     assert_eq!(metadata["tag"], "Source Builder");
     assert_eq!(metadata["recipe_name"], "name / demo");

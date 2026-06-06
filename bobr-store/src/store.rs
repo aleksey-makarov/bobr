@@ -127,7 +127,7 @@ pub struct QuarantinedStoreTemp {
     pub metadata_error: Option<String>,
 }
 
-/// Immutable handle to an `mbuild` store.
+/// Immutable handle to a `bobr` store.
 ///
 /// `Store` is the primary public interface for paths and operations that belong
 /// to a store. It also represents one runtime session: creating a `Store`
@@ -600,7 +600,7 @@ fn write_workspace_metadata(
     let mut metadata = Map::new();
     metadata.insert(
         "schema".to_string(),
-        Value::String("mbuild-workspace-v1".to_string()),
+        Value::String("bobr-workspace-v1".to_string()),
     );
     metadata.insert("serial".to_string(), Value::Number(serial.into()));
     metadata.insert("tag".to_string(), Value::String(request.tag.clone()));
@@ -779,7 +779,7 @@ fn write_quarantine_metadata(
         })?;
     let metadata_path = target.with_file_name(format!("{file_name}.json"));
     let metadata = json!({
-        "schema": "mbuild-quarantine-v1",
+        "schema": "bobr-quarantine-v1",
         "builder_tag": &request.builder_tag,
         "build_key": request.build_key.to_hex(),
         "original_path": request.temp_path.display().to_string(),

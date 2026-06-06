@@ -19,16 +19,16 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-const SCHEMA: &str = "mbuild-fs-tree-manifest-v2";
-const CANONICAL_SCHEMA_LINE: &[u8] = br#"{"schema":"mbuild-fs-tree-manifest-v2"}
+const SCHEMA: &str = "bobr-fs-tree-manifest-v2";
+const CANONICAL_SCHEMA_LINE: &[u8] = br#"{"schema":"bobr-fs-tree-manifest-v2"}
 "#;
-const FS_FILE_HASH_TAG: &[u8] = b"mbuild:fs-file:v1\0";
+const FS_FILE_HASH_TAG: &[u8] = b"bobr:fs-file:v1\0";
 
 /// Canonical `fs-tree manifest v2`.
 ///
 /// A manifest contains validated filesystem entries sorted by UTF-8 path bytes.
 /// The serialized form always starts with the
-/// `{"schema":"mbuild-fs-tree-manifest-v2"}` header line.
+/// `{"schema":"bobr-fs-tree-manifest-v2"}` header line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsTreeManifest {
     entries: Vec<FsTreeEntry>,
@@ -371,7 +371,7 @@ fn hash_fs_file_path(path: &Path) -> Result<FsFileHash, StoreError> {
 ///
 /// The hash algorithm is:
 ///
-/// `sha256(b"mbuild:fs-file:v1\0" || uid:u32be || gid:u32be || mode:u32be ||
+/// `sha256(b"bobr:fs-file:v1\0" || uid:u32be || gid:u32be || mode:u32be ||
 /// size:u64be || sha256(file_bytes))`.
 fn hash_fs_file_parts(
     uid: u32,
@@ -1148,7 +1148,7 @@ mod tests {
     }
 
     fn schema_line() -> &'static str {
-        r#"{"schema":"mbuild-fs-tree-manifest-v2"}"#
+        r#"{"schema":"bobr-fs-tree-manifest-v2"}"#
     }
 
     #[test]
@@ -1163,7 +1163,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(manifest.to_canonical_bytes().unwrap()).unwrap(),
             concat!(
-                r#"{"schema":"mbuild-fs-tree-manifest-v2"}"#,
+                r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
                 "\n",
                 r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
                 "\n",
@@ -1192,7 +1192,7 @@ mod tests {
     #[test]
     fn parser_accepts_canonical_sample_and_round_trips() {
         let bytes = concat!(
-            r#"{"schema":"mbuild-fs-tree-manifest-v2"}"#,
+            r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
             "\n",
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
@@ -1219,10 +1219,10 @@ mod tests {
 
     #[test]
     fn rejects_missing_final_newline_empty_file_and_empty_line() {
-        assert_parse_rejects(r#"{"schema":"mbuild-fs-tree-manifest-v2"}"#);
+        assert_parse_rejects(r#"{"schema":"bobr-fs-tree-manifest-v2"}"#);
         assert!(FsTreeManifest::parse_canonical_bytes(b"").is_err());
         assert_parse_rejects(concat!(
-            r#"{"schema":"mbuild-fs-tree-manifest-v2"}"#,
+            r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
             "\n",
             "\n",
         ));
@@ -1238,7 +1238,7 @@ mod tests {
             "\n",
         ));
         assert_parse_rejects(concat!(
-            r#"{ "schema":"mbuild-fs-tree-manifest-v2"}"#,
+            r#"{ "schema":"bobr-fs-tree-manifest-v2"}"#,
             "\n",
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
@@ -1256,7 +1256,7 @@ mod tests {
     #[test]
     fn rejects_file_metadata_and_symlink_hash() {
         assert_parse_rejects(concat!(
-            r#"{"schema":"mbuild-fs-tree-manifest-v2"}"#,
+            r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
             "\n",
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
@@ -1264,7 +1264,7 @@ mod tests {
             "\n",
         ));
         assert_parse_rejects(concat!(
-            r#"{"schema":"mbuild-fs-tree-manifest-v2"}"#,
+            r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
             "\n",
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
@@ -1281,7 +1281,7 @@ mod tests {
             FsTreeEntry::directory("a", 0, 0, 0o755),
         ]);
         assert_parse_rejects(concat!(
-            r#"{"schema":"mbuild-fs-tree-manifest-v2"}"#,
+            r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
             "\n",
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
@@ -1295,7 +1295,7 @@ mod tests {
     #[test]
     fn parser_rejects_entries_outside_canonical_order() {
         assert_parse_rejects(concat!(
-            r#"{"schema":"mbuild-fs-tree-manifest-v2"}"#,
+            r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
             "\n",
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
@@ -1350,7 +1350,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
             concat!(
-                r#"{"schema":"mbuild-fs-tree-manifest-v2"}"#,
+                r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
                 "\n",
                 r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
                 "\n",
@@ -1411,14 +1411,14 @@ mod tests {
         let hash = hash_fs_file_parts(1, 2, 0o644, 6, content).unwrap();
         assert_eq!(
             hash.to_hex(),
-            "dd7d9c9ca8f19d88b408764813ef7e3824ea544bc5e32973223f763d42d75ca9"
+            "cf253b6d1a9ce614d6887788ed05847b9c8398e82b6dd3f49b6be0fd7ad423ed"
         );
 
         let root = Path::new("/tmp/fs-files");
         assert_eq!(
             fs_file_path(root, hash).unwrap(),
             PathBuf::from(
-                "/tmp/fs-files/dd/dd7d9c9ca8f19d88b408764813ef7e3824ea544bc5e32973223f763d42d75ca9"
+                "/tmp/fs-files/cf/cf253b6d1a9ce614d6887788ed05847b9c8398e82b6dd3f49b6be0fd7ad423ed"
             )
         );
         assert!(hash_fs_file_parts(0, 0, 0o10000, 0, [0; 32]).is_err());

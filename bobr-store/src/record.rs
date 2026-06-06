@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use std::fs;
 use std::path::PathBuf;
 
-pub(crate) const RESULT_SCHEMA: &str = "mbuild-result-v5";
+pub(crate) const RESULT_SCHEMA: &str = "bobr-result-v5";
 #[cfg(test)]
 pub(crate) const BUILD_SCHEMA: &str = RESULT_SCHEMA;
 

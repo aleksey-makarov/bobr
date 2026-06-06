@@ -8,14 +8,14 @@ use crate::runtime::{
     ExecuteBuilderNodeRequest, RuntimeError, check_cancelled, execute_builder_node,
     log_runtime_event, lookup_build_handle, lookup_canonical_result, map_store_error,
 };
-use mbuild_core::{
-    BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderRun, CancellationToken,
-    OriginContext, RunOptions, SourceBuilder, Workspace,
-};
-use mbuild_store::{
+use bobr_store::{
     BuildKey, RealizedResult, ResultRecord, ReuseInputIdentity, SourceImportOutcome, SourceLookup,
     Store, StoreWorkspace, WorkspaceRequest, create_workspace, import_source_result,
     lookup_source_result, publish_result, remove_store_temp_dir_force,
+};
+use mbuild_core::{
+    BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderRun, CancellationToken,
+    OriginContext, RunOptions, SourceBuilder, Workspace,
 };
 use serde_json::{Map, Value, to_string_pretty};
 use std::collections::{HashMap, VecDeque};
@@ -995,10 +995,8 @@ fn realized_result_from_record(
 mod tests {
     use super::*;
     use crate::recipe::{ReuseOrigin, collect_graph};
+    use bobr_store::{PublishOutputRequest, compute_result_id, compute_reuse_key, publish_output};
     use mbuild_core::{CancellationToken, OriginContext, OriginSpec, ParsedOrigin};
-    use mbuild_store::{
-        PublishOutputRequest, compute_result_id, compute_reuse_key, publish_output,
-    };
     use serde_json::json;
     use std::collections::HashMap;
     use std::fs;

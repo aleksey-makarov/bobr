@@ -1,6 +1,6 @@
 use std::fmt;
 
-/// Error returned by operations that work with an `mbuild` store.
+/// Error returned by operations that work with a `bobr` store.
 ///
 /// `StoreError` is intentionally store-oriented rather than a generic
 /// filesystem error facade. Variants group failures by how callers should think

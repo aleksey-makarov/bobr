@@ -129,6 +129,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bobr-store"
+version = "0.1.0"
+dependencies = [
+ "fsobj-hash",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "time",
+]
+
+[[package]]
 name = "bstr"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -883,6 +896,7 @@ dependencies = [
 name = "mbuild"
 version = "0.1.0"
 dependencies = [
+ "bobr-store",
  "clap",
  "flate2",
  "fsobj-hash",
@@ -893,7 +907,6 @@ dependencies = [
  "mbuild-origin-http",
  "mbuild-origin-oci-registry",
  "mbuild-sandbox",
- "mbuild-store",
  "mbuild-tree",
  "mockito",
  "serde",
@@ -1040,19 +1053,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
-]
-
-[[package]]
-name = "mbuild-store"
-version = "0.1.0"
-dependencies = [
- "fsobj-hash",
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "time",
 ]
 
 [[package]]

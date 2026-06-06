@@ -57,7 +57,7 @@ def main() -> int:
         "--store",
         type=Path,
         default=default_store(),
-        help="store root (default: $MBUILD_STORE, ./mbuild-store, or ../mbuild-store)",
+        help="store root (default: $MBUILD_STORE, ./bobr-store, or ../bobr-store)",
     )
     parser.add_argument(
         "--fsobj-hash",
@@ -98,10 +98,10 @@ class CheckError(Exception):
 def default_store() -> Path:
     if value := os.environ.get("MBUILD_STORE"):
         return Path(value)
-    cwd_store = Path.cwd() / "mbuild-store"
+    cwd_store = Path.cwd() / "bobr-store"
     if cwd_store.is_dir():
         return cwd_store
-    parent_store = Path.cwd().parent / "mbuild-store"
+    parent_store = Path.cwd().parent / "bobr-store"
     if parent_store.is_dir():
         return parent_store
     return cwd_store

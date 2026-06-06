@@ -1,7 +1,7 @@
-//! Store ownership, object publication, and store metadata for `mbuild`.
+//! Store ownership, object publication, and store metadata for `bobr`.
 //!
 //! This crate is the public boundary for operations that create, inspect, or
-//! mutate an `mbuild` store. It owns store initialization, object import,
+//! mutate a `bobr` store. It owns store initialization, object import,
 //! build/result/reuse identifiers, result records, publication references, and
 //! the future manifest-addressed `fs-tree` storage API.
 //!
@@ -17,7 +17,7 @@
 #![deny(missing_docs)]
 
 #[cfg(not(target_os = "linux"))]
-compile_error!("mbuild requires Linux");
+compile_error!("bobr requires Linux");
 
 mod error;
 pub mod fs_tree;

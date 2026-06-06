@@ -12,7 +12,7 @@ members = [
   "mbuild-sandbox-runner",
   "mbuild-sandbox-runner-core",
   "mbuild-tree",
-  "mbuild-store",
+  "bobr-store",
   "fsobj-hash",
   "bobr-runtime",
 ]

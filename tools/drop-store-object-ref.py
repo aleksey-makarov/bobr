@@ -57,7 +57,7 @@ def main() -> int:
         "--store",
         type=Path,
         default=default_store(),
-        help="store root (default: $MBUILD_STORE, ./mbuild-store, or ../mbuild-store)",
+        help="store root (default: $MBUILD_STORE, ./bobr-store, or ../bobr-store)",
     )
     parser.add_argument(
         "--yes",
@@ -89,10 +89,10 @@ class StoreDropError(Exception):
 def default_store() -> Path:
     if value := os.environ.get("MBUILD_STORE"):
         return Path(value)
-    cwd_store = Path.cwd() / "mbuild-store"
+    cwd_store = Path.cwd() / "bobr-store"
     if cwd_store.is_dir():
         return cwd_store
-    parent_store = Path.cwd().parent / "mbuild-store"
+    parent_store = Path.cwd().parent / "bobr-store"
     if parent_store.is_dir():
         return parent_store
     return cwd_store
@@ -345,7 +345,7 @@ def quarantine_object_path(plan: DropPlan, error: OSError) -> Path:
 
 def write_quarantine_metadata(target: Path, plan: DropPlan, reason: str) -> None:
     metadata = {
-        "schema": "mbuild-store-drop-quarantine-v1",
+        "schema": "bobr-store-drop-quarantine-v1",
         "object_hash": plan.object_hash,
         "original_object_path": str(plan.object_path),
         "quarantine_path": str(target),

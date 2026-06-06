@@ -1,13 +1,13 @@
 use crate::resolved_inputs::ResolvedInputs;
-use mbuild_core::{
-    BuildContext, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderError,
-    BuilderRun, CancellationToken, Workspace,
-};
-use mbuild_store::{
+use bobr_store::{
     BuildKey, PublishedBuild, ReuseInputIdentity, Store, StoreError, StoreTempQuarantineRequest,
     StoreWorkspace, WorkspaceRequest, compute_reuse_key, create_workspace, load_build_handle,
     materialize_build, materialize_build_with_trusted_hash, quarantine_store_temp,
     recreate_store_temp_dir_force, remove_store_temp_dir_force, resolve_reuse_for_build,
+};
+use mbuild_core::{
+    BuildContext, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderError,
+    BuilderRun, CancellationToken, Workspace,
 };
 use serde_json::Value;
 use std::fmt;
@@ -502,13 +502,13 @@ fn quarantine_temp_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bobr_store::{
+        PublishOutputRequest, ReuseInputIdentity, WorkspaceRequest, compute_build_key,
+        create_workspace, list_quarantined_temps, publish_output,
+    };
     use mbuild_core::{
         BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, BuilderRun, BuilderSpec,
         CancellationToken, RunOptions, StagedBuildResult, TypedBuilder,
-    };
-    use mbuild_store::{
-        PublishOutputRequest, ReuseInputIdentity, WorkspaceRequest, compute_build_key,
-        create_workspace, list_quarantined_temps, publish_output,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
@@ -1060,7 +1060,7 @@ mod tests {
         let file_name = path.file_name().unwrap().to_str().unwrap();
         let metadata_path = path.with_file_name(format!("{file_name}.json"));
         let metadata: Value = serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
-        assert_eq!(metadata["schema"], "mbuild-quarantine-v1");
+        assert_eq!(metadata["schema"], "bobr-quarantine-v1");
         assert_eq!(metadata["builder_tag"], builder_tag);
         assert_eq!(metadata["build_key"], build_key.to_hex());
         assert_eq!(metadata["quarantine_path"], path.display().to_string());
