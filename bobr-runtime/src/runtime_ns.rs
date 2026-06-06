@@ -231,9 +231,11 @@ impl<C> Drop for NsRuntime<C> {
 /// different input and output types.
 pub struct NsFunction<C = JsonCodec> {
     name: &'static str,
-    call: Box<dyn Fn(&[u8]) -> RuntimeResult<Vec<u8>> + Send + Sync + 'static>,
+    call: Box<ErasedNsCall>,
     _codec: PhantomData<C>,
 }
+
+type ErasedNsCall = dyn Fn(&[u8]) -> RuntimeResult<Vec<u8>> + Send + Sync + 'static;
 
 impl<C> NsFunction<C>
 where
@@ -527,6 +529,17 @@ struct NsLaunch {
     protocol_reader: BufReader<File>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ChildExecFds {
+    stdin_read: RawFd,
+    stdout_write: RawFd,
+    stderr_write: RawFd,
+    protocol_read: RawFd,
+    protocol_write: RawFd,
+    userns_ready_write: RawFd,
+    idmap_ready_read: RawFd,
+}
+
 #[derive(Debug)]
 struct NsChild {
     pid: libc::pid_t,
@@ -682,13 +695,15 @@ fn fork_ns_worker(executable: &Path) -> RuntimeResult<NsLaunch> {
         child_exec_ns_worker(
             &executable,
             &arg_ptrs,
-            worker_stdin.as_raw_fd(),
-            worker_stdout.as_raw_fd(),
-            worker_stderr.as_raw_fd(),
-            protocol_request_read.as_raw_fd(),
-            protocol_response_write.as_raw_fd(),
-            userns_ready.write_raw(),
-            idmap_ready.read_raw(),
+            ChildExecFds {
+                stdin_read: worker_stdin.as_raw_fd(),
+                stdout_write: worker_stdout.as_raw_fd(),
+                stderr_write: worker_stderr.as_raw_fd(),
+                protocol_read: protocol_request_read.as_raw_fd(),
+                protocol_write: protocol_response_write.as_raw_fd(),
+                userns_ready_write: userns_ready.write_raw(),
+                idmap_ready_read: idmap_ready.read_raw(),
+            },
         );
     }
 
@@ -759,18 +774,12 @@ fn complete_namespace_setup(
 fn child_exec_ns_worker(
     executable: &CString,
     args: &[*const libc::c_char],
-    stdin_read: RawFd,
-    stdout_write: RawFd,
-    stderr_write: RawFd,
-    protocol_read_fd: RawFd,
-    protocol_write_fd: RawFd,
-    userns_ready_write: RawFd,
-    idmap_ready_read: RawFd,
+    fds: ChildExecFds,
 ) -> ! {
-    if !child_setup_stdio(stdin_read, stdout_write, stderr_write) {
+    if !child_setup_stdio(fds.stdin_read, fds.stdout_write, fds.stderr_write) {
         unsafe { libc::_exit(127) };
     }
-    if !child_clear_cloexec(protocol_read_fd) || !child_clear_cloexec(protocol_write_fd) {
+    if !child_clear_cloexec(fds.protocol_read) || !child_clear_cloexec(fds.protocol_write) {
         child_write_stderr(b"failed to preserve namespace runtime protocol fds\n");
         unsafe { libc::_exit(127) };
     }
@@ -778,11 +787,11 @@ fn child_exec_ns_worker(
         child_write_stderr(b"failed to unshare user namespace\n");
         unsafe { libc::_exit(127) };
     }
-    if write_handshake_byte(userns_ready_write).is_err() {
+    if write_handshake_byte(fds.userns_ready_write).is_err() {
         child_write_stderr(b"failed to signal user namespace readiness\n");
         unsafe { libc::_exit(127) };
     }
-    if !child_read_handshake_byte(idmap_ready_read) {
+    if !child_read_handshake_byte(fds.idmap_ready_read) {
         child_write_stderr(b"failed to wait for idmap readiness\n");
         unsafe { libc::_exit(127) };
     }
@@ -795,8 +804,8 @@ fn child_exec_ns_worker(
         unsafe { libc::_exit(127) };
     }
     unsafe {
-        child_close_fd(userns_ready_write);
-        child_close_fd(idmap_ready_read);
+        child_close_fd(fds.userns_ready_write);
+        child_close_fd(fds.idmap_ready_read);
         libc::execv(executable.as_ptr(), args.as_ptr());
     }
     child_write_stderr(b"failed to exec namespace runtime worker\n");
