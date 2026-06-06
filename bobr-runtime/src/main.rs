@@ -1,4 +1,5 @@
 mod checked_divide;
+mod namespace_identity;
 mod runtime;
 mod runtime_ns;
 mod runtime_plain;
@@ -6,6 +7,7 @@ mod uppercase;
 
 use crate::runtime::{Runtime, RuntimeFunction, RuntimeResult};
 use checked_divide::{CheckedDivide, DivideInput};
+use namespace_identity::{NamespaceIdentity, NamespaceIdentityInput};
 use runtime_ns::{NsFunction, NsRuntime};
 use runtime_plain::PlainRuntime;
 use std::process::ExitCode;
@@ -28,6 +30,7 @@ fn real_main() -> RuntimeResult<()> {
 
     let uppercase = Uppercase;
     let divide = CheckedDivide;
+    let identity = NamespaceIdentity;
 
     let mut plain = PlainRuntime::new();
     let mut namespace = NsRuntime::new()?;
@@ -49,6 +52,7 @@ fn real_main() -> RuntimeResult<()> {
             divisor: 5,
         },
     )?;
+    run_example("plain", &mut plain, &identity, NamespaceIdentityInput)?;
     run_example(
         "namespace",
         &mut namespace,
@@ -65,6 +69,12 @@ fn real_main() -> RuntimeResult<()> {
             dividend: 42,
             divisor: 5,
         },
+    )?;
+    run_example(
+        "namespace",
+        &mut namespace,
+        &identity,
+        NamespaceIdentityInput,
     )?;
 
     Ok(())
@@ -88,7 +98,11 @@ where
 }
 
 fn example_functions() -> Vec<NsFunction> {
-    vec![NsFunction::new(Uppercase), NsFunction::new(CheckedDivide)]
+    vec![
+        NsFunction::new(Uppercase),
+        NsFunction::new(CheckedDivide),
+        NsFunction::new(NamespaceIdentity),
+    ]
 }
 
 #[cfg(test)]
@@ -142,5 +156,20 @@ mod tests {
             serde_json::to_value(output).unwrap(),
             serde_json::json!({ "quotient": 8, "remainder": 2, "pid": 123 })
         );
+    }
+
+    #[test]
+    fn namespace_identity_reports_current_process_maps() {
+        let mut runtime = PlainRuntime::new();
+
+        let output = runtime
+            .run(&NamespaceIdentity, NamespaceIdentityInput)
+            .unwrap();
+
+        assert_eq!(output.pid, std::process::id());
+        assert_eq!(output.effective_uid, unsafe { libc::geteuid() });
+        assert_eq!(output.effective_gid, unsafe { libc::getegid() });
+        assert!(!output.uid_map.trim().is_empty());
+        assert!(!output.gid_map.trim().is_empty());
     }
 }
