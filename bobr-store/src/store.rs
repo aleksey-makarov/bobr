@@ -1,6 +1,6 @@
 use crate::StoreError;
 use crate::fsutil as private_fs;
-use crate::identity::{BuildKey, ObjectHash, ResultId, ReuseKey};
+use crate::identity::{BuildKey, ObjectHash, ReuseKey};
 use serde_json::{Map, Value, json};
 use std::fs;
 use std::io::Write;
@@ -238,13 +238,13 @@ impl Store {
         self.reuses_dir().join(reuse_key.to_hex())
     }
 
-    /// Returns the path of the JSON result record for `result_id`.
+    /// Returns the path of the JSON result record for `object_hash`.
     ///
     /// The path is under the JSON result record directory and has a `.json` suffix. The
     /// function does not check whether the record currently exists.
-    pub(crate) fn result_record_path(&self, result_id: ResultId) -> PathBuf {
+    pub(crate) fn result_record_path(&self, object_hash: ObjectHash) -> PathBuf {
         self.results_dir()
-            .join(format!("{}.json", result_id.to_hex()))
+            .join(format!("{}.json", object_hash.to_hex()))
     }
 }
 

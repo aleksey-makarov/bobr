@@ -2,7 +2,7 @@ use crate::builders;
 use crate::origins;
 use crate::runtime::{RuntimeError, map_store_error};
 use bobr_store::RealizedResult;
-use bobr_store::identity::{BuildKey, ResultId, compute_build_key, compute_result_id};
+use bobr_store::identity::{BuildKey, compute_build_key};
 use mbuild_core::{BuilderSpec, ObjectHash, ParsedOrigin};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -230,8 +230,7 @@ fn collect_graph_inner(
             collect_builder_recipe(request, recipe, nodes, stack, node_keys, topo_order)?
         }
         Recipe::Source(recipe) => {
-            let result_id = compute_result_id(recipe.object_hash);
-            let key = source_planning_key(result_id)?;
+            let key = source_planning_key(recipe.object_hash)?;
             let planned = PlannedRecipe::Source(PlannedSourceRecipe {
                 name: recipe.name.clone(),
                 object_hash: recipe.object_hash,
@@ -318,11 +317,11 @@ fn collect_builder_recipe(
     ))
 }
 
-fn source_planning_key(result_id: ResultId) -> Result<BuildKey, RuntimeError> {
+fn source_planning_key(object_hash: ObjectHash) -> Result<BuildKey, RuntimeError> {
     compute_build_key(
         "SourceNode",
         &json!({
-            "result_id": result_id.to_string(),
+            "object_hash": object_hash.to_string(),
         }),
         &[],
     )
@@ -873,11 +872,11 @@ mod tests {
         let (graph, _) = collect_one(&request).unwrap();
         let rootfs_key = compute_build_key("Tree", &rootfs["config"], &[]).unwrap();
         let script_key = compute_build_key("Tree", &script["config"], &[]).unwrap();
-        let source_key = source_planning_key(compute_result_id(
+        let source_key = source_planning_key(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                 .parse()
                 .unwrap(),
-        ))
+        )
         .unwrap();
         let expected = compute_build_key(
             "Sandbox",

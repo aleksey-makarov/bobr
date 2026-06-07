@@ -2,8 +2,7 @@
 //!
 //! This module computes deterministic identifiers from normalized semantic
 //! inputs: build keys for requested invocations, reuse keys for realized input
-//! objects, result ids for imported output objects, and object hashes for
-//! normalized filesystem objects.
+//! objects, and object hashes for normalized filesystem objects.
 
 use crate::{ReuseInputIdentity, StoreError};
 use fsobj_hash::define_hex_hash_type;
@@ -28,23 +27,11 @@ define_hex_hash_type! {
 }
 
 define_hex_hash_type! {
-    /// Stable identifier for a realized result object.
-    ///
-    /// Result ids are derived from the result object's [`ObjectHash`] by
-    /// [`compute_result_id`]. A result id names the JSON result record stored
-    /// under the store's `results` directory.
-    ///
-    /// The textual representation is exactly 64 lowercase hexadecimal
-    /// characters.
-    pub struct ResultId;
-}
-
-define_hex_hash_type! {
-    /// Stable key used to reuse an existing result across equivalent inputs.
+    /// Stable key used to reuse an existing object across equivalent inputs.
     ///
     /// A reuse key is produced by [`compute_reuse_key`] from the builder tag,
-    /// normalized payload, and input object identities. It maps to a
-    /// [`ResultId`] through the store's `reuses` references.
+    /// normalized payload, and input object identities. It maps to an
+    /// [`ObjectHash`] through the store's `reuses` references.
     ///
     /// The textual representation is exactly 64 lowercase hexadecimal
     /// characters.
@@ -119,17 +106,4 @@ pub fn compute_reuse_key(
 
     let canonical = crate::json::canonical_json_bytes(&Value::Object(root))?;
     Ok(ReuseKey::from_bytes(Sha256::digest(&canonical).into()))
-}
-
-/// Computes the stable result id for an imported object hash.
-///
-/// The result id is the key under which the result record is stored. It is
-/// derived only from the output object's [`ObjectHash`], so equivalent output
-/// objects share the same result record.
-pub fn compute_result_id(object_hash: ObjectHash) -> ResultId {
-    let canonical = format!(
-        "{{\"object_hash\":\"{}\",\"schema\":\"bobr-result-id-v2\"}}",
-        object_hash
-    );
-    ResultId::from_bytes(Sha256::digest(canonical.as_bytes()).into())
 }

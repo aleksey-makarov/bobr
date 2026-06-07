@@ -1,5 +1,5 @@
 use crate::fsutil as private_fs;
-use crate::identity::{BuildKey, ObjectHash, ResultId};
+use crate::identity::{BuildKey, ObjectHash};
 use crate::{Store, StoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -23,15 +23,13 @@ pub struct ReuseInputIdentity {
 
 /// Public build handle resolved from a build key.
 ///
-/// A build handle connects a [`BuildKey`] to the [`ResultId`] and object hash of
-/// the realized output. It is the deserializable public view returned when a
-/// stored build reference is resolved.
+/// A build handle connects a [`BuildKey`] to the object hash of the realized
+/// output. It is the deserializable public view returned when a stored build
+/// reference is resolved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Build {
     /// Build invocation key that was requested.
     pub build_key: BuildKey,
-    /// Result record id reached by the build reference.
-    pub result_id: ResultId,
     /// Hash of the output object recorded by the result.
     pub object_hash: ObjectHash,
     /// Optional RFC 3339 creation timestamp copied from the result record.
@@ -42,8 +40,8 @@ pub struct Build {
 /// Store record for a realized result object.
 ///
 /// Result records are stored as canonical JSON under the store's result record
-/// directory. The record id is derived from [`ResultRecord::object_hash`], not
-/// from the build key that first produced it.
+/// directory and are keyed by [`ResultRecord::object_hash`], not by the build
+/// key that first produced them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultRecord {
     /// Hash of the output object this record describes.
@@ -54,24 +52,12 @@ pub struct ResultRecord {
     pub inputs: Vec<ReuseInputIdentity>,
 }
 
-impl ResultRecord {
-    /// Returns the deterministic id for this result record.
-    ///
-    /// The id is computed from [`ResultRecord::object_hash`] and therefore does
-    /// not depend on the build or reuse key that points to the result.
-    pub fn result_id(&self) -> ResultId {
-        crate::identity::compute_result_id(self.object_hash)
-    }
-}
-
 /// Result information returned to runtime code after resolving or publishing.
 ///
 /// This is the serializable representation used when the runtime needs both
 /// the object identity and, optionally, the build key that led to the result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RealizedResult {
-    /// Result record id.
-    pub result_id: ResultId,
     /// Build key that resolved to the result, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_key: Option<BuildKey>,
@@ -108,23 +94,16 @@ pub struct StoredResult {
     pub object_path: PathBuf,
 }
 
-impl StoredResult {
-    /// Returns the deterministic id of the stored result.
-    pub fn result_id(&self) -> ResultId {
-        self.result.result_id()
-    }
-}
-
-/// Loads a result record by id.
+/// Loads a result record by object hash.
 ///
 /// Returns `Ok(None)` when the record file does not exist. Existing files are
-/// parsed as the current canonical result schema and are validated against the
-/// requested `result_id`.
+/// parsed as the current canonical result schema and are validated against
+/// the requested `object_hash`.
 pub fn load_result_record(
     store: &Store,
-    result_id: ResultId,
+    object_hash: ObjectHash,
 ) -> Result<Option<ResultRecord>, StoreError> {
-    let result_path = store.result_record_path(result_id);
+    let result_path = store.result_record_path(object_hash);
     if !result_path.exists() {
         return Ok(None);
     }
@@ -141,7 +120,7 @@ pub fn load_result_record(
             result_path.display()
         ))
     })?;
-    Ok(Some(parse_result_record_value(result_id, &value)?))
+    Ok(Some(parse_result_record_value(object_hash, &value)?))
 }
 
 /// Loads a result record and verifies that its object exists in the store.
@@ -150,9 +129,9 @@ pub fn load_result_record(
 /// parsed as canonical result JSON and must point to an existing object.
 pub fn load_stored_result(
     store: &Store,
-    result_id: ResultId,
+    object_hash: ObjectHash,
 ) -> Result<Option<StoredResult>, StoreError> {
-    let Some(result) = load_result_record(store, result_id)? else {
+    let Some(result) = load_result_record(store, object_hash)? else {
         return Ok(None);
     };
     Ok(Some(stored_result_from_record(store, result)?))
@@ -182,10 +161,10 @@ pub(crate) fn record_existing_source_result(
         inputs: Vec::new(),
     };
     store_result_record(store, &result)?;
-    load_stored_result(store, result.result_id())?.ok_or_else(|| {
+    load_stored_result(store, result.object_hash)?.ok_or_else(|| {
         StoreError::InvalidData(format!(
-            "source result '{}' was not stored",
-            result.result_id()
+            "source result for object '{}' was not stored",
+            result.object_hash
         ))
     })
 }
@@ -194,12 +173,11 @@ pub(crate) fn stored_result_from_record(
     store: &Store,
     result: ResultRecord,
 ) -> Result<StoredResult, StoreError> {
-    let result_id = result.result_id();
     let object_path = store.object_path(result.object_hash);
     if !object_path.exists() {
         return Err(StoreError::Io(format!(
-            "result '{}' points to missing object '{}'",
-            result_id,
+            "result for object '{}' points to missing object '{}'",
+            result.object_hash,
             object_path.display()
         )));
     }
@@ -214,7 +192,7 @@ pub(crate) fn stored_result_from_record(
 /// The record is written as canonical JSON under the store's result record
 /// directory. The operation is idempotent for an already-existing record path.
 pub(crate) fn store_result_record(store: &Store, record: &ResultRecord) -> Result<(), StoreError> {
-    let result_path = store.result_record_path(record.result_id());
+    let result_path = store.result_record_path(record.object_hash);
     if result_path.exists() {
         return Ok(());
     }
@@ -234,7 +212,6 @@ pub(crate) fn store_result_record(store: &Store, record: &ResultRecord) -> Resul
 pub(crate) fn build_from_result(build_key: BuildKey, result: &ResultRecord) -> Build {
     Build {
         build_key,
-        result_id: result.result_id(),
         object_hash: result.object_hash,
         created_at: result.created_at.clone(),
     }
@@ -294,7 +271,7 @@ pub(crate) fn build_json_value(
 }
 
 pub(crate) fn parse_result_record_value(
-    result_id: ResultId,
+    expected_object_hash: ObjectHash,
     value: &Value,
 ) -> Result<ResultRecord, StoreError> {
     let object = value.as_object().ok_or_else(|| {
@@ -329,11 +306,10 @@ pub(crate) fn parse_result_record_value(
         })
         .and_then(parse_object_hash_result)?;
 
-    let computed_result_id = crate::identity::compute_result_id(object_hash);
-    if computed_result_id != result_id {
+    if object_hash != expected_object_hash {
         return Err(StoreError::InvalidData(format!(
-            "result record key mismatch: path key '{}' does not match object hash '{}' computed key '{}'",
-            result_id, object_hash, computed_result_id
+            "result record key mismatch: path key '{}' does not match record object hash '{}'",
+            expected_object_hash, object_hash
         )));
     }
 

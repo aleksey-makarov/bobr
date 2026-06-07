@@ -100,8 +100,8 @@ declared object hash.
 
 ## Build Identity
 
-Build keys, reuse keys, result ids, and their relationship to store objects are
-defined by the store model. See [Store](./STORE.md#identity-model).
+Build keys, reuse keys, object hashes, and their relationship to store records
+are defined by the store model. See [Store](./STORE.md#identity-model).
 
 ## Planning and Execution
 
@@ -119,12 +119,12 @@ to realize the root.
 
 For each `Source` node, Rust:
 
-1. computes `result_id` from `object_hash`
-2. checks `<store>/results/<result_id>.json`
-3. if `origin` is missing and the result record is absent, checks whether
+1. checks `<store>/results/<object_hash>.json`
+2. if the result record is absent, checks whether
    `<store>/objects/<object_hash>` already exists
-4. if the object exists, reconstructs the missing canonical result record from
+3. if the object exists, reconstructs the missing canonical result record for
    `object_hash`
+4. if `origin` is missing and the object is absent, fails
 5. if `origin.tag = "Path"` is present, materializes `origin.path` directly
 6. if `origin.tag = "Http"` is present, downloads from `origin.url` in order
    and either stages one file object or unpacks one directory object

@@ -1,4 +1,4 @@
-use crate::identity::{BuildKey, ObjectHash, ResultId, ReuseKey};
+use crate::identity::{BuildKey, ObjectHash, ReuseKey};
 use crate::{PublishedBuild, ResultRecord, ReuseInputIdentity, Store, StoreError};
 use std::path::{Path, PathBuf};
 
@@ -25,16 +25,14 @@ pub struct PublishRequest {
 
 /// Summary returned after a publication update completes.
 ///
-/// The values identify the object and result now associated with the requested
-/// build publication.
+/// The values identify the object now associated with the requested build
+/// publication.
 #[derive(Debug, Clone, Copy)]
 pub struct Publication {
     /// Hash of the published object.
     pub object_hash: ObjectHash,
     /// Build key associated with the publication.
     pub build_key: BuildKey,
-    /// Result id associated with the publication.
-    pub result_id: ResultId,
 }
 
 /// Publishes a build under a publication name.
@@ -54,25 +52,26 @@ pub fn publish_build(store: &Store, request: PublishRequest) -> Result<Publicati
         crate::refs::publish_result(
             store,
             &request.publication_name,
-            published.result.result_id(),
+            published.result.object_hash,
         )?;
         return Ok(Publication {
             object_hash: published.build.object_hash,
             build_key: published.build.build_key,
-            result_id: published.result.result_id(),
         });
     }
 
     if let Some(published) =
         crate::refs::resolve_reuse_for_build(store, request.build_key, request.reuse_key)?
     {
-        let result_id = published.result.result_id();
         crate::object::remove_path_force(&request.staged_path)?;
-        crate::refs::publish_result(store, &request.publication_name, result_id)?;
+        crate::refs::publish_result(
+            store,
+            &request.publication_name,
+            published.result.object_hash,
+        )?;
         return Ok(Publication {
             object_hash: published.build.object_hash,
             build_key: published.build.build_key,
-            result_id,
         });
     }
 
@@ -87,13 +86,12 @@ pub fn publish_build(store: &Store, request: PublishRequest) -> Result<Publicati
     crate::refs::publish_result(
         store,
         &request.publication_name,
-        published.result.result_id(),
+        published.result.object_hash,
     )?;
 
     Ok(Publication {
         object_hash: published.build.object_hash,
         build_key: published.build.build_key,
-        result_id: published.result.result_id(),
     })
 }
 
@@ -158,15 +156,14 @@ fn materialize_build_impl(
     object_hash: Option<ObjectHash>,
 ) -> Result<PublishedBuild, StoreError> {
     let object_hash = crate::object::import_object_with_hash(store, staged_path, object_hash)?;
-    let result_id = crate::identity::compute_result_id(object_hash);
     let result = ResultRecord {
         object_hash,
         created_at: Some(created_at.to_string()),
         inputs,
     };
     crate::record::store_result_record(store, &result)?;
-    crate::refs::store_reuse_ref(store, reuse_key, result_id)?;
-    crate::refs::store_build_handle_ref(store, build_key, result_id)?;
+    crate::refs::store_reuse_ref(store, reuse_key, object_hash)?;
+    crate::refs::store_build_handle_ref(store, build_key, object_hash)?;
 
     Ok(PublishedBuild {
         object_path: store.object_path(object_hash),

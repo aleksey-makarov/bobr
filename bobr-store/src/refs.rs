@@ -1,4 +1,4 @@
-use crate::identity::{BuildKey, ObjectHash, ResultId, ReuseKey};
+use crate::identity::{BuildKey, ObjectHash, ReuseKey};
 use crate::{Build, PublishedBuild, ResultRecord, Store, StoreError, StoredResult};
 use std::fs;
 use std::os::unix::fs as unix_fs;
@@ -7,10 +7,10 @@ use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
-fn result_ref_target(result_id: ResultId) -> PathBuf {
+fn result_ref_target(object_hash: ObjectHash) -> PathBuf {
     PathBuf::from("..")
         .join(crate::store::RESULTS_DIR)
-        .join(format!("{}.json", result_id.to_hex()))
+        .join(format!("{}.json", object_hash.to_hex()))
 }
 
 fn object_ref_target(object_hash: ObjectHash) -> PathBuf {
@@ -23,7 +23,7 @@ fn parse_result_ref_target(
     ref_kind: &str,
     ref_path: &Path,
     target: &Path,
-) -> Result<ResultId, StoreError> {
+) -> Result<ObjectHash, StoreError> {
     let file_name = target
         .file_name()
         .and_then(|name| name.to_str())
@@ -34,22 +34,22 @@ fn parse_result_ref_target(
                 target.display()
             ))
         })?;
-    let result_id_str = file_name.strip_suffix(".json").ok_or_else(|| {
+    let object_hash_str = file_name.strip_suffix(".json").ok_or_else(|| {
         StoreError::InvalidData(format!(
             "{ref_kind} ref '{}' points to non-JSON result target '{}'",
             ref_path.display(),
             target.display()
         ))
     })?;
-    let result_id = result_id_str.parse::<ResultId>().map_err(|error| {
+    let object_hash = object_hash_str.parse::<ObjectHash>().map_err(|error| {
         StoreError::InvalidData(format!(
-            "{ref_kind} ref '{}' points to invalid result id '{}' in target '{}': {error}",
+            "{ref_kind} ref '{}' points to invalid object hash '{}' in target '{}': {error}",
             ref_path.display(),
-            result_id_str,
+            object_hash_str,
             target.display()
         ))
     })?;
-    let expected = result_ref_target(result_id);
+    let expected = result_ref_target(object_hash);
     if target != expected {
         return Err(StoreError::InvalidData(format!(
             "{ref_kind} ref '{}' points to non-canonical result target '{}'; expected '{}'",
@@ -58,7 +58,7 @@ fn parse_result_ref_target(
             expected.display()
         )));
     }
-    Ok(result_id)
+    Ok(object_hash)
 }
 
 fn parse_object_ref_target(
@@ -104,9 +104,9 @@ fn parse_object_ref_target(
 pub(crate) fn store_build_handle_ref(
     store: &Store,
     build_key: BuildKey,
-    result_id: ResultId,
+    object_hash: ObjectHash,
 ) -> Result<(), StoreError> {
-    let target = result_ref_target(result_id);
+    let target = result_ref_target(object_hash);
     replace_symlink(&target, &store.build_ref_path(build_key))
 }
 
@@ -118,9 +118,9 @@ pub(crate) fn store_build_handle_ref(
 pub(crate) fn store_reuse_ref(
     store: &Store,
     reuse_key: ReuseKey,
-    result_id: ResultId,
+    object_hash: ObjectHash,
 ) -> Result<(), StoreError> {
-    let target = result_ref_target(result_id);
+    let target = result_ref_target(object_hash);
     replace_symlink(&target, &store.reuse_ref_path(reuse_key))
 }
 
@@ -144,12 +144,12 @@ pub fn load_build_handle(
             build_ref_path.display()
         ))
     })?;
-    let result_id = parse_result_ref_target("build", &build_ref_path, &target)?;
-    let stored = crate::record::load_stored_result(store, result_id)?.ok_or_else(|| {
+    let object_hash = parse_result_ref_target("build", &build_ref_path, &target)?;
+    let stored = crate::record::load_stored_result(store, object_hash)?.ok_or_else(|| {
         StoreError::InvalidData(format!(
-            "build ref '{}' points to missing result '{}'",
+            "build ref '{}' points to missing result for object '{}'",
             build_ref_path.display(),
-            result_id
+            object_hash
         ))
     })?;
     Ok(Some(PublishedBuild {
@@ -178,12 +178,12 @@ pub(crate) fn load_reuse_record(
             reuse_ref_path.display()
         ))
     })?;
-    let result_id = parse_result_ref_target("reuse", &reuse_ref_path, &target)?;
-    let result = crate::record::load_result_record(store, result_id)?.ok_or_else(|| {
+    let object_hash = parse_result_ref_target("reuse", &reuse_ref_path, &target)?;
+    let result = crate::record::load_result_record(store, object_hash)?.ok_or_else(|| {
         StoreError::InvalidData(format!(
-            "reuse ref '{}' points to missing result '{}'",
+            "reuse ref '{}' points to missing result for object '{}'",
             reuse_ref_path.display(),
-            result_id
+            object_hash
         ))
     })?;
     Ok(Some(result))
@@ -202,8 +202,7 @@ pub fn resolve_reuse_for_build(
         return Ok(None);
     };
     let stored = crate::record::stored_result_from_record(store, result)?;
-    let result_id = stored.result_id();
-    store_build_handle_ref(store, build_key, result_id)?;
+    store_build_handle_ref(store, build_key, stored.result.object_hash)?;
     Ok(Some(PublishedBuild {
         build: crate::record::build_from_result(build_key, &stored.result),
         result: stored.result,
@@ -263,15 +262,16 @@ pub fn load_publication(
             result_ref_path.display()
         ))
     })?;
-    let result_id =
+    let result_object_hash =
         parse_result_ref_target("publication result", &result_ref_path, &result_target)?;
-    let stored = crate::record::load_stored_result(store, result_id)?.ok_or_else(|| {
-        StoreError::InvalidData(format!(
-            "publication result ref '{}' points to missing result '{}'",
-            result_ref_path.display(),
-            result_id
-        ))
-    })?;
+    let stored =
+        crate::record::load_stored_result(store, result_object_hash)?.ok_or_else(|| {
+            StoreError::InvalidData(format!(
+                "publication result ref '{}' points to missing result for object '{}'",
+                result_ref_path.display(),
+                result_object_hash
+            ))
+        })?;
 
     let object_target = fs::read_link(&object_ref_path).map_err(|error| {
         StoreError::Io(format!(
@@ -283,8 +283,8 @@ pub fn load_publication(
         parse_object_ref_target("publication object", &object_ref_path, &object_target)?;
     if object_hash != stored.result.object_hash {
         return Err(StoreError::InvalidData(format!(
-            "publication '{publication_name}' object ref points to '{}' but result '{}' records '{}'",
-            object_hash, result_id, stored.result.object_hash
+            "publication '{publication_name}' object ref points to '{}' but result records '{}'",
+            object_hash, stored.result.object_hash
         )));
     }
 
@@ -299,10 +299,13 @@ pub fn load_publication(
 pub fn publish_result(
     store: &Store,
     publication_name: &str,
-    result_id: ResultId,
+    object_hash: ObjectHash,
 ) -> Result<StoredResult, StoreError> {
-    let stored = crate::record::load_stored_result(store, result_id)?.ok_or_else(|| {
-        StoreError::InvalidData(format!("cannot publish missing result '{}'", result_id))
+    let stored = crate::record::load_stored_result(store, object_hash)?.ok_or_else(|| {
+        StoreError::InvalidData(format!(
+            "cannot publish missing result for object '{}'",
+            object_hash
+        ))
     })?;
     publish_publication_refs(store, publication_name, &stored.result)?;
     Ok(stored)
@@ -328,10 +331,10 @@ pub(crate) fn publish_publication_refs(
         .result_refs_dir()
         .join(format!("{publication_name}.json"));
     let current_object_ref_path = store.object_refs_dir().join(publication_name);
-    let result_id = result.result_id();
+    let object_hash = result.object_hash;
 
     if let Some(current) = load_current_publication(store, publication_name)?
-        && current.result.result_id() != result_id
+        && current.result.object_hash != object_hash
     {
         let generation_name =
             allocate_generation_name(store, publication_name, &generation_suffix(&current)?)?;
@@ -352,7 +355,7 @@ pub(crate) fn publish_publication_refs(
     let object_ref_target = object_ref_target_for_result(result)?;
     replace_symlink(&object_ref_target, &current_object_ref_path)?;
 
-    let target = result_ref_target(result_id);
+    let target = result_ref_target(object_hash);
     replace_symlink(&target, &current_result_ref_path)?;
     Ok(())
 }
@@ -409,12 +412,12 @@ pub(crate) fn load_current_publication(
             result_ref_path.display()
         ))
     })?;
-    let result_id = parse_result_ref_target("current result", &result_ref_path, &result_target)?;
-    let result = crate::record::load_result_record(store, result_id)?.ok_or_else(|| {
+    let object_hash = parse_result_ref_target("current result", &result_ref_path, &result_target)?;
+    let result = crate::record::load_result_record(store, object_hash)?.ok_or_else(|| {
         StoreError::InvalidData(format!(
-            "current result ref '{}' points to missing result '{}'",
+            "current result ref '{}' points to missing result for object '{}'",
             result_ref_path.display(),
-            result_id
+            object_hash
         ))
     })?;
 
@@ -431,7 +434,7 @@ pub(crate) fn load_current_publication(
     };
 
     Ok(Some(CurrentPublication {
-        result_path: store.result_record_path(result.result_id()),
+        result_path: store.result_record_path(result.object_hash),
         result,
         result_target: Some(result_target),
         object_target,

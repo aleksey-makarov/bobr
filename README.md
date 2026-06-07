@@ -156,7 +156,7 @@ In v1, `Source` supports three origins:
 
 `Source` may also omit `origin`. In that shape, the payload object must
 already exist in the store under `objects/<object_hash>`. If the canonical
-`<store>/results/<result_id>.json` record is missing, `mbuild` reconstructs
+`<store>/results/<object_hash>.json` record is missing, `mbuild` reconstructs
 it from the declared object hash.
 
 If a source origin materializes a different object than the declared
@@ -185,7 +185,7 @@ The store layout is content-addressed:
 - `<store>/objects/` stores payload objects by `object_hash`
 - fs-tree leaf hashes live in `manifest.jsonl`; the store does not maintain
   `object-indexes/`
-- `<store>/results/` stores canonical realized results by `result_id`
+- `<store>/results/` stores canonical realized results by `object_hash`
 - `<store>/reuses/` stores builder-only canonical reuse refs by `reuse_key`
 - `<store>/builds/` stores builder-only public build handles by `build_key`
 - `<store>/result-refs/` and `<store>/object-refs/` store published current refs
@@ -205,15 +205,7 @@ directory. File and symlink manifest entries include required `h` leaf hashes.
 
 - builder tag
 - normalized config payload
-- ordered direct dependency input identities
-
-Each direct input identity contains:
-
-- `object_hash`
-
-`result_id` is computed from:
-
-- `object_hash`
+- ordered direct dependency `object_hash` values
 
 The dependency order comes from the builder input contract:
 

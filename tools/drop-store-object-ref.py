@@ -31,7 +31,6 @@ class DropPlan:
     name: str
     object_hash: str
     object_path: Path
-    result_ids: tuple[str, ...]
     object_refs: tuple[Path, ...]
     result_refs: tuple[Path, ...]
     build_refs: tuple[Path, ...]
@@ -112,8 +111,8 @@ def build_drop_plan(store: Path, name: str) -> DropPlan:
         raise StoreDropError(f"object ref '{object_ref}' is missing or is not a symlink")
     object_path = store / "objects" / object_hash
 
-    result_ids = find_result_ids_for_object(store, object_hash)
-    result_id_set = set(result_ids)
+    result_name = f"{object_hash}.json"
+    result_path = store / "results" / result_name
 
     object_refs = find_refs_to_target(
         store / "object-refs",
@@ -124,31 +123,28 @@ def build_drop_plan(store: Path, name: str) -> DropPlan:
     result_refs = find_refs_to_target(
         store / "result-refs",
         expected_dir="results",
-        expected_names={f"{result_id}.json" for result_id in result_id_set},
+        expected_names={result_name},
         suffix=".json",
     )
     build_refs = find_refs_to_target(
         store / "builds",
         expected_dir="results",
-        expected_names={f"{result_id}.json" for result_id in result_id_set},
+        expected_names={result_name},
         suffix="",
     )
     reuse_refs = find_refs_to_target(
         store / "reuses",
         expected_dir="results",
-        expected_names={f"{result_id}.json" for result_id in result_id_set},
+        expected_names={result_name},
         suffix="",
     )
-    result_paths = tuple(
-        sorted((store / "results" / f"{result_id}.json" for result_id in result_ids))
-    )
+    result_paths = (result_path,) if result_path.exists() else tuple()
 
     return DropPlan(
         store=store,
         name=name,
         object_hash=object_hash,
         object_path=object_path,
-        result_ids=tuple(result_ids),
         object_refs=object_refs,
         result_refs=result_refs,
         build_refs=build_refs,
@@ -190,31 +186,6 @@ def parse_object_ref_target(ref: Path, target: str) -> str:
     return object_hash
 
 
-def find_result_ids_for_object(store: Path, object_hash: str) -> list[str]:
-    out: list[str] = []
-    for path in sorted((store / "results").glob("*.json")):
-        if not path.is_file():
-            continue
-        result_id = path.name.removesuffix(".json")
-        if not HEX64.fullmatch(result_id):
-            raise StoreDropError(f"invalid result record file name '{path.name}'")
-        try:
-            with path.open("rb") as handle:
-                record = json.load(handle)
-        except json.JSONDecodeError as error:
-            raise StoreDropError(f"failed to parse result record '{path}': {error}") from error
-        if not isinstance(record, dict):
-            raise StoreDropError(f"result record '{path}' is not a JSON object")
-        if record.get("object_hash") == object_hash:
-            encoded_result_id = record.get("result_id")
-            if encoded_result_id is not None and encoded_result_id != result_id:
-                raise StoreDropError(
-                    f"result record '{path}' encodes result_id '{encoded_result_id}'"
-                )
-            out.append(result_id)
-    return out
-
-
 def find_refs_to_target(
     directory: Path,
     *,
@@ -245,7 +216,6 @@ def print_plan(plan: DropPlan, *, deleting: bool) -> None:
     print(f"object_hash: {plan.object_hash}")
     print(f"object_path: {plan.object_path}")
     print_paths("object refs", plan.object_refs)
-    print_values("result ids", plan.result_ids)
     print_paths("result refs", plan.result_refs)
     print_paths("build refs", plan.build_refs)
     print_paths("reuse refs", plan.reuse_refs)

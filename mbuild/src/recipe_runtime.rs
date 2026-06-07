@@ -330,7 +330,7 @@ fn publish_reused_root(
             ReuseOrigin::CanonicalResult => "reusing existing canonical result",
         },
     );
-    publish_result(layout, root_name, realized.result_id).map_err(map_store_error)?;
+    publish_result(layout, root_name, realized.object_hash).map_err(map_store_error)?;
     log_runtime_event(
         node_logger.as_ref(),
         BuildLogLevel::Info,
@@ -565,7 +565,7 @@ fn execute_misses(
         let node = nodes.get(&key).ok_or_else(|| {
             RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
-        publish_result(layout, &node.publish_name, executed.realized.result_id)
+        publish_result(layout, &node.publish_name, executed.realized.object_hash)
             .map_err(map_store_error)?;
         log_runtime_event(
             executed.logger.as_ref(),
@@ -980,7 +980,6 @@ fn realized_result_from_record(
     result: &ResultRecord,
 ) -> RealizedResult {
     RealizedResult {
-        result_id: result.result_id(),
         build_key,
         object_hash: result.object_hash,
         created_at: result.created_at.clone(),
@@ -991,7 +990,7 @@ fn realized_result_from_record(
 mod tests {
     use super::*;
     use crate::recipe::{ReuseOrigin, collect_graph};
-    use bobr_store::identity::{compute_result_id, compute_reuse_key};
+    use bobr_store::identity::compute_reuse_key;
     use bobr_store::{PublishRequest, publish_build};
     use mbuild_core::{CancellationToken, OriginContext, OriginSpec, ParsedOrigin};
     use serde_json::json;
@@ -1066,7 +1065,6 @@ mod tests {
     fn sample_realized(build_key: Option<BuildKey>, object_hash: &str) -> RealizedResult {
         let object_hash = object_hash.parse().unwrap();
         RealizedResult {
-            result_id: compute_result_id(object_hash),
             build_key,
             object_hash,
             created_at: None,

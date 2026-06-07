@@ -49,18 +49,13 @@ match.
 Executing a builder or materializing a source produces one payload object. The
 payload is addressed by `object_hash`.
 
-`result_id` is computed from:
-
-- `object_hash`
-
-`result_id` is the realized result identity shared by both builders and
-sources. Because it is derived only from `object_hash`, different builder nodes
-can share one result record when they intentionally stage the same payload.
+The same `object_hash` also keys the canonical result record for that payload.
+Different builder nodes can share one result record when they intentionally
+stage the same payload.
 
 Publication names do not participate in object identity, `build_key`, or
-`reuse_key`. `result_id` is derived only from payload identity. The
-language-level realized result is `RealizedResult`. For builders it may also
-carry `build_key`; for `Source` it does not.
+`reuse_key`. The language-level realized result is `RealizedResult`. For
+builders it may also carry `build_key`; for `Source` it does not.
 
 ## Reuse Model
 
@@ -77,13 +72,13 @@ For `Source`, there is no `build_key` and no `reuse_key`.
 
 Source reuse lookup uses this order:
 
-1. canonical result hit on `result_id`
+1. canonical result hit on `object_hash`
 2. existing object hit on `object_hash`
 3. actual source materialization
 
 If source materialization produces a different object than the declared
 `object_hash`, the actual object is still imported into `objects/`, but the
-canonical `results/<result_id>.json` record is not written and the source
+canonical `results/<object_hash>.json` record is not written and the source
 import fails with the actual hash.
 
 ## Store Layout
@@ -95,13 +90,13 @@ The filesystem layout mirrors the identity model:
   objects/
     <object_hash>
   reuses/
-    <reuse_key> -> ../results/<result_id>.json
+    <reuse_key> -> ../results/<object_hash>.json
   builds/
-    <build_key> -> ../results/<result_id>.json
+    <build_key> -> ../results/<object_hash>.json
   results/
-    <result_id>.json
+    <object_hash>.json
   result-refs/
-    <name>.json -> ../results/<result_id>.json
+    <name>.json -> ../results/<object_hash>.json
   object-refs/
     <name> -> ../objects/<object_hash>
   logs/
@@ -118,7 +113,7 @@ The filesystem layout mirrors the identity model:
 ```
 
 - `objects/` holds payloads addressed by `object_hash`.
-- `results/` holds canonical result records addressed by `result_id`.
+- `results/` holds canonical result records addressed by `object_hash`.
 - `reuses/` holds builder-only canonical reuse refs addressed by `reuse_key`.
 - `builds/` holds builder-only public build-handle refs addressed by
   `build_key`.
@@ -140,7 +135,7 @@ Generic CAS objects may contain non-UTF-8 filesystem names. Such objects can
 still be imported and addressed by `object_hash`. Fs-tree objects are
 UTF-8-only because their manifest paths and symlink targets are JSON strings.
 
-`results/<result_id>.json` stores one canonical realized result record. The
+`results/<object_hash>.json` stores one canonical realized result record. The
 record payload contains:
 
 - payload identity: `object_hash`
@@ -162,7 +157,7 @@ Every recipe node carries a publication name.
 
 After a node is reused or built, the current publication refs are updated:
 
-- `result-refs/<name>.json -> ../results/<result_id>.json`
+- `result-refs/<name>.json -> ../results/<object_hash>.json`
 - `object-refs/<name> -> ../objects/<object_hash>`
 
 This `object-refs/` rule is the same for every object kind. Filesystem tree

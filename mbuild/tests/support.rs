@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use bobr_store::identity::ResultId;
+use bobr_store::identity::ObjectHash;
 use mbuild_origin_oci_registry::fetch_image_authenticated;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -121,10 +121,10 @@ fn build_ref_path(root: &Path, build_key: impl ToString) -> PathBuf {
     store_root(root).join("builds").join(build_key.to_string())
 }
 
-fn result_record_file_path(root: &Path, result_id: ResultId) -> PathBuf {
+fn result_record_file_path(root: &Path, object_hash: ObjectHash) -> PathBuf {
     store_root(root)
         .join("results")
-        .join(format!("{}.json", result_id.to_hex()))
+        .join(format!("{}.json", object_hash.to_hex()))
 }
 
 pub fn build_ref_count(root: &Path) -> usize {
@@ -145,8 +145,8 @@ pub fn remove_build_ref(root: &Path, build_key: impl ToString) {
     assert!(!build_ref.exists());
 }
 
-pub fn remove_result_record(root: &Path, result_id: ResultId) {
-    let result_path = result_record_file_path(root, result_id);
+pub fn remove_result_record(root: &Path, object_hash: ObjectHash) {
+    let result_path = result_record_file_path(root, object_hash);
     fs::remove_file(&result_path).unwrap();
     assert!(!result_path.exists());
 }
