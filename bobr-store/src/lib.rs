@@ -12,7 +12,7 @@
 //!
 //! Most fallible store operations return [`StoreError`]. Pure string parsing
 //! for value types keeps narrow parse errors such as
-//! [`identity::ParseBuildKeyError`] and [`fs_tree::ParseFsFileHashError`].
+//! [`identity::ParseIdentityError`] and [`fs_tree::ParseFsFileHashError`].
 
 #![deny(missing_docs)]
 
