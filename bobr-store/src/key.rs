@@ -81,11 +81,7 @@ pub fn compute_reuse_key(
 /// The result id is the key under which the result record is stored. It is
 /// derived only from the output object's [`ObjectHash`], so equivalent output
 /// objects share the same result record.
-pub fn compute_result_id(object_hash: ObjectHash) -> Result<ResultId, StoreError> {
-    Ok(result_id_for_object_hash(object_hash))
-}
-
-pub(crate) fn result_id_for_object_hash(object_hash: ObjectHash) -> ResultId {
+pub fn compute_result_id(object_hash: ObjectHash) -> ResultId {
     let canonical = format!(
         "{{\"object_hash\":\"{}\",\"schema\":\"bobr-result-id-v2\"}}",
         object_hash

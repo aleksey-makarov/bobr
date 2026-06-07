@@ -758,7 +758,7 @@ fn source_http_mismatch_imports_actual_object_without_canonical_result() {
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(object_path_exists(&layout, actual_hash.parse().unwrap()));
-    let wrong_result_id = compute_result_id(wrong_hash.parse().unwrap()).unwrap();
+    let wrong_result_id = compute_result_id(wrong_hash.parse().unwrap());
     assert!(
         load_result_record(&layout, wrong_result_id)
             .unwrap()
@@ -783,7 +783,7 @@ fn source_oci_registry_mismatch_imports_actual_object_without_canonical_result()
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(object_path_exists(&layout, actual_hash.parse().unwrap()));
-    let wrong_result_id = compute_result_id(wrong_hash.parse().unwrap()).unwrap();
+    let wrong_result_id = compute_result_id(wrong_hash.parse().unwrap());
     assert!(
         load_result_record(&layout, wrong_result_id)
             .unwrap()
@@ -889,7 +889,7 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(object_path_exists(&layout, actual_hash));
-    let wrong_result_id = compute_result_id(wrong_hash.parse().unwrap()).unwrap();
+    let wrong_result_id = compute_result_id(wrong_hash.parse().unwrap());
     assert!(
         load_result_record(&layout, wrong_result_id)
             .unwrap()

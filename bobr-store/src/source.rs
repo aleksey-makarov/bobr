@@ -1,4 +1,3 @@
-use crate::key::result_id_for_object_hash;
 use crate::object::import_object;
 use crate::record::{StoredResult, load_stored_result, record_existing_source_result};
 use crate::{Store, StoreError};
@@ -36,7 +35,7 @@ pub fn lookup_source_result(
     declared_hash: ObjectHash,
     created_at: &str,
 ) -> Result<SourceLookup, StoreError> {
-    let result_id = result_id_for_object_hash(declared_hash);
+    let result_id = crate::key::compute_result_id(declared_hash);
     if let Some(stored) = load_stored_result(store, result_id)? {
         return Ok(SourceLookup::Hit(stored));
     }

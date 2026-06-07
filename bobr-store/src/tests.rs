@@ -63,7 +63,7 @@ fn reuse_key_is_stable_for_identical_inputs() {
 fn parse_result_record_rejects_old_schema() {
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
-    let result_id = compute_result_id(object_hash).unwrap();
+    let result_id = compute_result_id(object_hash);
     let value = json!({
         "schema": "bobr-result-v4",
         "result_id": result_id.to_string(),
@@ -349,7 +349,7 @@ fn record_existing_source_result_requires_existing_object() {
     assert!(matches!(error, StoreError::Io(message) if message.contains("source object")));
     assert!(
         !layout
-            .result_record_path(compute_result_id(object_hash).unwrap())
+            .result_record_path(compute_result_id(object_hash))
             .exists()
     );
 }
@@ -366,7 +366,7 @@ fn lookup_source_result_returns_missing_when_result_and_object_absent() {
     assert!(matches!(lookup, SourceLookup::Missing));
     assert!(
         !layout
-            .result_record_path(compute_result_id(object_hash).unwrap())
+            .result_record_path(compute_result_id(object_hash))
             .exists()
     );
 }
@@ -405,7 +405,7 @@ fn lookup_source_result_records_existing_object_as_source_result() {
     let stage = temp.path().join("source.txt");
     fs::write(&stage, b"hello").unwrap();
     let object_hash = import_object(&layout, &stage).unwrap();
-    let result_path = layout.result_record_path(compute_result_id(object_hash).unwrap());
+    let result_path = layout.result_record_path(compute_result_id(object_hash));
     assert!(!result_path.exists());
 
     let lookup = lookup_source_result(&layout, object_hash, sample_created_at()).unwrap();
@@ -440,7 +440,7 @@ fn import_source_result_on_match_imports_object_and_writes_canonical_result() {
     assert!(layout.object_path(object_hash).exists());
     assert!(
         layout
-            .result_record_path(compute_result_id(object_hash).unwrap())
+            .result_record_path(compute_result_id(object_hash))
             .exists()
     );
     assert!(!stage.exists());
@@ -470,12 +470,12 @@ fn import_source_result_on_mismatch_imports_actual_object_without_declared_resul
     assert!(layout.object_path(actual_hash).exists());
     assert!(
         !layout
-            .result_record_path(compute_result_id(declared_hash).unwrap())
+            .result_record_path(compute_result_id(declared_hash))
             .exists()
     );
     assert!(
         !layout
-            .result_record_path(compute_result_id(actual_hash).unwrap())
+            .result_record_path(compute_result_id(actual_hash))
             .exists()
     );
     assert!(!stage.exists());

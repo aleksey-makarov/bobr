@@ -229,7 +229,7 @@ fn collect_graph_inner(
             collect_builder_recipe(request, recipe, nodes, stack, node_keys, topo_order)?
         }
         Recipe::Source(recipe) => {
-            let result_id = compute_result_id(recipe.object_hash).map_err(map_store_error)?;
+            let result_id = compute_result_id(recipe.object_hash);
             let key = source_planning_key(result_id)?;
             let planned = PlannedRecipe::Source(PlannedSourceRecipe {
                 name: recipe.name.clone(),
@@ -872,14 +872,11 @@ mod tests {
         let (graph, _) = collect_one(&request).unwrap();
         let rootfs_key = compute_build_key("Tree", &rootfs["config"], &[]).unwrap();
         let script_key = compute_build_key("Tree", &script["config"], &[]).unwrap();
-        let source_key = source_planning_key(
-            compute_result_id(
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                    .parse()
-                    .unwrap(),
-            )
-            .unwrap(),
-        )
+        let source_key = source_planning_key(compute_result_id(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .parse()
+                .unwrap(),
+        ))
         .unwrap();
         let expected = compute_build_key(
             "Sandbox",

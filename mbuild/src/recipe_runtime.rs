@@ -1069,7 +1069,7 @@ mod tests {
     fn sample_realized(build_key: Option<BuildKey>, object_hash: &str) -> RealizedResult {
         let object_hash = object_hash.parse().unwrap();
         RealizedResult {
-            result_id: compute_result_id(object_hash).unwrap(),
+            result_id: compute_result_id(object_hash),
             build_key,
             object_hash,
             created_at: None,
