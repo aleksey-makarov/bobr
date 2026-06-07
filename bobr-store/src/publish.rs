@@ -1,7 +1,5 @@
-use crate::{
-    BuildKey, PublishedBuild, ResultId, ResultRecord, ReuseInputIdentity, ReuseKey, Store,
-    StoreError,
-};
+use crate::identity::{BuildKey, ResultId, ReuseKey};
+use crate::{PublishedBuild, ResultRecord, ReuseInputIdentity, Store, StoreError};
 use fsobj_hash::ObjectHash;
 use std::path::{Path, PathBuf};
 
@@ -156,7 +154,7 @@ fn materialize_build_impl(
     object_hash: Option<ObjectHash>,
 ) -> Result<PublishedBuild, StoreError> {
     let object_hash = crate::object::import_object_with_hash(store, staged_path, object_hash)?;
-    let result_id = crate::key::compute_result_id(object_hash);
+    let result_id = crate::identity::compute_result_id(object_hash);
     let result = ResultRecord {
         object_hash,
         created_at: Some(created_at.to_string()),

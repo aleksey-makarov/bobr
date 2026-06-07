@@ -35,7 +35,7 @@ pub fn lookup_source_result(
     declared_hash: ObjectHash,
     created_at: &str,
 ) -> Result<SourceLookup, StoreError> {
-    let result_id = crate::key::compute_result_id(declared_hash);
+    let result_id = crate::identity::compute_result_id(declared_hash);
     if let Some(stored) = load_stored_result(store, result_id)? {
         return Ok(SourceLookup::Hit(stored));
     }

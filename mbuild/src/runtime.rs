@@ -1,9 +1,10 @@
 use crate::resolved_inputs::ResolvedInputs;
+use bobr_store::identity::{BuildKey, compute_reuse_key};
 use bobr_store::{
-    BuildKey, PublishedBuild, ReuseInputIdentity, Store, StoreError, StoreTempQuarantineRequest,
-    StoreWorkspace, WorkspaceRequest, compute_reuse_key, create_workspace, load_build_handle,
-    materialize_build, materialize_build_with_trusted_hash, quarantine_store_temp,
-    recreate_store_temp_dir_force, remove_store_temp_dir_force, resolve_reuse_for_build,
+    PublishedBuild, ReuseInputIdentity, Store, StoreError, StoreTempQuarantineRequest,
+    StoreWorkspace, WorkspaceRequest, create_workspace, load_build_handle, materialize_build,
+    materialize_build_with_trusted_hash, quarantine_store_temp, recreate_store_temp_dir_force,
+    remove_store_temp_dir_force, resolve_reuse_for_build,
 };
 use mbuild_core::{
     BuildContext, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderError,
@@ -502,9 +503,10 @@ fn quarantine_temp_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bobr_store::identity::compute_build_key;
     use bobr_store::{
-        PublishOutputRequest, ReuseInputIdentity, WorkspaceRequest, compute_build_key,
-        create_workspace, list_quarantined_temps, publish_output,
+        PublishOutputRequest, ReuseInputIdentity, WorkspaceRequest, create_workspace,
+        list_quarantined_temps, publish_output,
     };
     use mbuild_core::{
         BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, BuilderRun, BuilderSpec,

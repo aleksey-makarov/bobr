@@ -1,5 +1,6 @@
 use crate::fsutil as private_fs;
-use crate::{BuildKey, ResultId, Store, StoreError};
+use crate::identity::{BuildKey, ResultId};
+use crate::{Store, StoreError};
 use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -61,7 +62,7 @@ impl ResultRecord {
     /// The id is computed from [`ResultRecord::object_hash`] and therefore does
     /// not depend on the build or reuse key that points to the result.
     pub fn result_id(&self) -> ResultId {
-        crate::key::compute_result_id(self.object_hash)
+        crate::identity::compute_result_id(self.object_hash)
     }
 }
 
@@ -331,7 +332,7 @@ pub(crate) fn parse_result_record_value(
         })
         .and_then(parse_object_hash_result)?;
 
-    let computed_result_id = crate::key::compute_result_id(object_hash);
+    let computed_result_id = crate::identity::compute_result_id(object_hash);
     if computed_result_id != result_id {
         return Err(StoreError::InvalidData(format!(
             "result record key mismatch: path key '{}' does not match object hash '{}' computed key '{}'",

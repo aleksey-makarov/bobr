@@ -11,8 +11,8 @@
 //! or scanning/materializing an `fs-tree`.
 //!
 //! Most fallible store operations return [`StoreError`]. Pure string parsing
-//! for value types keeps narrow parse errors such as [`ParseBuildKeyError`] and
-//! [`fs_tree::ParseFsFileHashError`].
+//! for value types keeps narrow parse errors such as
+//! [`identity::ParseBuildKeyError`] and [`fs_tree::ParseFsFileHashError`].
 
 #![deny(missing_docs)]
 
@@ -22,9 +22,8 @@ compile_error!("bobr requires Linux");
 mod error;
 pub mod fs_tree;
 mod fsutil;
-mod id;
+pub mod identity;
 mod json;
-mod key;
 mod object;
 mod publish;
 mod record;
@@ -34,8 +33,6 @@ mod store;
 
 pub use error::StoreError;
 pub use fsobj_hash::ObjectHash;
-pub use id::{BuildKey, ParseBuildKeyError, ResultId, ReuseKey};
-pub use key::{compute_build_key, compute_result_id, compute_reuse_key};
 pub use object::import_object;
 #[doc(hidden)]
 pub use publish::materialize_build_with_trusted_hash;

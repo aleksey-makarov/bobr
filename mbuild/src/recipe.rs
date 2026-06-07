@@ -1,7 +1,8 @@
 use crate::builders;
 use crate::origins;
 use crate::runtime::{RuntimeError, map_store_error};
-use bobr_store::{BuildKey, RealizedResult, ResultId, compute_build_key, compute_result_id};
+use bobr_store::RealizedResult;
+use bobr_store::identity::{BuildKey, ResultId, compute_build_key, compute_result_id};
 use mbuild_core::{BuilderSpec, ObjectHash, ParsedOrigin};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};

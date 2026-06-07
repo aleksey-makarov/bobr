@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use bobr_store::ResultId;
+use bobr_store::identity::ResultId;
 use mbuild_origin_oci_registry::fetch_image_authenticated;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
