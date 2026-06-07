@@ -502,10 +502,7 @@ fn quarantine_temp_path(
 mod tests {
     use super::*;
     use bobr_store::identity::compute_build_key;
-    use bobr_store::{
-        PublishOutputRequest, ReuseInputIdentity, create_workspace, list_quarantined_temps,
-        publish_output,
-    };
+    use bobr_store::{PublishOutputRequest, ReuseInputIdentity, create_workspace, publish_output};
     use mbuild_core::{
         BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, BuilderRun, BuilderSpec,
         CancellationToken, RunOptions, StagedBuildResult, TypedBuilder,
@@ -583,6 +580,43 @@ mod tests {
 
     fn metadata_temp_dir(metadata: &Value) -> PathBuf {
         PathBuf::from(metadata["temp_dir"].as_str().unwrap())
+    }
+
+    fn metadata_log_dir(metadata: &Value) -> PathBuf {
+        PathBuf::from(metadata["log_dir"].as_str().unwrap())
+    }
+
+    fn event_log_records(log_dir: &Path) -> Vec<Value> {
+        fs::read_to_string(log_dir.join("events.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn assert_quarantine_event(
+        log_dir: &Path,
+        level: &str,
+        builder: &str,
+        name: &str,
+        build_key: BuildKey,
+    ) -> Value {
+        let events = event_log_records(log_dir)
+            .into_iter()
+            .filter(|event| event["phase"] == "temp-quarantine")
+            .collect::<Vec<_>>();
+        assert_eq!(events.len(), 1);
+
+        let event = events.into_iter().next().unwrap();
+        assert_eq!(event["level"], level);
+        assert_eq!(event["builder"], builder);
+        assert_eq!(event["name"], name);
+        assert_eq!(event["details"]["full_build_key"], build_key.to_string());
+
+        let message = event["message"].as_str().unwrap();
+        assert!(message.contains("moved temp dir"));
+        assert!(message.contains("to global quarantine"));
+        event
     }
 
     fn workspace_count(root: &Path) -> usize {
@@ -861,15 +895,13 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
-        let quarantined = quarantine_entries(&layout);
-        assert_eq!(quarantined.len(), 1);
-        assert!(
-            fs::symlink_metadata(&quarantined[0])
-                .unwrap()
-                .file_type()
-                .is_symlink()
+        assert_quarantine_event(
+            builder_run.log_dir(),
+            "warn",
+            "RuntimeTest",
+            "runtime-test",
+            build_key,
         );
-        assert_quarantine_metadata(&quarantined[0], "RuntimeTest", build_key);
     }
 
     #[test]
@@ -897,10 +929,19 @@ mod tests {
         let temp_dir = metadata_temp_dir(&metadata);
         assert!(!temp_dir.exists());
         assert!(executed.published.object_path.join("payload").is_file());
-        let quarantined = quarantine_entries(&layout);
-        assert_eq!(quarantined.len(), 1);
-        assert!(quarantined[0].join("sandbox-scratch").is_file());
-        assert_quarantine_metadata(&quarantined[0], "Sandbox", build_key);
+        let event = assert_quarantine_event(
+            &metadata_log_dir(&metadata),
+            "info",
+            "Sandbox",
+            "sandbox-runtime-test",
+            build_key,
+        );
+        assert!(
+            event["message"]
+                .as_str()
+                .unwrap()
+                .contains("sandbox temp may contain userns-owned files")
+        );
     }
 
     #[test]
@@ -932,9 +973,19 @@ mod tests {
         .unwrap();
 
         assert!(context.temp_dir.is_dir());
-        let quarantined = quarantine_entries(&layout);
-        assert_eq!(quarantined.len(), 1);
-        assert!(quarantined[0].join("stale").is_file());
+        let event = assert_quarantine_event(
+            builder_run.log_dir(),
+            "info",
+            "Sandbox",
+            "sandbox-runtime-test",
+            build_key,
+        );
+        assert!(
+            event["message"]
+                .as_str()
+                .unwrap()
+                .contains("stale sandbox temp dir may contain userns-owned files")
+        );
     }
 
     #[test]
@@ -986,13 +1037,12 @@ mod tests {
         cleanup_temp_dir(&temp_dir, &cleanup, logger.as_ref());
 
         assert!(fs::symlink_metadata(&temp_dir).is_err());
-        let quarantined = quarantine_entries(&layout);
-        assert_eq!(quarantined.len(), 1);
-        assert!(
-            fs::symlink_metadata(&quarantined[0])
-                .unwrap()
-                .file_type()
-                .is_file()
+        assert_quarantine_event(
+            builder_run.log_dir(),
+            "warn",
+            "RuntimeTest",
+            "runtime-test",
+            build_key,
         );
     }
 
@@ -1048,38 +1098,5 @@ mod tests {
 
         assert_eq!(error.class(), "cancelled");
         assert_eq!(workspace_count(temp.path()), 0);
-    }
-
-    fn quarantine_entries(layout: &Store) -> Vec<PathBuf> {
-        list_quarantined_temps(layout).unwrap()
-    }
-
-    fn assert_quarantine_metadata(path: &Path, builder_tag: &str, build_key: BuildKey) {
-        let file_name = path.file_name().unwrap().to_str().unwrap();
-        let metadata_path = path.with_file_name(format!("{file_name}.json"));
-        let metadata: Value = serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
-        assert_eq!(metadata["schema"], "bobr-quarantine-v1");
-        assert_eq!(metadata["builder_tag"], builder_tag);
-        assert_eq!(metadata["build_key"], build_key.to_hex());
-        assert_eq!(metadata["quarantine_path"], path.display().to_string());
-
-        let name_timestamp = file_name.split_once('-').unwrap().0;
-        let (name_timestamp, collision_counter) = name_timestamp
-            .split_once('.')
-            .map_or((name_timestamp, None), |(timestamp, counter)| {
-                (timestamp, Some(counter))
-            });
-        assert_eq!(name_timestamp.len(), 12);
-        assert!(name_timestamp.chars().all(|ch| ch.is_ascii_digit()));
-        if let Some(counter) = collision_counter {
-            assert!(counter.parse::<u16>().unwrap() >= 2);
-        }
-
-        let created_at = metadata["created_at_unix_nanos"]
-            .as_str()
-            .unwrap()
-            .parse::<u128>()
-            .unwrap();
-        assert!(created_at > 0);
     }
 }

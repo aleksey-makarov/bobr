@@ -366,33 +366,6 @@ pub fn quarantine_store_temp(
     )))
 }
 
-/// Lists quarantined temporary paths, excluding their JSON metadata records.
-pub fn list_quarantined_temps(store: &Store) -> Result<Vec<PathBuf>, StoreError> {
-    let quarantine_dir = store.quarantine_dir();
-    if !quarantine_dir.exists() {
-        return Ok(Vec::new());
-    }
-    let mut entries = fs::read_dir(&quarantine_dir)
-        .map_err(|error| {
-            StoreError::Io(format!(
-                "failed to read quarantine directory '{}': {error}",
-                quarantine_dir.display()
-            ))
-        })?
-        .map(|entry| {
-            entry.map(|entry| entry.path()).map_err(|error| {
-                StoreError::Io(format!(
-                    "failed to read quarantine entry in '{}': {error}",
-                    quarantine_dir.display()
-                ))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    entries.retain(|path| path.extension().and_then(|ext| ext.to_str()) != Some("json"));
-    entries.sort();
-    Ok(entries)
-}
-
 fn validate_root(root: &Path) -> Result<(), StoreError> {
     if !root.is_absolute() {
         return Err(StoreError::InvalidInput(format!(
