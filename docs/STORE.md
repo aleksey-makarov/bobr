@@ -1,0 +1,205 @@
+# Store
+
+## Summary
+
+The store contains immutable payloads, canonical realized result records,
+mutable build and publication refs, and per-run operational logs.
+
+The store is a content-addressed store (CAS). This means payload identity is
+derived from normalized content, not from the path or publication name used to
+reach it. Importing the same payload content produces the same `object_hash`;
+different payload content produces a different address. Human-facing names and
+build handles are mutable refs layered on top of immutable content-addressed
+objects and canonical result records.
+
+## Identity Model
+
+A builder node starts as a normalized build invocation. Its first store-facing
+identity is `build_key`, computed from:
+
+- builder tag
+- normalized config payload
+- ordered direct dependency `build_key`s
+
+Dependency order follows the builder input contract:
+
+- reserved inputs in spec order
+- extra inputs in lexical name order
+
+It does not follow the order of fields in JSON.
+
+`build_key` identifies a particular builder invocation and backs the public
+build-handle ref. A build-handle hit can be used before looking through the
+node's direct inputs.
+
+After a builder's direct inputs are realized, the builder-only canonical reuse
+identity, `reuse_key`, is computed from:
+
+- builder tag
+- normalized config payload
+- ordered direct dependency `object_hash` values
+
+The same builder input contract order is used for these `object_hash` values.
+
+`reuse_key` is independent from the particular dependency invocations that
+produced those input objects. Different build graph fragments can therefore
+reuse one canonical builder result when their direct input payload identities
+match.
+
+Executing a builder or materializing a source produces one payload object. The
+payload is addressed by `object_hash`.
+
+`result_id` is computed from:
+
+- `object_hash`
+
+`result_id` is the realized result identity shared by both builders and
+sources. Because it is derived only from `object_hash`, different builder nodes
+can share one result record when they intentionally stage the same payload.
+
+Publication names do not participate in object identity, `build_key`, or
+`reuse_key`. `result_id` is derived only from payload identity. The
+language-level realized result is `RealizedResult`. For builders it may also
+carry `build_key`; for `Source` it does not.
+
+## Reuse Model
+
+For one planned builder node, builder reuse lookup uses this order:
+
+1. build-handle hit on `build_key`
+2. canonical reuse hit on `reuse_key`
+3. actual builder execution
+
+If a canonical builder result exists but the public build handle is missing,
+the missing build-handle ref is recreated and the result is reused.
+
+For `Source`, there is no `build_key` and no `reuse_key`.
+
+Source reuse lookup uses this order:
+
+1. canonical result hit on `result_id`
+2. existing object hit on `object_hash`
+3. actual source materialization
+
+If source materialization produces a different object than the declared
+`object_hash`, the actual object is still imported into `objects/`, but the
+canonical `results/<result_id>.json` record is not written and the source
+import fails with the actual hash.
+
+## Store Layout
+
+The filesystem layout mirrors the identity model:
+
+```text
+<store>/
+  objects/
+    <object_hash>
+  reuses/
+    <reuse_key> -> ../results/<result_id>.json
+  builds/
+    <build_key> -> ../results/<result_id>.json
+  results/
+    <result_id>.json
+  result-refs/
+    <name>.json -> ../results/<result_id>.json
+  object-refs/
+    <name> -> ../objects/<object_hash>
+  logs/
+    <YYMMDDhhmmss>[.N]/
+      events.jsonl
+      index.jsonl
+      <00000000>-<tag>[-<name>]/
+        meta.json
+        events.jsonl
+        raw/
+  tmp/
+    <YYMMDDhhmmss>[.N]/
+      <00000000>-<tag>[-<name>]/
+```
+
+- `objects/` holds payloads addressed by `object_hash`.
+- `results/` holds canonical result records addressed by `result_id`.
+- `reuses/` holds builder-only canonical reuse refs addressed by `reuse_key`.
+- `builds/` holds builder-only public build-handle refs addressed by
+  `build_key`.
+- `result-refs/` holds human-facing refs from publication name to result
+  record.
+- `object-refs/` holds human-facing refs from publication name to payload.
+
+`objects/<object_hash>` is the payload itself, either a file or a directory.
+Concrete directory payload formats are builder-specific. For example, the
+OCI registry source handler realizes imported images as OCI image layout
+directories.
+
+Fs-tree objects store leaf hashes directly in `manifest.jsonl`. There is no
+store-level derived leaf index: if a file or symlink entry in an fs-tree
+manifest omits its `h` field, the object is invalid and consumers fail while
+reading the manifest.
+
+Generic CAS objects may contain non-UTF-8 filesystem names. Such objects can
+still be imported and addressed by `object_hash`. Fs-tree objects are
+UTF-8-only because their manifest paths and symlink targets are JSON strings.
+
+`results/<result_id>.json` stores one canonical realized result record. The
+record payload contains:
+
+- payload identity: `object_hash`
+- direct input identities under `inputs`, where each entry contains:
+  - `object_hash`
+
+`builds/<build_key>` stores the corresponding public build handle as a symlink
+to the canonical result record. `reuses/<reuse_key>` stores the canonical
+builder reuse index.
+
+`logs/<run-id>/<serial>-<tag>[-<name>]/raw/` stores raw per-subject log files
+such as captured tool output. `tmp/<run-id>/<serial>-<tag>[-<name>]/` is the
+matching per-subject scratch directory. Scratch directories may be removed or
+quarantined after execution; they are not part of the log record.
+
+## Publication
+
+Every recipe node carries a publication name.
+
+After a node is reused or built, the current publication refs are updated:
+
+- `result-refs/<name>.json -> ../results/<result_id>.json`
+- `object-refs/<name> -> ../objects/<object_hash>`
+
+This `object-refs/` rule is the same for every object kind. Filesystem tree
+objects still store their payload as an object directory containing
+`manifest.jsonl` and `root/`; optional top-level metadata files are part of
+the object layout for builders that define them. `root/` is part of the object
+layout, not the publication symlink target.
+
+If the current publication name already points at a different result, the old
+current refs are rotated into timestamp-suffixed history refs.
+
+## Logging
+
+Each run writes:
+
+- one run-level structured event log under `<store>/logs/<run-id>/events.jsonl`
+- one workspace index under `<store>/logs/<run-id>/index.jsonl`
+- per-subject logs under
+  `<store>/logs/<run-id>/<00000000>-<tag>[-<name>]/`
+
+`run-id` uses the local `<YYMMDDhhmmss>` timestamp. If another run has already
+claimed that directory, `.1`, `.2`, and so on are appended. Each builder,
+source, or scheduler subject gets a store-allocated serial number for its log
+directory name. The serial is an internal allocation detail; the full original
+tag, recipe name, build key, and workspace paths are stored in that subject's
+`meta.json`.
+
+The run-level event log records lifecycle events such as:
+
+- `start`
+- `cache-hit`
+- `result-hit`
+- `cache-miss`
+- `run`
+- `publish`
+- `done`
+- `fail`
+
+Subject events are also written to the subject's own `events.jsonl`. Raw logs
+created by builders are written under the subject's `raw/` directory.

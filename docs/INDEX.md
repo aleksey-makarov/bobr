@@ -18,9 +18,9 @@
    Naming convention for split package outputs and how those outputs are used
    in build and runtime dependency edges.
 
-5. [Content-Addressed Store](./CAS.md)
-   Content-addressed store, build handles, canonical result records, and
-   publication refs.
+5. [Store](./STORE.md)
+   Content-addressed store, build identity, canonical result records, build
+   handles, and publication refs.
 
 6. [Filesystem Object Hashing](./FSOBJ_HASH.md)
    Structural hashing rules shared by filesystem paths and tar archives.

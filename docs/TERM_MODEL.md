@@ -65,6 +65,12 @@ The runtime rejects:
 
 Children are always referenced by node id.
 
+`Group` is the phony aggregate builder for requests that need one root but must
+realize several otherwise unrelated targets. It does not merge or inspect input
+payloads. It stages a constant zero-byte marker file after all inputs have been
+realized, so its `RealizedResult` is only a completion marker. The meaningful
+artifacts are the input targets and their normal publications.
+
 `Source` is a separate execution class with this outer shape:
 
 - `name`
@@ -94,38 +100,8 @@ declared object hash.
 
 ## Build Identity
 
-For one builder node, `build_key` is computed from:
-
-- builder tag
-- normalized config payload
-- ordered direct dependency `build_key`s
-
-Dependency order follows the builder input contract:
-
-- reserved inputs in spec order
-- extra inputs in lexical name order
-
-It does not follow the order of fields in JSON.
-
-`reuse_key` is computed from:
-
-- builder tag
-- normalized config payload
-- ordered direct dependency input identities
-
-Each direct input identity contains:
-
-- `object_hash`
-
-`result_id` is computed from:
-
-- `object_hash`
-
-`build_key` is the builder invocation identity.
-`reuse_key` is the builder-only canonical reuse identity that can be computed
-before execution.
-`result_id` is the realized result identity shared by both builders and
-sources.
+Build keys, reuse keys, result ids, and their relationship to store objects are
+defined by the store model. See [Store](./STORE.md#identity-model).
 
 ## Planning and Execution
 
@@ -203,4 +179,6 @@ Builder semantics depend only on:
 - `stdout`: JSON serialization of the realized root `RealizedResult`
 - `stderr`: live progress log unless `--quiet`
 - `--jobs/-j`: limit parallel execution, default = available CPU parallelism
-- `paths.store`: absolute path to an existing store root directory
+- `paths.store`: absolute path to an existing store root directory. The value
+  is the store root itself; `mbuild` does not add an implicit `.mbuild/`
+  directory.
