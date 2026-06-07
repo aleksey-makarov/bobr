@@ -1,6 +1,5 @@
-use crate::identity::{BuildKey, ResultId, ReuseKey};
+use crate::identity::{BuildKey, ObjectHash, ResultId, ReuseKey};
 use crate::{PublishedBuild, ResultRecord, ReuseInputIdentity, Store, StoreError};
-use fsobj_hash::ObjectHash;
 use std::path::{Path, PathBuf};
 
 /// Request to publish a build under a publication name.

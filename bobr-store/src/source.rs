@@ -1,7 +1,7 @@
+use crate::identity::ObjectHash;
 use crate::object::import_object;
 use crate::record::{StoredResult, load_stored_result, record_existing_source_result};
 use crate::{Store, StoreError};
-use fsobj_hash::ObjectHash;
 use std::path::Path;
 
 /// Result of looking up the canonical store state for a declared source object.

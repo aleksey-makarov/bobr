@@ -21,7 +21,7 @@ pub(crate) fn hash_file(file: &FileNode) -> ObjectHash {
     hasher.update([u8::from(file.executable)]);
     hasher.update(file.size.to_be_bytes());
     hasher.update(file.content_hash);
-    ObjectHash(hasher.finalize().into())
+    ObjectHash::from_bytes(hasher.finalize().into())
 }
 
 pub(crate) fn hash_symlink(symlink: &SymlinkNode) -> ObjectHash {
@@ -29,7 +29,7 @@ pub(crate) fn hash_symlink(symlink: &SymlinkNode) -> ObjectHash {
     hasher.update(SYMLINK_TAG);
     hasher.update((symlink.target.len() as u64).to_be_bytes());
     hasher.update(&symlink.target);
-    ObjectHash(hasher.finalize().into())
+    ObjectHash::from_bytes(hasher.finalize().into())
 }
 
 pub(crate) fn hash_directory(directory: &DirectoryNode) -> ObjectHash {
@@ -38,7 +38,7 @@ pub(crate) fn hash_directory(directory: &DirectoryNode) -> ObjectHash {
     for entry in &directory.entries {
         hash_directory_entry(&mut hasher, entry);
     }
-    ObjectHash(hasher.finalize().into())
+    ObjectHash::from_bytes(hasher.finalize().into())
 }
 
 pub(crate) fn hash_directory_entries(entries: &[DirectoryHashEntry<'_>]) -> ObjectHash {
@@ -55,7 +55,7 @@ pub(crate) fn hash_directory_entries(entries: &[DirectoryHashEntry<'_>]) -> Obje
         hasher.update(entry.name);
         hasher.update(entry.hash.as_bytes());
     }
-    ObjectHash(hasher.finalize().into())
+    ObjectHash::from_bytes(hasher.finalize().into())
 }
 
 pub(crate) struct DirectoryHashEntry<'a> {

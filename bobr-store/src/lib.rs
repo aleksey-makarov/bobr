@@ -12,7 +12,7 @@
 //!
 //! Most fallible store operations return [`StoreError`]. Pure string parsing
 //! for value types keeps narrow parse errors such as
-//! [`identity::ParseIdentityError`] and [`fs_tree::ParseFsFileHashError`].
+//! [`identity::ParseHexHashError`] and [`fs_tree::ParseFsFileHashError`].
 
 #![deny(missing_docs)]
 
@@ -32,7 +32,6 @@ mod source;
 mod store;
 
 pub use error::StoreError;
-pub use fsobj_hash::ObjectHash;
 pub use object::import_object;
 #[doc(hidden)]
 pub use publish::materialize_build_with_trusted_hash;

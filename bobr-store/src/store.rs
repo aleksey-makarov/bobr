@@ -1,7 +1,6 @@
 use crate::StoreError;
 use crate::fsutil as private_fs;
-use crate::identity::{BuildKey, ResultId, ReuseKey};
-use fsobj_hash::ObjectHash;
+use crate::identity::{BuildKey, ObjectHash, ResultId, ReuseKey};
 use serde_json::{Map, Value, json};
 use std::fs;
 use std::io::Write;

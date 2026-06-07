@@ -1,5 +1,6 @@
 mod error;
 mod hash;
+mod hex_hash;
 mod node;
 mod normalize;
 mod object_hash;
@@ -7,6 +8,7 @@ mod path_source;
 mod tar_source;
 
 pub use error::{EntryKind, Error, InvalidPathReason, TarEntryKind};
+pub use hex_hash::ParseHexHashError;
 pub use object_hash::ObjectHash;
 
 use crate::hash::DirectoryHashEntry;

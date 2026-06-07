@@ -32,3 +32,18 @@ fn parse_rejects_uppercase_hex() {
             .is_err()
     );
 }
+
+#[test]
+fn serde_json_uses_bare_lowercase_hex() {
+    let value = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let hash = ObjectHash::from_str(value).unwrap();
+
+    assert_eq!(
+        serde_json::to_string(&hash).unwrap(),
+        format!("\"{value}\"")
+    );
+    assert_eq!(
+        serde_json::from_str::<ObjectHash>(&format!("\"{value}\"")).unwrap(),
+        hash
+    );
+}

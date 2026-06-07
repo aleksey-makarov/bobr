@@ -1,7 +1,6 @@
 use crate::fsutil as private_fs;
-use crate::identity::{BuildKey, ResultId};
+use crate::identity::{BuildKey, ObjectHash, ResultId};
 use crate::{Store, StoreError};
-use fsobj_hash::ObjectHash;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs;
@@ -34,7 +33,6 @@ pub struct Build {
     /// Result record id reached by the build reference.
     pub result_id: ResultId,
     /// Hash of the output object recorded by the result.
-    #[serde(with = "serde_object_hash")]
     pub object_hash: ObjectHash,
     /// Optional RFC 3339 creation timestamp copied from the result record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -78,7 +76,6 @@ pub struct RealizedResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_key: Option<BuildKey>,
     /// Hash of the output object.
-    #[serde(with = "serde_object_hash")]
     pub object_hash: ObjectHash,
     /// Optional RFC 3339 creation timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -375,25 +372,4 @@ fn parse_object_hash_result(value: &str) -> Result<ObjectHash, StoreError> {
             "invalid object hash '{value}' in result record: {error}"
         ))
     })
-}
-
-mod serde_object_hash {
-    use fsobj_hash::ObjectHash;
-    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
-    use std::str::FromStr;
-
-    pub fn serialize<S>(value: &ObjectHash, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&value.to_string())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<ObjectHash, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        ObjectHash::from_str(&value).map_err(D::Error::custom)
-    }
 }
