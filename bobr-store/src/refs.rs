@@ -219,20 +219,22 @@ pub fn load_public_build(store: &Store, build_key: BuildKey) -> Result<Option<Bu
     Ok(load_build_handle(store, build_key)?.map(|published| published.build))
 }
 
-/// Loads a public output by its publication name.
+/// Loads a publication by name.
 ///
-/// Returns `Ok(None)` when neither public ref exists for `output_name`. Existing
-/// public outputs must have both result and object refs, both refs must use
-/// canonical targets, and the object ref must point to the same object recorded
-/// by the result.
-pub fn load_public_output(
+/// Returns `Ok(None)` when neither publication ref exists for
+/// `publication_name`. Existing publications must have both result and object
+/// refs, both refs must use canonical targets, and the object ref must point to
+/// the same object recorded by the result.
+pub fn load_publication(
     store: &Store,
-    output_name: &str,
+    publication_name: &str,
 ) -> Result<Option<StoredResult>, StoreError> {
-    validate_output_name(output_name)?;
+    validate_publication_name(publication_name)?;
 
-    let result_ref_path = store.result_refs_dir().join(format!("{output_name}.json"));
-    let object_ref_path = store.object_refs_dir().join(output_name);
+    let result_ref_path = store
+        .result_refs_dir()
+        .join(format!("{publication_name}.json"));
+    let object_ref_path = store.object_refs_dir().join(publication_name);
     let result_ref_exists = result_ref_path.exists() || result_ref_path.is_symlink();
     let object_ref_exists = object_ref_path.exists() || object_ref_path.is_symlink();
 
@@ -240,14 +242,14 @@ pub fn load_public_output(
         (false, false) => return Ok(None),
         (true, false) => {
             return Err(StoreError::InvalidData(format!(
-                "public output '{output_name}' has result ref '{}' but missing object ref '{}'",
+                "publication '{publication_name}' has result ref '{}' but missing object ref '{}'",
                 result_ref_path.display(),
                 object_ref_path.display()
             )));
         }
         (false, true) => {
             return Err(StoreError::InvalidData(format!(
-                "public output '{output_name}' has object ref '{}' but missing result ref '{}'",
+                "publication '{publication_name}' has object ref '{}' but missing result ref '{}'",
                 object_ref_path.display(),
                 result_ref_path.display()
             )));
@@ -257,14 +259,15 @@ pub fn load_public_output(
 
     let result_target = fs::read_link(&result_ref_path).map_err(|error| {
         StoreError::Io(format!(
-            "failed to read public result ref '{}': {error}",
+            "failed to read publication result ref '{}': {error}",
             result_ref_path.display()
         ))
     })?;
-    let result_id = parse_result_ref_target("public result", &result_ref_path, &result_target)?;
+    let result_id =
+        parse_result_ref_target("publication result", &result_ref_path, &result_target)?;
     let stored = crate::record::load_stored_result(store, result_id)?.ok_or_else(|| {
         StoreError::InvalidData(format!(
-            "public result ref '{}' points to missing result '{}'",
+            "publication result ref '{}' points to missing result '{}'",
             result_ref_path.display(),
             result_id
         ))
@@ -272,14 +275,15 @@ pub fn load_public_output(
 
     let object_target = fs::read_link(&object_ref_path).map_err(|error| {
         StoreError::Io(format!(
-            "failed to read public object ref '{}': {error}",
+            "failed to read publication object ref '{}': {error}",
             object_ref_path.display()
         ))
     })?;
-    let object_hash = parse_object_ref_target("public object", &object_ref_path, &object_target)?;
+    let object_hash =
+        parse_object_ref_target("publication object", &object_ref_path, &object_target)?;
     if object_hash != stored.result.object_hash {
         return Err(StoreError::InvalidData(format!(
-            "public output '{output_name}' object ref points to '{}' but result '{}' records '{}'",
+            "publication '{publication_name}' object ref points to '{}' but result '{}' records '{}'",
             object_hash, result_id, stored.result.object_hash
         )));
     }
@@ -287,48 +291,50 @@ pub fn load_public_output(
     Ok(Some(stored))
 }
 
-/// Publishes a stored result under a public output name.
+/// Publishes a stored result under a publication name.
 ///
 /// The result record must already exist and must point to an existing object in
 /// the store. The checked result is returned to callers that need the resolved
 /// record and object path.
 pub fn publish_result(
     store: &Store,
-    output_name: &str,
+    publication_name: &str,
     result_id: ResultId,
 ) -> Result<StoredResult, StoreError> {
     let stored = crate::record::load_stored_result(store, result_id)?.ok_or_else(|| {
         StoreError::InvalidData(format!("cannot publish missing result '{}'", result_id))
     })?;
-    publish_result_refs(store, output_name, &stored.result)?;
+    publish_publication_refs(store, publication_name, &stored.result)?;
     Ok(stored)
 }
 
-/// Publishes a result under a public output name.
+/// Publishes a result under a publication name.
 ///
-/// The current object and result refs for `output_name` are replaced with refs
-/// to `result`. If the output name already points at a different result, the
+/// The current object and result refs for `publication_name` are replaced with refs
+/// to `result`. If the publication already points at a different result, the
 /// previous refs are preserved as timestamped generation refs before the
 /// current refs are updated.
 ///
-/// Output names must be non-empty and contain only ASCII letters, digits, `.`,
-/// `_`, or `-`.
-pub(crate) fn publish_result_refs(
+/// Publication names must be non-empty and contain only ASCII letters, digits,
+/// `.`, `_`, or `-`.
+pub(crate) fn publish_publication_refs(
     store: &Store,
-    output_name: &str,
+    publication_name: &str,
     result: &ResultRecord,
 ) -> Result<(), StoreError> {
-    validate_output_name(output_name)?;
+    validate_publication_name(publication_name)?;
 
-    let current_result_ref_path = store.result_refs_dir().join(format!("{output_name}.json"));
-    let current_object_ref_path = store.object_refs_dir().join(output_name);
+    let current_result_ref_path = store
+        .result_refs_dir()
+        .join(format!("{publication_name}.json"));
+    let current_object_ref_path = store.object_refs_dir().join(publication_name);
     let result_id = result.result_id();
 
-    if let Some(current) = load_current_publication(store, output_name)?
+    if let Some(current) = load_current_publication(store, publication_name)?
         && current.result.result_id() != result_id
     {
         let generation_name =
-            allocate_generation_name(store, output_name, &generation_suffix(&current)?)?;
+            allocate_generation_name(store, publication_name, &generation_suffix(&current)?)?;
 
         if let Some(target) = current.result_target {
             create_generation_ref(
@@ -355,15 +361,15 @@ fn object_ref_target_for_result(result: &ResultRecord) -> Result<PathBuf, StoreE
     Ok(object_ref_target(result.object_hash))
 }
 
-fn validate_output_name(name: &str) -> Result<(), StoreError> {
+fn validate_publication_name(name: &str) -> Result<(), StoreError> {
     if name.is_empty() {
         return Err(StoreError::InvalidInput(
-            "output name must not be empty".to_string(),
+            "publication name must not be empty".to_string(),
         ));
     }
     if name == "." || name == ".." {
         return Err(StoreError::InvalidInput(format!(
-            "invalid output name '{name}'"
+            "invalid publication name '{name}'"
         )));
     }
     if !name
@@ -371,7 +377,7 @@ fn validate_output_name(name: &str) -> Result<(), StoreError> {
         .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
     {
         return Err(StoreError::InvalidInput(format!(
-            "invalid output name '{}'; allowed chars: [A-Za-z0-9._-]",
+            "invalid publication name '{}'; allowed chars: [A-Za-z0-9._-]",
             name
         )));
     }
@@ -388,9 +394,11 @@ pub(crate) struct CurrentPublication {
 
 pub(crate) fn load_current_publication(
     store: &Store,
-    output_name: &str,
+    publication_name: &str,
 ) -> Result<Option<CurrentPublication>, StoreError> {
-    let result_ref_path = store.result_refs_dir().join(format!("{output_name}.json"));
+    let result_ref_path = store
+        .result_refs_dir()
+        .join(format!("{publication_name}.json"));
     if !result_ref_path.exists() && !result_ref_path.is_symlink() {
         return Ok(None);
     }
@@ -410,7 +418,7 @@ pub(crate) fn load_current_publication(
         ))
     })?;
 
-    let object_ref_path = store.object_refs_dir().join(output_name);
+    let object_ref_path = store.object_refs_dir().join(publication_name);
     let object_target = if object_ref_path.exists() || object_ref_path.is_symlink() {
         Some(fs::read_link(&object_ref_path).map_err(|error| {
             StoreError::Io(format!(
@@ -473,14 +481,14 @@ fn human_timestamp_from_datetime(parsed: OffsetDateTime) -> Result<String, Store
 
 fn allocate_generation_name(
     store: &Store,
-    output_name: &str,
+    publication_name: &str,
     suffix: &str,
 ) -> Result<String, StoreError> {
     for counter in 1..1000 {
         let candidate = if counter == 1 {
-            format!("{output_name}.{suffix}")
+            format!("{publication_name}.{suffix}")
         } else {
-            format!("{output_name}.{suffix}.{counter}")
+            format!("{publication_name}.{suffix}.{counter}")
         };
         let result_path = store.result_refs_dir().join(format!("{candidate}.json"));
         let object_path = store.object_refs_dir().join(&candidate);
@@ -494,7 +502,7 @@ fn allocate_generation_name(
     }
 
     Err(StoreError::Io(format!(
-        "failed to allocate generation ref name for '{output_name}.{suffix}'"
+        "failed to allocate generation ref name for '{publication_name}.{suffix}'"
     )))
 }
 

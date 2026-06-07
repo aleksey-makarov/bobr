@@ -3,15 +3,15 @@ use crate::{PublishedBuild, ResultRecord, ReuseInputIdentity, Store, StoreError}
 use fsobj_hash::ObjectHash;
 use std::path::{Path, PathBuf};
 
-/// Request to publish a staged build output.
+/// Request to publish a build under a publication name.
 ///
 /// The staged path is a completed output object outside the permanent object
 /// store. Publishing either reuses an existing build/result, or imports this
-/// staged object and records the new result.
+/// staged object, records the new result, and updates the publication refs.
 #[derive(Debug)]
-pub struct PublishOutputRequest {
-    /// Public output name to update under `object-refs` and `result-refs`.
-    pub output_name: String,
+pub struct PublishRequest {
+    /// Publication name to update under `object-refs` and `result-refs`.
+    pub publication_name: String,
     /// Build key for the invocation being published.
     pub build_key: BuildKey,
     /// Reuse key for the invocation being published.
@@ -24,13 +24,13 @@ pub struct PublishOutputRequest {
     pub inputs: Vec<ReuseInputIdentity>,
 }
 
-/// Summary returned after an output publication completes.
+/// Summary returned after a publication update completes.
 ///
 /// The values identify the object and result now associated with the requested
-/// build/output publication.
+/// build publication.
 #[derive(Debug, Clone, Copy)]
-pub struct PublishedOutput {
-    /// Hash of the published output object.
+pub struct Publication {
+    /// Hash of the published object.
     pub object_hash: ObjectHash,
     /// Build key associated with the publication.
     pub build_key: BuildKey,
@@ -38,7 +38,7 @@ pub struct PublishedOutput {
     pub result_id: ResultId,
 }
 
-/// Publishes a staged output or reuses an existing result.
+/// Publishes a build under a publication name.
 ///
 /// The operation checks, in order:
 ///
@@ -46,17 +46,18 @@ pub struct PublishedOutput {
 /// 2. An existing reuse record for `request.reuse_key`.
 /// 3. The staged object supplied in `request.staged_path`.
 ///
-/// In all successful cases the public output refs named by
-/// [`PublishOutputRequest::output_name`] are updated to the selected result.
+/// In all successful cases the publication refs named by
+/// [`PublishRequest::publication_name`] are updated to the selected result.
 /// If the staged object is not needed because reuse succeeded, it is removed.
-pub fn publish_output(
-    store: &Store,
-    request: PublishOutputRequest,
-) -> Result<PublishedOutput, StoreError> {
+pub fn publish_build(store: &Store, request: PublishRequest) -> Result<Publication, StoreError> {
     if let Some(published) = crate::refs::load_build_handle(store, request.build_key)? {
         crate::object::remove_path_force(&request.staged_path)?;
-        crate::refs::publish_result(store, &request.output_name, published.result.result_id())?;
-        return Ok(PublishedOutput {
+        crate::refs::publish_result(
+            store,
+            &request.publication_name,
+            published.result.result_id(),
+        )?;
+        return Ok(Publication {
             object_hash: published.build.object_hash,
             build_key: published.build.build_key,
             result_id: published.result.result_id(),
@@ -68,8 +69,8 @@ pub fn publish_output(
     {
         let result_id = published.result.result_id();
         crate::object::remove_path_force(&request.staged_path)?;
-        crate::refs::publish_result(store, &request.output_name, result_id)?;
-        return Ok(PublishedOutput {
+        crate::refs::publish_result(store, &request.publication_name, result_id)?;
+        return Ok(Publication {
             object_hash: published.build.object_hash,
             build_key: published.build.build_key,
             result_id,
@@ -84,9 +85,13 @@ pub fn publish_output(
         request.inputs,
         &request.staged_path,
     )?;
-    crate::refs::publish_result(store, &request.output_name, published.result.result_id())?;
+    crate::refs::publish_result(
+        store,
+        &request.publication_name,
+        published.result.result_id(),
+    )?;
 
-    Ok(PublishedOutput {
+    Ok(Publication {
         object_hash: published.build.object_hash,
         build_key: published.build.build_key,
         result_id: published.result.result_id(),
@@ -95,10 +100,10 @@ pub fn publish_output(
 
 /// Imports a staged object and records a newly materialized build result.
 ///
-/// This lower-level operation does not update public output refs. It imports
+/// This lower-level operation does not update publication refs. It imports
 /// `staged_path`, stores the result record, writes the reuse ref, and writes the
-/// build handle ref. Call [`publish_output`] when the caller also needs to
-/// update an output name under `object-refs` and `result-refs`.
+/// build handle ref. Call [`publish_build`] when the caller also needs to
+/// update a publication name under `object-refs` and `result-refs`.
 pub fn materialize_build(
     store: &Store,
     build_key: BuildKey,

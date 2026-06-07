@@ -1,7 +1,7 @@
 mod support;
 
 use bobr_store::identity::compute_result_id;
-use bobr_store::{Store, load_build_handle, load_public_output, load_result_record};
+use bobr_store::{Store, load_build_handle, load_publication, load_result_record};
 use mbuild::recipe_runtime::{
     BuildRunOptions, run_recipe_json_in_workspace, run_recipe_json_in_workspace_with_options,
 };
@@ -70,21 +70,21 @@ fn group_root_builds_independent_inputs() {
 
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let root_output = load_public_output(&layout, "all-targets")
+    let root_publication = load_publication(&layout, "all-targets")
         .unwrap()
-        .expect("expected root public output");
-    assert_eq!(root_output.result.object_hash, realized.object_hash);
-    assert_eq!(fs::read(&root_output.object_path).unwrap(), b"");
+        .expect("expected root publication");
+    assert_eq!(root_publication.result.object_hash, realized.object_hash);
+    assert_eq!(fs::read(&root_publication.object_path).unwrap(), b"");
 
     for name in ["all-targets", "first-target", "second-target"] {
         assert!(
-            load_public_output(&layout, name).unwrap().is_some(),
-            "missing public output {name}"
+            load_publication(&layout, name).unwrap().is_some(),
+            "missing publication {name}"
         );
     }
 }
 
-fn remove_public_output_refs(workspace_root: &Path, name: &str) {
+fn remove_publication_refs(workspace_root: &Path, name: &str) {
     let store = store_root(workspace_root);
     let refs = [
         store.join("result-refs").join(format!("{name}.json")),
@@ -356,8 +356,8 @@ fn json_recipe_executes_source_and_group_graph() {
 
     for name in ["source", "base-image", "final-group"] {
         assert!(
-            load_public_output(&layout, name).unwrap().is_some(),
-            "missing public output {name}"
+            load_publication(&layout, name).unwrap().is_some(),
+            "missing publication {name}"
         );
     }
 
@@ -410,8 +410,8 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
             .is_some()
     );
     assert_eq!(build_ref_count(workspace.path()), 1);
-    assert!(load_public_output(&layout, "source-a").unwrap().is_some());
-    assert!(load_public_output(&layout, "source-b").unwrap().is_none());
+    assert!(load_publication(&layout, "source-a").unwrap().is_some());
+    assert!(load_publication(&layout, "source-b").unwrap().is_none());
 }
 
 #[test]
@@ -455,19 +455,15 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
     );
 
     for name in ["source", "final-group"] {
-        remove_public_output_refs(workspace.path(), name);
+        remove_publication_refs(workspace.path(), name);
     }
 
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
     assert_eq!(first.build_key, second.build_key);
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    assert!(
-        load_public_output(&layout, "final-group")
-            .unwrap()
-            .is_some()
-    );
-    assert!(load_public_output(&layout, "source").unwrap().is_none());
+    assert!(load_publication(&layout, "final-group").unwrap().is_some());
+    assert!(load_publication(&layout, "source").unwrap().is_none());
 }
 
 #[test]
@@ -597,14 +593,11 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
 
     assert!(published.object_path.is_dir());
     assert!(published.object_path.join("manifest.jsonl").is_file());
-    let public_output = load_public_output(&layout, "runtime-tree")
+    let publication = load_publication(&layout, "runtime-tree")
         .unwrap()
-        .expect("expected public output");
-    assert_eq!(
-        public_output.result.object_hash,
-        published.build.object_hash
-    );
-    assert_eq!(public_output.object_path, published.object_path);
+        .expect("expected publication");
+    assert_eq!(publication.result.object_hash, published.build.object_hash);
+    assert_eq!(publication.object_path, published.object_path);
     let root = published.object_path.join("root");
     assert!(root.is_dir());
     assert!(root.join("dev").is_dir());
@@ -705,13 +698,13 @@ fn source_path_tar_materializes_unpacked_tree_without_build_handle() {
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let public_output = load_public_output(&layout, "source-tar")
+    let publication = load_publication(&layout, "source-tar")
         .unwrap()
-        .expect("expected public output");
-    let object_path = public_output.object_path;
+        .expect("expected publication");
+    let object_path = publication.object_path;
     assert!(realized.build_key.is_none());
     assert_eq!(realized.object_hash, object_hash);
-    assert_eq!(public_output.result.object_hash, object_hash);
+    assert_eq!(publication.result.object_hash, object_hash);
     assert!(object_path.is_dir());
     assert_eq!(
         fs::read_to_string(object_path.join("pkg/README.txt")).unwrap(),

@@ -992,7 +992,7 @@ mod tests {
     use super::*;
     use crate::recipe::{ReuseOrigin, collect_graph};
     use bobr_store::identity::{compute_result_id, compute_reuse_key};
-    use bobr_store::{PublishOutputRequest, publish_output};
+    use bobr_store::{PublishRequest, publish_build};
     use mbuild_core::{CancellationToken, OriginContext, OriginSpec, ParsedOrigin};
     use serde_json::json;
     use std::collections::HashMap;
@@ -1175,10 +1175,10 @@ mod tests {
         let stage_dir = temp.path().join("root-out");
         fs::create_dir_all(&stage_dir).unwrap();
         fs::write(stage_dir.join("payload"), b"ok\n").unwrap();
-        publish_output(
+        publish_build(
             &layout,
-            PublishOutputRequest {
-                output_name: "bin".to_string(),
+            PublishRequest {
+                publication_name: "bin".to_string(),
                 build_key: root_key,
                 reuse_key,
                 created_at: "2026-04-05T12:00:00.000000000Z".to_string(),

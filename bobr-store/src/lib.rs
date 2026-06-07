@@ -36,14 +36,13 @@ pub use fsobj_hash::ObjectHash;
 pub use object::import_object;
 #[doc(hidden)]
 pub use publish::materialize_build_with_trusted_hash;
-pub use publish::{PublishOutputRequest, PublishedOutput, materialize_build, publish_output};
+pub use publish::{Publication, PublishRequest, materialize_build, publish_build};
 pub use record::{
     Build, PublishedBuild, RealizedResult, ResultRecord, ReuseInputIdentity, StoredResult,
     load_result_record, load_stored_result,
 };
 pub use refs::{
-    load_build_handle, load_public_build, load_public_output, publish_result,
-    resolve_reuse_for_build,
+    load_build_handle, load_public_build, load_publication, publish_result, resolve_reuse_for_build,
 };
 pub use source::{SourceImportOutcome, SourceLookup, import_source_result, lookup_source_result};
 pub use store::{

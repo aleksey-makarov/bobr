@@ -502,7 +502,7 @@ fn quarantine_temp_path(
 mod tests {
     use super::*;
     use bobr_store::identity::compute_build_key;
-    use bobr_store::{PublishOutputRequest, ReuseInputIdentity, create_workspace, publish_output};
+    use bobr_store::{PublishRequest, ReuseInputIdentity, create_workspace, publish_build};
     use mbuild_core::{
         BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, BuilderRun, BuilderSpec,
         CancellationToken, RunOptions, StagedBuildResult, TypedBuilder,
@@ -787,10 +787,10 @@ mod tests {
                 .unwrap();
         let stage = temp.path().join("script.sh");
         fs::write(&stage, b"echo hi\n").unwrap();
-        publish_output(
+        publish_build(
             &layout,
-            PublishOutputRequest {
-                output_name: "script".to_string(),
+            PublishRequest {
+                publication_name: "script".to_string(),
                 build_key: build_key_for_result,
                 reuse_key,
                 created_at: "2026-04-05T12:00:00.000000000Z".to_string(),

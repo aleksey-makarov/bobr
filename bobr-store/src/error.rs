@@ -11,7 +11,7 @@ pub enum StoreError {
     /// The caller passed an invalid argument to a store operation.
     ///
     /// Examples include non-store temporary paths, non-absolute fs-tree roots,
-    /// invalid output names, or entries that cannot form a valid manifest.
+    /// invalid publication names, or entries that cannot form a valid manifest.
     InvalidInput(String),
     /// Store data or a store-owned serialized format is malformed.
     ///
