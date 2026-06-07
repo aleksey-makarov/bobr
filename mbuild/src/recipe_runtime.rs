@@ -11,8 +11,8 @@ use crate::runtime::{
 use bobr_store::identity::BuildKey;
 use bobr_store::{
     RealizedResult, ResultRecord, ReuseInputIdentity, SourceImportOutcome, SourceLookup, Store,
-    StoreWorkspace, WorkspaceRequest, create_workspace, import_source_result, lookup_source_result,
-    publish_result, remove_store_temp_dir_force,
+    StoreWorkspace, create_workspace, import_source_result, lookup_source_result, publish_result,
+    remove_store_temp_dir_force,
 };
 use mbuild_core::{
     BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderRun, CancellationToken,
@@ -297,7 +297,9 @@ fn publish_reused_root(
 ) -> Result<(), RuntimeError> {
     let workspace = create_workspace(
         layout,
-        WorkspaceRequest::new(root_tag, Some(root_name.to_string()), key.to_string()),
+        root_tag,
+        Some(root_name.to_string()),
+        key.to_string(),
     )
     .map(core_workspace)
     .map_err(map_store_error)?;
@@ -426,11 +428,9 @@ fn execute_misses(
     let mut last_wait_log: Option<Instant> = None;
     let scheduler_workspace = create_workspace(
         layout,
-        WorkspaceRequest::new(
-            "Scheduler",
-            Some("executor".to_string()),
-            root_key.to_string(),
-        ),
+        "Scheduler",
+        Some("executor".to_string()),
+        root_key.to_string(),
     )
     .map(core_workspace)
     .map_err(map_store_error)?;
@@ -813,13 +813,8 @@ fn execute_source_recipe(
     cancellation: CancellationToken,
     recipe: PlannedSourceRecipe,
 ) -> Result<ExecutedNode, RuntimeError> {
-    let mut workspace_request =
-        WorkspaceRequest::new("Source", Some(recipe.name.clone()), key.to_string());
-    workspace_request.metadata.insert(
-        "declared_object_hash".to_string(),
-        Value::String(recipe.object_hash.to_string()),
-    );
-    let workspace = create_workspace(layout, workspace_request).map_err(map_store_error)?;
+    let workspace = create_workspace(layout, "Source", Some(recipe.name.clone()), key.to_string())
+        .map_err(map_store_error)?;
     let workspace = core_workspace(workspace);
     let source_builder = SourceBuilder::new(
         recipe.name,

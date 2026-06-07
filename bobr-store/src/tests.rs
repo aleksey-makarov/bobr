@@ -1365,16 +1365,9 @@ fn store_clone_shares_run_directories_and_serial_counter() {
     let layout = Store::create(temp.path()).unwrap();
     let clone = layout.clone();
 
-    let first = create_workspace(
-        &layout,
-        WorkspaceRequest::new("Tree", Some("left".to_string()), "build-left"),
-    )
-    .unwrap();
-    let second = create_workspace(
-        &clone,
-        WorkspaceRequest::new("Tree", Some("right".to_string()), "build-right"),
-    )
-    .unwrap();
+    let first = create_workspace(&layout, "Tree", Some("left".to_string()), "build-left").unwrap();
+    let second =
+        create_workspace(&clone, "Tree", Some("right".to_string()), "build-right").unwrap();
 
     assert!(first.log_dir().starts_with(layout.run_log_dir()));
     assert!(second.log_dir().starts_with(layout.run_log_dir()));
@@ -1402,19 +1395,13 @@ fn store_clone_shares_run_directories_and_serial_counter() {
 fn workspace_allocation_writes_metadata_index_and_sanitized_paths() {
     let temp = tempdir().unwrap();
     let layout = Store::create(temp.path()).unwrap();
-    let mut request = WorkspaceRequest::new(
+    let workspace = create_workspace(
+        &layout,
         "Source Builder",
         Some("name / demo".to_string()),
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    );
-    request.metadata.insert(
-        "declared_object_hash".to_string(),
-        Value::String(
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
-        ),
-    );
-
-    let workspace = create_workspace(&layout, request).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(
         workspace.log_dir().file_name().unwrap().to_str().unwrap(),
@@ -1439,10 +1426,6 @@ fn workspace_allocation_writes_metadata_index_and_sanitized_paths() {
     assert_eq!(
         metadata["build_key"],
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    );
-    assert_eq!(
-        metadata["declared_object_hash"],
-        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     );
     assert_eq!(
         metadata["temp_dir"],
@@ -1489,11 +1472,9 @@ fn parallel_workspace_allocation_does_not_reuse_serials() {
         handles.push(thread::spawn(move || {
             create_workspace(
                 &layout,
-                WorkspaceRequest::new(
-                    "Tree",
-                    Some(format!("node-{index}")),
-                    format!("build-{index}"),
-                ),
+                "Tree",
+                Some(format!("node-{index}")),
+                format!("build-{index}"),
             )
             .unwrap()
             .log_dir()

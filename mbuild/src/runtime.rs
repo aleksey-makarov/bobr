@@ -2,7 +2,7 @@ use crate::resolved_inputs::ResolvedInputs;
 use bobr_store::identity::{BuildKey, compute_reuse_key};
 use bobr_store::{
     PublishedBuild, ReuseInputIdentity, Store, StoreError, StoreTempQuarantineRequest,
-    StoreWorkspace, WorkspaceRequest, create_workspace, load_build_handle, materialize_build,
+    StoreWorkspace, create_workspace, load_build_handle, materialize_build,
     materialize_build_with_trusted_hash, quarantine_store_temp, recreate_store_temp_dir_force,
     remove_store_temp_dir_force, resolve_reuse_for_build,
 };
@@ -95,11 +95,9 @@ pub(crate) fn execute_builder_node(
         .map_err(map_builder_error)?;
     let workspace = create_workspace(
         layout,
-        WorkspaceRequest::new(
-            builder.spec().tag,
-            Some(build_name.to_string()),
-            build_key.to_string(),
-        ),
+        builder.spec().tag,
+        Some(build_name.to_string()),
+        build_key.to_string(),
     )
     .map(core_workspace)
     .map_err(map_store_error)?;
@@ -505,8 +503,8 @@ mod tests {
     use super::*;
     use bobr_store::identity::compute_build_key;
     use bobr_store::{
-        PublishOutputRequest, ReuseInputIdentity, WorkspaceRequest, create_workspace,
-        list_quarantined_temps, publish_output,
+        PublishOutputRequest, ReuseInputIdentity, create_workspace, list_quarantined_temps,
+        publish_output,
     };
     use mbuild_core::{
         BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, BuilderRun, BuilderSpec,
@@ -544,12 +542,10 @@ mod tests {
         name: &str,
         build_key: BuildKey,
     ) -> (BuilderRun, Arc<dyn BuildLogger>) {
-        let workspace = create_workspace(
-            layout,
-            WorkspaceRequest::new(tag, Some(name.to_string()), build_key.to_string()),
-        )
-        .map(core_workspace)
-        .unwrap();
+        let workspace =
+            create_workspace(layout, tag, Some(name.to_string()), build_key.to_string())
+                .map(core_workspace)
+                .unwrap();
         let builder_run = BuilderRun::new(
             tag.to_string(),
             Some(name.to_string()),

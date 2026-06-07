@@ -76,35 +76,6 @@ impl StoreWorkspace {
     }
 }
 
-/// Request for allocating a store-owned workspace for one run subject.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkspaceRequest {
-    /// Builder/source/scheduler tag used in log records and directory names.
-    pub tag: String,
-    /// Optional recipe or subject name used in log records and directory names.
-    pub recipe_name: Option<String>,
-    /// Full build key string associated with this subject.
-    pub build_key: String,
-    /// Additional metadata fields written to `meta.json`.
-    pub metadata: Map<String, Value>,
-}
-
-impl WorkspaceRequest {
-    /// Creates a request without additional metadata fields.
-    pub fn new(
-        tag: impl Into<String>,
-        recipe_name: Option<String>,
-        build_key: impl Into<String>,
-    ) -> Self {
-        Self {
-            tag: tag.into(),
-            recipe_name,
-            build_key: build_key.into(),
-            metadata: Map::new(),
-        }
-    }
-}
-
 /// Request to move a store-owned temporary path into quarantine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreTempQuarantineRequest {
@@ -281,11 +252,14 @@ impl Store {
 /// Allocates store-owned paths for one concrete builder/source/scheduler run.
 pub fn create_workspace(
     store: &Store,
-    request: WorkspaceRequest,
+    tag: impl Into<String>,
+    recipe_name: Option<String>,
+    build_key: impl Into<String>,
 ) -> Result<StoreWorkspace, StoreError> {
+    let tag = tag.into();
+    let build_key = build_key.into();
     let serial = store.inner.next_serial.fetch_add(1, Ordering::SeqCst);
-    let directory_name =
-        workspace_directory_name(serial, &request.tag, request.recipe_name.as_deref());
+    let directory_name = workspace_directory_name(serial, &tag, recipe_name.as_deref());
     let log_dir = store.run_log_dir().join(&directory_name);
     let temp_dir = store.run_tmp_dir().join(&directory_name);
     fs::create_dir(&log_dir).map_err(|error| {
@@ -308,8 +282,17 @@ pub fn create_workspace(
         ))
     })?;
 
-    write_workspace_metadata(store, serial, &request, &log_dir, &raw_log_dir, &temp_dir)?;
-    append_workspace_index(store, serial, &request, &log_dir)?;
+    let record = WorkspaceLogRecord {
+        serial,
+        tag: &tag,
+        recipe_name: recipe_name.as_deref(),
+        build_key: &build_key,
+        log_dir: &log_dir,
+        raw_log_dir: &raw_log_dir,
+        temp_dir: &temp_dir,
+    };
+    write_workspace_metadata(store, &record)?;
+    append_workspace_index(store, &record)?;
 
     Ok(StoreWorkspace::new(log_dir, raw_log_dir, temp_dir))
 }
@@ -589,30 +572,36 @@ fn safe_log_component(value: &str) -> String {
         .collect()
 }
 
+struct WorkspaceLogRecord<'a> {
+    serial: u64,
+    tag: &'a str,
+    recipe_name: Option<&'a str>,
+    build_key: &'a str,
+    log_dir: &'a Path,
+    raw_log_dir: &'a Path,
+    temp_dir: &'a Path,
+}
+
 fn write_workspace_metadata(
     store: &Store,
-    serial: u64,
-    request: &WorkspaceRequest,
-    log_dir: &Path,
-    raw_log_dir: &Path,
-    temp_dir: &Path,
+    record: &WorkspaceLogRecord<'_>,
 ) -> Result<(), StoreError> {
     let mut metadata = Map::new();
     metadata.insert(
         "schema".to_string(),
         Value::String("bobr-workspace-v1".to_string()),
     );
-    metadata.insert("serial".to_string(), Value::Number(serial.into()));
-    metadata.insert("tag".to_string(), Value::String(request.tag.clone()));
-    if let Some(recipe_name) = &request.recipe_name {
+    metadata.insert("serial".to_string(), Value::Number(record.serial.into()));
+    metadata.insert("tag".to_string(), Value::String(record.tag.to_string()));
+    if let Some(recipe_name) = record.recipe_name {
         metadata.insert(
             "recipe_name".to_string(),
-            Value::String(recipe_name.clone()),
+            Value::String(recipe_name.to_string()),
         );
     }
     metadata.insert(
         "build_key".to_string(),
-        Value::String(request.build_key.clone()),
+        Value::String(record.build_key.to_string()),
     );
     metadata.insert(
         "created_at".to_string(),
@@ -620,21 +609,17 @@ fn write_workspace_metadata(
     );
     metadata.insert(
         "log_dir".to_string(),
-        Value::String(log_dir.display().to_string()),
+        Value::String(record.log_dir.display().to_string()),
     );
     metadata.insert(
         "raw_log_dir".to_string(),
-        Value::String(raw_log_dir.display().to_string()),
+        Value::String(record.raw_log_dir.display().to_string()),
     );
     metadata.insert(
         "temp_dir".to_string(),
-        Value::String(temp_dir.display().to_string()),
+        Value::String(record.temp_dir.display().to_string()),
     );
-    for (key, value) in &request.metadata {
-        metadata.insert(key.clone(), value.clone());
-    }
-
-    let path = log_dir.join("meta.json");
+    let path = record.log_dir.join("meta.json");
     let bytes = serde_json::to_vec_pretty(&Value::Object(metadata)).map_err(|error| {
         StoreError::InvalidData(format!("failed to encode workspace metadata: {error}"))
     })?;
@@ -648,9 +633,7 @@ fn write_workspace_metadata(
 
 fn append_workspace_index(
     store: &Store,
-    serial: u64,
-    request: &WorkspaceRequest,
-    log_dir: &Path,
+    record: &WorkspaceLogRecord<'_>,
 ) -> Result<(), StoreError> {
     let _guard = store
         .inner
@@ -669,11 +652,11 @@ fn append_workspace_index(
             ))
         })?;
     let record = json!({
-        "serial": serial,
-        "tag": &request.tag,
-        "recipe_name": &request.recipe_name,
-        "build_key": &request.build_key,
-        "log_dir": log_dir.display().to_string(),
+        "serial": record.serial,
+        "tag": record.tag,
+        "recipe_name": record.recipe_name,
+        "build_key": record.build_key,
+        "log_dir": record.log_dir.display().to_string(),
     });
     let line = serde_json::to_string(&record).map_err(|error| {
         StoreError::InvalidData(format!("failed to encode workspace index record: {error}"))
