@@ -102,7 +102,6 @@ pub fn run_recipe_json_in_workspace_with_options(
             "--jobs and recipe options.jobs must be greater than zero".to_string(),
         ));
     }
-    validate_runtime_paths(&envelope.paths)?;
     run_recipe_request_in_store_with_options(&envelope.paths, envelope.request, options)
 }
 
@@ -117,7 +116,6 @@ pub fn run_recipe_request_in_store_with_options(
         ));
     }
     check_cancelled(&options.cancellation)?;
-    validate_runtime_paths(paths)?;
 
     let layout = Store::create(&paths.store).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> = Arc::new(
@@ -184,27 +182,6 @@ pub fn render_object_as_json(object: &RealizedObject) -> Result<String, RuntimeE
     })?;
     rendered.push('\n');
     Ok(rendered)
-}
-
-fn validate_runtime_paths(paths: &RecipePaths) -> Result<(), RuntimeError> {
-    validate_existing_dir(&paths.store, "store path")?;
-    Ok(())
-}
-
-fn validate_existing_dir(path: &Path, label: &str) -> Result<(), RuntimeError> {
-    let metadata = fs::metadata(path).map_err(|error| {
-        RuntimeError::RecipeLoad(format!(
-            "{label} '{}' does not exist or is not accessible: {error}",
-            path.display()
-        ))
-    })?;
-    if !metadata.is_dir() {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "{label} '{}' is not a directory",
-            path.display()
-        )));
-    }
-    Ok(())
 }
 
 fn ensure_planned(

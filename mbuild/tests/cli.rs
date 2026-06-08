@@ -355,11 +355,8 @@ fn cli_reports_missing_store_directory() {
 
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("error[invalid-input]"), "{stderr}");
-    assert!(
-        stderr.contains("does not exist or is not accessible"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("error[build-failed]"), "{stderr}");
+    assert!(stderr.contains("store root must exist"), "{stderr}");
 }
 
 #[test]
