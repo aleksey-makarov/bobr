@@ -6,13 +6,13 @@ use crate::recipe::{
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
     ExecuteBuilderNodeRequest, RuntimeError, check_cancelled, execute_builder_node,
-    log_runtime_event, lookup_build_handle, lookup_canonical_result, map_store_error,
+    log_runtime_event, lookup_build_handle, lookup_canonical_object, map_store_error,
 };
 use bobr_store::identity::BuildKey;
 use bobr_store::{
-    RealizedResult, ResultRecord, ReuseInputIdentity, SourceImportOutcome, SourceLookup, Store,
-    StoreWorkspace, create_workspace, import_source_result, lookup_source_result, publish_result,
-    remove_store_temp_dir_force,
+    ObjectRecord, RealizedObject, ReuseInputIdentity, SourceImportOutcome, SourceLookup, Store,
+    StoreWorkspace, create_workspace, import_source_object, lookup_source_object,
+    publish_stored_object, remove_store_temp_dir_force,
 };
 use mbuild_core::{
     BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderRun, CancellationToken,
@@ -45,14 +45,14 @@ impl Default for BuildRunOptions {
 
 #[derive(Debug, Clone)]
 struct ExecutedNode {
-    realized: RealizedResult,
+    realized: RealizedObject,
     logger: Arc<dyn BuildLogger>,
 }
 
 pub fn run_recipe_json_in_workspace(
     workspace_root: &Path,
     recipe_path: &Path,
-) -> Result<RealizedResult, RuntimeError> {
+) -> Result<RealizedObject, RuntimeError> {
     run_recipe_json_in_workspace_with_options(
         workspace_root,
         recipe_path,
@@ -64,7 +64,7 @@ pub fn run_recipe_json_in_workspace_with_options(
     _workspace_root: &Path,
     recipe_path: &Path,
     cli_options: BuildRunOptions,
-) -> Result<RealizedResult, RuntimeError> {
+) -> Result<RealizedObject, RuntimeError> {
     if !recipe_path.exists() {
         return Err(RuntimeError::RecipeLoad(format!(
             "recipe file '{}' does not exist",
@@ -110,7 +110,7 @@ pub fn run_recipe_request_in_store_with_options(
     paths: &RecipePaths,
     request: RecipeRequest,
     options: BuildRunOptions,
-) -> Result<RealizedResult, RuntimeError> {
+) -> Result<RealizedObject, RuntimeError> {
     if options.jobs == 0 {
         return Err(RuntimeError::InvalidRequest(
             "--jobs must be greater than zero".to_string(),
@@ -178,9 +178,9 @@ pub fn run_recipe_request_in_store_with_options(
     )
 }
 
-pub fn render_result_as_json(result: &RealizedResult) -> Result<String, RuntimeError> {
-    let mut rendered = to_string_pretty(result).map_err(|error| {
-        RuntimeError::InvalidRequest(format!("failed to render realized result as JSON: {error}"))
+pub fn render_object_as_json(object: &RealizedObject) -> Result<String, RuntimeError> {
+    let mut rendered = to_string_pretty(object).map_err(|error| {
+        RuntimeError::InvalidRequest(format!("failed to render realized object as JSON: {error}"))
     })?;
     rendered.push('\n');
     Ok(rendered)
@@ -230,9 +230,9 @@ fn ensure_planned(
                     RuntimeError::Store(format!("missing planned node for key '{}'", key))
                 })?;
                 node.state = PlanningState::Reused {
-                    realized: realized_result_from_record(
+                    realized: realized_object_from_record(
                         Some(published.build.build_key),
-                        &published.result,
+                        &published.object_record,
                     ),
                     origin: ReuseOrigin::BuildHandle,
                 };
@@ -254,7 +254,7 @@ fn ensure_planned(
                 })?;
                 node.state = PlanningState::Reused {
                     realized,
-                    origin: ReuseOrigin::CanonicalResult,
+                    origin: ReuseOrigin::CanonicalObject,
                 };
             } else {
                 let node = nodes.get_mut(&key).ok_or_else(|| {
@@ -267,13 +267,13 @@ fn ensure_planned(
             let node = nodes.get_mut(&key).ok_or_else(|| {
                 RuntimeError::Store(format!("missing planned node for key '{}'", key))
             })?;
-            match lookup_source_result(layout, source.object_hash, created_at)
+            match lookup_source_object(layout, source.object_hash, created_at)
                 .map_err(map_store_error)?
             {
                 SourceLookup::Hit(stored) => {
                     node.state = PlanningState::Reused {
-                        realized: realized_result_from_record(None, &stored.result),
-                        origin: ReuseOrigin::CanonicalResult,
+                        realized: realized_object_from_record(None, &stored.object_record),
+                        origin: ReuseOrigin::CanonicalObject,
                     };
                 }
                 SourceLookup::Missing => {
@@ -292,7 +292,7 @@ fn publish_reused_root(
     key: BuildKey,
     root_tag: &str,
     root_name: &str,
-    realized: &RealizedResult,
+    realized: &RealizedObject,
     origin: ReuseOrigin,
 ) -> Result<(), RuntimeError> {
     let workspace = create_workspace(
@@ -323,14 +323,14 @@ fn publish_reused_root(
         BuildLogLevel::Info,
         match origin {
             ReuseOrigin::BuildHandle => "cache-hit",
-            ReuseOrigin::CanonicalResult => "result-hit",
+            ReuseOrigin::CanonicalObject => "object-hit",
         },
         match origin {
             ReuseOrigin::BuildHandle => "reusing existing build ref",
-            ReuseOrigin::CanonicalResult => "reusing existing canonical result",
+            ReuseOrigin::CanonicalObject => "reusing existing canonical object",
         },
     );
-    publish_result(layout, root_name, realized.object_hash).map_err(map_store_error)?;
+    publish_stored_object(layout, root_name, realized.object_hash).map_err(map_store_error)?;
     log_runtime_event(
         node_logger.as_ref(),
         BuildLogLevel::Info,
@@ -353,7 +353,7 @@ fn lookup_canonical_for_planned_node(
     layout: &Store,
     nodes: &HashMap<BuildKey, PlannedNode>,
     key: BuildKey,
-) -> Result<Option<RealizedResult>, RuntimeError> {
+) -> Result<Option<RealizedObject>, RuntimeError> {
     let node = nodes
         .get(&key)
         .ok_or_else(|| RuntimeError::Store(format!("missing planned node for key '{}'", key)))?;
@@ -383,8 +383,8 @@ fn lookup_canonical_for_planned_node(
     }
 
     Ok(
-        lookup_canonical_result(layout, spec.tag, config, &input_identities, key)?
-            .map(|published| realized_result_from_record(Some(key), &published.result)),
+        lookup_canonical_object(layout, spec.tag, config, &input_identities, key)?
+            .map(|published| realized_object_from_record(Some(key), &published.object_record)),
     )
 }
 
@@ -392,11 +392,11 @@ fn execute_misses(
     layout: &Store,
     logger: Arc<BuildRunLogger>,
     nodes: &HashMap<BuildKey, PlannedNode>,
-    completed: &mut HashMap<BuildKey, RealizedResult>,
+    completed: &mut HashMap<BuildKey, RealizedObject>,
     root_key: BuildKey,
     jobs: usize,
     cancellation: CancellationToken,
-) -> Result<RealizedResult, RuntimeError> {
+) -> Result<RealizedObject, RuntimeError> {
     let mut remaining = HashMap::<BuildKey, usize>::new();
     let mut reverse = HashMap::<BuildKey, Vec<BuildKey>>::new();
     let mut ready = VecDeque::<BuildKey>::new();
@@ -501,7 +501,7 @@ fn execute_misses(
                 return Err(error);
             }
             return Err(RuntimeError::Build(
-                "planner/executor stalled: no ready jobs and root result is still unresolved"
+                "planner/executor stalled: no ready jobs and root object is still unresolved"
                     .to_string(),
             ));
         }
@@ -565,7 +565,7 @@ fn execute_misses(
         let node = nodes.get(&key).ok_or_else(|| {
             RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
-        publish_result(layout, &node.publish_name, executed.realized.object_hash)
+        publish_stored_object(layout, &node.publish_name, executed.realized.object_hash)
             .map_err(map_store_error)?;
         log_runtime_event(
             executed.logger.as_ref(),
@@ -608,7 +608,7 @@ fn execute_misses(
     }
     completed.get(&root_key).cloned().ok_or_else(|| {
         RuntimeError::Store(format!(
-            "root result for key '{}' is missing after executor completion",
+            "root object for key '{}' is missing after executor completion",
             root_key
         ))
     })
@@ -639,7 +639,7 @@ fn log_scheduler_event(
 
 fn scheduler_first_error_details(
     nodes: &HashMap<BuildKey, PlannedNode>,
-    completed: &HashMap<BuildKey, RealizedResult>,
+    completed: &HashMap<BuildKey, RealizedObject>,
     ready: &VecDeque<BuildKey>,
     in_flight: &HashMap<BuildKey, JoinHandle<()>>,
     failed_key: BuildKey,
@@ -660,7 +660,7 @@ fn scheduler_first_error_details(
 
 fn scheduler_wait_details(
     nodes: &HashMap<BuildKey, PlannedNode>,
-    completed: &HashMap<BuildKey, RealizedResult>,
+    completed: &HashMap<BuildKey, RealizedObject>,
     ready: &VecDeque<BuildKey>,
     in_flight: &HashMap<BuildKey, JoinHandle<()>>,
     error: &RuntimeError,
@@ -683,7 +683,7 @@ fn scheduler_wait_details(
 
 fn scheduler_state_details(
     nodes: &HashMap<BuildKey, PlannedNode>,
-    completed: &HashMap<BuildKey, RealizedResult>,
+    completed: &HashMap<BuildKey, RealizedObject>,
     ready: &VecDeque<BuildKey>,
     in_flight: &HashMap<BuildKey, JoinHandle<()>>,
 ) -> Map<String, Value> {
@@ -743,7 +743,7 @@ fn short_build_key(key: BuildKey) -> String {
 fn build_resolved_inputs(
     layout: &Store,
     recipe: &PlannedBuilderRecipe,
-    completed: &HashMap<BuildKey, RealizedResult>,
+    completed: &HashMap<BuildKey, RealizedObject>,
 ) -> Result<ResolvedInputs, RuntimeError> {
     let mut inputs = ResolvedInputs::empty();
     for input_name in recipe.spec.ordered_present_input_names(&recipe.inputs) {
@@ -761,12 +761,12 @@ fn build_resolved_inputs(
 
 fn resolved_dependency_from_completed(
     layout: &Store,
-    completed: &HashMap<BuildKey, RealizedResult>,
+    completed: &HashMap<BuildKey, RealizedObject>,
     key: BuildKey,
 ) -> Result<ResolvedDependency, RuntimeError> {
     let realized = completed.get(&key).cloned().ok_or_else(|| {
         RuntimeError::Build(format!(
-            "dependency result '{}' is not available in completed set",
+            "dependency object '{}' is not available in completed set",
             key
         ))
     })?;
@@ -801,7 +801,7 @@ fn execute_builder_recipe(
         inputs,
     })?;
     Ok(ExecutedNode {
-        realized: realized_result_from_record(Some(key), &executed.published.result),
+        realized: realized_object_from_record(Some(key), &executed.published.object_record),
         logger: executed.logger,
     })
 }
@@ -837,7 +837,7 @@ fn execute_source_recipe(
         return Err(error);
     }
 
-    match lookup_source_result(
+    match lookup_source_object(
         layout,
         source_builder.declared_object_hash(),
         layout.created_at(),
@@ -848,12 +848,12 @@ fn execute_source_recipe(
             log_runtime_event(
                 logger.as_ref(),
                 BuildLogLevel::Info,
-                "result-hit",
-                "reusing existing source result",
+                "object-hit",
+                "reusing existing source object",
             );
             cleanup_workspace_temp_dir(layout, source_builder.temp_dir(), logger.as_ref());
             return Ok(ExecutedNode {
-                realized: realized_result_from_record(None, &stored.result),
+                realized: realized_object_from_record(None, &stored.object_record),
                 logger,
             });
         }
@@ -911,7 +911,7 @@ fn execute_source_recipe(
         "materializing source origin",
     );
 
-    let import_outcome = import_source_result(
+    let import_outcome = import_source_object(
         layout,
         source_builder.declared_object_hash(),
         &staged_path,
@@ -929,7 +929,7 @@ fn execute_source_recipe(
 
     match import_outcome {
         SourceImportOutcome::Matched(stored) => Ok(ExecutedNode {
-            realized: realized_result_from_record(None, &stored.result),
+            realized: realized_object_from_record(None, &stored.object_record),
             logger,
         }),
         SourceImportOutcome::Mismatched { actual_hash } => {
@@ -975,14 +975,14 @@ fn cleanup_workspace_temp_dir(layout: &Store, temp_dir: &Path, logger: &dyn Buil
     }
 }
 
-fn realized_result_from_record(
+fn realized_object_from_record(
     build_key: Option<BuildKey>,
-    result: &ResultRecord,
-) -> RealizedResult {
-    RealizedResult {
+    object_record: &ObjectRecord,
+) -> RealizedObject {
+    RealizedObject {
         build_key,
-        object_hash: result.object_hash,
-        created_at: result.created_at.clone(),
+        object_hash: object_record.object_hash,
+        created_at: object_record.created_at.clone(),
     }
 }
 
@@ -1062,9 +1062,9 @@ mod tests {
         }
     }
 
-    fn sample_realized(build_key: Option<BuildKey>, object_hash: &str) -> RealizedResult {
+    fn sample_realized(build_key: Option<BuildKey>, object_hash: &str) -> RealizedObject {
         let object_hash = object_hash.parse().unwrap();
-        RealizedResult {
+        RealizedObject {
             build_key,
             object_hash,
             created_at: None,
@@ -1154,11 +1154,11 @@ mod tests {
         );
         nodes.get_mut(&dep_keys[0]).unwrap().state = PlanningState::Reused {
             realized: rootfs_realized.clone(),
-            origin: ReuseOrigin::CanonicalResult,
+            origin: ReuseOrigin::CanonicalObject,
         };
         nodes.get_mut(&dep_keys[1]).unwrap().state = PlanningState::Reused {
             realized: script_realized.clone(),
-            origin: ReuseOrigin::CanonicalResult,
+            origin: ReuseOrigin::CanonicalObject,
         };
 
         let root_inputs = vec![
@@ -1188,7 +1188,7 @@ mod tests {
 
         let published = lookup_canonical_for_planned_node(&layout, &nodes, root_key)
             .unwrap()
-            .expect("expected canonical result hit");
+            .expect("expected canonical object hit");
         assert_eq!(published.build_key, Some(root_key));
     }
 

@@ -32,10 +32,10 @@ class DropPlan:
     object_hash: str
     object_path: Path
     object_refs: tuple[Path, ...]
-    result_refs: tuple[Path, ...]
+    object_record_refs: tuple[Path, ...]
     build_refs: tuple[Path, ...]
     reuse_refs: tuple[Path, ...]
-    result_paths: tuple[Path, ...]
+    object_record_paths: tuple[Path, ...]
 
 
 def main() -> int:
@@ -61,7 +61,7 @@ def main() -> int:
     parser.add_argument(
         "--yes",
         action="store_true",
-        help="delete the planned refs, result records, and object payload",
+        help="delete the planned refs, object records, and object payload",
     )
     args = parser.parse_args()
 
@@ -111,8 +111,8 @@ def build_drop_plan(store: Path, name: str) -> DropPlan:
         raise StoreDropError(f"object ref '{object_ref}' is missing or is not a symlink")
     object_path = store / "objects" / object_hash
 
-    result_name = f"{object_hash}.json"
-    result_path = store / "results" / result_name
+    object_record_name = f"{object_hash}.json"
+    object_record_path = store / "object-records" / object_record_name
 
     object_refs = find_refs_to_target(
         store / "object-refs",
@@ -120,25 +120,25 @@ def build_drop_plan(store: Path, name: str) -> DropPlan:
         expected_names={object_hash},
         suffix="",
     )
-    result_refs = find_refs_to_target(
-        store / "result-refs",
-        expected_dir="results",
-        expected_names={result_name},
+    object_record_refs = find_refs_to_target(
+        store / "object-record-refs",
+        expected_dir="object-records",
+        expected_names={object_record_name},
         suffix=".json",
     )
     build_refs = find_refs_to_target(
         store / "builds",
-        expected_dir="results",
-        expected_names={result_name},
+        expected_dir="object-records",
+        expected_names={object_record_name},
         suffix="",
     )
     reuse_refs = find_refs_to_target(
         store / "reuses",
-        expected_dir="results",
-        expected_names={result_name},
+        expected_dir="object-records",
+        expected_names={object_record_name},
         suffix="",
     )
-    result_paths = (result_path,) if result_path.exists() else tuple()
+    object_record_paths = (object_record_path,) if object_record_path.exists() else tuple()
 
     return DropPlan(
         store=store,
@@ -146,10 +146,10 @@ def build_drop_plan(store: Path, name: str) -> DropPlan:
         object_hash=object_hash,
         object_path=object_path,
         object_refs=object_refs,
-        result_refs=result_refs,
+        object_record_refs=object_record_refs,
         build_refs=build_refs,
         reuse_refs=reuse_refs,
-        result_paths=result_paths,
+        object_record_paths=object_record_paths,
     )
 
 
@@ -165,7 +165,7 @@ def validate_name(name: str) -> None:
 
 
 def require_store_layout(store: Path) -> None:
-    required = ["object-refs", "result-refs", "objects", "results", "builds", "reuses"]
+    required = ["object-refs", "object-record-refs", "objects", "object-records", "builds", "reuses"]
     missing = [name for name in required if not (store / name).is_dir()]
     if missing:
         joined = ", ".join(missing)
@@ -216,10 +216,10 @@ def print_plan(plan: DropPlan, *, deleting: bool) -> None:
     print(f"object_hash: {plan.object_hash}")
     print(f"object_path: {plan.object_path}")
     print_paths("object refs", plan.object_refs)
-    print_paths("result refs", plan.result_refs)
+    print_paths("object record refs", plan.object_record_refs)
     print_paths("build refs", plan.build_refs)
     print_paths("reuse refs", plan.reuse_refs)
-    print_paths("result records", plan.result_paths)
+    print_paths("object records", plan.object_record_paths)
 
 
 def print_values(label: str, values: Iterable[str]) -> None:
@@ -250,10 +250,10 @@ def execute_drop_plan(plan: DropPlan) -> Path | None:
 
     for path in (
         *plan.object_refs,
-        *plan.result_refs,
+        *plan.object_record_refs,
         *plan.build_refs,
         *plan.reuse_refs,
-        *plan.result_paths,
+        *plan.object_record_paths,
     ):
         remove_file_or_symlink(path)
     return quarantine_path

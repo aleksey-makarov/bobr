@@ -1,7 +1,7 @@
 use crate::builders;
 use crate::origins;
 use crate::runtime::{RuntimeError, map_store_error};
-use bobr_store::RealizedResult;
+use bobr_store::RealizedObject;
 use bobr_store::identity::{BuildKey, compute_build_key};
 use mbuild_core::{BuilderSpec, ObjectHash, ParsedOrigin};
 use serde_json::{Map, Value, json};
@@ -161,7 +161,7 @@ impl PlannedNode {
 pub(crate) enum PlanningState {
     Unknown,
     Reused {
-        realized: RealizedResult,
+        realized: RealizedObject,
         origin: ReuseOrigin,
     },
     NeedsBuild,
@@ -170,7 +170,7 @@ pub(crate) enum PlanningState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReuseOrigin {
     BuildHandle,
-    CanonicalResult,
+    CanonicalObject,
 }
 
 #[allow(dead_code)]

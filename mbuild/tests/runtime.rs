@@ -1,6 +1,6 @@
 mod support;
 
-use bobr_store::{Store, load_build_handle, load_publication, load_result_record};
+use bobr_store::{Store, load_build_handle, load_object_record, load_publication};
 use mbuild::recipe_runtime::{
     BuildRunOptions, run_recipe_json_in_workspace, run_recipe_json_in_workspace_with_options,
 };
@@ -15,7 +15,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use support::{
-    base_image_recipe, build_ref_count, group_recipe, recipe_node, remove_result_record,
+    base_image_recipe, build_ref_count, group_recipe, recipe_node, remove_object_record,
     source_recipe, spawn_test_oci_registry, store_root, tree_file_recipe, write_recipe,
 };
 #[cfg(feature = "integration-tests")]
@@ -72,7 +72,10 @@ fn group_root_builds_independent_inputs() {
     let root_publication = load_publication(&layout, "all-targets")
         .unwrap()
         .expect("expected root publication");
-    assert_eq!(root_publication.result.object_hash, realized.object_hash);
+    assert_eq!(
+        root_publication.object_record.object_hash,
+        realized.object_hash
+    );
     assert_eq!(fs::read(&root_publication.object_path).unwrap(), b"");
 
     for name in ["all-targets", "first-target", "second-target"] {
@@ -86,7 +89,9 @@ fn group_root_builds_independent_inputs() {
 fn remove_publication_refs(workspace_root: &Path, name: &str) {
     let store = store_root(workspace_root);
     let refs = [
-        store.join("result-refs").join(format!("{name}.json")),
+        store
+            .join("object-record-refs")
+            .join(format!("{name}.json")),
         store.join("object-refs").join(name),
     ];
     for path in refs {
@@ -595,7 +600,10 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
     let publication = load_publication(&layout, "runtime-tree")
         .unwrap()
         .expect("expected publication");
-    assert_eq!(publication.result.object_hash, published.build.object_hash);
+    assert_eq!(
+        publication.object_record.object_hash,
+        published.build.object_hash
+    );
     assert_eq!(publication.object_path, published.object_path);
     let root = published.object_path.join("root");
     assert!(root.is_dir());
@@ -659,9 +667,9 @@ fn source_path_file_materializes_known_object_without_build_handle() {
     assert!(realized.build_key.is_none());
     assert_eq!(realized.object_hash, object_hash);
     assert!(object_path_exists(&layout, object_hash));
-    let result = load_result_record(&layout, realized.object_hash)
+    let result = load_object_record(&layout, realized.object_hash)
         .unwrap()
-        .expect("expected source result record");
+        .expect("expected source object record");
     assert_eq!(result.object_hash, object_hash);
     assert_eq!(build_ref_count(workspace.path()), 0);
 }
@@ -703,21 +711,21 @@ fn source_path_tar_materializes_unpacked_tree_without_build_handle() {
     let object_path = publication.object_path;
     assert!(realized.build_key.is_none());
     assert_eq!(realized.object_hash, object_hash);
-    assert_eq!(publication.result.object_hash, object_hash);
+    assert_eq!(publication.object_record.object_hash, object_hash);
     assert!(object_path.is_dir());
     assert_eq!(
         fs::read_to_string(object_path.join("pkg/README.txt")).unwrap(),
         "hello tar source\n"
     );
     assert!(
-        load_result_record(&layout, realized.object_hash)
+        load_object_record(&layout, realized.object_hash)
             .unwrap()
             .is_some()
     );
 }
 
 #[test]
-fn source_http_mismatch_imports_actual_object_without_canonical_result() {
+fn source_http_mismatch_imports_actual_object_without_canonical_record() {
     let workspace = tempdir().unwrap();
     let source_tar = {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -750,14 +758,14 @@ fn source_http_mismatch_imports_actual_object_without_canonical_result() {
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(object_path_exists(&layout, actual_hash.parse().unwrap()));
     assert!(
-        load_result_record(&layout, wrong_hash.parse().unwrap())
+        load_object_record(&layout, wrong_hash.parse().unwrap())
             .unwrap()
             .is_none()
     );
 }
 
 #[test]
-fn source_oci_registry_mismatch_imports_actual_object_without_canonical_result() {
+fn source_oci_registry_mismatch_imports_actual_object_without_canonical_record() {
     let workspace = tempdir().unwrap();
     let (_oci_server, image_ref, pinned_digest, actual_hash) = spawn_test_oci_registry();
     let wrong_hash = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -774,7 +782,7 @@ fn source_oci_registry_mismatch_imports_actual_object_without_canonical_result()
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(object_path_exists(&layout, actual_hash.parse().unwrap()));
     assert!(
-        load_result_record(&layout, wrong_hash.parse().unwrap())
+        load_object_record(&layout, wrong_hash.parse().unwrap())
             .unwrap()
             .is_none()
     );
@@ -879,7 +887,7 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(object_path_exists(&layout, actual_hash));
     assert!(
-        load_result_record(&layout, wrong_hash.parse().unwrap())
+        load_object_record(&layout, wrong_hash.parse().unwrap())
             .unwrap()
             .is_none()
     );
@@ -897,7 +905,7 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
 }
 
 #[test]
-fn source_without_origin_reuses_existing_canonical_result() {
+fn source_without_origin_reuses_existing_canonical_object() {
     let workspace = tempdir().unwrap();
     let source_path = workspace.path().join("payload.txt");
     fs::write(&source_path, b"hello source\n").unwrap();
@@ -974,9 +982,9 @@ fn source_without_origin_republishes_existing_object() {
     let first = run_recipe_json_in_workspace(workspace.path(), &materialized_recipe_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    remove_result_record(workspace.path(), first.object_hash);
+    remove_object_record(workspace.path(), first.object_hash);
 
-    let recipe_path = workspace.path().join("source-cutoff-missing-result.json");
+    let recipe_path = workspace.path().join("source-cutoff-missing-record.json");
     write_recipe(
         &recipe_path,
         &json!({
@@ -987,16 +995,16 @@ fn source_without_origin_republishes_existing_object() {
     );
 
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-    let restored = load_result_record(&layout, second.object_hash)
+    let restored = load_object_record(&layout, second.object_hash)
         .unwrap()
-        .expect("expected restored result record");
+        .expect("expected restored object record");
     assert_eq!(restored.object_hash, object_hash);
 }
 
 #[test]
-fn source_without_origin_requires_existing_object_or_result() {
+fn source_without_origin_requires_existing_object_or_record() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("source-cutoff-missing-result.json");
+    let recipe_path = workspace.path().join("source-cutoff-missing-record.json");
     write_recipe(
         &recipe_path,
         &json!({

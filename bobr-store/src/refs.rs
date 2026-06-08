@@ -1,5 +1,5 @@
 use crate::identity::{BuildKey, ObjectHash, ReuseKey};
-use crate::{Build, PublishedBuild, ResultRecord, Store, StoreError, StoredResult};
+use crate::{Build, ObjectRecord, PublishedBuild, Store, StoreError, StoredObjectRecord};
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
@@ -7,9 +7,9 @@ use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
-fn result_ref_target(object_hash: ObjectHash) -> PathBuf {
+fn object_record_ref_target(object_hash: ObjectHash) -> PathBuf {
     PathBuf::from("..")
-        .join(crate::store::RESULTS_DIR)
+        .join(crate::store::OBJECT_RECORDS_DIR)
         .join(format!("{}.json", object_hash.to_hex()))
 }
 
@@ -19,7 +19,7 @@ fn object_ref_target(object_hash: ObjectHash) -> PathBuf {
         .join(object_hash.to_hex())
 }
 
-fn parse_result_ref_target(
+fn parse_object_record_ref_target(
     ref_kind: &str,
     ref_path: &Path,
     target: &Path,
@@ -29,14 +29,14 @@ fn parse_result_ref_target(
         .and_then(|name| name.to_str())
         .ok_or_else(|| {
             StoreError::InvalidData(format!(
-                "{ref_kind} ref '{}' points to invalid result target '{}'",
+                "{ref_kind} ref '{}' points to invalid object record target '{}'",
                 ref_path.display(),
                 target.display()
             ))
         })?;
     let object_hash_str = file_name.strip_suffix(".json").ok_or_else(|| {
         StoreError::InvalidData(format!(
-            "{ref_kind} ref '{}' points to non-JSON result target '{}'",
+            "{ref_kind} ref '{}' points to non-JSON object record target '{}'",
             ref_path.display(),
             target.display()
         ))
@@ -49,10 +49,10 @@ fn parse_result_ref_target(
             target.display()
         ))
     })?;
-    let expected = result_ref_target(object_hash);
+    let expected = object_record_ref_target(object_hash);
     if target != expected {
         return Err(StoreError::InvalidData(format!(
-            "{ref_kind} ref '{}' points to non-canonical result target '{}'; expected '{}'",
+            "{ref_kind} ref '{}' points to non-canonical object record target '{}'; expected '{}'",
             ref_path.display(),
             target.display(),
             expected.display()
@@ -98,7 +98,7 @@ fn parse_object_ref_target(
 
 /// Stores or replaces the build reference for `build_key`.
 ///
-/// Build refs are symlinks pointing to result records through canonical
+/// Build refs are symlinks pointing to object records through canonical
 /// relative targets. The replacement is performed through a temporary symlink
 /// and rename.
 pub(crate) fn store_build_handle_ref(
@@ -106,13 +106,13 @@ pub(crate) fn store_build_handle_ref(
     build_key: BuildKey,
     object_hash: ObjectHash,
 ) -> Result<(), StoreError> {
-    let target = result_ref_target(object_hash);
+    let target = object_record_ref_target(object_hash);
     replace_symlink(&target, &store.build_ref_path(build_key))
 }
 
 /// Stores or replaces the reuse reference for `reuse_key`.
 ///
-/// Reuse refs are symlinks pointing to result records through canonical
+/// Reuse refs are symlinks pointing to object records through canonical
 /// relative targets. The replacement is performed through a temporary symlink
 /// and rename.
 pub(crate) fn store_reuse_ref(
@@ -120,14 +120,14 @@ pub(crate) fn store_reuse_ref(
     reuse_key: ReuseKey,
     object_hash: ObjectHash,
 ) -> Result<(), StoreError> {
-    let target = result_ref_target(object_hash);
+    let target = object_record_ref_target(object_hash);
     replace_symlink(&target, &store.reuse_ref_path(reuse_key))
 }
 
 /// Loads the published build reached by a build key.
 ///
 /// Returns `Ok(None)` when the build ref does not exist. Existing refs must be
-/// canonical symlinks to result records, and the referenced result must point to
+/// canonical symlinks to object records, and the referenced object record must point to
 /// an existing object in the store.
 pub fn load_build_handle(
     store: &Store,
@@ -144,29 +144,30 @@ pub fn load_build_handle(
             build_ref_path.display()
         ))
     })?;
-    let object_hash = parse_result_ref_target("build", &build_ref_path, &target)?;
-    let stored = crate::record::load_stored_result(store, object_hash)?.ok_or_else(|| {
-        StoreError::InvalidData(format!(
-            "build ref '{}' points to missing result for object '{}'",
-            build_ref_path.display(),
-            object_hash
-        ))
-    })?;
+    let object_hash = parse_object_record_ref_target("build", &build_ref_path, &target)?;
+    let stored =
+        crate::record::load_stored_object_record(store, object_hash)?.ok_or_else(|| {
+            StoreError::InvalidData(format!(
+                "build ref '{}' points to missing object record for object '{}'",
+                build_ref_path.display(),
+                object_hash
+            ))
+        })?;
     Ok(Some(PublishedBuild {
-        build: crate::record::build_from_result(build_key, &stored.result),
-        result: stored.result,
+        build: crate::record::build_from_object_record(build_key, &stored.object_record),
+        object_record: stored.object_record,
         object_path: stored.object_path,
     }))
 }
 
-/// Loads the reusable result reached by a reuse key.
+/// Loads the reusable object record reached by a reuse key.
 ///
 /// Returns `Ok(None)` when the reuse ref does not exist. Existing refs must be
-/// canonical symlinks to result records.
-pub(crate) fn load_reuse_record(
+/// canonical symlinks to object records.
+pub(crate) fn load_reuse_object_record(
     store: &Store,
     reuse_key: ReuseKey,
-) -> Result<Option<ResultRecord>, StoreError> {
+) -> Result<Option<ObjectRecord>, StoreError> {
     let reuse_ref_path = store.reuse_ref_path(reuse_key);
     if !reuse_ref_path.exists() && !reuse_ref_path.is_symlink() {
         return Ok(None);
@@ -178,34 +179,35 @@ pub(crate) fn load_reuse_record(
             reuse_ref_path.display()
         ))
     })?;
-    let object_hash = parse_result_ref_target("reuse", &reuse_ref_path, &target)?;
-    let result = crate::record::load_result_record(store, object_hash)?.ok_or_else(|| {
-        StoreError::InvalidData(format!(
-            "reuse ref '{}' points to missing result for object '{}'",
-            reuse_ref_path.display(),
-            object_hash
-        ))
-    })?;
-    Ok(Some(result))
+    let object_hash = parse_object_record_ref_target("reuse", &reuse_ref_path, &target)?;
+    let object_record =
+        crate::record::load_object_record(store, object_hash)?.ok_or_else(|| {
+            StoreError::InvalidData(format!(
+                "reuse ref '{}' points to missing object record for object '{}'",
+                reuse_ref_path.display(),
+                object_hash
+            ))
+        })?;
+    Ok(Some(object_record))
 }
 
-/// Resolves a reusable result and repairs the build handle for `build_key`.
+/// Resolves a reusable object record and repairs the build handle for `build_key`.
 ///
 /// Returns `Ok(None)` when the reuse ref does not exist. Existing reuse refs
-/// must point to an existing result record whose object exists in the store.
+/// must point to an existing object record whose object exists in the store.
 pub fn resolve_reuse_for_build(
     store: &Store,
     build_key: BuildKey,
     reuse_key: ReuseKey,
 ) -> Result<Option<PublishedBuild>, StoreError> {
-    let Some(result) = load_reuse_record(store, reuse_key)? else {
+    let Some(object_record) = load_reuse_object_record(store, reuse_key)? else {
         return Ok(None);
     };
-    let stored = crate::record::stored_result_from_record(store, result)?;
-    store_build_handle_ref(store, build_key, stored.result.object_hash)?;
+    let stored = crate::record::stored_object_record_from_record(store, object_record)?;
+    store_build_handle_ref(store, build_key, stored.object_record.object_hash)?;
     Ok(Some(PublishedBuild {
-        build: crate::record::build_from_result(build_key, &stored.result),
-        result: stored.result,
+        build: crate::record::build_from_object_record(build_key, &stored.object_record),
+        object_record: stored.object_record,
         object_path: stored.object_path,
     }))
 }
@@ -221,55 +223,59 @@ pub fn load_public_build(store: &Store, build_key: BuildKey) -> Result<Option<Bu
 /// Loads a publication by name.
 ///
 /// Returns `Ok(None)` when neither publication ref exists for
-/// `publication_name`. Existing publications must have both result and object
-/// refs, both refs must use canonical targets, and the object ref must point to
-/// the same object recorded by the result.
+/// `publication_name`. Existing publications must have both object-record and
+/// object refs, both refs must use canonical targets, and the object ref must
+/// point to the same object recorded by the object record.
 pub fn load_publication(
     store: &Store,
     publication_name: &str,
-) -> Result<Option<StoredResult>, StoreError> {
+) -> Result<Option<StoredObjectRecord>, StoreError> {
     validate_publication_name(publication_name)?;
 
-    let result_ref_path = store
-        .result_refs_dir()
+    let object_record_ref_path = store
+        .object_record_refs_dir()
         .join(format!("{publication_name}.json"));
     let object_ref_path = store.object_refs_dir().join(publication_name);
-    let result_ref_exists = result_ref_path.exists() || result_ref_path.is_symlink();
+    let object_record_ref_exists =
+        object_record_ref_path.exists() || object_record_ref_path.is_symlink();
     let object_ref_exists = object_ref_path.exists() || object_ref_path.is_symlink();
 
-    match (result_ref_exists, object_ref_exists) {
+    match (object_record_ref_exists, object_ref_exists) {
         (false, false) => return Ok(None),
         (true, false) => {
             return Err(StoreError::InvalidData(format!(
-                "publication '{publication_name}' has result ref '{}' but missing object ref '{}'",
-                result_ref_path.display(),
+                "publication '{publication_name}' has object record ref '{}' but missing object ref '{}'",
+                object_record_ref_path.display(),
                 object_ref_path.display()
             )));
         }
         (false, true) => {
             return Err(StoreError::InvalidData(format!(
-                "publication '{publication_name}' has object ref '{}' but missing result ref '{}'",
+                "publication '{publication_name}' has object ref '{}' but missing object record ref '{}'",
                 object_ref_path.display(),
-                result_ref_path.display()
+                object_record_ref_path.display()
             )));
         }
         (true, true) => {}
     }
 
-    let result_target = fs::read_link(&result_ref_path).map_err(|error| {
+    let object_record_target = fs::read_link(&object_record_ref_path).map_err(|error| {
         StoreError::Io(format!(
-            "failed to read publication result ref '{}': {error}",
-            result_ref_path.display()
+            "failed to read publication object record ref '{}': {error}",
+            object_record_ref_path.display()
         ))
     })?;
-    let result_object_hash =
-        parse_result_ref_target("publication result", &result_ref_path, &result_target)?;
+    let object_record_hash = parse_object_record_ref_target(
+        "publication object record",
+        &object_record_ref_path,
+        &object_record_target,
+    )?;
     let stored =
-        crate::record::load_stored_result(store, result_object_hash)?.ok_or_else(|| {
+        crate::record::load_stored_object_record(store, object_record_hash)?.ok_or_else(|| {
             StoreError::InvalidData(format!(
-                "publication result ref '{}' points to missing result for object '{}'",
-                result_ref_path.display(),
-                result_object_hash
+                "publication object record ref '{}' points to missing object record for object '{}'",
+                object_record_ref_path.display(),
+                object_record_hash
             ))
         })?;
 
@@ -281,69 +287,70 @@ pub fn load_publication(
     })?;
     let object_hash =
         parse_object_ref_target("publication object", &object_ref_path, &object_target)?;
-    if object_hash != stored.result.object_hash {
+    if object_hash != stored.object_record.object_hash {
         return Err(StoreError::InvalidData(format!(
-            "publication '{publication_name}' object ref points to '{}' but result records '{}'",
-            object_hash, stored.result.object_hash
+            "publication '{publication_name}' object ref points to '{}' but object record points to '{}'",
+            object_hash, stored.object_record.object_hash
         )));
     }
 
     Ok(Some(stored))
 }
 
-/// Publishes a stored result under a publication name.
+/// Publishes a stored object under a publication name.
 ///
-/// The result record must already exist and must point to an existing object in
-/// the store. The checked result is returned to callers that need the resolved
+/// The object record must already exist and must point to an existing object in
+/// the store. The checked object record is returned to callers that need the resolved
 /// record and object path.
-pub fn publish_result(
+pub fn publish_stored_object(
     store: &Store,
     publication_name: &str,
     object_hash: ObjectHash,
-) -> Result<StoredResult, StoreError> {
-    let stored = crate::record::load_stored_result(store, object_hash)?.ok_or_else(|| {
-        StoreError::InvalidData(format!(
-            "cannot publish missing result for object '{}'",
-            object_hash
-        ))
-    })?;
-    publish_publication_refs(store, publication_name, &stored.result)?;
+) -> Result<StoredObjectRecord, StoreError> {
+    let stored =
+        crate::record::load_stored_object_record(store, object_hash)?.ok_or_else(|| {
+            StoreError::InvalidData(format!(
+                "cannot publish missing object record for object '{}'",
+                object_hash
+            ))
+        })?;
+    publish_publication_refs(store, publication_name, &stored.object_record)?;
     Ok(stored)
 }
 
-/// Publishes a result under a publication name.
+/// Publishes an object record under a publication name.
 ///
-/// The current object and result refs for `publication_name` are replaced with refs
-/// to `result`. If the publication already points at a different result, the
-/// previous refs are preserved as timestamped generation refs before the
-/// current refs are updated.
+/// The current object and object-record refs for `publication_name` are
+/// replaced with refs to `object_record`. If the publication already points at
+/// a different object record, the previous refs are preserved as timestamped
+/// generation refs before the current refs are updated.
 ///
 /// Publication names must be non-empty and contain only ASCII letters, digits,
 /// `.`, `_`, or `-`.
 pub(crate) fn publish_publication_refs(
     store: &Store,
     publication_name: &str,
-    result: &ResultRecord,
+    object_record: &ObjectRecord,
 ) -> Result<(), StoreError> {
     validate_publication_name(publication_name)?;
 
-    let current_result_ref_path = store
-        .result_refs_dir()
+    let current_object_record_ref_path = store
+        .object_record_refs_dir()
         .join(format!("{publication_name}.json"));
     let current_object_ref_path = store.object_refs_dir().join(publication_name);
-    let object_hash = result.object_hash;
+    let object_hash = object_record.object_hash;
 
     if let Some(current) = load_current_publication(store, publication_name)?
-        && current.result.object_hash != object_hash
+        && current.object_record.object_hash != object_hash
     {
         let generation_name =
             allocate_generation_name(store, publication_name, &generation_suffix(&current)?)?;
 
-        if let Some(target) = current.result_target {
+        if let Some(target) = current.object_record_target {
             create_generation_ref(
                 &target,
                 &store
-                    .result_refs_dir()
+                    .object_record_refs_dir()
                     .join(format!("{generation_name}.json")),
             )?;
         }
@@ -352,16 +359,16 @@ pub(crate) fn publish_publication_refs(
         }
     }
 
-    let object_ref_target = object_ref_target_for_result(result)?;
+    let object_ref_target = object_ref_target_for_record(object_record);
     replace_symlink(&object_ref_target, &current_object_ref_path)?;
 
-    let target = result_ref_target(object_hash);
-    replace_symlink(&target, &current_result_ref_path)?;
+    let target = object_record_ref_target(object_hash);
+    replace_symlink(&target, &current_object_record_ref_path)?;
     Ok(())
 }
 
-fn object_ref_target_for_result(result: &ResultRecord) -> Result<PathBuf, StoreError> {
-    Ok(object_ref_target(result.object_hash))
+fn object_ref_target_for_record(object_record: &ObjectRecord) -> PathBuf {
+    object_ref_target(object_record.object_hash)
 }
 
 fn validate_publication_name(name: &str) -> Result<(), StoreError> {
@@ -389,9 +396,9 @@ fn validate_publication_name(name: &str) -> Result<(), StoreError> {
 
 #[derive(Debug)]
 pub(crate) struct CurrentPublication {
-    result: ResultRecord,
-    result_path: PathBuf,
-    result_target: Option<PathBuf>,
+    object_record: ObjectRecord,
+    object_record_path: PathBuf,
+    object_record_target: Option<PathBuf>,
     object_target: Option<PathBuf>,
 }
 
@@ -399,27 +406,32 @@ pub(crate) fn load_current_publication(
     store: &Store,
     publication_name: &str,
 ) -> Result<Option<CurrentPublication>, StoreError> {
-    let result_ref_path = store
-        .result_refs_dir()
+    let object_record_ref_path = store
+        .object_record_refs_dir()
         .join(format!("{publication_name}.json"));
-    if !result_ref_path.exists() && !result_ref_path.is_symlink() {
+    if !object_record_ref_path.exists() && !object_record_ref_path.is_symlink() {
         return Ok(None);
     }
 
-    let result_target = fs::read_link(&result_ref_path).map_err(|error| {
+    let object_record_target = fs::read_link(&object_record_ref_path).map_err(|error| {
         StoreError::Io(format!(
-            "failed to read current result ref '{}': {error}",
-            result_ref_path.display()
+            "failed to read current object record ref '{}': {error}",
+            object_record_ref_path.display()
         ))
     })?;
-    let object_hash = parse_result_ref_target("current result", &result_ref_path, &result_target)?;
-    let result = crate::record::load_result_record(store, object_hash)?.ok_or_else(|| {
-        StoreError::InvalidData(format!(
-            "current result ref '{}' points to missing result for object '{}'",
-            result_ref_path.display(),
-            object_hash
-        ))
-    })?;
+    let object_hash = parse_object_record_ref_target(
+        "current object record",
+        &object_record_ref_path,
+        &object_record_target,
+    )?;
+    let object_record =
+        crate::record::load_object_record(store, object_hash)?.ok_or_else(|| {
+            StoreError::InvalidData(format!(
+                "current object record ref '{}' points to missing object record for object '{}'",
+                object_record_ref_path.display(),
+                object_hash
+            ))
+        })?;
 
     let object_ref_path = store.object_refs_dir().join(publication_name);
     let object_target = if object_ref_path.exists() || object_ref_path.is_symlink() {
@@ -434,30 +446,30 @@ pub(crate) fn load_current_publication(
     };
 
     Ok(Some(CurrentPublication {
-        result_path: store.result_record_path(result.object_hash),
-        result,
-        result_target: Some(result_target),
+        object_record_path: store.object_record_path(object_record.object_hash),
+        object_record,
+        object_record_target: Some(object_record_target),
         object_target,
     }))
 }
 
 pub(crate) fn generation_suffix(current: &CurrentPublication) -> Result<String, StoreError> {
-    if let Some(created_at) = &current.result.created_at {
+    if let Some(created_at) = &current.object_record.created_at {
         return human_timestamp_from_rfc3339(created_at);
     }
 
-    let modified = fs::metadata(&current.result_path)
+    let modified = fs::metadata(&current.object_record_path)
         .map_err(|error| {
             StoreError::Io(format!(
-                "failed to stat result record '{}' for generation timestamp: {error}",
-                current.result_path.display()
+                "failed to stat object record '{}' for generation timestamp: {error}",
+                current.object_record_path.display()
             ))
         })?
         .modified()
         .map_err(|error| {
             StoreError::Io(format!(
-                "failed to read mtime for result record '{}': {error}",
-                current.result_path.display()
+                "failed to read mtime for object record '{}': {error}",
+                current.object_record_path.display()
             ))
         })?;
     let parsed = OffsetDateTime::from(modified);
@@ -467,7 +479,7 @@ pub(crate) fn generation_suffix(current: &CurrentPublication) -> Result<String, 
 pub(crate) fn human_timestamp_from_rfc3339(value: &str) -> Result<String, StoreError> {
     let parsed = OffsetDateTime::parse(value, &Rfc3339).map_err(|error| {
         StoreError::InvalidData(format!(
-            "invalid result record created_at '{value}': {error}"
+            "invalid object record created_at '{value}': {error}"
         ))
     })?;
     human_timestamp_from_datetime(parsed)
@@ -493,10 +505,12 @@ fn allocate_generation_name(
         } else {
             format!("{publication_name}.{suffix}.{counter}")
         };
-        let result_path = store.result_refs_dir().join(format!("{candidate}.json"));
+        let object_record_ref_path = store
+            .object_record_refs_dir()
+            .join(format!("{candidate}.json"));
         let object_path = store.object_refs_dir().join(&candidate);
-        if !(result_path.exists()
-            || result_path.is_symlink()
+        if !(object_record_ref_path.exists()
+            || object_record_ref_path.is_symlink()
             || object_path.exists()
             || object_path.is_symlink())
         {

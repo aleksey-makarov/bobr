@@ -121,9 +121,9 @@ fn build_ref_path(root: &Path, build_key: impl ToString) -> PathBuf {
     store_root(root).join("builds").join(build_key.to_string())
 }
 
-fn result_record_file_path(root: &Path, object_hash: ObjectHash) -> PathBuf {
+fn object_record_file_path(root: &Path, object_hash: ObjectHash) -> PathBuf {
     store_root(root)
-        .join("results")
+        .join("object-records")
         .join(format!("{}.json", object_hash.to_hex()))
 }
 
@@ -133,8 +133,8 @@ pub fn build_ref_count(root: &Path) -> usize {
         .count()
 }
 
-pub fn result_record_count(root: &Path) -> usize {
-    fs::read_dir(store_root(root).join("results"))
+pub fn object_record_count(root: &Path) -> usize {
+    fs::read_dir(store_root(root).join("object-records"))
         .unwrap()
         .count()
 }
@@ -145,10 +145,10 @@ pub fn remove_build_ref(root: &Path, build_key: impl ToString) {
     assert!(!build_ref.exists());
 }
 
-pub fn remove_result_record(root: &Path, object_hash: ObjectHash) {
-    let result_path = result_record_file_path(root, object_hash);
-    fs::remove_file(&result_path).unwrap();
-    assert!(!result_path.exists());
+pub fn remove_object_record(root: &Path, object_hash: ObjectHash) {
+    let object_record_path = object_record_file_path(root, object_hash);
+    fs::remove_file(&object_record_path).unwrap();
+    assert!(!object_record_path.exists());
 }
 
 pub fn store_root(root: &Path) -> PathBuf {

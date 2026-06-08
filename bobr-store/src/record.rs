@@ -6,11 +6,11 @@ use serde_json::{Map, Value};
 use std::fs;
 use std::path::PathBuf;
 
-pub(crate) const RESULT_SCHEMA: &str = "bobr-result-v5";
+pub(crate) const OBJECT_RECORD_SCHEMA: &str = "bobr-object-record-v1";
 #[cfg(test)]
-pub(crate) const BUILD_SCHEMA: &str = RESULT_SCHEMA;
+pub(crate) const OBJECT_RECORD_SCHEMA_FOR_TEST: &str = OBJECT_RECORD_SCHEMA;
 
-/// Identity of an input result used by reuse-key computation and result records.
+/// Identity of an input object used by reuse-key computation and object records.
 ///
 /// Reuse is based on realized input object identities rather than only on input
 /// build keys. This lets equivalent input objects participate in reuse even
@@ -30,35 +30,35 @@ pub struct ReuseInputIdentity {
 pub struct Build {
     /// Build invocation key that was requested.
     pub build_key: BuildKey,
-    /// Hash of the output object recorded by the result.
+    /// Hash of the output object recorded by the object record.
     pub object_hash: ObjectHash,
-    /// Optional RFC 3339 creation timestamp copied from the result record.
+    /// Optional RFC 3339 creation timestamp copied from the object record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
 }
 
-/// Store record for a realized result object.
+/// Store record for a realized object.
 ///
-/// Result records are stored as canonical JSON under the store's result record
-/// directory and are keyed by [`ResultRecord::object_hash`], not by the build
+/// Object records are stored as canonical JSON under the store's object record
+/// directory and are keyed by [`ObjectRecord::object_hash`], not by the build
 /// key that first produced them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResultRecord {
+pub struct ObjectRecord {
     /// Hash of the output object this record describes.
     pub object_hash: ObjectHash,
-    /// Optional RFC 3339 timestamp for when the result was created.
+    /// Optional RFC 3339 timestamp for when the object was recorded.
     pub created_at: Option<String>,
     /// Realized input object identities used for reuse accounting.
     pub inputs: Vec<ReuseInputIdentity>,
 }
 
-/// Result information returned to runtime code after resolving or publishing.
+/// Object information returned to runtime code after resolving or publishing.
 ///
 /// This is the serializable representation used when the runtime needs both
-/// the object identity and, optionally, the build key that led to the result.
+/// the object identity and, optionally, the build key that led to the object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RealizedResult {
-    /// Build key that resolved to the result, when known.
+pub struct RealizedObject {
+    /// Build key that resolved to the object, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_key: Option<BuildKey>,
     /// Hash of the output object.
@@ -70,82 +70,85 @@ pub struct RealizedResult {
 
 /// Fully resolved build publication inside the local store.
 ///
-/// This combines the public build handle, the underlying result record, and the
+/// This combines the public build handle, the underlying object record, and the
 /// local filesystem path of the imported output object.
 #[derive(Debug, Clone)]
 pub struct PublishedBuild {
     /// Build handle resolved from the build reference.
     pub build: Build,
-    /// Result record reached by the build handle.
-    pub result: ResultRecord,
+    /// Object record reached by the build handle.
+    pub object_record: ObjectRecord,
     /// Local path of the imported output object in the store.
     pub object_path: PathBuf,
 }
 
-/// Result record resolved to an existing object in the local store.
+/// Object record resolved to an existing object in the local store.
 ///
-/// A `StoredResult` is stronger than a raw [`ResultRecord`]: loading it checks
+/// A `StoredObjectRecord` is stronger than a raw [`ObjectRecord`]: loading it checks
 /// that the record exists and that its object path exists in the store.
 #[derive(Debug, Clone)]
-pub struct StoredResult {
-    /// Result record loaded from the store.
-    pub result: ResultRecord,
-    /// Local path of the result object in the store.
+pub struct StoredObjectRecord {
+    /// Object record loaded from the store.
+    pub object_record: ObjectRecord,
+    /// Local path of the recorded object in the store.
     pub object_path: PathBuf,
 }
 
-/// Loads a result record by object hash.
+/// Loads an object record by object hash.
 ///
 /// Returns `Ok(None)` when the record file does not exist. Existing files are
-/// parsed as the current canonical result schema and are validated against
+/// parsed as the current canonical object record schema and are validated against
 /// the requested `object_hash`.
-pub fn load_result_record(
+pub fn load_object_record(
     store: &Store,
     object_hash: ObjectHash,
-) -> Result<Option<ResultRecord>, StoreError> {
-    let result_path = store.result_record_path(object_hash);
-    if !result_path.exists() {
+) -> Result<Option<ObjectRecord>, StoreError> {
+    let object_record_path = store.object_record_path(object_hash);
+    if !object_record_path.exists() {
         return Ok(None);
     }
 
-    let bytes = fs::read(&result_path).map_err(|error| {
+    let bytes = fs::read(&object_record_path).map_err(|error| {
         StoreError::Io(format!(
-            "failed to read result record '{}': {error}",
-            result_path.display()
+            "failed to read object record '{}': {error}",
+            object_record_path.display()
         ))
     })?;
     let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
         StoreError::InvalidData(format!(
-            "failed to parse result record '{}': {error}",
-            result_path.display()
+            "failed to parse object record '{}': {error}",
+            object_record_path.display()
         ))
     })?;
-    Ok(Some(parse_result_record_value(object_hash, &value)?))
+    Ok(Some(parse_object_record_value(object_hash, &value)?))
 }
 
-/// Loads a result record and verifies that its object exists in the store.
+/// Loads an object record and verifies that its object exists in the store.
 ///
 /// Returns `Ok(None)` when the record file does not exist. Existing records are
-/// parsed as canonical result JSON and must point to an existing object.
-pub fn load_stored_result(
+/// parsed as canonical object record JSON and must point to an existing object.
+pub fn load_stored_object_record(
     store: &Store,
     object_hash: ObjectHash,
-) -> Result<Option<StoredResult>, StoreError> {
-    let Some(result) = load_result_record(store, object_hash)? else {
+) -> Result<Option<StoredObjectRecord>, StoreError> {
+    let Some(object_record) = load_object_record(store, object_hash)? else {
         return Ok(None);
     };
-    Ok(Some(stored_result_from_record(store, result)?))
+    Ok(Some(stored_object_record_from_record(
+        store,
+        object_record,
+    )?))
 }
 
-/// Records a source result for an object already present in the store.
+/// Records a source object already present in the store.
 ///
-/// The object path for `object_hash` must exist. The result record is written
-/// idempotently and then reloaded as a checked [`StoredResult`].
-pub(crate) fn record_existing_source_result(
+/// The object path for `object_hash` must exist. The object record is written
+/// idempotently and then reloaded as a checked [`StoredObjectRecord`].
+pub(crate) fn record_existing_source_object(
     store: &Store,
     object_hash: ObjectHash,
     created_at: &str,
-) -> Result<StoredResult, StoreError> {
+) -> Result<StoredObjectRecord, StoreError> {
     let object_path = store.object_path(object_hash);
     if !object_path.exists() {
         return Err(StoreError::Io(format!(
@@ -155,69 +158,69 @@ pub(crate) fn record_existing_source_result(
         )));
     }
 
-    let result = ResultRecord {
+    let object_record = ObjectRecord {
         object_hash,
         created_at: Some(created_at.to_string()),
         inputs: Vec::new(),
     };
-    store_result_record(store, &result)?;
-    load_stored_result(store, result.object_hash)?.ok_or_else(|| {
+    store_object_record(store, &object_record)?;
+    load_stored_object_record(store, object_record.object_hash)?.ok_or_else(|| {
         StoreError::InvalidData(format!(
-            "source result for object '{}' was not stored",
-            result.object_hash
+            "source object record for object '{}' was not stored",
+            object_record.object_hash
         ))
     })
 }
 
-pub(crate) fn stored_result_from_record(
+pub(crate) fn stored_object_record_from_record(
     store: &Store,
-    result: ResultRecord,
-) -> Result<StoredResult, StoreError> {
-    let object_path = store.object_path(result.object_hash);
+    object_record: ObjectRecord,
+) -> Result<StoredObjectRecord, StoreError> {
+    let object_path = store.object_path(object_record.object_hash);
     if !object_path.exists() {
         return Err(StoreError::Io(format!(
-            "result for object '{}' points to missing object '{}'",
-            result.object_hash,
+            "object record for object '{}' points to missing object '{}'",
+            object_record.object_hash,
             object_path.display()
         )));
     }
-    Ok(StoredResult {
-        result,
+    Ok(StoredObjectRecord {
+        object_record,
         object_path,
     })
 }
 
-/// Stores a result record if it is not already present.
+/// Stores an object record if it is not already present.
 ///
-/// The record is written as canonical JSON under the store's result record
+/// The record is written as canonical JSON under the store's object record
 /// directory. The operation is idempotent for an already-existing record path.
-pub(crate) fn store_result_record(store: &Store, record: &ResultRecord) -> Result<(), StoreError> {
-    let result_path = store.result_record_path(record.object_hash);
-    if result_path.exists() {
+pub(crate) fn store_object_record(store: &Store, record: &ObjectRecord) -> Result<(), StoreError> {
+    let object_record_path = store.object_record_path(record.object_hash);
+    if object_record_path.exists() {
         return Ok(());
     }
-    let result_value = result_record_json_value(record);
-    let canonical = crate::json::canonical_json_bytes(&result_value)?;
+    let object_record_value = object_record_json_value(record);
+    let canonical = crate::json::canonical_json_bytes(&object_record_value)?;
     private_fs::write_atomic(
-        &result_path,
+        &object_record_path,
         std::str::from_utf8(&canonical).map_err(|error| {
             StoreError::InvalidData(format!(
-                "failed to encode canonical result JSON as UTF-8: {error}"
+                "failed to encode canonical object record JSON as UTF-8: {error}"
             ))
         })?,
     )
     .map_err(crate::error::map_fsutil_error)
 }
 
-pub(crate) fn build_from_result(build_key: BuildKey, result: &ResultRecord) -> Build {
+pub(crate) fn build_from_object_record(build_key: BuildKey, object_record: &ObjectRecord) -> Build {
     Build {
         build_key,
-        object_hash: result.object_hash,
-        created_at: result.created_at.clone(),
+        object_hash: object_record.object_hash,
+        created_at: object_record.created_at.clone(),
     }
 }
 
-fn result_json_value(
+fn object_record_json_value_from_parts(
     created_at: Option<&str>,
     object_hash: ObjectHash,
     inputs: &[ReuseInputIdentity],
@@ -237,7 +240,7 @@ fn result_json_value(
     let mut root = Map::new();
     root.insert(
         "schema".to_string(),
-        Value::String(RESULT_SCHEMA.to_string()),
+        Value::String(OBJECT_RECORD_SCHEMA.to_string()),
     );
     if let Some(created_at) = created_at {
         root.insert(
@@ -253,8 +256,8 @@ fn result_json_value(
     Value::Object(root)
 }
 
-fn result_record_json_value(record: &ResultRecord) -> Value {
-    result_json_value(
+fn object_record_json_value(record: &ObjectRecord) -> Value {
+    object_record_json_value_from_parts(
         record.created_at.as_deref(),
         record.object_hash,
         &record.inputs,
@@ -267,24 +270,24 @@ pub(crate) fn build_json_value(
     object_hash: ObjectHash,
     inputs: &[ReuseInputIdentity],
 ) -> Value {
-    result_json_value(created_at, object_hash, inputs)
+    object_record_json_value_from_parts(created_at, object_hash, inputs)
 }
 
-pub(crate) fn parse_result_record_value(
+pub(crate) fn parse_object_record_value(
     expected_object_hash: ObjectHash,
     value: &Value,
-) -> Result<ResultRecord, StoreError> {
+) -> Result<ObjectRecord, StoreError> {
     let object = value.as_object().ok_or_else(|| {
-        StoreError::InvalidData("result record root must be a JSON object".to_string())
+        StoreError::InvalidData("object record root must be a JSON object".to_string())
     })?;
 
     let schema = object
         .get("schema")
         .and_then(Value::as_str)
-        .ok_or_else(|| StoreError::InvalidData("result record is missing 'schema'".to_string()))?;
-    if schema != RESULT_SCHEMA {
+        .ok_or_else(|| StoreError::InvalidData("object record is missing 'schema'".to_string()))?;
+    if schema != OBJECT_RECORD_SCHEMA {
         return Err(StoreError::InvalidData(format!(
-            "unsupported result record schema '{schema}'"
+            "unsupported object record schema '{schema}'"
         )));
     }
 
@@ -292,7 +295,7 @@ pub(crate) fn parse_result_record_value(
         .get("created_at")
         .map(|value| {
             value.as_str().ok_or_else(|| {
-                StoreError::InvalidData("result record created_at must be a string".to_string())
+                StoreError::InvalidData("object record created_at must be a string".to_string())
             })
         })
         .transpose()?
@@ -302,13 +305,13 @@ pub(crate) fn parse_result_record_value(
         .get("object_hash")
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            StoreError::InvalidData("result record is missing 'object_hash'".to_string())
+            StoreError::InvalidData("object record is missing 'object_hash'".to_string())
         })
-        .and_then(parse_object_hash_result)?;
+        .and_then(parse_object_hash_for_record)?;
 
     if object_hash != expected_object_hash {
         return Err(StoreError::InvalidData(format!(
-            "result record key mismatch: path key '{}' does not match record object hash '{}'",
+            "object record key mismatch: path key '{}' does not match record object hash '{}'",
             expected_object_hash, object_hash
         )));
     }
@@ -316,36 +319,36 @@ pub(crate) fn parse_result_record_value(
     let inputs = object
         .get("inputs")
         .and_then(Value::as_array)
-        .ok_or_else(|| StoreError::InvalidData("result record is missing 'inputs'".to_string()))?
+        .ok_or_else(|| StoreError::InvalidData("object record is missing 'inputs'".to_string()))?
         .iter()
         .map(|value| {
             let object = value.as_object().ok_or_else(|| {
-                StoreError::InvalidData("result record inputs must contain objects".to_string())
+                StoreError::InvalidData("object record inputs must contain objects".to_string())
             })?;
             let object_hash = object
                 .get("object_hash")
                 .and_then(Value::as_str)
                 .ok_or_else(|| {
                     StoreError::InvalidData(
-                        "result record input is missing 'object_hash'".to_string(),
+                        "object record input is missing 'object_hash'".to_string(),
                     )
                 })
-                .and_then(parse_object_hash_result)?;
+                .and_then(parse_object_hash_for_record)?;
             Ok(ReuseInputIdentity { object_hash })
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(ResultRecord {
+    Ok(ObjectRecord {
         object_hash,
         created_at,
         inputs,
     })
 }
 
-fn parse_object_hash_result(value: &str) -> Result<ObjectHash, StoreError> {
+fn parse_object_hash_for_record(value: &str) -> Result<ObjectHash, StoreError> {
     value.parse::<ObjectHash>().map_err(|error| {
         StoreError::InvalidData(format!(
-            "invalid object hash '{value}' in result record: {error}"
+            "invalid object hash '{value}' in object record: {error}"
         ))
     })
 }

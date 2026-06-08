@@ -13,10 +13,10 @@ use time::{OffsetDateTime, UtcOffset};
 
 pub(crate) const OBJECTS_DIR: &str = "objects";
 pub(crate) const BUILDS_DIR: &str = "builds";
-pub(crate) const RESULTS_DIR: &str = "results";
+pub(crate) const OBJECT_RECORDS_DIR: &str = "object-records";
 pub(crate) const REUSES_DIR: &str = "reuses";
 pub(crate) const OBJECT_REFS_DIR: &str = "object-refs";
-pub(crate) const RESULT_REFS_DIR: &str = "result-refs";
+pub(crate) const OBJECT_RECORD_REFS_DIR: &str = "object-record-refs";
 pub(crate) const FS_FILES_DIR: &str = "fs-files";
 pub(crate) const FS_TREES_DIR: &str = "fs-trees";
 pub(crate) const QUARANTINE_DIR: &str = "quarantine";
@@ -187,9 +187,9 @@ impl Store {
         self.root().join(REUSES_DIR)
     }
 
-    /// Returns the JSON result record directory.
-    pub(crate) fn results_dir(&self) -> PathBuf {
-        self.root().join(RESULTS_DIR)
+    /// Returns the JSON object record directory.
+    pub(crate) fn object_records_dir(&self) -> PathBuf {
+        self.root().join(OBJECT_RECORDS_DIR)
     }
 
     /// Returns the public object reference directory.
@@ -197,9 +197,9 @@ impl Store {
         self.root().join(OBJECT_REFS_DIR)
     }
 
-    /// Returns the public result reference directory.
-    pub(crate) fn result_refs_dir(&self) -> PathBuf {
-        self.root().join(RESULT_REFS_DIR)
+    /// Returns the public object-record reference directory.
+    pub(crate) fn object_record_refs_dir(&self) -> PathBuf {
+        self.root().join(OBJECT_RECORD_REFS_DIR)
     }
 
     /// Returns the content-addressed future fs-file object directory.
@@ -238,12 +238,12 @@ impl Store {
         self.reuses_dir().join(reuse_key.to_hex())
     }
 
-    /// Returns the path of the JSON result record for `object_hash`.
+    /// Returns the path of the JSON object record for `object_hash`.
     ///
-    /// The path is under the JSON result record directory and has a `.json` suffix. The
-    /// function does not check whether the record currently exists.
-    pub(crate) fn result_record_path(&self, object_hash: ObjectHash) -> PathBuf {
-        self.results_dir()
+    /// The path is under the JSON object record directory and has a `.json`
+    /// suffix. The function does not check whether the record currently exists.
+    pub(crate) fn object_record_path(&self, object_hash: ObjectHash) -> PathBuf {
+        self.object_records_dir()
             .join(format!("{}.json", object_hash.to_hex()))
     }
 }
@@ -444,9 +444,9 @@ fn ensure_store_layout(root: &Path) -> Result<(), StoreError> {
     ensure_store_dir(&root.join(OBJECTS_DIR), "objects")?;
     ensure_store_dir(&root.join(BUILDS_DIR), "builds")?;
     ensure_store_dir(&root.join(REUSES_DIR), "reuses")?;
-    ensure_store_dir(&root.join(RESULTS_DIR), "results")?;
+    ensure_store_dir(&root.join(OBJECT_RECORDS_DIR), "object-records")?;
     ensure_store_dir(&root.join(OBJECT_REFS_DIR), "object-refs")?;
-    ensure_store_dir(&root.join(RESULT_REFS_DIR), "result-refs")?;
+    ensure_store_dir(&root.join(OBJECT_RECORD_REFS_DIR), "object-record-refs")?;
     ensure_store_dir(&root.join(FS_FILES_DIR), "fs-files")?;
     ensure_store_dir(&root.join(FS_TREES_DIR), "fs-trees")?;
     ensure_store_dir(&root.join(LOGS_DIR), "logs")?;

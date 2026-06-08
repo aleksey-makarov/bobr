@@ -4,7 +4,7 @@ use bobr_store::{Store, load_build_handle};
 use mbuild::recipe_runtime::run_recipe_json_in_workspace;
 use std::fs;
 use support::{
-    build_ref_count, remove_build_ref, result_record_count, store_root, tree_file_recipe,
+    build_ref_count, object_record_count, remove_build_ref, store_root, tree_file_recipe,
     write_recipe,
 };
 use tempfile::tempdir;
@@ -37,7 +37,7 @@ fn second_run_reuses_existing_root_build_handle() {
 }
 
 #[test]
-fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
+fn second_run_reuses_canonical_object_when_build_handle_is_missing() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("recipe.json");
     let recipe = tree_file_recipe("hello", "hello.txt", "hi\n", false);
@@ -45,7 +45,7 @@ fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
 
     let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
     let build_key = first.build_key.expect("builder root");
-    let results_after_first = result_record_count(workspace.path());
+    let object_records_after_first = object_record_count(workspace.path());
     let objects_after_first = fs::read_dir(store_root(workspace.path()).join("objects"))
         .unwrap()
         .count();
@@ -53,7 +53,7 @@ fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
     remove_build_ref(workspace.path(), build_key);
 
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-    let results_after_second = result_record_count(workspace.path());
+    let object_records_after_second = object_record_count(workspace.path());
     let objects_after_second = fs::read_dir(store_root(workspace.path()).join("objects"))
         .unwrap()
         .count();
@@ -61,8 +61,8 @@ fn second_run_reuses_canonical_result_when_build_handle_is_missing() {
 
     assert_eq!(first.build_key, second.build_key);
     assert_eq!(first.object_hash, second.object_hash);
-    assert_eq!(results_after_first, 1);
-    assert_eq!(results_after_second, 1);
+    assert_eq!(object_records_after_first, 1);
+    assert_eq!(object_records_after_second, 1);
     assert_eq!(objects_after_first, 1);
     assert_eq!(objects_after_second, 1);
     assert_eq!(builds_after_second, 1);

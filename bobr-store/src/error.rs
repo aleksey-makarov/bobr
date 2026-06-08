@@ -15,7 +15,7 @@ pub enum StoreError {
     InvalidInput(String),
     /// Store data or a store-owned serialized format is malformed.
     ///
-    /// This is used for corrupt result records, invalid reference targets,
+    /// This is used for corrupt object records, invalid reference targets,
     /// non-canonical fs-tree manifests, and similar data-integrity failures.
     InvalidData(String),
     /// The requested operation reached a filesystem case the store does not

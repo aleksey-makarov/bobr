@@ -23,10 +23,10 @@ fn canonical_json_hash_is_stable_across_key_order() {
     let left = json!({
         "z": 1,
         "a": true,
-        "result": build_json_value(Some(sample_created_at()), object_hash, &[]),
+        "object_record": build_json_value(Some(sample_created_at()), object_hash, &[]),
     });
     let right = json!({
-        "result": build_json_value(Some(sample_created_at()), object_hash, &[]),
+        "object_record": build_json_value(Some(sample_created_at()), object_hash, &[]),
         "a": true,
         "z": 1,
     });
@@ -60,44 +60,44 @@ fn reuse_key_is_stable_for_identical_inputs() {
 }
 
 #[test]
-fn parse_result_record_rejects_old_schema() {
+fn parse_object_record_rejects_old_schema() {
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
     let value = json!({
-        "schema": "bobr-result-v4",
+        "schema": "bobr-object-record-v0",
         "object_hash": object_hash.to_string(),
         "inputs": [],
     });
 
     assert!(matches!(
-        parse_result_record_value(object_hash, &value),
+        parse_object_record_value(object_hash, &value),
         Err(StoreError::InvalidData(message))
-            if message == "unsupported result record schema 'bobr-result-v4'"
+            if message == "unsupported object record schema 'bobr-object-record-v0'"
     ));
 }
 
 #[test]
-fn parse_result_record_rejects_mismatched_path_key() {
+fn parse_object_record_rejects_mismatched_path_key() {
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
     let mismatched_object_hash = "2222222222222222222222222222222222222222222222222222222222222222"
         .parse::<ObjectHash>()
         .unwrap();
     let value = json!({
-        "schema": RESULT_SCHEMA,
+        "schema": OBJECT_RECORD_SCHEMA,
         "object_hash": object_hash.to_string(),
         "inputs": [],
     });
 
     assert!(matches!(
-        parse_result_record_value(mismatched_object_hash, &value),
+        parse_object_record_value(mismatched_object_hash, &value),
         Err(StoreError::InvalidData(message))
             if message.contains("does not match record object hash")
     ));
 }
 
 #[test]
-fn publish_build_reuses_existing_result_via_new_build_handle_ref() {
+fn publish_build_reuses_existing_object_record_via_new_build_handle_ref() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -148,20 +148,20 @@ fn publish_build_reuses_existing_result_via_new_build_handle_ref() {
     assert_eq!(
         fs::read_link(layout.build_ref_path(first.build_key)).unwrap(),
         PathBuf::from("..")
-            .join(RESULTS_DIR)
+            .join(OBJECT_RECORDS_DIR)
             .join(format!("{}.json", first.object_hash.to_hex()))
     );
     assert!(layout.build_ref_path(second.build_key).exists());
     assert_eq!(
         fs::read_link(layout.build_ref_path(second.build_key)).unwrap(),
         PathBuf::from("..")
-            .join(RESULTS_DIR)
+            .join(OBJECT_RECORDS_DIR)
             .join(format!("{}.json", second.object_hash.to_hex()))
     );
     assert_eq!(
-        fs::read_link(layout.result_refs_dir().join("hello-copy.json")).unwrap(),
+        fs::read_link(layout.object_record_refs_dir().join("hello-copy.json")).unwrap(),
         PathBuf::from("..")
-            .join(RESULTS_DIR)
+            .join(OBJECT_RECORDS_DIR)
             .join(format!("{}.json", second.object_hash.to_hex()))
     );
 }
@@ -198,20 +198,21 @@ fn publish_build_writes_build_record_and_refs() {
     .unwrap();
 
     let build_ref_path = layout.build_ref_path(published.build_key);
-    let result_path = layout.result_record_path(published.object_hash);
+    let object_record_path = layout.object_record_path(published.object_hash);
     assert!(build_ref_path.exists());
-    assert!(result_path.exists());
+    assert!(object_record_path.exists());
     assert_eq!(
         fs::read_link(&build_ref_path).unwrap(),
         PathBuf::from("..")
-            .join(RESULTS_DIR)
+            .join(OBJECT_RECORDS_DIR)
             .join(format!("{}.json", published.object_hash.to_hex()))
     );
 
-    let build_json: Value = serde_json::from_slice(&fs::read(&result_path).unwrap()).unwrap();
+    let build_json: Value =
+        serde_json::from_slice(&fs::read(&object_record_path).unwrap()).unwrap();
     assert_eq!(
         build_json["schema"],
-        Value::String(BUILD_SCHEMA.to_string())
+        Value::String(OBJECT_RECORD_SCHEMA_FOR_TEST.to_string())
     );
     assert_eq!(
         build_json["created_at"],
@@ -224,9 +225,9 @@ fn publish_build_writes_build_record_and_refs() {
     assert_eq!(build_json["inputs"], Value::Array(vec![]));
 
     assert_eq!(
-        fs::read_link(layout.result_refs_dir().join("script.json")).unwrap(),
+        fs::read_link(layout.object_record_refs_dir().join("script.json")).unwrap(),
         PathBuf::from("..")
-            .join(RESULTS_DIR)
+            .join(OBJECT_RECORDS_DIR)
             .join(format!("{}.json", published.object_hash.to_hex()))
     );
     assert_eq!(
@@ -238,7 +239,7 @@ fn publish_build_writes_build_record_and_refs() {
 }
 
 #[test]
-fn result_ref_loaders_reject_non_canonical_targets() {
+fn object_record_ref_loaders_reject_non_canonical_targets() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -259,31 +260,43 @@ fn result_ref_loaders_reject_non_canonical_targets() {
     )
     .unwrap();
     let non_canonical_target = PathBuf::from("..")
-        .join("not-results")
+        .join("not-object-records")
         .join(format!("{}.json", published.object_hash.to_hex()));
 
     replace_symlink(&non_canonical_target, &layout.build_ref_path(build_key)).unwrap();
     let error = load_build_handle(&layout, build_key).unwrap_err();
     assert!(error.to_string().contains("build ref"));
-    assert!(error.to_string().contains("non-canonical result target"));
+    assert!(
+        error
+            .to_string()
+            .contains("non-canonical object record target")
+    );
 
     replace_symlink(&non_canonical_target, &layout.reuse_ref_path(reuse_key)).unwrap();
-    let error = load_reuse_record(&layout, reuse_key).unwrap_err();
+    let error = load_reuse_object_record(&layout, reuse_key).unwrap_err();
     assert!(error.to_string().contains("reuse ref"));
-    assert!(error.to_string().contains("non-canonical result target"));
+    assert!(
+        error
+            .to_string()
+            .contains("non-canonical object record target")
+    );
 
     replace_symlink(
         &non_canonical_target,
-        &layout.result_refs_dir().join("script.json"),
+        &layout.object_record_refs_dir().join("script.json"),
     )
     .unwrap();
     let error = load_current_publication(&layout, "script").unwrap_err();
-    assert!(error.to_string().contains("current result ref"));
-    assert!(error.to_string().contains("non-canonical result target"));
+    assert!(error.to_string().contains("current object record ref"));
+    assert!(
+        error
+            .to_string()
+            .contains("non-canonical object record target")
+    );
 }
 
 #[test]
-fn result_record_round_trips_inputs() {
+fn object_record_round_trips_inputs() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -325,49 +338,49 @@ fn result_record_round_trips_inputs() {
     )
     .unwrap();
 
-    let loaded = load_result_record(&layout, published.object_hash)
+    let loaded = load_object_record(&layout, published.object_hash)
         .unwrap()
-        .expect("expected result record to exist");
+        .expect("expected object record to exist");
 
     assert_eq!(loaded.inputs, inputs);
 }
 
 #[test]
-fn record_existing_source_result_requires_existing_object() {
+fn record_existing_source_object_requires_existing_object() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
 
     let error =
-        crate::record::record_existing_source_result(&layout, object_hash, sample_created_at())
+        crate::record::record_existing_source_object(&layout, object_hash, sample_created_at())
             .unwrap_err();
 
     assert!(matches!(error, StoreError::Io(message) if message.contains("source object")));
-    assert!(!layout.result_record_path(object_hash).exists());
+    assert!(!layout.object_record_path(object_hash).exists());
 }
 
 #[test]
-fn lookup_source_result_returns_missing_when_result_and_object_absent() {
+fn lookup_source_object_returns_missing_when_record_and_object_absent() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
 
-    let lookup = lookup_source_result(&layout, object_hash, sample_created_at()).unwrap();
+    let lookup = lookup_source_object(&layout, object_hash, sample_created_at()).unwrap();
 
     assert!(matches!(lookup, SourceLookup::Missing));
-    assert!(!layout.result_record_path(object_hash).exists());
+    assert!(!layout.object_record_path(object_hash).exists());
 }
 
 #[test]
-fn lookup_source_result_reuses_canonical_result() {
+fn lookup_source_object_reuses_canonical_record() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
     let stage = temp.path().join("source.txt");
     fs::write(&stage, b"hello").unwrap();
     let object_hash = import_object(&layout, &stage).unwrap();
-    let stored = crate::record::record_existing_source_result(
+    let stored = crate::record::record_existing_source_object(
         &layout,
         object_hash,
         "2026-03-24T13:00:00.000000000Z",
@@ -375,64 +388,70 @@ fn lookup_source_result_reuses_canonical_result() {
     .unwrap();
 
     let lookup =
-        lookup_source_result(&layout, object_hash, "2026-03-24T14:00:00.000000000Z").unwrap();
+        lookup_source_object(&layout, object_hash, "2026-03-24T14:00:00.000000000Z").unwrap();
 
     let SourceLookup::Hit(hit) = lookup else {
         panic!("expected source hit");
     };
-    assert_eq!(hit.result.object_hash, stored.result.object_hash);
     assert_eq!(
-        hit.result.created_at.as_deref(),
+        hit.object_record.object_hash,
+        stored.object_record.object_hash
+    );
+    assert_eq!(
+        hit.object_record.created_at.as_deref(),
         Some("2026-03-24T13:00:00.000000000Z")
     );
 }
 
 #[test]
-fn lookup_source_result_records_existing_object_as_source_result() {
+fn lookup_source_object_records_existing_object_as_source_object() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
     let stage = temp.path().join("source.txt");
     fs::write(&stage, b"hello").unwrap();
     let object_hash = import_object(&layout, &stage).unwrap();
-    let result_path = layout.result_record_path(object_hash);
-    assert!(!result_path.exists());
+    let object_record_path = layout.object_record_path(object_hash);
+    assert!(!object_record_path.exists());
 
-    let lookup = lookup_source_result(&layout, object_hash, sample_created_at()).unwrap();
+    let lookup = lookup_source_object(&layout, object_hash, sample_created_at()).unwrap();
 
     let SourceLookup::Hit(hit) = lookup else {
         panic!("expected source hit");
     };
-    assert_eq!(hit.result.object_hash, object_hash);
-    assert_eq!(hit.result.inputs, Vec::new());
-    assert_eq!(hit.result.created_at.as_deref(), Some(sample_created_at()));
-    assert!(result_path.exists());
+    assert_eq!(hit.object_record.object_hash, object_hash);
+    assert_eq!(hit.object_record.inputs, Vec::new());
+    assert_eq!(
+        hit.object_record.created_at.as_deref(),
+        Some(sample_created_at())
+    );
+    assert!(object_record_path.exists());
 }
 
 #[test]
-fn import_source_result_on_match_imports_object_and_writes_canonical_result() {
+fn import_source_object_on_match_imports_object_and_writes_canonical_record() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
     let stage = temp.path().join("source.txt");
     fs::write(&stage, b"hello").unwrap();
     let object_hash = hash_path(&stage).unwrap();
 
-    let outcome = import_source_result(&layout, object_hash, &stage, sample_created_at()).unwrap();
+    let outcome = import_source_object(&layout, object_hash, &stage, sample_created_at()).unwrap();
 
     let SourceImportOutcome::Matched(stored) = outcome else {
         panic!("expected source import match");
     };
-    assert_eq!(stored.result.object_hash, object_hash);
+    assert_eq!(stored.object_record.object_hash, object_hash);
     assert_eq!(
-        stored.result.created_at.as_deref(),
+        stored.object_record.created_at.as_deref(),
         Some(sample_created_at())
     );
     assert!(layout.object_path(object_hash).exists());
-    assert!(layout.result_record_path(object_hash).exists());
+    assert!(layout.object_record_path(object_hash).exists());
     assert!(!stage.exists());
 }
 
 #[test]
-fn import_source_result_on_mismatch_imports_actual_object_without_declared_result() {
+fn import_source_object_on_mismatch_imports_actual_object_without_declared_record() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
     let stage = temp.path().join("source.txt");
@@ -443,7 +462,7 @@ fn import_source_result_on_mismatch_imports_actual_object_without_declared_resul
     assert_ne!(actual_hash, declared_hash);
 
     let outcome =
-        import_source_result(&layout, declared_hash, &stage, sample_created_at()).unwrap();
+        import_source_object(&layout, declared_hash, &stage, sample_created_at()).unwrap();
 
     let SourceImportOutcome::Mismatched {
         actual_hash: imported_hash,
@@ -453,29 +472,34 @@ fn import_source_result_on_mismatch_imports_actual_object_without_declared_resul
     };
     assert_eq!(imported_hash, actual_hash);
     assert!(layout.object_path(actual_hash).exists());
-    assert!(!layout.result_record_path(declared_hash).exists());
-    assert!(!layout.result_record_path(actual_hash).exists());
+    assert!(!layout.object_record_path(declared_hash).exists());
+    assert!(!layout.object_record_path(actual_hash).exists());
     assert!(!stage.exists());
 }
 
 #[test]
-fn publish_result_rejects_result_with_missing_object_without_refs() {
+fn publish_stored_object_rejects_record_with_missing_object_without_refs() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
-    let result = ResultRecord {
+    let object_record = ObjectRecord {
         object_hash,
         created_at: Some(sample_created_at().to_string()),
         inputs: Vec::new(),
     };
-    crate::record::store_result_record(&layout, &result).unwrap();
+    crate::record::store_object_record(&layout, &object_record).unwrap();
 
-    let error = publish_result(&layout, "missing", object_hash).unwrap_err();
+    let error = publish_stored_object(&layout, "missing", object_hash).unwrap_err();
 
     assert!(matches!(error, StoreError::Io(message) if message.contains("missing object")));
     assert!(!layout.object_refs_dir().join("missing").exists());
-    assert!(!layout.result_refs_dir().join("missing.json").exists());
+    assert!(
+        !layout
+            .object_record_refs_dir()
+            .join("missing.json")
+            .exists()
+    );
 }
 
 #[test]
@@ -496,8 +520,8 @@ fn load_publication_loads_publication() {
         .unwrap()
         .expect("expected publication");
 
-    assert_eq!(loaded.result.object_hash, published.object_hash);
-    assert_eq!(loaded.result.object_hash, published.object_hash);
+    assert_eq!(loaded.object_record.object_hash, published.object_hash);
+    assert_eq!(loaded.object_record.object_hash, published.object_hash);
     assert!(loaded.object_path.exists());
 }
 
@@ -542,31 +566,35 @@ fn load_publication_rejects_object_ref_hash_mismatch() {
         error,
         StoreError::InvalidData(message)
             if message.contains("object ref points to")
-                && message.contains("records")
+                && message.contains("object record points to")
     ));
 }
 
 #[test]
-fn load_publication_rejects_non_canonical_result_and_object_refs() {
+fn load_publication_rejects_non_canonical_object_record_and_object_refs() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
     let published = publish_text_output(&layout, temp.path(), "script", "hello");
-    let result_ref_path = layout.result_refs_dir().join("script.json");
+    let object_record_ref_path = layout.object_record_refs_dir().join("script.json");
     let object_ref_path = layout.object_refs_dir().join("script");
 
-    let non_canonical_result = PathBuf::from("..")
-        .join("not-results")
+    let non_canonical_object_record = PathBuf::from("..")
+        .join("not-object-records")
         .join(format!("{}.json", published.object_hash.to_hex()));
-    replace_symlink(&non_canonical_result, &result_ref_path).unwrap();
+    replace_symlink(&non_canonical_object_record, &object_record_ref_path).unwrap();
     let error = load_publication(&layout, "script").unwrap_err();
-    assert!(error.to_string().contains("publication result ref"));
-    assert!(error.to_string().contains("non-canonical result target"));
+    assert!(error.to_string().contains("publication object record ref"));
+    assert!(
+        error
+            .to_string()
+            .contains("non-canonical object record target")
+    );
 
     replace_symlink(
         &PathBuf::from("..")
-            .join(RESULTS_DIR)
+            .join(OBJECT_RECORDS_DIR)
             .join(format!("{}.json", published.object_hash.to_hex())),
-        &result_ref_path,
+        &object_record_ref_path,
     )
     .unwrap();
     let non_canonical_object = PathBuf::from("..")
@@ -772,9 +800,9 @@ fn publish_build_rotates_existing_refs_into_generations() {
             .join(second.object_hash.to_hex())
     );
     assert_eq!(
-        fs::read_link(layout.result_refs_dir().join("shared.json")).unwrap(),
+        fs::read_link(layout.object_record_refs_dir().join("shared.json")).unwrap(),
         PathBuf::from("..")
-            .join(RESULTS_DIR)
+            .join(OBJECT_RECORDS_DIR)
             .join(format!("{}.json", second.object_hash.to_hex()))
     );
     assert_eq!(
@@ -786,12 +814,12 @@ fn publish_build_rotates_existing_refs_into_generations() {
     assert_eq!(
         fs::read_link(
             layout
-                .result_refs_dir()
+                .object_record_refs_dir()
                 .join(format!("shared.{suffix}.json"))
         )
         .unwrap(),
         PathBuf::from("..")
-            .join(RESULTS_DIR)
+            .join(OBJECT_RECORDS_DIR)
             .join(format!("{}.json", first.object_hash.to_hex()))
     );
 }
@@ -852,7 +880,7 @@ fn publish_build_same_build_key_does_not_create_generation_refs() {
     );
     assert!(
         !layout
-            .result_refs_dir()
+            .object_record_refs_dir()
             .join(format!("shared.{suffix}.json"))
             .exists()
     );
@@ -1265,7 +1293,7 @@ fn store_create_creates_full_layout() {
     assert_eq!(layout.root(), temp.path());
     assert!(layout.objects_dir().is_dir());
     assert!(layout.builds_dir().is_dir());
-    assert!(layout.result_refs_dir().is_dir());
+    assert!(layout.object_record_refs_dir().is_dir());
     assert!(layout.object_refs_dir().is_dir());
     assert!(layout.fs_files_dir().is_dir());
     assert!(layout.fs_trees_dir().is_dir());

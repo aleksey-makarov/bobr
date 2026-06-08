@@ -103,8 +103,8 @@ or more arbitrary inputs:
 
 `Group` does not merge or inspect input payloads. It stages a constant
 zero-byte marker file after all inputs have been realized, so the root
-`RealizedResult` is only a completion marker. The meaningful artifacts are the
-input targets and their normal `result-refs/` and `object-refs/` publications.
+`RealizedObject` is only a completion marker. The meaningful artifacts are the
+input targets and their normal `object-record-refs/` and `object-refs/` publications.
 
 `Source` is a separate execution class with its own shape:
 
@@ -156,12 +156,12 @@ In v1, `Source` supports three origins:
 
 `Source` may also omit `origin`. In that shape, the payload object must
 already exist in the store under `objects/<object_hash>`. If the canonical
-`<store>/results/<object_hash>.json` record is missing, `mbuild` reconstructs
+`<store>/object-records/<object_hash>.json` record is missing, `mbuild` reconstructs
 it from the declared object hash.
 
 If a source origin materializes a different object than the declared
 `object_hash`, `mbuild` still imports the actual object into
-`objects/<actual_hash>`, but it does not write the canonical result record or
+`objects/<actual_hash>`, but it does not write the canonical object record or
 publish refs. The failing message includes the actual hash so the recipe can
 be updated and rerun without downloading again.
 
@@ -169,7 +169,7 @@ CLI contract:
 
 - `mbuild [recipe.json]`
 - if `recipe.json` is omitted, the JSON envelope is read from `stdin`
-- on success, `stdout` receives the realized root `RealizedResult` as JSON
+- on success, `stdout` receives the realized root `RealizedObject` as JSON
 - live progress goes to `stderr` unless `--quiet` is set
 - `--jobs/-j` limits parallel builder execution; the default is the available
   CPU parallelism
@@ -185,10 +185,10 @@ The store layout is content-addressed:
 - `<store>/objects/` stores payload objects by `object_hash`
 - fs-tree leaf hashes live in `manifest.jsonl`; the store does not maintain
   `object-indexes/`
-- `<store>/results/` stores canonical realized results by `object_hash`
+- `<store>/object-records/` stores canonical object records by `object_hash`
 - `<store>/reuses/` stores builder-only canonical reuse refs by `reuse_key`
 - `<store>/builds/` stores builder-only public build handles by `build_key`
-- `<store>/result-refs/` and `<store>/object-refs/` store published current refs
+- `<store>/object-record-refs/` and `<store>/object-refs/` store published current refs
 
 `<store>/object-refs/<name>` always points at
 `../objects/<object_hash>`, regardless of object kind. Filesystem tree objects

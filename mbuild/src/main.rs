@@ -120,7 +120,7 @@ fn build(
         options,
     )
     .map_err(map_runtime_error)?;
-    let rendered = recipe_runtime::render_result_as_json(&build).map_err(map_runtime_error)?;
+    let rendered = recipe_runtime::render_object_as_json(&build).map_err(map_runtime_error)?;
     print!("{rendered}");
     Ok(())
 }

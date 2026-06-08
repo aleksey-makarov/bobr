@@ -11,14 +11,14 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 const INVOCATION_SCHEMA: &str = "bobr-build-invocation-v1";
-const RESULT_INVOCATION_SCHEMA: &str = "bobr-build-result-invocation-v3";
+const REUSE_INVOCATION_SCHEMA: &str = "bobr-build-reuse-invocation-v1";
 
 define_hex_hash_type! {
     /// Stable key for a normalized build invocation.
     ///
     /// A build key is the SHA-256 digest produced by [`compute_build_key`]. It
     /// identifies the builder tag, normalized payload, and input build keys,
-    /// independent of whether the corresponding result has already been
+    /// independent of whether the corresponding object has already been
     /// published.
     ///
     /// The textual representation is exactly 64 lowercase hexadecimal
@@ -70,11 +70,11 @@ pub fn compute_build_key(
     Ok(BuildKey::from_bytes(Sha256::digest(&canonical).into()))
 }
 
-/// Computes the stable reuse key for a normalized result invocation.
+/// Computes the stable reuse key for a normalized object invocation.
 ///
 /// The key covers the builder tag, the normalized JSON payload, and the ordered
 /// list of realized input object identities. Runtime code uses this key to find
-/// a reusable result even when the current build key has not been seen before.
+/// a reusable object even when the current build key has not been seen before.
 pub fn compute_reuse_key(
     builder_tag: &str,
     normalized_payload: &Value,
@@ -95,7 +95,7 @@ pub fn compute_reuse_key(
     let mut root = Map::new();
     root.insert(
         "schema".to_string(),
-        Value::String(RESULT_INVOCATION_SCHEMA.to_string()),
+        Value::String(REUSE_INVOCATION_SCHEMA.to_string()),
     );
     root.insert(
         "builder_tag".to_string(),

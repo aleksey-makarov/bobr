@@ -1,25 +1,26 @@
 use crate::identity::{BuildKey, ObjectHash, ReuseKey};
-use crate::{PublishedBuild, ResultRecord, ReuseInputIdentity, Store, StoreError};
+use crate::{ObjectRecord, PublishedBuild, ReuseInputIdentity, Store, StoreError};
 use std::path::{Path, PathBuf};
 
 /// Request to publish a build under a publication name.
 ///
 /// The staged path is a completed output object outside the permanent object
-/// store. Publishing either reuses an existing build/result, or imports this
-/// staged object, records the new result, and updates the publication refs.
+/// store. Publishing either reuses an existing build/object-record pair, or
+/// imports this staged object, records the new object record, and updates the
+/// publication refs.
 #[derive(Debug)]
 pub struct PublishRequest {
-    /// Publication name to update under `object-refs` and `result-refs`.
+    /// Publication name to update under `object-refs` and `object-record-refs`.
     pub publication_name: String,
     /// Build key for the invocation being published.
     pub build_key: BuildKey,
     /// Reuse key for the invocation being published.
     pub reuse_key: ReuseKey,
-    /// RFC 3339 timestamp recorded for a newly materialized result.
+    /// RFC 3339 timestamp recorded for a newly materialized object.
     pub created_at: String,
     /// Staged output object to import if reuse does not satisfy the request.
     pub staged_path: PathBuf,
-    /// Realized input object identities to store with a newly materialized result.
+    /// Realized input object identities to store with a newly materialized object.
     pub inputs: Vec<ReuseInputIdentity>,
 }
 
@@ -44,15 +45,15 @@ pub struct Publication {
 /// 3. The staged object supplied in `request.staged_path`.
 ///
 /// In all successful cases the publication refs named by
-/// [`PublishRequest::publication_name`] are updated to the selected result.
+/// [`PublishRequest::publication_name`] are updated to the selected object.
 /// If the staged object is not needed because reuse succeeded, it is removed.
 pub fn publish_build(store: &Store, request: PublishRequest) -> Result<Publication, StoreError> {
     if let Some(published) = crate::refs::load_build_handle(store, request.build_key)? {
         crate::object::remove_path_force(&request.staged_path)?;
-        crate::refs::publish_result(
+        crate::refs::publish_stored_object(
             store,
             &request.publication_name,
-            published.result.object_hash,
+            published.object_record.object_hash,
         )?;
         return Ok(Publication {
             object_hash: published.build.object_hash,
@@ -64,10 +65,10 @@ pub fn publish_build(store: &Store, request: PublishRequest) -> Result<Publicati
         crate::refs::resolve_reuse_for_build(store, request.build_key, request.reuse_key)?
     {
         crate::object::remove_path_force(&request.staged_path)?;
-        crate::refs::publish_result(
+        crate::refs::publish_stored_object(
             store,
             &request.publication_name,
-            published.result.object_hash,
+            published.object_record.object_hash,
         )?;
         return Ok(Publication {
             object_hash: published.build.object_hash,
@@ -83,10 +84,10 @@ pub fn publish_build(store: &Store, request: PublishRequest) -> Result<Publicati
         request.inputs,
         &request.staged_path,
     )?;
-    crate::refs::publish_result(
+    crate::refs::publish_stored_object(
         store,
         &request.publication_name,
-        published.result.object_hash,
+        published.object_record.object_hash,
     )?;
 
     Ok(Publication {
@@ -95,12 +96,12 @@ pub fn publish_build(store: &Store, request: PublishRequest) -> Result<Publicati
     })
 }
 
-/// Imports a staged object and records a newly materialized build result.
+/// Imports a staged object and records a newly materialized build object.
 ///
 /// This lower-level operation does not update publication refs. It imports
-/// `staged_path`, stores the result record, writes the reuse ref, and writes the
-/// build handle ref. Call [`publish_build`] when the caller also needs to
-/// update a publication name under `object-refs` and `result-refs`.
+/// `staged_path`, stores the object record, writes the reuse ref, and writes
+/// the build handle ref. Call [`publish_build`] when the caller also needs to
+/// update a publication name under `object-refs` and `object-record-refs`.
 pub fn materialize_build(
     store: &Store,
     build_key: BuildKey,
@@ -156,18 +157,18 @@ fn materialize_build_impl(
     object_hash: Option<ObjectHash>,
 ) -> Result<PublishedBuild, StoreError> {
     let object_hash = crate::object::import_object_with_hash(store, staged_path, object_hash)?;
-    let result = ResultRecord {
+    let object_record = ObjectRecord {
         object_hash,
         created_at: Some(created_at.to_string()),
         inputs,
     };
-    crate::record::store_result_record(store, &result)?;
+    crate::record::store_object_record(store, &object_record)?;
     crate::refs::store_reuse_ref(store, reuse_key, object_hash)?;
     crate::refs::store_build_handle_ref(store, build_key, object_hash)?;
 
     Ok(PublishedBuild {
         object_path: store.object_path(object_hash),
-        build: crate::record::build_from_result(build_key, &result),
-        result,
+        build: crate::record::build_from_object_record(build_key, &object_record),
+        object_record,
     })
 }

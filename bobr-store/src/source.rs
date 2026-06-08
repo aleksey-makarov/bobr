@@ -1,23 +1,23 @@
 use crate::identity::ObjectHash;
 use crate::object::import_object;
-use crate::record::{StoredResult, load_stored_result, record_existing_source_result};
+use crate::record::{StoredObjectRecord, load_stored_object_record, record_existing_source_object};
 use crate::{Store, StoreError};
 use std::path::Path;
 
-/// Result of looking up the canonical store state for a declared source object.
+/// Outcome of looking up the canonical store state for a declared source object.
 #[derive(Debug, Clone)]
 pub enum SourceLookup {
-    /// The source is available through an existing canonical result record.
-    Hit(StoredResult),
-    /// Neither the canonical result nor the declared object exists in the store.
+    /// The source is available through an existing canonical object record.
+    Hit(StoredObjectRecord),
+    /// Neither the canonical object record nor the declared object exists in the store.
     Missing,
 }
 
-/// Result of importing a materialized source origin into the store.
+/// Outcome of importing a materialized source origin into the store.
 #[derive(Debug, Clone)]
 pub enum SourceImportOutcome {
     /// The materialized object matched the declared hash and was recorded.
-    Matched(StoredResult),
+    Matched(StoredObjectRecord),
     /// The materialized object was imported, but it did not match the declared hash.
     Mismatched {
         /// Hash of the object that was actually imported.
@@ -25,22 +25,22 @@ pub enum SourceImportOutcome {
     },
 }
 
-/// Looks up the canonical result for a declared source object.
+/// Looks up the canonical object record for a declared source object.
 ///
-/// If the result record is missing but the declared object already exists in
-/// the store, this records the object as a canonical source result
+/// If the object record is missing but the declared object already exists in
+/// the store, this records the object as a canonical source object
 /// idempotently and returns it as a hit.
-pub fn lookup_source_result(
+pub fn lookup_source_object(
     store: &Store,
     declared_hash: ObjectHash,
     created_at: &str,
 ) -> Result<SourceLookup, StoreError> {
-    if let Some(stored) = load_stored_result(store, declared_hash)? {
+    if let Some(stored) = load_stored_object_record(store, declared_hash)? {
         return Ok(SourceLookup::Hit(stored));
     }
 
     if store.object_path(declared_hash).exists() {
-        let stored = record_existing_source_result(store, declared_hash, created_at)?;
+        let stored = record_existing_source_object(store, declared_hash, created_at)?;
         return Ok(SourceLookup::Hit(stored));
     }
 
@@ -51,8 +51,8 @@ pub fn lookup_source_result(
 ///
 /// The staged object is always imported into the store before the hash is
 /// compared. On mismatch the imported actual object remains in the store, but
-/// the canonical result for the declared hash is not written.
-pub fn import_source_result(
+/// the canonical object record for the declared hash is not written.
+pub fn import_source_object(
     store: &Store,
     declared_hash: ObjectHash,
     staged_path: &Path,
@@ -63,6 +63,6 @@ pub fn import_source_result(
         return Ok(SourceImportOutcome::Mismatched { actual_hash });
     }
 
-    let stored = record_existing_source_result(store, declared_hash, created_at)?;
+    let stored = record_existing_source_object(store, declared_hash, created_at)?;
     Ok(SourceImportOutcome::Matched(stored))
 }

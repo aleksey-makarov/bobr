@@ -2,7 +2,7 @@
 
 ## Summary
 
-The store contains immutable payloads, canonical realized result records,
+The store contains immutable payloads, canonical object records,
 mutable build and publication refs, and per-run operational logs.
 
 The store is a content-addressed store (CAS). This means payload identity is
@@ -10,7 +10,7 @@ derived from normalized content, not from the path or publication name used to
 reach it. Importing the same payload content produces the same `object_hash`;
 different payload content produces a different address. Human-facing names and
 build handles are mutable refs layered on top of immutable content-addressed
-objects and canonical result records.
+objects and canonical object records.
 
 ## Identity Model
 
@@ -43,18 +43,18 @@ The same builder input contract order is used for these `object_hash` values.
 
 `reuse_key` is independent from the particular dependency invocations that
 produced those input objects. Different build graph fragments can therefore
-reuse one canonical builder result when their direct input payload identities
+reuse one canonical builder object when their direct input payload identities
 match.
 
 Executing a builder or materializing a source produces one payload object. The
 payload is addressed by `object_hash`.
 
-The same `object_hash` also keys the canonical result record for that payload.
-Different builder nodes can share one result record when they intentionally
+The same `object_hash` also keys the canonical object record for that payload.
+Different builder nodes can share one object record when they intentionally
 stage the same payload.
 
 Publication names do not participate in object identity, `build_key`, or
-`reuse_key`. The language-level realized result is `RealizedResult`. For
+`reuse_key`. The language-level realized object is `RealizedObject`. For
 builders it may also carry `build_key`; for `Source` it does not.
 
 ## Reuse Model
@@ -65,20 +65,20 @@ For one planned builder node, builder reuse lookup uses this order:
 2. canonical reuse hit on `reuse_key`
 3. actual builder execution
 
-If a canonical builder result exists but the public build handle is missing,
-the missing build-handle ref is recreated and the result is reused.
+If a canonical builder object exists but the public build handle is missing,
+the missing build-handle ref is recreated and the object is reused.
 
 For `Source`, there is no `build_key` and no `reuse_key`.
 
 Source reuse lookup uses this order:
 
-1. canonical result hit on `object_hash`
+1. canonical object-record hit on `object_hash`
 2. existing object hit on `object_hash`
 3. actual source materialization
 
 If source materialization produces a different object than the declared
 `object_hash`, the actual object is still imported into `objects/`, but the
-canonical `results/<object_hash>.json` record is not written and the source
+canonical `object-records/<object_hash>.json` record is not written and the source
 import fails with the actual hash.
 
 ## Store Layout
@@ -90,13 +90,13 @@ The filesystem layout mirrors the identity model:
   objects/
     <object_hash>
   reuses/
-    <reuse_key> -> ../results/<object_hash>.json
+    <reuse_key> -> ../object-records/<object_hash>.json
   builds/
-    <build_key> -> ../results/<object_hash>.json
-  results/
+    <build_key> -> ../object-records/<object_hash>.json
+  object-records/
     <object_hash>.json
-  result-refs/
-    <name>.json -> ../results/<object_hash>.json
+  object-record-refs/
+    <name>.json -> ../object-records/<object_hash>.json
   object-refs/
     <name> -> ../objects/<object_hash>
   logs/
@@ -113,11 +113,11 @@ The filesystem layout mirrors the identity model:
 ```
 
 - `objects/` holds payloads addressed by `object_hash`.
-- `results/` holds canonical result records addressed by `object_hash`.
+- `object-records/` holds canonical object records addressed by `object_hash`.
 - `reuses/` holds builder-only canonical reuse refs addressed by `reuse_key`.
 - `builds/` holds builder-only public build-handle refs addressed by
   `build_key`.
-- `result-refs/` holds human-facing refs from publication name to result
+- `object-record-refs/` holds human-facing refs from publication name to object
   record.
 - `object-refs/` holds human-facing refs from publication name to payload.
 
@@ -135,7 +135,7 @@ Generic CAS objects may contain non-UTF-8 filesystem names. Such objects can
 still be imported and addressed by `object_hash`. Fs-tree objects are
 UTF-8-only because their manifest paths and symlink targets are JSON strings.
 
-`results/<object_hash>.json` stores one canonical realized result record. The
+`object-records/<object_hash>.json` stores one canonical object record. The
 record payload contains:
 
 - payload identity: `object_hash`
@@ -143,7 +143,7 @@ record payload contains:
   - `object_hash`
 
 `builds/<build_key>` stores the corresponding public build handle as a symlink
-to the canonical result record. `reuses/<reuse_key>` stores the canonical
+to the canonical object record. `reuses/<reuse_key>` stores the canonical
 builder reuse index.
 
 `logs/<run-id>/<serial>-<tag>[-<name>]/raw/` stores raw per-subject log files
@@ -157,7 +157,7 @@ Every recipe node carries a publication name.
 
 After a node is reused or built, the current publication refs are updated:
 
-- `result-refs/<name>.json -> ../results/<object_hash>.json`
+- `object-record-refs/<name>.json -> ../object-records/<object_hash>.json`
 - `object-refs/<name> -> ../objects/<object_hash>`
 
 This `object-refs/` rule is the same for every object kind. Filesystem tree
@@ -166,7 +166,7 @@ objects still store their payload as an object directory containing
 the object layout for builders that define them. `root/` is part of the object
 layout, not the publication symlink target.
 
-If the current publication name already points at a different result, the old
+If the current publication name already points at a different object, the old
 current refs are rotated into timestamp-suffixed history refs.
 
 ## Logging
@@ -189,7 +189,7 @@ The run-level event log records lifecycle events such as:
 
 - `start`
 - `cache-hit`
-- `result-hit`
+- `object-hit`
 - `cache-miss`
 - `run`
 - `publish`

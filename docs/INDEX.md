@@ -19,7 +19,7 @@
    in build and runtime dependency edges.
 
 5. [Store](./STORE.md)
-   Content-addressed store, build identity, canonical result records, build
+   Content-addressed store, build identity, canonical object records, build
    handles, and publication refs.
 
 6. [Filesystem Object Hashing](./FSOBJ_HASH.md)

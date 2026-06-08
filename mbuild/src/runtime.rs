@@ -139,8 +139,8 @@ pub(crate) fn execute_builder_node(
         log_runtime_event(
             logger.as_ref(),
             BuildLogLevel::Info,
-            "result-hit",
-            "reusing existing canonical result",
+            "object-hit",
+            "reusing existing canonical object",
         );
         cleanup_temp_dir(
             builder_run.temp_dir(),
@@ -236,7 +236,7 @@ pub(crate) fn lookup_build_handle(
     load_build_handle(layout, build_key).map_err(map_store_error)
 }
 
-pub(crate) fn lookup_canonical_result(
+pub(crate) fn lookup_canonical_object(
     layout: &Store,
     builder_tag: &str,
     config: &Value,
@@ -768,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn lookup_canonical_result_depends_on_input_object_hash() {
+    fn lookup_canonical_object_depends_on_input_object_hash() {
         let temp = tempdir().unwrap();
         let layout = create_test_store(temp.path());
 
@@ -779,7 +779,7 @@ mod tests {
         }];
         let payload = json!({ "source": "echo hi\n", "executable": true });
         let reuse_key = compute_reuse_key("RuntimeLookupTest", &payload, &matching_inputs).unwrap();
-        let build_key_for_result =
+        let build_key_for_object =
             BuildKey::from_str("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
                 .unwrap();
         let lookup_build_key =
@@ -791,7 +791,7 @@ mod tests {
             &layout,
             PublishRequest {
                 publication_name: "script".to_string(),
-                build_key: build_key_for_result,
+                build_key: build_key_for_object,
                 reuse_key,
                 created_at: "2026-04-05T12:00:00.000000000Z".to_string(),
                 staged_path: stage,
@@ -800,7 +800,7 @@ mod tests {
         )
         .unwrap();
 
-        let hit = lookup_canonical_result(
+        let hit = lookup_canonical_object(
             &layout,
             "RuntimeLookupTest",
             &payload,
@@ -808,7 +808,7 @@ mod tests {
             lookup_build_key,
         )
         .unwrap()
-        .expect("expected canonical result hit");
+        .expect("expected canonical object hit");
         assert_eq!(hit.build.build_key, lookup_build_key);
 
         let mismatching_inputs = vec![ReuseInputIdentity {
@@ -817,7 +817,7 @@ mod tests {
                 .unwrap(),
         }];
         assert!(
-            lookup_canonical_result(
+            lookup_canonical_object(
                 &layout,
                 "RuntimeLookupTest",
                 &payload,

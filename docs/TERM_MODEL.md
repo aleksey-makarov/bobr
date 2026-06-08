@@ -68,7 +68,7 @@ Children are always referenced by node id.
 `Group` is the phony aggregate builder for requests that need one root but must
 realize several otherwise unrelated targets. It does not merge or inspect input
 payloads. It stages a constant zero-byte marker file after all inputs have been
-realized, so its `RealizedResult` is only a completion marker. The meaningful
+realized, so its `RealizedObject` is only a completion marker. The meaningful
 artifacts are the input targets and their normal publications.
 
 `Source` is a separate execution class with this outer shape:
@@ -95,7 +95,7 @@ In v1, `Source` supports:
 - manifest lists and OCI indexes resolve to the `linux/amd64` manifest only
 
 If `origin` is omitted, the payload object must already exist in the store.
-If the canonical result record is missing, Rust reconstructs it from the
+If the canonical object record is missing, Rust reconstructs it from the
 declared object hash.
 
 ## Build Identity
@@ -119,10 +119,10 @@ to realize the root.
 
 For each `Source` node, Rust:
 
-1. checks `<store>/results/<object_hash>.json`
-2. if the result record is absent, checks whether
+1. checks `<store>/object-records/<object_hash>.json`
+2. if the object record is absent, checks whether
    `<store>/objects/<object_hash>` already exists
-3. if the object exists, reconstructs the missing canonical result record for
+3. if the object exists, reconstructs the missing canonical object record for
    `object_hash`
 4. if `origin` is missing and the object is absent, fails
 5. if `origin.tag = "Path"` is present, materializes `origin.path` directly
@@ -130,8 +130,8 @@ For each `Source` node, Rust:
    and either stages one file object or unpacks one directory object
 7. imports the staged object into `objects/<actual_hash>`
 8. if `actual_hash != object_hash`, fails without writing the canonical
-   result record and reports the actual hash
-9. otherwise writes the canonical result record for `object_hash`
+   object record and reports the actual hash
+9. otherwise writes the canonical object record for `object_hash`
 
 Execution then proceeds bottom-up:
 
@@ -176,7 +176,7 @@ Builder semantics depend only on:
 `mbuild [recipe.json]`
 
 - if `recipe.json` is omitted, the JSON envelope is read from `stdin`
-- `stdout`: JSON serialization of the realized root `RealizedResult`
+- `stdout`: JSON serialization of the realized root `RealizedObject`
 - `stderr`: live progress log unless `--quiet`
 - `--jobs/-j`: limit parallel execution, default = available CPU parallelism
 - `paths.store`: absolute path to an existing store root directory. The value
