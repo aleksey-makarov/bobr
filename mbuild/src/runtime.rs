@@ -8,7 +8,7 @@ use bobr_store::{
 };
 use mbuild_core::{
     BuildContext, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderError,
-    BuilderRun, CancellationToken, Workspace,
+    BuilderRun, BuilderRunInit, CancellationToken, Workspace,
 };
 use serde_json::Value;
 use std::fmt;
@@ -101,11 +101,11 @@ pub(crate) fn execute_builder_node(
     )
     .map(core_workspace)
     .map_err(map_store_error)?;
-    let builder_run = builder.create_run(
-        Some(build_name.to_string()),
-        build_key.to_string(),
+    let builder_run = builder.create_object(BuilderRunInit {
+        recipe_name: Some(build_name.to_string()),
+        build_key: build_key.to_string(),
         workspace,
-    );
+    });
     let logger = run_logger
         .bind_builder(&builder_run)
         .map_err(RuntimeError::Store)?;

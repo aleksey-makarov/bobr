@@ -15,8 +15,8 @@ use bobr_store::{
     publish_stored_object, remove_store_temp_dir_force,
 };
 use mbuild_core::{
-    BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderRun, CancellationToken,
-    OriginContext, RunOptions, SourceBuilder, Workspace,
+    BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderClassBase, BuilderRun,
+    CancellationToken, OriginContext, RunOptions, SourceBuilderClass, SourceBuilderInit, Workspace,
 };
 use serde_json::{Map, Value, to_string_pretty};
 use std::collections::{HashMap, VecDeque};
@@ -816,13 +816,13 @@ fn execute_source_recipe(
     let workspace = create_workspace(layout, "Source", Some(recipe.name.clone()), key.to_string())
         .map_err(map_store_error)?;
     let workspace = core_workspace(workspace);
-    let source_builder = SourceBuilder::new(
-        recipe.name,
-        key.to_string(),
-        recipe.object_hash,
-        recipe.origin,
+    let source_builder = SourceBuilderClass.create_object(SourceBuilderInit {
+        recipe_name: recipe.name,
+        build_key: key.to_string(),
+        declared_object_hash: recipe.object_hash,
+        origin: recipe.origin,
         workspace,
-    );
+    });
     let logger = run_logger
         .bind_source(&source_builder)
         .map_err(RuntimeError::Store)?;
