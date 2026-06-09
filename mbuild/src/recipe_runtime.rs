@@ -16,7 +16,7 @@ use bobr_store::{
 };
 use mbuild_core::{
     BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderClassBase, BuilderRun,
-    CancellationToken, OriginContext, RunOptions, SourceBuilderClass, SourceBuilderInit, Workspace,
+    CancellationToken, OriginContext, SourceBuilderClass, SourceBuilderInit, Workspace,
 };
 use serde_json::{Map, Value, to_string_pretty};
 use std::collections::{HashMap, VecDeque};
@@ -71,19 +71,16 @@ pub fn run_recipe_envelope(
     let emit_progress = !options.quiet.unwrap_or(false);
     check_cancelled(&cancellation)?;
 
-    let layout = Store::create(&paths.store).map_err(map_store_error)?;
-    let logger: Arc<BuildRunLogger> = Arc::new(
-        build_run_logger_for_store(&layout, RunOptions { emit_progress })
-            .map_err(RuntimeError::Store)?,
-    );
+    let store = Store::create(&paths.store).map_err(map_store_error)?;
+    let logger: Arc<BuildRunLogger> =
+        Arc::new(build_run_logger_for_store(&store, emit_progress).map_err(RuntimeError::Store)?);
 
     let mut nodes = HashMap::new();
-    let graph = collect_graph(&request, "root", &mut nodes)?;
-    let root_key = graph.root_key;
+    let root_key = collect_graph(&request, &mut nodes)?;
     let root_recipe = request.node("root")?;
     let root_name = root_recipe.name().to_string();
     let root_tag = root_recipe.tag().to_string();
-    ensure_planned(&layout, &mut nodes, root_key, layout.created_at())?;
+    ensure_planned(&store, &mut nodes, root_key, store.created_at())?;
 
     let mut completed = HashMap::new();
     for (key, node) in &nodes {
@@ -109,13 +106,13 @@ pub fn run_recipe_envelope(
             }
         };
         publish_reused_root(
-            &layout, &logger, root_key, &root_tag, &root_name, &realized, origin,
+            &store, &logger, root_key, &root_tag, &root_name, &realized, origin,
         )?;
         return Ok(realized);
     }
 
     execute_misses(
-        &layout,
+        &store,
         logger,
         &nodes,
         &mut completed,
@@ -140,7 +137,7 @@ fn default_jobs() -> usize {
 }
 
 fn ensure_planned(
-    layout: &Store,
+    store: &Store,
     nodes: &mut HashMap<BuildKey, PlannedNode>,
     key: BuildKey,
     created_at: &str,
@@ -157,7 +154,7 @@ fn ensure_planned(
 
     match &recipe {
         PlannedRecipe::Builder(_) => {
-            if let Some(published) = lookup_build_handle(layout, key)? {
+            if let Some(published) = lookup_build_handle(store, key)? {
                 let node = nodes.get_mut(&key).ok_or_else(|| {
                     RuntimeError::Store(format!("missing planned node for key '{}'", key))
                 })?;
@@ -177,10 +174,10 @@ fn ensure_planned(
                 Ok::<_, RuntimeError>(())
             })?;
             for dep in deps {
-                ensure_planned(layout, nodes, dep, created_at)?;
+                ensure_planned(store, nodes, dep, created_at)?;
             }
 
-            if let Some(realized) = lookup_canonical_for_planned_node(layout, nodes, key)? {
+            if let Some(realized) = lookup_canonical_for_planned_node(store, nodes, key)? {
                 let node = nodes.get_mut(&key).ok_or_else(|| {
                     RuntimeError::Store(format!("missing planned node for key '{}'", key))
                 })?;
@@ -199,7 +196,7 @@ fn ensure_planned(
             let node = nodes.get_mut(&key).ok_or_else(|| {
                 RuntimeError::Store(format!("missing planned node for key '{}'", key))
             })?;
-            match lookup_source_object(layout, source.object_hash, created_at)
+            match lookup_source_object(store, source.object_hash, created_at)
                 .map_err(map_store_error)?
             {
                 SourceLookup::Hit(stored) => {
@@ -219,7 +216,7 @@ fn ensure_planned(
 }
 
 fn publish_reused_root(
-    layout: &Store,
+    store: &Store,
     logger: &Arc<BuildRunLogger>,
     key: BuildKey,
     root_tag: &str,
@@ -228,7 +225,7 @@ fn publish_reused_root(
     origin: ReuseOrigin,
 ) -> Result<(), RuntimeError> {
     let workspace = create_workspace(
-        layout,
+        store,
         root_tag,
         Some(root_name.to_string()),
         key.to_string(),
@@ -262,7 +259,7 @@ fn publish_reused_root(
             ReuseOrigin::CanonicalObject => "reusing existing canonical object",
         },
     );
-    publish_stored_object(layout, root_name, realized.object_hash).map_err(map_store_error)?;
+    publish_stored_object(store, root_name, realized.object_hash).map_err(map_store_error)?;
     log_runtime_event(
         node_logger.as_ref(),
         BuildLogLevel::Info,
@@ -277,12 +274,12 @@ fn publish_reused_root(
         raw_log_path: None,
         details: serde_json::Map::new(),
     });
-    cleanup_workspace_temp_dir(layout, root_run.temp_dir(), node_logger.as_ref());
+    cleanup_workspace_temp_dir(store, root_run.temp_dir(), node_logger.as_ref());
     Ok(())
 }
 
 fn lookup_canonical_for_planned_node(
-    layout: &Store,
+    store: &Store,
     nodes: &HashMap<BuildKey, PlannedNode>,
     key: BuildKey,
 ) -> Result<Option<RealizedObject>, RuntimeError> {
@@ -315,13 +312,13 @@ fn lookup_canonical_for_planned_node(
     }
 
     Ok(
-        lookup_canonical_object(layout, spec.tag, config, &input_identities, key)?
+        lookup_canonical_object(store, spec.tag, config, &input_identities, key)?
             .map(|published| realized_object_from_record(Some(key), &published.object_record)),
     )
 }
 
 fn execute_misses(
-    layout: &Store,
+    store: &Store,
     logger: Arc<BuildRunLogger>,
     nodes: &HashMap<BuildKey, PlannedNode>,
     completed: &mut HashMap<BuildKey, RealizedObject>,
@@ -359,7 +356,7 @@ fn execute_misses(
     let mut in_flight = HashMap::<BuildKey, JoinHandle<()>>::new();
     let mut last_wait_log: Option<Instant> = None;
     let scheduler_workspace = create_workspace(
-        layout,
+        store,
         "Scheduler",
         Some("executor".to_string()),
         root_key.to_string(),
@@ -375,7 +372,7 @@ fn execute_misses(
     let scheduler_logger = logger
         .bind_builder(&scheduler_run)
         .map_err(RuntimeError::Store)?;
-    cleanup_workspace_temp_dir(layout, scheduler_run.temp_dir(), scheduler_logger.as_ref());
+    cleanup_workspace_temp_dir(store, scheduler_run.temp_dir(), scheduler_logger.as_ref());
 
     while !completed.contains_key(&root_key) {
         if first_error.is_none() && cancellation.is_cancelled() {
@@ -394,21 +391,21 @@ fn execute_misses(
             let node = nodes.get(&key).ok_or_else(|| {
                 RuntimeError::Store(format!("missing planned node for key '{}'", key))
             })?;
-            let layout = layout.clone();
+            let store = store.clone();
             let logger = logger.clone();
             let tx = tx.clone();
             let cancellation = cancellation.clone();
             let recipe = node.recipe.clone();
             let builder_inputs = match &recipe {
                 PlannedRecipe::Builder(builder_recipe) => {
-                    Some(build_resolved_inputs(&layout, builder_recipe, completed)?)
+                    Some(build_resolved_inputs(&store, builder_recipe, completed)?)
                 }
                 PlannedRecipe::Source(_) => None,
             };
             let handle = thread::spawn(move || {
                 let result = match recipe {
                     PlannedRecipe::Builder(builder_recipe) => execute_builder_recipe(
-                        &layout,
+                        &store,
                         logger,
                         key,
                         builder_recipe,
@@ -416,7 +413,7 @@ fn execute_misses(
                         builder_inputs.expect("builder inputs must be prepared"),
                     ),
                     PlannedRecipe::Source(source_recipe) => {
-                        execute_source_recipe(&layout, logger, key, cancellation, source_recipe)
+                        execute_source_recipe(&store, logger, key, cancellation, source_recipe)
                     }
                 };
                 let _ = tx.send((key, result));
@@ -497,7 +494,7 @@ fn execute_misses(
         let node = nodes.get(&key).ok_or_else(|| {
             RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
-        publish_stored_object(layout, &node.publish_name, executed.realized.object_hash)
+        publish_stored_object(store, &node.publish_name, executed.realized.object_hash)
             .map_err(map_store_error)?;
         log_runtime_event(
             executed.logger.as_ref(),
@@ -673,7 +670,7 @@ fn short_build_key(key: BuildKey) -> String {
 }
 
 fn build_resolved_inputs(
-    layout: &Store,
+    store: &Store,
     recipe: &PlannedBuilderRecipe,
     completed: &HashMap<BuildKey, RealizedObject>,
 ) -> Result<ResolvedInputs, RuntimeError> {
@@ -685,14 +682,14 @@ fn build_resolved_inputs(
                 input_name, recipe.name
             ))
         })?;
-        let dep = resolved_dependency_from_completed(layout, completed, key)?;
+        let dep = resolved_dependency_from_completed(store, completed, key)?;
         inputs.insert(input_name, dep);
     }
     Ok(inputs)
 }
 
 fn resolved_dependency_from_completed(
-    layout: &Store,
+    store: &Store,
     completed: &HashMap<BuildKey, RealizedObject>,
     key: BuildKey,
 ) -> Result<ResolvedDependency, RuntimeError> {
@@ -704,12 +701,12 @@ fn resolved_dependency_from_completed(
     })?;
     Ok(ResolvedDependency {
         object_hash: realized.object_hash,
-        object_path: layout.object_path(realized.object_hash),
+        object_path: store.object_path(realized.object_hash),
     })
 }
 
 fn execute_builder_recipe(
-    layout: &Store,
+    store: &Store,
     logger: Arc<BuildRunLogger>,
     key: BuildKey,
     recipe: PlannedBuilderRecipe,
@@ -717,7 +714,7 @@ fn execute_builder_recipe(
     inputs: ResolvedInputs,
 ) -> Result<ExecutedNode, RuntimeError> {
     let executed = execute_builder_node(ExecuteBuilderNodeRequest {
-        layout,
+        store,
         builder: builders::get_builder(recipe.spec.tag).ok_or_else(|| {
             RuntimeError::UnknownBuilder(format!(
                 "unknown builder tag '{}'; supported builders: {}",
@@ -739,13 +736,13 @@ fn execute_builder_recipe(
 }
 
 fn execute_source_recipe(
-    layout: &Store,
+    store: &Store,
     run_logger: Arc<BuildRunLogger>,
     key: BuildKey,
     cancellation: CancellationToken,
     recipe: PlannedSourceRecipe,
 ) -> Result<ExecutedNode, RuntimeError> {
-    let workspace = create_workspace(layout, "Source", Some(recipe.name.clone()), key.to_string())
+    let workspace = create_workspace(store, "Source", Some(recipe.name.clone()), key.to_string())
         .map_err(map_store_error)?;
     let workspace = core_workspace(workspace);
     let source_builder = SourceBuilderClass.create_object(SourceBuilderInit {
@@ -765,14 +762,14 @@ fn execute_source_recipe(
         "starting builder node",
     );
     if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_workspace_temp_dir(layout, source_builder.temp_dir(), logger.as_ref());
+        cleanup_workspace_temp_dir(store, source_builder.temp_dir(), logger.as_ref());
         return Err(error);
     }
 
     match lookup_source_object(
-        layout,
+        store,
         source_builder.declared_object_hash(),
-        layout.created_at(),
+        store.created_at(),
     )
     .map_err(map_store_error)?
     {
@@ -783,7 +780,7 @@ fn execute_source_recipe(
                 "object-hit",
                 "reusing existing source object",
             );
-            cleanup_workspace_temp_dir(layout, source_builder.temp_dir(), logger.as_ref());
+            cleanup_workspace_temp_dir(store, source_builder.temp_dir(), logger.as_ref());
             return Ok(ExecutedNode {
                 realized: realized_object_from_record(None, &stored.object_record),
                 logger,
@@ -805,13 +802,13 @@ fn execute_source_recipe(
             source_builder.declared_object_hash()
         );
         log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
-        cleanup_workspace_temp_dir(layout, source_builder.temp_dir(), logger.as_ref());
+        cleanup_workspace_temp_dir(store, source_builder.temp_dir(), logger.as_ref());
         return Err(RuntimeError::Build(message));
     }
 
     let temp_root = source_builder.temp_dir().to_path_buf();
     if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_workspace_temp_dir(layout, &temp_root, logger.as_ref());
+        cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
         return Err(error);
     }
     let staged_path = match source_builder
@@ -822,7 +819,7 @@ fn execute_source_recipe(
         }) {
         Ok(path) => path,
         Err(error) => {
-            cleanup_workspace_temp_dir(layout, &temp_root, logger.as_ref());
+            cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
             log_runtime_event(
                 logger.as_ref(),
                 BuildLogLevel::Error,
@@ -833,7 +830,7 @@ fn execute_source_recipe(
         }
     };
     if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_workspace_temp_dir(layout, &temp_root, logger.as_ref());
+        cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
         return Err(error);
     }
     log_runtime_event(
@@ -844,20 +841,20 @@ fn execute_source_recipe(
     );
 
     let import_outcome = import_source_object(
-        layout,
+        store,
         source_builder.declared_object_hash(),
         &staged_path,
-        layout.created_at(),
+        store.created_at(),
     )
     .map_err(|error| {
-        cleanup_workspace_temp_dir(layout, &temp_root, logger.as_ref());
+        cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
         map_store_error(error)
     })?;
     if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_workspace_temp_dir(layout, &temp_root, logger.as_ref());
+        cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
         return Err(error);
     }
-    cleanup_workspace_temp_dir(layout, &temp_root, logger.as_ref());
+    cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
 
     match import_outcome {
         SourceImportOutcome::Matched(stored) => Ok(ExecutedNode {
@@ -878,11 +875,15 @@ fn execute_source_recipe(
 }
 
 fn build_run_logger_for_store(
-    layout: &Store,
-    options: RunOptions,
+    store: &Store,
+    emit_progress: bool,
 ) -> Result<BuildRunLogger, String> {
-    let locations = layout.run_log_locations();
-    BuildRunLogger::new(locations.run_log_dir(), locations.created_at(), options)
+    let locations = store.run_log_locations();
+    BuildRunLogger::new(
+        locations.run_log_dir(),
+        locations.created_at(),
+        emit_progress,
+    )
 }
 
 fn core_workspace(workspace: StoreWorkspace) -> Workspace {
@@ -893,8 +894,8 @@ fn core_workspace(workspace: StoreWorkspace) -> Workspace {
     )
 }
 
-fn cleanup_workspace_temp_dir(layout: &Store, temp_dir: &Path, logger: &dyn BuildLogger) {
-    if let Err(error) = remove_store_temp_dir_force(layout, temp_dir) {
+fn cleanup_workspace_temp_dir(store: &Store, temp_dir: &Path, logger: &dyn BuildLogger) {
+    if let Err(error) = remove_store_temp_dir_force(store, temp_dir) {
         log_runtime_event(
             logger,
             BuildLogLevel::Warn,
@@ -939,8 +940,8 @@ mod tests {
         Store::create(&store_root).unwrap()
     }
 
-    fn create_test_logger(layout: &Store) -> Arc<BuildRunLogger> {
-        Arc::new(build_run_logger_for_store(layout, RunOptions::default()).unwrap())
+    fn create_test_logger(store: &Store) -> Arc<BuildRunLogger> {
+        Arc::new(build_run_logger_for_store(store, false).unwrap())
     }
 
     fn workspace_metadata(root: &Path, tag: &str, name: &str) -> serde_json::Value {
@@ -1006,7 +1007,7 @@ mod tests {
     #[test]
     fn lookup_canonical_for_planned_node_uses_dependency_object_hashes() {
         let temp = tempdir().unwrap();
-        let layout = create_test_store(temp.path());
+        let store = create_test_store(temp.path());
         let request = RecipeEnvelope::parse_json(
             br##"{
                 "paths": {
@@ -1059,8 +1060,7 @@ mod tests {
         .request;
 
         let mut nodes = HashMap::new();
-        let graph = collect_graph(&request, "root", &mut nodes).unwrap();
-        let root_key = graph.root_key;
+        let root_key = collect_graph(&request, &mut nodes).unwrap();
         let dep_keys = {
             let mut keys = Vec::new();
             nodes
@@ -1106,7 +1106,7 @@ mod tests {
         fs::create_dir_all(&stage_dir).unwrap();
         fs::write(stage_dir.join("payload"), b"ok\n").unwrap();
         publish_build(
-            &layout,
+            &store,
             PublishRequest {
                 publication_name: "bin".to_string(),
                 build_key: root_key,
@@ -1118,7 +1118,7 @@ mod tests {
         )
         .unwrap();
 
-        let published = lookup_canonical_for_planned_node(&layout, &nodes, root_key)
+        let published = lookup_canonical_for_planned_node(&store, &nodes, root_key)
             .unwrap()
             .expect("expected canonical object hit");
         assert_eq!(published.build_key, Some(root_key));
@@ -1127,8 +1127,8 @@ mod tests {
     #[test]
     fn source_temp_dir_is_removed_when_cancelled_after_materialize() {
         let temp = tempdir().unwrap();
-        let layout = create_test_store(temp.path());
-        let logger = create_test_logger(&layout);
+        let store = create_test_store(temp.path());
+        let logger = create_test_logger(&store);
         let cancellation = CancellationToken::new();
         let object_hash = "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
@@ -1144,7 +1144,7 @@ mod tests {
             })),
         };
 
-        let error = execute_source_recipe(&layout, logger, key, cancellation, recipe)
+        let error = execute_source_recipe(&store, logger, key, cancellation, recipe)
             .expect_err("expected cancellation");
 
         assert_eq!(error.class(), "cancelled");

@@ -173,37 +173,15 @@ pub(crate) enum ReuseOrigin {
     CanonicalObject,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub(crate) struct CollectedGraph {
-    pub(crate) root_key: BuildKey,
-    pub(crate) node_keys: HashMap<String, BuildKey>,
-    pub(crate) topo_order: Vec<String>,
-}
-
 pub(crate) fn collect_graph(
     request: &RecipeRequest,
-    node_id: &str,
     nodes: &mut HashMap<BuildKey, PlannedNode>,
-) -> Result<CollectedGraph, RuntimeError> {
+) -> Result<BuildKey, RuntimeError> {
     builders::validate_registered_builders().map_err(RuntimeError::InvalidRequest)?;
 
     let mut stack = BTreeSet::new();
     let mut node_keys = HashMap::new();
-    let mut topo_order = Vec::new();
-    let root_key = collect_graph_inner(
-        request,
-        node_id,
-        nodes,
-        &mut stack,
-        &mut node_keys,
-        &mut topo_order,
-    )?;
-    Ok(CollectedGraph {
-        root_key,
-        node_keys,
-        topo_order,
-    })
+    collect_graph_inner(request, "root", nodes, &mut stack, &mut node_keys)
 }
 
 fn collect_graph_inner(
@@ -212,7 +190,6 @@ fn collect_graph_inner(
     nodes: &mut HashMap<BuildKey, PlannedNode>,
     stack: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, BuildKey>,
-    topo_order: &mut Vec<String>,
 ) -> Result<BuildKey, RuntimeError> {
     if let Some(existing) = node_keys.get(node_id) {
         return Ok(*existing);
@@ -227,7 +204,7 @@ fn collect_graph_inner(
     let recipe = request.node(node_id)?;
     let (key, planned_recipe) = match recipe {
         Recipe::Builder(recipe) => {
-            collect_builder_recipe(request, recipe, nodes, stack, node_keys, topo_order)?
+            collect_builder_recipe(request, recipe, nodes, stack, node_keys)?
         }
         Recipe::Source(recipe) => {
             let key = source_planning_key(recipe.object_hash)?;
@@ -250,17 +227,15 @@ fn collect_graph_inner(
         .entry(key)
         .or_insert_with(|| PlannedNode::new(planned_recipe, publish_name));
     node_keys.insert(node_id.to_string(), key);
-    topo_order.push(node_id.to_string());
     Ok(key)
 }
 
 fn collect_builder_recipe(
     request: &RecipeRequest,
     recipe: &BuilderRecipe,
-    _nodes: &mut HashMap<BuildKey, PlannedNode>,
+    nodes: &mut HashMap<BuildKey, PlannedNode>,
     stack: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, BuildKey>,
-    topo_order: &mut Vec<String>,
 ) -> Result<(BuildKey, PlannedRecipe), RuntimeError> {
     let builder = builders::get_builder(&recipe.tag).ok_or_else(|| {
         RuntimeError::UnknownBuilder(format!(
@@ -295,7 +270,7 @@ fn collect_builder_recipe(
 
     let mut ordered_direct_deps = Vec::new();
     for (input_name, child_id) in &recipe.inputs {
-        let key = collect_graph_inner(request, child_id, _nodes, stack, node_keys, topo_order)?;
+        let key = collect_graph_inner(request, child_id, nodes, stack, node_keys)?;
         inputs.insert(input_name.clone(), key);
     }
     for input_name in spec.ordered_present_input_names(&inputs) {
@@ -591,11 +566,11 @@ mod tests {
 
     fn collect_one(
         request: &Value,
-    ) -> Result<(CollectedGraph, HashMap<BuildKey, PlannedNode>), RuntimeError> {
+    ) -> Result<(BuildKey, HashMap<BuildKey, PlannedNode>), RuntimeError> {
         let request = parse_request_value(request.clone(), "$")?;
         let mut nodes = HashMap::new();
-        let graph = collect_graph(&request, "root", &mut nodes)?;
-        Ok((graph, nodes))
+        let root_key = collect_graph(&request, &mut nodes)?;
+        Ok((root_key, nodes))
     }
 
     fn tree_config(path: &str, text: &str, executable: bool) -> Value {
@@ -664,8 +639,8 @@ mod tests {
                 }
             }
         });
-        let (graph, nodes) = collect_one(&request).unwrap();
-        let node = nodes.get(&graph.root_key).unwrap();
+        let (root_key, nodes) = collect_one(&request).unwrap();
+        let node = nodes.get(&root_key).unwrap();
         assert!(matches!(node.recipe, PlannedRecipe::Source(_)));
     }
 
@@ -683,8 +658,8 @@ mod tests {
                 }
             }
         });
-        let (graph, nodes) = collect_one(&request).unwrap();
-        let node = nodes.get(&graph.root_key).unwrap();
+        let (root_key, nodes) = collect_one(&request).unwrap();
+        let node = nodes.get(&root_key).unwrap();
         assert!(matches!(node.recipe, PlannedRecipe::Source(_)));
     }
 
@@ -697,8 +672,8 @@ mod tests {
                 "object_hash": "1111111111111111111111111111111111111111111111111111111111111111"
             }
         });
-        let (graph, nodes) = collect_one(&request).unwrap();
-        let node = nodes.get(&graph.root_key).unwrap();
+        let (root_key, nodes) = collect_one(&request).unwrap();
+        let node = nodes.get(&root_key).unwrap();
         let PlannedRecipe::Source(source) = &node.recipe else {
             panic!("expected source recipe");
         };
@@ -719,8 +694,8 @@ mod tests {
                 }
             }
         });
-        let (graph, nodes) = collect_one(&request).unwrap();
-        let node = nodes.get(&graph.root_key).unwrap();
+        let (root_key, nodes) = collect_one(&request).unwrap();
+        let node = nodes.get(&root_key).unwrap();
         let PlannedRecipe::Source(source) = &node.recipe else {
             panic!("expected source recipe");
         };
@@ -757,8 +732,8 @@ mod tests {
                 "object_hash": "1111111111111111111111111111111111111111111111111111111111111111\n"
             }
         });
-        let (graph, nodes) = collect_one(&request).unwrap();
-        let node = nodes.get(&graph.root_key).unwrap();
+        let (root_key, nodes) = collect_one(&request).unwrap();
+        let node = nodes.get(&root_key).unwrap();
         let PlannedRecipe::Source(source) = &node.recipe else {
             panic!("expected source recipe");
         };
@@ -869,7 +844,7 @@ mod tests {
             "source": source.clone()
         });
 
-        let (graph, _) = collect_one(&request).unwrap();
+        let (root_key, _) = collect_one(&request).unwrap();
         let rootfs_key = compute_build_key("Tree", &rootfs["config"], &[]).unwrap();
         let script_key = compute_build_key("Tree", &script["config"], &[]).unwrap();
         let source_key = source_planning_key(
@@ -885,7 +860,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(graph.root_key, expected);
+        assert_eq!(root_key, expected);
     }
 
     #[test]
@@ -904,13 +879,11 @@ mod tests {
             "binary-b": tree_recipe("binary-b", "same.txt", "same", false)
         });
 
-        let (graph, nodes) = collect_one(&request).unwrap();
-        let a_key = *graph.node_keys.get("binary-a").unwrap();
-        let b_key = *graph.node_keys.get("binary-b").unwrap();
-        assert_eq!(a_key, b_key);
-        let node = nodes.get(&a_key).unwrap();
+        let (_root_key, nodes) = collect_one(&request).unwrap();
+        let deduped_key =
+            compute_build_key("Tree", &tree_config("same.txt", "same", false), &[]).unwrap();
+        let node = nodes.get(&deduped_key).unwrap();
         assert_eq!(node.publish_name, "binary-a");
-        assert_eq!(graph.topo_order.last().map(String::as_str), Some("root"));
     }
 
     #[test]

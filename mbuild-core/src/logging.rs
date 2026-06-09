@@ -97,11 +97,6 @@ impl RunTimestamp {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RunOptions {
-    pub emit_progress: bool,
-}
-
 #[derive(Debug)]
 pub struct BuildRunLogger {
     run_log_dir: PathBuf,
@@ -112,7 +107,7 @@ pub struct BuildRunLogger {
 }
 
 impl BuildRunLogger {
-    pub fn new(run_log_dir: &Path, created_at: &str, options: RunOptions) -> Result<Self, String> {
+    pub fn new(run_log_dir: &Path, created_at: &str, emit_progress: bool) -> Result<Self, String> {
         fs::create_dir_all(run_log_dir).map_err(|error| {
             format!(
                 "failed to create run log directory '{}': {error}",
@@ -131,7 +126,7 @@ impl BuildRunLogger {
         Ok(Self {
             run_log_dir: run_log_dir.to_path_buf(),
             event_log_path,
-            emit_progress: options.emit_progress,
+            emit_progress,
             run_timestamp: RunTimestamp::from_created_at(created_at),
             writer: Mutex::new(BufWriter::new(file)),
         })
@@ -453,12 +448,6 @@ fn create_event_log_file(path: &Path) -> Result<File, String> {
         .map_err(|error| error.to_string())
 }
 
-impl fmt::Display for RunOptions {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "RunOptions {{ emit_progress: {} }}", self.emit_progress)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,12 +461,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let run_log_dir = temp.path().join("logs").join("260603123456");
         let logger = Arc::new(
-            BuildRunLogger::new(
-                &run_log_dir,
-                "2026-06-03T12:34:56.000000000Z",
-                RunOptions::default(),
-            )
-            .unwrap(),
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
         );
         let build_key = "1111111111111111111111111111111111111111111111111111111111111111";
         let subject_dir = run_log_dir.join("00000000-Sandbox-bash");
@@ -531,12 +515,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let run_log_dir = temp.path().join("logs").join("260603123456");
         let logger = Arc::new(
-            BuildRunLogger::new(
-                &run_log_dir,
-                "2026-06-03T12:34:56.000000000Z",
-                RunOptions::default(),
-            )
-            .unwrap(),
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
         );
         let build_key = "2222222222222222222222222222222222222222222222222222222222222222";
         let subject_dir = run_log_dir.join("00000000-Sandbox-bash_debug_test");

@@ -59,7 +59,7 @@ impl fmt::Display for RuntimeError {
 impl std::error::Error for RuntimeError {}
 
 pub(crate) struct ExecuteBuilderNodeRequest<'a> {
-    pub(crate) layout: &'a Store,
+    pub(crate) store: &'a Store,
     pub(crate) builder: &'static dyn Builder,
     pub(crate) build_key: BuildKey,
     pub(crate) build_name: &'a str,
@@ -79,7 +79,7 @@ pub(crate) fn execute_builder_node(
     request: ExecuteBuilderNodeRequest<'_>,
 ) -> Result<ExecutedBuilderNode, RuntimeError> {
     let ExecuteBuilderNodeRequest {
-        layout,
+        store,
         builder,
         build_key,
         build_name,
@@ -94,7 +94,7 @@ pub(crate) fn execute_builder_node(
         .ordered_reuse_input_identities(builder.spec())
         .map_err(map_builder_error)?;
     let workspace = create_workspace(
-        layout,
+        store,
         builder.spec().tag,
         Some(build_name.to_string()),
         build_key.to_string(),
@@ -116,7 +116,7 @@ pub(crate) fn execute_builder_node(
         "starting builder node",
     );
 
-    if let Some(published) = load_build_handle(layout, build_key).map_err(map_store_error)? {
+    if let Some(published) = load_build_handle(store, build_key).map_err(map_store_error)? {
         log_runtime_event(
             logger.as_ref(),
             BuildLogLevel::Info,
@@ -125,7 +125,7 @@ pub(crate) fn execute_builder_node(
         );
         cleanup_temp_dir(
             builder_run.temp_dir(),
-            &TempCleanupContext::new(layout, builder.spec().tag, build_key),
+            &TempCleanupContext::new(store, builder.spec().tag, build_key),
             logger.as_ref(),
         );
         return Ok(ExecutedBuilderNode { published, logger });
@@ -134,7 +134,7 @@ pub(crate) fn execute_builder_node(
     let reuse_key = compute_reuse_key(builder.spec().tag, &config, &inputs_identity)
         .map_err(map_store_error)?;
     if let Some(published) =
-        resolve_reuse_for_build(layout, build_key, reuse_key).map_err(map_store_error)?
+        resolve_reuse_for_build(store, build_key, reuse_key).map_err(map_store_error)?
     {
         log_runtime_event(
             logger.as_ref(),
@@ -144,7 +144,7 @@ pub(crate) fn execute_builder_node(
         );
         cleanup_temp_dir(
             builder_run.temp_dir(),
-            &TempCleanupContext::new(layout, builder.spec().tag, build_key),
+            &TempCleanupContext::new(store, builder.spec().tag, build_key),
             logger.as_ref(),
         );
         return Ok(ExecutedBuilderNode { published, logger });
@@ -157,9 +157,9 @@ pub(crate) fn execute_builder_node(
         "executing builder",
     );
     check_cancelled(&cancellation)?;
-    let cleanup = TempCleanupContext::new(layout, builder.spec().tag, build_key);
+    let cleanup = TempCleanupContext::new(store, builder.spec().tag, build_key);
     let mut context = build_context(
-        layout,
+        store,
         &builder_run,
         build_key,
         logger.clone(),
@@ -190,19 +190,19 @@ pub(crate) fn execute_builder_node(
     }
     let published = match staged.object_hash {
         Some(object_hash) => materialize_build_with_trusted_hash(
-            layout,
+            store,
             build_key,
             reuse_key,
-            layout.created_at(),
+            store.created_at(),
             inputs_identity,
             &staged.staged_path,
             object_hash,
         ),
         None => materialize_build(
-            layout,
+            store,
             build_key,
             reuse_key,
-            layout.created_at(),
+            store.created_at(),
             inputs_identity,
             &staged.staged_path,
         ),
@@ -230,31 +230,31 @@ fn core_workspace(workspace: StoreWorkspace) -> Workspace {
 }
 
 pub(crate) fn lookup_build_handle(
-    layout: &Store,
+    store: &Store,
     build_key: BuildKey,
 ) -> Result<Option<PublishedBuild>, RuntimeError> {
-    load_build_handle(layout, build_key).map_err(map_store_error)
+    load_build_handle(store, build_key).map_err(map_store_error)
 }
 
 pub(crate) fn lookup_canonical_object(
-    layout: &Store,
+    store: &Store,
     builder_tag: &str,
     config: &Value,
     inputs: &[ReuseInputIdentity],
     build_key: BuildKey,
 ) -> Result<Option<PublishedBuild>, RuntimeError> {
     let reuse_key = compute_reuse_key(builder_tag, config, inputs).map_err(map_store_error)?;
-    resolve_reuse_for_build(layout, build_key, reuse_key).map_err(map_store_error)
+    resolve_reuse_for_build(store, build_key, reuse_key).map_err(map_store_error)
 }
 
 pub(crate) fn build_context(
-    layout: &Store,
+    store: &Store,
     builder_run: &BuilderRun,
     build_key: BuildKey,
     logger: Arc<dyn BuildLogger>,
     cancellation: CancellationToken,
 ) -> Result<BuildContext, RuntimeError> {
-    let cleanup = TempCleanupContext::new(layout, builder_run.tag(), build_key);
+    let cleanup = TempCleanupContext::new(store, builder_run.tag(), build_key);
     recreate_empty_temp_dir_with_quarantine(builder_run.temp_dir(), &cleanup, logger.as_ref())?;
     Ok(
         BuildContext::with_noop_logger(builder_run.temp_dir().to_path_buf())
@@ -323,7 +323,7 @@ fn recreate_empty_temp_dir_with_quarantine(
         });
     }
 
-    match recreate_store_temp_dir_force(&cleanup.layout, temp_dir) {
+    match recreate_store_temp_dir_force(&cleanup.store, temp_dir) {
         Ok(()) => return Ok(()),
         Err(error) if fs::symlink_metadata(temp_dir).is_ok() => {
             quarantine_temp_path(temp_dir, cleanup, logger, error.to_string())
@@ -360,16 +360,16 @@ enum TempCleanupMode {
 
 #[derive(Debug)]
 struct TempCleanupContext {
-    layout: Store,
+    store: Store,
     builder_tag: String,
     build_key: BuildKey,
     mode: TempCleanupMode,
 }
 
 impl TempCleanupContext {
-    fn new(layout: &Store, builder_tag: &str, build_key: BuildKey) -> Self {
+    fn new(store: &Store, builder_tag: &str, build_key: BuildKey) -> Self {
         Self {
-            layout: layout.clone(),
+            store: store.clone(),
             builder_tag: builder_tag.to_string(),
             build_key,
             mode: cleanup_mode_for_builder(builder_tag),
@@ -389,7 +389,7 @@ fn cleanup_temp_dir(temp_dir: &Path, cleanup: &TempCleanupContext, logger: &dyn 
     if cleanup.mode == TempCleanupMode::DirectQuarantine {
         if fs::symlink_metadata(temp_dir).is_ok() {
             if is_empty_directory(temp_dir) {
-                if let Err(error) = remove_store_temp_dir_force(&cleanup.layout, temp_dir) {
+                if let Err(error) = remove_store_temp_dir_force(&cleanup.store, temp_dir) {
                     log_runtime_event(
                         logger,
                         BuildLogLevel::Warn,
@@ -426,7 +426,7 @@ fn cleanup_temp_dir(temp_dir: &Path, cleanup: &TempCleanupContext, logger: &dyn 
         return;
     }
 
-    if let Err(error) = remove_store_temp_dir_force(&cleanup.layout, temp_dir) {
+    if let Err(error) = remove_store_temp_dir_force(&cleanup.store, temp_dir) {
         if fs::symlink_metadata(temp_dir).is_ok() {
             match quarantine_temp_path(temp_dir, cleanup, logger, error.to_string()) {
                 Ok(_) => return,
@@ -464,7 +464,7 @@ fn quarantine_temp_path(
     reason: String,
 ) -> Result<PathBuf, String> {
     let quarantined = quarantine_store_temp(
-        &cleanup.layout,
+        &cleanup.store,
         StoreTempQuarantineRequest {
             temp_path: temp_dir.to_path_buf(),
             builder_tag: cleanup.builder_tag.clone(),
@@ -505,7 +505,7 @@ mod tests {
     use bobr_store::{PublishRequest, ReuseInputIdentity, create_workspace, publish_build};
     use mbuild_core::{
         BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, BuilderRun, BuilderSpec,
-        CancellationToken, RunOptions, StagedBuildResult, TypedBuilder,
+        CancellationToken, StagedBuildResult, TypedBuilder,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
@@ -520,29 +520,23 @@ mod tests {
         Store::create(&store_root).unwrap()
     }
 
-    fn create_test_logger(layout: &Store) -> Arc<BuildRunLogger> {
-        let locations = layout.run_log_locations();
+    fn create_test_logger(store: &Store) -> Arc<BuildRunLogger> {
+        let locations = store.run_log_locations();
         Arc::new(
-            BuildRunLogger::new(
-                locations.run_log_dir(),
-                locations.created_at(),
-                RunOptions::default(),
-            )
-            .unwrap(),
+            BuildRunLogger::new(locations.run_log_dir(), locations.created_at(), false).unwrap(),
         )
     }
 
     fn create_test_builder_run(
-        layout: &Store,
+        store: &Store,
         run_logger: &Arc<BuildRunLogger>,
         tag: &str,
         name: &str,
         build_key: BuildKey,
     ) -> (BuilderRun, Arc<dyn BuildLogger>) {
-        let workspace =
-            create_workspace(layout, tag, Some(name.to_string()), build_key.to_string())
-                .map(core_workspace)
-                .unwrap();
+        let workspace = create_workspace(store, tag, Some(name.to_string()), build_key.to_string())
+            .map(core_workspace)
+            .unwrap();
         let builder_run = BuilderRun::new(
             tag.to_string(),
             Some(name.to_string()),
@@ -770,7 +764,7 @@ mod tests {
     #[test]
     fn lookup_canonical_object_depends_on_input_object_hash() {
         let temp = tempdir().unwrap();
-        let layout = create_test_store(temp.path());
+        let store = create_test_store(temp.path());
 
         let matching_inputs = vec![ReuseInputIdentity {
             object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
@@ -788,7 +782,7 @@ mod tests {
         let stage = temp.path().join("script.sh");
         fs::write(&stage, b"echo hi\n").unwrap();
         publish_build(
-            &layout,
+            &store,
             PublishRequest {
                 publication_name: "script".to_string(),
                 build_key: build_key_for_object,
@@ -801,7 +795,7 @@ mod tests {
         .unwrap();
 
         let hit = lookup_canonical_object(
-            &layout,
+            &store,
             "RuntimeLookupTest",
             &payload,
             &matching_inputs,
@@ -818,7 +812,7 @@ mod tests {
         }];
         assert!(
             lookup_canonical_object(
-                &layout,
+                &store,
                 "RuntimeLookupTest",
                 &payload,
                 &mismatching_inputs,
@@ -832,14 +826,14 @@ mod tests {
     #[test]
     fn execute_builder_node_prepares_dirs_and_cleans_temp_on_success() {
         let temp = tempdir().unwrap();
-        let layout = create_test_store(temp.path());
-        let logger = create_test_logger(&layout);
+        let store = create_test_store(temp.path());
+        let logger = create_test_logger(&store);
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
 
         let executed = execute_builder_node(ExecuteBuilderNodeRequest {
-            layout: &layout,
+            store: &store,
             builder: &RUNTIME_TEST_BUILDER,
             build_key,
             build_name: "runtime-test",
@@ -863,12 +857,12 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let temp = tempdir().unwrap();
-        let layout = create_test_store(temp.path());
+        let store = create_test_store(temp.path());
         let config = json!({});
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
-        let run_logger = create_test_logger(&layout);
+        let run_logger = create_test_logger(&store);
         let (builder_run, logger) = create_test_builder_run(
-            &layout,
+            &store,
             &run_logger,
             "RuntimeTest",
             "runtime-test",
@@ -880,7 +874,7 @@ mod tests {
         symlink(&stale_target, &temp_dir).unwrap();
 
         let context = build_context(
-            &layout,
+            &store,
             &builder_run,
             build_key,
             logger,
@@ -907,14 +901,14 @@ mod tests {
     #[test]
     fn execute_sandbox_builder_quarantines_temp_without_removing_it() {
         let temp = tempdir().unwrap();
-        let layout = create_test_store(temp.path());
-        let logger = create_test_logger(&layout);
+        let store = create_test_store(temp.path());
+        let logger = create_test_logger(&store);
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("Sandbox", &config, &[]).unwrap();
 
         let executed = execute_builder_node(ExecuteBuilderNodeRequest {
-            layout: &layout,
+            store: &store,
             builder: &SANDBOX_RUNTIME_TEST_BUILDER,
             build_key,
             build_name: "sandbox-runtime-test",
@@ -947,12 +941,12 @@ mod tests {
     #[test]
     fn build_context_quarantines_stale_sandbox_temp_before_recreate() {
         let temp = tempdir().unwrap();
-        let layout = create_test_store(temp.path());
-        let run_logger = create_test_logger(&layout);
+        let store = create_test_store(temp.path());
+        let run_logger = create_test_logger(&store);
         let config = json!({});
         let build_key = compute_build_key("Sandbox", &config, &[]).unwrap();
         let (builder_run, logger) = create_test_builder_run(
-            &layout,
+            &store,
             &run_logger,
             "Sandbox",
             "sandbox-runtime-test",
@@ -964,7 +958,7 @@ mod tests {
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
         let context = build_context(
-            &layout,
+            &store,
             &builder_run,
             build_key,
             logger,
@@ -991,14 +985,14 @@ mod tests {
     #[test]
     fn execute_builder_node_cleans_temp_on_failure() {
         let temp = tempdir().unwrap();
-        let layout = create_test_store(temp.path());
-        let logger = create_test_logger(&layout);
+        let store = create_test_store(temp.path());
+        let logger = create_test_logger(&store);
         let config = Value::Object(Map::new());
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
 
         let error = execute_builder_node(ExecuteBuilderNodeRequest {
-            layout: &layout,
+            store: &store,
             builder: &RUNTIME_FAIL_BUILDER,
             build_key,
             build_name: "runtime-fail",
@@ -1019,11 +1013,11 @@ mod tests {
     #[test]
     fn cleanup_temp_dir_quarantines_when_remove_fails() {
         let temp = tempdir().unwrap();
-        let layout = create_test_store(temp.path());
-        let run_logger = create_test_logger(&layout);
+        let store = create_test_store(temp.path());
+        let run_logger = create_test_logger(&store);
         let build_key = compute_build_key("RuntimeTest", &json!({}), &[]).unwrap();
         let (builder_run, logger) = create_test_builder_run(
-            &layout,
+            &store,
             &run_logger,
             "RuntimeTest",
             "runtime-test",
@@ -1033,7 +1027,7 @@ mod tests {
         fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
         fs::write(&temp_dir, b"not a directory\n").unwrap();
 
-        let cleanup = TempCleanupContext::new(&layout, "RuntimeTest", build_key);
+        let cleanup = TempCleanupContext::new(&store, "RuntimeTest", build_key);
         cleanup_temp_dir(&temp_dir, &cleanup, logger.as_ref());
 
         assert!(fs::symlink_metadata(&temp_dir).is_err());
@@ -1049,14 +1043,14 @@ mod tests {
     #[test]
     fn execute_builder_node_cleans_temp_on_materialize_failure() {
         let temp = tempdir().unwrap();
-        let layout = create_test_store(temp.path());
-        let logger = create_test_logger(&layout);
+        let store = create_test_store(temp.path());
+        let logger = create_test_logger(&store);
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
 
         let error = execute_builder_node(ExecuteBuilderNodeRequest {
-            layout: &layout,
+            store: &store,
             builder: &RUNTIME_BROKEN_STAGE_BUILDER,
             build_key,
             build_name: "runtime-broken-stage",
@@ -1076,8 +1070,8 @@ mod tests {
     #[test]
     fn execute_builder_node_pre_cancelled_does_not_start_builder() {
         let temp = tempdir().unwrap();
-        let layout = create_test_store(temp.path());
-        let logger = create_test_logger(&layout);
+        let store = create_test_store(temp.path());
+        let logger = create_test_logger(&store);
         let config = json!({});
         let inputs = ResolvedInputs::empty();
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
@@ -1085,7 +1079,7 @@ mod tests {
         cancellation.cancel();
 
         let error = execute_builder_node(ExecuteBuilderNodeRequest {
-            layout: &layout,
+            store: &store,
             builder: &RUNTIME_TEST_BUILDER,
             build_key,
             build_name: "runtime-test",
