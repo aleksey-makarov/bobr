@@ -80,7 +80,7 @@ pub fn run_recipe_envelope(
     let root_recipe = request.node("root")?;
     let root_name = root_recipe.name().to_string();
     let root_tag = root_recipe.tag().to_string();
-    ensure_planned(&store, &mut nodes, root_key, store.created_at())?;
+    ensure_planned(&store, &mut nodes, root_key)?;
 
     let mut completed = HashMap::new();
     for (key, node) in &nodes {
@@ -140,7 +140,6 @@ fn ensure_planned(
     store: &Store,
     nodes: &mut HashMap<BuildKey, PlannedNode>,
     key: BuildKey,
-    created_at: &str,
 ) -> Result<(), RuntimeError> {
     let recipe = {
         let node = nodes.get(&key).ok_or_else(|| {
@@ -174,7 +173,7 @@ fn ensure_planned(
                 Ok::<_, RuntimeError>(())
             })?;
             for dep in deps {
-                ensure_planned(store, nodes, dep, created_at)?;
+                ensure_planned(store, nodes, dep)?;
             }
 
             if let Some(realized) = lookup_canonical_for_planned_node(store, nodes, key)? {
@@ -196,9 +195,7 @@ fn ensure_planned(
             let node = nodes.get_mut(&key).ok_or_else(|| {
                 RuntimeError::Store(format!("missing planned node for key '{}'", key))
             })?;
-            match lookup_source_object(store, source.object_hash, created_at)
-                .map_err(map_store_error)?
-            {
+            match lookup_source_object(store, source.object_hash).map_err(map_store_error)? {
                 SourceLookup::Hit(stored) => {
                     node.state = PlanningState::Reused {
                         realized: realized_object_from_record(None, &stored.object_record),
@@ -766,12 +763,8 @@ fn execute_source_recipe(
         return Err(error);
     }
 
-    match lookup_source_object(
-        store,
-        source_builder.declared_object_hash(),
-        store.created_at(),
-    )
-    .map_err(map_store_error)?
+    match lookup_source_object(store, source_builder.declared_object_hash())
+        .map_err(map_store_error)?
     {
         SourceLookup::Hit(stored) => {
             log_runtime_event(
@@ -840,16 +833,13 @@ fn execute_source_recipe(
         "materializing source origin",
     );
 
-    let import_outcome = import_source_object(
-        store,
-        source_builder.declared_object_hash(),
-        &staged_path,
-        store.created_at(),
-    )
-    .map_err(|error| {
-        cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
-        map_store_error(error)
-    })?;
+    let import_outcome =
+        import_source_object(store, source_builder.declared_object_hash(), &staged_path).map_err(
+            |error| {
+                cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
+                map_store_error(error)
+            },
+        )?;
     if let Err(error) = check_cancelled(&cancellation) {
         cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
         return Err(error);
@@ -879,11 +869,7 @@ fn build_run_logger_for_store(
     emit_progress: bool,
 ) -> Result<BuildRunLogger, String> {
     let locations = store.run_log_locations();
-    BuildRunLogger::new(
-        locations.run_log_dir(),
-        locations.created_at(),
-        emit_progress,
-    )
+    BuildRunLogger::new(locations.run_log_dir(), locations.run_id(), emit_progress)
 }
 
 fn core_workspace(workspace: StoreWorkspace) -> Workspace {
@@ -915,7 +901,7 @@ fn realized_object_from_record(
     RealizedObject {
         build_key,
         object_hash: object_record.object_hash,
-        created_at: object_record.created_at.clone(),
+        run_id: object_record.run_id.clone(),
     }
 }
 
@@ -1000,7 +986,7 @@ mod tests {
         RealizedObject {
             build_key,
             object_hash,
-            created_at: None,
+            run_id: None,
         }
     }
 
@@ -1111,7 +1097,6 @@ mod tests {
                 publication_name: "bin".to_string(),
                 build_key: root_key,
                 reuse_key,
-                created_at: "2026-04-05T12:00:00.000000000Z".to_string(),
                 staged_path: stage_dir,
                 inputs: root_inputs,
             },

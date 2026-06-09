@@ -33,14 +33,13 @@ pub enum SourceImportOutcome {
 pub fn lookup_source_object(
     store: &Store,
     declared_hash: ObjectHash,
-    created_at: &str,
 ) -> Result<SourceLookup, StoreError> {
     if let Some(stored) = load_stored_object_record(store, declared_hash)? {
         return Ok(SourceLookup::Hit(stored));
     }
 
     if store.object_path(declared_hash).exists() {
-        let stored = record_existing_source_object(store, declared_hash, created_at)?;
+        let stored = record_existing_source_object(store, declared_hash)?;
         return Ok(SourceLookup::Hit(stored));
     }
 
@@ -56,13 +55,12 @@ pub fn import_source_object(
     store: &Store,
     declared_hash: ObjectHash,
     staged_path: &Path,
-    created_at: &str,
 ) -> Result<SourceImportOutcome, StoreError> {
     let actual_hash = import_object(store, staged_path)?;
     if actual_hash != declared_hash {
         return Ok(SourceImportOutcome::Mismatched { actual_hash });
     }
 
-    let stored = record_existing_source_object(store, declared_hash, created_at)?;
+    let stored = record_existing_source_object(store, declared_hash)?;
     Ok(SourceImportOutcome::Matched(stored))
 }

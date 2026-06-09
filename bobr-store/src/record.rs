@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use std::fs;
 use std::path::PathBuf;
 
-pub(crate) const OBJECT_RECORD_SCHEMA: &str = "bobr-object-record-v1";
+pub(crate) const OBJECT_RECORD_SCHEMA: &str = "bobr-object-record-v2";
 #[cfg(test)]
 pub(crate) const OBJECT_RECORD_SCHEMA_FOR_TEST: &str = OBJECT_RECORD_SCHEMA;
 
@@ -32,9 +32,9 @@ pub struct Build {
     pub build_key: BuildKey,
     /// Hash of the output object recorded by the object record.
     pub object_hash: ObjectHash,
-    /// Optional RFC 3339 creation timestamp copied from the object record.
+    /// Optional store run id copied from the object record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<String>,
+    pub run_id: Option<String>,
 }
 
 /// Store record for a realized object.
@@ -46,8 +46,8 @@ pub struct Build {
 pub struct ObjectRecord {
     /// Hash of the output object this record describes.
     pub object_hash: ObjectHash,
-    /// Optional RFC 3339 timestamp for when the object was recorded.
-    pub created_at: Option<String>,
+    /// Optional store run id that recorded this object.
+    pub run_id: Option<String>,
     /// Realized input object identities used for reuse accounting.
     pub inputs: Vec<ReuseInputIdentity>,
 }
@@ -63,9 +63,9 @@ pub struct RealizedObject {
     pub build_key: Option<BuildKey>,
     /// Hash of the output object.
     pub object_hash: ObjectHash,
-    /// Optional RFC 3339 creation timestamp.
+    /// Optional store run id that recorded this object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub created_at: Option<String>,
+    pub run_id: Option<String>,
 }
 
 /// Fully resolved build publication inside the local store.
@@ -147,7 +147,6 @@ pub fn load_stored_object_record(
 pub(crate) fn record_existing_source_object(
     store: &Store,
     object_hash: ObjectHash,
-    created_at: &str,
 ) -> Result<StoredObjectRecord, StoreError> {
     let object_path = store.object_path(object_hash);
     if !object_path.exists() {
@@ -160,7 +159,7 @@ pub(crate) fn record_existing_source_object(
 
     let object_record = ObjectRecord {
         object_hash,
-        created_at: Some(created_at.to_string()),
+        run_id: Some(store.run_id().to_string()),
         inputs: Vec::new(),
     };
     store_object_record(store, &object_record)?;
@@ -216,12 +215,12 @@ pub(crate) fn build_from_object_record(build_key: BuildKey, object_record: &Obje
     Build {
         build_key,
         object_hash: object_record.object_hash,
-        created_at: object_record.created_at.clone(),
+        run_id: object_record.run_id.clone(),
     }
 }
 
 fn object_record_json_value_from_parts(
-    created_at: Option<&str>,
+    run_id: Option<&str>,
     object_hash: ObjectHash,
     inputs: &[ReuseInputIdentity],
 ) -> Value {
@@ -242,11 +241,8 @@ fn object_record_json_value_from_parts(
         "schema".to_string(),
         Value::String(OBJECT_RECORD_SCHEMA.to_string()),
     );
-    if let Some(created_at) = created_at {
-        root.insert(
-            "created_at".to_string(),
-            Value::String(created_at.to_string()),
-        );
+    if let Some(run_id) = run_id {
+        root.insert("run_id".to_string(), Value::String(run_id.to_string()));
     }
     root.insert(
         "object_hash".to_string(),
@@ -258,7 +254,7 @@ fn object_record_json_value_from_parts(
 
 fn object_record_json_value(record: &ObjectRecord) -> Value {
     object_record_json_value_from_parts(
-        record.created_at.as_deref(),
+        record.run_id.as_deref(),
         record.object_hash,
         &record.inputs,
     )
@@ -266,11 +262,11 @@ fn object_record_json_value(record: &ObjectRecord) -> Value {
 
 #[cfg(test)]
 pub(crate) fn build_json_value(
-    created_at: Option<&str>,
+    run_id: Option<&str>,
     object_hash: ObjectHash,
     inputs: &[ReuseInputIdentity],
 ) -> Value {
-    object_record_json_value_from_parts(created_at, object_hash, inputs)
+    object_record_json_value_from_parts(run_id, object_hash, inputs)
 }
 
 pub(crate) fn parse_object_record_value(
@@ -291,11 +287,11 @@ pub(crate) fn parse_object_record_value(
         )));
     }
 
-    let created_at = object
-        .get("created_at")
+    let run_id = object
+        .get("run_id")
         .map(|value| {
             value.as_str().ok_or_else(|| {
-                StoreError::InvalidData("object record created_at must be a string".to_string())
+                StoreError::InvalidData("object record run_id must be a string".to_string())
             })
         })
         .transpose()?
@@ -340,7 +336,7 @@ pub(crate) fn parse_object_record_value(
 
     Ok(ObjectRecord {
         object_hash,
-        created_at,
+        run_id,
         inputs,
     })
 }

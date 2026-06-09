@@ -193,7 +193,6 @@ pub(crate) fn execute_builder_node(
             store,
             build_key,
             reuse_key,
-            store.created_at(),
             inputs_identity,
             &staged.staged_path,
             object_hash,
@@ -202,7 +201,6 @@ pub(crate) fn execute_builder_node(
             store,
             build_key,
             reuse_key,
-            store.created_at(),
             inputs_identity,
             &staged.staged_path,
         ),
@@ -522,9 +520,7 @@ mod tests {
 
     fn create_test_logger(store: &Store) -> Arc<BuildRunLogger> {
         let locations = store.run_log_locations();
-        Arc::new(
-            BuildRunLogger::new(locations.run_log_dir(), locations.created_at(), false).unwrap(),
-        )
+        Arc::new(BuildRunLogger::new(locations.run_log_dir(), locations.run_id(), false).unwrap())
     }
 
     fn create_test_builder_run(
@@ -787,7 +783,6 @@ mod tests {
                 publication_name: "script".to_string(),
                 build_key: build_key_for_object,
                 reuse_key,
-                created_at: "2026-04-05T12:00:00.000000000Z".to_string(),
                 staged_path: stage,
                 inputs: matching_inputs.clone(),
             },

@@ -59,10 +59,7 @@ pub(crate) use record::{
     parse_object_record_value,
 };
 #[cfg(test)]
-pub(crate) use refs::{
-    human_timestamp_from_rfc3339, load_current_publication, load_reuse_object_record,
-    replace_symlink,
-};
+pub(crate) use refs::{load_current_publication, load_reuse_object_record, replace_symlink};
 #[cfg(test)]
 pub(crate) use store::{LOGS_DIR, OBJECT_RECORDS_DIR, OBJECTS_DIR, TMP_DIR};
 

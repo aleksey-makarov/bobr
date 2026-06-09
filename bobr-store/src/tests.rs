@@ -23,10 +23,10 @@ fn canonical_json_hash_is_stable_across_key_order() {
     let left = json!({
         "z": 1,
         "a": true,
-        "object_record": build_json_value(Some(sample_created_at()), object_hash, &[]),
+        "object_record": build_json_value(Some(sample_run_id()), object_hash, &[]),
     });
     let right = json!({
-        "object_record": build_json_value(Some(sample_created_at()), object_hash, &[]),
+        "object_record": build_json_value(Some(sample_run_id()), object_hash, &[]),
         "a": true,
         "z": 1,
     });
@@ -64,7 +64,7 @@ fn parse_object_record_rejects_old_schema() {
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
     let value = json!({
-        "schema": "bobr-object-record-v0",
+        "schema": "bobr-object-record-v1",
         "object_hash": object_hash.to_string(),
         "inputs": [],
     });
@@ -72,7 +72,7 @@ fn parse_object_record_rejects_old_schema() {
     assert!(matches!(
         parse_object_record_value(object_hash, &value),
         Err(StoreError::InvalidData(message))
-            if message == "unsupported object record schema 'bobr-object-record-v0'"
+            if message == "unsupported object record schema 'bobr-object-record-v1'"
     ));
 }
 
@@ -115,7 +115,6 @@ fn publish_build_reuses_existing_object_record_via_new_build_handle_ref() {
                 &[],
             ),
             reuse_key,
-            created_at: sample_created_at().to_string(),
             staged_path: first_stage,
             inputs: vec![],
         },
@@ -134,7 +133,6 @@ fn publish_build_reuses_existing_object_record_via_new_build_handle_ref() {
                 &[],
             ),
             reuse_key,
-            created_at: sample_created_at().to_string(),
             staged_path: second_stage,
             inputs: vec![],
         },
@@ -190,7 +188,6 @@ fn publish_build_writes_build_record_and_refs() {
                 &[],
             )
             .unwrap(),
-            created_at: sample_created_at().to_string(),
             staged_path: stage,
             inputs: vec![],
         },
@@ -215,8 +212,8 @@ fn publish_build_writes_build_record_and_refs() {
         Value::String(OBJECT_RECORD_SCHEMA_FOR_TEST.to_string())
     );
     assert_eq!(
-        build_json["created_at"],
-        Value::String(sample_created_at().to_string())
+        build_json["run_id"],
+        Value::String(layout.run_id().to_string())
     );
     assert_eq!(
         build_json["object_hash"],
@@ -253,7 +250,6 @@ fn object_record_ref_loaders_reject_non_canonical_targets() {
             publication_name: "script".to_string(),
             build_key,
             reuse_key,
-            created_at: sample_created_at().to_string(),
             staged_path: stage,
             inputs: vec![],
         },
@@ -331,7 +327,6 @@ fn object_record_round_trips_inputs() {
                 &[],
             ),
             reuse_key,
-            created_at: sample_created_at().to_string(),
             staged_path: stage,
             inputs: inputs.clone(),
         },
@@ -352,9 +347,7 @@ fn record_existing_source_object_requires_existing_object() {
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
 
-    let error =
-        crate::record::record_existing_source_object(&layout, object_hash, sample_created_at())
-            .unwrap_err();
+    let error = crate::record::record_existing_source_object(&layout, object_hash).unwrap_err();
 
     assert!(matches!(error, StoreError::Io(message) if message.contains("source object")));
     assert!(!layout.object_record_path(object_hash).exists());
@@ -367,7 +360,7 @@ fn lookup_source_object_returns_missing_when_record_and_object_absent() {
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
 
-    let lookup = lookup_source_object(&layout, object_hash, sample_created_at()).unwrap();
+    let lookup = lookup_source_object(&layout, object_hash).unwrap();
 
     assert!(matches!(lookup, SourceLookup::Missing));
     assert!(!layout.object_record_path(object_hash).exists());
@@ -380,15 +373,9 @@ fn lookup_source_object_reuses_canonical_record() {
     let stage = temp.path().join("source.txt");
     fs::write(&stage, b"hello").unwrap();
     let object_hash = import_object(&layout, &stage).unwrap();
-    let stored = crate::record::record_existing_source_object(
-        &layout,
-        object_hash,
-        "2026-03-24T13:00:00.000000000Z",
-    )
-    .unwrap();
+    let stored = crate::record::record_existing_source_object(&layout, object_hash).unwrap();
 
-    let lookup =
-        lookup_source_object(&layout, object_hash, "2026-03-24T14:00:00.000000000Z").unwrap();
+    let lookup = lookup_source_object(&layout, object_hash).unwrap();
 
     let SourceLookup::Hit(hit) = lookup else {
         panic!("expected source hit");
@@ -397,10 +384,7 @@ fn lookup_source_object_reuses_canonical_record() {
         hit.object_record.object_hash,
         stored.object_record.object_hash
     );
-    assert_eq!(
-        hit.object_record.created_at.as_deref(),
-        Some("2026-03-24T13:00:00.000000000Z")
-    );
+    assert_eq!(hit.object_record.run_id.as_deref(), Some(layout.run_id()));
 }
 
 #[test]
@@ -413,17 +397,14 @@ fn lookup_source_object_records_existing_object_as_source_object() {
     let object_record_path = layout.object_record_path(object_hash);
     assert!(!object_record_path.exists());
 
-    let lookup = lookup_source_object(&layout, object_hash, sample_created_at()).unwrap();
+    let lookup = lookup_source_object(&layout, object_hash).unwrap();
 
     let SourceLookup::Hit(hit) = lookup else {
         panic!("expected source hit");
     };
     assert_eq!(hit.object_record.object_hash, object_hash);
     assert_eq!(hit.object_record.inputs, Vec::new());
-    assert_eq!(
-        hit.object_record.created_at.as_deref(),
-        Some(sample_created_at())
-    );
+    assert_eq!(hit.object_record.run_id.as_deref(), Some(layout.run_id()));
     assert!(object_record_path.exists());
 }
 
@@ -435,15 +416,15 @@ fn import_source_object_on_match_imports_object_and_writes_canonical_record() {
     fs::write(&stage, b"hello").unwrap();
     let object_hash = hash_path(&stage).unwrap();
 
-    let outcome = import_source_object(&layout, object_hash, &stage, sample_created_at()).unwrap();
+    let outcome = import_source_object(&layout, object_hash, &stage).unwrap();
 
     let SourceImportOutcome::Matched(stored) = outcome else {
         panic!("expected source import match");
     };
     assert_eq!(stored.object_record.object_hash, object_hash);
     assert_eq!(
-        stored.object_record.created_at.as_deref(),
-        Some(sample_created_at())
+        stored.object_record.run_id.as_deref(),
+        Some(layout.run_id())
     );
     assert!(layout.object_path(object_hash).exists());
     assert!(layout.object_record_path(object_hash).exists());
@@ -461,8 +442,7 @@ fn import_source_object_on_mismatch_imports_actual_object_without_declared_recor
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
     assert_ne!(actual_hash, declared_hash);
 
-    let outcome =
-        import_source_object(&layout, declared_hash, &stage, sample_created_at()).unwrap();
+    let outcome = import_source_object(&layout, declared_hash, &stage).unwrap();
 
     let SourceImportOutcome::Mismatched {
         actual_hash: imported_hash,
@@ -485,7 +465,7 @@ fn publish_stored_object_rejects_record_with_missing_object_without_refs() {
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
     let object_record = ObjectRecord {
         object_hash,
-        created_at: Some(sample_created_at().to_string()),
+        run_id: Some(sample_run_id().to_string()),
         inputs: Vec::new(),
     };
     crate::record::store_object_record(&layout, &object_record).unwrap();
@@ -627,7 +607,6 @@ fn same_object_different_payload_produces_different_build_key() {
                 json!({ "kind": "sandbox-script", "source": "hello" }),
                 &[],
             ),
-            created_at: sample_created_at().to_string(),
             staged_path: first_stage,
             inputs: vec![],
         },
@@ -650,7 +629,6 @@ fn same_object_different_payload_produces_different_build_key() {
                 json!({ "kind": "source-tree", "source": "hello" }),
                 &[],
             ),
-            created_at: sample_created_at().to_string(),
             staged_path: second_stage,
             inputs: vec![],
         },
@@ -674,7 +652,6 @@ fn build_key_changes_when_kind_changes() {
             publication_name: "kind-a".to_string(),
             build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
             reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-            created_at: sample_created_at().to_string(),
             staged_path: first_stage,
             inputs: vec![],
         },
@@ -689,7 +666,6 @@ fn build_key_changes_when_kind_changes() {
             publication_name: "kind-b".to_string(),
             build_key: build_key_for("CasTest", json!({ "kind": "source-tree" }), &[]),
             reuse_key: reuse_key_for("CasTest", json!({ "kind": "source-tree" }), &[]),
-            created_at: sample_created_at().to_string(),
             staged_path: second_stage,
             inputs: vec![],
         },
@@ -713,7 +689,6 @@ fn build_key_changes_when_builder_tag_changes() {
             publication_name: "producer-a".to_string(),
             build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
             reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-            created_at: sample_created_at().to_string(),
             staged_path: first_stage,
             inputs: vec![],
         },
@@ -728,7 +703,6 @@ fn build_key_changes_when_builder_tag_changes() {
             publication_name: "producer-b".to_string(),
             build_key: build_key_for("Sandbox", json!({ "kind": "sandbox-script" }), &[]),
             reuse_key: reuse_key_for("Sandbox", json!({ "kind": "sandbox-script" }), &[]),
-            created_at: sample_created_at().to_string(),
             staged_path: second_stage,
             inputs: vec![],
         },
@@ -760,7 +734,6 @@ fn publish_build_rotates_existing_refs_into_generations() {
                 json!({ "kind": "sandbox-script", "source": "hello" }),
                 &[],
             ),
-            created_at: "2026-03-24T12:34:56.123456789Z".to_string(),
             staged_path: first_stage,
             inputs: vec![],
         },
@@ -783,14 +756,13 @@ fn publish_build_rotates_existing_refs_into_generations() {
                 json!({ "kind": "sandbox-script", "source": "hello world" }),
                 &[],
             ),
-            created_at: "2026-03-24T12:35:30.123456789Z".to_string(),
             staged_path: second_stage,
             inputs: vec![],
         },
     )
     .unwrap();
 
-    let suffix = human_timestamp_from_rfc3339("2026-03-24T12:34:56.123456789Z").unwrap();
+    let suffix = layout.run_id();
     assert_ne!(first.object_hash, second.object_hash);
     assert_ne!(first.build_key, second.build_key);
     assert_eq!(
@@ -847,7 +819,6 @@ fn publish_build_same_build_key_does_not_create_generation_refs() {
             publication_name: "shared".to_string(),
             build_key,
             reuse_key,
-            created_at: "2026-03-24T12:34:56.123456789Z".to_string(),
             staged_path: first_stage,
             inputs: vec![],
         },
@@ -862,7 +833,6 @@ fn publish_build_same_build_key_does_not_create_generation_refs() {
             publication_name: "shared".to_string(),
             build_key,
             reuse_key,
-            created_at: "2026-03-24T12:35:30.123456789Z".to_string(),
             staged_path: second_stage,
             inputs: vec![],
         },
@@ -871,7 +841,7 @@ fn publish_build_same_build_key_does_not_create_generation_refs() {
 
     assert_eq!(first.build_key, second.build_key);
     assert_eq!(first.object_hash, second.object_hash);
-    let suffix = human_timestamp_from_rfc3339("2026-03-24T12:34:56.123456789Z").unwrap();
+    let suffix = layout.run_id();
     assert!(
         !layout
             .object_refs_dir()
@@ -907,7 +877,6 @@ fn publish_build_generation_suffix_collisions_get_numeric_suffixes() {
                 json!({ "kind": "sandbox-script", "source": "one" }),
                 &[],
             ),
-            created_at: "2026-03-24T12:34:56.100000000Z".to_string(),
             staged_path: first_stage,
             inputs: vec![],
         },
@@ -930,7 +899,6 @@ fn publish_build_generation_suffix_collisions_get_numeric_suffixes() {
                 json!({ "kind": "sandbox-script", "source": "two" }),
                 &[],
             ),
-            created_at: "2026-03-24T12:34:56.200000000Z".to_string(),
             staged_path: second_stage,
             inputs: vec![],
         },
@@ -953,14 +921,13 @@ fn publish_build_generation_suffix_collisions_get_numeric_suffixes() {
                 json!({ "kind": "sandbox-script", "source": "three" }),
                 &[],
             ),
-            created_at: "2026-03-24T12:34:56.300000000Z".to_string(),
             staged_path: third_stage,
             inputs: vec![],
         },
     )
     .unwrap();
 
-    let suffix = human_timestamp_from_rfc3339("2026-03-24T12:34:56.100000000Z").unwrap();
+    let suffix = layout.run_id();
     assert_eq!(
         fs::read_link(layout.object_refs_dir().join(format!("shared.{suffix}"))).unwrap(),
         PathBuf::from("..")
@@ -1032,7 +999,6 @@ fn invalid_publication_name_is_rejected() {
                 publication_name: invalid_name.to_string(),
                 build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
                 reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-                created_at: sample_created_at().to_string(),
                 staged_path: stage,
                 inputs: vec![],
             },
@@ -1058,7 +1024,6 @@ fn publish_build_accepts_directory_objects() {
             publication_name: "tree".to_string(),
             build_key: build_key_for("Tree", json!({ "kind": "source-tree" }), &[]),
             reuse_key: reuse_key_for("Tree", json!({ "kind": "source-tree" }), &[]),
-            created_at: sample_created_at().to_string(),
             staged_path: stage_dir,
             inputs: vec![],
         },
@@ -1088,7 +1053,6 @@ fn materialize_build_trusted_hash_accepts_unreadable_object() {
         &layout,
         build_key,
         reuse_key,
-        sample_created_at(),
         vec![],
         &stage_dir,
         object_hash,
@@ -1122,7 +1086,6 @@ fn publish_build_points_fs_tree_object_ref_at_object_root() {
             publication_name: "tree".to_string(),
             build_key: build_key_for("Tree", json!({ "kind": "fs-tree" }), &[]),
             reuse_key: reuse_key_for("Tree", json!({ "kind": "fs-tree" }), &[]),
-            created_at: sample_created_at().to_string(),
             staged_path: stage_dir,
             inputs: vec![],
         },
@@ -1173,7 +1136,6 @@ fn existing_object_reuse_removes_staged_path() {
             publication_name: "first".to_string(),
             build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
             reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-            created_at: sample_created_at().to_string(),
             staged_path: first_stage,
             inputs: vec![],
         },
@@ -1189,7 +1151,6 @@ fn existing_object_reuse_removes_staged_path() {
             publication_name: "second".to_string(),
             build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
             reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-            created_at: sample_created_at().to_string(),
             staged_path: second_stage,
             inputs: vec![],
         },
@@ -1211,7 +1172,6 @@ fn existing_trusted_object_reuse_leaves_staged_path_for_runtime_cleanup() {
         &layout,
         build_key_for("CasTest", json!({ "kind": "first" }), &[]),
         reuse_key_for("CasTest", json!({ "kind": "first" }), &[]),
-        sample_created_at(),
         vec![],
         &first_stage,
         object_hash,
@@ -1225,7 +1185,6 @@ fn existing_trusted_object_reuse_leaves_staged_path_for_runtime_cleanup() {
         &layout,
         build_key_for("CasTest", json!({ "kind": "second" }), &[]),
         reuse_key_for("CasTest", json!({ "kind": "second" }), &[]),
-        sample_created_at(),
         vec![],
         &second_stage,
         object_hash,
@@ -1254,7 +1213,6 @@ fn build_key_changes_when_input_build_key_order_changes() {
                 &[key_a, key_b],
             ),
             reuse_key: reuse_key_for("Sandbox", json!({ "kind": "sandbox-output" }), &[]),
-            created_at: sample_created_at().to_string(),
             staged_path: first_stage,
             inputs: vec![],
         },
@@ -1273,7 +1231,6 @@ fn build_key_changes_when_input_build_key_order_changes() {
                 &[key_b, key_a],
             ),
             reuse_key: reuse_key_for("Sandbox", json!({ "kind": "sandbox-output" }), &[]),
-            created_at: sample_created_at().to_string(),
             staged_path: second_stage,
             inputs: vec![],
         },
@@ -1329,24 +1286,75 @@ fn store_create_allocates_unique_run_directories() {
 }
 
 #[test]
-fn run_dir_allocation_uses_numeric_disambiguation_across_logs_and_tmp() {
-    let temp = tempdir().unwrap();
-    let logs_dir = temp.path().join(LOGS_DIR);
-    let tmp_dir = temp.path().join(TMP_DIR);
-    fs::create_dir_all(&logs_dir).unwrap();
-    fs::create_dir_all(&tmp_dir).unwrap();
-    fs::create_dir(logs_dir.join("260603123456")).unwrap();
-    fs::create_dir(tmp_dir.join("260603123456.1")).unwrap();
+fn run_dir_allocation_disambiguates_by_logs_dir() {
+    for _ in 0..100 {
+        let temp = tempdir().unwrap();
+        let logs_dir = temp.path().join(LOGS_DIR);
+        let tmp_dir = temp.path().join(TMP_DIR);
+        fs::create_dir_all(&logs_dir).unwrap();
+        fs::create_dir_all(&tmp_dir).unwrap();
 
-    let (allocated_logs, allocated_tmp) =
-        crate::store::create_run_dirs(&logs_dir, &tmp_dir, "260603123456").unwrap();
+        let first_run_id = crate::store::allocate_store_run_id(temp.path()).unwrap();
+        let first_suffix = format!("{first_run_id}.1");
+        let second_suffix = format!("{first_run_id}.2");
+        fs::create_dir(logs_dir.join(&first_suffix)).unwrap();
 
-    assert_eq!(allocated_logs.file_name().unwrap(), "260603123456.2");
-    assert_eq!(allocated_tmp.file_name().unwrap(), "260603123456.2");
-    assert!(allocated_logs.is_dir());
-    assert!(allocated_tmp.is_dir());
-    assert!(!logs_dir.join("260603123456.1").exists());
-    assert!(tmp_dir.join("260603123456.1").is_dir());
+        let run_id = crate::store::allocate_store_run_id(temp.path()).unwrap();
+        if run_id != second_suffix {
+            assert!(
+                !run_id.starts_with(&format!("{first_run_id}.")),
+                "unexpected run id suffix after log directory collision: {run_id}"
+            );
+            continue;
+        }
+
+        let allocated_logs = logs_dir.join(&run_id);
+        let allocated_tmp = tmp_dir.join(&run_id);
+
+        assert!(allocated_logs.is_dir());
+        assert!(allocated_tmp.is_dir());
+        assert!(logs_dir.join(&first_suffix).is_dir());
+        assert!(!tmp_dir.join(&first_suffix).exists());
+        return;
+    }
+
+    panic!("could not perform two run id allocations inside one timestamp second");
+}
+
+#[test]
+fn run_dir_allocation_errors_when_matching_tmp_dir_exists() {
+    for _ in 0..100 {
+        let temp = tempdir().unwrap();
+        let logs_dir = temp.path().join(LOGS_DIR);
+        let tmp_dir = temp.path().join(TMP_DIR);
+        fs::create_dir_all(&logs_dir).unwrap();
+        fs::create_dir_all(&tmp_dir).unwrap();
+
+        let first_run_id = crate::store::allocate_store_run_id(temp.path()).unwrap();
+        let conflicting_run_id = format!("{first_run_id}.1");
+        fs::create_dir(tmp_dir.join(&conflicting_run_id)).unwrap();
+
+        match crate::store::allocate_store_run_id(temp.path()) {
+            Ok(run_id) => {
+                assert!(
+                    !run_id.starts_with(&format!("{first_run_id}.")),
+                    "allocator ignored matching tmp directory collision: {run_id}"
+                );
+                continue;
+            }
+            Err(error) => {
+                assert!(
+                    matches!(error, StoreError::Io(message) if message.contains("failed to create run temp directory"))
+                );
+                assert!(!logs_dir.join(&conflicting_run_id).exists());
+                assert!(!logs_dir.join(format!("{first_run_id}.2")).exists());
+                assert!(tmp_dir.join(&conflicting_run_id).is_dir());
+                return;
+            }
+        }
+    }
+
+    panic!("could not test matching tmp directory collision inside one timestamp second");
 }
 
 #[test]
@@ -1356,7 +1364,7 @@ fn store_exposes_run_log_locations() {
     let locations = layout.run_log_locations();
 
     assert_eq!(locations.run_log_dir(), layout.run_log_dir());
-    assert_eq!(locations.created_at(), layout.created_at());
+    assert_eq!(locations.run_id(), layout.run_id());
     assert!(locations.run_log_dir().is_dir());
 }
 
@@ -1616,7 +1624,6 @@ fn executable_bit_changes_object_hash_for_distinct_invocations() {
                 json!({ "kind": "sandbox-script", "source": "hello", "variant": "plain" }),
                 &[],
             ),
-            created_at: sample_created_at().to_string(),
             staged_path: first_stage,
             inputs: vec![],
         },
@@ -1640,7 +1647,6 @@ fn executable_bit_changes_object_hash_for_distinct_invocations() {
                 json!({ "kind": "sandbox-script", "source": "hello", "variant": "exec" }),
                 &[],
             ),
-            created_at: sample_created_at().to_string(),
             staged_path: exec_stage,
             inputs: vec![],
         },
@@ -1670,7 +1676,6 @@ fn publish_text_output(
             publication_name: publication_name.to_string(),
             build_key: build_key_for("CasTest", payload.clone(), &[]),
             reuse_key: reuse_key_for("CasTest", payload, &[]),
-            created_at: sample_created_at().to_string(),
             staged_path: stage,
             inputs: vec![],
         },
@@ -1686,8 +1691,8 @@ fn parse_build_key(value: &str) -> BuildKey {
     BuildKey::from_str(value).unwrap()
 }
 
-fn sample_created_at() -> &'static str {
-    "2026-03-24T12:34:56.123456789Z"
+fn sample_run_id() -> &'static str {
+    "260324123456"
 }
 
 fn build_key_for(builder_tag: &str, payload: Value, input_build_keys: &[BuildKey]) -> BuildKey {

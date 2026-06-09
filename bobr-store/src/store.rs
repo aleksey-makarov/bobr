@@ -27,7 +27,7 @@ pub(crate) const TMP_DIR: &str = "tmp";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreRunLogLocations {
     run_log_dir: PathBuf,
-    created_at: String,
+    run_id: String,
 }
 
 impl StoreRunLogLocations {
@@ -36,9 +36,9 @@ impl StoreRunLogLocations {
         &self.run_log_dir
     }
 
-    /// Returns the store session creation timestamp.
-    pub fn created_at(&self) -> &str {
-        &self.created_at
+    /// Returns the store run/session id.
+    pub fn run_id(&self) -> &str {
+        &self.run_id
     }
 }
 
@@ -114,11 +114,11 @@ pub struct Store {
 #[derive(Debug)]
 struct StoreInner {
     root: PathBuf,
-    run_log_dir: PathBuf,
-    run_tmp_dir: PathBuf,
-    created_at: String,
+    run_id: String,
     next_serial: AtomicU64,
-    index_lock: Mutex<()>,
+    // Serializes appends to logs/<run-id>/index.jsonl when cloned Store
+    // handles allocate workspaces concurrently.
+    workspace_index_lock: Mutex<()>,
 }
 
 impl Store {
@@ -131,18 +131,13 @@ impl Store {
     pub fn create(root: &Path) -> Result<Self, StoreError> {
         validate_root(root)?;
         ensure_store_layout(root)?;
-        let timestamp = current_run_timestamp();
-        let logs_dir = root.join(LOGS_DIR);
-        let tmp_dir = root.join(TMP_DIR);
-        let (run_log_dir, run_tmp_dir) = create_run_dirs(&logs_dir, &tmp_dir, &timestamp.run_id)?;
+        let run_id = allocate_store_run_id(root)?;
         Ok(Self {
             inner: Arc::new(StoreInner {
                 root: root.to_path_buf(),
-                run_log_dir,
-                run_tmp_dir,
-                created_at: timestamp.created_at,
+                run_id,
                 next_serial: AtomicU64::new(0),
-                index_lock: Mutex::new(()),
+                workspace_index_lock: Mutex::new(()),
             }),
         })
     }
@@ -151,24 +146,24 @@ impl Store {
         &self.inner.root
     }
 
-    pub(crate) fn run_log_dir(&self) -> &Path {
-        &self.inner.run_log_dir
+    pub(crate) fn run_log_dir(&self) -> PathBuf {
+        self.inner.root.join(LOGS_DIR).join(&self.inner.run_id)
     }
 
-    pub(crate) fn run_tmp_dir(&self) -> &Path {
-        &self.inner.run_tmp_dir
+    pub(crate) fn run_tmp_dir(&self) -> PathBuf {
+        self.inner.root.join(TMP_DIR).join(&self.inner.run_id)
     }
 
-    /// Returns the creation timestamp of this store session.
-    pub fn created_at(&self) -> &str {
-        &self.inner.created_at
+    /// Returns the run/session id of this store handle.
+    pub fn run_id(&self) -> &str {
+        &self.inner.run_id
     }
 
     /// Returns the run log locations allocated for this store session.
     pub fn run_log_locations(&self) -> StoreRunLogLocations {
         StoreRunLogLocations {
-            run_log_dir: self.inner.run_log_dir.clone(),
-            created_at: self.inner.created_at.clone(),
+            run_log_dir: self.run_log_dir(),
+            run_id: self.inner.run_id.clone(),
         }
     }
 
@@ -391,30 +386,6 @@ fn validate_root(root: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StoreRunTimestamp {
-    run_id: String,
-    created_at: String,
-}
-
-fn current_run_timestamp() -> StoreRunTimestamp {
-    let now = OffsetDateTime::now_utc();
-    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    let local = now.to_offset(offset);
-    let run_id_format =
-        format_description!("[year repr:last_two][month][day][hour][minute][second]");
-    let created_at_format =
-        format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z");
-    StoreRunTimestamp {
-        run_id: local
-            .format(&run_id_format)
-            .unwrap_or_else(|_| "000000000000".to_string()),
-        created_at: now
-            .format(&created_at_format)
-            .unwrap_or_else(|_| "1970-01-01T00:00:00.000000000Z".to_string()),
-    }
-}
-
 fn ensure_store_dir(path: &Path, label: &str) -> Result<(), StoreError> {
     if path.exists() || path.is_symlink() {
         let metadata = fs::symlink_metadata(path).map_err(|error| {
@@ -454,19 +425,25 @@ fn ensure_store_layout(root: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-pub(crate) fn create_run_dirs(
-    logs_dir: &Path,
-    tmp_dir: &Path,
-    run_id: &str,
-) -> Result<(PathBuf, PathBuf), StoreError> {
+pub(crate) fn allocate_store_run_id(root: &Path) -> Result<String, StoreError> {
+    let now = OffsetDateTime::now_utc();
+    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    let local = now.to_offset(offset);
+    let run_id_format =
+        format_description!("[year repr:last_two][month][day][hour][minute][second]");
+    let run_id_base = local
+        .format(&run_id_format)
+        .unwrap_or_else(|_| "000000000000".to_string());
+    let logs_dir = root.join(LOGS_DIR);
+    let tmp_dir = root.join(TMP_DIR);
     for attempt in 0..1000 {
-        let name = if attempt == 0 {
-            run_id.to_string()
+        let run_id = if attempt == 0 {
+            run_id_base.to_string()
         } else {
-            format!("{run_id}.{attempt}")
+            format!("{run_id_base}.{attempt}")
         };
-        let log_path = logs_dir.join(&name);
-        let tmp_path = tmp_dir.join(&name);
+        let log_path = logs_dir.join(&run_id);
+        let tmp_path = tmp_dir.join(&run_id);
         match fs::create_dir(&log_path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -478,38 +455,24 @@ pub(crate) fn create_run_dirs(
             }
         }
 
-        match fs::create_dir(&tmp_path) {
-            Ok(()) => return Ok((log_path, tmp_path)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                fs::remove_dir(&log_path).map_err(|cleanup_error| {
-                    StoreError::Io(format!(
-                        "failed to remove unused run log directory '{}' after temp directory collision at '{}': {cleanup_error}",
-                        log_path.display(),
-                        tmp_path.display()
-                    ))
-                })?;
-                continue;
-            }
-            Err(error) => {
-                fs::remove_dir(&log_path).map_err(|cleanup_error| {
-                    StoreError::Io(format!(
-                        "failed to remove unused run log directory '{}' after temp directory allocation failed at '{}': {cleanup_error}",
-                        log_path.display(),
-                        tmp_path.display()
-                    ))
-                })?;
-                return Err(StoreError::Io(format!(
-                    "failed to create run temp directory '{}': {error}",
+        if let Err(error) = fs::create_dir(&tmp_path) {
+            fs::remove_dir(&log_path).map_err(|cleanup_error| {
+                StoreError::Io(format!(
+                    "failed to remove unused run log directory '{}' after temp directory allocation failed at '{}': {cleanup_error}",
+                    log_path.display(),
                     tmp_path.display()
-                )));
-            }
+                ))
+            })?;
+            return Err(StoreError::Io(format!(
+                "failed to create run temp directory '{}': {error}",
+                tmp_path.display()
+            )));
         }
+        return Ok(run_id);
     }
 
     Err(StoreError::Io(format!(
-        "failed to allocate unique run directories under '{}' and '{}'",
-        logs_dir.display(),
-        tmp_dir.display()
+        "failed to allocate unique store run id for '{run_id_base}'"
     )))
 }
 
@@ -576,8 +539,8 @@ fn write_workspace_metadata(
         Value::String(record.build_key.to_string()),
     );
     metadata.insert(
-        "created_at".to_string(),
-        Value::String(store.created_at().to_string()),
+        "run_id".to_string(),
+        Value::String(store.run_id().to_string()),
     );
     metadata.insert(
         "log_dir".to_string(),
@@ -609,7 +572,7 @@ fn append_workspace_index(
 ) -> Result<(), StoreError> {
     let _guard = store
         .inner
-        .index_lock
+        .workspace_index_lock
         .lock()
         .map_err(|error| StoreError::Io(format!("failed to lock workspace index: {error}")))?;
     let path = store.run_log_dir().join("index.jsonl");
@@ -740,7 +703,7 @@ fn write_quarantine_metadata(
         "original_path": request.temp_path.display().to_string(),
         "quarantine_path": target.display().to_string(),
         "reason": &request.reason,
-        "created_at_unix_nanos": stamp.to_string(),
+        "quarantined_at_unix_nanos": stamp.to_string(),
     });
     serde_json::to_vec_pretty(&metadata)
         .map_err(|error| {

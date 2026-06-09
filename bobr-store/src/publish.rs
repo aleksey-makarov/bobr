@@ -16,8 +16,6 @@ pub struct PublishRequest {
     pub build_key: BuildKey,
     /// Reuse key for the invocation being published.
     pub reuse_key: ReuseKey,
-    /// RFC 3339 timestamp recorded for a newly materialized object.
-    pub created_at: String,
     /// Staged output object to import if reuse does not satisfy the request.
     pub staged_path: PathBuf,
     /// Realized input object identities to store with a newly materialized object.
@@ -80,7 +78,6 @@ pub fn publish_build(store: &Store, request: PublishRequest) -> Result<Publicati
         store,
         request.build_key,
         request.reuse_key,
-        &request.created_at,
         request.inputs,
         &request.staged_path,
     )?;
@@ -106,19 +103,10 @@ pub fn materialize_build(
     store: &Store,
     build_key: BuildKey,
     reuse_key: ReuseKey,
-    created_at: &str,
     inputs: Vec<ReuseInputIdentity>,
     staged_path: &Path,
 ) -> Result<PublishedBuild, StoreError> {
-    materialize_build_impl(
-        store,
-        build_key,
-        reuse_key,
-        created_at,
-        inputs,
-        staged_path,
-        None,
-    )
+    materialize_build_impl(store, build_key, reuse_key, inputs, staged_path, None)
 }
 
 /// Imports a staged object under a trusted precomputed hash.
@@ -131,7 +119,6 @@ pub fn materialize_build_with_trusted_hash(
     store: &Store,
     build_key: BuildKey,
     reuse_key: ReuseKey,
-    created_at: &str,
     inputs: Vec<ReuseInputIdentity>,
     staged_path: &Path,
     trusted_object_hash: ObjectHash,
@@ -140,7 +127,6 @@ pub fn materialize_build_with_trusted_hash(
         store,
         build_key,
         reuse_key,
-        created_at,
         inputs,
         staged_path,
         Some(trusted_object_hash),
@@ -151,7 +137,6 @@ fn materialize_build_impl(
     store: &Store,
     build_key: BuildKey,
     reuse_key: ReuseKey,
-    created_at: &str,
     inputs: Vec<ReuseInputIdentity>,
     staged_path: &Path,
     object_hash: Option<ObjectHash>,
@@ -159,7 +144,7 @@ fn materialize_build_impl(
     let object_hash = crate::object::import_object_with_hash(store, staged_path, object_hash)?;
     let object_record = ObjectRecord {
         object_hash,
-        created_at: Some(created_at.to_string()),
+        run_id: Some(store.run_id().to_string()),
         inputs,
     };
     crate::record::store_object_record(store, &object_record)?;

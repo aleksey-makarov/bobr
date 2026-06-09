@@ -55,59 +55,17 @@ impl BuildLogger for NoopBuildLogger {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct RunTimestamp {
-    human: String,
-    rfc3339_utc: String,
-}
-
-impl RunTimestamp {
-    pub fn now() -> Self {
-        let now = current_timestamp_utc();
-        let human_format =
-            format_description!("[year repr:last_two][month][day][hour][minute][second]");
-        let rfc3339_format = format_description!(
-            "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:9]Z"
-        );
-        let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-        let local = now.to_offset(offset);
-        Self {
-            human: local
-                .format(&human_format)
-                .unwrap_or_else(|_| "000000000000".to_string()),
-            rfc3339_utc: now
-                .format(&rfc3339_format)
-                .unwrap_or_else(|_| "1970-01-01T00:00:00.000000000Z".to_string()),
-        }
-    }
-
-    pub fn from_created_at(created_at: &str) -> Self {
-        Self {
-            human: current_human_timestamp(),
-            rfc3339_utc: created_at.to_string(),
-        }
-    }
-
-    pub fn human(&self) -> &str {
-        &self.human
-    }
-
-    pub fn rfc3339_utc(&self) -> &str {
-        &self.rfc3339_utc
-    }
-}
-
 #[derive(Debug)]
 pub struct BuildRunLogger {
     run_log_dir: PathBuf,
     event_log_path: PathBuf,
     emit_progress: bool,
-    run_timestamp: RunTimestamp,
+    run_id: String,
     writer: Mutex<BufWriter<File>>,
 }
 
 impl BuildRunLogger {
-    pub fn new(run_log_dir: &Path, created_at: &str, emit_progress: bool) -> Result<Self, String> {
+    pub fn new(run_log_dir: &Path, run_id: &str, emit_progress: bool) -> Result<Self, String> {
         fs::create_dir_all(run_log_dir).map_err(|error| {
             format!(
                 "failed to create run log directory '{}': {error}",
@@ -127,13 +85,13 @@ impl BuildRunLogger {
             run_log_dir: run_log_dir.to_path_buf(),
             event_log_path,
             emit_progress,
-            run_timestamp: RunTimestamp::from_created_at(created_at),
+            run_id: run_id.to_string(),
             writer: Mutex::new(BufWriter::new(file)),
         })
     }
 
-    pub fn created_at(&self) -> &str {
-        self.run_timestamp.rfc3339_utc()
+    pub fn run_id(&self) -> &str {
+        &self.run_id
     }
 
     pub fn run_log_dir(&self) -> &Path {

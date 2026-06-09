@@ -3,7 +3,6 @@ use crate::{Build, ObjectRecord, PublishedBuild, Store, StoreError, StoredObject
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
-use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
@@ -454,8 +453,8 @@ pub(crate) fn load_current_publication(
 }
 
 pub(crate) fn generation_suffix(current: &CurrentPublication) -> Result<String, StoreError> {
-    if let Some(created_at) = &current.object_record.created_at {
-        return human_timestamp_from_rfc3339(created_at);
+    if let Some(run_id) = &current.object_record.run_id {
+        return Ok(run_id.clone());
     }
 
     let modified = fs::metadata(&current.object_record_path)
@@ -473,15 +472,6 @@ pub(crate) fn generation_suffix(current: &CurrentPublication) -> Result<String, 
             ))
         })?;
     let parsed = OffsetDateTime::from(modified);
-    human_timestamp_from_datetime(parsed)
-}
-
-pub(crate) fn human_timestamp_from_rfc3339(value: &str) -> Result<String, StoreError> {
-    let parsed = OffsetDateTime::parse(value, &Rfc3339).map_err(|error| {
-        StoreError::InvalidData(format!(
-            "invalid object record created_at '{value}': {error}"
-        ))
-    })?;
     human_timestamp_from_datetime(parsed)
 }
 
