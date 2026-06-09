@@ -1,12 +1,12 @@
-use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, parser::ValueSource};
+use clap::{ArgAction, Parser};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use mbuild::recipe_runtime::{self, BuildRunOptions};
-use mbuild::{RecipeEnvelope, RecipeOptions};
+use mbuild::RecipeEnvelope;
+use mbuild::recipe_runtime;
 use mbuild_core::CancellationToken;
 use tracing_subscriber::EnvFilter;
 
@@ -59,13 +59,10 @@ struct Cli {
 fn main() -> ExitCode {
     init_tracing();
 
-    let matches = Cli::command().get_matches();
-    let quiet_from_cli = matches.value_source("quiet") == Some(ValueSource::CommandLine);
-    let jobs_from_cli = matches.value_source("jobs") == Some(ValueSource::CommandLine);
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    let cli = Cli::parse();
     let cancellation = CancellationToken::new();
     signal::install_handlers(cancellation.clone());
-    let result = build(cli, quiet_from_cli, jobs_from_cli, cancellation);
+    let result = build(cli, cancellation);
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -88,27 +85,19 @@ fn init_tracing() {
         .try_init();
 }
 
-fn build(
-    cli: Cli,
-    quiet_from_cli: bool,
-    jobs_from_cli: bool,
-    cancellation: CancellationToken,
-) -> MResult<()> {
+fn build(cli: Cli, cancellation: CancellationToken) -> MResult<()> {
     let recipe_bytes = read_recipe_bytes(cli.recipe_file.as_ref())?;
-    let envelope = RecipeEnvelope::parse_json(&recipe_bytes).map_err(map_runtime_error)?;
+    let mut envelope = RecipeEnvelope::parse_json(&recipe_bytes).map_err(map_runtime_error)?;
 
-    let options = resolve_build_options(
-        &envelope.options,
-        quiet_from_cli.then_some(cli.quiet),
-        if jobs_from_cli { cli.jobs } else { None },
-        cancellation,
-    )?;
-    let build = recipe_runtime::run_recipe_request_in_store_with_options(
-        &envelope.paths,
-        envelope.request,
-        options,
-    )
-    .map_err(map_runtime_error)?;
+    if cli.quiet {
+        envelope.options.quiet = Some(true);
+    }
+    if let Some(jobs) = cli.jobs {
+        envelope.options.jobs = Some(jobs);
+    }
+
+    let build =
+        recipe_runtime::run_recipe_envelope(envelope, cancellation).map_err(map_runtime_error)?;
     let rendered = recipe_runtime::render_object_as_json(&build).map_err(map_runtime_error)?;
     print!("{rendered}");
     Ok(())
@@ -130,28 +119,6 @@ fn read_recipe_bytes(recipe_file: Option<&PathBuf>) -> MResult<Vec<u8>> {
             Ok(bytes)
         }
     }
-}
-
-fn resolve_build_options(
-    recipe_options: &RecipeOptions,
-    quiet_from_cli: Option<bool>,
-    jobs_from_cli: Option<usize>,
-    cancellation: CancellationToken,
-) -> MResult<BuildRunOptions> {
-    let quiet = quiet_from_cli.or(recipe_options.quiet).unwrap_or(false);
-    let jobs = jobs_from_cli
-        .or(recipe_options.jobs)
-        .unwrap_or_else(default_jobs);
-    if jobs == 0 {
-        return Err(MbuildError::InvalidInput(
-            "--jobs and recipe options.jobs must be greater than zero".to_string(),
-        ));
-    }
-    Ok(BuildRunOptions {
-        emit_progress: !quiet,
-        jobs,
-        cancellation,
-    })
 }
 
 fn map_runtime_error(error: mbuild::RuntimeError) -> MbuildError {
@@ -211,10 +178,4 @@ mod signal {
     use mbuild_core::CancellationToken;
 
     pub fn install_handlers(_cancellation: CancellationToken) {}
-}
-
-fn default_jobs() -> usize {
-    std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1)
 }

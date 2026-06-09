@@ -1,9 +1,7 @@
 mod support;
 
 use bobr_store::{Store, load_build_handle, load_object_record, load_publication};
-use mbuild::recipe_runtime::{
-    BuildRunOptions, run_recipe_json_in_workspace, run_recipe_json_in_workspace_with_options,
-};
+use mbuild::recipe_runtime::run_recipe_json_in_workspace;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -17,6 +15,7 @@ use std::time::Instant;
 use support::{
     base_image_recipe, build_ref_count, group_recipe, recipe_node, remove_object_record,
     source_recipe, spawn_test_oci_registry, store_root, tree_file_recipe, write_recipe,
+    write_recipe_with_options,
 };
 #[cfg(feature = "integration-tests")]
 use support::{tree_directory_recipe, tree_symlink_recipe};
@@ -535,18 +534,9 @@ fn identical_fetch_sources_are_deduped_by_object_hash() {
         &source_hash,
     );
     let recipe_path = workspace.path().join("parallel.json");
-    write_recipe(&recipe_path, &recipe);
+    write_recipe_with_options(&recipe_path, &recipe, &json!({ "jobs": 4 }));
 
-    let build = run_recipe_json_in_workspace_with_options(
-        workspace.path(),
-        &recipe_path,
-        BuildRunOptions {
-            emit_progress: false,
-            jobs: 4,
-            ..BuildRunOptions::default()
-        },
-    )
-    .unwrap();
+    let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
     handle.join().unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();

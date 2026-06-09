@@ -1,7 +1,7 @@
 use crate::builders;
 use crate::recipe::{
     PlannedBuilderRecipe, PlannedNode, PlannedRecipe, PlannedSourceRecipe, PlanningState,
-    RecipeEnvelope, RecipePaths, RecipeRequest, ReuseOrigin, collect_graph,
+    RecipeEnvelope, ReuseOrigin, collect_graph,
 };
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
@@ -27,43 +27,14 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
-pub struct BuildRunOptions {
-    pub emit_progress: bool,
-    pub jobs: usize,
-    pub cancellation: CancellationToken,
-}
-
-impl Default for BuildRunOptions {
-    fn default() -> Self {
-        Self {
-            emit_progress: false,
-            jobs: 1,
-            cancellation: CancellationToken::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 struct ExecutedNode {
     realized: RealizedObject,
     logger: Arc<dyn BuildLogger>,
 }
 
 pub fn run_recipe_json_in_workspace(
-    workspace_root: &Path,
-    recipe_path: &Path,
-) -> Result<RealizedObject, RuntimeError> {
-    run_recipe_json_in_workspace_with_options(
-        workspace_root,
-        recipe_path,
-        BuildRunOptions::default(),
-    )
-}
-
-pub fn run_recipe_json_in_workspace_with_options(
     _workspace_root: &Path,
     recipe_path: &Path,
-    cli_options: BuildRunOptions,
 ) -> Result<RealizedObject, RuntimeError> {
     if !recipe_path.exists() {
         return Err(RuntimeError::RecipeLoad(format!(
@@ -79,53 +50,31 @@ pub fn run_recipe_json_in_workspace_with_options(
         ))
     })?;
     let envelope = RecipeEnvelope::parse_json(&recipe_bytes)?;
-    let options = BuildRunOptions {
-        emit_progress: cli_options.emit_progress,
-        jobs: if cli_options.jobs == BuildRunOptions::default().jobs {
-            envelope.options.jobs.unwrap_or(cli_options.jobs)
-        } else {
-            cli_options.jobs
-        },
-        cancellation: cli_options.cancellation.clone(),
-    };
-    let options = BuildRunOptions {
-        emit_progress: if cli_options.emit_progress == BuildRunOptions::default().emit_progress {
-            !envelope.options.quiet.unwrap_or(!cli_options.emit_progress)
-        } else {
-            cli_options.emit_progress
-        },
-        jobs: options.jobs,
-        cancellation: options.cancellation,
-    };
-    if options.jobs == 0 {
-        return Err(RuntimeError::InvalidRequest(
-            "--jobs and recipe options.jobs must be greater than zero".to_string(),
-        ));
-    }
-    run_recipe_request_in_store_with_options(&envelope.paths, envelope.request, options)
+    run_recipe_envelope(envelope, CancellationToken::new())
 }
 
-pub fn run_recipe_request_in_store_with_options(
-    paths: &RecipePaths,
-    request: RecipeRequest,
-    options: BuildRunOptions,
+pub fn run_recipe_envelope(
+    envelope: RecipeEnvelope,
+    cancellation: CancellationToken,
 ) -> Result<RealizedObject, RuntimeError> {
-    if options.jobs == 0 {
+    let RecipeEnvelope {
+        paths,
+        options,
+        request,
+    } = envelope;
+    let jobs = options.jobs.unwrap_or_else(default_jobs);
+    if jobs == 0 {
         return Err(RuntimeError::InvalidRequest(
-            "--jobs must be greater than zero".to_string(),
+            "recipe options.jobs must be greater than zero".to_string(),
         ));
     }
-    check_cancelled(&options.cancellation)?;
+    let emit_progress = !options.quiet.unwrap_or(false);
+    check_cancelled(&cancellation)?;
 
     let layout = Store::create(&paths.store).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> = Arc::new(
-        build_run_logger_for_store(
-            &layout,
-            RunOptions {
-                emit_progress: options.emit_progress,
-            },
-        )
-        .map_err(RuntimeError::Store)?,
+        build_run_logger_for_store(&layout, RunOptions { emit_progress })
+            .map_err(RuntimeError::Store)?,
     );
 
     let mut nodes = HashMap::new();
@@ -171,8 +120,8 @@ pub fn run_recipe_request_in_store_with_options(
         &nodes,
         &mut completed,
         root_key,
-        options.jobs,
-        options.cancellation,
+        jobs,
+        cancellation,
     )
 }
 
@@ -182,6 +131,12 @@ pub fn render_object_as_json(object: &RealizedObject) -> Result<String, RuntimeE
     })?;
     rendered.push('\n');
     Ok(rendered)
+}
+
+fn default_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
 }
 
 fn ensure_planned(
