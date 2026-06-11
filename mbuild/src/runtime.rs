@@ -95,7 +95,7 @@ pub(crate) fn execute_builder_node(
         .map_err(map_builder_error)?;
     let workspace = create_workspace(
         store,
-        builder.spec().tag,
+        builder.tag(),
         Some(build_name.to_string()),
         build_key.to_string(),
     )
@@ -125,14 +125,14 @@ pub(crate) fn execute_builder_node(
         );
         cleanup_temp_dir(
             builder_run.temp_dir(),
-            &TempCleanupContext::new(store, builder.spec().tag, build_key),
+            &TempCleanupContext::new(store, builder.tag(), build_key),
             logger.as_ref(),
         );
         return Ok(ExecutedBuilderNode { published, logger });
     }
 
-    let reuse_key = compute_reuse_key(builder.spec().tag, &config, &inputs_identity)
-        .map_err(map_store_error)?;
+    let reuse_key =
+        compute_reuse_key(builder.tag(), &config, &inputs_identity).map_err(map_store_error)?;
     if let Some(published) =
         resolve_reuse_for_build(store, build_key, reuse_key).map_err(map_store_error)?
     {
@@ -144,7 +144,7 @@ pub(crate) fn execute_builder_node(
         );
         cleanup_temp_dir(
             builder_run.temp_dir(),
-            &TempCleanupContext::new(store, builder.spec().tag, build_key),
+            &TempCleanupContext::new(store, builder.tag(), build_key),
             logger.as_ref(),
         );
         return Ok(ExecutedBuilderNode { published, logger });
@@ -157,7 +157,7 @@ pub(crate) fn execute_builder_node(
         "executing builder",
     );
     check_cancelled(&cancellation)?;
-    let cleanup = TempCleanupContext::new(store, builder.spec().tag, build_key);
+    let cleanup = TempCleanupContext::new(store, builder.tag(), build_key);
     let mut context = build_context(
         store,
         &builder_run,
@@ -502,8 +502,8 @@ mod tests {
     use bobr_store::identity::compute_build_key;
     use bobr_store::{PublishRequest, ReuseInputIdentity, create_workspace, publish_build};
     use mbuild_core::{
-        BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, BuilderRun, BuilderSpec,
-        CancellationToken, StagedBuildResult, TypedBuilder,
+        BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, BuilderRun, CancellationToken,
+        InputSpec, StagedBuildResult, TypedBuilder,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
@@ -624,8 +624,7 @@ mod tests {
     #[serde(deny_unknown_fields)]
     struct RuntimeTestConfig {}
 
-    static RUNTIME_TEST_SPEC: BuilderSpec = BuilderSpec {
-        tag: "RuntimeTest",
+    static RUNTIME_TEST_SPEC: InputSpec = InputSpec {
         required_inputs: &[],
         optional_inputs: &[],
         allow_extra_inputs: false,
@@ -638,7 +637,11 @@ mod tests {
     impl TypedBuilder for RuntimeTestBuilder {
         type Config = RuntimeTestConfig;
 
-        fn spec(&self) -> &'static BuilderSpec {
+        fn tag(&self) -> &'static str {
+            "RuntimeTest"
+        }
+
+        fn spec(&self) -> &'static InputSpec {
             &RUNTIME_TEST_SPEC
         }
 
@@ -662,8 +665,7 @@ mod tests {
         }
     }
 
-    static SANDBOX_RUNTIME_TEST_SPEC: BuilderSpec = BuilderSpec {
-        tag: "Sandbox",
+    static SANDBOX_RUNTIME_TEST_SPEC: InputSpec = InputSpec {
         required_inputs: &[],
         optional_inputs: &[],
         allow_extra_inputs: false,
@@ -676,7 +678,11 @@ mod tests {
     impl TypedBuilder for SandboxRuntimeTestBuilder {
         type Config = RuntimeTestConfig;
 
-        fn spec(&self) -> &'static BuilderSpec {
+        fn tag(&self) -> &'static str {
+            "Sandbox"
+        }
+
+        fn spec(&self) -> &'static InputSpec {
             &SANDBOX_RUNTIME_TEST_SPEC
         }
 
@@ -708,7 +714,11 @@ mod tests {
     impl TypedBuilder for RuntimeFailBuilder {
         type Config = RuntimeTestConfig;
 
-        fn spec(&self) -> &'static BuilderSpec {
+        fn tag(&self) -> &'static str {
+            "RuntimeTest"
+        }
+
+        fn spec(&self) -> &'static InputSpec {
             &RUNTIME_TEST_SPEC
         }
 
@@ -735,7 +745,11 @@ mod tests {
     impl TypedBuilder for RuntimeBrokenStageBuilder {
         type Config = RuntimeTestConfig;
 
-        fn spec(&self) -> &'static BuilderSpec {
+        fn tag(&self) -> &'static str {
+            "RuntimeTest"
+        }
+
+        fn spec(&self) -> &'static InputSpec {
             &RUNTIME_TEST_SPEC
         }
 

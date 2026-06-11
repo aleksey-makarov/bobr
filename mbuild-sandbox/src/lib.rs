@@ -19,7 +19,7 @@
 //! 5. Stage the runtime output directory as an fs-tree object.
 
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, InputSpec,
     StagedBuildResult, TypedBuilder, load_fs_tree_object,
 };
 use mbuild_runtime::{
@@ -89,8 +89,7 @@ struct BuildStep {
 }
 
 // Static builder contract advertised to the mbuild recipe runtime.
-static SANDBOX_SPEC: BuilderSpec = BuilderSpec {
-    tag: "Sandbox",
+static SANDBOX_SPEC: InputSpec = InputSpec {
     required_inputs: &["rootfs"],
     optional_inputs: &[],
     allow_extra_inputs: true,
@@ -131,7 +130,11 @@ type BResult<T> = Result<T, SandboxError>;
 impl TypedBuilder for SandboxBuilder {
     type Config = SandboxConfig;
 
-    fn spec(&self) -> &'static BuilderSpec {
+    fn tag(&self) -> &'static str {
+        "Sandbox"
+    }
+
+    fn spec(&self) -> &'static InputSpec {
         &SANDBOX_SPEC
     }
 
@@ -521,7 +524,7 @@ fn build_sandbox_input(name: &str, input: &BuilderInputObject) -> BResult<Sandbo
 /// mounts and interpolation variables. Reserved names are rejected because they
 /// would shadow built-in variables.
 fn collect_extra_inputs(
-    spec: &BuilderSpec,
+    spec: &InputSpec,
     builder_name: &str,
     inputs: &BuilderInputs,
 ) -> BResult<Vec<(String, BuilderInputObject)>> {
@@ -910,8 +913,8 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn sandbox_spec_uses_rootfs_required_input() {
-        assert_eq!(SANDBOX_SPEC.tag, "Sandbox");
+    fn sandbox_input_spec_uses_rootfs_required_input() {
+        assert_eq!(mbuild_core::TypedBuilder::tag(&SandboxBuilder), "Sandbox");
         assert_eq!(SANDBOX_SPEC.required_inputs, &["rootfs"]);
         assert!(SANDBOX_SPEC.allow_extra_inputs);
     }

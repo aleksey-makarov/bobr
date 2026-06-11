@@ -288,7 +288,7 @@ fn lookup_canonical_for_planned_node(
     let node = nodes
         .get(&key)
         .ok_or_else(|| RuntimeError::Store(format!("missing planned node for key '{}'", key)))?;
-    let Some((spec, config, _inputs)) = node.recipe.builder() else {
+    let Some((builder_tag, _spec, config, _inputs)) = node.recipe.builder() else {
         return Ok(None);
     };
 
@@ -314,7 +314,7 @@ fn lookup_canonical_for_planned_node(
     }
 
     Ok(
-        lookup_canonical_object(store, spec.tag, config, &input_identities, key)?
+        lookup_canonical_object(store, builder_tag, config, &input_identities, key)?
             .map(|published| realized_object_from_record(Some(key), &published.object_record)),
     )
 }
@@ -717,10 +717,10 @@ fn execute_builder_recipe(
 ) -> Result<ExecutedNode, RuntimeError> {
     let executed = execute_builder_node(ExecuteBuilderNodeRequest {
         store,
-        builder: builders::get_builder(recipe.spec.tag).ok_or_else(|| {
+        builder: builders::get_builder(recipe.tag).ok_or_else(|| {
             RuntimeError::UnknownBuilder(format!(
                 "unknown builder tag '{}'; supported builders: {}",
-                recipe.spec.tag,
+                recipe.tag,
                 builders::supported_builder_tags().join(", ")
             ))
         })?,

@@ -1,5 +1,5 @@
 use bobr_store::ReuseInputIdentity;
-use mbuild_core::{BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec, ObjectHash};
+use mbuild_core::{BuilderError, BuilderInputObject, BuilderInputs, InputSpec, ObjectHash};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -53,7 +53,7 @@ impl ResolvedInputs {
 
     pub(crate) fn extra<'a>(
         &'a self,
-        spec: &BuilderSpec,
+        spec: &InputSpec,
         name: &str,
     ) -> Option<&'a ResolvedDependency> {
         if spec.is_reserved_input(name) {
@@ -65,7 +65,7 @@ impl ResolvedInputs {
 
     pub(crate) fn extras<'a>(
         &'a self,
-        spec: &'a BuilderSpec,
+        spec: &'a InputSpec,
     ) -> impl Iterator<Item = (&'a str, &'a ResolvedDependency)> + 'a {
         self.slots.iter().filter_map(move |(name, dep)| {
             if spec.is_reserved_input(name) {
@@ -78,7 +78,7 @@ impl ResolvedInputs {
 
     pub(crate) fn ordered_reuse_input_identities(
         &self,
-        spec: &BuilderSpec,
+        spec: &InputSpec,
     ) -> Result<Vec<ReuseInputIdentity>, BuilderError> {
         let mut ordered = Vec::new();
         for name in spec.ordered_present_input_names(&self.slots) {
@@ -128,8 +128,7 @@ mod tests {
         inputs.insert("script", object.clone());
         inputs.insert("source", object.clone());
 
-        let spec = BuilderSpec {
-            tag: "Sandbox",
+        let spec = InputSpec {
             required_inputs: &["rootfs"],
             optional_inputs: &["base"],
             allow_extra_inputs: true,
@@ -162,8 +161,7 @@ mod tests {
         let first = sample_object();
         let second = sample_object();
 
-        let spec = BuilderSpec {
-            tag: "Sandbox",
+        let spec = InputSpec {
             required_inputs: &["rootfs"],
             optional_inputs: &[],
             allow_extra_inputs: true,
@@ -207,15 +205,14 @@ mod tests {
         assert_eq!(resolved.path, object.object_path);
     }
 
-    static ORDERED_SPEC: BuilderSpec = BuilderSpec {
-        tag: "Ordered",
+    static ORDERED_SPEC: InputSpec = InputSpec {
         required_inputs: &["first"],
         optional_inputs: &["optional"],
         allow_extra_inputs: true,
     };
 
     #[test]
-    fn ordered_reuse_input_identities_follow_builder_spec_order() {
+    fn ordered_reuse_input_identities_follow_input_spec_order() {
         let mut first = sample_object();
         first.object_hash = ObjectHash::from_str(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

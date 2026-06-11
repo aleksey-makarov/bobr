@@ -252,21 +252,24 @@ impl BuilderClassBase for SourceBuilderClass {
 }
 
 #[derive(Debug)]
-pub struct BuilderSpec {
-    pub tag: &'static str,
+pub struct InputSpec {
     pub required_inputs: &'static [&'static str],
     pub optional_inputs: &'static [&'static str],
     pub allow_extra_inputs: bool,
 }
 
-impl BuilderSpec {
+impl InputSpec {
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_for_builder("input spec")
+    }
+
+    pub fn validate_for_builder(&self, builder_tag: &str) -> Result<(), String> {
         let mut required = BTreeSet::new();
         for name in self.required_inputs {
             if !required.insert(*name) {
                 return Err(format!(
                     "builder '{}' declares duplicate required input '{}'",
-                    self.tag, name
+                    builder_tag, name
                 ));
             }
         }
@@ -276,13 +279,13 @@ impl BuilderSpec {
             if !optional.insert(*name) {
                 return Err(format!(
                     "builder '{}' declares duplicate optional input '{}'",
-                    self.tag, name
+                    builder_tag, name
                 ));
             }
             if required.contains(name) {
                 return Err(format!(
                     "builder '{}' declares input '{}' as both required and optional",
-                    self.tag, name
+                    builder_tag, name
                 ));
             }
         }
@@ -377,7 +380,7 @@ impl BuilderInputs {
         self.slots.get(name)
     }
 
-    pub fn extra<'a>(&'a self, spec: &BuilderSpec, name: &str) -> Option<&'a BuilderInputObject> {
+    pub fn extra<'a>(&'a self, spec: &InputSpec, name: &str) -> Option<&'a BuilderInputObject> {
         if spec.is_reserved_input(name) {
             None
         } else {
@@ -387,7 +390,7 @@ impl BuilderInputs {
 
     pub fn extras<'a>(
         &'a self,
-        spec: &'a BuilderSpec,
+        spec: &'a InputSpec,
     ) -> impl Iterator<Item = (&'a str, &'a BuilderInputObject)> + 'a {
         self.slots.iter().filter_map(move |(name, object)| {
             if spec.is_reserved_input(name) {
@@ -552,7 +555,7 @@ pub struct StagedBuildResult {
 }
 
 pub trait Builder: BuilderClassBase<Init = BuilderRunInit, Object = BuilderRun> {
-    fn spec(&self) -> &'static BuilderSpec;
+    fn spec(&self) -> &'static InputSpec;
 
     fn build_erased(
         &self,
@@ -565,7 +568,9 @@ pub trait Builder: BuilderClassBase<Init = BuilderRunInit, Object = BuilderRun> 
 pub trait TypedBuilder: Send + Sync {
     type Config: DeserializeOwned;
 
-    fn spec(&self) -> &'static BuilderSpec;
+    fn tag(&self) -> &'static str;
+
+    fn spec(&self) -> &'static InputSpec;
 
     fn build_typed(
         &self,
@@ -583,7 +588,7 @@ where
     type Object = BuilderRun;
 
     fn tag(&self) -> &'static str {
-        <T as TypedBuilder>::spec(self).tag
+        <T as TypedBuilder>::tag(self)
     }
 
     fn create_object(&self, init: Self::Init) -> Self::Object {
@@ -595,7 +600,7 @@ impl<T> Builder for T
 where
     T: TypedBuilder,
 {
-    fn spec(&self) -> &'static BuilderSpec {
+    fn spec(&self) -> &'static InputSpec {
         <T as TypedBuilder>::spec(self)
     }
 
@@ -624,58 +629,54 @@ mod tests {
     }
 
     #[test]
-    fn builder_spec_validate_accepts_distinct_inputs() {
-        let spec = BuilderSpec {
-            tag: "Test",
+    fn input_spec_validate_accepts_distinct_inputs() {
+        let spec = InputSpec {
             required_inputs: &["rootfs", "toolchain"],
             optional_inputs: &["source"],
             allow_extra_inputs: true,
         };
 
-        spec.validate().unwrap();
+        spec.validate_for_builder("Test").unwrap();
     }
 
     #[test]
-    fn builder_spec_validate_rejects_duplicate_required_inputs() {
-        let spec = BuilderSpec {
-            tag: "Test",
+    fn input_spec_validate_rejects_duplicate_required_inputs() {
+        let spec = InputSpec {
             required_inputs: &["rootfs", "rootfs"],
             optional_inputs: &[],
             allow_extra_inputs: true,
         };
 
         assert_eq!(
-            spec.validate().unwrap_err(),
+            spec.validate_for_builder("Test").unwrap_err(),
             "builder 'Test' declares duplicate required input 'rootfs'"
         );
     }
 
     #[test]
-    fn builder_spec_validate_rejects_duplicate_optional_inputs() {
-        let spec = BuilderSpec {
-            tag: "Test",
+    fn input_spec_validate_rejects_duplicate_optional_inputs() {
+        let spec = InputSpec {
             required_inputs: &[],
             optional_inputs: &["source", "source"],
             allow_extra_inputs: true,
         };
 
         assert_eq!(
-            spec.validate().unwrap_err(),
+            spec.validate_for_builder("Test").unwrap_err(),
             "builder 'Test' declares duplicate optional input 'source'"
         );
     }
 
     #[test]
-    fn builder_spec_validate_rejects_required_optional_overlap() {
-        let spec = BuilderSpec {
-            tag: "Test",
+    fn input_spec_validate_rejects_required_optional_overlap() {
+        let spec = InputSpec {
             required_inputs: &["rootfs"],
             optional_inputs: &["rootfs"],
             allow_extra_inputs: true,
         };
 
         assert_eq!(
-            spec.validate().unwrap_err(),
+            spec.validate_for_builder("Test").unwrap_err(),
             "builder 'Test' declares input 'rootfs' as both required and optional"
         );
     }
@@ -688,8 +689,7 @@ mod tests {
         inputs.insert("source", object.clone());
         inputs.insert("patch", object.clone());
 
-        let spec = BuilderSpec {
-            tag: "Sandbox",
+        let spec = InputSpec {
             required_inputs: &["image"],
             optional_inputs: &["base"],
             allow_extra_inputs: true,
@@ -710,8 +710,7 @@ mod tests {
         demo: String,
     }
 
-    static DUMMY_SPEC: BuilderSpec = BuilderSpec {
-        tag: "Dummy",
+    static DUMMY_SPEC: InputSpec = InputSpec {
         required_inputs: &[],
         optional_inputs: &[],
         allow_extra_inputs: false,
@@ -720,7 +719,11 @@ mod tests {
     impl TypedBuilder for DummyBuilder {
         type Config = DummyConfig;
 
-        fn spec(&self) -> &'static BuilderSpec {
+        fn tag(&self) -> &'static str {
+            "Dummy"
+        }
+
+        fn spec(&self) -> &'static InputSpec {
             &DUMMY_SPEC
         }
 
@@ -766,7 +769,7 @@ mod tests {
         let builder = DummyBuilder;
         let erased: &dyn Builder = &builder;
 
-        assert_eq!(erased.spec().tag, "Dummy");
+        assert_eq!(erased.tag(), "Dummy");
         assert!(erased.spec().required_inputs.is_empty());
         assert!(erased.spec().optional_inputs.is_empty());
         assert!(!erased.spec().allow_extra_inputs);

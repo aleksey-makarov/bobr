@@ -1,5 +1,5 @@
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, BuilderSpec, StagedBuildResult,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, InputSpec, StagedBuildResult,
     TypedBuilder,
 };
 use serde::Deserialize;
@@ -13,8 +13,7 @@ pub struct GroupConfig {}
 
 pub struct GroupBuilder;
 
-static GROUP_SPEC: BuilderSpec = BuilderSpec {
-    tag: "Group",
+static GROUP_SPEC: InputSpec = InputSpec {
     required_inputs: &[],
     optional_inputs: &[],
     allow_extra_inputs: true,
@@ -23,7 +22,11 @@ static GROUP_SPEC: BuilderSpec = BuilderSpec {
 impl TypedBuilder for GroupBuilder {
     type Config = GroupConfig;
 
-    fn spec(&self) -> &'static BuilderSpec {
+    fn tag(&self) -> &'static str {
+        "Group"
+    }
+
+    fn spec(&self) -> &'static InputSpec {
         &GROUP_SPEC
     }
 
@@ -103,7 +106,7 @@ mod tests {
         let builder = GroupBuilder;
         let spec = mbuild_core::TypedBuilder::spec(&builder);
 
-        assert_eq!(spec.tag, "Group");
+        assert_eq!(mbuild_core::TypedBuilder::tag(&builder), "Group");
         assert!(spec.required_inputs.is_empty());
         assert!(spec.optional_inputs.is_empty());
         assert!(spec.allow_extra_inputs);

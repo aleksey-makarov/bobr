@@ -26,7 +26,7 @@ Explicit CLI flags override `options`.
 Rust is responsible for:
 
 - decoding the JSON graph
-- validating each node against `BuilderSpec`
+- validating each node against `InputSpec`
 - computing `build_key`s
 - performing top-down lookup planning
 - building missing nodes bottom-up

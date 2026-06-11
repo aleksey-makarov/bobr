@@ -1,10 +1,9 @@
 use flate2::read::GzDecoder;
 use fsobj_hash::{hash_file_bytes, hash_symlink_node};
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
-    FsTreeEntry, FsTreeManifest, FsTreeObjectError, FsTreeObjectPaths, ObjectHash,
-    StagedBuildResult, TypedBuilder, create_fs_tree_staging_dir,
-    hash_fs_tree_object_from_manifest_with_extra_files,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, FsTreeEntry,
+    FsTreeManifest, FsTreeObjectError, FsTreeObjectPaths, InputSpec, ObjectHash, StagedBuildResult,
+    TypedBuilder, create_fs_tree_staging_dir, hash_fs_tree_object_from_manifest_with_extra_files,
 };
 #[cfg(test)]
 use mbuild_core::{FsTreeOwnerMap, ValidatedFsTreeObject, validate_fs_tree_object};
@@ -35,8 +34,7 @@ pub struct OciExtractConfig {}
 
 pub struct OciExtractBuilder;
 
-static OCI_EXTRACT_SPEC: BuilderSpec = BuilderSpec {
-    tag: "OciExtract",
+static OCI_EXTRACT_SPEC: InputSpec = InputSpec {
     required_inputs: &["image"],
     optional_inputs: &[],
     allow_extra_inputs: false,
@@ -45,7 +43,11 @@ static OCI_EXTRACT_SPEC: BuilderSpec = BuilderSpec {
 impl TypedBuilder for OciExtractBuilder {
     type Config = OciExtractConfig;
 
-    fn spec(&self) -> &'static BuilderSpec {
+    fn tag(&self) -> &'static str {
+        "OciExtract"
+    }
+
+    fn spec(&self) -> &'static InputSpec {
         &OCI_EXTRACT_SPEC
     }
 
@@ -966,8 +968,8 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn builder_spec_is_registered_shape() {
-        assert_eq!(OCI_EXTRACT_SPEC.tag, "OciExtract");
+    fn input_spec_is_registered_shape() {
+        assert_eq!(OciExtractBuilder.tag(), "OciExtract");
         assert_eq!(OCI_EXTRACT_SPEC.required_inputs, &["image"]);
         assert!(!OCI_EXTRACT_SPEC.allow_extra_inputs);
     }

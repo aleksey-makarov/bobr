@@ -1,8 +1,8 @@
 use fsobj_hash::{EntryKind, ObjectHash, hash_file_bytes, hash_path, hash_symlink_node};
 use globset::{Glob, GlobMatcher};
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, BuilderSpec,
-    ComposedFsTree, ComposedFsTreeEntry, FsTreeComposeInput, FsTreeEntry, FsTreeManifest,
+    BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, ComposedFsTree,
+    ComposedFsTreeEntry, FsTreeComposeInput, FsTreeEntry, FsTreeManifest, InputSpec,
     StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir,
     load_fs_tree_object,
 };
@@ -261,8 +261,7 @@ pub struct TreeMergeBuilder;
 pub struct ErofsRootfsBuilder;
 pub struct InitramfsBuilder;
 
-static TREE_SPEC: BuilderSpec = BuilderSpec {
-    tag: "Tree",
+static TREE_SPEC: InputSpec = InputSpec {
     required_inputs: &[],
     optional_inputs: &[],
     allow_extra_inputs: false,
@@ -278,15 +277,13 @@ pub struct TreeSubsetConfig {
     include: Vec<String>,
 }
 
-static TREE_MERGE_SPEC: BuilderSpec = BuilderSpec {
-    tag: "TreeMerge",
+static TREE_MERGE_SPEC: InputSpec = InputSpec {
     required_inputs: &[],
     optional_inputs: &[],
     allow_extra_inputs: true,
 };
 
-static TREE_SUBSET_SPEC: BuilderSpec = BuilderSpec {
-    tag: "TreeSubset",
+static TREE_SUBSET_SPEC: InputSpec = InputSpec {
     required_inputs: &["tree"],
     optional_inputs: &[],
     allow_extra_inputs: false,
@@ -301,8 +298,7 @@ pub struct ErofsRootfsConfig {
     label: Option<String>,
 }
 
-static EROFS_ROOTFS_SPEC: BuilderSpec = BuilderSpec {
-    tag: "ErofsRootfs",
+static EROFS_ROOTFS_SPEC: InputSpec = InputSpec {
     required_inputs: &[],
     optional_inputs: &[],
     allow_extra_inputs: true,
@@ -312,8 +308,7 @@ static EROFS_ROOTFS_SPEC: BuilderSpec = BuilderSpec {
 #[serde(deny_unknown_fields)]
 pub struct InitramfsConfig {}
 
-static INITRAMFS_SPEC: BuilderSpec = BuilderSpec {
-    tag: "Initramfs",
+static INITRAMFS_SPEC: InputSpec = InputSpec {
     required_inputs: &[],
     optional_inputs: &[],
     allow_extra_inputs: true,
@@ -322,7 +317,11 @@ static INITRAMFS_SPEC: BuilderSpec = BuilderSpec {
 impl TypedBuilder for TreeBuilder {
     type Config = TreeConfig;
 
-    fn spec(&self) -> &'static BuilderSpec {
+    fn tag(&self) -> &'static str {
+        "Tree"
+    }
+
+    fn spec(&self) -> &'static InputSpec {
         &TREE_SPEC
     }
 
@@ -339,7 +338,11 @@ impl TypedBuilder for TreeBuilder {
 impl TypedBuilder for TreeMergeBuilder {
     type Config = TreeMergeConfig;
 
-    fn spec(&self) -> &'static BuilderSpec {
+    fn tag(&self) -> &'static str {
+        "TreeMerge"
+    }
+
+    fn spec(&self) -> &'static InputSpec {
         &TREE_MERGE_SPEC
     }
 
@@ -356,7 +359,11 @@ impl TypedBuilder for TreeMergeBuilder {
 impl TypedBuilder for TreeSubsetBuilder {
     type Config = TreeSubsetConfig;
 
-    fn spec(&self) -> &'static BuilderSpec {
+    fn tag(&self) -> &'static str {
+        "TreeSubset"
+    }
+
+    fn spec(&self) -> &'static InputSpec {
         &TREE_SUBSET_SPEC
     }
 
@@ -373,7 +380,11 @@ impl TypedBuilder for TreeSubsetBuilder {
 impl TypedBuilder for ErofsRootfsBuilder {
     type Config = ErofsRootfsConfig;
 
-    fn spec(&self) -> &'static BuilderSpec {
+    fn tag(&self) -> &'static str {
+        "ErofsRootfs"
+    }
+
+    fn spec(&self) -> &'static InputSpec {
         &EROFS_ROOTFS_SPEC
     }
 
@@ -396,7 +407,11 @@ impl TypedBuilder for ErofsRootfsBuilder {
 impl TypedBuilder for InitramfsBuilder {
     type Config = InitramfsConfig;
 
-    fn spec(&self) -> &'static BuilderSpec {
+    fn tag(&self) -> &'static str {
+        "Initramfs"
+    }
+
+    fn spec(&self) -> &'static InputSpec {
         &INITRAMFS_SPEC
     }
 

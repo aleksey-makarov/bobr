@@ -3,7 +3,7 @@ use crate::origins;
 use crate::runtime::{RuntimeError, map_store_error};
 use bobr_store::RealizedObject;
 use bobr_store::identity::{BuildKey, compute_build_key};
-use mbuild_core::{BuilderSpec, ObjectHash, ParsedOrigin};
+use mbuild_core::{InputSpec, ObjectHash, ParsedOrigin};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -89,7 +89,8 @@ pub(crate) enum PlannedRecipe {
 #[derive(Debug, Clone)]
 pub(crate) struct PlannedBuilderRecipe {
     pub(crate) name: String,
-    pub(crate) spec: &'static BuilderSpec,
+    pub(crate) tag: &'static str,
+    pub(crate) spec: &'static InputSpec,
     pub(crate) config: Value,
     pub(crate) inputs: BTreeMap<String, BuildKey>,
 }
@@ -104,16 +105,23 @@ pub(crate) struct PlannedSourceRecipe {
 impl PlannedRecipe {
     pub(crate) fn tag(&self) -> &str {
         match self {
-            Self::Builder(recipe) => recipe.spec.tag,
+            Self::Builder(recipe) => recipe.tag,
             Self::Source(_) => "Source",
         }
     }
 
     pub(crate) fn builder(
         &self,
-    ) -> Option<(&'static BuilderSpec, &Value, &BTreeMap<String, BuildKey>)> {
+    ) -> Option<(
+        &'static str,
+        &'static InputSpec,
+        &Value,
+        &BTreeMap<String, BuildKey>,
+    )> {
         match self {
-            Self::Builder(recipe) => Some((recipe.spec, &recipe.config, &recipe.inputs)),
+            Self::Builder(recipe) => {
+                Some((recipe.tag, recipe.spec, &recipe.config, &recipe.inputs))
+            }
             Self::Source(_) => None,
         }
     }
@@ -239,6 +247,7 @@ fn collect_builder_recipe(
             builders::supported_builder_tags().join(", ")
         ))
     })?;
+    let tag = builder.tag();
     let spec = builder.spec();
 
     let reserved_inputs = spec.reserved_input_names().collect::<Vec<_>>();
@@ -246,7 +255,7 @@ fn collect_builder_recipe(
         if !spec.allow_extra_inputs && !spec.is_reserved_input(input_name) {
             return Err(RuntimeError::InvalidRequest(format!(
                 "builder '{}' does not accept extra input '{}'; allowed inputs: {}",
-                spec.tag,
+                tag,
                 input_name,
                 reserved_inputs.join(", ")
             )));
@@ -258,7 +267,7 @@ fn collect_builder_recipe(
         if !recipe.inputs.contains_key(*required) {
             return Err(RuntimeError::InvalidRequest(format!(
                 "builder '{}' is missing required input '{}' in recipe '{}'",
-                spec.tag, required, recipe.name
+                tag, required, recipe.name
             )));
         }
     }
@@ -274,12 +283,13 @@ fn collect_builder_recipe(
         }
     }
 
-    let key = compute_build_key(spec.tag, &recipe.config, &ordered_direct_deps)
-        .map_err(map_store_error)?;
+    let key =
+        compute_build_key(tag, &recipe.config, &ordered_direct_deps).map_err(map_store_error)?;
     Ok((
         key,
         PlannedRecipe::Builder(PlannedBuilderRecipe {
             name: recipe.name.clone(),
+            tag,
             spec,
             config: recipe.config.clone(),
             inputs,
@@ -779,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn build_key_order_follows_builder_spec_not_json_field_order() {
+    fn build_key_order_follows_input_spec_not_json_field_order() {
         let rootfs = json!({
             "name": "rootfs",
             "tag": "Tree",

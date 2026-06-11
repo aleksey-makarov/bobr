@@ -30,7 +30,7 @@ pub fn registered_builders() -> [&'static dyn Builder; 8] {
 
 pub fn validate_registered_builders() -> Result<(), String> {
     for builder in registered_builders() {
-        builder.spec().validate()?;
+        builder.spec().validate_for_builder(builder.tag())?;
     }
     Ok(())
 }
@@ -38,14 +38,14 @@ pub fn validate_registered_builders() -> Result<(), String> {
 pub fn get_builder(tag: &str) -> Option<&'static dyn Builder> {
     registered_builders()
         .iter()
-        .find(|builder| builder.spec().tag.eq_ignore_ascii_case(tag))
+        .find(|builder| builder.tag().eq_ignore_ascii_case(tag))
         .copied()
 }
 
 pub fn supported_builder_tags() -> Vec<&'static str> {
     registered_builders()
         .iter()
-        .map(|builder| builder.spec().tag)
+        .map(|builder| builder.tag())
         .collect()
 }
 
@@ -54,7 +54,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registered_builder_specs_are_valid() {
+    fn registered_input_specs_are_valid() {
         validate_registered_builders().unwrap();
     }
 }
