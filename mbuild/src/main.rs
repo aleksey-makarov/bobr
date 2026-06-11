@@ -47,15 +47,20 @@ impl fmt::Display for MbuildError {
 #[command(name = "mbuild")]
 #[command(about = "mbuild runtime for JSON recipe graphs")]
 struct Cli {
-    #[arg(long, action = ArgAction::SetTrue, help = "suppress live build progress on stderr")]
+    #[arg(long, action = ArgAction::SetTrue, help = "Suppress live build progress on stderr")]
     quiet: bool,
 
-    #[arg(short = 'j', long = "jobs")]
+    #[arg(
+        short = 'j',
+        long = "jobs",
+        help = "Set the maximum number of parallel jobs"
+    )]
     jobs: Option<usize>,
 
-    #[arg(long = "store")]
+    #[arg(long = "store", help = "Use this store root for the build")]
     store: Option<PathBuf>,
 
+    #[arg(help = "Read recipe JSON from this file instead of stdin")]
     recipe_file: Option<PathBuf>,
 }
 
