@@ -1,12 +1,18 @@
 use crate::builders;
 use crate::origins;
-use crate::runtime::{RuntimeError, map_store_error};
+#[cfg(test)]
+use crate::planned::source_planning_key;
+use crate::planned::{BuilderPlannedSubject, PlannedSubject, ReuseOrigin, SourcePlannedSubject};
+use crate::runtime::RuntimeError;
 use bobr_store::RealizedObject;
-use bobr_store::identity::{BuildKey, compute_build_key};
-use mbuild_core::{InputSpec, ObjectHash, ParsedOrigin};
-use serde_json::{Map, Value, json};
+use bobr_store::identity::BuildKey;
+#[cfg(test)]
+use bobr_store::identity::compute_build_key;
+use mbuild_core::{ObjectHash, ParsedOrigin};
+use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct RecipeEnvelope {
@@ -80,86 +86,27 @@ impl RecipeRequest {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum PlannedRecipe {
-    Builder(PlannedBuilderRecipe),
-    Source(PlannedSourceRecipe),
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PlannedBuilderRecipe {
-    pub(crate) name: String,
-    pub(crate) tag: &'static str,
-    pub(crate) spec: &'static InputSpec,
-    pub(crate) config: Value,
-    pub(crate) inputs: BTreeMap<String, BuildKey>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PlannedSourceRecipe {
-    pub(crate) name: String,
-    pub(crate) object_hash: ObjectHash,
-    pub(crate) origin: Option<Box<dyn ParsedOrigin>>,
-}
-
-impl PlannedRecipe {
-    pub(crate) fn name(&self) -> &str {
-        match self {
-            Self::Builder(recipe) => &recipe.name,
-            Self::Source(recipe) => &recipe.name,
-        }
-    }
-
-    pub(crate) fn tag(&self) -> &str {
-        match self {
-            Self::Builder(recipe) => recipe.tag,
-            Self::Source(_) => "Source",
-        }
-    }
-
-    pub(crate) fn builder(
-        &self,
-    ) -> Option<(
-        &'static str,
-        &'static InputSpec,
-        &Value,
-        &BTreeMap<String, BuildKey>,
-    )> {
-        match self {
-            Self::Builder(recipe) => {
-                Some((recipe.tag, recipe.spec, &recipe.config, &recipe.inputs))
-            }
-            Self::Source(_) => None,
-        }
-    }
-
-    pub(crate) fn try_for_each_direct_dep<E>(
-        &self,
-        mut f: impl FnMut(BuildKey) -> Result<(), E>,
-    ) -> Result<(), E> {
-        if let Self::Builder(recipe) = self {
-            for name in recipe.spec.ordered_present_input_names(&recipe.inputs) {
-                let key = recipe
-                    .inputs
-                    .get(name)
-                    .expect("planned recipe inputs must match builder spec");
-                f(*key)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PlannedNode {
-    pub(crate) recipe: PlannedRecipe,
+#[derive(Clone)]
+pub(crate) struct GraphNode {
+    pub(crate) subject: Arc<dyn PlannedSubject>,
     pub(crate) state: PlanningState,
 }
 
-impl PlannedNode {
-    pub(crate) fn new(recipe: PlannedRecipe) -> Self {
+impl std::fmt::Debug for GraphNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GraphNode")
+            .field("name", &self.subject.name())
+            .field("tag", &self.subject.tag())
+            .field("build_key", &self.subject.build_key())
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+impl GraphNode {
+    pub(crate) fn new(subject: Arc<dyn PlannedSubject>) -> Self {
         Self {
-            recipe,
+            subject,
             state: PlanningState::Unknown,
         }
     }
@@ -175,15 +122,9 @@ pub(crate) enum PlanningState {
     NeedsBuild,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReuseOrigin {
-    BuildHandle,
-    CanonicalObject,
-}
-
 pub(crate) fn collect_graph(
     request: &RecipeRequest,
-    nodes: &mut HashMap<BuildKey, PlannedNode>,
+    nodes: &mut HashMap<BuildKey, GraphNode>,
 ) -> Result<BuildKey, RuntimeError> {
     builders::validate_registered_builders().map_err(RuntimeError::InvalidRequest)?;
 
@@ -195,7 +136,7 @@ pub(crate) fn collect_graph(
 fn collect_graph_inner(
     request: &RecipeRequest,
     node_id: &str,
-    nodes: &mut HashMap<BuildKey, PlannedNode>,
+    nodes: &mut HashMap<BuildKey, GraphNode>,
     stack: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, BuildKey>,
 ) -> Result<BuildKey, RuntimeError> {
@@ -210,37 +151,32 @@ fn collect_graph_inner(
     }
 
     let recipe = request.node(node_id)?;
-    let (key, planned_recipe) = match recipe {
+    let subject = match recipe {
         Recipe::Builder(recipe) => {
-            collect_builder_recipe(request, recipe, nodes, stack, node_keys)?
+            collect_builder_subject(request, recipe, nodes, stack, node_keys)?
         }
-        Recipe::Source(recipe) => {
-            let key = source_planning_key(recipe.object_hash)?;
-            let planned = PlannedRecipe::Source(PlannedSourceRecipe {
-                name: recipe.name.clone(),
-                object_hash: recipe.object_hash,
-                origin: recipe.origin.clone(),
-            });
-            (key, planned)
-        }
+        Recipe::Source(recipe) => Arc::new(SourcePlannedSubject::new(
+            recipe.name.clone(),
+            recipe.object_hash,
+            recipe.origin.clone(),
+        )?) as Arc<dyn PlannedSubject>,
     };
 
     stack.remove(node_id);
 
-    nodes
-        .entry(key)
-        .or_insert_with(|| PlannedNode::new(planned_recipe));
+    let key = subject.build_key();
+    nodes.entry(key).or_insert_with(|| GraphNode::new(subject));
     node_keys.insert(node_id.to_string(), key);
     Ok(key)
 }
 
-fn collect_builder_recipe(
+fn collect_builder_subject(
     request: &RecipeRequest,
     recipe: &BuilderRecipe,
-    nodes: &mut HashMap<BuildKey, PlannedNode>,
+    nodes: &mut HashMap<BuildKey, GraphNode>,
     stack: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, BuildKey>,
-) -> Result<(BuildKey, PlannedRecipe), RuntimeError> {
+) -> Result<Arc<dyn PlannedSubject>, RuntimeError> {
     let builder = builders::get_builder(&recipe.tag).ok_or_else(|| {
         RuntimeError::UnknownBuilder(format!(
             "unknown builder tag '{}'; supported builders: {}",
@@ -248,65 +184,18 @@ fn collect_builder_recipe(
             builders::supported_builder_tags().join(", ")
         ))
     })?;
-    let tag = builder.tag();
-    let spec = builder.spec();
-
-    let reserved_inputs = spec.reserved_input_names().collect::<Vec<_>>();
-    for input_name in recipe.inputs.keys() {
-        if !spec.allow_extra_inputs && !spec.is_reserved_input(input_name) {
-            return Err(RuntimeError::InvalidRequest(format!(
-                "builder '{}' does not accept extra input '{}'; allowed inputs: {}",
-                tag,
-                input_name,
-                reserved_inputs.join(", ")
-            )));
-        }
-    }
-
     let mut inputs = BTreeMap::new();
-    for required in spec.required_inputs {
-        if !recipe.inputs.contains_key(*required) {
-            return Err(RuntimeError::InvalidRequest(format!(
-                "builder '{}' is missing required input '{}' in recipe '{}'",
-                tag, required, recipe.name
-            )));
-        }
-    }
-
-    let mut ordered_direct_deps = Vec::new();
     for (input_name, child_id) in &recipe.inputs {
         let key = collect_graph_inner(request, child_id, nodes, stack, node_keys)?;
         inputs.insert(input_name.clone(), key);
     }
-    for input_name in spec.ordered_present_input_names(&inputs) {
-        if let Some(key) = inputs.get(input_name) {
-            ordered_direct_deps.push(*key);
-        }
-    }
 
-    let key =
-        compute_build_key(tag, &recipe.config, &ordered_direct_deps).map_err(map_store_error)?;
-    Ok((
-        key,
-        PlannedRecipe::Builder(PlannedBuilderRecipe {
-            name: recipe.name.clone(),
-            tag,
-            spec,
-            config: recipe.config.clone(),
-            inputs,
-        }),
-    ))
-}
-
-fn source_planning_key(object_hash: ObjectHash) -> Result<BuildKey, RuntimeError> {
-    compute_build_key(
-        "SourceNode",
-        &json!({
-            "object_hash": object_hash.to_string(),
-        }),
-        &[],
-    )
-    .map_err(map_store_error)
+    Ok(Arc::new(BuilderPlannedSubject::new(
+        builder,
+        recipe.name.clone(),
+        recipe.config.clone(),
+        inputs,
+    )?) as Arc<dyn PlannedSubject>)
 }
 
 fn parse_envelope_value(value: Value, path: &str) -> Result<RecipeEnvelope, RuntimeError> {
@@ -551,7 +440,7 @@ mod tests {
 
     fn collect_one(
         request: &Value,
-    ) -> Result<(BuildKey, HashMap<BuildKey, PlannedNode>), RuntimeError> {
+    ) -> Result<(BuildKey, HashMap<BuildKey, GraphNode>), RuntimeError> {
         let request = parse_request_value(request.clone(), "$")?;
         let mut nodes = HashMap::new();
         let root_key = collect_graph(&request, &mut nodes)?;
@@ -626,7 +515,9 @@ mod tests {
         });
         let (root_key, nodes) = collect_one(&request).unwrap();
         let node = nodes.get(&root_key).unwrap();
-        assert!(matches!(node.recipe, PlannedRecipe::Source(_)));
+        assert_eq!(node.subject.name(), "local-source");
+        assert_eq!(node.subject.tag(), "Source");
+        assert!(node.subject.inputs().is_empty());
     }
 
     #[test]
@@ -645,7 +536,9 @@ mod tests {
         });
         let (root_key, nodes) = collect_one(&request).unwrap();
         let node = nodes.get(&root_key).unwrap();
-        assert!(matches!(node.recipe, PlannedRecipe::Source(_)));
+        assert_eq!(node.subject.name(), "local-source");
+        assert_eq!(node.subject.tag(), "Source");
+        assert!(node.subject.inputs().is_empty());
     }
 
     #[test]
@@ -659,10 +552,9 @@ mod tests {
         });
         let (root_key, nodes) = collect_one(&request).unwrap();
         let node = nodes.get(&root_key).unwrap();
-        let PlannedRecipe::Source(source) = &node.recipe else {
-            panic!("expected source recipe");
-        };
-        assert!(source.origin.is_none());
+        assert_eq!(node.subject.name(), "local-source");
+        assert_eq!(node.subject.tag(), "Source");
+        assert!(node.subject.inputs().is_empty());
     }
 
     #[test]
@@ -681,10 +573,8 @@ mod tests {
         });
         let (root_key, nodes) = collect_one(&request).unwrap();
         let node = nodes.get(&root_key).unwrap();
-        let PlannedRecipe::Source(source) = &node.recipe else {
-            panic!("expected source recipe");
-        };
-        assert_eq!(source.origin.as_ref().unwrap().spec().tag, "OciRegistry");
+        assert_eq!(node.subject.name(), "base-image");
+        assert_eq!(node.subject.tag(), "Source");
     }
 
     #[test]
@@ -719,13 +609,14 @@ mod tests {
         });
         let (root_key, nodes) = collect_one(&request).unwrap();
         let node = nodes.get(&root_key).unwrap();
-        let PlannedRecipe::Source(source) = &node.recipe else {
-            panic!("expected source recipe");
-        };
-        assert_eq!(
-            source.object_hash.to_string(),
+        let expected_key = source_planning_key(
             "1111111111111111111111111111111111111111111111111111111111111111"
-        );
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(root_key, expected_key);
+        assert_eq!(node.subject.build_key(), expected_key);
     }
 
     #[test]
@@ -868,7 +759,9 @@ mod tests {
         let deduped_key =
             compute_build_key("Tree", &tree_config("same.txt", "same", false), &[]).unwrap();
         let node = nodes.get(&deduped_key).unwrap();
-        assert_eq!(node.recipe.name(), "binary-a");
+        assert_eq!(node.subject.name(), "binary-a");
+        assert_eq!(node.subject.tag(), "Tree");
+        assert_eq!(node.subject.build_key(), deduped_key);
     }
 
     #[test]

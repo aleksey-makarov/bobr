@@ -1,22 +1,17 @@
-use crate::builders;
-use crate::recipe::{
-    PlannedBuilderRecipe, PlannedNode, PlannedRecipe, PlannedSourceRecipe, PlanningState,
-    RecipeEnvelope, ReuseOrigin, collect_graph,
+use crate::planned::{
+    PlannedDependencyLookupContext, PlannedExecutionContext, PlannedLookupContext, ReuseOrigin,
+    SubjectExecution,
 };
-use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
-use crate::runtime::{
-    ExecuteBuilderNodeRequest, RuntimeError, check_cancelled, execute_builder_node,
-    log_runtime_event, lookup_build_handle, lookup_canonical_object, map_store_error,
-};
+use crate::recipe::{GraphNode, PlanningState, RecipeEnvelope, collect_graph};
+use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
 use bobr_store::identity::BuildKey;
 use bobr_store::{
-    ObjectRecord, RealizedObject, ReuseInputIdentity, SourceImportOutcome, SourceLookup, Store,
-    StoreWorkspace, create_workspace, import_source_object, lookup_source_object,
-    publish_stored_object, remove_store_temp_dir_force,
+    RealizedObject, Store, StoreWorkspace, create_workspace, publish_stored_object,
+    remove_store_temp_dir_force,
 };
 use mbuild_core::{
-    BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderClassBase, BuilderRun,
-    CancellationToken, OriginContext, SourceBuilderClass, SourceBuilderInit, Workspace,
+    BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderRun, CancellationToken,
+    Workspace,
 };
 use serde_json::{Map, Value, to_string_pretty};
 use std::collections::{HashMap, VecDeque};
@@ -25,12 +20,6 @@ use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-
-#[derive(Debug, Clone)]
-struct ExecutedNode {
-    realized: RealizedObject,
-    logger: Arc<dyn BuildLogger>,
-}
 
 pub fn run_recipe_json_in_workspace(
     _workspace_root: &Path,
@@ -143,78 +132,109 @@ fn default_jobs() -> usize {
 
 fn ensure_planned(
     store: &Store,
-    nodes: &mut HashMap<BuildKey, PlannedNode>,
+    nodes: &mut HashMap<BuildKey, GraphNode>,
     key: BuildKey,
 ) -> Result<(), RuntimeError> {
-    let recipe = {
+    let subject = {
         let node = nodes.get(&key).ok_or_else(|| {
             RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
         if !matches!(node.state, PlanningState::Unknown) {
             return Ok(());
         }
-        node.recipe.clone()
+        node.subject.clone()
     };
 
-    match &recipe {
-        PlannedRecipe::Builder(_) => {
-            if let Some(published) = lookup_build_handle(store, key)? {
-                let node = nodes.get_mut(&key).ok_or_else(|| {
-                    RuntimeError::Store(format!("missing planned node for key '{}'", key))
-                })?;
-                node.state = PlanningState::Reused {
-                    realized: realized_object_from_record(
-                        Some(published.build.build_key),
-                        &published.object_record,
-                    ),
-                    origin: ReuseOrigin::BuildHandle,
-                };
-                return Ok(());
-            }
+    if let Some(reuse) = subject.lookup_direct_reuse(PlannedLookupContext { store })? {
+        set_node_state(
+            nodes,
+            key,
+            PlanningState::Reused {
+                realized: reuse.realized,
+                origin: reuse.origin,
+            },
+        )?;
+        return Ok(());
+    }
 
-            let mut deps = Vec::new();
-            recipe.try_for_each_direct_dep(|dep| {
-                deps.push(dep);
-                Ok::<_, RuntimeError>(())
-            })?;
-            for dep in deps {
-                ensure_planned(store, nodes, dep)?;
-            }
+    for dep in subject.inputs().values().copied().collect::<Vec<_>>() {
+        ensure_planned(store, nodes, dep)?;
+    }
 
-            if let Some(realized) = lookup_canonical_for_planned_node(store, nodes, key)? {
-                let node = nodes.get_mut(&key).ok_or_else(|| {
-                    RuntimeError::Store(format!("missing planned node for key '{}'", key))
-                })?;
-                node.state = PlanningState::Reused {
-                    realized,
-                    origin: ReuseOrigin::CanonicalObject,
-                };
-            } else {
-                let node = nodes.get_mut(&key).ok_or_else(|| {
-                    RuntimeError::Store(format!("missing planned node for key '{}'", key))
-                })?;
-                node.state = PlanningState::NeedsBuild;
-            }
-        }
-        PlannedRecipe::Source(source) => {
-            let node = nodes.get_mut(&key).ok_or_else(|| {
-                RuntimeError::Store(format!("missing planned node for key '{}'", key))
-            })?;
-            match lookup_source_object(store, source.object_hash).map_err(map_store_error)? {
-                SourceLookup::Hit(stored) => {
-                    node.state = PlanningState::Reused {
-                        realized: realized_object_from_record(None, &stored.object_record),
-                        origin: ReuseOrigin::CanonicalObject,
-                    };
-                }
-                SourceLookup::Missing => {
-                    node.state = PlanningState::NeedsBuild;
-                }
-            }
-        }
+    let Some(realized_inputs) = reused_inputs_for_subject(nodes, subject.as_ref())? else {
+        set_node_state(nodes, key, PlanningState::NeedsBuild)?;
+        return Ok(());
+    };
+
+    if let Some(reuse) = subject.lookup_after_inputs_reused(PlannedDependencyLookupContext {
+        store,
+        realized_inputs: &realized_inputs,
+    })? {
+        set_node_state(
+            nodes,
+            key,
+            PlanningState::Reused {
+                realized: reuse.realized,
+                origin: reuse.origin,
+            },
+        )?;
+    } else {
+        set_node_state(nodes, key, PlanningState::NeedsBuild)?;
     }
 
     Ok(())
+}
+
+fn set_node_state(
+    nodes: &mut HashMap<BuildKey, GraphNode>,
+    key: BuildKey,
+    state: PlanningState,
+) -> Result<(), RuntimeError> {
+    let node = nodes
+        .get_mut(&key)
+        .ok_or_else(|| RuntimeError::Store(format!("missing planned node for key '{}'", key)))?;
+    node.state = state;
+    Ok(())
+}
+
+fn reused_inputs_for_subject(
+    nodes: &HashMap<BuildKey, GraphNode>,
+    subject: &dyn crate::planned::PlannedSubject,
+) -> Result<Option<HashMap<BuildKey, RealizedObject>>, RuntimeError> {
+    let mut realized_inputs = HashMap::new();
+    for dep in subject.inputs().values() {
+        let dep_node = nodes.get(dep).ok_or_else(|| {
+            RuntimeError::Store(format!(
+                "missing dependency node '{}' for key '{}'",
+                dep,
+                subject.build_key()
+            ))
+        })?;
+        match &dep_node.state {
+            PlanningState::Reused { realized, .. } => {
+                realized_inputs.insert(*dep, realized.clone());
+            }
+            PlanningState::Unknown | PlanningState::NeedsBuild => return Ok(None),
+        }
+    }
+    Ok(Some(realized_inputs))
+}
+
+fn completed_inputs_for_subject(
+    completed: &HashMap<BuildKey, RealizedObject>,
+    subject: &dyn crate::planned::PlannedSubject,
+) -> Result<HashMap<BuildKey, RealizedObject>, RuntimeError> {
+    let mut realized_inputs = HashMap::new();
+    for dep in subject.inputs().values() {
+        let realized = completed.get(dep).cloned().ok_or_else(|| {
+            RuntimeError::Build(format!(
+                "dependency object '{}' is not available in completed set",
+                dep
+            ))
+        })?;
+        realized_inputs.insert(*dep, realized);
+    }
+    Ok(realized_inputs)
 }
 
 fn publish_reused_root(
@@ -280,49 +300,10 @@ fn publish_reused_root(
     Ok(())
 }
 
-fn lookup_canonical_for_planned_node(
-    store: &Store,
-    nodes: &HashMap<BuildKey, PlannedNode>,
-    key: BuildKey,
-) -> Result<Option<RealizedObject>, RuntimeError> {
-    let node = nodes
-        .get(&key)
-        .ok_or_else(|| RuntimeError::Store(format!("missing planned node for key '{}'", key)))?;
-    let Some((builder_tag, _spec, config, _inputs)) = node.recipe.builder() else {
-        return Ok(None);
-    };
-
-    let mut input_identities = Vec::<ReuseInputIdentity>::new();
-    let mut all_reused = true;
-    node.recipe.try_for_each_direct_dep(|dep| {
-        let dep_node = nodes.get(&dep).ok_or_else(|| {
-            RuntimeError::Store(format!(
-                "missing dependency node '{}' for key '{}'",
-                dep, key
-            ))
-        })?;
-        match &dep_node.state {
-            PlanningState::Reused { realized, .. } => input_identities.push(ReuseInputIdentity {
-                object_hash: realized.object_hash,
-            }),
-            PlanningState::Unknown | PlanningState::NeedsBuild => all_reused = false,
-        }
-        Ok(())
-    })?;
-    if !all_reused {
-        return Ok(None);
-    }
-
-    Ok(
-        lookup_canonical_object(store, builder_tag, config, &input_identities, key)?
-            .map(|published| realized_object_from_record(Some(key), &published.object_record)),
-    )
-}
-
 fn execute_misses(
     store: &Store,
     logger: Arc<BuildRunLogger>,
-    nodes: &HashMap<BuildKey, PlannedNode>,
+    nodes: &HashMap<BuildKey, GraphNode>,
     completed: &mut HashMap<BuildKey, RealizedObject>,
     root_key: BuildKey,
     jobs: usize,
@@ -338,23 +319,21 @@ fn execute_misses(
             continue;
         }
         let mut wait_for = 0usize;
-        node.recipe
-            .try_for_each_direct_dep(|dep| -> Result<(), RuntimeError> {
-                if let Some(dep_node) = nodes.get(&dep)
-                    && matches!(dep_node.state, PlanningState::NeedsBuild)
-                {
-                    wait_for += 1;
-                    reverse.entry(dep).or_default().push(*key);
-                }
-                Ok(())
-            })?;
+        for dep in node.subject.inputs().values() {
+            if let Some(dep_node) = nodes.get(dep)
+                && matches!(dep_node.state, PlanningState::NeedsBuild)
+            {
+                wait_for += 1;
+                reverse.entry(*dep).or_default().push(*key);
+            }
+        }
         remaining.insert(*key, wait_for);
         if wait_for == 0 {
             ready.push_back(*key);
         }
     }
 
-    let (tx, rx) = mpsc::channel::<(BuildKey, Result<ExecutedNode, RuntimeError>)>();
+    let (tx, rx) = mpsc::channel::<(BuildKey, Result<SubjectExecution, RuntimeError>)>();
     let mut in_flight = HashMap::<BuildKey, JoinHandle<()>>::new();
     let mut last_wait_log: Option<Instant> = None;
     let scheduler_workspace = create_workspace(
@@ -397,27 +376,15 @@ fn execute_misses(
             let logger = logger.clone();
             let tx = tx.clone();
             let cancellation = cancellation.clone();
-            let recipe = node.recipe.clone();
-            let builder_inputs = match &recipe {
-                PlannedRecipe::Builder(builder_recipe) => {
-                    Some(build_resolved_inputs(&store, builder_recipe, completed)?)
-                }
-                PlannedRecipe::Source(_) => None,
-            };
+            let subject = node.subject.clone();
+            let realized_inputs = completed_inputs_for_subject(completed, subject.as_ref())?;
             let handle = thread::spawn(move || {
-                let result = match recipe {
-                    PlannedRecipe::Builder(builder_recipe) => execute_builder_recipe(
-                        &store,
-                        logger,
-                        key,
-                        builder_recipe,
-                        cancellation,
-                        builder_inputs.expect("builder inputs must be prepared"),
-                    ),
-                    PlannedRecipe::Source(source_recipe) => {
-                        execute_source_recipe(&store, logger, key, cancellation, source_recipe)
-                    }
-                };
+                let result = subject.execute(PlannedExecutionContext {
+                    store: &store,
+                    run_logger: logger,
+                    cancellation,
+                    realized_inputs: &realized_inputs,
+                });
                 let _ = tx.send((key, result));
             });
             in_flight.insert(key, handle);
@@ -496,7 +463,7 @@ fn execute_misses(
         let node = nodes.get(&key).ok_or_else(|| {
             RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
-        let publication_name = node.recipe.name();
+        let publication_name = node.subject.name();
         publish_stored_object(store, publication_name, executed.realized.object_hash)
             .map_err(map_store_error)?;
         log_runtime_event(
@@ -570,7 +537,7 @@ fn log_scheduler_event(
 }
 
 fn scheduler_first_error_details(
-    nodes: &HashMap<BuildKey, PlannedNode>,
+    nodes: &HashMap<BuildKey, GraphNode>,
     completed: &HashMap<BuildKey, RealizedObject>,
     ready: &VecDeque<BuildKey>,
     in_flight: &HashMap<BuildKey, JoinHandle<()>>,
@@ -591,7 +558,7 @@ fn scheduler_first_error_details(
 }
 
 fn scheduler_wait_details(
-    nodes: &HashMap<BuildKey, PlannedNode>,
+    nodes: &HashMap<BuildKey, GraphNode>,
     completed: &HashMap<BuildKey, RealizedObject>,
     ready: &VecDeque<BuildKey>,
     in_flight: &HashMap<BuildKey, JoinHandle<()>>,
@@ -614,7 +581,7 @@ fn scheduler_wait_details(
 }
 
 fn scheduler_state_details(
-    nodes: &HashMap<BuildKey, PlannedNode>,
+    nodes: &HashMap<BuildKey, GraphNode>,
     completed: &HashMap<BuildKey, RealizedObject>,
     ready: &VecDeque<BuildKey>,
     in_flight: &HashMap<BuildKey, JoinHandle<()>>,
@@ -640,7 +607,7 @@ fn scheduler_state_details(
 }
 
 fn in_flight_summaries(
-    nodes: &HashMap<BuildKey, PlannedNode>,
+    nodes: &HashMap<BuildKey, GraphNode>,
     in_flight: &HashMap<BuildKey, JoinHandle<()>>,
 ) -> Vec<Value> {
     let mut entries = in_flight
@@ -651,7 +618,7 @@ fn in_flight_summaries(
     entries.into_iter().map(|(_, value)| value).collect()
 }
 
-fn node_summary_value(nodes: &HashMap<BuildKey, PlannedNode>, key: BuildKey) -> Value {
+fn node_summary_value(nodes: &HashMap<BuildKey, GraphNode>, key: BuildKey) -> Value {
     let mut object = Map::new();
     object.insert("build_key".to_string(), Value::String(key.to_string()));
     object.insert(
@@ -661,11 +628,11 @@ fn node_summary_value(nodes: &HashMap<BuildKey, PlannedNode>, key: BuildKey) -> 
     if let Some(node) = nodes.get(&key) {
         object.insert(
             "tag".to_string(),
-            Value::String(node.recipe.tag().to_string()),
+            Value::String(node.subject.tag().to_string()),
         );
         object.insert(
             "name".to_string(),
-            Value::String(node.recipe.name().to_string()),
+            Value::String(node.subject.name().to_string()),
         );
     }
     Value::Object(object)
@@ -673,204 +640,6 @@ fn node_summary_value(nodes: &HashMap<BuildKey, PlannedNode>, key: BuildKey) -> 
 
 fn short_build_key(key: BuildKey) -> String {
     key.to_string().chars().take(12).collect()
-}
-
-fn build_resolved_inputs(
-    store: &Store,
-    recipe: &PlannedBuilderRecipe,
-    completed: &HashMap<BuildKey, RealizedObject>,
-) -> Result<ResolvedInputs, RuntimeError> {
-    let mut inputs = ResolvedInputs::empty();
-    for input_name in recipe.spec.ordered_present_input_names(&recipe.inputs) {
-        let key = *recipe.inputs.get(input_name).ok_or_else(|| {
-            RuntimeError::Store(format!(
-                "planned builder input '{}' is missing for '{}'",
-                input_name, recipe.name
-            ))
-        })?;
-        let dep = resolved_dependency_from_completed(store, completed, key)?;
-        inputs.insert(input_name, dep);
-    }
-    Ok(inputs)
-}
-
-fn resolved_dependency_from_completed(
-    store: &Store,
-    completed: &HashMap<BuildKey, RealizedObject>,
-    key: BuildKey,
-) -> Result<ResolvedDependency, RuntimeError> {
-    let realized = completed.get(&key).cloned().ok_or_else(|| {
-        RuntimeError::Build(format!(
-            "dependency object '{}' is not available in completed set",
-            key
-        ))
-    })?;
-    Ok(ResolvedDependency {
-        object_hash: realized.object_hash,
-        object_path: store.object_path(realized.object_hash),
-    })
-}
-
-fn execute_builder_recipe(
-    store: &Store,
-    logger: Arc<BuildRunLogger>,
-    key: BuildKey,
-    recipe: PlannedBuilderRecipe,
-    cancellation: CancellationToken,
-    inputs: ResolvedInputs,
-) -> Result<ExecutedNode, RuntimeError> {
-    let executed = execute_builder_node(ExecuteBuilderNodeRequest {
-        store,
-        builder: builders::get_builder(recipe.tag).ok_or_else(|| {
-            RuntimeError::UnknownBuilder(format!(
-                "unknown builder tag '{}'; supported builders: {}",
-                recipe.tag,
-                builders::supported_builder_tags().join(", ")
-            ))
-        })?,
-        build_key: key,
-        build_name: &recipe.name,
-        run_logger: logger,
-        cancellation,
-        config: recipe.config,
-        inputs,
-    })?;
-    Ok(ExecutedNode {
-        realized: realized_object_from_record(Some(key), &executed.published.object_record),
-        logger: executed.logger,
-    })
-}
-
-fn execute_source_recipe(
-    store: &Store,
-    run_logger: Arc<BuildRunLogger>,
-    key: BuildKey,
-    cancellation: CancellationToken,
-    recipe: PlannedSourceRecipe,
-) -> Result<ExecutedNode, RuntimeError> {
-    let workspace = create_workspace(store, "Source", Some(recipe.name.clone()), key.to_string())
-        .map_err(map_store_error)?;
-    let workspace = core_workspace(workspace);
-    let source_builder = SourceBuilderClass.create_object(SourceBuilderInit {
-        recipe_name: recipe.name,
-        build_key: key.to_string(),
-        declared_object_hash: recipe.object_hash,
-        origin: recipe.origin,
-        workspace,
-    });
-    let logger = run_logger
-        .bind_source(&source_builder)
-        .map_err(RuntimeError::Store)?;
-    log_runtime_event(
-        logger.as_ref(),
-        BuildLogLevel::Info,
-        "start",
-        "starting builder node",
-    );
-    if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_workspace_temp_dir(store, source_builder.temp_dir(), logger.as_ref());
-        return Err(error);
-    }
-
-    match lookup_source_object(store, source_builder.declared_object_hash())
-        .map_err(map_store_error)?
-    {
-        SourceLookup::Hit(stored) => {
-            log_runtime_event(
-                logger.as_ref(),
-                BuildLogLevel::Info,
-                "object-hit",
-                "reusing existing source object",
-            );
-            cleanup_workspace_temp_dir(store, source_builder.temp_dir(), logger.as_ref());
-            return Ok(ExecutedNode {
-                realized: realized_object_from_record(None, &stored.object_record),
-                logger,
-            });
-        }
-        SourceLookup::Missing => {}
-    }
-    log_runtime_event(
-        logger.as_ref(),
-        BuildLogLevel::Info,
-        "cache-miss",
-        "materializing source",
-    );
-
-    if source_builder.origin().is_none() {
-        let message = format!(
-            "source '{}' has no origin and object '{}' is not present in store",
-            source_builder.recipe_name(),
-            source_builder.declared_object_hash()
-        );
-        log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
-        cleanup_workspace_temp_dir(store, source_builder.temp_dir(), logger.as_ref());
-        return Err(RuntimeError::Build(message));
-    }
-
-    let temp_root = source_builder.temp_dir().to_path_buf();
-    if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
-        return Err(error);
-    }
-    let staged_path = match source_builder
-        .origin()
-        .expect("origin checked above")
-        .materialize(&OriginContext {
-            temp_root: temp_root.as_path(),
-        }) {
-        Ok(path) => path,
-        Err(error) => {
-            cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
-            log_runtime_event(
-                logger.as_ref(),
-                BuildLogLevel::Error,
-                "fail",
-                error.to_string(),
-            );
-            return Err(RuntimeError::Build(error));
-        }
-    };
-    if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
-        return Err(error);
-    }
-    log_runtime_event(
-        logger.as_ref(),
-        BuildLogLevel::Info,
-        "run",
-        "materializing source origin",
-    );
-
-    let import_outcome =
-        import_source_object(store, source_builder.declared_object_hash(), &staged_path).map_err(
-            |error| {
-                cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
-                map_store_error(error)
-            },
-        )?;
-    if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
-        return Err(error);
-    }
-    cleanup_workspace_temp_dir(store, &temp_root, logger.as_ref());
-
-    match import_outcome {
-        SourceImportOutcome::Matched(stored) => Ok(ExecutedNode {
-            realized: realized_object_from_record(None, &stored.object_record),
-            logger,
-        }),
-        SourceImportOutcome::Mismatched { actual_hash } => {
-            let message = format!(
-                "source '{}' materialized unexpected object hash: expected {}, got {}",
-                source_builder.recipe_name(),
-                source_builder.declared_object_hash(),
-                actual_hash
-            );
-            log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
-            Err(RuntimeError::Build(message))
-        }
-    }
 }
 
 fn build_run_logger_for_store(
@@ -903,29 +672,18 @@ fn cleanup_workspace_temp_dir(store: &Store, temp_dir: &Path, logger: &dyn Build
     }
 }
 
-fn realized_object_from_record(
-    build_key: Option<BuildKey>,
-    object_record: &ObjectRecord,
-) -> RealizedObject {
-    RealizedObject {
-        build_key,
-        object_hash: object_record.object_hash,
-        run_id: object_record.run_id.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recipe::{ReuseOrigin, collect_graph};
+    use crate::planned::{PlannedSubject, ReuseOrigin, SourcePlannedSubject};
+    use crate::recipe::collect_graph;
     use bobr_store::identity::compute_reuse_key;
-    use bobr_store::{PublishRequest, publish_build};
+    use bobr_store::{PublishRequest, ReuseInputIdentity, publish_build};
     use mbuild_core::{CancellationToken, OriginContext, OriginSpec, ParsedOrigin};
     use serde_json::json;
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::str::FromStr;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -1000,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn lookup_canonical_for_planned_node_uses_dependency_object_hashes() {
+    fn planned_subject_canonical_lookup_uses_dependency_object_hashes() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let request = RecipeEnvelope::parse_json(
@@ -1057,17 +815,14 @@ mod tests {
         let mut nodes = HashMap::new();
         let root_key = collect_graph(&request, &mut nodes).unwrap();
         let dep_keys = {
-            let mut keys = Vec::new();
             nodes
                 .get(&root_key)
                 .unwrap()
-                .recipe
-                .try_for_each_direct_dep(|dep| {
-                    keys.push(dep);
-                    Ok::<_, RuntimeError>(())
-                })
-                .unwrap();
-            keys
+                .subject
+                .inputs()
+                .values()
+                .copied()
+                .collect::<Vec<_>>()
         };
         assert_eq!(dep_keys.len(), 2);
 
@@ -1112,10 +867,21 @@ mod tests {
         )
         .unwrap();
 
-        let published = lookup_canonical_for_planned_node(&store, &nodes, root_key)
+        let realized_inputs = HashMap::from([
+            (dep_keys[0], rootfs_realized),
+            (dep_keys[1], script_realized),
+        ]);
+        let published = nodes
+            .get(&root_key)
+            .unwrap()
+            .subject
+            .lookup_after_inputs_reused(PlannedDependencyLookupContext {
+                store: &store,
+                realized_inputs: &realized_inputs,
+            })
             .unwrap()
             .expect("expected canonical object hit");
-        assert_eq!(published.build_key, Some(root_key));
+        assert_eq!(published.realized.build_key, Some(root_key));
     }
 
     #[test]
@@ -1127,18 +893,23 @@ mod tests {
         let object_hash = "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
             .unwrap();
-        let key =
-            BuildKey::from_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                .unwrap();
-        let recipe = PlannedSourceRecipe {
-            name: "cancel-source".to_string(),
+        let subject = SourcePlannedSubject::new(
+            "cancel-source".to_string(),
             object_hash,
-            origin: Some(Box::new(CancellingOrigin {
+            Some(Box::new(CancellingOrigin {
                 cancellation: cancellation.clone(),
             })),
-        };
+        )
+        .unwrap();
 
-        let error = execute_source_recipe(&store, logger, key, cancellation, recipe)
+        let realized_inputs = HashMap::new();
+        let error = subject
+            .execute(PlannedExecutionContext {
+                store: &store,
+                run_logger: logger,
+                cancellation,
+                realized_inputs: &realized_inputs,
+            })
             .expect_err("expected cancellation");
 
         assert_eq!(error.class(), "cancelled");
