@@ -1,6 +1,7 @@
 use crate::planned::{
     BuilderPlannedSubject, GraphKey, PlannedDependencyLookupContext, PlannedExecutionContext,
-    PlannedLookupContext, ReuseOrigin, SubjectExecution,
+    PlannedLookupContext, ReuseOrigin, SubjectExecution, execute_subject,
+    lookup_after_inputs_reused, lookup_direct_reuse,
 };
 use crate::recipe::{GraphNode, PlanningState, RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
@@ -146,7 +147,7 @@ fn ensure_planned(
         node.subject.clone()
     };
 
-    if let Some(reuse) = subject.lookup_direct_reuse(PlannedLookupContext { store })? {
+    if let Some(reuse) = lookup_direct_reuse(subject.as_ref(), PlannedLookupContext { store })? {
         set_node_state(
             nodes,
             key,
@@ -172,10 +173,13 @@ fn ensure_planned(
         return Ok(());
     };
 
-    if let Some(reuse) = subject.lookup_after_inputs_reused(PlannedDependencyLookupContext {
-        store,
-        realized_inputs: &realized_inputs,
-    })? {
+    if let Some(reuse) = lookup_after_inputs_reused(
+        subject.as_ref(),
+        PlannedDependencyLookupContext {
+            store,
+            realized_inputs: &realized_inputs,
+        },
+    )? {
         set_node_state(
             nodes,
             key,
@@ -390,12 +394,15 @@ fn execute_misses(
                 None => HashMap::new(),
             };
             let handle = thread::spawn(move || {
-                let result = subject.execute(PlannedExecutionContext {
-                    store: &store,
-                    run_logger: logger,
-                    cancellation,
-                    realized_inputs: &realized_inputs,
-                });
+                let result = execute_subject(
+                    &subject,
+                    PlannedExecutionContext {
+                        store: &store,
+                        run_logger: logger,
+                        cancellation,
+                        realized_inputs: &realized_inputs,
+                    },
+                );
                 let _ = tx.send((key, result));
             });
             in_flight.insert(key, handle);
@@ -899,16 +906,15 @@ mod tests {
             (dep_keys[0], rootfs_realized),
             (dep_keys[1], script_realized),
         ]);
-        let published = nodes
-            .get(&root_key)
-            .unwrap()
-            .subject
-            .lookup_after_inputs_reused(PlannedDependencyLookupContext {
+        let published = lookup_after_inputs_reused(
+            nodes.get(&root_key).unwrap().subject.as_ref(),
+            PlannedDependencyLookupContext {
                 store: &store,
                 realized_inputs: &realized_inputs,
-            })
-            .unwrap()
-            .expect("expected canonical object hit");
+            },
+        )
+        .unwrap()
+        .expect("expected canonical object hit");
         assert_eq!(published.realized.build_key, Some(root_build_key));
     }
 
@@ -921,23 +927,25 @@ mod tests {
         let object_hash = "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
             .unwrap();
-        let subject = SourcePlannedSubject::new(
+        let subject = PlannedSubject::Source(SourcePlannedSubject::new(
             "cancel-source".to_string(),
             object_hash,
             Some(Box::new(CancellingOrigin {
                 cancellation: cancellation.clone(),
             })),
-        );
+        ));
 
         let realized_inputs = HashMap::new();
-        let error = subject
-            .execute(PlannedExecutionContext {
+        let error = execute_subject(
+            &subject,
+            PlannedExecutionContext {
                 store: &store,
                 run_logger: logger,
                 cancellation,
                 realized_inputs: &realized_inputs,
-            })
-            .expect_err("expected cancellation");
+            },
+        )
+        .expect_err("expected cancellation");
 
         assert_eq!(error.class(), "cancelled");
         let metadata = workspace_metadata(temp.path(), "Source", "cancel-source");

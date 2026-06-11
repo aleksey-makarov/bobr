@@ -77,36 +77,6 @@ impl PlannedSubject {
             Self::Builder(subject) => Some(subject),
         }
     }
-
-    pub(crate) fn lookup_direct_reuse(
-        &self,
-        cx: PlannedLookupContext<'_>,
-    ) -> Result<Option<ReuseDecision>, RuntimeError> {
-        match self {
-            Self::Source(subject) => subject.lookup_direct_reuse(cx),
-            Self::Builder(subject) => subject.lookup_direct_reuse(cx),
-        }
-    }
-
-    pub(crate) fn lookup_after_inputs_reused(
-        &self,
-        cx: PlannedDependencyLookupContext<'_>,
-    ) -> Result<Option<ReuseDecision>, RuntimeError> {
-        match self {
-            Self::Source(_) => Ok(None),
-            Self::Builder(subject) => subject.lookup_after_inputs_reused(cx),
-        }
-    }
-
-    pub(crate) fn execute(
-        &self,
-        cx: PlannedExecutionContext<'_>,
-    ) -> Result<SubjectExecution, RuntimeError> {
-        match self {
-            Self::Source(subject) => subject.execute(cx),
-            Self::Builder(subject) => subject.execute(cx),
-        }
-    }
 }
 
 pub(crate) struct PlannedLookupContext<'a> {
@@ -198,69 +168,6 @@ impl BuilderPlannedSubject {
             build_key,
         })
     }
-
-    fn realized_input_identities(
-        &self,
-        realized_inputs: &HashMap<GraphKey, RealizedObject>,
-    ) -> Result<Vec<bobr_store::ReuseInputIdentity>, RuntimeError> {
-        let mut ordered = Vec::new();
-        for input_name in self
-            .builder
-            .spec()
-            .ordered_present_input_names(&self.inputs)
-        {
-            let key = self.inputs.get(input_name).ok_or_else(|| {
-                RuntimeError::Store(format!(
-                    "planned builder input '{}' is missing for '{}'",
-                    input_name, self.name
-                ))
-            })?;
-            let realized = realized_inputs.get(key).ok_or_else(|| {
-                RuntimeError::Build(format!(
-                    "dependency object '{}' is not available for '{}'",
-                    key, self.name
-                ))
-            })?;
-            ordered.push(bobr_store::ReuseInputIdentity {
-                object_hash: realized.object_hash,
-            });
-        }
-        Ok(ordered)
-    }
-
-    fn resolved_inputs(
-        &self,
-        store: &Store,
-        realized_inputs: &HashMap<GraphKey, RealizedObject>,
-    ) -> Result<ResolvedInputs, RuntimeError> {
-        let mut inputs = ResolvedInputs::empty();
-        for input_name in self
-            .builder
-            .spec()
-            .ordered_present_input_names(&self.inputs)
-        {
-            let key = *self.inputs.get(input_name).ok_or_else(|| {
-                RuntimeError::Store(format!(
-                    "planned builder input '{}' is missing for '{}'",
-                    input_name, self.name
-                ))
-            })?;
-            let realized = realized_inputs.get(&key).cloned().ok_or_else(|| {
-                RuntimeError::Build(format!(
-                    "dependency object '{}' is not available in completed set",
-                    key
-                ))
-            })?;
-            inputs.insert(
-                input_name,
-                ResolvedDependency {
-                    object_hash: realized.object_hash,
-                    object_path: store.object_path(realized.object_hash),
-                },
-            );
-        }
-        Ok(inputs)
-    }
 }
 
 impl BuilderPlannedSubject {
@@ -278,63 +185,6 @@ impl BuilderPlannedSubject {
 
     pub(crate) fn inputs(&self) -> &BTreeMap<String, GraphKey> {
         &self.inputs
-    }
-
-    pub(crate) fn lookup_direct_reuse(
-        &self,
-        cx: PlannedLookupContext<'_>,
-    ) -> Result<Option<ReuseDecision>, RuntimeError> {
-        Ok(
-            lookup_build_handle(cx.store, self.build_key)?.map(|published| ReuseDecision {
-                realized: realized_object_from_record(
-                    Some(published.build.build_key),
-                    &published.object_record,
-                ),
-                origin: ReuseOrigin::BuildHandle,
-            }),
-        )
-    }
-
-    pub(crate) fn lookup_after_inputs_reused(
-        &self,
-        cx: PlannedDependencyLookupContext<'_>,
-    ) -> Result<Option<ReuseDecision>, RuntimeError> {
-        let input_identities = self.realized_input_identities(cx.realized_inputs)?;
-        Ok(lookup_canonical_object(
-            cx.store,
-            self.builder.tag(),
-            &self.config,
-            &input_identities,
-            self.build_key,
-        )?
-        .map(|published| ReuseDecision {
-            realized: realized_object_from_record(Some(self.build_key), &published.object_record),
-            origin: ReuseOrigin::CanonicalObject,
-        }))
-    }
-
-    pub(crate) fn execute(
-        &self,
-        cx: PlannedExecutionContext<'_>,
-    ) -> Result<SubjectExecution, RuntimeError> {
-        let inputs = self.resolved_inputs(cx.store, cx.realized_inputs)?;
-        let executed = execute_builder_node(ExecuteBuilderNodeRequest {
-            store: cx.store,
-            builder: self.builder,
-            build_key: self.build_key,
-            build_name: &self.name,
-            run_logger: cx.run_logger,
-            cancellation: cx.cancellation,
-            config: self.config.clone(),
-            inputs,
-        })?;
-        Ok(SubjectExecution {
-            realized: realized_object_from_record(
-                Some(self.build_key),
-                &executed.published.object_record,
-            ),
-            logger: executed.logger,
-        })
     }
 }
 
@@ -368,157 +218,307 @@ impl SourcePlannedSubject {
     pub(crate) fn object_hash(&self) -> ObjectHash {
         self.object_hash
     }
+}
 
-    pub(crate) fn lookup_direct_reuse(
-        &self,
-        cx: PlannedLookupContext<'_>,
-    ) -> Result<Option<ReuseDecision>, RuntimeError> {
-        match lookup_source_object(cx.store, self.object_hash).map_err(map_store_error)? {
-            SourceLookup::Hit(stored) => Ok(Some(ReuseDecision {
-                realized: realized_object_from_record(None, &stored.object_record),
-                origin: ReuseOrigin::CanonicalObject,
-            })),
-            SourceLookup::Missing => Ok(None),
-        }
+pub(crate) fn lookup_direct_reuse(
+    subject: &PlannedSubject,
+    cx: PlannedLookupContext<'_>,
+) -> Result<Option<ReuseDecision>, RuntimeError> {
+    match subject {
+        PlannedSubject::Source(subject) => lookup_source_direct_reuse(subject, cx),
+        PlannedSubject::Builder(subject) => lookup_builder_direct_reuse(subject, cx),
+    }
+}
+
+pub(crate) fn lookup_after_inputs_reused(
+    subject: &PlannedSubject,
+    cx: PlannedDependencyLookupContext<'_>,
+) -> Result<Option<ReuseDecision>, RuntimeError> {
+    match subject {
+        PlannedSubject::Source(_) => Ok(None),
+        PlannedSubject::Builder(subject) => lookup_builder_after_inputs_reused(subject, cx),
+    }
+}
+
+pub(crate) fn execute_subject(
+    subject: &PlannedSubject,
+    cx: PlannedExecutionContext<'_>,
+) -> Result<SubjectExecution, RuntimeError> {
+    match subject {
+        PlannedSubject::Source(subject) => execute_source_subject(subject, cx),
+        PlannedSubject::Builder(subject) => execute_builder_subject(subject, cx),
+    }
+}
+
+fn lookup_builder_direct_reuse(
+    subject: &BuilderPlannedSubject,
+    cx: PlannedLookupContext<'_>,
+) -> Result<Option<ReuseDecision>, RuntimeError> {
+    Ok(
+        lookup_build_handle(cx.store, subject.build_key)?.map(|published| ReuseDecision {
+            realized: realized_object_from_record(
+                Some(published.build.build_key),
+                &published.object_record,
+            ),
+            origin: ReuseOrigin::BuildHandle,
+        }),
+    )
+}
+
+fn lookup_builder_after_inputs_reused(
+    subject: &BuilderPlannedSubject,
+    cx: PlannedDependencyLookupContext<'_>,
+) -> Result<Option<ReuseDecision>, RuntimeError> {
+    let input_identities = builder_realized_input_identities(subject, cx.realized_inputs)?;
+    Ok(lookup_canonical_object(
+        cx.store,
+        subject.builder.tag(),
+        &subject.config,
+        &input_identities,
+        subject.build_key,
+    )?
+    .map(|published| ReuseDecision {
+        realized: realized_object_from_record(Some(subject.build_key), &published.object_record),
+        origin: ReuseOrigin::CanonicalObject,
+    }))
+}
+
+fn lookup_source_direct_reuse(
+    subject: &SourcePlannedSubject,
+    cx: PlannedLookupContext<'_>,
+) -> Result<Option<ReuseDecision>, RuntimeError> {
+    match lookup_source_object(cx.store, subject.object_hash).map_err(map_store_error)? {
+        SourceLookup::Hit(stored) => Ok(Some(ReuseDecision {
+            realized: realized_object_from_record(None, &stored.object_record),
+            origin: ReuseOrigin::CanonicalObject,
+        })),
+        SourceLookup::Missing => Ok(None),
+    }
+}
+
+fn execute_builder_subject(
+    subject: &BuilderPlannedSubject,
+    cx: PlannedExecutionContext<'_>,
+) -> Result<SubjectExecution, RuntimeError> {
+    let inputs = builder_resolved_inputs(subject, cx.store, cx.realized_inputs)?;
+    let executed = execute_builder_node(ExecuteBuilderNodeRequest {
+        store: cx.store,
+        builder: subject.builder,
+        build_key: subject.build_key,
+        build_name: &subject.name,
+        run_logger: cx.run_logger,
+        cancellation: cx.cancellation,
+        config: subject.config.clone(),
+        inputs,
+    })?;
+    Ok(SubjectExecution {
+        realized: realized_object_from_record(
+            Some(subject.build_key),
+            &executed.published.object_record,
+        ),
+        logger: executed.logger,
+    })
+}
+
+fn execute_source_subject(
+    subject: &SourcePlannedSubject,
+    cx: PlannedExecutionContext<'_>,
+) -> Result<SubjectExecution, RuntimeError> {
+    let object_key = subject.object_hash.to_string();
+    let workspace = create_workspace(
+        cx.store,
+        "Source",
+        Some(subject.name.clone()),
+        object_key.clone(),
+    )
+    .map(core_workspace)
+    .map_err(map_store_error)?;
+    let source_builder = SourceBuilderClass.create_object(SourceBuilderInit {
+        recipe_name: subject.name.clone(),
+        build_key: object_key,
+        declared_object_hash: subject.object_hash,
+        origin: subject.origin.clone(),
+        workspace,
+    });
+    let logger = cx
+        .run_logger
+        .bind_source(&source_builder)
+        .map_err(RuntimeError::Store)?;
+    log_runtime_event(
+        logger.as_ref(),
+        BuildLogLevel::Info,
+        "start",
+        "starting builder node",
+    );
+    if let Err(error) = check_cancelled(&cx.cancellation) {
+        cleanup_workspace_temp_dir(cx.store, source_builder.temp_dir(), logger.as_ref());
+        return Err(error);
     }
 
-    pub(crate) fn execute(
-        &self,
-        cx: PlannedExecutionContext<'_>,
-    ) -> Result<SubjectExecution, RuntimeError> {
-        let object_key = self.object_hash.to_string();
-        let workspace = create_workspace(
-            cx.store,
-            "Source",
-            Some(self.name.clone()),
-            object_key.clone(),
-        )
-        .map(core_workspace)
-        .map_err(map_store_error)?;
-        let source_builder = SourceBuilderClass.create_object(SourceBuilderInit {
-            recipe_name: self.name.clone(),
-            build_key: object_key,
-            declared_object_hash: self.object_hash,
-            origin: self.origin.clone(),
-            workspace,
-        });
-        let logger = cx
-            .run_logger
-            .bind_source(&source_builder)
-            .map_err(RuntimeError::Store)?;
-        log_runtime_event(
-            logger.as_ref(),
-            BuildLogLevel::Info,
-            "start",
-            "starting builder node",
-        );
-        if let Err(error) = check_cancelled(&cx.cancellation) {
-            cleanup_workspace_temp_dir(cx.store, source_builder.temp_dir(), logger.as_ref());
-            return Err(error);
-        }
-
-        match lookup_source_object(cx.store, source_builder.declared_object_hash())
-            .map_err(map_store_error)?
-        {
-            SourceLookup::Hit(stored) => {
-                log_runtime_event(
-                    logger.as_ref(),
-                    BuildLogLevel::Info,
-                    "object-hit",
-                    "reusing existing source object",
-                );
-                cleanup_workspace_temp_dir(cx.store, source_builder.temp_dir(), logger.as_ref());
-                return Ok(SubjectExecution {
-                    realized: realized_object_from_record(None, &stored.object_record),
-                    logger,
-                });
-            }
-            SourceLookup::Missing => {}
-        }
-        log_runtime_event(
-            logger.as_ref(),
-            BuildLogLevel::Info,
-            "cache-miss",
-            "materializing source",
-        );
-
-        if source_builder.origin().is_none() {
-            let message = format!(
-                "source '{}' has no origin and object '{}' is not present in store",
-                source_builder.recipe_name(),
-                source_builder.declared_object_hash()
+    match lookup_source_object(cx.store, source_builder.declared_object_hash())
+        .map_err(map_store_error)?
+    {
+        SourceLookup::Hit(stored) => {
+            log_runtime_event(
+                logger.as_ref(),
+                BuildLogLevel::Info,
+                "object-hit",
+                "reusing existing source object",
             );
-            log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
             cleanup_workspace_temp_dir(cx.store, source_builder.temp_dir(), logger.as_ref());
-            return Err(RuntimeError::Build(message));
-        }
-
-        let temp_root = source_builder.temp_dir().to_path_buf();
-        if let Err(error) = check_cancelled(&cx.cancellation) {
-            cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
-            return Err(error);
-        }
-        let staged_path = match source_builder
-            .origin()
-            .expect("origin checked above")
-            .materialize(&OriginContext {
-                temp_root: temp_root.as_path(),
-            }) {
-            Ok(path) => path,
-            Err(error) => {
-                cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
-                log_runtime_event(
-                    logger.as_ref(),
-                    BuildLogLevel::Error,
-                    "fail",
-                    error.to_string(),
-                );
-                return Err(RuntimeError::Build(error));
-            }
-        };
-        if let Err(error) = check_cancelled(&cx.cancellation) {
-            cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
-            return Err(error);
-        }
-        log_runtime_event(
-            logger.as_ref(),
-            BuildLogLevel::Info,
-            "run",
-            "materializing source origin",
-        );
-
-        let import_outcome = import_source_object(
-            cx.store,
-            source_builder.declared_object_hash(),
-            &staged_path,
-        )
-        .map_err(|error| {
-            cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
-            map_store_error(error)
-        })?;
-        if let Err(error) = check_cancelled(&cx.cancellation) {
-            cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
-            return Err(error);
-        }
-        cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
-
-        match import_outcome {
-            SourceImportOutcome::Matched(stored) => Ok(SubjectExecution {
+            return Ok(SubjectExecution {
                 realized: realized_object_from_record(None, &stored.object_record),
                 logger,
-            }),
-            SourceImportOutcome::Mismatched { actual_hash } => {
-                let message = format!(
-                    "source '{}' materialized unexpected object hash: expected {}, got {}",
-                    source_builder.recipe_name(),
-                    source_builder.declared_object_hash(),
-                    actual_hash
-                );
-                log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
-                Err(RuntimeError::Build(message))
-            }
+            });
+        }
+        SourceLookup::Missing => {}
+    }
+    log_runtime_event(
+        logger.as_ref(),
+        BuildLogLevel::Info,
+        "cache-miss",
+        "materializing source",
+    );
+
+    if source_builder.origin().is_none() {
+        let message = format!(
+            "source '{}' has no origin and object '{}' is not present in store",
+            source_builder.recipe_name(),
+            source_builder.declared_object_hash()
+        );
+        log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
+        cleanup_workspace_temp_dir(cx.store, source_builder.temp_dir(), logger.as_ref());
+        return Err(RuntimeError::Build(message));
+    }
+
+    let temp_root = source_builder.temp_dir().to_path_buf();
+    if let Err(error) = check_cancelled(&cx.cancellation) {
+        cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
+        return Err(error);
+    }
+    let staged_path = match source_builder
+        .origin()
+        .expect("origin checked above")
+        .materialize(&OriginContext {
+            temp_root: temp_root.as_path(),
+        }) {
+        Ok(path) => path,
+        Err(error) => {
+            cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
+            log_runtime_event(
+                logger.as_ref(),
+                BuildLogLevel::Error,
+                "fail",
+                error.to_string(),
+            );
+            return Err(RuntimeError::Build(error));
+        }
+    };
+    if let Err(error) = check_cancelled(&cx.cancellation) {
+        cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
+        return Err(error);
+    }
+    log_runtime_event(
+        logger.as_ref(),
+        BuildLogLevel::Info,
+        "run",
+        "materializing source origin",
+    );
+
+    let import_outcome = import_source_object(
+        cx.store,
+        source_builder.declared_object_hash(),
+        &staged_path,
+    )
+    .map_err(|error| {
+        cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
+        map_store_error(error)
+    })?;
+    if let Err(error) = check_cancelled(&cx.cancellation) {
+        cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
+        return Err(error);
+    }
+    cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
+
+    match import_outcome {
+        SourceImportOutcome::Matched(stored) => Ok(SubjectExecution {
+            realized: realized_object_from_record(None, &stored.object_record),
+            logger,
+        }),
+        SourceImportOutcome::Mismatched { actual_hash } => {
+            let message = format!(
+                "source '{}' materialized unexpected object hash: expected {}, got {}",
+                source_builder.recipe_name(),
+                source_builder.declared_object_hash(),
+                actual_hash
+            );
+            log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
+            Err(RuntimeError::Build(message))
         }
     }
+}
+
+fn builder_realized_input_identities(
+    subject: &BuilderPlannedSubject,
+    realized_inputs: &HashMap<GraphKey, RealizedObject>,
+) -> Result<Vec<bobr_store::ReuseInputIdentity>, RuntimeError> {
+    let mut ordered = Vec::new();
+    for input_name in subject
+        .builder
+        .spec()
+        .ordered_present_input_names(&subject.inputs)
+    {
+        let key = subject.inputs.get(input_name).ok_or_else(|| {
+            RuntimeError::Store(format!(
+                "planned builder input '{}' is missing for '{}'",
+                input_name, subject.name
+            ))
+        })?;
+        let realized = realized_inputs.get(key).ok_or_else(|| {
+            RuntimeError::Build(format!(
+                "dependency object '{}' is not available for '{}'",
+                key, subject.name
+            ))
+        })?;
+        ordered.push(bobr_store::ReuseInputIdentity {
+            object_hash: realized.object_hash,
+        });
+    }
+    Ok(ordered)
+}
+
+fn builder_resolved_inputs(
+    subject: &BuilderPlannedSubject,
+    store: &Store,
+    realized_inputs: &HashMap<GraphKey, RealizedObject>,
+) -> Result<ResolvedInputs, RuntimeError> {
+    let mut inputs = ResolvedInputs::empty();
+    for input_name in subject
+        .builder
+        .spec()
+        .ordered_present_input_names(&subject.inputs)
+    {
+        let key = *subject.inputs.get(input_name).ok_or_else(|| {
+            RuntimeError::Store(format!(
+                "planned builder input '{}' is missing for '{}'",
+                input_name, subject.name
+            ))
+        })?;
+        let realized = realized_inputs.get(&key).cloned().ok_or_else(|| {
+            RuntimeError::Build(format!(
+                "dependency object '{}' is not available in completed set",
+                key
+            ))
+        })?;
+        inputs.insert(
+            input_name,
+            ResolvedDependency {
+                object_hash: realized.object_hash,
+                object_path: store.object_path(realized.object_hash),
+            },
+        );
+    }
+    Ok(inputs)
 }
 
 pub(crate) fn realized_object_from_record(
