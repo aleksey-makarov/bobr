@@ -103,6 +103,13 @@ pub(crate) struct PlannedSourceRecipe {
 }
 
 impl PlannedRecipe {
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Builder(recipe) => &recipe.name,
+            Self::Source(recipe) => &recipe.name,
+        }
+    }
+
     pub(crate) fn tag(&self) -> &str {
         match self {
             Self::Builder(recipe) => recipe.tag,
@@ -146,15 +153,13 @@ impl PlannedRecipe {
 #[derive(Debug, Clone)]
 pub(crate) struct PlannedNode {
     pub(crate) recipe: PlannedRecipe,
-    pub(crate) publish_name: String,
     pub(crate) state: PlanningState,
 }
 
 impl PlannedNode {
-    pub(crate) fn new(recipe: PlannedRecipe, publish_name: String) -> Self {
+    pub(crate) fn new(recipe: PlannedRecipe) -> Self {
         Self {
             recipe,
-            publish_name,
             state: PlanningState::Unknown,
         }
     }
@@ -222,13 +227,9 @@ fn collect_graph_inner(
 
     stack.remove(node_id);
 
-    let publish_name = match recipe {
-        Recipe::Builder(recipe) => recipe.name.clone(),
-        Recipe::Source(recipe) => recipe.name.clone(),
-    };
     nodes
         .entry(key)
-        .or_insert_with(|| PlannedNode::new(planned_recipe, publish_name));
+        .or_insert_with(|| PlannedNode::new(planned_recipe));
     node_keys.insert(node_id.to_string(), key);
     Ok(key)
 }
@@ -848,7 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_graph_keeps_first_publish_name_for_deduped_nodes() {
+    fn collect_graph_keeps_first_representative_recipe_for_deduped_nodes() {
         let request = json!({
             "root": {
                 "name": "final-group",
@@ -867,7 +868,7 @@ mod tests {
         let deduped_key =
             compute_build_key("Tree", &tree_config("same.txt", "same", false), &[]).unwrap();
         let node = nodes.get(&deduped_key).unwrap();
-        assert_eq!(node.publish_name, "binary-a");
+        assert_eq!(node.recipe.name(), "binary-a");
     }
 
     #[test]

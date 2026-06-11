@@ -496,7 +496,8 @@ fn execute_misses(
         let node = nodes.get(&key).ok_or_else(|| {
             RuntimeError::Store(format!("missing planned node for key '{}'", key))
         })?;
-        publish_stored_object(store, &node.publish_name, executed.realized.object_hash)
+        let publication_name = node.recipe.name();
+        publish_stored_object(store, publication_name, executed.realized.object_hash)
             .map_err(map_store_error)?;
         log_runtime_event(
             executed.logger.as_ref(),
@@ -504,7 +505,7 @@ fn execute_misses(
             "publish",
             format!(
                 "published '{}' -> {}",
-                node.publish_name, executed.realized.object_hash
+                publication_name, executed.realized.object_hash
             ),
         );
         executed.logger.log_event(BuildLogEvent {
@@ -662,7 +663,10 @@ fn node_summary_value(nodes: &HashMap<BuildKey, PlannedNode>, key: BuildKey) -> 
             "tag".to_string(),
             Value::String(node.recipe.tag().to_string()),
         );
-        object.insert("name".to_string(), Value::String(node.publish_name.clone()));
+        object.insert(
+            "name".to_string(),
+            Value::String(node.recipe.name().to_string()),
+        );
     }
     Value::Object(object)
 }
