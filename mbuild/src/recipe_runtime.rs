@@ -61,12 +61,6 @@ pub fn run_recipe_envelope(
     let store_path = options.store.as_ref().ok_or_else(|| {
         RuntimeError::InvalidRequest("recipe options.store or --store must be set".to_string())
     })?;
-    if store_path.is_absolute() && !store_path.exists() {
-        return Err(RuntimeError::Store(format!(
-            "store root must exist: '{}'",
-            store_path.display()
-        )));
-    }
     let store = Store::create(store_path).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> =
         Arc::new(build_run_logger_for_store(&store, emit_progress).map_err(RuntimeError::Store)?);
