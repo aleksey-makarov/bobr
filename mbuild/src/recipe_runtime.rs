@@ -1,9 +1,10 @@
 use crate::planned::{
-    PlannedDependencyLookupContext, PlannedExecutionContext, PlannedLookupContext, ReuseOrigin,
-    SubjectExecution,
+    BuilderPlannedSubject, GraphKey, PlannedDependencyLookupContext, PlannedExecutionContext,
+    PlannedLookupContext, ReuseOrigin, SubjectExecution,
 };
 use crate::recipe::{GraphNode, PlanningState, RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
+#[cfg(test)]
 use bobr_store::identity::BuildKey;
 use bobr_store::{
     RealizedObject, Store, StoreWorkspace, create_workspace, publish_stored_object,
@@ -132,8 +133,8 @@ fn default_jobs() -> usize {
 
 fn ensure_planned(
     store: &Store,
-    nodes: &mut HashMap<BuildKey, GraphNode>,
-    key: BuildKey,
+    nodes: &mut HashMap<GraphKey, GraphNode>,
+    key: GraphKey,
 ) -> Result<(), RuntimeError> {
     let subject = {
         let node = nodes.get(&key).ok_or_else(|| {
@@ -157,11 +158,16 @@ fn ensure_planned(
         return Ok(());
     }
 
-    for dep in subject.inputs().values().copied().collect::<Vec<_>>() {
+    let Some(builder) = subject.as_builder() else {
+        set_node_state(nodes, key, PlanningState::NeedsBuild)?;
+        return Ok(());
+    };
+
+    for dep in builder.inputs().values().copied().collect::<Vec<_>>() {
         ensure_planned(store, nodes, dep)?;
     }
 
-    let Some(realized_inputs) = reused_inputs_for_subject(nodes, subject.as_ref())? else {
+    let Some(realized_inputs) = reused_inputs_for_builder(nodes, builder)? else {
         set_node_state(nodes, key, PlanningState::NeedsBuild)?;
         return Ok(());
     };
@@ -186,8 +192,8 @@ fn ensure_planned(
 }
 
 fn set_node_state(
-    nodes: &mut HashMap<BuildKey, GraphNode>,
-    key: BuildKey,
+    nodes: &mut HashMap<GraphKey, GraphNode>,
+    key: GraphKey,
     state: PlanningState,
 ) -> Result<(), RuntimeError> {
     let node = nodes
@@ -197,17 +203,17 @@ fn set_node_state(
     Ok(())
 }
 
-fn reused_inputs_for_subject(
-    nodes: &HashMap<BuildKey, GraphNode>,
-    subject: &dyn crate::planned::PlannedSubject,
-) -> Result<Option<HashMap<BuildKey, RealizedObject>>, RuntimeError> {
+fn reused_inputs_for_builder(
+    nodes: &HashMap<GraphKey, GraphNode>,
+    builder: &BuilderPlannedSubject,
+) -> Result<Option<HashMap<GraphKey, RealizedObject>>, RuntimeError> {
     let mut realized_inputs = HashMap::new();
-    for dep in subject.inputs().values() {
+    for dep in builder.inputs().values() {
         let dep_node = nodes.get(dep).ok_or_else(|| {
             RuntimeError::Store(format!(
-                "missing dependency node '{}' for key '{}'",
+                "missing dependency node '{}' for builder '{}'",
                 dep,
-                subject.build_key()
+                builder.name()
             ))
         })?;
         match &dep_node.state {
@@ -220,12 +226,12 @@ fn reused_inputs_for_subject(
     Ok(Some(realized_inputs))
 }
 
-fn completed_inputs_for_subject(
-    completed: &HashMap<BuildKey, RealizedObject>,
-    subject: &dyn crate::planned::PlannedSubject,
-) -> Result<HashMap<BuildKey, RealizedObject>, RuntimeError> {
+fn completed_inputs_for_builder(
+    completed: &HashMap<GraphKey, RealizedObject>,
+    builder: &BuilderPlannedSubject,
+) -> Result<HashMap<GraphKey, RealizedObject>, RuntimeError> {
     let mut realized_inputs = HashMap::new();
-    for dep in subject.inputs().values() {
+    for dep in builder.inputs().values() {
         let realized = completed.get(dep).cloned().ok_or_else(|| {
             RuntimeError::Build(format!(
                 "dependency object '{}' is not available in completed set",
@@ -240,7 +246,7 @@ fn completed_inputs_for_subject(
 fn publish_reused_root(
     store: &Store,
     logger: &Arc<BuildRunLogger>,
-    key: BuildKey,
+    key: GraphKey,
     root_tag: &str,
     root_name: &str,
     realized: &RealizedObject,
@@ -303,15 +309,15 @@ fn publish_reused_root(
 fn execute_misses(
     store: &Store,
     logger: Arc<BuildRunLogger>,
-    nodes: &HashMap<BuildKey, GraphNode>,
-    completed: &mut HashMap<BuildKey, RealizedObject>,
-    root_key: BuildKey,
+    nodes: &HashMap<GraphKey, GraphNode>,
+    completed: &mut HashMap<GraphKey, RealizedObject>,
+    root_key: GraphKey,
     jobs: usize,
     cancellation: CancellationToken,
 ) -> Result<RealizedObject, RuntimeError> {
-    let mut remaining = HashMap::<BuildKey, usize>::new();
-    let mut reverse = HashMap::<BuildKey, Vec<BuildKey>>::new();
-    let mut ready = VecDeque::<BuildKey>::new();
+    let mut remaining = HashMap::<GraphKey, usize>::new();
+    let mut reverse = HashMap::<GraphKey, Vec<GraphKey>>::new();
+    let mut ready = VecDeque::<GraphKey>::new();
     let mut first_error: Option<RuntimeError> = None;
 
     for (key, node) in nodes {
@@ -319,12 +325,14 @@ fn execute_misses(
             continue;
         }
         let mut wait_for = 0usize;
-        for dep in node.subject.inputs().values() {
-            if let Some(dep_node) = nodes.get(dep)
-                && matches!(dep_node.state, PlanningState::NeedsBuild)
-            {
-                wait_for += 1;
-                reverse.entry(*dep).or_default().push(*key);
+        if let Some(builder) = node.subject.as_builder() {
+            for dep in builder.inputs().values() {
+                if let Some(dep_node) = nodes.get(dep)
+                    && matches!(dep_node.state, PlanningState::NeedsBuild)
+                {
+                    wait_for += 1;
+                    reverse.entry(*dep).or_default().push(*key);
+                }
             }
         }
         remaining.insert(*key, wait_for);
@@ -333,8 +341,8 @@ fn execute_misses(
         }
     }
 
-    let (tx, rx) = mpsc::channel::<(BuildKey, Result<SubjectExecution, RuntimeError>)>();
-    let mut in_flight = HashMap::<BuildKey, JoinHandle<()>>::new();
+    let (tx, rx) = mpsc::channel::<(GraphKey, Result<SubjectExecution, RuntimeError>)>();
+    let mut in_flight = HashMap::<GraphKey, JoinHandle<()>>::new();
     let mut last_wait_log: Option<Instant> = None;
     let scheduler_workspace = create_workspace(
         store,
@@ -377,7 +385,10 @@ fn execute_misses(
             let tx = tx.clone();
             let cancellation = cancellation.clone();
             let subject = node.subject.clone();
-            let realized_inputs = completed_inputs_for_subject(completed, subject.as_ref())?;
+            let realized_inputs = match subject.as_builder() {
+                Some(builder) => completed_inputs_for_builder(completed, builder)?,
+                None => HashMap::new(),
+            };
             let handle = thread::spawn(move || {
                 let result = subject.execute(PlannedExecutionContext {
                     store: &store,
@@ -537,11 +548,11 @@ fn log_scheduler_event(
 }
 
 fn scheduler_first_error_details(
-    nodes: &HashMap<BuildKey, GraphNode>,
-    completed: &HashMap<BuildKey, RealizedObject>,
-    ready: &VecDeque<BuildKey>,
-    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
-    failed_key: BuildKey,
+    nodes: &HashMap<GraphKey, GraphNode>,
+    completed: &HashMap<GraphKey, RealizedObject>,
+    ready: &VecDeque<GraphKey>,
+    in_flight: &HashMap<GraphKey, JoinHandle<()>>,
+    failed_key: GraphKey,
     error: &RuntimeError,
 ) -> Map<String, Value> {
     let mut details = scheduler_state_details(nodes, completed, ready, in_flight);
@@ -558,10 +569,10 @@ fn scheduler_first_error_details(
 }
 
 fn scheduler_wait_details(
-    nodes: &HashMap<BuildKey, GraphNode>,
-    completed: &HashMap<BuildKey, RealizedObject>,
-    ready: &VecDeque<BuildKey>,
-    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
+    nodes: &HashMap<GraphKey, GraphNode>,
+    completed: &HashMap<GraphKey, RealizedObject>,
+    ready: &VecDeque<GraphKey>,
+    in_flight: &HashMap<GraphKey, JoinHandle<()>>,
     error: &RuntimeError,
 ) -> Map<String, Value> {
     let mut details = scheduler_state_details(nodes, completed, ready, in_flight);
@@ -581,10 +592,10 @@ fn scheduler_wait_details(
 }
 
 fn scheduler_state_details(
-    nodes: &HashMap<BuildKey, GraphNode>,
-    completed: &HashMap<BuildKey, RealizedObject>,
-    ready: &VecDeque<BuildKey>,
-    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
+    nodes: &HashMap<GraphKey, GraphNode>,
+    completed: &HashMap<GraphKey, RealizedObject>,
+    ready: &VecDeque<GraphKey>,
+    in_flight: &HashMap<GraphKey, JoinHandle<()>>,
 ) -> Map<String, Value> {
     let mut details = Map::new();
     details.insert(
@@ -607,8 +618,8 @@ fn scheduler_state_details(
 }
 
 fn in_flight_summaries(
-    nodes: &HashMap<BuildKey, GraphNode>,
-    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
+    nodes: &HashMap<GraphKey, GraphNode>,
+    in_flight: &HashMap<GraphKey, JoinHandle<()>>,
 ) -> Vec<Value> {
     let mut entries = in_flight
         .keys()
@@ -618,13 +629,25 @@ fn in_flight_summaries(
     entries.into_iter().map(|(_, value)| value).collect()
 }
 
-fn node_summary_value(nodes: &HashMap<BuildKey, GraphNode>, key: BuildKey) -> Value {
+fn node_summary_value(nodes: &HashMap<GraphKey, GraphNode>, key: GraphKey) -> Value {
     let mut object = Map::new();
-    object.insert("build_key".to_string(), Value::String(key.to_string()));
-    object.insert(
-        "short_build_key".to_string(),
-        Value::String(short_build_key(key)),
-    );
+    match key {
+        GraphKey::ObjectKey(object_hash) => {
+            object.insert("key_kind".to_string(), Value::String("object".to_string()));
+            object.insert(
+                "object_hash".to_string(),
+                Value::String(object_hash.to_string()),
+            );
+        }
+        GraphKey::BuildKey(build_key) => {
+            object.insert("key_kind".to_string(), Value::String("build".to_string()));
+            object.insert(
+                "build_key".to_string(),
+                Value::String(build_key.to_string()),
+            );
+        }
+    }
+    object.insert("short_key".to_string(), Value::String(key.short()));
     if let Some(node) = nodes.get(&key) {
         object.insert(
             "tag".to_string(),
@@ -636,10 +659,6 @@ fn node_summary_value(nodes: &HashMap<BuildKey, GraphNode>, key: BuildKey) -> Va
         );
     }
     Value::Object(object)
-}
-
-fn short_build_key(key: BuildKey) -> String {
-    key.to_string().chars().take(12).collect()
 }
 
 fn build_run_logger_for_store(
@@ -757,6 +776,15 @@ mod tests {
         }
     }
 
+    fn expect_build_key(key: GraphKey) -> BuildKey {
+        match key {
+            GraphKey::BuildKey(build_key) => build_key,
+            GraphKey::ObjectKey(object_hash) => {
+                panic!("expected build graph key, got object key {object_hash}")
+            }
+        }
+    }
+
     #[test]
     fn planned_subject_canonical_lookup_uses_dependency_object_hashes() {
         let temp = tempdir().unwrap();
@@ -814,24 +842,24 @@ mod tests {
 
         let mut nodes = HashMap::new();
         let root_key = collect_graph(&request, &mut nodes).unwrap();
+        let root_build_key = expect_build_key(root_key);
         let dep_keys = {
-            nodes
-                .get(&root_key)
-                .unwrap()
-                .subject
-                .inputs()
-                .values()
-                .copied()
-                .collect::<Vec<_>>()
+            let subject = nodes.get(&root_key).unwrap().subject.as_ref();
+            match subject {
+                PlannedSubject::Builder(builder) => {
+                    builder.inputs().values().copied().collect::<Vec<_>>()
+                }
+                PlannedSubject::Source(_) => panic!("expected builder root subject"),
+            }
         };
         assert_eq!(dep_keys.len(), 2);
 
         let rootfs_realized = sample_realized(
-            Some(dep_keys[0]),
+            Some(expect_build_key(dep_keys[0])),
             "1111111111111111111111111111111111111111111111111111111111111111",
         );
         let script_realized = sample_realized(
-            Some(dep_keys[1]),
+            Some(expect_build_key(dep_keys[1])),
             "2222222222222222222222222222222222222222222222222222222222222222",
         );
         nodes.get_mut(&dep_keys[0]).unwrap().state = PlanningState::Reused {
@@ -859,7 +887,7 @@ mod tests {
             &store,
             PublishRequest {
                 publication_name: "bin".to_string(),
-                build_key: root_key,
+                build_key: root_build_key,
                 reuse_key,
                 staged_path: stage_dir,
                 inputs: root_inputs,
@@ -881,7 +909,7 @@ mod tests {
             })
             .unwrap()
             .expect("expected canonical object hit");
-        assert_eq!(published.realized.build_key, Some(root_key));
+        assert_eq!(published.realized.build_key, Some(root_build_key));
     }
 
     #[test]
@@ -899,8 +927,7 @@ mod tests {
             Some(Box::new(CancellingOrigin {
                 cancellation: cancellation.clone(),
             })),
-        )
-        .unwrap();
+        );
 
         let realized_inputs = HashMap::new();
         let error = subject

@@ -3,7 +3,7 @@ use crate::runtime::{
     ExecuteBuilderNodeRequest, RuntimeError, check_cancelled, execute_builder_node,
     log_runtime_event, lookup_build_handle, lookup_canonical_object, map_store_error,
 };
-use bobr_store::identity::{BuildKey, compute_build_key};
+use bobr_store::identity::{BuildInputKey, BuildKey, ObjectHash, compute_build_key};
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, SourceLookup, Store, create_workspace,
     import_source_object, lookup_source_object, remove_store_temp_dir_force,
@@ -12,27 +12,101 @@ use mbuild_core::{
     BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase, CancellationToken,
     OriginContext, ParsedOrigin, SourceBuilderClass, SourceBuilderInit, Workspace,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::sync::Arc;
 
-pub(crate) trait PlannedSubject: Send + Sync {
-    fn name(&self) -> &str;
-    fn tag(&self) -> &str;
-    fn build_key(&self) -> BuildKey;
-    fn inputs(&self) -> &BTreeMap<String, BuildKey>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum GraphKey {
+    /// Key for a source planned subject.
+    ///
+    /// Source subjects expose an already-known object hash as their graph key
+    /// and have no planned inputs at the type level. The reverse is not true:
+    /// a builder with no inputs still uses [`GraphKey::BuildKey`] because its
+    /// object hash is not known until execution or reuse.
+    ObjectKey(ObjectHash),
+    BuildKey(BuildKey),
+}
 
-    fn lookup_direct_reuse(
+impl GraphKey {
+    pub(crate) fn as_build_input_key(self) -> BuildInputKey {
+        match self {
+            Self::ObjectKey(object_hash) => BuildInputKey::ObjectKey(object_hash),
+            Self::BuildKey(build_key) => BuildInputKey::BuildKey(build_key),
+        }
+    }
+
+    pub(crate) fn short(self) -> String {
+        self.to_string().chars().take(12).collect()
+    }
+}
+
+impl fmt::Display for GraphKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ObjectKey(object_hash) => write!(f, "{object_hash}"),
+            Self::BuildKey(build_key) => write!(f, "{build_key}"),
+        }
+    }
+}
+
+pub(crate) enum PlannedSubject {
+    Source(SourcePlannedSubject),
+    Builder(BuilderPlannedSubject),
+}
+
+impl PlannedSubject {
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Source(subject) => subject.name(),
+            Self::Builder(subject) => subject.name(),
+        }
+    }
+
+    pub(crate) fn tag(&self) -> &str {
+        match self {
+            Self::Source(subject) => subject.tag(),
+            Self::Builder(subject) => subject.tag(),
+        }
+    }
+
+    pub(crate) fn as_builder(&self) -> Option<&BuilderPlannedSubject> {
+        match self {
+            Self::Source(_) => None,
+            Self::Builder(subject) => Some(subject),
+        }
+    }
+
+    pub(crate) fn lookup_direct_reuse(
         &self,
         cx: PlannedLookupContext<'_>,
-    ) -> Result<Option<ReuseDecision>, RuntimeError>;
+    ) -> Result<Option<ReuseDecision>, RuntimeError> {
+        match self {
+            Self::Source(subject) => subject.lookup_direct_reuse(cx),
+            Self::Builder(subject) => subject.lookup_direct_reuse(cx),
+        }
+    }
 
-    fn lookup_after_inputs_reused(
+    pub(crate) fn lookup_after_inputs_reused(
         &self,
         cx: PlannedDependencyLookupContext<'_>,
-    ) -> Result<Option<ReuseDecision>, RuntimeError>;
+    ) -> Result<Option<ReuseDecision>, RuntimeError> {
+        match self {
+            Self::Source(_) => Ok(None),
+            Self::Builder(subject) => subject.lookup_after_inputs_reused(cx),
+        }
+    }
 
-    fn execute(&self, cx: PlannedExecutionContext<'_>) -> Result<SubjectExecution, RuntimeError>;
+    pub(crate) fn execute(
+        &self,
+        cx: PlannedExecutionContext<'_>,
+    ) -> Result<SubjectExecution, RuntimeError> {
+        match self {
+            Self::Source(subject) => subject.execute(cx),
+            Self::Builder(subject) => subject.execute(cx),
+        }
+    }
 }
 
 pub(crate) struct PlannedLookupContext<'a> {
@@ -41,14 +115,14 @@ pub(crate) struct PlannedLookupContext<'a> {
 
 pub(crate) struct PlannedDependencyLookupContext<'a> {
     pub(crate) store: &'a Store,
-    pub(crate) realized_inputs: &'a HashMap<BuildKey, RealizedObject>,
+    pub(crate) realized_inputs: &'a HashMap<GraphKey, RealizedObject>,
 }
 
 pub(crate) struct PlannedExecutionContext<'a> {
     pub(crate) store: &'a Store,
     pub(crate) run_logger: Arc<BuildRunLogger>,
     pub(crate) cancellation: CancellationToken,
-    pub(crate) realized_inputs: &'a HashMap<BuildKey, RealizedObject>,
+    pub(crate) realized_inputs: &'a HashMap<GraphKey, RealizedObject>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,7 +147,7 @@ pub(crate) struct BuilderPlannedSubject {
     builder: &'static dyn Builder,
     name: String,
     config: Value,
-    inputs: BTreeMap<String, BuildKey>,
+    inputs: BTreeMap<String, GraphKey>,
     build_key: BuildKey,
 }
 
@@ -82,7 +156,7 @@ impl BuilderPlannedSubject {
         builder: &'static dyn Builder,
         name: String,
         config: Value,
-        inputs: BTreeMap<String, BuildKey>,
+        inputs: BTreeMap<String, GraphKey>,
     ) -> Result<Self, RuntimeError> {
         let tag = builder.tag();
         let spec = builder.spec();
@@ -111,6 +185,7 @@ impl BuilderPlannedSubject {
             .ordered_present_input_names(&inputs)
             .into_iter()
             .filter_map(|input_name| inputs.get(input_name).copied())
+            .map(GraphKey::as_build_input_key)
             .collect::<Vec<_>>();
         let build_key =
             compute_build_key(tag, &config, &ordered_direct_deps).map_err(map_store_error)?;
@@ -126,7 +201,7 @@ impl BuilderPlannedSubject {
 
     fn realized_input_identities(
         &self,
-        realized_inputs: &HashMap<BuildKey, RealizedObject>,
+        realized_inputs: &HashMap<GraphKey, RealizedObject>,
     ) -> Result<Vec<bobr_store::ReuseInputIdentity>, RuntimeError> {
         let mut ordered = Vec::new();
         for input_name in self
@@ -156,7 +231,7 @@ impl BuilderPlannedSubject {
     fn resolved_inputs(
         &self,
         store: &Store,
-        realized_inputs: &HashMap<BuildKey, RealizedObject>,
+        realized_inputs: &HashMap<GraphKey, RealizedObject>,
     ) -> Result<ResolvedInputs, RuntimeError> {
         let mut inputs = ResolvedInputs::empty();
         for input_name in self
@@ -188,24 +263,24 @@ impl BuilderPlannedSubject {
     }
 }
 
-impl PlannedSubject for BuilderPlannedSubject {
-    fn name(&self) -> &str {
+impl BuilderPlannedSubject {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    fn tag(&self) -> &str {
+    pub(crate) fn tag(&self) -> &str {
         self.builder.tag()
     }
 
-    fn build_key(&self) -> BuildKey {
+    pub(crate) fn build_key(&self) -> BuildKey {
         self.build_key
     }
 
-    fn inputs(&self) -> &BTreeMap<String, BuildKey> {
+    pub(crate) fn inputs(&self) -> &BTreeMap<String, GraphKey> {
         &self.inputs
     }
 
-    fn lookup_direct_reuse(
+    pub(crate) fn lookup_direct_reuse(
         &self,
         cx: PlannedLookupContext<'_>,
     ) -> Result<Option<ReuseDecision>, RuntimeError> {
@@ -220,7 +295,7 @@ impl PlannedSubject for BuilderPlannedSubject {
         )
     }
 
-    fn lookup_after_inputs_reused(
+    pub(crate) fn lookup_after_inputs_reused(
         &self,
         cx: PlannedDependencyLookupContext<'_>,
     ) -> Result<Option<ReuseDecision>, RuntimeError> {
@@ -238,7 +313,10 @@ impl PlannedSubject for BuilderPlannedSubject {
         }))
     }
 
-    fn execute(&self, cx: PlannedExecutionContext<'_>) -> Result<SubjectExecution, RuntimeError> {
+    pub(crate) fn execute(
+        &self,
+        cx: PlannedExecutionContext<'_>,
+    ) -> Result<SubjectExecution, RuntimeError> {
         let inputs = self.resolved_inputs(cx.store, cx.realized_inputs)?;
         let executed = execute_builder_node(ExecuteBuilderNodeRequest {
             store: cx.store,
@@ -262,47 +340,36 @@ impl PlannedSubject for BuilderPlannedSubject {
 
 pub(crate) struct SourcePlannedSubject {
     name: String,
-    object_hash: fsobj_hash::ObjectHash,
+    object_hash: ObjectHash,
     origin: Option<Box<dyn ParsedOrigin>>,
-    inputs: BTreeMap<String, BuildKey>,
-    build_key: BuildKey,
 }
 
 impl SourcePlannedSubject {
     pub(crate) fn new(
         name: String,
-        object_hash: fsobj_hash::ObjectHash,
+        object_hash: ObjectHash,
         origin: Option<Box<dyn ParsedOrigin>>,
-    ) -> Result<Self, RuntimeError> {
-        let build_key = source_planning_key(object_hash)?;
-        Ok(Self {
+    ) -> Self {
+        Self {
             name,
             object_hash,
             origin,
-            inputs: BTreeMap::new(),
-            build_key,
-        })
+        }
     }
-}
 
-impl PlannedSubject for SourcePlannedSubject {
-    fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         &self.name
     }
 
-    fn tag(&self) -> &str {
+    pub(crate) fn tag(&self) -> &str {
         "Source"
     }
 
-    fn build_key(&self) -> BuildKey {
-        self.build_key
+    pub(crate) fn object_hash(&self) -> ObjectHash {
+        self.object_hash
     }
 
-    fn inputs(&self) -> &BTreeMap<String, BuildKey> {
-        &self.inputs
-    }
-
-    fn lookup_direct_reuse(
+    pub(crate) fn lookup_direct_reuse(
         &self,
         cx: PlannedLookupContext<'_>,
     ) -> Result<Option<ReuseDecision>, RuntimeError> {
@@ -315,25 +382,22 @@ impl PlannedSubject for SourcePlannedSubject {
         }
     }
 
-    fn lookup_after_inputs_reused(
+    pub(crate) fn execute(
         &self,
-        _cx: PlannedDependencyLookupContext<'_>,
-    ) -> Result<Option<ReuseDecision>, RuntimeError> {
-        Ok(None)
-    }
-
-    fn execute(&self, cx: PlannedExecutionContext<'_>) -> Result<SubjectExecution, RuntimeError> {
+        cx: PlannedExecutionContext<'_>,
+    ) -> Result<SubjectExecution, RuntimeError> {
+        let object_key = self.object_hash.to_string();
         let workspace = create_workspace(
             cx.store,
             "Source",
             Some(self.name.clone()),
-            self.build_key.to_string(),
+            object_key.clone(),
         )
         .map(core_workspace)
         .map_err(map_store_error)?;
         let source_builder = SourceBuilderClass.create_object(SourceBuilderInit {
             recipe_name: self.name.clone(),
-            build_key: self.build_key.to_string(),
+            build_key: object_key,
             declared_object_hash: self.object_hash,
             origin: self.origin.clone(),
             workspace,
@@ -457,19 +521,6 @@ impl PlannedSubject for SourcePlannedSubject {
     }
 }
 
-pub(crate) fn source_planning_key(
-    object_hash: fsobj_hash::ObjectHash,
-) -> Result<BuildKey, RuntimeError> {
-    compute_build_key(
-        "SourceNode",
-        &json!({
-            "object_hash": object_hash.to_string(),
-        }),
-        &[],
-    )
-    .map_err(map_store_error)
-}
-
 pub(crate) fn realized_object_from_record(
     build_key: Option<BuildKey>,
     object_record: &ObjectRecord,
@@ -509,9 +560,11 @@ mod tests {
     use serde_json::json;
     use std::str::FromStr;
 
-    fn sample_build_key() -> BuildKey {
-        BuildKey::from_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            .unwrap()
+    fn sample_graph_key() -> GraphKey {
+        GraphKey::BuildKey(
+            BuildKey::from_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap(),
+        )
     }
 
     fn expect_builder_subject_error(
@@ -530,7 +583,7 @@ mod tests {
             builder,
             "tree".to_string(),
             json!({}),
-            BTreeMap::from([("unexpected".to_string(), sample_build_key())]),
+            BTreeMap::from([("unexpected".to_string(), sample_graph_key())]),
         ));
 
         assert!(
@@ -548,7 +601,7 @@ mod tests {
             builder,
             "sandbox".to_string(),
             json!({}),
-            BTreeMap::from([("script".to_string(), sample_build_key())]),
+            BTreeMap::from([("script".to_string(), sample_graph_key())]),
         ));
 
         assert!(
@@ -572,7 +625,7 @@ mod tests {
                 }]
             }
         });
-        let subject = BuilderPlannedSubject::new(
+        let builder_subject = BuilderPlannedSubject::new(
             builder,
             "tree".to_string(),
             config.clone(),
@@ -581,24 +634,22 @@ mod tests {
         .unwrap();
         let expected = compute_build_key("Tree", &config, &[]).unwrap();
 
-        assert_eq!(subject.name(), "tree");
-        assert_eq!(subject.tag(), "Tree");
-        assert_eq!(subject.build_key(), expected);
-        assert!(subject.inputs().is_empty());
+        assert_eq!(builder_subject.name(), "tree");
+        assert_eq!(builder_subject.tag(), "Tree");
+        assert_eq!(builder_subject.build_key(), expected);
+        assert!(builder_subject.inputs().is_empty());
     }
 
     #[test]
-    fn source_subject_has_empty_inputs_and_source_build_key() {
-        let object_hash = fsobj_hash::ObjectHash::from_str(
+    fn source_subject_exposes_object_hash_without_inputs() {
+        let object_hash = ObjectHash::from_str(
             "1111111111111111111111111111111111111111111111111111111111111111",
         )
         .unwrap();
-        let subject = SourcePlannedSubject::new("source".to_string(), object_hash, None).unwrap();
-        let expected = source_planning_key(object_hash).unwrap();
+        let subject = SourcePlannedSubject::new("source".to_string(), object_hash, None);
 
         assert_eq!(subject.name(), "source");
         assert_eq!(subject.tag(), "Source");
-        assert_eq!(subject.build_key(), expected);
-        assert!(subject.inputs().is_empty());
+        assert_eq!(subject.object_hash(), object_hash);
     }
 }

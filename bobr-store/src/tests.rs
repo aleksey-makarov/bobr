@@ -1,5 +1,7 @@
 use super::*;
-use crate::identity::{BuildKey, ObjectHash, ReuseKey, compute_build_key, compute_reuse_key};
+use crate::identity::{
+    BuildInputKey, BuildKey, ObjectHash, ReuseKey, compute_build_key, compute_reuse_key,
+};
 use fsobj_hash::hash_path;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -57,6 +59,25 @@ fn reuse_key_is_stable_for_identical_inputs() {
         compute_reuse_key("CasTest", &payload, &inputs).unwrap(),
         compute_reuse_key("CasTest", &payload, &inputs).unwrap()
     );
+}
+
+#[test]
+fn build_key_distinguishes_build_and_object_input_domains() {
+    let hex = "1111111111111111111111111111111111111111111111111111111111111111";
+    let object_hash = parse_object_hash(hex);
+    let build_key = parse_build_key(hex);
+    let payload = json!({ "kind": "domain-test" });
+
+    let by_object = compute_build_key(
+        "CasTest",
+        &payload,
+        &[BuildInputKey::ObjectKey(object_hash)],
+    )
+    .unwrap();
+    let by_build =
+        compute_build_key("CasTest", &payload, &[BuildInputKey::BuildKey(build_key)]).unwrap();
+
+    assert_ne!(by_object, by_build);
 }
 
 #[test]
@@ -1195,7 +1216,7 @@ fn existing_trusted_object_reuse_leaves_staged_path_for_runtime_cleanup() {
 }
 
 #[test]
-fn build_key_changes_when_input_build_key_order_changes() {
+fn build_key_changes_when_input_order_changes() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
     let key_a = parse_build_key("1111111111111111111111111111111111111111111111111111111111111111");
@@ -1695,8 +1716,13 @@ fn sample_run_id() -> &'static str {
     "260324123456"
 }
 
-fn build_key_for(builder_tag: &str, payload: Value, input_build_keys: &[BuildKey]) -> BuildKey {
-    compute_build_key(builder_tag, &payload, input_build_keys).unwrap()
+fn build_key_for(builder_tag: &str, payload: Value, input_builds: &[BuildKey]) -> BuildKey {
+    let input_keys = input_builds
+        .iter()
+        .copied()
+        .map(BuildInputKey::BuildKey)
+        .collect::<Vec<_>>();
+    compute_build_key(builder_tag, &payload, &input_keys).unwrap()
 }
 
 fn reuse_key_for(builder_tag: &str, payload: Value, inputs: &[ReuseInputIdentity]) -> ReuseKey {

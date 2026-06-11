@@ -1,13 +1,12 @@
 use crate::builders;
 use crate::origins;
-#[cfg(test)]
-use crate::planned::source_planning_key;
-use crate::planned::{BuilderPlannedSubject, PlannedSubject, ReuseOrigin, SourcePlannedSubject};
+use crate::planned::{
+    BuilderPlannedSubject, GraphKey, PlannedSubject, ReuseOrigin, SourcePlannedSubject,
+};
 use crate::runtime::RuntimeError;
 use bobr_store::RealizedObject;
-use bobr_store::identity::BuildKey;
 #[cfg(test)]
-use bobr_store::identity::compute_build_key;
+use bobr_store::identity::{BuildInputKey, compute_build_key};
 use mbuild_core::{ObjectHash, ParsedOrigin};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -88,7 +87,7 @@ impl RecipeRequest {
 
 #[derive(Clone)]
 pub(crate) struct GraphNode {
-    pub(crate) subject: Arc<dyn PlannedSubject>,
+    pub(crate) subject: Arc<PlannedSubject>,
     pub(crate) state: PlanningState,
 }
 
@@ -97,14 +96,13 @@ impl std::fmt::Debug for GraphNode {
         f.debug_struct("GraphNode")
             .field("name", &self.subject.name())
             .field("tag", &self.subject.tag())
-            .field("build_key", &self.subject.build_key())
             .field("state", &self.state)
             .finish()
     }
 }
 
 impl GraphNode {
-    pub(crate) fn new(subject: Arc<dyn PlannedSubject>) -> Self {
+    pub(crate) fn new(subject: Arc<PlannedSubject>) -> Self {
         Self {
             subject,
             state: PlanningState::Unknown,
@@ -124,8 +122,8 @@ pub(crate) enum PlanningState {
 
 pub(crate) fn collect_graph(
     request: &RecipeRequest,
-    nodes: &mut HashMap<BuildKey, GraphNode>,
-) -> Result<BuildKey, RuntimeError> {
+    nodes: &mut HashMap<GraphKey, GraphNode>,
+) -> Result<GraphKey, RuntimeError> {
     builders::validate_registered_builders().map_err(RuntimeError::InvalidRequest)?;
 
     let mut stack = BTreeSet::new();
@@ -136,10 +134,10 @@ pub(crate) fn collect_graph(
 fn collect_graph_inner(
     request: &RecipeRequest,
     node_id: &str,
-    nodes: &mut HashMap<BuildKey, GraphNode>,
+    nodes: &mut HashMap<GraphKey, GraphNode>,
     stack: &mut BTreeSet<String>,
-    node_keys: &mut HashMap<String, BuildKey>,
-) -> Result<BuildKey, RuntimeError> {
+    node_keys: &mut HashMap<String, GraphKey>,
+) -> Result<GraphKey, RuntimeError> {
     if let Some(existing) = node_keys.get(node_id) {
         return Ok(*existing);
     }
@@ -151,20 +149,30 @@ fn collect_graph_inner(
     }
 
     let recipe = request.node(node_id)?;
-    let subject = match recipe {
+    let (key, subject) = match recipe {
         Recipe::Builder(recipe) => {
-            collect_builder_subject(request, recipe, nodes, stack, node_keys)?
+            let builder_subject =
+                collect_builder_subject(request, recipe, nodes, stack, node_keys)?;
+            (
+                GraphKey::BuildKey(builder_subject.build_key()),
+                Arc::new(PlannedSubject::Builder(builder_subject)),
+            )
         }
-        Recipe::Source(recipe) => Arc::new(SourcePlannedSubject::new(
-            recipe.name.clone(),
-            recipe.object_hash,
-            recipe.origin.clone(),
-        )?) as Arc<dyn PlannedSubject>,
+        Recipe::Source(recipe) => {
+            let subject = SourcePlannedSubject::new(
+                recipe.name.clone(),
+                recipe.object_hash,
+                recipe.origin.clone(),
+            );
+            (
+                GraphKey::ObjectKey(subject.object_hash()),
+                Arc::new(PlannedSubject::Source(subject)),
+            )
+        }
     };
 
     stack.remove(node_id);
 
-    let key = subject.build_key();
     nodes.entry(key).or_insert_with(|| GraphNode::new(subject));
     node_keys.insert(node_id.to_string(), key);
     Ok(key)
@@ -173,10 +181,10 @@ fn collect_graph_inner(
 fn collect_builder_subject(
     request: &RecipeRequest,
     recipe: &BuilderRecipe,
-    nodes: &mut HashMap<BuildKey, GraphNode>,
+    nodes: &mut HashMap<GraphKey, GraphNode>,
     stack: &mut BTreeSet<String>,
-    node_keys: &mut HashMap<String, BuildKey>,
-) -> Result<Arc<dyn PlannedSubject>, RuntimeError> {
+    node_keys: &mut HashMap<String, GraphKey>,
+) -> Result<BuilderPlannedSubject, RuntimeError> {
     let builder = builders::get_builder(&recipe.tag).ok_or_else(|| {
         RuntimeError::UnknownBuilder(format!(
             "unknown builder tag '{}'; supported builders: {}",
@@ -190,12 +198,7 @@ fn collect_builder_subject(
         inputs.insert(input_name.clone(), key);
     }
 
-    Ok(Arc::new(BuilderPlannedSubject::new(
-        builder,
-        recipe.name.clone(),
-        recipe.config.clone(),
-        inputs,
-    )?) as Arc<dyn PlannedSubject>)
+    BuilderPlannedSubject::new(builder, recipe.name.clone(), recipe.config.clone(), inputs)
 }
 
 fn parse_envelope_value(value: Value, path: &str) -> Result<RecipeEnvelope, RuntimeError> {
@@ -440,7 +443,7 @@ mod tests {
 
     fn collect_one(
         request: &Value,
-    ) -> Result<(BuildKey, HashMap<BuildKey, GraphNode>), RuntimeError> {
+    ) -> Result<(GraphKey, HashMap<GraphKey, GraphNode>), RuntimeError> {
         let request = parse_request_value(request.clone(), "$")?;
         let mut nodes = HashMap::new();
         let root_key = collect_graph(&request, &mut nodes)?;
@@ -517,7 +520,7 @@ mod tests {
         let node = nodes.get(&root_key).unwrap();
         assert_eq!(node.subject.name(), "local-source");
         assert_eq!(node.subject.tag(), "Source");
-        assert!(node.subject.inputs().is_empty());
+        assert!(matches!(node.subject.as_ref(), PlannedSubject::Source(_)));
     }
 
     #[test]
@@ -538,7 +541,7 @@ mod tests {
         let node = nodes.get(&root_key).unwrap();
         assert_eq!(node.subject.name(), "local-source");
         assert_eq!(node.subject.tag(), "Source");
-        assert!(node.subject.inputs().is_empty());
+        assert!(matches!(node.subject.as_ref(), PlannedSubject::Source(_)));
     }
 
     #[test]
@@ -554,7 +557,7 @@ mod tests {
         let node = nodes.get(&root_key).unwrap();
         assert_eq!(node.subject.name(), "local-source");
         assert_eq!(node.subject.tag(), "Source");
-        assert!(node.subject.inputs().is_empty());
+        assert!(matches!(node.subject.as_ref(), PlannedSubject::Source(_)));
     }
 
     #[test]
@@ -609,14 +612,14 @@ mod tests {
         });
         let (root_key, nodes) = collect_one(&request).unwrap();
         let node = nodes.get(&root_key).unwrap();
-        let expected_key = source_planning_key(
-            "1111111111111111111111111111111111111111111111111111111111111111"
-                .parse()
-                .unwrap(),
-        )
-        .unwrap();
+        let object_hash = "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+        let expected_key = GraphKey::ObjectKey(object_hash);
         assert_eq!(root_key, expected_key);
-        assert_eq!(node.subject.build_key(), expected_key);
+        assert!(
+            matches!(node.subject.as_ref(), PlannedSubject::Source(source) if source.object_hash() == object_hash)
+        );
     }
 
     #[test]
@@ -723,20 +726,21 @@ mod tests {
         let (root_key, _) = collect_one(&request).unwrap();
         let rootfs_key = compute_build_key("Tree", &rootfs["config"], &[]).unwrap();
         let script_key = compute_build_key("Tree", &script["config"], &[]).unwrap();
-        let source_key = source_planning_key(
-            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                .parse()
-                .unwrap(),
-        )
-        .unwrap();
+        let source_key = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            .parse()
+            .unwrap();
         let expected = compute_build_key(
             "Sandbox",
             &request["root"]["config"],
-            &[rootfs_key, script_key, source_key],
+            &[
+                BuildInputKey::BuildKey(rootfs_key),
+                BuildInputKey::BuildKey(script_key),
+                BuildInputKey::ObjectKey(source_key),
+            ],
         )
         .unwrap();
 
-        assert_eq!(root_key, expected);
+        assert_eq!(root_key, GraphKey::BuildKey(expected));
     }
 
     #[test]
@@ -758,10 +762,12 @@ mod tests {
         let (_root_key, nodes) = collect_one(&request).unwrap();
         let deduped_key =
             compute_build_key("Tree", &tree_config("same.txt", "same", false), &[]).unwrap();
-        let node = nodes.get(&deduped_key).unwrap();
+        let node = nodes.get(&GraphKey::BuildKey(deduped_key)).unwrap();
         assert_eq!(node.subject.name(), "binary-a");
         assert_eq!(node.subject.tag(), "Tree");
-        assert_eq!(node.subject.build_key(), deduped_key);
+        assert!(
+            matches!(node.subject.as_ref(), PlannedSubject::Builder(builder) if builder.build_key() == deduped_key)
+        );
     }
 
     #[test]

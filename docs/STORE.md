@@ -19,9 +19,16 @@ identity is `build_key`, computed from:
 
 - builder tag
 - normalized config payload
-- ordered direct dependency `build_key`s
+- ordered direct input identities
 
-Dependency order follows the builder input contract:
+Each direct input identity is tagged by its domain:
+
+- builder dependencies contribute their `build_key`
+- source dependencies contribute their declared `object_hash`
+
+The domain tag is part of the build identity, so a build key and an object hash
+with the same 64-character text are still distinct inputs. Dependency order
+follows the builder input contract:
 
 - reserved inputs in spec order
 - extra inputs in lexical name order
@@ -182,8 +189,9 @@ Each run writes:
 claimed that directory, `.1`, `.2`, and so on are appended. Each builder,
 source, or scheduler subject gets a store-allocated serial number for its log
 directory name. The serial is an internal allocation detail; the full original
-tag, recipe name, build key, and workspace paths are stored in that subject's
-`meta.json`.
+tag, recipe name, subject key, and workspace paths are stored in that subject's
+`meta.json`. Builder subject keys are build keys; source subject keys are
+declared object hashes.
 
 The run-level event log records lifecycle events such as:
 

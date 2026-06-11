@@ -1,8 +1,8 @@
 //! Stable store identity computation.
 //!
 //! This module computes deterministic identifiers from normalized semantic
-//! inputs: build keys for requested invocations, reuse keys for realized input
-//! objects, and object hashes for normalized filesystem objects.
+//! inputs: requested invocation keys and known object keys, reuse keys for
+//! realized input objects, and object hashes for normalized filesystem objects.
 
 use crate::{ReuseInputIdentity, StoreError};
 use fsobj_hash::define_hex_hash_type;
@@ -10,20 +10,34 @@ pub use fsobj_hash::{ObjectHash, ParseHexHashError};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-const INVOCATION_SCHEMA: &str = "bobr-build-invocation-v1";
+const INVOCATION_SCHEMA: &str = "bobr-build-invocation-v2";
 const REUSE_INVOCATION_SCHEMA: &str = "bobr-build-reuse-invocation-v1";
 
 define_hex_hash_type! {
     /// Stable key for a normalized build invocation.
     ///
     /// A build key is the SHA-256 digest produced by [`compute_build_key`]. It
-    /// identifies the builder tag, normalized payload, and input build keys,
-    /// independent of whether the corresponding object has already been
-    /// published.
+    /// identifies the builder tag, normalized payload, and direct input
+    /// identities, independent of whether the corresponding object has already
+    /// been published.
     ///
     /// The textual representation is exactly 64 lowercase hexadecimal
     /// characters.
     pub struct BuildKey;
+}
+
+/// Stable identity of a direct input used to compute a build key.
+///
+/// Builder inputs can be represented either by the build invocation that will
+/// realize them or by an already-known object hash. These two identity domains
+/// are intentionally tagged separately even though both values use the same
+/// 64-character lowercase-hex textual form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuildInputKey {
+    /// Input identified directly by an object hash.
+    ObjectKey(ObjectHash),
+    /// Input identified by another build invocation.
+    BuildKey(BuildKey),
 }
 
 define_hex_hash_type! {
@@ -41,17 +55,30 @@ define_hex_hash_type! {
 /// Computes the stable key for a normalized build invocation.
 ///
 /// The key covers the builder tag, the normalized JSON payload, and the ordered
-/// list of input build keys. The payload is serialized with the store's
+/// list of direct input identities. The payload is serialized with the store's
 /// canonical JSON encoder before hashing, so callers must pass the already
 /// normalized semantic payload rather than arbitrary user input.
 pub fn compute_build_key(
     builder_tag: &str,
     normalized_payload: &Value,
-    input_build_keys: &[BuildKey],
+    input_keys: &[BuildInputKey],
 ) -> Result<BuildKey, StoreError> {
-    let input_keys = input_build_keys
+    let input_values = input_keys
         .iter()
-        .map(|key| Value::String(key.to_string()))
+        .map(|key| match key {
+            BuildInputKey::ObjectKey(object_hash) => {
+                let mut input = Map::new();
+                input.insert("kind".to_string(), Value::String("object".to_string()));
+                input.insert("hash".to_string(), Value::String(object_hash.to_string()));
+                Value::Object(input)
+            }
+            BuildInputKey::BuildKey(build_key) => {
+                let mut input = Map::new();
+                input.insert("kind".to_string(), Value::String("build".to_string()));
+                input.insert("key".to_string(), Value::String(build_key.to_string()));
+                Value::Object(input)
+            }
+        })
         .collect::<Vec<_>>();
 
     let mut root = Map::new();
@@ -64,7 +91,7 @@ pub fn compute_build_key(
         Value::String(builder_tag.to_string()),
     );
     root.insert("payload".to_string(), normalized_payload.clone());
-    root.insert("input_build_keys".to_string(), Value::Array(input_keys));
+    root.insert("inputs".to_string(), Value::Array(input_values));
 
     let canonical = crate::json::canonical_json_bytes(&Value::Object(root))?;
     Ok(BuildKey::from_bytes(Sha256::digest(&canonical).into()))
