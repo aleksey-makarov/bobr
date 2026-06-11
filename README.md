@@ -6,14 +6,13 @@
 
 The input document is a JSON envelope with:
 
-- `paths`
-- `options` (optional)
+- `options` (optional when `--store` supplies the store path)
 - `nodes`
 
 `nodes` is a table of recipe nodes keyed by technical ids. The root build
 target is the entry with the reserved id `root`. Dependencies are encoded as
-id references in input slots. `paths.store` points at the store root that
-`mbuild` should use for this request. `mbuild` parses that DAG request,
+id references in input slots. `options.store` or `--store` points at the store
+root that `mbuild` should use for this request. `mbuild` parses that DAG request,
 validates each node, performs top-down store lookups, and materializes only
 the missing nodes. Missing leaves and other ready nodes may execute in
 parallel.
@@ -24,11 +23,8 @@ Builder nodes use the generic builder shape:
 
 ```json
 {
-  "paths": {
-    "store": "/abs/path/to/store",
-    "local": "/abs/path/to/local-sources"
-  },
   "options": {
+    "store": "/abs/path/to/store",
     "quiet": false,
     "jobs": 8
   },
@@ -110,10 +106,8 @@ input targets and their normal `object-record-refs/` and `object-refs/` publicat
 
 ```json
 {
-  "paths": {
-    "store": "/abs/path/to/store"
-  },
   "options": {
+    "store": "/abs/path/to/store",
     "quiet": false,
     "jobs": 8
   },
@@ -173,10 +167,11 @@ CLI contract:
 - live progress goes to `stderr` unless `--quiet` is set
 - `--jobs/-j` limits parallel builder execution; the default is the available
   CPU parallelism
-- recipe-level `options.quiet` and `options.jobs` provide per-request defaults
-  that are overridden by explicit CLI flags
+- `--store` sets the store root for the request
+- recipe-level `options.store`, `options.quiet`, and `options.jobs` provide
+  per-request defaults that are overridden by explicit CLI flags
 
-`paths.store` must be an absolute path to an existing directory. That
+The final store path must be an absolute path to an existing directory. That
 directory is the store root itself. A request may still choose a path named
 `.mbuild`, but `mbuild` no longer adds an extra `.mbuild/` layer implicitly.
 

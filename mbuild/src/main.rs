@@ -53,6 +53,9 @@ struct Cli {
     #[arg(short = 'j', long = "jobs")]
     jobs: Option<usize>,
 
+    #[arg(long = "store")]
+    store: Option<PathBuf>,
+
     recipe_file: Option<PathBuf>,
 }
 
@@ -89,6 +92,9 @@ fn build(cli: Cli, cancellation: CancellationToken) -> MResult<()> {
     let recipe_bytes = read_recipe_bytes(cli.recipe_file.as_ref())?;
     let mut envelope = RecipeEnvelope::parse_json(&recipe_bytes).map_err(map_runtime_error)?;
 
+    if let Some(store) = cli.store {
+        envelope.options.store = Some(store);
+    }
     if cli.quiet {
         envelope.options.quiet = Some(true);
     }

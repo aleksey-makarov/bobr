@@ -6,18 +6,18 @@
 
 The input is a JSON envelope with:
 
-- `paths`
-- `options` (optional)
+- `options` (optional when `--store` supplies the store path)
 - `nodes`
 
 `nodes` is a top-level object of recipe nodes keyed by technical ids. The
 reserved id `root` identifies the build target for the current invocation.
-`paths.store` points at the store root for the request. Each node describes
-either one builder node or one source node. Dependencies are encoded as id
-references rather than inline child recipe objects.
+`options.store` or `--store` points at the store root for the request. Each
+node describes either one builder node or one source node. Dependencies are
+encoded as id references rather than inline child recipe objects.
 
 `options` currently supports:
 
+- `store: string`
 - `quiet: bool`
 - `jobs: integer`
 
@@ -179,6 +179,7 @@ Builder semantics depend only on:
 - `stdout`: JSON serialization of the realized root `RealizedObject`
 - `stderr`: live progress log unless `--quiet`
 - `--jobs/-j`: limit parallel execution, default = available CPU parallelism
-- `paths.store`: absolute path to an existing store root directory. The value
-  is the store root itself; `mbuild` does not add an implicit `.mbuild/`
+- `--store`: set the store root for the request
+- final store path: absolute path to an existing store root directory. The
+  value is the store root itself; `mbuild` does not add an implicit `.mbuild/`
   directory.

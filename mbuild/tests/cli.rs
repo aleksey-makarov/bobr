@@ -61,6 +61,68 @@ fn cli_accepts_explicit_recipe_path() {
 }
 
 #[test]
+fn cli_store_flag_supplies_missing_recipe_store() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("store-from-cli.json");
+    let store = store_root(workspace.path());
+    fs::create_dir_all(&store).unwrap();
+    fs::write(
+        &recipe_path,
+        serde_json::to_vec_pretty(&json!({
+            "nodes": {
+                "root": tree_file_recipe("store-from-cli", "store.txt", "hello store", false)
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg("--store")
+        .arg(&store)
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let _build: RealizedObject = serde_json::from_str(&stdout).unwrap();
+    assert!(stderr.contains("[start] Tree store-from-cli"), "{stderr}");
+}
+
+#[test]
+fn cli_reports_missing_store_option() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("missing-store-option.json");
+    fs::write(
+        &recipe_path,
+        serde_json::to_vec_pretty(&json!({
+            "nodes": {
+                "root": tree_file_recipe("missing-store-option", "missing.txt", "hello", false)
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("error[invalid-input]"), "{stderr}");
+    assert!(
+        stderr.contains("recipe options.store or --store must be set"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn cli_quiet_suppresses_live_progress() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("quiet.json");
@@ -160,7 +222,7 @@ fn cli_reports_invalid_generic_input_shape() {
     fs::write(
         &recipe_path,
         serde_json::to_vec_pretty(&json!({
-            "paths": { "store": store.to_string_lossy() },
+            "options": { "store": store.to_string_lossy() },
             "nodes": {
                 "root": {
                     "name": "sandbox",
@@ -195,7 +257,7 @@ fn cli_reports_relative_store_path() {
     fs::write(
         &recipe_path,
         serde_json::to_vec_pretty(&json!({
-            "paths": { "store": "relative/store" },
+            "options": { "store": "relative/store" },
             "nodes": {
                 "root": {
                     "name": "tree",
@@ -226,10 +288,8 @@ fn cli_reports_relative_store_path() {
 
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("$.paths.store: expected absolute path"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("error[build-failed]"), "{stderr}");
+    assert!(stderr.contains("store root must be absolute"), "{stderr}");
 }
 
 #[test]
@@ -241,7 +301,7 @@ fn cli_reports_unexpected_local_path() {
     fs::write(
         &recipe_path,
         serde_json::to_vec_pretty(&json!({
-            "paths": {
+            "options": {
                 "store": store.to_string_lossy(),
                 "local": "relative/local"
             },
@@ -270,7 +330,7 @@ fn cli_reports_unexpected_local_path() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("$.paths: unexpected fields: local"),
+        stderr.contains("$.options: unexpected fields: local"),
         "{stderr}"
     );
 }
@@ -284,7 +344,7 @@ fn cli_reports_relative_source_path() {
     fs::write(
         &recipe_path,
         serde_json::to_vec_pretty(&json!({
-            "paths": { "store": store.to_string_lossy() },
+            "options": { "store": store.to_string_lossy() },
             "nodes": {
                 "root": {
                     "name": "source",
@@ -324,7 +384,7 @@ fn cli_reports_missing_store_directory() {
     fs::write(
         &recipe_path,
         serde_json::to_vec_pretty(&json!({
-            "paths": { "store": missing_store.to_string_lossy() },
+            "options": { "store": missing_store.to_string_lossy() },
             "nodes": {
                 "root": {
                     "name": "tree",

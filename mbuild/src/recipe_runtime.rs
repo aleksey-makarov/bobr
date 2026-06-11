@@ -57,11 +57,7 @@ pub fn run_recipe_envelope(
     envelope: RecipeEnvelope,
     cancellation: CancellationToken,
 ) -> Result<RealizedObject, RuntimeError> {
-    let RecipeEnvelope {
-        paths,
-        options,
-        request,
-    } = envelope;
+    let RecipeEnvelope { options, request } = envelope;
     let jobs = options.jobs.unwrap_or_else(default_jobs);
     if jobs == 0 {
         return Err(RuntimeError::InvalidRequest(
@@ -71,7 +67,16 @@ pub fn run_recipe_envelope(
     let emit_progress = !options.quiet.unwrap_or(false);
     check_cancelled(&cancellation)?;
 
-    let store = Store::create(&paths.store).map_err(map_store_error)?;
+    let store_path = options.store.as_ref().ok_or_else(|| {
+        RuntimeError::InvalidRequest("recipe options.store or --store must be set".to_string())
+    })?;
+    if store_path.is_absolute() && !store_path.exists() {
+        return Err(RuntimeError::Store(format!(
+            "store root must exist: '{}'",
+            store_path.display()
+        )));
+    }
+    let store = Store::create(store_path).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> =
         Arc::new(build_run_logger_for_store(&store, emit_progress).map_err(RuntimeError::Store)?);
 
@@ -996,8 +1001,8 @@ mod tests {
         let store = create_test_store(temp.path());
         let request = RecipeEnvelope::parse_json(
             br##"{
-                "paths": {
-                    "store": "/tmp/unused-store"
+                "options": {
+                "store": "/tmp/unused-store"
                 },
                 "nodes": {
                     "root": {

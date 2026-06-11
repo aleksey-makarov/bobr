@@ -21,11 +21,13 @@ pub fn write_recipe_with_options(recipe_path: &Path, recipe: &Value, options: &V
     let store = store_root(root);
     fs::create_dir_all(&store).unwrap();
     let request = normalize_request(recipe);
+    let mut options = options.as_object().cloned().unwrap_or_default();
+    options.insert(
+        "store".to_string(),
+        Value::String(store.to_string_lossy().into_owned()),
+    );
     let envelope = json!({
-        "paths": {
-            "store": store.to_string_lossy(),
-        },
-        "options": options,
+        "options": Value::Object(options),
         "nodes": request,
     });
     fs::write(recipe_path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();

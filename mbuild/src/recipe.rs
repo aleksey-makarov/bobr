@@ -10,18 +10,13 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct RecipeEnvelope {
-    pub paths: RecipePaths,
     pub options: RecipeOptions,
     pub request: RecipeRequest,
 }
 
-#[derive(Debug, Clone)]
-pub struct RecipePaths {
-    pub store: PathBuf,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct RecipeOptions {
+    pub store: Option<PathBuf>,
     pub quiet: Option<bool>,
     pub jobs: Option<usize>,
 }
@@ -308,12 +303,6 @@ fn parse_envelope_value(value: Value, path: &str) -> Result<RecipeEnvelope, Runt
         RuntimeError::RecipeLoad(format!("{path}: expected top-level recipe object"))
     })?;
 
-    let paths = parse_paths_value(
-        object.remove("paths").ok_or_else(|| {
-            RuntimeError::RecipeLoad(format!("{path}: missing required field 'paths'"))
-        })?,
-        &format!("{path}.paths"),
-    )?;
     let options = match object.remove("options") {
         Some(value) => parse_options_value(value, &format!("{path}.options"))?,
         None => RecipeOptions::default(),
@@ -331,31 +320,7 @@ fn parse_envelope_value(value: Value, path: &str) -> Result<RecipeEnvelope, Runt
         )));
     }
 
-    Ok(RecipeEnvelope {
-        paths,
-        options,
-        request,
-    })
-}
-
-fn parse_paths_value(value: Value, path: &str) -> Result<RecipePaths, RuntimeError> {
-    let mut object = value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: expected object")))?;
-    let store = PathBuf::from(take_string(&mut object, path, "store")?);
-    if !store.is_absolute() {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "{path}.store: expected absolute path"
-        )));
-    }
-    if !object.is_empty() {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "{path}: unexpected fields: {}",
-            object.keys().cloned().collect::<Vec<_>>().join(", ")
-        )));
-    }
-    Ok(RecipePaths { store })
+    Ok(RecipeEnvelope { options, request })
 }
 
 fn parse_options_value(value: Value, path: &str) -> Result<RecipeOptions, RuntimeError> {
@@ -364,6 +329,15 @@ fn parse_options_value(value: Value, path: &str) -> Result<RecipeOptions, Runtim
         .cloned()
         .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: expected object")))?;
 
+    let store = match object.remove("store") {
+        Some(Value::String(value)) => Some(PathBuf::from(value)),
+        Some(_) => {
+            return Err(RuntimeError::RecipeLoad(format!(
+                "{path}.store: expected string"
+            )));
+        }
+        None => None,
+    };
     let quiet = match object.remove("quiet") {
         Some(Value::Bool(value)) => Some(value),
         Some(_) => {
@@ -398,7 +372,7 @@ fn parse_options_value(value: Value, path: &str) -> Result<RecipeOptions, Runtim
             object.keys().cloned().collect::<Vec<_>>().join(", ")
         )));
     }
-    Ok(RecipeOptions { quiet, jobs })
+    Ok(RecipeOptions { store, quiet, jobs })
 }
 
 fn parse_request_value(value: Value, path: &str) -> Result<RecipeRequest, RuntimeError> {
@@ -941,7 +915,7 @@ mod tests {
         let error = RecipeEnvelope::parse_json(serde_json::to_vec(&old_shape).unwrap().as_slice())
             .unwrap_err();
         assert!(
-            error.to_string().contains("missing required field 'paths'"),
+            error.to_string().contains("missing required field 'nodes'"),
             "{error}"
         );
     }
