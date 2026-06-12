@@ -65,15 +65,16 @@ pub fn run_recipe_envelope(
     let store_path = options.store.as_ref().ok_or_else(|| {
         RuntimeError::InvalidRequest("recipe options.store or --store must be set".to_string())
     })?;
+    let mut subjects = HashMap::new();
+    let collected = collect_graph(&request, &mut subjects)?;
+    let root_key = collected.root_key;
+    let root_name = collected.root_subject.name().to_string();
+    let root_tag = collected.root_subject.tag().to_string();
+
     let store = Store::create(store_path).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> =
         Arc::new(build_run_logger_for_store(&store, emit_progress).map_err(RuntimeError::Store)?);
 
-    let mut subjects = HashMap::new();
-    let root_key = collect_graph(&request, &mut subjects)?;
-    let root_recipe = request.node("root")?;
-    let root_name = root_recipe.name().to_string();
-    let root_tag = root_recipe.tag().to_string();
     let mut states = HashMap::new();
     ensure_planned(&store, &subjects, &mut states, root_key)?;
 
@@ -861,7 +862,8 @@ mod tests {
         .request;
 
         let mut subjects = HashMap::new();
-        let root_key = collect_graph(&request, &mut subjects).unwrap();
+        let collected = collect_graph(&request, &mut subjects).unwrap();
+        let root_key = collected.root_key;
         let root_build_key = expect_build_key(root_key);
         let dep_keys = {
             let subject = subjects.get(&root_key).unwrap().as_ref();

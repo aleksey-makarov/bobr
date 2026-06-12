@@ -5,7 +5,7 @@ use crate::runtime::RuntimeError;
 use bobr_store::identity::GraphKey;
 #[cfg(test)]
 use bobr_store::identity::compute_build_key;
-use mbuild_core::{ObjectHash, ParsedOrigin};
+use mbuild_core::ObjectHash;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -14,7 +14,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct RecipeEnvelope {
     pub options: RecipeOptions,
-    pub request: RecipeRequest,
+    pub request: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -22,48 +22,6 @@ pub struct RecipeOptions {
     pub store: Option<PathBuf>,
     pub quiet: Option<bool>,
     pub jobs: Option<usize>,
-}
-
-#[derive(Debug, Clone)]
-pub struct RecipeRequest {
-    nodes: BTreeMap<String, Recipe>,
-}
-
-#[derive(Debug, Clone)]
-pub enum Recipe {
-    Builder(BuilderRecipe),
-    Source(SourceRecipe),
-}
-
-impl Recipe {
-    pub(crate) fn name(&self) -> &str {
-        match self {
-            Self::Builder(recipe) => &recipe.name,
-            Self::Source(recipe) => &recipe.name,
-        }
-    }
-
-    pub(crate) fn tag(&self) -> &str {
-        match self {
-            Self::Builder(recipe) => &recipe.tag,
-            Self::Source(_) => "Source",
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct BuilderRecipe {
-    name: String,
-    tag: String,
-    config: Value,
-    inputs: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SourceRecipe {
-    name: String,
-    object_hash: ObjectHash,
-    origin: Option<Box<dyn ParsedOrigin>>,
 }
 
 impl RecipeEnvelope {
@@ -75,32 +33,55 @@ impl RecipeEnvelope {
     }
 }
 
-impl RecipeRequest {
-    pub(crate) fn node(&self, id: &str) -> Result<&Recipe, RuntimeError> {
-        self.nodes.get(id).ok_or_else(|| {
-            RuntimeError::InvalidRequest(format!("request references unknown node id '{id}'"))
-        })
-    }
+pub(crate) struct CollectedGraph {
+    pub(crate) root_key: GraphKey,
+    pub(crate) root_subject: Arc<PlannedSubject>,
 }
 
 pub(crate) fn collect_graph(
-    request: &RecipeRequest,
+    request: &BTreeMap<String, Value>,
     subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
-) -> Result<GraphKey, RuntimeError> {
+) -> Result<CollectedGraph, RuntimeError> {
     let mut stack = BTreeSet::new();
     let mut node_keys = HashMap::new();
-    collect_graph_inner(request, "root", subjects, &mut stack, &mut node_keys)
+    let mut node_subjects = HashMap::new();
+    let root = collect_graph_inner(
+        request,
+        "root",
+        subjects,
+        &mut stack,
+        &mut node_keys,
+        &mut node_subjects,
+    )?;
+    Ok(CollectedGraph {
+        root_key: root.key,
+        root_subject: root.subject,
+    })
+}
+
+struct CollectedNode {
+    key: GraphKey,
+    subject: Arc<PlannedSubject>,
 }
 
 fn collect_graph_inner(
-    request: &RecipeRequest,
+    request: &BTreeMap<String, Value>,
     node_id: &str,
     subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
     stack: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, GraphKey>,
-) -> Result<GraphKey, RuntimeError> {
+    node_subjects: &mut HashMap<String, Arc<PlannedSubject>>,
+) -> Result<CollectedNode, RuntimeError> {
     if let Some(existing) = node_keys.get(node_id) {
-        return Ok(*existing);
+        let subject = node_subjects.get(node_id).cloned().ok_or_else(|| {
+            RuntimeError::Store(format!(
+                "missing collected subject for memoized node id '{node_id}'"
+            ))
+        })?;
+        return Ok(CollectedNode {
+            key: *existing,
+            subject,
+        });
     }
 
     if !stack.insert(node_id.to_string()) {
@@ -109,57 +90,101 @@ fn collect_graph_inner(
         )));
     }
 
-    let recipe = request.node(node_id)?;
-    let (key, subject) = match recipe {
-        Recipe::Builder(recipe) => {
-            let builder_subject =
-                collect_builder_subject(request, recipe, subjects, stack, node_keys)?;
-            (
-                GraphKey::BuildKey(builder_subject.build_key()),
-                Arc::new(PlannedSubject::Builder(builder_subject)),
-            )
-        }
-        Recipe::Source(recipe) => {
-            let subject = SourcePlannedSubject::new(
-                recipe.name.clone(),
-                recipe.object_hash,
-                recipe.origin.clone(),
-            );
-            (
-                GraphKey::ObjectKey(subject.object_hash()),
-                Arc::new(PlannedSubject::Source(subject)),
-            )
-        }
+    let node_value = request.get(node_id).ok_or_else(|| {
+        RuntimeError::InvalidRequest(format!("request references unknown node id '{node_id}'"))
+    })?;
+    let node_path = node_path(node_id);
+    let object = node_value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{node_path}: expected recipe object")))?;
+    let tag = object
+        .get("tag")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{node_path}.tag: expected string")))?;
+
+    let (key, subject) = if tag == "Source" {
+        let subject = parse_source_subject(object, &node_path)?;
+        (
+            GraphKey::ObjectKey(subject.object_hash()),
+            Arc::new(PlannedSubject::Source(subject)),
+        )
+    } else {
+        let builder_subject = collect_builder_subject(
+            request,
+            object,
+            &node_path,
+            subjects,
+            stack,
+            node_keys,
+            node_subjects,
+        )?;
+        (
+            GraphKey::BuildKey(builder_subject.build_key()),
+            Arc::new(PlannedSubject::Builder(builder_subject)),
+        )
     };
 
     stack.remove(node_id);
 
-    subjects.entry(key).or_insert(subject);
+    subjects.entry(key).or_insert_with(|| subject.clone());
     node_keys.insert(node_id.to_string(), key);
-    Ok(key)
+    node_subjects.insert(node_id.to_string(), subject.clone());
+    Ok(CollectedNode { key, subject })
 }
 
 fn collect_builder_subject(
-    request: &RecipeRequest,
-    recipe: &BuilderRecipe,
+    request: &BTreeMap<String, Value>,
+    mut object: Map<String, Value>,
+    path: &str,
     subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
     stack: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, GraphKey>,
+    node_subjects: &mut HashMap<String, Arc<PlannedSubject>>,
 ) -> Result<BuilderPlannedSubject, RuntimeError> {
-    let builder = builders::get_builder(&recipe.tag).ok_or_else(|| {
+    let name = take_string(&mut object, path, "name")?;
+    let tag = take_string(&mut object, path, "tag")?;
+    let config = object.remove("config").ok_or_else(|| {
+        RuntimeError::RecipeLoad(format!("{path}: missing required field 'config'"))
+    })?;
+    let inputs_value = object.remove("inputs").ok_or_else(|| {
+        RuntimeError::RecipeLoad(format!("{path}: missing required field 'inputs'"))
+    })?;
+    if !object.is_empty() {
+        return Err(RuntimeError::RecipeLoad(format!(
+            "{path}: unexpected fields: {}",
+            object.keys().cloned().collect::<Vec<_>>().join(", ")
+        )));
+    }
+
+    let builder = builders::get_builder(&tag).ok_or_else(|| {
         RuntimeError::UnknownBuilder(format!(
             "unknown builder tag '{}'; supported builders: {}",
-            recipe.tag,
+            tag,
             builders::supported_builder_tags().join(", ")
         ))
     })?;
+    let inputs_object = inputs_value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}.inputs: expected object")))?;
     let mut inputs = BTreeMap::new();
-    for (input_name, child_id) in &recipe.inputs {
-        let key = collect_graph_inner(request, child_id, subjects, stack, node_keys)?;
-        inputs.insert(input_name.clone(), key);
+    for (input_name, slot_value) in inputs_object {
+        validate_input_name(&input_name, &format!("{path}.inputs"))?;
+        let input_path = format!("{path}.inputs.{input_name}");
+        let child_id = parse_input_value(slot_value, &input_path)?;
+        let child = collect_graph_inner(
+            request,
+            &child_id,
+            subjects,
+            stack,
+            node_keys,
+            node_subjects,
+        )?;
+        inputs.insert(input_name, child.key);
     }
 
-    BuilderPlannedSubject::new(builder, recipe.name.clone(), recipe.config.clone(), inputs)
+    BuilderPlannedSubject::new(builder, name, config, inputs)
 }
 
 fn parse_envelope_value(value: Value, path: &str) -> Result<RecipeEnvelope, RuntimeError> {
@@ -239,7 +264,7 @@ fn parse_options_value(value: Value, path: &str) -> Result<RecipeOptions, Runtim
     Ok(RecipeOptions { store, quiet, jobs })
 }
 
-fn parse_request_value(value: Value, path: &str) -> Result<RecipeRequest, RuntimeError> {
+fn parse_request_value(value: Value, path: &str) -> Result<BTreeMap<String, Value>, RuntimeError> {
     let object = value.as_object().cloned().ok_or_else(|| {
         RuntimeError::RecipeLoad(format!(
             "{path}: expected top-level object of node definitions"
@@ -258,65 +283,20 @@ fn parse_request_value(value: Value, path: &str) -> Result<RecipeRequest, Runtim
         nodes.insert(node_id, parse_recipe_value(node_value, &node_path)?);
     }
 
-    Ok(RecipeRequest { nodes })
+    Ok(nodes)
 }
 
-fn parse_recipe_value(value: Value, path: &str) -> Result<Recipe, RuntimeError> {
-    let object = value
+fn parse_recipe_value(value: Value, path: &str) -> Result<Value, RuntimeError> {
+    value
         .as_object()
-        .cloned()
         .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: expected recipe object")))?;
-
-    let tag = object
-        .get("tag")
-        .and_then(Value::as_str)
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}.tag: expected string")))?;
-
-    if tag == "Source" {
-        return parse_source_recipe(object, path);
-    }
-    parse_builder_recipe(object, path)
+    Ok(value)
 }
 
-fn parse_builder_recipe(
+fn parse_source_subject(
     mut object: Map<String, Value>,
     path: &str,
-) -> Result<Recipe, RuntimeError> {
-    let name = take_string(&mut object, path, "name")?;
-    let tag = take_string(&mut object, path, "tag")?;
-    let config = object.remove("config").ok_or_else(|| {
-        RuntimeError::RecipeLoad(format!("{path}: missing required field 'config'"))
-    })?;
-    let inputs_value = object.remove("inputs").ok_or_else(|| {
-        RuntimeError::RecipeLoad(format!("{path}: missing required field 'inputs'"))
-    })?;
-    if !object.is_empty() {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "{path}: unexpected fields: {}",
-            object.keys().cloned().collect::<Vec<_>>().join(", ")
-        )));
-    }
-
-    let inputs_object = inputs_value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}.inputs: expected object")))?;
-    let mut inputs = BTreeMap::new();
-    for (slot_name, slot_value) in inputs_object {
-        validate_input_name(&slot_name, &format!("{path}.inputs"))?;
-        let input_path = format!("{path}.inputs.{slot_name}");
-        inputs.insert(slot_name, parse_input_value(slot_value, &input_path)?);
-    }
-
-    Ok(Recipe::Builder(BuilderRecipe {
-        name,
-        tag,
-        config,
-        inputs,
-    }))
-}
-
-fn parse_source_recipe(mut object: Map<String, Value>, path: &str) -> Result<Recipe, RuntimeError> {
+) -> Result<SourcePlannedSubject, RuntimeError> {
     let name = take_string(&mut object, path, "name")?;
     let tag = take_string(&mut object, path, "tag")?;
     debug_assert_eq!(tag, "Source");
@@ -341,11 +321,11 @@ fn parse_source_recipe(mut object: Map<String, Value>, path: &str) -> Result<Rec
         )));
     }
 
-    Ok(Recipe::Source(SourceRecipe {
-        name,
-        object_hash,
-        origin,
-    }))
+    Ok(SourcePlannedSubject::new(name, object_hash, origin))
+}
+
+fn node_path(node_id: &str) -> String {
+    format!("$.nodes.{node_id}")
 }
 
 fn parse_input_value(value: Value, path: &str) -> Result<String, RuntimeError> {
@@ -407,8 +387,8 @@ mod tests {
     ) -> Result<(GraphKey, HashMap<GraphKey, Arc<PlannedSubject>>), RuntimeError> {
         let request = parse_request_value(request.clone(), "$")?;
         let mut subjects = HashMap::new();
-        let root_key = collect_graph(&request, &mut subjects)?;
-        Ok((root_key, subjects))
+        let collected = collect_graph(&request, &mut subjects)?;
+        Ok((collected.root_key, subjects))
     }
 
     fn collect_error(request: &Value) -> RuntimeError {
@@ -468,6 +448,22 @@ mod tests {
                 .contains("unknown builder tag 'NoSuchBuilder'"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn unreachable_node_recipe_fields_are_not_interpreted() {
+        let request = json!({
+            "root": tree_recipe("root", "hello.txt", "hello", false),
+            "unused": {
+                "tag": [],
+                "name": 42,
+                "config": "not checked"
+            }
+        });
+
+        let (root_key, subjects) = collect_one(&request).unwrap();
+        assert!(matches!(root_key, GraphKey::BuildKey(_)));
+        assert_eq!(subjects.len(), 1);
     }
 
     #[test]
