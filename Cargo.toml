@@ -1,16 +1,14 @@
 [workspace]
 members = [
   "mbuild",
+  "mbuild-builder",
   "mbuild-core",
   "mbuild-source",
   "mbuild-sandbox",
-  "mbuild-group",
-  "mbuild-image",
   "mbuild-runtime",
   "mbuild-runtime-helper",
   "mbuild-sandbox-runner",
   "mbuild-sandbox-runner-core",
-  "mbuild-tree",
   "bobr-store",
   "fsobj-hash",
   "bobr-runtime",

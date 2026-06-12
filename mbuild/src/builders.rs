@@ -1,10 +1,9 @@
-use mbuild_core::Builder;
-use mbuild_group::GroupBuilder;
-use mbuild_image::OciExtractBuilder;
-use mbuild_sandbox::SandboxBuilder;
-use mbuild_tree::{
-    ErofsRootfsBuilder, InitramfsBuilder, TreeBuilder, TreeMergeBuilder, TreeSubsetBuilder,
+use mbuild_builder::{
+    ErofsRootfsBuilder, GroupBuilder, InitramfsBuilder, OciExtractBuilder, TreeBuilder,
+    TreeMergeBuilder, TreeSubsetBuilder,
 };
+use mbuild_core::Builder;
+use mbuild_sandbox::SandboxBuilder;
 use std::sync::OnceLock;
 
 static SANDBOX_BUILDER: SandboxBuilder = SandboxBuilder;

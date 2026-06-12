@@ -903,12 +903,10 @@ dependencies = [
  "flate2",
  "fsobj-hash",
  "libc",
+ "mbuild-builder",
  "mbuild-core",
- "mbuild-group",
- "mbuild-image",
  "mbuild-sandbox",
  "mbuild-source",
- "mbuild-tree",
  "mockito",
  "serde",
  "serde_json",
@@ -917,6 +915,24 @@ dependencies = [
  "tempfile",
  "time",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "mbuild-builder"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "fsobj-hash",
+ "globset",
+ "libc",
+ "mbuild-core",
+ "mbuild-runtime",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -930,33 +946,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "time",
-]
-
-[[package]]
-name = "mbuild-group"
-version = "0.1.0"
-dependencies = [
- "mbuild-core",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "mbuild-image"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "fsobj-hash",
- "libc",
- "mbuild-core",
- "mbuild-runtime",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
- "tracing",
 ]
 
 [[package]]
@@ -1042,20 +1031,6 @@ dependencies = [
  "ureq",
  "xz2",
  "zip",
-]
-
-[[package]]
-name = "mbuild-tree"
-version = "0.1.0"
-dependencies = [
- "fsobj-hash",
- "globset",
- "mbuild-core",
- "mbuild-runtime",
- "serde",
- "serde_json",
- "tar",
- "tempfile",
 ]
 
 [[package]]

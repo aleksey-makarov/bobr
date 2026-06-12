@@ -1,12 +1,12 @@
 #![cfg(all(feature = "integration-tests", target_os = "linux"))]
 
+use mbuild_builder::{TreeBuilder, TreeMergeBuilder, TreeSubsetBuilder};
 use mbuild_core::{
     BuildContext, Builder, BuilderInputObject, BuilderInputs, FsTreeEntry, FsTreeManifest,
 };
 use mbuild_runtime::{
     FsTreeArchiveEntrySource, FsTreeArchiveInput, write_fs_tree_tar_in_ownership_namespace,
 };
-use mbuild_tree::{TreeBuilder, TreeMergeBuilder, TreeSubsetBuilder};
 use serde_json::json;
 use std::fs;
 use std::io;
