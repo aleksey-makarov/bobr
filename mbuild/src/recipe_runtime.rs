@@ -74,7 +74,7 @@ pub fn run_recipe_envelope(
     let root_recipe = request.node("root")?;
     let root_name = root_recipe.name().to_string();
     let root_tag = root_recipe.tag().to_string();
-    let mut states = initial_planning_states(&subjects);
+    let mut states = HashMap::new();
     ensure_planned(&store, &subjects, &mut states, root_key)?;
 
     let mut completed = HashMap::new();
@@ -130,20 +130,11 @@ fn default_jobs() -> usize {
 
 #[derive(Debug, Clone)]
 enum PlanningState {
-    Unknown,
     Reused {
         realized: RealizedObject,
         origin: ReuseOrigin,
     },
     NeedsBuild,
-}
-
-fn initial_planning_states(subjects: &SubjectGraph) -> PlanningStates {
-    subjects
-        .keys()
-        .copied()
-        .map(|key| (key, PlanningState::Unknown))
-        .collect()
 }
 
 fn ensure_planned(
@@ -156,10 +147,7 @@ fn ensure_planned(
         let subject = subjects.get(&key).ok_or_else(|| {
             RuntimeError::Store(format!("missing planned subject for key '{}'", key))
         })?;
-        let state = states.get(&key).ok_or_else(|| {
-            RuntimeError::Store(format!("missing planning state for key '{}'", key))
-        })?;
-        if !matches!(state, PlanningState::Unknown) {
+        if states.contains_key(&key) {
             return Ok(());
         }
         subject.clone()
@@ -173,12 +161,12 @@ fn ensure_planned(
                 realized: reuse.realized,
                 origin: reuse.origin,
             },
-        )?;
+        );
         return Ok(());
     }
 
     let Some(builder) = subject.as_builder() else {
-        set_planning_state(states, key, PlanningState::NeedsBuild)?;
+        set_planning_state(states, key, PlanningState::NeedsBuild);
         return Ok(());
     };
 
@@ -187,7 +175,7 @@ fn ensure_planned(
     }
 
     let Some(realized_inputs) = reused_inputs_for_builder(states, builder)? else {
-        set_planning_state(states, key, PlanningState::NeedsBuild)?;
+        set_planning_state(states, key, PlanningState::NeedsBuild);
         return Ok(());
     };
 
@@ -205,24 +193,16 @@ fn ensure_planned(
                 realized: reuse.realized,
                 origin: reuse.origin,
             },
-        )?;
+        );
     } else {
-        set_planning_state(states, key, PlanningState::NeedsBuild)?;
+        set_planning_state(states, key, PlanningState::NeedsBuild);
     }
 
     Ok(())
 }
 
-fn set_planning_state(
-    states: &mut PlanningStates,
-    key: GraphKey,
-    state: PlanningState,
-) -> Result<(), RuntimeError> {
-    let slot = states
-        .get_mut(&key)
-        .ok_or_else(|| RuntimeError::Store(format!("missing planning state for key '{}'", key)))?;
-    *slot = state;
-    Ok(())
+fn set_planning_state(states: &mut PlanningStates, key: GraphKey, state: PlanningState) {
+    states.insert(key, state);
 }
 
 fn reused_inputs_for_builder(
@@ -242,7 +222,7 @@ fn reused_inputs_for_builder(
             PlanningState::Reused { realized, .. } => {
                 realized_inputs.insert(*dep, realized.clone());
             }
-            PlanningState::Unknown | PlanningState::NeedsBuild => return Ok(None),
+            PlanningState::NeedsBuild => return Ok(None),
         }
     }
     Ok(Some(realized_inputs))
@@ -356,24 +336,17 @@ fn execute_misses(cx: ExecuteMissesContext<'_>) -> Result<RealizedObject, Runtim
     let mut ready = VecDeque::<GraphKey>::new();
     let mut first_error: Option<RuntimeError> = None;
 
-    for (key, subject) in subjects {
-        let state = states.get(key).ok_or_else(|| {
-            RuntimeError::Store(format!("missing planning state for key '{key}'"))
-        })?;
+    for (key, state) in states {
         if !matches!(state, PlanningState::NeedsBuild) {
             continue;
         }
+        let subject = subjects.get(key).ok_or_else(|| {
+            RuntimeError::Store(format!("missing planned subject for key '{key}'"))
+        })?;
         let mut wait_for = 0usize;
         if let Some(builder) = subject.as_builder() {
             for dep in builder.inputs().values() {
-                let dep_state = states.get(dep).ok_or_else(|| {
-                    RuntimeError::Store(format!(
-                        "missing dependency state '{}' for builder '{}'",
-                        dep,
-                        builder.name()
-                    ))
-                })?;
-                if matches!(dep_state, PlanningState::NeedsBuild) {
+                if matches!(states.get(dep), Some(PlanningState::NeedsBuild)) {
                     wait_for += 1;
                     reverse.entry(*dep).or_default().push(*key);
                 }
