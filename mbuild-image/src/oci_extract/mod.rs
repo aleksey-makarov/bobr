@@ -4,10 +4,10 @@ use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, FsTreeEntry,
     FsTreeManifest, FsTreeObjectError, FsTreeObjectPaths, InputSpec, ObjectHash, StagedBuildResult,
     TypedBuilder, create_fs_tree_staging_dir, hash_fs_tree_object_from_manifest_with_extra_files,
+    oci::{self, OciDescriptor, OciManifest},
 };
 #[cfg(test)]
 use mbuild_core::{FsTreeOwnerMap, ValidatedFsTreeObject, validate_fs_tree_object};
-use mbuild_origin_oci_registry::oci::{self, OciDescriptor, OciManifest};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;

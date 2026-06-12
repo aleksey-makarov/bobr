@@ -24,7 +24,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 flate2 = "1.0"
-mbuild-origin-oci-registry = { path = "../mbuild-origin-oci-registry" }
 mockito = "1.6"
 sha2 = "0.10"
 tar = "0.4"

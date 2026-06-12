@@ -3,10 +3,11 @@
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use mbuild_core::{
-    BuildContext, BuilderInputObject, BuilderInputs, FsTreeEntry, TypedBuilder, load_fs_tree_object,
+    BuildContext, BuilderInputObject, BuilderInputs, FsTreeEntry, TypedBuilder,
+    load_fs_tree_object,
+    oci::{self, OciDescriptor},
 };
 use mbuild_image::{OciExtractBuilder, OciExtractConfig};
-use mbuild_origin_oci_registry::oci::{self, OciDescriptor};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Cursor, Write};

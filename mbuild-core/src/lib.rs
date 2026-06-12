@@ -7,6 +7,7 @@ pub mod fs_tree_manifest;
 pub mod fs_tree_object;
 pub mod initramfs;
 pub mod logging;
+pub mod oci;
 pub mod origin;
 #[doc(hidden)]
 pub mod runtime_helper_protocol;

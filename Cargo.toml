@@ -5,8 +5,6 @@ members = [
   "mbuild-source",
   "mbuild-sandbox",
   "mbuild-group",
-  "mbuild-origin-http",
-  "mbuild-origin-oci-registry",
   "mbuild-image",
   "mbuild-runtime",
   "mbuild-runtime-helper",

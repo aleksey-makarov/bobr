@@ -16,7 +16,7 @@ use xz2::read::XzDecoder;
 use zip::read::ZipArchive;
 
 const REDIRECT_LIMIT: usize = 10;
-const USER_AGENT: &str = "mbuild-origin-http/0.1";
+const USER_AGENT: &str = "mbuild-source-http/0.1";
 
 static HTTP_ORIGIN_SPEC: OriginSpec = OriginSpec { tag: "Http" };
 

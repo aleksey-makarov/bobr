@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 mbuild-core = { path = "../mbuild-core" }
-mbuild-origin-oci-registry = { path = "../mbuild-origin-oci-registry" }
 mbuild-runtime = { path = "../mbuild-runtime" }
 fsobj-hash = { path = "../fsobj-hash" }
 flate2 = "1.0"

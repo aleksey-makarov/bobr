@@ -906,7 +906,6 @@ dependencies = [
  "mbuild-core",
  "mbuild-group",
  "mbuild-image",
- "mbuild-origin-oci-registry",
  "mbuild-sandbox",
  "mbuild-source",
  "mbuild-tree",
@@ -951,7 +950,6 @@ dependencies = [
  "fsobj-hash",
  "libc",
  "mbuild-core",
- "mbuild-origin-oci-registry",
  "mbuild-runtime",
  "serde",
  "serde_json",
@@ -959,36 +957,6 @@ dependencies = [
  "tar",
  "tempfile",
  "tracing",
-]
-
-[[package]]
-name = "mbuild-origin-http"
-version = "0.1.0"
-dependencies = [
- "bzip2",
- "flate2",
- "fsobj-hash",
- "mbuild-core",
- "reqwest",
- "serde",
- "serde_json",
- "tar",
- "tempfile",
- "xz2",
- "zip",
-]
-
-[[package]]
-name = "mbuild-origin-oci-registry"
-version = "0.1.0"
-dependencies = [
- "mbuild-core",
- "mockito",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "ureq",
 ]
 
 [[package]]
@@ -1061,11 +1029,19 @@ dependencies = [
 name = "mbuild-source"
 version = "0.1.0"
 dependencies = [
+ "bzip2",
+ "flate2",
+ "fsobj-hash",
  "mbuild-core",
- "mbuild-origin-http",
- "mbuild-origin-oci-registry",
+ "mockito",
+ "reqwest",
  "serde_json",
+ "sha2",
  "tar",
+ "tempfile",
+ "ureq",
+ "xz2",
+ "zip",
 ]
 
 [[package]]

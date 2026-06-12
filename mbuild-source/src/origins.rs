@@ -1,12 +1,12 @@
 mod path;
 
 use mbuild_core::{OriginHandler, ParsedOrigin};
-use mbuild_origin_http::HttpOriginHandler;
-use mbuild_origin_oci_registry::OciRegistryOriginHandler;
 use serde_json::Value;
 
 use self::path::PathOriginHandler;
 use crate::SourceRecipeError;
+use crate::http::HttpOriginHandler;
+use crate::oci_registry::OciRegistryOriginHandler;
 
 static PATH_ORIGIN: PathOriginHandler = PathOriginHandler;
 static HTTP_ORIGIN: HttpOriginHandler = HttpOriginHandler;

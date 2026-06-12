@@ -1,3 +1,5 @@
+mod http;
+pub mod oci_registry;
 mod origins;
 
 use mbuild_core::{ObjectHash, ParsedOrigin};
