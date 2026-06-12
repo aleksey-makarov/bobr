@@ -36,23 +36,23 @@ pub(crate) fn collect_graph(
     request: &BTreeMap<String, Value>,
     subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
 ) -> Result<GraphKey, RuntimeError> {
-    let mut stack = BTreeSet::new();
+    let mut visited_in_path = BTreeSet::new();
     let mut node_keys = HashMap::new();
-    collect_graph_inner(request, "root", subjects, &mut stack, &mut node_keys)
+    collect_graph_inner(request, "root", subjects, &mut visited_in_path, &mut node_keys)
 }
 
 fn collect_graph_inner(
     request: &BTreeMap<String, Value>,
     node_id: &str,
     subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
-    stack: &mut BTreeSet<String>,
+    visited_in_path: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, GraphKey>,
 ) -> Result<GraphKey, RuntimeError> {
     if let Some(existing) = node_keys.get(node_id) {
         return Ok(*existing);
     }
 
-    if !stack.insert(node_id.to_string()) {
+    if !visited_in_path.insert(node_id.to_string()) {
         return Err(RuntimeError::InvalidRequest(format!(
             "request graph contains a cycle through node id '{node_id}'"
         )));
@@ -80,14 +80,14 @@ fn collect_graph_inner(
         )
     } else {
         let builder_subject =
-            collect_builder_subject(request, object, &node_path, subjects, stack, node_keys)?;
+            collect_builder_subject(request, object, &node_path, subjects, visited_in_path, node_keys)?;
         (
             GraphKey::BuildKey(builder_subject.build_key()),
             Arc::new(PlannedSubject::Builder(builder_subject)),
         )
     };
 
-    stack.remove(node_id);
+    visited_in_path.remove(node_id);
 
     subjects.entry(key).or_insert_with(|| subject.clone());
     node_keys.insert(node_id.to_string(), key);
@@ -99,7 +99,7 @@ fn collect_builder_subject(
     mut object: Map<String, Value>,
     path: &str,
     subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
-    stack: &mut BTreeSet<String>,
+    visited_in_path: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, GraphKey>,
 ) -> Result<BuilderPlannedSubject, RuntimeError> {
     let name = take_string(&mut object, path, "name")?;
@@ -133,7 +133,7 @@ fn collect_builder_subject(
         validate_input_name(&input_name, &format!("{path}.inputs"))?;
         let input_path = format!("{path}.inputs.{input_name}");
         let child_id = parse_input_value(slot_value, &input_path)?;
-        let child = collect_graph_inner(request, &child_id, subjects, stack, node_keys)?;
+        let child = collect_graph_inner(request, &child_id, subjects, visited_in_path, node_keys)?;
         inputs.insert(input_name, child);
     }
 
