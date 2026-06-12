@@ -87,8 +87,6 @@ pub(crate) fn collect_graph(
     request: &RecipeRequest,
     subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
 ) -> Result<GraphKey, RuntimeError> {
-    builders::validate_registered_builders().map_err(RuntimeError::InvalidRequest)?;
-
     let mut stack = BTreeSet::new();
     let mut node_keys = HashMap::new();
     collect_graph_inner(request, "root", subjects, &mut stack, &mut node_keys)

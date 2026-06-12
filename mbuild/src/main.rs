@@ -94,6 +94,8 @@ fn init_tracing() {
 }
 
 fn build(cli: Cli, cancellation: CancellationToken) -> MResult<()> {
+    mbuild::builders::ensure_registered_builders_valid().map_err(MbuildError::InvalidInput)?;
+
     let recipe_bytes = read_recipe_bytes(cli.recipe_file.as_ref())?;
     let mut envelope = RecipeEnvelope::parse_json(&recipe_bytes).map_err(map_runtime_error)?;
 

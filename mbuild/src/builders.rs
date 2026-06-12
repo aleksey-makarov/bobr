@@ -5,6 +5,7 @@ use mbuild_sandbox::SandboxBuilder;
 use mbuild_tree::{
     ErofsRootfsBuilder, InitramfsBuilder, TreeBuilder, TreeMergeBuilder, TreeSubsetBuilder,
 };
+use std::sync::OnceLock;
 
 static SANDBOX_BUILDER: SandboxBuilder = SandboxBuilder;
 static GROUP_BUILDER: GroupBuilder = GroupBuilder;
@@ -28,7 +29,15 @@ pub fn registered_builders() -> [&'static dyn Builder; 8] {
     ]
 }
 
-pub fn validate_registered_builders() -> Result<(), String> {
+static REGISTERED_BUILDERS_VALID: OnceLock<Result<(), String>> = OnceLock::new();
+
+pub fn ensure_registered_builders_valid() -> Result<(), String> {
+    REGISTERED_BUILDERS_VALID
+        .get_or_init(validate_registered_builders)
+        .clone()
+}
+
+fn validate_registered_builders() -> Result<(), String> {
     for builder in registered_builders() {
         builder.spec().validate_for_builder(builder.tag())?;
     }
@@ -55,6 +64,6 @@ mod tests {
 
     #[test]
     fn registered_input_specs_are_valid() {
-        validate_registered_builders().unwrap();
+        ensure_registered_builders_valid().unwrap();
     }
 }
