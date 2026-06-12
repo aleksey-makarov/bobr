@@ -2,6 +2,7 @@
 members = [
   "mbuild",
   "mbuild-core",
+  "mbuild-source",
   "mbuild-sandbox",
   "mbuild-group",
   "mbuild-origin-http",

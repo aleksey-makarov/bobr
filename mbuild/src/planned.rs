@@ -3,15 +3,18 @@ use crate::runtime::{
     ExecuteBuilderNodeRequest, RuntimeError, check_cancelled, execute_builder_node,
     log_runtime_event, lookup_build_handle, lookup_canonical_object, map_store_error,
 };
-use bobr_store::identity::{BuildKey, GraphKey, ObjectHash, compute_build_key};
+#[cfg(test)]
+use bobr_store::identity::ObjectHash;
+use bobr_store::identity::{BuildKey, GraphKey, compute_build_key};
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, SourceLookup, Store, create_workspace,
     import_source_object, lookup_source_object, remove_store_temp_dir_force,
 };
 use mbuild_core::{
     BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase, CancellationToken,
-    OriginContext, ParsedOrigin, SourceBuilderClass, SourceBuilderInit, Workspace,
+    OriginContext, SourceBuilderClass, SourceBuilderInit, Workspace,
 };
+use mbuild_source::SourcePlannedSubject;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -152,38 +155,6 @@ impl BuilderPlannedSubject {
     }
 }
 
-pub(crate) struct SourcePlannedSubject {
-    name: String,
-    object_hash: ObjectHash,
-    origin: Option<Box<dyn ParsedOrigin>>,
-}
-
-impl SourcePlannedSubject {
-    pub(crate) fn new(
-        name: String,
-        object_hash: ObjectHash,
-        origin: Option<Box<dyn ParsedOrigin>>,
-    ) -> Self {
-        Self {
-            name,
-            object_hash,
-            origin,
-        }
-    }
-
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub(crate) fn tag(&self) -> &str {
-        "Source"
-    }
-
-    pub(crate) fn object_hash(&self) -> ObjectHash {
-        self.object_hash
-    }
-}
-
 pub(crate) fn lookup_direct_reuse(
     subject: &PlannedSubject,
     cx: PlannedLookupContext<'_>,
@@ -251,7 +222,7 @@ fn lookup_source_direct_reuse(
     subject: &SourcePlannedSubject,
     cx: PlannedLookupContext<'_>,
 ) -> Result<Option<ReuseDecision>, RuntimeError> {
-    match lookup_source_object(cx.store, subject.object_hash).map_err(map_store_error)? {
+    match lookup_source_object(cx.store, subject.object_hash()).map_err(map_store_error)? {
         SourceLookup::Hit(stored) => Ok(Some(ReuseDecision {
             realized: realized_object_from_record(None, &stored.object_record),
             origin: ReuseOrigin::CanonicalObject,
@@ -288,20 +259,20 @@ fn execute_source_subject(
     subject: &SourcePlannedSubject,
     cx: PlannedExecutionContext<'_>,
 ) -> Result<SubjectExecution, RuntimeError> {
-    let object_key = subject.object_hash.to_string();
+    let object_key = subject.object_hash().to_string();
     let workspace = create_workspace(
         cx.store,
         "Source",
-        Some(subject.name.clone()),
+        Some(subject.name().to_string()),
         object_key.clone(),
     )
     .map(core_workspace)
     .map_err(map_store_error)?;
     let source_builder = SourceBuilderClass.create_object(SourceBuilderInit {
-        recipe_name: subject.name.clone(),
+        recipe_name: subject.name().to_string(),
         build_key: object_key,
-        declared_object_hash: subject.object_hash,
-        origin: subject.origin.clone(),
+        declared_object_hash: subject.object_hash(),
+        origin: subject.clone_origin(),
         workspace,
     });
     let logger = cx

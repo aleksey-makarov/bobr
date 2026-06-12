@@ -1,11 +1,10 @@
 use crate::builders;
-use crate::origins;
-use crate::planned::{BuilderPlannedSubject, PlannedSubject, SourcePlannedSubject};
+use crate::planned::{BuilderPlannedSubject, PlannedSubject};
 use crate::runtime::RuntimeError;
 use bobr_store::identity::GraphKey;
 #[cfg(test)]
 use bobr_store::identity::compute_build_key;
-use mbuild_core::ObjectHash;
+use mbuild_source::parse_source_subject;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -73,7 +72,8 @@ fn collect_graph_inner(
         .ok_or_else(|| RuntimeError::RecipeLoad(format!("{node_path}.tag: expected string")))?;
 
     let (key, subject) = if tag == "Source" {
-        let subject = parse_source_subject(object, &node_path)?;
+        let subject = parse_source_subject(object, &node_path)
+            .map_err(|error| RuntimeError::RecipeLoad(error.to_string()))?;
         (
             GraphKey::ObjectKey(subject.object_hash()),
             Arc::new(PlannedSubject::Source(subject)),
@@ -244,37 +244,6 @@ fn parse_recipe_value(value: Value, path: &str) -> Result<Value, RuntimeError> {
         .as_object()
         .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: expected recipe object")))?;
     Ok(value)
-}
-
-fn parse_source_subject(
-    mut object: Map<String, Value>,
-    path: &str,
-) -> Result<SourcePlannedSubject, RuntimeError> {
-    let name = take_string(&mut object, path, "name")?;
-    let tag = take_string(&mut object, path, "tag")?;
-    debug_assert_eq!(tag, "Source");
-
-    let object_hash = take_string(&mut object, path, "object_hash")?
-        .trim()
-        .parse::<ObjectHash>()
-        .map_err(|error| {
-            RuntimeError::RecipeLoad(format!("{path}.object_hash: invalid object hash: {error}"))
-        })?;
-    let origin = match object.remove("origin") {
-        Some(value) => Some(origins::parse_origin_value(
-            value,
-            &format!("{path}.origin"),
-        )?),
-        None => None,
-    };
-    if !object.is_empty() {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "{path}: unexpected fields: {}",
-            object.keys().cloned().collect::<Vec<_>>().join(", ")
-        )));
-    }
-
-    Ok(SourcePlannedSubject::new(name, object_hash, origin))
 }
 
 fn node_path(node_id: &str) -> String {

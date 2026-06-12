@@ -1,29 +1,29 @@
 mod path;
 
-use crate::runtime::RuntimeError;
 use mbuild_core::{OriginHandler, ParsedOrigin};
 use mbuild_origin_http::HttpOriginHandler;
 use mbuild_origin_oci_registry::OciRegistryOriginHandler;
 use serde_json::Value;
 
 use self::path::PathOriginHandler;
+use crate::SourceRecipeError;
 
 static PATH_ORIGIN: PathOriginHandler = PathOriginHandler;
 static HTTP_ORIGIN: HttpOriginHandler = HttpOriginHandler;
 static OCI_REGISTRY_ORIGIN: OciRegistryOriginHandler = OciRegistryOriginHandler;
 
-pub fn registered_origins() -> [&'static dyn OriginHandler; 3] {
+fn registered_origins() -> [&'static dyn OriginHandler; 3] {
     [&PATH_ORIGIN, &HTTP_ORIGIN, &OCI_REGISTRY_ORIGIN]
 }
 
-pub fn get_origin(tag: &str) -> Option<&'static dyn OriginHandler> {
+fn get_origin(tag: &str) -> Option<&'static dyn OriginHandler> {
     registered_origins()
         .iter()
         .find(|origin| origin.spec().tag == tag)
         .copied()
 }
 
-pub fn supported_origin_tags() -> Vec<&'static str> {
+fn supported_origin_tags() -> Vec<&'static str> {
     registered_origins()
         .iter()
         .map(|origin| origin.spec().tag)
@@ -33,24 +33,24 @@ pub fn supported_origin_tags() -> Vec<&'static str> {
 pub(crate) fn parse_origin_value(
     value: Value,
     field_path: &str,
-) -> Result<Box<dyn ParsedOrigin>, RuntimeError> {
+) -> Result<Box<dyn ParsedOrigin>, SourceRecipeError> {
     let object = value
         .as_object()
         .cloned()
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{field_path}: expected object")))?;
+        .ok_or_else(|| SourceRecipeError::new(format!("{field_path}: expected object")))?;
     let tag = object
         .get("tag")
         .and_then(Value::as_str)
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{field_path}.tag: expected string")))?;
+        .ok_or_else(|| SourceRecipeError::new(format!("{field_path}.tag: expected string")))?;
     let supported = supported_origin_tags().join(", ");
     let handler = get_origin(tag).ok_or_else(|| {
-        RuntimeError::RecipeLoad(format!(
+        SourceRecipeError::new(format!(
             "{field_path}.tag: unsupported source origin tag '{tag}' (supported: {supported})"
         ))
     })?;
     handler
         .parse(object, field_path)
-        .map_err(RuntimeError::RecipeLoad)
+        .map_err(SourceRecipeError::new)
 }
 
 #[cfg(test)]

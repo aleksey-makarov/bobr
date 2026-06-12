@@ -717,11 +717,12 @@ fn cleanup_workspace_temp_dir(store: &Store, temp_dir: &Path, logger: &dyn Build
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::planned::{PlannedSubject, SourcePlannedSubject};
+    use crate::planned::PlannedSubject;
     use crate::recipe::collect_graph;
     use bobr_store::identity::compute_reuse_key;
     use bobr_store::{PublishRequest, ReuseInputIdentity, publish_build};
     use mbuild_core::{CancellationToken, OriginContext, OriginSpec, ParsedOrigin};
+    use mbuild_source::SourcePlannedSubject;
     use serde_json::json;
     use std::collections::HashMap;
     use std::fs;

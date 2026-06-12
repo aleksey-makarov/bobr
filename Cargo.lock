@@ -906,9 +906,9 @@ dependencies = [
  "mbuild-core",
  "mbuild-group",
  "mbuild-image",
- "mbuild-origin-http",
  "mbuild-origin-oci-registry",
  "mbuild-sandbox",
+ "mbuild-source",
  "mbuild-tree",
  "mockito",
  "serde",
@@ -1055,6 +1055,17 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "mbuild-source"
+version = "0.1.0"
+dependencies = [
+ "mbuild-core",
+ "mbuild-origin-http",
+ "mbuild-origin-oci-registry",
+ "serde_json",
+ "tar",
 ]
 
 [[package]]
