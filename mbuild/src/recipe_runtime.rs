@@ -1,5 +1,5 @@
 use crate::planned::{
-    BuilderPlannedSubject, GraphKey, PlannedDependencyLookupContext, PlannedExecutionContext,
+    BuilderPlannedSubject, PlannedDependencyLookupContext, PlannedExecutionContext,
     PlannedLookupContext, ReuseOrigin, SubjectExecution, execute_subject,
     lookup_after_inputs_reused, lookup_direct_reuse,
 };
@@ -7,6 +7,7 @@ use crate::recipe::{GraphNode, PlanningState, RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
 #[cfg(test)]
 use bobr_store::identity::BuildKey;
+use bobr_store::identity::GraphKey;
 use bobr_store::{
     RealizedObject, Store, StoreWorkspace, create_workspace, publish_stored_object,
     remove_store_temp_dir_force,

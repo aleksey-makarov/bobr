@@ -1,6 +1,6 @@
 use super::*;
 use crate::identity::{
-    BuildInputKey, BuildKey, ObjectHash, ReuseKey, compute_build_key, compute_reuse_key,
+    BuildKey, GraphKey, ObjectHash, ReuseKey, compute_build_key, compute_reuse_key,
 };
 use fsobj_hash::hash_path;
 use serde_json::{Value, json};
@@ -68,14 +68,10 @@ fn build_key_distinguishes_build_and_object_input_domains() {
     let build_key = parse_build_key(hex);
     let payload = json!({ "kind": "domain-test" });
 
-    let by_object = compute_build_key(
-        "CasTest",
-        &payload,
-        &[BuildInputKey::ObjectKey(object_hash)],
-    )
-    .unwrap();
+    let by_object =
+        compute_build_key("CasTest", &payload, &[GraphKey::ObjectKey(object_hash)]).unwrap();
     let by_build =
-        compute_build_key("CasTest", &payload, &[BuildInputKey::BuildKey(build_key)]).unwrap();
+        compute_build_key("CasTest", &payload, &[GraphKey::BuildKey(build_key)]).unwrap();
 
     assert_ne!(by_object, by_build);
 }
@@ -1720,7 +1716,7 @@ fn build_key_for(builder_tag: &str, payload: Value, input_builds: &[BuildKey]) -
     let input_keys = input_builds
         .iter()
         .copied()
-        .map(BuildInputKey::BuildKey)
+        .map(GraphKey::BuildKey)
         .collect::<Vec<_>>();
     compute_build_key(builder_tag, &payload, &input_keys).unwrap()
 }

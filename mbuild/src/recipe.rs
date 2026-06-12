@@ -1,12 +1,11 @@
 use crate::builders;
 use crate::origins;
-use crate::planned::{
-    BuilderPlannedSubject, GraphKey, PlannedSubject, ReuseOrigin, SourcePlannedSubject,
-};
+use crate::planned::{BuilderPlannedSubject, PlannedSubject, ReuseOrigin, SourcePlannedSubject};
 use crate::runtime::RuntimeError;
 use bobr_store::RealizedObject;
+use bobr_store::identity::GraphKey;
 #[cfg(test)]
-use bobr_store::identity::{BuildInputKey, compute_build_key};
+use bobr_store::identity::compute_build_key;
 use mbuild_core::{ObjectHash, ParsedOrigin};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -733,9 +732,9 @@ mod tests {
             "Sandbox",
             &request["root"]["config"],
             &[
-                BuildInputKey::BuildKey(rootfs_key),
-                BuildInputKey::BuildKey(script_key),
-                BuildInputKey::ObjectKey(source_key),
+                GraphKey::BuildKey(rootfs_key),
+                GraphKey::BuildKey(script_key),
+                GraphKey::ObjectKey(source_key),
             ],
         )
         .unwrap();

@@ -3,7 +3,7 @@ use crate::runtime::{
     ExecuteBuilderNodeRequest, RuntimeError, check_cancelled, execute_builder_node,
     log_runtime_event, lookup_build_handle, lookup_canonical_object, map_store_error,
 };
-use bobr_store::identity::{BuildInputKey, BuildKey, ObjectHash, compute_build_key};
+use bobr_store::identity::{BuildKey, GraphKey, ObjectHash, compute_build_key};
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, SourceLookup, Store, create_workspace,
     import_source_object, lookup_source_object, remove_store_temp_dir_force,
@@ -14,42 +14,7 @@ use mbuild_core::{
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
-use std::fmt;
 use std::sync::Arc;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum GraphKey {
-    /// Key for a source planned subject.
-    ///
-    /// Source subjects expose an already-known object hash as their graph key
-    /// and have no planned inputs at the type level. The reverse is not true:
-    /// a builder with no inputs still uses [`GraphKey::BuildKey`] because its
-    /// object hash is not known until execution or reuse.
-    ObjectKey(ObjectHash),
-    BuildKey(BuildKey),
-}
-
-impl GraphKey {
-    pub(crate) fn as_build_input_key(self) -> BuildInputKey {
-        match self {
-            Self::ObjectKey(object_hash) => BuildInputKey::ObjectKey(object_hash),
-            Self::BuildKey(build_key) => BuildInputKey::BuildKey(build_key),
-        }
-    }
-
-    pub(crate) fn short(self) -> String {
-        self.to_string().chars().take(12).collect()
-    }
-}
-
-impl fmt::Display for GraphKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ObjectKey(object_hash) => write!(f, "{object_hash}"),
-            Self::BuildKey(build_key) => write!(f, "{build_key}"),
-        }
-    }
-}
 
 pub(crate) enum PlannedSubject {
     Source(SourcePlannedSubject),
@@ -155,7 +120,6 @@ impl BuilderPlannedSubject {
             .ordered_present_input_names(&inputs)
             .into_iter()
             .filter_map(|input_name| inputs.get(input_name).copied())
-            .map(GraphKey::as_build_input_key)
             .collect::<Vec<_>>();
         let build_key =
             compute_build_key(tag, &config, &ordered_direct_deps).map_err(map_store_error)?;

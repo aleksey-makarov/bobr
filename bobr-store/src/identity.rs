@@ -9,6 +9,7 @@ use fsobj_hash::define_hex_hash_type;
 pub use fsobj_hash::{ObjectHash, ParseHexHashError};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::fmt;
 
 const INVOCATION_SCHEMA: &str = "bobr-build-invocation-v2";
 const REUSE_INVOCATION_SCHEMA: &str = "bobr-build-reuse-invocation-v1";
@@ -26,18 +27,35 @@ define_hex_hash_type! {
     pub struct BuildKey;
 }
 
-/// Stable identity of a direct input used to compute a build key.
+/// Stable identity of a build graph node.
 ///
-/// Builder inputs can be represented either by the build invocation that will
-/// realize them or by an already-known object hash. These two identity domains
-/// are intentionally tagged separately even though both values use the same
-/// 64-character lowercase-hex textual form.
+/// Source nodes are keyed directly by the object hash they declare and have no
+/// planned inputs. Builder nodes are keyed by the build invocation that will
+/// realize them. These two identity domains are intentionally tagged separately
+/// even though both values use the same 64-character lowercase-hex textual
+/// form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum BuildInputKey {
-    /// Input identified directly by an object hash.
+pub enum GraphKey {
+    /// Source or input identified directly by an object hash.
     ObjectKey(ObjectHash),
-    /// Input identified by another build invocation.
+    /// Builder node or input identified by another build invocation.
     BuildKey(BuildKey),
+}
+
+impl GraphKey {
+    /// Returns a short human-readable prefix of the key.
+    pub fn short(self) -> String {
+        self.to_string().chars().take(12).collect()
+    }
+}
+
+impl fmt::Display for GraphKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ObjectKey(object_hash) => write!(f, "{object_hash}"),
+            Self::BuildKey(build_key) => write!(f, "{build_key}"),
+        }
+    }
 }
 
 define_hex_hash_type! {
@@ -61,18 +79,18 @@ define_hex_hash_type! {
 pub fn compute_build_key(
     builder_tag: &str,
     normalized_payload: &Value,
-    input_keys: &[BuildInputKey],
+    input_keys: &[GraphKey],
 ) -> Result<BuildKey, StoreError> {
     let input_values = input_keys
         .iter()
         .map(|key| match key {
-            BuildInputKey::ObjectKey(object_hash) => {
+            GraphKey::ObjectKey(object_hash) => {
                 let mut input = Map::new();
                 input.insert("kind".to_string(), Value::String("object".to_string()));
                 input.insert("hash".to_string(), Value::String(object_hash.to_string()));
                 Value::Object(input)
             }
-            BuildInputKey::BuildKey(build_key) => {
+            GraphKey::BuildKey(build_key) => {
                 let mut input = Map::new();
                 input.insert("kind".to_string(), Value::String("build".to_string()));
                 input.insert("key".to_string(), Value::String(build_key.to_string()));
