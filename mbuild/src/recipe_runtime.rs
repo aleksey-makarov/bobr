@@ -66,10 +66,12 @@ pub fn run_recipe_envelope(
         RuntimeError::InvalidRequest("recipe options.store or --store must be set".to_string())
     })?;
     let mut subjects = HashMap::new();
-    let collected = collect_graph(&request, &mut subjects)?;
-    let root_key = collected.root_key;
-    let root_name = collected.root_subject.name().to_string();
-    let root_tag = collected.root_subject.tag().to_string();
+    let root_key = collect_graph(&request, &mut subjects)?;
+    let root_subject = subjects.get(&root_key).ok_or_else(|| {
+        RuntimeError::Store(format!("missing root subject for key '{}'", root_key))
+    })?;
+    let root_name = root_subject.name().to_string();
+    let root_tag = root_subject.tag().to_string();
 
     let store = Store::create(store_path).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> =
@@ -862,8 +864,7 @@ mod tests {
         .request;
 
         let mut subjects = HashMap::new();
-        let collected = collect_graph(&request, &mut subjects).unwrap();
-        let root_key = collected.root_key;
+        let root_key = collect_graph(&request, &mut subjects).unwrap();
         let root_build_key = expect_build_key(root_key);
         let dep_keys = {
             let subject = subjects.get(&root_key).unwrap().as_ref();

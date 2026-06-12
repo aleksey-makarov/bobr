@@ -33,35 +33,13 @@ impl RecipeEnvelope {
     }
 }
 
-pub(crate) struct CollectedGraph {
-    pub(crate) root_key: GraphKey,
-    pub(crate) root_subject: Arc<PlannedSubject>,
-}
-
 pub(crate) fn collect_graph(
     request: &BTreeMap<String, Value>,
     subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
-) -> Result<CollectedGraph, RuntimeError> {
+) -> Result<GraphKey, RuntimeError> {
     let mut stack = BTreeSet::new();
     let mut node_keys = HashMap::new();
-    let mut node_subjects = HashMap::new();
-    let root = collect_graph_inner(
-        request,
-        "root",
-        subjects,
-        &mut stack,
-        &mut node_keys,
-        &mut node_subjects,
-    )?;
-    Ok(CollectedGraph {
-        root_key: root.key,
-        root_subject: root.subject,
-    })
-}
-
-struct CollectedNode {
-    key: GraphKey,
-    subject: Arc<PlannedSubject>,
+    collect_graph_inner(request, "root", subjects, &mut stack, &mut node_keys)
 }
 
 fn collect_graph_inner(
@@ -70,18 +48,9 @@ fn collect_graph_inner(
     subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
     stack: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, GraphKey>,
-    node_subjects: &mut HashMap<String, Arc<PlannedSubject>>,
-) -> Result<CollectedNode, RuntimeError> {
+) -> Result<GraphKey, RuntimeError> {
     if let Some(existing) = node_keys.get(node_id) {
-        let subject = node_subjects.get(node_id).cloned().ok_or_else(|| {
-            RuntimeError::Store(format!(
-                "missing collected subject for memoized node id '{node_id}'"
-            ))
-        })?;
-        return Ok(CollectedNode {
-            key: *existing,
-            subject,
-        });
+        return Ok(*existing);
     }
 
     if !stack.insert(node_id.to_string()) {
@@ -110,15 +79,8 @@ fn collect_graph_inner(
             Arc::new(PlannedSubject::Source(subject)),
         )
     } else {
-        let builder_subject = collect_builder_subject(
-            request,
-            object,
-            &node_path,
-            subjects,
-            stack,
-            node_keys,
-            node_subjects,
-        )?;
+        let builder_subject =
+            collect_builder_subject(request, object, &node_path, subjects, stack, node_keys)?;
         (
             GraphKey::BuildKey(builder_subject.build_key()),
             Arc::new(PlannedSubject::Builder(builder_subject)),
@@ -129,8 +91,7 @@ fn collect_graph_inner(
 
     subjects.entry(key).or_insert_with(|| subject.clone());
     node_keys.insert(node_id.to_string(), key);
-    node_subjects.insert(node_id.to_string(), subject.clone());
-    Ok(CollectedNode { key, subject })
+    Ok(key)
 }
 
 fn collect_builder_subject(
@@ -140,7 +101,6 @@ fn collect_builder_subject(
     subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
     stack: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, GraphKey>,
-    node_subjects: &mut HashMap<String, Arc<PlannedSubject>>,
 ) -> Result<BuilderPlannedSubject, RuntimeError> {
     let name = take_string(&mut object, path, "name")?;
     let tag = take_string(&mut object, path, "tag")?;
@@ -173,15 +133,8 @@ fn collect_builder_subject(
         validate_input_name(&input_name, &format!("{path}.inputs"))?;
         let input_path = format!("{path}.inputs.{input_name}");
         let child_id = parse_input_value(slot_value, &input_path)?;
-        let child = collect_graph_inner(
-            request,
-            &child_id,
-            subjects,
-            stack,
-            node_keys,
-            node_subjects,
-        )?;
-        inputs.insert(input_name, child.key);
+        let child = collect_graph_inner(request, &child_id, subjects, stack, node_keys)?;
+        inputs.insert(input_name, child);
     }
 
     BuilderPlannedSubject::new(builder, name, config, inputs)
@@ -387,8 +340,8 @@ mod tests {
     ) -> Result<(GraphKey, HashMap<GraphKey, Arc<PlannedSubject>>), RuntimeError> {
         let request = parse_request_value(request.clone(), "$")?;
         let mut subjects = HashMap::new();
-        let collected = collect_graph(&request, &mut subjects)?;
-        Ok((collected.root_key, subjects))
+        let root_key = collect_graph(&request, &mut subjects)?;
+        Ok((root_key, subjects))
     }
 
     fn collect_error(request: &Value) -> RuntimeError {
