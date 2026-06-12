@@ -1,9 +1,9 @@
 use crate::planned::{
     BuilderPlannedSubject, PlannedDependencyLookupContext, PlannedExecutionContext,
-    PlannedLookupContext, ReuseOrigin, SubjectExecution, execute_subject,
+    PlannedLookupContext, PlannedSubject, ReuseOrigin, SubjectExecution, execute_subject,
     lookup_after_inputs_reused, lookup_direct_reuse,
 };
-use crate::recipe::{GraphNode, PlanningState, RecipeEnvelope, collect_graph};
+use crate::recipe::{RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
 #[cfg(test)]
 use bobr_store::identity::BuildKey;
@@ -23,6 +23,9 @@ use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+type SubjectGraph = HashMap<GraphKey, Arc<PlannedSubject>>;
+type PlanningStates = HashMap<GraphKey, PlanningState>;
 
 pub fn run_recipe_json_in_workspace(
     _workspace_root: &Path,
@@ -66,28 +69,25 @@ pub fn run_recipe_envelope(
     let logger: Arc<BuildRunLogger> =
         Arc::new(build_run_logger_for_store(&store, emit_progress).map_err(RuntimeError::Store)?);
 
-    let mut nodes = HashMap::new();
-    let root_key = collect_graph(&request, &mut nodes)?;
+    let mut subjects = HashMap::new();
+    let root_key = collect_graph(&request, &mut subjects)?;
     let root_recipe = request.node("root")?;
     let root_name = root_recipe.name().to_string();
     let root_tag = root_recipe.tag().to_string();
-    ensure_planned(&store, &mut nodes, root_key)?;
+    let mut states = initial_planning_states(&subjects);
+    ensure_planned(&store, &subjects, &mut states, root_key)?;
 
     let mut completed = HashMap::new();
-    for (key, node) in &nodes {
-        if let PlanningState::Reused { realized, .. } = &node.state {
+    for (key, state) in &states {
+        if let PlanningState::Reused { realized, .. } = state {
             completed.insert(*key, realized.clone());
         }
     }
 
     if let Some(realized) = completed.get(&root_key).cloned() {
-        let origin = match &nodes
-            .get(&root_key)
-            .ok_or_else(|| {
-                RuntimeError::Store(format!("missing planned node for key '{}'", root_key))
-            })?
-            .state
-        {
+        let origin = match states.get(&root_key).ok_or_else(|| {
+            RuntimeError::Store(format!("missing planning state for key '{}'", root_key))
+        })? {
             PlanningState::Reused { origin, .. } => *origin,
             _ => {
                 return Err(RuntimeError::Store(format!(
@@ -102,15 +102,16 @@ pub fn run_recipe_envelope(
         return Ok(realized);
     }
 
-    execute_misses(
-        &store,
+    execute_misses(ExecuteMissesContext {
+        store: &store,
         logger,
-        &nodes,
-        &mut completed,
+        subjects: &subjects,
+        states: &states,
+        completed: &mut completed,
         root_key,
         jobs,
         cancellation,
-    )
+    })
 }
 
 pub fn render_object_as_json(object: &RealizedObject) -> Result<String, RuntimeError> {
@@ -127,24 +128,46 @@ fn default_jobs() -> usize {
         .unwrap_or(1)
 }
 
+#[derive(Debug, Clone)]
+enum PlanningState {
+    Unknown,
+    Reused {
+        realized: RealizedObject,
+        origin: ReuseOrigin,
+    },
+    NeedsBuild,
+}
+
+fn initial_planning_states(subjects: &SubjectGraph) -> PlanningStates {
+    subjects
+        .keys()
+        .copied()
+        .map(|key| (key, PlanningState::Unknown))
+        .collect()
+}
+
 fn ensure_planned(
     store: &Store,
-    nodes: &mut HashMap<GraphKey, GraphNode>,
+    subjects: &SubjectGraph,
+    states: &mut PlanningStates,
     key: GraphKey,
 ) -> Result<(), RuntimeError> {
     let subject = {
-        let node = nodes.get(&key).ok_or_else(|| {
-            RuntimeError::Store(format!("missing planned node for key '{}'", key))
+        let subject = subjects.get(&key).ok_or_else(|| {
+            RuntimeError::Store(format!("missing planned subject for key '{}'", key))
         })?;
-        if !matches!(node.state, PlanningState::Unknown) {
+        let state = states.get(&key).ok_or_else(|| {
+            RuntimeError::Store(format!("missing planning state for key '{}'", key))
+        })?;
+        if !matches!(state, PlanningState::Unknown) {
             return Ok(());
         }
-        node.subject.clone()
+        subject.clone()
     };
 
     if let Some(reuse) = lookup_direct_reuse(subject.as_ref(), PlannedLookupContext { store })? {
-        set_node_state(
-            nodes,
+        set_planning_state(
+            states,
             key,
             PlanningState::Reused {
                 realized: reuse.realized,
@@ -155,16 +178,16 @@ fn ensure_planned(
     }
 
     let Some(builder) = subject.as_builder() else {
-        set_node_state(nodes, key, PlanningState::NeedsBuild)?;
+        set_planning_state(states, key, PlanningState::NeedsBuild)?;
         return Ok(());
     };
 
     for dep in builder.inputs().values().copied().collect::<Vec<_>>() {
-        ensure_planned(store, nodes, dep)?;
+        ensure_planned(store, subjects, states, dep)?;
     }
 
-    let Some(realized_inputs) = reused_inputs_for_builder(nodes, builder)? else {
-        set_node_state(nodes, key, PlanningState::NeedsBuild)?;
+    let Some(realized_inputs) = reused_inputs_for_builder(states, builder)? else {
+        set_planning_state(states, key, PlanningState::NeedsBuild)?;
         return Ok(());
     };
 
@@ -175,8 +198,8 @@ fn ensure_planned(
             realized_inputs: &realized_inputs,
         },
     )? {
-        set_node_state(
-            nodes,
+        set_planning_state(
+            states,
             key,
             PlanningState::Reused {
                 realized: reuse.realized,
@@ -184,38 +207,38 @@ fn ensure_planned(
             },
         )?;
     } else {
-        set_node_state(nodes, key, PlanningState::NeedsBuild)?;
+        set_planning_state(states, key, PlanningState::NeedsBuild)?;
     }
 
     Ok(())
 }
 
-fn set_node_state(
-    nodes: &mut HashMap<GraphKey, GraphNode>,
+fn set_planning_state(
+    states: &mut PlanningStates,
     key: GraphKey,
     state: PlanningState,
 ) -> Result<(), RuntimeError> {
-    let node = nodes
+    let slot = states
         .get_mut(&key)
-        .ok_or_else(|| RuntimeError::Store(format!("missing planned node for key '{}'", key)))?;
-    node.state = state;
+        .ok_or_else(|| RuntimeError::Store(format!("missing planning state for key '{}'", key)))?;
+    *slot = state;
     Ok(())
 }
 
 fn reused_inputs_for_builder(
-    nodes: &HashMap<GraphKey, GraphNode>,
+    states: &PlanningStates,
     builder: &BuilderPlannedSubject,
 ) -> Result<Option<HashMap<GraphKey, RealizedObject>>, RuntimeError> {
     let mut realized_inputs = HashMap::new();
     for dep in builder.inputs().values() {
-        let dep_node = nodes.get(dep).ok_or_else(|| {
+        let dep_state = states.get(dep).ok_or_else(|| {
             RuntimeError::Store(format!(
-                "missing dependency node '{}' for builder '{}'",
+                "missing dependency state '{}' for builder '{}'",
                 dep,
                 builder.name()
             ))
         })?;
-        match &dep_node.state {
+        match dep_state {
             PlanningState::Reused { realized, .. } => {
                 realized_inputs.insert(*dep, realized.clone());
             }
@@ -305,30 +328,52 @@ fn publish_reused_root(
     Ok(())
 }
 
-fn execute_misses(
-    store: &Store,
+struct ExecuteMissesContext<'a> {
+    store: &'a Store,
     logger: Arc<BuildRunLogger>,
-    nodes: &HashMap<GraphKey, GraphNode>,
-    completed: &mut HashMap<GraphKey, RealizedObject>,
+    subjects: &'a SubjectGraph,
+    states: &'a PlanningStates,
+    completed: &'a mut HashMap<GraphKey, RealizedObject>,
     root_key: GraphKey,
     jobs: usize,
     cancellation: CancellationToken,
-) -> Result<RealizedObject, RuntimeError> {
+}
+
+fn execute_misses(cx: ExecuteMissesContext<'_>) -> Result<RealizedObject, RuntimeError> {
+    let ExecuteMissesContext {
+        store,
+        logger,
+        subjects,
+        states,
+        completed,
+        root_key,
+        jobs,
+        cancellation,
+    } = cx;
+
     let mut remaining = HashMap::<GraphKey, usize>::new();
     let mut reverse = HashMap::<GraphKey, Vec<GraphKey>>::new();
     let mut ready = VecDeque::<GraphKey>::new();
     let mut first_error: Option<RuntimeError> = None;
 
-    for (key, node) in nodes {
-        if !matches!(node.state, PlanningState::NeedsBuild) {
+    for (key, subject) in subjects {
+        let state = states.get(key).ok_or_else(|| {
+            RuntimeError::Store(format!("missing planning state for key '{key}'"))
+        })?;
+        if !matches!(state, PlanningState::NeedsBuild) {
             continue;
         }
         let mut wait_for = 0usize;
-        if let Some(builder) = node.subject.as_builder() {
+        if let Some(builder) = subject.as_builder() {
             for dep in builder.inputs().values() {
-                if let Some(dep_node) = nodes.get(dep)
-                    && matches!(dep_node.state, PlanningState::NeedsBuild)
-                {
+                let dep_state = states.get(dep).ok_or_else(|| {
+                    RuntimeError::Store(format!(
+                        "missing dependency state '{}' for builder '{}'",
+                        dep,
+                        builder.name()
+                    ))
+                })?;
+                if matches!(dep_state, PlanningState::NeedsBuild) {
                     wait_for += 1;
                     reverse.entry(*dep).or_default().push(*key);
                 }
@@ -376,14 +421,14 @@ fn execute_misses(
             if completed.contains_key(&key) || in_flight.contains_key(&key) {
                 continue;
             }
-            let node = nodes.get(&key).ok_or_else(|| {
-                RuntimeError::Store(format!("missing planned node for key '{}'", key))
+            let subject = subjects.get(&key).ok_or_else(|| {
+                RuntimeError::Store(format!("missing planned subject for key '{}'", key))
             })?;
             let store = store.clone();
             let logger = logger.clone();
             let tx = tx.clone();
             let cancellation = cancellation.clone();
-            let subject = node.subject.clone();
+            let subject = subject.clone();
             let realized_inputs = match subject.as_builder() {
                 Some(builder) => completed_inputs_for_builder(completed, builder)?,
                 None => HashMap::new(),
@@ -430,7 +475,7 @@ fn execute_misses(
                         && should_log_scheduler_wait(last_wait_log)
                     {
                         let details =
-                            scheduler_wait_details(nodes, completed, &ready, &in_flight, error);
+                            scheduler_wait_details(subjects, completed, &ready, &in_flight, error);
                         log_scheduler_event(
                             scheduler_logger.as_ref(),
                             BuildLogLevel::Warn,
@@ -458,7 +503,7 @@ fn execute_misses(
             Err(error) => {
                 if first_error.is_none() {
                     let details = scheduler_first_error_details(
-                        nodes, completed, &ready, &in_flight, key, &error,
+                        subjects, completed, &ready, &in_flight, key, &error,
                     );
                     log_scheduler_event(
                         scheduler_logger.as_ref(),
@@ -473,10 +518,10 @@ fn execute_misses(
                 continue;
             }
         };
-        let node = nodes.get(&key).ok_or_else(|| {
-            RuntimeError::Store(format!("missing planned node for key '{}'", key))
+        let subject = subjects.get(&key).ok_or_else(|| {
+            RuntimeError::Store(format!("missing planned subject for key '{}'", key))
         })?;
-        let publication_name = node.subject.name();
+        let publication_name = subject.name();
         publish_stored_object(store, publication_name, executed.realized.object_hash)
             .map_err(map_store_error)?;
         log_runtime_event(
@@ -550,15 +595,18 @@ fn log_scheduler_event(
 }
 
 fn scheduler_first_error_details(
-    nodes: &HashMap<GraphKey, GraphNode>,
+    subjects: &SubjectGraph,
     completed: &HashMap<GraphKey, RealizedObject>,
     ready: &VecDeque<GraphKey>,
     in_flight: &HashMap<GraphKey, JoinHandle<()>>,
     failed_key: GraphKey,
     error: &RuntimeError,
 ) -> Map<String, Value> {
-    let mut details = scheduler_state_details(nodes, completed, ready, in_flight);
-    details.insert("failed".to_string(), node_summary_value(nodes, failed_key));
+    let mut details = scheduler_state_details(subjects, completed, ready, in_flight);
+    details.insert(
+        "failed".to_string(),
+        subject_summary_value(subjects, failed_key),
+    );
     details.insert(
         "error_class".to_string(),
         Value::String(error.class().to_string()),
@@ -571,13 +619,13 @@ fn scheduler_first_error_details(
 }
 
 fn scheduler_wait_details(
-    nodes: &HashMap<GraphKey, GraphNode>,
+    subjects: &SubjectGraph,
     completed: &HashMap<GraphKey, RealizedObject>,
     ready: &VecDeque<GraphKey>,
     in_flight: &HashMap<GraphKey, JoinHandle<()>>,
     error: &RuntimeError,
 ) -> Map<String, Value> {
-    let mut details = scheduler_state_details(nodes, completed, ready, in_flight);
+    let mut details = scheduler_state_details(subjects, completed, ready, in_flight);
     details.insert(
         "first_error_class".to_string(),
         Value::String(error.class().to_string()),
@@ -594,7 +642,7 @@ fn scheduler_wait_details(
 }
 
 fn scheduler_state_details(
-    nodes: &HashMap<GraphKey, GraphNode>,
+    subjects: &SubjectGraph,
     completed: &HashMap<GraphKey, RealizedObject>,
     ready: &VecDeque<GraphKey>,
     in_flight: &HashMap<GraphKey, JoinHandle<()>>,
@@ -614,24 +662,24 @@ fn scheduler_state_details(
     );
     details.insert(
         "in_flight".to_string(),
-        Value::Array(in_flight_summaries(nodes, in_flight)),
+        Value::Array(in_flight_summaries(subjects, in_flight)),
     );
     details
 }
 
 fn in_flight_summaries(
-    nodes: &HashMap<GraphKey, GraphNode>,
+    subjects: &SubjectGraph,
     in_flight: &HashMap<GraphKey, JoinHandle<()>>,
 ) -> Vec<Value> {
     let mut entries = in_flight
         .keys()
-        .map(|key| (key.to_string(), node_summary_value(nodes, *key)))
+        .map(|key| (key.to_string(), subject_summary_value(subjects, *key)))
         .collect::<Vec<_>>();
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     entries.into_iter().map(|(_, value)| value).collect()
 }
 
-fn node_summary_value(nodes: &HashMap<GraphKey, GraphNode>, key: GraphKey) -> Value {
+fn subject_summary_value(subjects: &SubjectGraph, key: GraphKey) -> Value {
     let mut object = Map::new();
     match key {
         GraphKey::ObjectKey(object_hash) => {
@@ -650,14 +698,11 @@ fn node_summary_value(nodes: &HashMap<GraphKey, GraphNode>, key: GraphKey) -> Va
         }
     }
     object.insert("short_key".to_string(), Value::String(key.short()));
-    if let Some(node) = nodes.get(&key) {
-        object.insert(
-            "tag".to_string(),
-            Value::String(node.subject.tag().to_string()),
-        );
+    if let Some(subject) = subjects.get(&key) {
+        object.insert("tag".to_string(), Value::String(subject.tag().to_string()));
         object.insert(
             "name".to_string(),
-            Value::String(node.subject.name().to_string()),
+            Value::String(subject.name().to_string()),
         );
     }
     Value::Object(object)
@@ -696,7 +741,7 @@ fn cleanup_workspace_temp_dir(store: &Store, temp_dir: &Path, logger: &dyn Build
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::planned::{PlannedSubject, ReuseOrigin, SourcePlannedSubject};
+    use crate::planned::{PlannedSubject, SourcePlannedSubject};
     use crate::recipe::collect_graph;
     use bobr_store::identity::compute_reuse_key;
     use bobr_store::{PublishRequest, ReuseInputIdentity, publish_build};
@@ -842,11 +887,11 @@ mod tests {
         .unwrap()
         .request;
 
-        let mut nodes = HashMap::new();
-        let root_key = collect_graph(&request, &mut nodes).unwrap();
+        let mut subjects = HashMap::new();
+        let root_key = collect_graph(&request, &mut subjects).unwrap();
         let root_build_key = expect_build_key(root_key);
         let dep_keys = {
-            let subject = nodes.get(&root_key).unwrap().subject.as_ref();
+            let subject = subjects.get(&root_key).unwrap().as_ref();
             match subject {
                 PlannedSubject::Builder(builder) => {
                     builder.inputs().values().copied().collect::<Vec<_>>()
@@ -864,15 +909,6 @@ mod tests {
             Some(expect_build_key(dep_keys[1])),
             "2222222222222222222222222222222222222222222222222222222222222222",
         );
-        nodes.get_mut(&dep_keys[0]).unwrap().state = PlanningState::Reused {
-            realized: rootfs_realized.clone(),
-            origin: ReuseOrigin::CanonicalObject,
-        };
-        nodes.get_mut(&dep_keys[1]).unwrap().state = PlanningState::Reused {
-            realized: script_realized.clone(),
-            origin: ReuseOrigin::CanonicalObject,
-        };
-
         let root_inputs = vec![
             ReuseInputIdentity {
                 object_hash: rootfs_realized.object_hash,
@@ -902,7 +938,7 @@ mod tests {
             (dep_keys[1], script_realized),
         ]);
         let published = lookup_after_inputs_reused(
-            nodes.get(&root_key).unwrap().subject.as_ref(),
+            subjects.get(&root_key).unwrap().as_ref(),
             PlannedDependencyLookupContext {
                 store: &store,
                 realized_inputs: &realized_inputs,

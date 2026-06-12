@@ -1,8 +1,7 @@
 use crate::builders;
 use crate::origins;
-use crate::planned::{BuilderPlannedSubject, PlannedSubject, ReuseOrigin, SourcePlannedSubject};
+use crate::planned::{BuilderPlannedSubject, PlannedSubject, SourcePlannedSubject};
 use crate::runtime::RuntimeError;
-use bobr_store::RealizedObject;
 use bobr_store::identity::GraphKey;
 #[cfg(test)]
 use bobr_store::identity::compute_build_key;
@@ -84,56 +83,21 @@ impl RecipeRequest {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct GraphNode {
-    pub(crate) subject: Arc<PlannedSubject>,
-    pub(crate) state: PlanningState,
-}
-
-impl std::fmt::Debug for GraphNode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GraphNode")
-            .field("name", &self.subject.name())
-            .field("tag", &self.subject.tag())
-            .field("state", &self.state)
-            .finish()
-    }
-}
-
-impl GraphNode {
-    pub(crate) fn new(subject: Arc<PlannedSubject>) -> Self {
-        Self {
-            subject,
-            state: PlanningState::Unknown,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) enum PlanningState {
-    Unknown,
-    Reused {
-        realized: RealizedObject,
-        origin: ReuseOrigin,
-    },
-    NeedsBuild,
-}
-
 pub(crate) fn collect_graph(
     request: &RecipeRequest,
-    nodes: &mut HashMap<GraphKey, GraphNode>,
+    subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
 ) -> Result<GraphKey, RuntimeError> {
     builders::validate_registered_builders().map_err(RuntimeError::InvalidRequest)?;
 
     let mut stack = BTreeSet::new();
     let mut node_keys = HashMap::new();
-    collect_graph_inner(request, "root", nodes, &mut stack, &mut node_keys)
+    collect_graph_inner(request, "root", subjects, &mut stack, &mut node_keys)
 }
 
 fn collect_graph_inner(
     request: &RecipeRequest,
     node_id: &str,
-    nodes: &mut HashMap<GraphKey, GraphNode>,
+    subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
     stack: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, GraphKey>,
 ) -> Result<GraphKey, RuntimeError> {
@@ -151,7 +115,7 @@ fn collect_graph_inner(
     let (key, subject) = match recipe {
         Recipe::Builder(recipe) => {
             let builder_subject =
-                collect_builder_subject(request, recipe, nodes, stack, node_keys)?;
+                collect_builder_subject(request, recipe, subjects, stack, node_keys)?;
             (
                 GraphKey::BuildKey(builder_subject.build_key()),
                 Arc::new(PlannedSubject::Builder(builder_subject)),
@@ -172,7 +136,7 @@ fn collect_graph_inner(
 
     stack.remove(node_id);
 
-    nodes.entry(key).or_insert_with(|| GraphNode::new(subject));
+    subjects.entry(key).or_insert(subject);
     node_keys.insert(node_id.to_string(), key);
     Ok(key)
 }
@@ -180,7 +144,7 @@ fn collect_graph_inner(
 fn collect_builder_subject(
     request: &RecipeRequest,
     recipe: &BuilderRecipe,
-    nodes: &mut HashMap<GraphKey, GraphNode>,
+    subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
     stack: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, GraphKey>,
 ) -> Result<BuilderPlannedSubject, RuntimeError> {
@@ -193,7 +157,7 @@ fn collect_builder_subject(
     })?;
     let mut inputs = BTreeMap::new();
     for (input_name, child_id) in &recipe.inputs {
-        let key = collect_graph_inner(request, child_id, nodes, stack, node_keys)?;
+        let key = collect_graph_inner(request, child_id, subjects, stack, node_keys)?;
         inputs.insert(input_name.clone(), key);
     }
 
@@ -442,11 +406,18 @@ mod tests {
 
     fn collect_one(
         request: &Value,
-    ) -> Result<(GraphKey, HashMap<GraphKey, GraphNode>), RuntimeError> {
+    ) -> Result<(GraphKey, HashMap<GraphKey, Arc<PlannedSubject>>), RuntimeError> {
         let request = parse_request_value(request.clone(), "$")?;
-        let mut nodes = HashMap::new();
-        let root_key = collect_graph(&request, &mut nodes)?;
-        Ok((root_key, nodes))
+        let mut subjects = HashMap::new();
+        let root_key = collect_graph(&request, &mut subjects)?;
+        Ok((root_key, subjects))
+    }
+
+    fn collect_error(request: &Value) -> RuntimeError {
+        match collect_one(request) {
+            Ok(_) => panic!("expected collect_graph to fail"),
+            Err(error) => error,
+        }
     }
 
     fn tree_config(path: &str, text: &str, executable: bool) -> Value {
@@ -492,7 +463,7 @@ mod tests {
                 "inputs": {}
             }
         });
-        let error = collect_one(&request).unwrap_err();
+        let error = collect_error(&request);
         assert!(
             error
                 .to_string()
@@ -515,11 +486,11 @@ mod tests {
                 }
             }
         });
-        let (root_key, nodes) = collect_one(&request).unwrap();
-        let node = nodes.get(&root_key).unwrap();
-        assert_eq!(node.subject.name(), "local-source");
-        assert_eq!(node.subject.tag(), "Source");
-        assert!(matches!(node.subject.as_ref(), PlannedSubject::Source(_)));
+        let (root_key, subjects) = collect_one(&request).unwrap();
+        let subject = subjects.get(&root_key).unwrap();
+        assert_eq!(subject.name(), "local-source");
+        assert_eq!(subject.tag(), "Source");
+        assert!(matches!(subject.as_ref(), PlannedSubject::Source(_)));
     }
 
     #[test]
@@ -536,11 +507,11 @@ mod tests {
                 }
             }
         });
-        let (root_key, nodes) = collect_one(&request).unwrap();
-        let node = nodes.get(&root_key).unwrap();
-        assert_eq!(node.subject.name(), "local-source");
-        assert_eq!(node.subject.tag(), "Source");
-        assert!(matches!(node.subject.as_ref(), PlannedSubject::Source(_)));
+        let (root_key, subjects) = collect_one(&request).unwrap();
+        let subject = subjects.get(&root_key).unwrap();
+        assert_eq!(subject.name(), "local-source");
+        assert_eq!(subject.tag(), "Source");
+        assert!(matches!(subject.as_ref(), PlannedSubject::Source(_)));
     }
 
     #[test]
@@ -552,11 +523,11 @@ mod tests {
                 "object_hash": "1111111111111111111111111111111111111111111111111111111111111111"
             }
         });
-        let (root_key, nodes) = collect_one(&request).unwrap();
-        let node = nodes.get(&root_key).unwrap();
-        assert_eq!(node.subject.name(), "local-source");
-        assert_eq!(node.subject.tag(), "Source");
-        assert!(matches!(node.subject.as_ref(), PlannedSubject::Source(_)));
+        let (root_key, subjects) = collect_one(&request).unwrap();
+        let subject = subjects.get(&root_key).unwrap();
+        assert_eq!(subject.name(), "local-source");
+        assert_eq!(subject.tag(), "Source");
+        assert!(matches!(subject.as_ref(), PlannedSubject::Source(_)));
     }
 
     #[test]
@@ -573,10 +544,10 @@ mod tests {
                 }
             }
         });
-        let (root_key, nodes) = collect_one(&request).unwrap();
-        let node = nodes.get(&root_key).unwrap();
-        assert_eq!(node.subject.name(), "base-image");
-        assert_eq!(node.subject.tag(), "Source");
+        let (root_key, subjects) = collect_one(&request).unwrap();
+        let subject = subjects.get(&root_key).unwrap();
+        assert_eq!(subject.name(), "base-image");
+        assert_eq!(subject.tag(), "Source");
     }
 
     #[test]
@@ -593,7 +564,7 @@ mod tests {
                 }
             }
         });
-        let error = collect_one(&request).unwrap_err();
+        let error = collect_error(&request);
         assert!(
             error.to_string().contains("expected absolute path"),
             "{error}"
@@ -609,15 +580,15 @@ mod tests {
                 "object_hash": "1111111111111111111111111111111111111111111111111111111111111111\n"
             }
         });
-        let (root_key, nodes) = collect_one(&request).unwrap();
-        let node = nodes.get(&root_key).unwrap();
+        let (root_key, subjects) = collect_one(&request).unwrap();
+        let subject = subjects.get(&root_key).unwrap();
         let object_hash = "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
             .unwrap();
         let expected_key = GraphKey::ObjectKey(object_hash);
         assert_eq!(root_key, expected_key);
         assert!(
-            matches!(node.subject.as_ref(), PlannedSubject::Source(source) if source.object_hash() == object_hash)
+            matches!(subject.as_ref(), PlannedSubject::Source(source) if source.object_hash() == object_hash)
         );
     }
 
@@ -632,7 +603,7 @@ mod tests {
             },
             "dep": tree_recipe("dep", "dep.txt", "dep", false)
         });
-        let error = collect_one(&request).unwrap_err();
+        let error = collect_error(&request);
         assert!(
             error
                 .to_string()
@@ -652,7 +623,7 @@ mod tests {
             },
             "script": tree_recipe("script", "script.sh", "#!/bin/sh\n", true)
         });
-        let error = collect_one(&request).unwrap_err();
+        let error = collect_error(&request);
         assert!(
             error
                 .to_string()
@@ -673,7 +644,7 @@ mod tests {
                 }
             }
         });
-        let error = collect_one(&request).unwrap_err();
+        let error = collect_error(&request);
         assert!(
             error
                 .to_string()
@@ -758,14 +729,14 @@ mod tests {
             "binary-b": tree_recipe("binary-b", "same.txt", "same", false)
         });
 
-        let (_root_key, nodes) = collect_one(&request).unwrap();
+        let (_root_key, subjects) = collect_one(&request).unwrap();
         let deduped_key =
             compute_build_key("Tree", &tree_config("same.txt", "same", false), &[]).unwrap();
-        let node = nodes.get(&GraphKey::BuildKey(deduped_key)).unwrap();
-        assert_eq!(node.subject.name(), "binary-a");
-        assert_eq!(node.subject.tag(), "Tree");
+        let subject = subjects.get(&GraphKey::BuildKey(deduped_key)).unwrap();
+        assert_eq!(subject.name(), "binary-a");
+        assert_eq!(subject.tag(), "Tree");
         assert!(
-            matches!(node.subject.as_ref(), PlannedSubject::Builder(builder) if builder.build_key() == deduped_key)
+            matches!(subject.as_ref(), PlannedSubject::Builder(builder) if builder.build_key() == deduped_key)
         );
     }
 
@@ -784,7 +755,7 @@ mod tests {
             "script": tree_recipe("script", "script.sh", "#!/bin/sh\n", true)
         });
 
-        let error = collect_one(&request).unwrap_err();
+        let error = collect_error(&request);
         assert!(error.to_string().contains("contains a cycle"), "{error}");
     }
 
@@ -803,7 +774,7 @@ mod tests {
             "script": tree_recipe("script", "script.sh", "#!/bin/sh\n", true)
         });
 
-        let error = collect_one(&request).unwrap_err();
+        let error = collect_error(&request);
         assert!(
             error
                 .to_string()
