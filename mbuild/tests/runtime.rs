@@ -423,7 +423,7 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
 }
 
 #[test]
-fn second_run_reuses_root_without_republishing_dependency_refs() {
+fn second_run_reuses_root_and_republishes_dependency_refs() {
     let workspace = tempdir().unwrap();
     let source_tar = {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -470,8 +470,10 @@ fn second_run_reuses_root_without_republishing_dependency_refs() {
 
     assert_eq!(first.build_key, second.build_key);
     let layout = Store::create(&store_root(workspace.path())).unwrap();
+    // Every node now runs through the executor on each run, so reused
+    // dependencies republish their refs alongside the root.
     assert!(load_publication(&layout, "final-group").unwrap().is_some());
-    assert!(load_publication(&layout, "source").unwrap().is_none());
+    assert!(load_publication(&layout, "source").unwrap().is_some());
 }
 
 #[test]
