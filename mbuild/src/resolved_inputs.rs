@@ -1,5 +1,6 @@
-use bobr_store::ReuseInputIdentity;
-use mbuild_core::{BuilderError, BuilderInputObject, BuilderInputs, InputSpec, ObjectHash};
+use mbuild_core::{
+    BuilderError, BuilderInputObject, BuilderInputs, InputSpec, ObjectHash, ReuseInputIdentity,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 

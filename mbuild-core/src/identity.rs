@@ -1,14 +1,14 @@
-//! Stable store identity computation.
+//! Stable build identity computation.
 //!
 //! This module computes deterministic identifiers from normalized semantic
-//! inputs: requested invocation keys, reuse keys for realized input objects,
+//! inputs: requested build graph keys, reuse keys for realized input objects,
 //! and object hashes for normalized filesystem objects.
 
-use crate::{ReuseInputIdentity, StoreError};
 use fsobj_hash::define_hex_hash_type;
 pub use fsobj_hash::{ObjectHash, ParseHexHashError};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::fmt;
 
 const INVOCATION_SCHEMA: &str = "bobr-build-invocation-v2";
 const REUSE_INVOCATION_SCHEMA: &str = "bobr-build-reuse-invocation-v1";
@@ -46,25 +46,57 @@ define_hex_hash_type! {
     /// Stable key used to reuse an existing object across equivalent inputs.
     ///
     /// A reuse key is produced by [`compute_reuse_key`] from the builder tag,
-    /// normalized payload, and input object identities. It maps to an
-    /// [`ObjectHash`] through the store's `reuses` references.
+    /// normalized payload, and input object identities.
     ///
     /// The textual representation is exactly 64 lowercase hexadecimal
     /// characters.
     pub struct ReuseKey;
 }
 
+/// Identity of an input object used by reuse-key computation and object records.
+///
+/// Reuse is based on realized input object identities rather than only on input
+/// build keys. This lets equivalent input objects participate in reuse even
+/// when they were produced through different build keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReuseInputIdentity {
+    /// Hash of the realized input object.
+    pub object_hash: ObjectHash,
+}
+
+/// Error returned while computing build identities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityError {
+    message: String,
+}
+
+impl IdentityError {
+    fn json(error: serde_json::Error) -> Self {
+        Self {
+            message: format!("failed to serialize canonical identity JSON: {error}"),
+        }
+    }
+}
+
+impl fmt::Display for IdentityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for IdentityError {}
+
 /// Computes the stable key for a normalized build invocation.
 ///
 /// The key covers the builder tag, the normalized JSON payload, and the ordered
 /// list of direct dependency build keys. The payload is serialized with the
-/// store's canonical JSON encoder before hashing, so callers must pass the
-/// already normalized semantic payload rather than arbitrary user input.
+/// core canonical JSON encoder before hashing, so callers must pass the already
+/// normalized semantic payload rather than arbitrary user input.
 pub fn compute_build_key(
     builder_tag: &str,
     normalized_payload: &Value,
     input_keys: &[BuildKey],
-) -> Result<BuildKey, StoreError> {
+) -> Result<BuildKey, IdentityError> {
     let input_values = input_keys
         .iter()
         .map(|build_key| {
@@ -89,7 +121,7 @@ pub fn compute_build_key(
     root.insert("payload".to_string(), normalized_payload.clone());
     root.insert("inputs".to_string(), Value::Array(input_values));
 
-    let canonical = crate::json::canonical_json_bytes(&Value::Object(root))?;
+    let canonical = canonical_json_bytes(&Value::Object(root))?;
     Ok(BuildKey::from_bytes(Sha256::digest(&canonical).into()))
 }
 
@@ -102,7 +134,7 @@ pub fn compute_reuse_key(
     builder_tag: &str,
     normalized_payload: &Value,
     inputs: &[ReuseInputIdentity],
-) -> Result<ReuseKey, StoreError> {
+) -> Result<ReuseKey, IdentityError> {
     let input_values = inputs
         .iter()
         .map(|input| {
@@ -127,6 +159,46 @@ pub fn compute_reuse_key(
     root.insert("payload".to_string(), normalized_payload.clone());
     root.insert("inputs".to_string(), Value::Array(input_values));
 
-    let canonical = crate::json::canonical_json_bytes(&Value::Object(root))?;
+    let canonical = canonical_json_bytes(&Value::Object(root))?;
     Ok(ReuseKey::from_bytes(Sha256::digest(&canonical).into()))
+}
+
+fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, IdentityError> {
+    let mut out = Vec::new();
+    write_canonical_json(value, &mut out)?;
+    Ok(out)
+}
+
+fn write_canonical_json(value: &Value, out: &mut Vec<u8>) -> Result<(), IdentityError> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            serde_json::to_writer(out, value).map_err(IdentityError::json)
+        }
+        Value::Array(items) => {
+            out.push(b'[');
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push(b',');
+                }
+                write_canonical_json(item, out)?;
+            }
+            out.push(b']');
+            Ok(())
+        }
+        Value::Object(object) => {
+            out.push(b'{');
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort();
+            for (idx, key) in keys.iter().enumerate() {
+                if idx > 0 {
+                    out.push(b',');
+                }
+                serde_json::to_writer(&mut *out, key).map_err(IdentityError::json)?;
+                out.push(b':');
+                write_canonical_json(&object[*key], out)?;
+            }
+            out.push(b'}');
+            Ok(())
+        }
+    }
 }

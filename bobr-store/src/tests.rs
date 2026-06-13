@@ -1,6 +1,8 @@
 use super::*;
-use crate::identity::{BuildKey, ObjectHash, ReuseKey, compute_build_key, compute_reuse_key};
 use fsobj_hash::hash_path;
+use mbuild_core::{
+    BuildKey, ObjectHash, ReuseInputIdentity, ReuseKey, compute_build_key, compute_reuse_key,
+};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;

@@ -1,14 +1,14 @@
 use crate::resolved_inputs::ResolvedInputs;
-use bobr_store::identity::{BuildKey, compute_reuse_key};
 use bobr_store::{
-    PublishedBuild, ReuseInputIdentity, Store, StoreError, StoreTempQuarantineRequest,
-    StoreWorkspace, create_workspace, load_build_handle, materialize_build,
-    materialize_build_with_trusted_hash, quarantine_store_temp, recreate_store_temp_dir_force,
-    remove_store_temp_dir_force, resolve_reuse_for_build,
+    PublishedBuild, Store, StoreError, StoreTempQuarantineRequest, StoreWorkspace,
+    create_workspace, load_build_handle, materialize_build, materialize_build_with_trusted_hash,
+    quarantine_store_temp, recreate_store_temp_dir_force, remove_store_temp_dir_force,
+    resolve_reuse_for_build,
 };
 use mbuild_core::{
-    BuildContext, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderError,
-    BuilderRun, BuilderRunInit, CancellationToken, Workspace,
+    BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, Builder,
+    BuilderError, BuilderRun, BuilderRunInit, CancellationToken, IdentityError, ReuseInputIdentity,
+    Workspace, compute_reuse_key,
 };
 use serde_json::Value;
 use std::fmt;
@@ -132,7 +132,7 @@ pub(crate) fn execute_builder_node(
     }
 
     let reuse_key =
-        compute_reuse_key(builder.tag(), &config, &inputs_identity).map_err(map_store_error)?;
+        compute_reuse_key(builder.tag(), &config, &inputs_identity).map_err(map_identity_error)?;
     if let Some(published) =
         resolve_reuse_for_build(store, build_key, reuse_key).map_err(map_store_error)?
     {
@@ -241,7 +241,7 @@ pub(crate) fn lookup_canonical_object(
     inputs: &[ReuseInputIdentity],
     build_key: BuildKey,
 ) -> Result<Option<PublishedBuild>, RuntimeError> {
-    let reuse_key = compute_reuse_key(builder_tag, config, inputs).map_err(map_store_error)?;
+    let reuse_key = compute_reuse_key(builder_tag, config, inputs).map_err(map_identity_error)?;
     resolve_reuse_for_build(store, build_key, reuse_key).map_err(map_store_error)
 }
 
@@ -270,6 +270,10 @@ pub(crate) fn map_builder_error(error: BuilderError) -> RuntimeError {
 
 pub(crate) fn map_store_error(error: StoreError) -> RuntimeError {
     RuntimeError::Store(error.to_string())
+}
+
+pub(crate) fn map_identity_error(error: IdentityError) -> RuntimeError {
+    RuntimeError::InvalidRequest(error.to_string())
 }
 
 pub(crate) fn log_runtime_event(
@@ -499,11 +503,10 @@ fn quarantine_temp_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bobr_store::identity::compute_build_key;
-    use bobr_store::{PublishRequest, ReuseInputIdentity, create_workspace, publish_build};
+    use bobr_store::{PublishRequest, create_workspace, publish_build};
     use mbuild_core::{
         BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, BuilderRun, CancellationToken,
-        InputSpec, StagedBuildResult, TypedBuilder,
+        InputSpec, ReuseInputIdentity, StagedBuildResult, TypedBuilder, compute_build_key,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};

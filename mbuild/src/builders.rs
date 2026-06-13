@@ -1,11 +1,10 @@
 use crate::planned::BuilderPlannedSubject;
 use crate::runtime::RuntimeError;
-use bobr_store::identity::BuildKey;
 use mbuild_builder::{
     ErofsRootfsBuilder, GroupBuilder, InitramfsBuilder, OciExtractBuilder, TreeBuilder,
     TreeMergeBuilder, TreeSubsetBuilder,
 };
-use mbuild_core::Builder;
+use mbuild_core::{BuildKey, Builder};
 use mbuild_sandbox::SandboxBuilder;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;

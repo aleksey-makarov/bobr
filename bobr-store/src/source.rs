@@ -1,7 +1,7 @@
-use crate::identity::{BuildKey, ObjectHash};
 use crate::object::import_object;
 use crate::record::{StoredObjectRecord, load_stored_object_record, record_existing_source_object};
 use crate::{Store, StoreError};
+use mbuild_core::{BuildKey, ObjectHash};
 use std::path::Path;
 
 /// Outcome of looking up the canonical store state for a declared source object.

@@ -1,18 +1,19 @@
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
     ExecuteBuilderNodeRequest, RuntimeError, check_cancelled, execute_builder_node,
-    log_runtime_event, lookup_build_handle, lookup_canonical_object, map_store_error,
+    log_runtime_event, lookup_build_handle, lookup_canonical_object, map_identity_error,
+    map_store_error,
 };
-#[cfg(test)]
-use bobr_store::identity::ObjectHash;
-use bobr_store::identity::{BuildKey, compute_build_key};
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, SourceLookup, Store, create_workspace,
     import_source_object, lookup_source_object, remove_store_temp_dir_force,
 };
+#[cfg(test)]
+use mbuild_core::ObjectHash;
 use mbuild_core::{
-    BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase, CancellationToken,
-    OriginContext, SourceBuilderClass, SourceBuilderInit, Workspace,
+    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase,
+    CancellationToken, OriginContext, ReuseInputIdentity, SourceBuilderClass, SourceBuilderInit,
+    Workspace, compute_build_key,
 };
 use mbuild_source::SourcePlannedSubject;
 use serde_json::Value;
@@ -125,7 +126,7 @@ impl BuilderPlannedSubject {
             .filter_map(|input_name| inputs.get(input_name).copied())
             .collect::<Vec<_>>();
         let build_key =
-            compute_build_key(tag, &config, &ordered_direct_deps).map_err(map_store_error)?;
+            compute_build_key(tag, &config, &ordered_direct_deps).map_err(map_identity_error)?;
 
         Ok(Self {
             builder,
@@ -396,7 +397,7 @@ fn execute_source_subject(
 fn builder_realized_input_identities(
     subject: &BuilderPlannedSubject,
     realized_inputs: &HashMap<BuildKey, RealizedObject>,
-) -> Result<Vec<bobr_store::ReuseInputIdentity>, RuntimeError> {
+) -> Result<Vec<ReuseInputIdentity>, RuntimeError> {
     let mut ordered = Vec::new();
     for input_name in subject
         .builder
@@ -415,7 +416,7 @@ fn builder_realized_input_identities(
                 key, subject.name
             ))
         })?;
-        ordered.push(bobr_store::ReuseInputIdentity {
+        ordered.push(ReuseInputIdentity {
             object_hash: realized.object_hash,
         });
     }

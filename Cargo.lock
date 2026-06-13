@@ -134,6 +134,7 @@ version = "0.1.0"
 dependencies = [
  "fsobj-hash",
  "libc",
+ "mbuild-core",
  "serde",
  "serde_json",
  "sha2",
@@ -1018,7 +1019,6 @@ dependencies = [
 name = "mbuild-source"
 version = "0.1.0"
 dependencies = [
- "bobr-store",
  "bzip2",
  "flate2",
  "fsobj-hash",

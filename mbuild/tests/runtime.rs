@@ -1,8 +1,8 @@
 mod support;
 
-use bobr_store::identity::BuildKey;
 use bobr_store::{Store, load_build_handle, load_object_record, load_publication};
 use mbuild::recipe_runtime::run_recipe_json_in_workspace;
+use mbuild_core::BuildKey;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Cursor, Read, Write};

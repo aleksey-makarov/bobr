@@ -12,7 +12,7 @@
 //!
 //! Most fallible store operations return [`StoreError`]. Pure string parsing
 //! for value types keeps narrow parse errors such as
-//! [`identity::ParseHexHashError`] and [`fs_tree::ParseFsFileHashError`].
+//! [`mbuild_core::ParseHexHashError`] and [`fs_tree::ParseFsFileHashError`].
 
 #![deny(missing_docs)]
 
@@ -22,7 +22,6 @@ compile_error!("bobr requires Linux");
 mod error;
 pub mod fs_tree;
 mod fsutil;
-pub mod identity;
 mod json;
 mod object;
 mod publish;
@@ -37,8 +36,8 @@ pub use object::import_object;
 pub use publish::materialize_build_with_trusted_hash;
 pub use publish::{Publication, PublishRequest, materialize_build, publish_build};
 pub use record::{
-    Build, ObjectRecord, PublishedBuild, RealizedObject, ReuseInputIdentity, StoredObjectRecord,
-    load_object_record, load_stored_object_record,
+    Build, ObjectRecord, PublishedBuild, RealizedObject, StoredObjectRecord, load_object_record,
+    load_stored_object_record,
 };
 pub use refs::{
     load_build_handle, load_public_build, load_publication, publish_stored_object,

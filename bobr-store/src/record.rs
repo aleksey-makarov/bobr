@@ -1,6 +1,6 @@
 use crate::fsutil as private_fs;
-use crate::identity::{BuildKey, ObjectHash};
 use crate::{Store, StoreError};
+use mbuild_core::{BuildKey, ObjectHash, ReuseInputIdentity};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs;
@@ -9,17 +9,6 @@ use std::path::PathBuf;
 pub(crate) const OBJECT_RECORD_SCHEMA: &str = "bobr-object-record-v2";
 #[cfg(test)]
 pub(crate) const OBJECT_RECORD_SCHEMA_FOR_TEST: &str = OBJECT_RECORD_SCHEMA;
-
-/// Identity of an input object used by reuse-key computation and object records.
-///
-/// Reuse is based on realized input object identities rather than only on input
-/// build keys. This lets equivalent input objects participate in reuse even
-/// when they were produced through different build keys.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReuseInputIdentity {
-    /// Hash of the realized input object.
-    pub object_hash: ObjectHash,
-}
 
 /// Public build handle resolved from a build key.
 ///

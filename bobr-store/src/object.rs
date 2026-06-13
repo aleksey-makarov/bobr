@@ -1,7 +1,7 @@
 use crate::fsutil as private_fs;
-use crate::identity::ObjectHash;
 use crate::{Store, StoreError};
 use fsobj_hash::hash_path;
+use mbuild_core::ObjectHash;
 use std::fs;
 use std::path::Path;
 

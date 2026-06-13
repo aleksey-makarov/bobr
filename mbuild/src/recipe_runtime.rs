@@ -5,14 +5,13 @@ use crate::planned::{
 };
 use crate::recipe::{RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
-use bobr_store::identity::BuildKey;
 use bobr_store::{
     RealizedObject, Store, StoreWorkspace, create_workspace, publish_stored_object,
     remove_store_temp_dir_force,
 };
 use mbuild_core::{
-    BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderRun, CancellationToken,
-    Workspace,
+    BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderRun,
+    CancellationToken, Workspace,
 };
 use serde_json::{Map, Value, to_string_pretty};
 use std::collections::{HashMap, VecDeque};
@@ -702,9 +701,11 @@ mod tests {
     use super::*;
     use crate::planned::PlannedSubject;
     use crate::recipe::collect_graph;
-    use bobr_store::identity::compute_reuse_key;
-    use bobr_store::{PublishRequest, ReuseInputIdentity, publish_build};
-    use mbuild_core::{CancellationToken, OriginContext, OriginSpec, ParsedOrigin};
+    use bobr_store::{PublishRequest, publish_build};
+    use mbuild_core::{
+        CancellationToken, OriginContext, OriginSpec, ParsedOrigin, ReuseInputIdentity,
+        compute_reuse_key,
+    };
     use mbuild_source::SourcePlannedSubject;
     use serde_json::json;
     use std::collections::HashMap;

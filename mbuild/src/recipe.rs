@@ -1,9 +1,9 @@
 use crate::builders;
 use crate::planned::PlannedSubject;
 use crate::runtime::RuntimeError;
-use bobr_store::identity::BuildKey;
+use mbuild_core::BuildKey;
 #[cfg(test)]
-use bobr_store::identity::compute_build_key;
+use mbuild_core::compute_build_key;
 use mbuild_source::parse_source_subject;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};

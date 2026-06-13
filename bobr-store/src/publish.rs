@@ -1,5 +1,5 @@
-use crate::identity::{BuildKey, ObjectHash, ReuseKey};
-use crate::{ObjectRecord, PublishedBuild, ReuseInputIdentity, Store, StoreError};
+use crate::{ObjectRecord, PublishedBuild, Store, StoreError};
+use mbuild_core::{BuildKey, ObjectHash, ReuseInputIdentity, ReuseKey};
 use std::path::{Path, PathBuf};
 
 /// Request to publish a build under a publication name.

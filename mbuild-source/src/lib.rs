@@ -2,8 +2,7 @@ mod http;
 pub mod oci_registry;
 mod origins;
 
-use bobr_store::identity::BuildKey;
-use mbuild_core::{ObjectHash, ParsedOrigin};
+use mbuild_core::{BuildKey, ObjectHash, ParsedOrigin};
 use serde_json::{Map, Value};
 use std::fmt;
 
