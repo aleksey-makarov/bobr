@@ -15,10 +15,10 @@ use mbuild_core::{
 use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::{Arc, mpsc};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::thread;
 
 type SubjectGraph = HashMap<BuildKey, Arc<PlannedSubject>>;
 type PlanningStates = HashMap<BuildKey, PlanningState>;
@@ -357,7 +357,7 @@ fn execute_misses(cx: ExecuteMissesContext<'_>) -> Result<RealizedObject, Runtim
     }
 
     let (tx, rx) = mpsc::channel::<(BuildKey, Result<SubjectExecution, RuntimeError>)>();
-    let mut in_flight = HashMap::<BuildKey, JoinHandle<()>>::new();
+    let mut in_flight = 0usize;
 
     while !completed.contains_key(&root_key) {
         if first_error.is_none() && cancellation.is_cancelled() {
@@ -366,13 +366,10 @@ fn execute_misses(cx: ExecuteMissesContext<'_>) -> Result<RealizedObject, Runtim
             ));
         }
 
-        while first_error.is_none() && !cancellation.is_cancelled() && in_flight.len() < jobs {
+        while first_error.is_none() && !cancellation.is_cancelled() && in_flight < jobs {
             let Some(key) = ready.pop_front() else {
                 break;
             };
-            if completed.contains_key(&key) || in_flight.contains_key(&key) {
-                continue;
-            }
             let subject = subjects.get(&key).ok_or_else(|| {
                 RuntimeError::Store(format!("missing planned subject for key '{}'", key))
             })?;
@@ -385,26 +382,33 @@ fn execute_misses(cx: ExecuteMissesContext<'_>) -> Result<RealizedObject, Runtim
                 Some(builder) => completed_inputs_for_builder(completed, builder)?,
                 None => HashMap::new(),
             };
-            let handle = thread::spawn(move || {
-                let result = execute_subject(
-                    &subject,
-                    PlannedExecutionContext {
-                        store: &store,
-                        run_logger: logger,
-                        cancellation,
-                        realized_inputs: &realized_inputs,
-                    },
-                );
+            thread::spawn(move || {
+                let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                    execute_subject(
+                        &subject,
+                        PlannedExecutionContext {
+                            store: &store,
+                            run_logger: logger,
+                            cancellation,
+                            realized_inputs: &realized_inputs,
+                        },
+                    )
+                }))
+                .unwrap_or_else(|_| {
+                    Err(RuntimeError::Build(format!(
+                        "worker thread for key '{key}' panicked"
+                    )))
+                });
                 let _ = tx.send((key, result));
             });
-            in_flight.insert(key, handle);
+            in_flight += 1;
         }
 
         if completed.contains_key(&root_key) {
             break;
         }
 
-        if in_flight.is_empty() {
+        if in_flight == 0 {
             if let Some(error) = first_error.take() {
                 return Err(error);
             }
@@ -414,28 +418,10 @@ fn execute_misses(cx: ExecuteMissesContext<'_>) -> Result<RealizedObject, Runtim
             ));
         }
 
-        let (key, result) = loop {
-            match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(message) => break message,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if first_error.is_none() && cancellation.is_cancelled() {
-                        first_error = Some(RuntimeError::Cancelled(
-                            "build cancelled by signal".to_string(),
-                        ));
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(RuntimeError::Build(
-                        "worker channel closed unexpectedly".to_string(),
-                    ));
-                }
-            }
-        };
-        if let Some(handle) = in_flight.remove(&key) {
-            handle.join().map_err(|_| {
-                RuntimeError::Build(format!("worker thread for key '{}' panicked", key))
-            })?;
-        }
+        let (key, result) = rx
+            .recv()
+            .map_err(|_| RuntimeError::Build("worker channel closed unexpectedly".to_string()))?;
+        in_flight -= 1;
         let executed = match result {
             Ok(executed) => executed,
             Err(error) => {
