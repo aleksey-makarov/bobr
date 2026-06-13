@@ -227,13 +227,6 @@ fn core_workspace(workspace: StoreWorkspace) -> Workspace {
     )
 }
 
-pub(crate) fn lookup_build_handle(
-    store: &Store,
-    build_key: BuildKey,
-) -> Result<Option<PublishedBuild>, RuntimeError> {
-    load_build_handle(store, build_key).map_err(map_store_error)
-}
-
 pub(crate) fn lookup_canonical_object(
     store: &Store,
     builder_tag: &str,

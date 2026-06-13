@@ -1,13 +1,13 @@
 use crate::planned::{
-    BuilderPlannedSubject, PlannedDependencyLookupContext, PlannedExecutionContext,
-    PlannedLookupContext, PlannedSubject, ReuseOrigin, SubjectExecution, execute_subject,
-    lookup_after_inputs_reused, lookup_direct_reuse,
+    BuilderPlannedSubject, PlannedDependencyLookupContext, PlannedExecutionContext, PlannedSubject,
+    ReuseOrigin, SubjectExecution, execute_subject, lookup_after_inputs_reused,
+    realized_object_from_record,
 };
 use crate::recipe::{RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
 use bobr_store::{
-    RealizedObject, Store, StoreWorkspace, create_workspace, publish_stored_object,
-    remove_store_temp_dir_force,
+    RealizedObject, Store, StoreWorkspace, create_workspace, load_build_handle,
+    publish_stored_object, remove_store_temp_dir_force,
 };
 use mbuild_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderRun,
@@ -153,12 +153,17 @@ fn ensure_planned(
         subject.clone()
     };
 
-    if let Some(reuse) = lookup_direct_reuse(subject.as_ref(), PlannedLookupContext { store })? {
+    if let Some(published) =
+        load_build_handle(store, subject.build_key()).map_err(map_store_error)?
+    {
         states.insert(
             key,
             PlanningState::Reused {
-                realized: reuse.realized,
-                origin: reuse.origin,
+                realized: realized_object_from_record(
+                    Some(published.build.build_key),
+                    &published.object_record,
+                ),
+                origin: ReuseOrigin::BuildHandle,
             },
         );
         return Ok(());

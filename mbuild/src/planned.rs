@@ -1,12 +1,12 @@
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
     ExecuteBuilderNodeRequest, RuntimeError, check_cancelled, execute_builder_node,
-    log_runtime_event, lookup_build_handle, lookup_canonical_object, map_identity_error,
-    map_store_error,
+    log_runtime_event, lookup_canonical_object, map_identity_error, map_store_error,
 };
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, Store, create_workspace,
-    import_source_object, record_existing_source_object, remove_store_temp_dir_force,
+    import_source_object, load_build_handle, record_existing_source_object,
+    remove_store_temp_dir_force,
 };
 use mbuild_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase,
@@ -51,10 +51,6 @@ impl PlannedSubject {
             Self::Builder(subject) => Some(subject),
         }
     }
-}
-
-pub(crate) struct PlannedLookupContext<'a> {
-    pub(crate) store: &'a Store,
 }
 
 pub(crate) struct PlannedDependencyLookupContext<'a> {
@@ -161,21 +157,6 @@ impl BuilderPlannedSubject {
     }
 }
 
-pub(crate) fn lookup_direct_reuse(
-    subject: &PlannedSubject,
-    cx: PlannedLookupContext<'_>,
-) -> Result<Option<ReuseDecision>, RuntimeError> {
-    Ok(
-        lookup_build_handle(cx.store, subject.build_key())?.map(|published| ReuseDecision {
-            realized: realized_object_from_record(
-                Some(published.build.build_key),
-                &published.object_record,
-            ),
-            origin: ReuseOrigin::BuildHandle,
-        }),
-    )
-}
-
 pub(crate) fn lookup_after_inputs_reused(
     subject: &PlannedSubject,
     cx: PlannedDependencyLookupContext<'_>,
@@ -273,7 +254,7 @@ fn execute_source_subject(
         return Err(error);
     }
 
-    if let Some(published) = lookup_build_handle(cx.store, build_key)? {
+    if let Some(published) = load_build_handle(cx.store, build_key).map_err(map_store_error)? {
         log_runtime_event(
             logger.as_ref(),
             BuildLogLevel::Info,
