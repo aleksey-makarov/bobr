@@ -78,19 +78,12 @@ impl SourcePlannedSubject {
     }
 }
 
-/// Parses a raw source recipe object into a planned source subject.
+/// Parses a source recipe object whose tag was already removed by the caller.
 pub fn parse_source_subject(
     mut object: Map<String, Value>,
     path: &str,
 ) -> Result<SourcePlannedSubject, SourceRecipeError> {
     let name = take_string(&mut object, path, "name")?;
-    let tag = take_string(&mut object, path, "tag")?;
-    if tag != "Source" {
-        return Err(SourceRecipeError::new(format!(
-            "{path}.tag: expected 'Source', got '{tag}'"
-        )));
-    }
-
     let object_hash = take_string(&mut object, path, "object_hash")?
         .trim()
         .parse::<ObjectHash>()
@@ -136,7 +129,6 @@ mod tests {
     fn source_object(origin: Option<Value>) -> Map<String, Value> {
         let mut object = json!({
             "name": "local-source",
-            "tag": "Source",
             "object_hash": "1111111111111111111111111111111111111111111111111111111111111111"
         })
         .as_object()
@@ -237,15 +229,5 @@ mod tests {
             subject.object_hash().to_string(),
             "1111111111111111111111111111111111111111111111111111111111111111"
         );
-    }
-
-    #[test]
-    fn source_tag_must_be_source() {
-        let mut object = source_object(None);
-        object.insert("tag".to_string(), Value::String("Tree".to_string()));
-
-        let error = parse_source_subject(object, "$.nodes.root").unwrap_err();
-
-        assert!(error.to_string().contains("expected 'Source'"));
     }
 }

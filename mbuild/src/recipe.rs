@@ -1,5 +1,5 @@
 use crate::builders;
-use crate::planned::{BuilderPlannedSubject, PlannedSubject};
+use crate::planned::PlannedSubject;
 use crate::runtime::RuntimeError;
 use bobr_store::identity::BuildKey;
 #[cfg(test)]
@@ -68,14 +68,11 @@ fn collect_graph_inner(
         RuntimeError::InvalidRequest(format!("request references unknown node id '{node_id}'"))
     })?;
     let node_path = node_path(node_id);
-    let object = node_value
+    let mut object = node_value
         .as_object()
         .cloned()
         .ok_or_else(|| RuntimeError::RecipeLoad(format!("{node_path}: expected recipe object")))?;
-    let tag = object
-        .get("tag")
-        .and_then(Value::as_str)
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{node_path}.tag: expected string")))?;
+    let tag = take_string(&mut object, &node_path, "tag")?;
 
     let (key, subject) = if tag == "Source" {
         let subject = parse_source_subject(object, &node_path)
@@ -83,14 +80,24 @@ fn collect_graph_inner(
         let key = BuildKey::from_object_hash(subject.object_hash());
         (key, Arc::new(PlannedSubject::Source(subject)))
     } else {
-        let builder_subject = collect_builder_subject(
-            request,
-            object,
-            &node_path,
-            subjects,
-            visited_in_path,
-            node_keys,
-        )?;
+        let inputs_value = object.remove("inputs").ok_or_else(|| {
+            RuntimeError::RecipeLoad(format!("{node_path}: missing required field 'inputs'"))
+        })?;
+
+        let inputs_object = inputs_value.as_object().cloned().ok_or_else(|| {
+            RuntimeError::RecipeLoad(format!("{node_path}.inputs: expected object"))
+        })?;
+        let mut inputs = BTreeMap::new();
+        for (input_name, slot_value) in inputs_object {
+            validate_input_name(&input_name, &format!("{node_path}.inputs"))?;
+            let input_path = format!("{node_path}.inputs.{input_name}");
+            let child_id = parse_input_value(slot_value, &input_path)?;
+            let child =
+                collect_graph_inner(request, &child_id, subjects, visited_in_path, node_keys)?;
+            inputs.insert(input_name, child);
+        }
+
+        let builder_subject = builders::parse_builder_subject(&tag, object, inputs, &node_path)?;
         (
             builder_subject.build_key(),
             Arc::new(PlannedSubject::Builder(builder_subject)),
@@ -102,52 +109,6 @@ fn collect_graph_inner(
     subjects.entry(key).or_insert_with(|| subject.clone());
     node_keys.insert(node_id.to_string(), key);
     Ok(key)
-}
-
-fn collect_builder_subject(
-    request: &BTreeMap<String, Value>,
-    mut object: Map<String, Value>,
-    path: &str,
-    subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
-    visited_in_path: &mut BTreeSet<String>,
-    node_keys: &mut HashMap<String, BuildKey>,
-) -> Result<BuilderPlannedSubject, RuntimeError> {
-    let name = take_string(&mut object, path, "name")?;
-    let tag = take_string(&mut object, path, "tag")?;
-    let config = object.remove("config").ok_or_else(|| {
-        RuntimeError::RecipeLoad(format!("{path}: missing required field 'config'"))
-    })?;
-    let inputs_value = object.remove("inputs").ok_or_else(|| {
-        RuntimeError::RecipeLoad(format!("{path}: missing required field 'inputs'"))
-    })?;
-    if !object.is_empty() {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "{path}: unexpected fields: {}",
-            object.keys().cloned().collect::<Vec<_>>().join(", ")
-        )));
-    }
-
-    let builder = builders::get_builder(&tag).ok_or_else(|| {
-        RuntimeError::UnknownBuilder(format!(
-            "unknown builder tag '{}'; supported builders: {}",
-            tag,
-            builders::supported_builder_tags().join(", ")
-        ))
-    })?;
-    let inputs_object = inputs_value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}.inputs: expected object")))?;
-    let mut inputs = BTreeMap::new();
-    for (input_name, slot_value) in inputs_object {
-        validate_input_name(&input_name, &format!("{path}.inputs"))?;
-        let input_path = format!("{path}.inputs.{input_name}");
-        let child_id = parse_input_value(slot_value, &input_path)?;
-        let child = collect_graph_inner(request, &child_id, subjects, visited_in_path, node_keys)?;
-        inputs.insert(input_name, child);
-    }
-
-    BuilderPlannedSubject::new(builder, name, config, inputs)
 }
 
 fn parse_envelope_value(value: Value, path: &str) -> Result<RecipeEnvelope, RuntimeError> {
