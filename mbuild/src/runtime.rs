@@ -7,8 +7,8 @@ use bobr_store::{
 };
 use mbuild_core::{
     BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, Builder,
-    BuilderError, BuilderRun, BuilderRunInit, CancellationToken, IdentityError, ObjectHash,
-    Workspace, compute_reuse_key,
+    BuilderError, BuilderRun, BuilderRunInit, CancellationToken, IdentityError, Workspace,
+    compute_reuse_key,
 };
 use serde_json::Value;
 use std::fmt;
@@ -225,17 +225,6 @@ fn core_workspace(workspace: StoreWorkspace) -> Workspace {
         workspace.raw_log_dir().to_path_buf(),
         workspace.temp_dir().to_path_buf(),
     )
-}
-
-pub(crate) fn lookup_canonical_object(
-    store: &Store,
-    builder_tag: &str,
-    config: &Value,
-    inputs: &[ObjectHash],
-    build_key: BuildKey,
-) -> Result<Option<PublishedBuild>, RuntimeError> {
-    let reuse_key = compute_reuse_key(builder_tag, config, inputs).map_err(map_identity_error)?;
-    resolve_reuse_for_build(store, build_key, reuse_key).map_err(map_store_error)
 }
 
 pub(crate) fn build_context(
@@ -768,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn lookup_canonical_object_depends_on_input_object_hash() {
+    fn resolve_reuse_for_build_depends_on_input_object_hash() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
 
@@ -799,15 +788,11 @@ mod tests {
         )
         .unwrap();
 
-        let hit = lookup_canonical_object(
-            &store,
-            "RuntimeLookupTest",
-            &payload,
-            &matching_inputs,
-            lookup_build_key,
-        )
-        .unwrap()
-        .expect("expected canonical object hit");
+        let matching_reuse_key =
+            compute_reuse_key("RuntimeLookupTest", &payload, &matching_inputs).unwrap();
+        let hit = resolve_reuse_for_build(&store, lookup_build_key, matching_reuse_key)
+            .unwrap()
+            .expect("expected canonical object hit");
         assert_eq!(hit.build.build_key, lookup_build_key);
 
         let mismatching_inputs = vec![
@@ -815,16 +800,12 @@ mod tests {
                 .parse()
                 .unwrap(),
         ];
+        let mismatching_reuse_key =
+            compute_reuse_key("RuntimeLookupTest", &payload, &mismatching_inputs).unwrap();
         assert!(
-            lookup_canonical_object(
-                &store,
-                "RuntimeLookupTest",
-                &payload,
-                &mismatching_inputs,
-                lookup_build_key,
-            )
-            .unwrap()
-            .is_none()
+            resolve_reuse_for_build(&store, lookup_build_key, mismatching_reuse_key)
+                .unwrap()
+                .is_none()
         );
     }
 

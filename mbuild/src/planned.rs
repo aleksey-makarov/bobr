@@ -1,7 +1,7 @@
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
     ExecuteBuilderNodeRequest, RuntimeError, check_cancelled, execute_builder_node,
-    log_runtime_event, lookup_canonical_object, map_identity_error, map_store_error,
+    log_runtime_event, map_identity_error, map_store_error,
 };
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, Store, create_workspace,
@@ -10,8 +10,8 @@ use bobr_store::{
 };
 use mbuild_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase,
-    CancellationToken, ObjectHash, OriginContext, SourceBuilderClass, SourceBuilderInit, Workspace,
-    compute_build_key,
+    CancellationToken, ObjectHash, OriginContext, ReuseKey, SourceBuilderClass, SourceBuilderInit,
+    Workspace, compute_build_key, compute_reuse_key,
 };
 use mbuild_source::SourcePlannedSubject;
 use serde_json::Value;
@@ -53,22 +53,11 @@ impl PlannedSubject {
     }
 }
 
-pub(crate) struct PlannedDependencyLookupContext<'a> {
-    pub(crate) store: &'a Store,
-    pub(crate) realized_inputs: &'a HashMap<BuildKey, RealizedObject>,
-}
-
 pub(crate) struct PlannedExecutionContext<'a> {
     pub(crate) store: &'a Store,
     pub(crate) run_logger: Arc<BuildRunLogger>,
     pub(crate) cancellation: CancellationToken,
     pub(crate) realized_inputs: &'a HashMap<BuildKey, RealizedObject>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ReuseDecision {
-    pub(crate) realized: RealizedObject,
-    pub(crate) origin: ReuseOrigin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,15 +144,13 @@ impl BuilderPlannedSubject {
     pub(crate) fn inputs(&self) -> &BTreeMap<String, BuildKey> {
         &self.inputs
     }
-}
 
-pub(crate) fn lookup_after_inputs_reused(
-    subject: &PlannedSubject,
-    cx: PlannedDependencyLookupContext<'_>,
-) -> Result<Option<ReuseDecision>, RuntimeError> {
-    match subject {
-        PlannedSubject::Source(_) => Ok(None),
-        PlannedSubject::Builder(subject) => lookup_builder_after_inputs_reused(subject, cx),
+    pub(crate) fn reuse_key_for_realized_inputs(
+        &self,
+        realized_inputs: &HashMap<BuildKey, RealizedObject>,
+    ) -> Result<ReuseKey, RuntimeError> {
+        let input_hashes = builder_realized_input_hashes(self, realized_inputs)?;
+        compute_reuse_key(self.tag(), &self.config, &input_hashes).map_err(map_identity_error)
     }
 }
 
@@ -175,24 +162,6 @@ pub(crate) fn execute_subject(
         PlannedSubject::Source(subject) => execute_source_subject(subject, cx),
         PlannedSubject::Builder(subject) => execute_builder_subject(subject, cx),
     }
-}
-
-fn lookup_builder_after_inputs_reused(
-    subject: &BuilderPlannedSubject,
-    cx: PlannedDependencyLookupContext<'_>,
-) -> Result<Option<ReuseDecision>, RuntimeError> {
-    let input_hashes = builder_realized_input_hashes(subject, cx.realized_inputs)?;
-    Ok(lookup_canonical_object(
-        cx.store,
-        subject.builder.tag(),
-        &subject.config,
-        &input_hashes,
-        subject.build_key,
-    )?
-    .map(|published| ReuseDecision {
-        realized: realized_object_from_record(Some(subject.build_key), &published.object_record),
-        origin: ReuseOrigin::CanonicalObject,
-    }))
 }
 
 fn execute_builder_subject(

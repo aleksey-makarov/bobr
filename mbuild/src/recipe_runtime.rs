@@ -1,13 +1,12 @@
 use crate::planned::{
-    BuilderPlannedSubject, PlannedDependencyLookupContext, PlannedExecutionContext, PlannedSubject,
-    ReuseOrigin, SubjectExecution, execute_subject, lookup_after_inputs_reused,
-    realized_object_from_record,
+    BuilderPlannedSubject, PlannedExecutionContext, PlannedSubject, ReuseOrigin, SubjectExecution,
+    execute_subject, realized_object_from_record,
 };
 use crate::recipe::{RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
 use bobr_store::{
     RealizedObject, Store, StoreWorkspace, create_workspace, load_build_handle,
-    publish_stored_object, remove_store_temp_dir_force,
+    publish_stored_object, remove_store_temp_dir_force, resolve_reuse_for_build,
 };
 use mbuild_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderRun,
@@ -75,7 +74,7 @@ pub fn run_recipe_envelope(
         Arc::new(build_run_logger_for_store(&store, emit_progress).map_err(RuntimeError::Store)?);
 
     let mut states = HashMap::new();
-    ensure_planned(&store, &subjects, &mut states, root_key)?;
+    resolve_planning_state(&store, &subjects, &mut states, root_key)?;
 
     let mut completed = HashMap::new();
     for (key, state) in &states {
@@ -137,7 +136,7 @@ enum PlanningState {
     NeedsBuild,
 }
 
-fn ensure_planned(
+fn resolve_planning_state(
     store: &Store,
     subjects: &SubjectGraph,
     states: &mut PlanningStates,
@@ -175,7 +174,7 @@ fn ensure_planned(
     };
 
     for dep in builder.inputs().values().copied().collect::<Vec<_>>() {
-        ensure_planned(store, subjects, states, dep)?;
+        resolve_planning_state(store, subjects, states, dep)?;
     }
 
     let Some(realized_inputs) = reused_inputs_for_builder(states, builder)? else {
@@ -183,18 +182,18 @@ fn ensure_planned(
         return Ok(());
     };
 
-    if let Some(reuse) = lookup_after_inputs_reused(
-        subject.as_ref(),
-        PlannedDependencyLookupContext {
-            store,
-            realized_inputs: &realized_inputs,
-        },
-    )? {
+    let reuse_key = builder.reuse_key_for_realized_inputs(&realized_inputs)?;
+    if let Some(published) =
+        resolve_reuse_for_build(store, builder.build_key(), reuse_key).map_err(map_store_error)?
+    {
         states.insert(
             key,
             PlanningState::Reused {
-                realized: reuse.realized,
-                origin: reuse.origin,
+                realized: realized_object_from_record(
+                    Some(builder.build_key()),
+                    &published.object_record,
+                ),
+                origin: ReuseOrigin::CanonicalObject,
             },
         );
     } else {
@@ -880,16 +879,20 @@ mod tests {
             (dep_keys[0], rootfs_realized),
             (dep_keys[1], script_realized),
         ]);
-        let published = lookup_after_inputs_reused(
-            subjects.get(&root_key).unwrap().as_ref(),
-            PlannedDependencyLookupContext {
-                store: &store,
-                realized_inputs: &realized_inputs,
-            },
-        )
-        .unwrap()
-        .expect("expected canonical object hit");
-        assert_eq!(published.realized.build_key, Some(root_build_key));
+        let root_builder = subjects
+            .get(&root_key)
+            .unwrap()
+            .as_ref()
+            .as_builder()
+            .expect("expected builder root subject");
+        let actual_reuse_key = root_builder
+            .reuse_key_for_realized_inputs(&realized_inputs)
+            .unwrap();
+        assert_eq!(actual_reuse_key, reuse_key);
+        let published = resolve_reuse_for_build(&store, root_build_key, actual_reuse_key)
+            .unwrap()
+            .expect("expected canonical object hit");
+        assert_eq!(published.build.build_key, root_build_key);
     }
 
     #[test]
