@@ -12,13 +12,13 @@ use mbuild_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuilderRun,
     CancellationToken, Workspace,
 };
-use serde_json::{Map, Value, to_string_pretty};
+use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 type SubjectGraph = HashMap<BuildKey, Arc<PlannedSubject>>;
 type PlanningStates = HashMap<BuildKey, PlanningState>;
@@ -358,25 +358,6 @@ fn execute_misses(cx: ExecuteMissesContext<'_>) -> Result<RealizedObject, Runtim
 
     let (tx, rx) = mpsc::channel::<(BuildKey, Result<SubjectExecution, RuntimeError>)>();
     let mut in_flight = HashMap::<BuildKey, JoinHandle<()>>::new();
-    let mut last_wait_log: Option<Instant> = None;
-    let scheduler_workspace = create_workspace(
-        store,
-        "Scheduler",
-        Some("executor".to_string()),
-        root_key.to_string(),
-    )
-    .map(core_workspace)
-    .map_err(map_store_error)?;
-    let scheduler_run = BuilderRun::new(
-        "Scheduler",
-        Some("executor".to_string()),
-        root_key.to_string(),
-        scheduler_workspace,
-    );
-    let scheduler_logger = logger
-        .bind_builder(&scheduler_run)
-        .map_err(RuntimeError::Store)?;
-    cleanup_workspace_temp_dir(store, scheduler_run.temp_dir(), scheduler_logger.as_ref());
 
     while !completed.contains_key(&root_key) {
         if first_error.is_none() && cancellation.is_cancelled() {
@@ -442,20 +423,6 @@ fn execute_misses(cx: ExecuteMissesContext<'_>) -> Result<RealizedObject, Runtim
                             "build cancelled by signal".to_string(),
                         ));
                     }
-                    if let Some(error) = &first_error
-                        && should_log_scheduler_wait(last_wait_log)
-                    {
-                        let details =
-                            scheduler_wait_details(subjects, completed, &ready, &in_flight, error);
-                        log_scheduler_event(
-                            scheduler_logger.as_ref(),
-                            BuildLogLevel::Warn,
-                            "scheduler-wait",
-                            "first error recorded; waiting for in-flight jobs to finish",
-                            details,
-                        );
-                        last_wait_log = Some(Instant::now());
-                    }
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(RuntimeError::Build(
@@ -473,18 +440,7 @@ fn execute_misses(cx: ExecuteMissesContext<'_>) -> Result<RealizedObject, Runtim
             Ok(executed) => executed,
             Err(error) => {
                 if first_error.is_none() {
-                    let details = scheduler_first_error_details(
-                        subjects, completed, &ready, &in_flight, key, &error,
-                    );
-                    log_scheduler_event(
-                        scheduler_logger.as_ref(),
-                        BuildLogLevel::Error,
-                        "scheduler-error",
-                        "worker returned first error; running jobs remain in flight",
-                        details,
-                    );
                     first_error = Some(error);
-                    last_wait_log = None;
                 }
                 continue;
             }
@@ -540,128 +496,6 @@ fn execute_misses(cx: ExecuteMissesContext<'_>) -> Result<RealizedObject, Runtim
             root_key
         ))
     })
-}
-
-fn should_log_scheduler_wait(last_wait_log: Option<Instant>) -> bool {
-    last_wait_log
-        .map(|instant| instant.elapsed() >= Duration::from_secs(5))
-        .unwrap_or(true)
-}
-
-fn log_scheduler_event(
-    logger: &dyn BuildLogger,
-    level: BuildLogLevel,
-    phase: &str,
-    message: impl Into<String>,
-    details: Map<String, Value>,
-) {
-    logger.log_event(BuildLogEvent {
-        level,
-        phase: phase.to_string(),
-        message: message.into(),
-        object_hash: None,
-        raw_log_path: None,
-        details,
-    });
-}
-
-fn scheduler_first_error_details(
-    subjects: &SubjectGraph,
-    completed: &HashMap<BuildKey, RealizedObject>,
-    ready: &VecDeque<BuildKey>,
-    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
-    failed_key: BuildKey,
-    error: &RuntimeError,
-) -> Map<String, Value> {
-    let mut details = scheduler_state_details(subjects, completed, ready, in_flight);
-    details.insert(
-        "failed".to_string(),
-        subject_summary_value(subjects, failed_key),
-    );
-    details.insert(
-        "error_class".to_string(),
-        Value::String(error.class().to_string()),
-    );
-    details.insert(
-        "error_message".to_string(),
-        Value::String(error.message().to_string()),
-    );
-    details
-}
-
-fn scheduler_wait_details(
-    subjects: &SubjectGraph,
-    completed: &HashMap<BuildKey, RealizedObject>,
-    ready: &VecDeque<BuildKey>,
-    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
-    error: &RuntimeError,
-) -> Map<String, Value> {
-    let mut details = scheduler_state_details(subjects, completed, ready, in_flight);
-    details.insert(
-        "first_error_class".to_string(),
-        Value::String(error.class().to_string()),
-    );
-    details.insert(
-        "first_error_message".to_string(),
-        Value::String(error.message().to_string()),
-    );
-    details.insert(
-        "wait_reason".to_string(),
-        Value::String("in-flight jobs are allowed to finish after the first error".to_string()),
-    );
-    details
-}
-
-fn scheduler_state_details(
-    subjects: &SubjectGraph,
-    completed: &HashMap<BuildKey, RealizedObject>,
-    ready: &VecDeque<BuildKey>,
-    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
-) -> Map<String, Value> {
-    let mut details = Map::new();
-    details.insert(
-        "completed_count".to_string(),
-        Value::Number((completed.len() as u64).into()),
-    );
-    details.insert(
-        "ready_count".to_string(),
-        Value::Number((ready.len() as u64).into()),
-    );
-    details.insert(
-        "in_flight_count".to_string(),
-        Value::Number((in_flight.len() as u64).into()),
-    );
-    details.insert(
-        "in_flight".to_string(),
-        Value::Array(in_flight_summaries(subjects, in_flight)),
-    );
-    details
-}
-
-fn in_flight_summaries(
-    subjects: &SubjectGraph,
-    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
-) -> Vec<Value> {
-    let mut entries = in_flight
-        .keys()
-        .map(|key| (key.to_string(), subject_summary_value(subjects, *key)))
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
-    entries.into_iter().map(|(_, value)| value).collect()
-}
-
-fn subject_summary_value(subjects: &SubjectGraph, key: BuildKey) -> Value {
-    let mut object = Map::new();
-    object.insert("build_key".to_string(), Value::String(key.to_string()));
-    object.insert("short_key".to_string(), Value::String(key.short()));
-    if let Some(subject) = subjects.get(&key) {
-        object.insert("tag".to_string(), Value::String(subject.tag().to_string()));
-        object.insert(
-            "name".to_string(),
-            Value::String(subject.name().to_string()),
-        );
-    }
-    Value::Object(object)
 }
 
 fn build_run_logger_for_store(
