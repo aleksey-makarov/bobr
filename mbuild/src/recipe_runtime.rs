@@ -703,8 +703,7 @@ mod tests {
     use crate::recipe::collect_graph;
     use bobr_store::{PublishRequest, publish_build};
     use mbuild_core::{
-        CancellationToken, OriginContext, OriginSpec, ParsedOrigin, ReuseInputIdentity,
-        compute_reuse_key,
+        CancellationToken, OriginContext, OriginSpec, ParsedOrigin, compute_reuse_key,
     };
     use mbuild_source::SourcePlannedSubject;
     use serde_json::json;
@@ -861,14 +860,7 @@ mod tests {
             Some(dep_keys[1]),
             "2222222222222222222222222222222222222222222222222222222222222222",
         );
-        let root_inputs = vec![
-            ReuseInputIdentity {
-                object_hash: rootfs_realized.object_hash,
-            },
-            ReuseInputIdentity {
-                object_hash: script_realized.object_hash,
-            },
-        ];
+        let root_inputs = vec![rootfs_realized.object_hash, script_realized.object_hash];
         let reuse_key = compute_reuse_key("Sandbox", &json!({}), &root_inputs).unwrap();
         let stage_dir = temp.path().join("root-out");
         fs::create_dir_all(&stage_dir).unwrap();

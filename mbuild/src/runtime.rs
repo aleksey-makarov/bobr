@@ -7,7 +7,7 @@ use bobr_store::{
 };
 use mbuild_core::{
     BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, Builder,
-    BuilderError, BuilderRun, BuilderRunInit, CancellationToken, IdentityError, ReuseInputIdentity,
+    BuilderError, BuilderRun, BuilderRunInit, CancellationToken, IdentityError, ObjectHash,
     Workspace, compute_reuse_key,
 };
 use serde_json::Value;
@@ -90,8 +90,8 @@ pub(crate) fn execute_builder_node(
     } = request;
 
     check_cancelled(&cancellation)?;
-    let inputs_identity = inputs
-        .ordered_reuse_input_identities(builder.spec())
+    let input_hashes = inputs
+        .ordered_reuse_input_hashes(builder.spec())
         .map_err(map_builder_error)?;
     let workspace = create_workspace(
         store,
@@ -132,7 +132,7 @@ pub(crate) fn execute_builder_node(
     }
 
     let reuse_key =
-        compute_reuse_key(builder.tag(), &config, &inputs_identity).map_err(map_identity_error)?;
+        compute_reuse_key(builder.tag(), &config, &input_hashes).map_err(map_identity_error)?;
     if let Some(published) =
         resolve_reuse_for_build(store, build_key, reuse_key).map_err(map_store_error)?
     {
@@ -193,7 +193,7 @@ pub(crate) fn execute_builder_node(
             store,
             build_key,
             reuse_key,
-            inputs_identity,
+            input_hashes,
             &staged.staged_path,
             object_hash,
         ),
@@ -201,7 +201,7 @@ pub(crate) fn execute_builder_node(
             store,
             build_key,
             reuse_key,
-            inputs_identity,
+            input_hashes,
             &staged.staged_path,
         ),
     }
@@ -238,7 +238,7 @@ pub(crate) fn lookup_canonical_object(
     store: &Store,
     builder_tag: &str,
     config: &Value,
-    inputs: &[ReuseInputIdentity],
+    inputs: &[ObjectHash],
     build_key: BuildKey,
 ) -> Result<Option<PublishedBuild>, RuntimeError> {
     let reuse_key = compute_reuse_key(builder_tag, config, inputs).map_err(map_identity_error)?;
@@ -506,7 +506,7 @@ mod tests {
     use bobr_store::{PublishRequest, create_workspace, publish_build};
     use mbuild_core::{
         BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, BuilderRun, CancellationToken,
-        InputSpec, ReuseInputIdentity, StagedBuildResult, TypedBuilder, compute_build_key,
+        InputSpec, StagedBuildResult, TypedBuilder, compute_build_key,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
@@ -779,11 +779,11 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
 
-        let matching_inputs = vec![ReuseInputIdentity {
-            object_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+        let matching_inputs = vec![
+            "1111111111111111111111111111111111111111111111111111111111111111"
                 .parse()
                 .unwrap(),
-        }];
+        ];
         let payload = json!({ "source": "echo hi\n", "executable": true });
         let reuse_key = compute_reuse_key("RuntimeLookupTest", &payload, &matching_inputs).unwrap();
         let build_key_for_object =
@@ -817,11 +817,11 @@ mod tests {
         .expect("expected canonical object hit");
         assert_eq!(hit.build.build_key, lookup_build_key);
 
-        let mismatching_inputs = vec![ReuseInputIdentity {
-            object_hash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        let mismatching_inputs = vec![
+            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                 .parse()
                 .unwrap(),
-        }];
+        ];
         assert!(
             lookup_canonical_object(
                 &store,

@@ -1,8 +1,6 @@
 use super::*;
 use fsobj_hash::hash_path;
-use mbuild_core::{
-    BuildKey, ObjectHash, ReuseInputIdentity, ReuseKey, compute_build_key, compute_reuse_key,
-};
+use mbuild_core::{BuildKey, ObjectHash, ReuseKey, compute_build_key, compute_reuse_key};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
@@ -43,16 +41,8 @@ fn canonical_json_hash_is_stable_across_key_order() {
 fn reuse_key_is_stable_for_identical_inputs() {
     let payload = json!({ "kind": "sandbox-script" });
     let inputs = vec![
-        ReuseInputIdentity {
-            object_hash: parse_object_hash(
-                "1111111111111111111111111111111111111111111111111111111111111111",
-            ),
-        },
-        ReuseInputIdentity {
-            object_hash: parse_object_hash(
-                "2222222222222222222222222222222222222222222222222222222222222222",
-            ),
-        },
+        parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111"),
+        parse_object_hash("2222222222222222222222222222222222222222222222222222222222222222"),
     ];
 
     assert_eq!(
@@ -307,16 +297,8 @@ fn object_record_round_trips_inputs() {
     let layout = create_test_store(temp.path());
 
     let inputs = vec![
-        ReuseInputIdentity {
-            object_hash: parse_object_hash(
-                "1111111111111111111111111111111111111111111111111111111111111111",
-            ),
-        },
-        ReuseInputIdentity {
-            object_hash: parse_object_hash(
-                "2222222222222222222222222222222222222222222222222222222222222222",
-            ),
-        },
+        parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111"),
+        parse_object_hash("2222222222222222222222222222222222222222222222222222222222222222"),
     ];
     let reuse_key = compute_reuse_key(
         "CasTest",
@@ -348,6 +330,20 @@ fn object_record_round_trips_inputs() {
         .expect("expected object record to exist");
 
     assert_eq!(loaded.inputs, inputs);
+
+    let raw: Value = serde_json::from_slice(
+        &fs::read(layout.object_record_path(published.object_hash)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        raw["inputs"],
+        Value::Array(
+            inputs
+                .iter()
+                .map(|object_hash| Value::String(object_hash.to_string()))
+                .collect()
+        )
+    );
 }
 
 #[test]
@@ -1731,6 +1727,6 @@ fn build_key_for(builder_tag: &str, payload: Value, input_builds: &[BuildKey]) -
     compute_build_key(builder_tag, &payload, input_builds).unwrap()
 }
 
-fn reuse_key_for(builder_tag: &str, payload: Value, inputs: &[ReuseInputIdentity]) -> ReuseKey {
+fn reuse_key_for(builder_tag: &str, payload: Value, inputs: &[ObjectHash]) -> ReuseKey {
     compute_reuse_key(builder_tag, &payload, inputs).unwrap()
 }

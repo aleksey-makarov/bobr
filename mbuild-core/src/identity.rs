@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 
 const INVOCATION_SCHEMA: &str = "bobr-build-invocation-v2";
-const REUSE_INVOCATION_SCHEMA: &str = "bobr-build-reuse-invocation-v1";
+const REUSE_INVOCATION_SCHEMA: &str = "bobr-build-reuse-invocation-v2";
 
 define_hex_hash_type! {
     /// Stable key for a planned build graph node.
@@ -46,22 +46,11 @@ define_hex_hash_type! {
     /// Stable key used to reuse an existing object across equivalent inputs.
     ///
     /// A reuse key is produced by [`compute_reuse_key`] from the builder tag,
-    /// normalized payload, and input object identities.
+    /// normalized payload, and realized input object hashes.
     ///
     /// The textual representation is exactly 64 lowercase hexadecimal
     /// characters.
     pub struct ReuseKey;
-}
-
-/// Identity of an input object used by reuse-key computation and object records.
-///
-/// Reuse is based on realized input object identities rather than only on input
-/// build keys. This lets equivalent input objects participate in reuse even
-/// when they were produced through different build keys.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReuseInputIdentity {
-    /// Hash of the realized input object.
-    pub object_hash: ObjectHash,
 }
 
 /// Error returned while computing build identities.
@@ -128,23 +117,16 @@ pub fn compute_build_key(
 /// Computes the stable reuse key for a normalized object invocation.
 ///
 /// The key covers the builder tag, the normalized JSON payload, and the ordered
-/// list of realized input object identities. Runtime code uses this key to find
+/// list of realized input object hashes. Runtime code uses this key to find
 /// a reusable object even when the current build key has not been seen before.
 pub fn compute_reuse_key(
     builder_tag: &str,
     normalized_payload: &Value,
-    inputs: &[ReuseInputIdentity],
+    inputs: &[ObjectHash],
 ) -> Result<ReuseKey, IdentityError> {
     let input_values = inputs
         .iter()
-        .map(|input| {
-            let mut object = Map::new();
-            object.insert(
-                "object_hash".to_string(),
-                Value::String(input.object_hash.to_string()),
-            );
-            Value::Object(object)
-        })
+        .map(|object_hash| Value::String(object_hash.to_string()))
         .collect::<Vec<_>>();
 
     let mut root = Map::new();

@@ -1,5 +1,5 @@
 use crate::{ObjectRecord, PublishedBuild, Store, StoreError};
-use mbuild_core::{BuildKey, ObjectHash, ReuseInputIdentity, ReuseKey};
+use mbuild_core::{BuildKey, ObjectHash, ReuseKey};
 use std::path::{Path, PathBuf};
 
 /// Request to publish a build under a publication name.
@@ -18,8 +18,8 @@ pub struct PublishRequest {
     pub reuse_key: ReuseKey,
     /// Staged output object to import if reuse does not satisfy the request.
     pub staged_path: PathBuf,
-    /// Realized input object identities to store with a newly materialized object.
-    pub inputs: Vec<ReuseInputIdentity>,
+    /// Realized input object hashes to store with a newly materialized object.
+    pub inputs: Vec<ObjectHash>,
 }
 
 /// Summary returned after a publication update completes.
@@ -103,7 +103,7 @@ pub fn materialize_build(
     store: &Store,
     build_key: BuildKey,
     reuse_key: ReuseKey,
-    inputs: Vec<ReuseInputIdentity>,
+    inputs: Vec<ObjectHash>,
     staged_path: &Path,
 ) -> Result<PublishedBuild, StoreError> {
     materialize_build_impl(store, build_key, reuse_key, inputs, staged_path, None)
@@ -119,7 +119,7 @@ pub fn materialize_build_with_trusted_hash(
     store: &Store,
     build_key: BuildKey,
     reuse_key: ReuseKey,
-    inputs: Vec<ReuseInputIdentity>,
+    inputs: Vec<ObjectHash>,
     staged_path: &Path,
     trusted_object_hash: ObjectHash,
 ) -> Result<PublishedBuild, StoreError> {
@@ -137,7 +137,7 @@ fn materialize_build_impl(
     store: &Store,
     build_key: BuildKey,
     reuse_key: ReuseKey,
-    inputs: Vec<ReuseInputIdentity>,
+    inputs: Vec<ObjectHash>,
     staged_path: &Path,
     object_hash: Option<ObjectHash>,
 ) -> Result<PublishedBuild, StoreError> {

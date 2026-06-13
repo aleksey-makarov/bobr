@@ -1,6 +1,4 @@
-use mbuild_core::{
-    BuilderError, BuilderInputObject, BuilderInputs, InputSpec, ObjectHash, ReuseInputIdentity,
-};
+use mbuild_core::{BuilderError, BuilderInputObject, BuilderInputs, InputSpec, ObjectHash};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -77,16 +75,14 @@ impl ResolvedInputs {
         })
     }
 
-    pub(crate) fn ordered_reuse_input_identities(
+    pub(crate) fn ordered_reuse_input_hashes(
         &self,
         spec: &InputSpec,
-    ) -> Result<Vec<ReuseInputIdentity>, BuilderError> {
+    ) -> Result<Vec<ObjectHash>, BuilderError> {
         let mut ordered = Vec::new();
         for name in spec.ordered_present_input_names(&self.slots) {
             if let Some(object) = self.get(name) {
-                ordered.push(ReuseInputIdentity {
-                    object_hash: object.object_hash,
-                });
+                ordered.push(object.object_hash);
             }
         }
         Ok(ordered)
@@ -213,7 +209,7 @@ mod tests {
     };
 
     #[test]
-    fn ordered_reuse_input_identities_follow_input_spec_order() {
+    fn ordered_reuse_input_hashes_follow_input_spec_order() {
         let mut first = sample_object();
         first.object_hash = ObjectHash::from_str(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -242,36 +238,26 @@ mod tests {
             ("extra_a".to_string(), extra_a),
         ]));
 
-        let ordered = inputs
-            .ordered_reuse_input_identities(&ORDERED_SPEC)
-            .unwrap();
+        let ordered = inputs.ordered_reuse_input_hashes(&ORDERED_SPEC).unwrap();
         assert_eq!(
             ordered,
             vec![
-                ReuseInputIdentity {
-                    object_hash: ObjectHash::from_str(
-                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    )
-                    .unwrap(),
-                },
-                ReuseInputIdentity {
-                    object_hash: ObjectHash::from_str(
-                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    )
-                    .unwrap(),
-                },
-                ReuseInputIdentity {
-                    object_hash: ObjectHash::from_str(
-                        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                    )
-                    .unwrap(),
-                },
-                ReuseInputIdentity {
-                    object_hash: ObjectHash::from_str(
-                        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                    )
-                    .unwrap(),
-                },
+                ObjectHash::from_str(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .unwrap(),
+                ObjectHash::from_str(
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                )
+                .unwrap(),
+                ObjectHash::from_str(
+                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                )
+                .unwrap(),
+                ObjectHash::from_str(
+                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                )
+                .unwrap(),
             ]
         );
     }

@@ -8,12 +8,10 @@ use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, SourceLookup, Store, create_workspace,
     import_source_object, lookup_source_object, remove_store_temp_dir_force,
 };
-#[cfg(test)]
-use mbuild_core::ObjectHash;
 use mbuild_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase,
-    CancellationToken, OriginContext, ReuseInputIdentity, SourceBuilderClass, SourceBuilderInit,
-    Workspace, compute_build_key,
+    CancellationToken, ObjectHash, OriginContext, SourceBuilderClass, SourceBuilderInit, Workspace,
+    compute_build_key,
 };
 use mbuild_source::SourcePlannedSubject;
 use serde_json::Value;
@@ -205,12 +203,12 @@ fn lookup_builder_after_inputs_reused(
     subject: &BuilderPlannedSubject,
     cx: PlannedDependencyLookupContext<'_>,
 ) -> Result<Option<ReuseDecision>, RuntimeError> {
-    let input_identities = builder_realized_input_identities(subject, cx.realized_inputs)?;
+    let input_hashes = builder_realized_input_hashes(subject, cx.realized_inputs)?;
     Ok(lookup_canonical_object(
         cx.store,
         subject.builder.tag(),
         &subject.config,
-        &input_identities,
+        &input_hashes,
         subject.build_key,
     )?
     .map(|published| ReuseDecision {
@@ -394,10 +392,10 @@ fn execute_source_subject(
     }
 }
 
-fn builder_realized_input_identities(
+fn builder_realized_input_hashes(
     subject: &BuilderPlannedSubject,
     realized_inputs: &HashMap<BuildKey, RealizedObject>,
-) -> Result<Vec<ReuseInputIdentity>, RuntimeError> {
+) -> Result<Vec<ObjectHash>, RuntimeError> {
     let mut ordered = Vec::new();
     for input_name in subject
         .builder
@@ -416,9 +414,7 @@ fn builder_realized_input_identities(
                 key, subject.name
             ))
         })?;
-        ordered.push(ReuseInputIdentity {
-            object_hash: realized.object_hash,
-        });
+        ordered.push(realized.object_hash);
     }
     Ok(ordered)
 }

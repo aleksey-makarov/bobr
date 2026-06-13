@@ -1,12 +1,12 @@
 use crate::fsutil as private_fs;
 use crate::{Store, StoreError};
-use mbuild_core::{BuildKey, ObjectHash, ReuseInputIdentity};
+use mbuild_core::{BuildKey, ObjectHash};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::fs;
 use std::path::PathBuf;
 
-pub(crate) const OBJECT_RECORD_SCHEMA: &str = "bobr-object-record-v2";
+pub(crate) const OBJECT_RECORD_SCHEMA: &str = "bobr-object-record-v3";
 #[cfg(test)]
 pub(crate) const OBJECT_RECORD_SCHEMA_FOR_TEST: &str = OBJECT_RECORD_SCHEMA;
 
@@ -37,8 +37,8 @@ pub struct ObjectRecord {
     pub object_hash: ObjectHash,
     /// Optional store run id that recorded this object.
     pub run_id: Option<String>,
-    /// Realized input object identities used for reuse accounting.
-    pub inputs: Vec<ReuseInputIdentity>,
+    /// Realized input object hashes used for reuse accounting.
+    pub inputs: Vec<ObjectHash>,
 }
 
 /// Object information returned to runtime code after resolving or publishing.
@@ -211,18 +211,11 @@ pub(crate) fn build_from_object_record(build_key: BuildKey, object_record: &Obje
 fn object_record_json_value_from_parts(
     run_id: Option<&str>,
     object_hash: ObjectHash,
-    inputs: &[ReuseInputIdentity],
+    inputs: &[ObjectHash],
 ) -> Value {
     let input_values = inputs
         .iter()
-        .map(|input| {
-            let mut object = Map::new();
-            object.insert(
-                "object_hash".to_string(),
-                Value::String(input.object_hash.to_string()),
-            );
-            Value::Object(object)
-        })
+        .map(|input_hash| Value::String(input_hash.to_string()))
         .collect::<Vec<_>>();
 
     let mut root = Map::new();
@@ -253,7 +246,7 @@ fn object_record_json_value(record: &ObjectRecord) -> Value {
 pub(crate) fn build_json_value(
     run_id: Option<&str>,
     object_hash: ObjectHash,
-    inputs: &[ReuseInputIdentity],
+    inputs: &[ObjectHash],
 ) -> Value {
     object_record_json_value_from_parts(run_id, object_hash, inputs)
 }
@@ -307,19 +300,14 @@ pub(crate) fn parse_object_record_value(
         .ok_or_else(|| StoreError::InvalidData("object record is missing 'inputs'".to_string()))?
         .iter()
         .map(|value| {
-            let object = value.as_object().ok_or_else(|| {
-                StoreError::InvalidData("object record inputs must contain objects".to_string())
-            })?;
-            let object_hash = object
-                .get("object_hash")
-                .and_then(Value::as_str)
+            value
+                .as_str()
                 .ok_or_else(|| {
                     StoreError::InvalidData(
-                        "object record input is missing 'object_hash'".to_string(),
+                        "object record inputs must contain object hash strings".to_string(),
                     )
                 })
-                .and_then(parse_object_hash_for_record)?;
-            Ok(ReuseInputIdentity { object_hash })
+                .and_then(parse_object_hash_for_record)
         })
         .collect::<Result<Vec<_>, _>>()?;
 
