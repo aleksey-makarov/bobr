@@ -5,8 +5,8 @@ use crate::runtime::{
     map_store_error,
 };
 use bobr_store::{
-    ObjectRecord, RealizedObject, SourceImportOutcome, SourceLookup, Store, create_workspace,
-    import_source_object, lookup_source_object, remove_store_temp_dir_force,
+    ObjectRecord, RealizedObject, SourceImportOutcome, Store, create_workspace,
+    import_source_object, record_existing_source_object, remove_store_temp_dir_force,
 };
 use mbuild_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase,
@@ -35,6 +35,13 @@ impl PlannedSubject {
         match self {
             Self::Source(subject) => subject.tag(),
             Self::Builder(subject) => subject.tag(),
+        }
+    }
+
+    pub(crate) fn build_key(&self) -> BuildKey {
+        match self {
+            Self::Source(subject) => subject.build_key(),
+            Self::Builder(subject) => subject.build_key(),
         }
     }
 
@@ -158,10 +165,15 @@ pub(crate) fn lookup_direct_reuse(
     subject: &PlannedSubject,
     cx: PlannedLookupContext<'_>,
 ) -> Result<Option<ReuseDecision>, RuntimeError> {
-    match subject {
-        PlannedSubject::Source(subject) => lookup_source_direct_reuse(subject, cx),
-        PlannedSubject::Builder(subject) => lookup_builder_direct_reuse(subject, cx),
-    }
+    Ok(
+        lookup_build_handle(cx.store, subject.build_key())?.map(|published| ReuseDecision {
+            realized: realized_object_from_record(
+                Some(published.build.build_key),
+                &published.object_record,
+            ),
+            origin: ReuseOrigin::BuildHandle,
+        }),
+    )
 }
 
 pub(crate) fn lookup_after_inputs_reused(
@@ -184,21 +196,6 @@ pub(crate) fn execute_subject(
     }
 }
 
-fn lookup_builder_direct_reuse(
-    subject: &BuilderPlannedSubject,
-    cx: PlannedLookupContext<'_>,
-) -> Result<Option<ReuseDecision>, RuntimeError> {
-    Ok(
-        lookup_build_handle(cx.store, subject.build_key)?.map(|published| ReuseDecision {
-            realized: realized_object_from_record(
-                Some(published.build.build_key),
-                &published.object_record,
-            ),
-            origin: ReuseOrigin::BuildHandle,
-        }),
-    )
-}
-
 fn lookup_builder_after_inputs_reused(
     subject: &BuilderPlannedSubject,
     cx: PlannedDependencyLookupContext<'_>,
@@ -215,19 +212,6 @@ fn lookup_builder_after_inputs_reused(
         realized: realized_object_from_record(Some(subject.build_key), &published.object_record),
         origin: ReuseOrigin::CanonicalObject,
     }))
-}
-
-fn lookup_source_direct_reuse(
-    subject: &SourcePlannedSubject,
-    cx: PlannedLookupContext<'_>,
-) -> Result<Option<ReuseDecision>, RuntimeError> {
-    match lookup_source_object(cx.store, subject.declared_object_hash()).map_err(map_store_error)? {
-        SourceLookup::Hit(stored) => Ok(Some(ReuseDecision {
-            realized: realized_object_from_record(Some(subject.build_key()), &stored.object_record),
-            origin: ReuseOrigin::CanonicalObject,
-        })),
-        SourceLookup::Missing => Ok(None),
-    }
 }
 
 fn execute_builder_subject(
@@ -289,24 +273,37 @@ fn execute_source_subject(
         return Err(error);
     }
 
-    match lookup_source_object(cx.store, source_builder.declared_object_hash())
-        .map_err(map_store_error)?
-    {
-        SourceLookup::Hit(stored) => {
-            log_runtime_event(
-                logger.as_ref(),
-                BuildLogLevel::Info,
-                "object-hit",
-                "reusing existing source object",
-            );
-            cleanup_workspace_temp_dir(cx.store, source_builder.temp_dir(), logger.as_ref());
-            return Ok(SubjectExecution {
-                realized: realized_object_from_record(Some(build_key), &stored.object_record),
-                logger,
-            });
-        }
-        SourceLookup::Missing => {}
+    if let Some(published) = lookup_build_handle(cx.store, build_key)? {
+        log_runtime_event(
+            logger.as_ref(),
+            BuildLogLevel::Info,
+            "cache-hit",
+            "reusing existing source build ref",
+        );
+        cleanup_workspace_temp_dir(cx.store, source_builder.temp_dir(), logger.as_ref());
+        return Ok(SubjectExecution {
+            realized: realized_object_from_record(Some(build_key), &published.object_record),
+            logger,
+        });
     }
+
+    if let Some(stored) =
+        record_existing_source_object(cx.store, source_builder.declared_object_hash())
+            .map_err(map_store_error)?
+    {
+        log_runtime_event(
+            logger.as_ref(),
+            BuildLogLevel::Info,
+            "object-hit",
+            "reusing existing source object",
+        );
+        cleanup_workspace_temp_dir(cx.store, source_builder.temp_dir(), logger.as_ref());
+        return Ok(SubjectExecution {
+            realized: realized_object_from_record(Some(build_key), &stored.object_record),
+            logger,
+        });
+    }
+
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,

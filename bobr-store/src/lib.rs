@@ -43,7 +43,7 @@ pub use refs::{
     load_build_handle, load_public_build, load_publication, publish_stored_object,
     resolve_reuse_for_build,
 };
-pub use source::{SourceImportOutcome, SourceLookup, import_source_object, lookup_source_object};
+pub use source::{SourceImportOutcome, import_source_object, record_existing_source_object};
 pub use store::{
     QuarantinedStoreTemp, Store, StoreRunLogLocations, StoreTempQuarantineRequest, StoreWorkspace,
     create_workspace, quarantine_store_temp, recreate_store_temp_dir_force,

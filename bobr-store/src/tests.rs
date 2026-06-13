@@ -360,15 +360,15 @@ fn record_existing_source_object_requires_existing_object() {
 }
 
 #[test]
-fn lookup_source_object_returns_missing_when_record_and_object_absent() {
+fn record_existing_source_object_returns_none_when_object_absent() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
 
-    let lookup = lookup_source_object(&layout, object_hash).unwrap();
+    let recorded = record_existing_source_object(&layout, object_hash).unwrap();
 
-    assert!(matches!(lookup, SourceLookup::Missing));
+    assert!(recorded.is_none());
     assert!(!layout.object_record_path(object_hash).exists());
     assert!(
         load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
@@ -378,7 +378,7 @@ fn lookup_source_object_returns_missing_when_record_and_object_absent() {
 }
 
 #[test]
-fn lookup_source_object_reuses_canonical_record() {
+fn record_existing_source_object_reuses_canonical_record() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
     let stage = temp.path().join("source.txt");
@@ -386,11 +386,9 @@ fn lookup_source_object_reuses_canonical_record() {
     let object_hash = import_object(&layout, &stage).unwrap();
     let stored = crate::record::record_existing_source_object(&layout, object_hash).unwrap();
 
-    let lookup = lookup_source_object(&layout, object_hash).unwrap();
-
-    let SourceLookup::Hit(hit) = lookup else {
-        panic!("expected source hit");
-    };
+    let hit = record_existing_source_object(&layout, object_hash)
+        .unwrap()
+        .expect("expected source hit");
     assert_eq!(
         hit.object_record.object_hash,
         stored.object_record.object_hash
@@ -403,7 +401,7 @@ fn lookup_source_object_reuses_canonical_record() {
 }
 
 #[test]
-fn lookup_source_object_records_existing_object_as_source_object() {
+fn record_existing_source_object_records_existing_object_as_source_object() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
     let stage = temp.path().join("source.txt");
@@ -412,11 +410,9 @@ fn lookup_source_object_records_existing_object_as_source_object() {
     let object_record_path = layout.object_record_path(object_hash);
     assert!(!object_record_path.exists());
 
-    let lookup = lookup_source_object(&layout, object_hash).unwrap();
-
-    let SourceLookup::Hit(hit) = lookup else {
-        panic!("expected source hit");
-    };
+    let hit = record_existing_source_object(&layout, object_hash)
+        .unwrap()
+        .expect("expected source hit");
     assert_eq!(hit.object_record.object_hash, object_hash);
     assert_eq!(hit.object_record.inputs, Vec::new());
     assert_eq!(hit.object_record.run_id.as_deref(), Some(layout.run_id()));

@@ -1,17 +1,10 @@
 use crate::object::import_object;
-use crate::record::{StoredObjectRecord, load_stored_object_record, record_existing_source_object};
+use crate::record::{
+    StoredObjectRecord, record_existing_source_object as record_existing_source_object_record,
+};
 use crate::{Store, StoreError};
 use mbuild_core::{BuildKey, ObjectHash};
 use std::path::Path;
-
-/// Outcome of looking up the canonical store state for a declared source object.
-#[derive(Debug, Clone)]
-pub enum SourceLookup {
-    /// The source is available through an existing canonical object record.
-    Hit(StoredObjectRecord),
-    /// Neither the canonical object record nor the declared object exists in the store.
-    Missing,
-}
 
 /// Outcome of importing a materialized source origin into the store.
 #[derive(Debug, Clone)]
@@ -25,28 +18,22 @@ pub enum SourceImportOutcome {
     },
 }
 
-/// Looks up the canonical object record for a declared source object.
+/// Records an already-imported source object when it is present in the store.
 ///
-/// If the object record is missing but the declared object already exists in
-/// the store, this records the object as a canonical source object
-/// idempotently and returns it as a hit. On every hit, this also records the
-/// source build handle `builds/<object_hash>`.
-pub fn lookup_source_object(
+/// If the object is missing, this returns `Ok(None)`. If it exists, this
+/// idempotently writes the canonical object record and the source build handle
+/// `builds/<object_hash>`.
+pub fn record_existing_source_object(
     store: &Store,
     declared_hash: ObjectHash,
-) -> Result<SourceLookup, StoreError> {
-    if let Some(stored) = load_stored_object_record(store, declared_hash)? {
-        record_source_build_handle(store, declared_hash)?;
-        return Ok(SourceLookup::Hit(stored));
+) -> Result<Option<StoredObjectRecord>, StoreError> {
+    if !store.object_path(declared_hash).exists() {
+        return Ok(None);
     }
 
-    if store.object_path(declared_hash).exists() {
-        let stored = record_existing_source_object(store, declared_hash)?;
-        record_source_build_handle(store, declared_hash)?;
-        return Ok(SourceLookup::Hit(stored));
-    }
-
-    Ok(SourceLookup::Missing)
+    let stored = record_existing_source_object_record(store, declared_hash)?;
+    record_source_build_handle(store, declared_hash)?;
+    Ok(Some(stored))
 }
 
 /// Imports a materialized source origin and records it if it matches the declaration.
@@ -65,7 +52,7 @@ pub fn import_source_object(
         return Ok(SourceImportOutcome::Mismatched { actual_hash });
     }
 
-    let stored = record_existing_source_object(store, declared_hash)?;
+    let stored = record_existing_source_object_record(store, declared_hash)?;
     record_source_build_handle(store, declared_hash)?;
     Ok(SourceImportOutcome::Matched(stored))
 }

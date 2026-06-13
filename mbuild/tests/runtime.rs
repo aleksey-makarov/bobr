@@ -14,9 +14,9 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use support::{
-    base_image_recipe, build_ref_count, group_recipe, recipe_node, remove_object_record,
-    source_recipe, spawn_test_oci_registry, store_root, tree_file_recipe, write_recipe,
-    write_recipe_with_options,
+    base_image_recipe, build_ref_count, group_recipe, recipe_node, remove_build_ref,
+    remove_object_record, source_recipe, spawn_test_oci_registry, store_root, tree_file_recipe,
+    write_recipe, write_recipe_with_options,
 };
 #[cfg(feature = "integration-tests")]
 use support::{tree_directory_recipe, tree_symlink_recipe};
@@ -990,6 +990,10 @@ fn source_without_origin_republishes_existing_object() {
     let first = run_recipe_json_in_workspace(workspace.path(), &materialized_recipe_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
+    remove_build_ref(
+        workspace.path(),
+        first.build_key.expect("expected source build key"),
+    );
     remove_object_record(workspace.path(), first.object_hash);
 
     let recipe_path = workspace.path().join("source-cutoff-missing-record.json");
