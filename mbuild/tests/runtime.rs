@@ -1,5 +1,6 @@
 mod support;
 
+use bobr_store::identity::BuildKey;
 use bobr_store::{Store, load_build_handle, load_object_record, load_publication};
 use mbuild::recipe_runtime::run_recipe_json_in_workspace;
 use serde_json::{Value, json};
@@ -20,6 +21,10 @@ use support::{
 #[cfg(feature = "integration-tests")]
 use support::{tree_directory_recipe, tree_symlink_recipe};
 use tempfile::tempdir;
+
+fn source_build_key(object_hash: fsobj_hash::ObjectHash) -> BuildKey {
+    BuildKey::from_object_hash(object_hash)
+}
 
 #[test]
 fn registered_builders_include_current_tags_only() {
@@ -365,7 +370,7 @@ fn json_recipe_executes_source_and_group_graph() {
     }
 
     let objects_dir = store_root(workspace.path()).join("objects");
-    assert_eq!(build_ref_count(workspace.path()), 1);
+    assert_eq!(build_ref_count(workspace.path()), 3);
     assert_eq!(fs::read_dir(&objects_dir).unwrap().count(), 3);
     drop(oci_server);
 }
@@ -412,7 +417,7 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
             .unwrap()
             .is_some()
     );
-    assert_eq!(build_ref_count(workspace.path()), 1);
+    assert_eq!(build_ref_count(workspace.path()), 2);
     assert!(load_publication(&layout, "source-a").unwrap().is_some());
     assert!(load_publication(&layout, "source-b").unwrap().is_none());
 }
@@ -635,7 +640,7 @@ fn tree_symlink_recipe_builds_successfully_via_runtime() {
 }
 
 #[test]
-fn source_path_file_materializes_known_object_without_build_handle() {
+fn source_path_file_materializes_known_object_with_source_build_handle() {
     let workspace = tempdir().unwrap();
     let source_path = workspace.path().join("payload.txt");
     fs::write(&source_path, b"hello source\n").unwrap();
@@ -654,18 +659,23 @@ fn source_path_file_materializes_known_object_without_build_handle() {
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    assert!(realized.build_key.is_none());
+    let build_key = source_build_key(object_hash);
+    assert_eq!(realized.build_key, Some(build_key));
     assert_eq!(realized.object_hash, object_hash);
     assert!(object_path_exists(&layout, object_hash));
+    let published = load_build_handle(&layout, build_key)
+        .unwrap()
+        .expect("expected source build handle");
+    assert_eq!(published.object_record.object_hash, object_hash);
     let result = load_object_record(&layout, realized.object_hash)
         .unwrap()
         .expect("expected source object record");
     assert_eq!(result.object_hash, object_hash);
-    assert_eq!(build_ref_count(workspace.path()), 0);
+    assert_eq!(build_ref_count(workspace.path()), 1);
 }
 
 #[test]
-fn source_path_tar_materializes_unpacked_tree_without_build_handle() {
+fn source_path_tar_materializes_unpacked_tree_with_source_build_handle() {
     let workspace = tempdir().unwrap();
     let tar_path = workspace.path().join("payload.tar");
     {
@@ -699,9 +709,14 @@ fn source_path_tar_materializes_unpacked_tree_without_build_handle() {
         .unwrap()
         .expect("expected publication");
     let object_path = publication.object_path;
-    assert!(realized.build_key.is_none());
+    let build_key = source_build_key(object_hash);
+    assert_eq!(realized.build_key, Some(build_key));
     assert_eq!(realized.object_hash, object_hash);
     assert_eq!(publication.object_record.object_hash, object_hash);
+    let published = load_build_handle(&layout, build_key)
+        .unwrap()
+        .expect("expected source build handle");
+    assert_eq!(published.object_record.object_hash, object_hash);
     assert!(object_path.is_dir());
     assert_eq!(
         fs::read_to_string(object_path.join("pkg/README.txt")).unwrap(),
@@ -924,7 +939,7 @@ fn source_without_origin_reuses_existing_canonical_object() {
 
     let second = run_recipe_json_in_workspace(workspace.path(), &cutoff_recipe_path).unwrap();
     assert_eq!(first.object_hash, second.object_hash);
-    assert!(second.build_key.is_none());
+    assert_eq!(second.build_key, Some(source_build_key(object_hash)));
 }
 
 #[test]
@@ -950,7 +965,10 @@ fn source_without_origin_reuses_existing_oci_layout_object() {
 
     let second = run_recipe_json_in_workspace(workspace.path(), &cutoff_recipe_path).unwrap();
     assert_eq!(first.object_hash, second.object_hash);
-    assert!(second.build_key.is_none());
+    assert_eq!(
+        second.build_key,
+        Some(source_build_key(object_hash.parse().unwrap()))
+    );
 }
 
 #[test]

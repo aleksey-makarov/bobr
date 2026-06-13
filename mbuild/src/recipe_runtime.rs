@@ -5,9 +5,7 @@ use crate::planned::{
 };
 use crate::recipe::{RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
-#[cfg(test)]
 use bobr_store::identity::BuildKey;
-use bobr_store::identity::GraphKey;
 use bobr_store::{
     RealizedObject, Store, StoreWorkspace, create_workspace, publish_stored_object,
     remove_store_temp_dir_force,
@@ -24,8 +22,8 @@ use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-type SubjectGraph = HashMap<GraphKey, Arc<PlannedSubject>>;
-type PlanningStates = HashMap<GraphKey, PlanningState>;
+type SubjectGraph = HashMap<BuildKey, Arc<PlannedSubject>>;
+type PlanningStates = HashMap<BuildKey, PlanningState>;
 
 pub fn run_recipe_json_in_workspace(
     _workspace_root: &Path,
@@ -144,7 +142,7 @@ fn ensure_planned(
     store: &Store,
     subjects: &SubjectGraph,
     states: &mut PlanningStates,
-    key: GraphKey,
+    key: BuildKey,
 ) -> Result<(), RuntimeError> {
     let subject = {
         let subject = subjects.get(&key).ok_or_else(|| {
@@ -204,14 +202,14 @@ fn ensure_planned(
     Ok(())
 }
 
-fn set_planning_state(states: &mut PlanningStates, key: GraphKey, state: PlanningState) {
+fn set_planning_state(states: &mut PlanningStates, key: BuildKey, state: PlanningState) {
     states.insert(key, state);
 }
 
 fn reused_inputs_for_builder(
     states: &PlanningStates,
     builder: &BuilderPlannedSubject,
-) -> Result<Option<HashMap<GraphKey, RealizedObject>>, RuntimeError> {
+) -> Result<Option<HashMap<BuildKey, RealizedObject>>, RuntimeError> {
     let mut realized_inputs = HashMap::new();
     for dep in builder.inputs().values() {
         let dep_state = states.get(dep).ok_or_else(|| {
@@ -232,9 +230,9 @@ fn reused_inputs_for_builder(
 }
 
 fn completed_inputs_for_builder(
-    completed: &HashMap<GraphKey, RealizedObject>,
+    completed: &HashMap<BuildKey, RealizedObject>,
     builder: &BuilderPlannedSubject,
-) -> Result<HashMap<GraphKey, RealizedObject>, RuntimeError> {
+) -> Result<HashMap<BuildKey, RealizedObject>, RuntimeError> {
     let mut realized_inputs = HashMap::new();
     for dep in builder.inputs().values() {
         let realized = completed.get(dep).cloned().ok_or_else(|| {
@@ -251,7 +249,7 @@ fn completed_inputs_for_builder(
 fn publish_reused_root(
     store: &Store,
     logger: &Arc<BuildRunLogger>,
-    key: GraphKey,
+    key: BuildKey,
     root_tag: &str,
     root_name: &str,
     realized: &RealizedObject,
@@ -316,8 +314,8 @@ struct ExecuteMissesContext<'a> {
     logger: Arc<BuildRunLogger>,
     subjects: &'a SubjectGraph,
     states: &'a PlanningStates,
-    completed: &'a mut HashMap<GraphKey, RealizedObject>,
-    root_key: GraphKey,
+    completed: &'a mut HashMap<BuildKey, RealizedObject>,
+    root_key: BuildKey,
     jobs: usize,
     cancellation: CancellationToken,
 }
@@ -334,9 +332,9 @@ fn execute_misses(cx: ExecuteMissesContext<'_>) -> Result<RealizedObject, Runtim
         cancellation,
     } = cx;
 
-    let mut remaining = HashMap::<GraphKey, usize>::new();
-    let mut reverse = HashMap::<GraphKey, Vec<GraphKey>>::new();
-    let mut ready = VecDeque::<GraphKey>::new();
+    let mut remaining = HashMap::<BuildKey, usize>::new();
+    let mut reverse = HashMap::<BuildKey, Vec<BuildKey>>::new();
+    let mut ready = VecDeque::<BuildKey>::new();
     let mut first_error: Option<RuntimeError> = None;
 
     for (key, state) in states {
@@ -361,8 +359,8 @@ fn execute_misses(cx: ExecuteMissesContext<'_>) -> Result<RealizedObject, Runtim
         }
     }
 
-    let (tx, rx) = mpsc::channel::<(GraphKey, Result<SubjectExecution, RuntimeError>)>();
-    let mut in_flight = HashMap::<GraphKey, JoinHandle<()>>::new();
+    let (tx, rx) = mpsc::channel::<(BuildKey, Result<SubjectExecution, RuntimeError>)>();
+    let mut in_flight = HashMap::<BuildKey, JoinHandle<()>>::new();
     let mut last_wait_log: Option<Instant> = None;
     let scheduler_workspace = create_workspace(
         store,
@@ -572,10 +570,10 @@ fn log_scheduler_event(
 
 fn scheduler_first_error_details(
     subjects: &SubjectGraph,
-    completed: &HashMap<GraphKey, RealizedObject>,
-    ready: &VecDeque<GraphKey>,
-    in_flight: &HashMap<GraphKey, JoinHandle<()>>,
-    failed_key: GraphKey,
+    completed: &HashMap<BuildKey, RealizedObject>,
+    ready: &VecDeque<BuildKey>,
+    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
+    failed_key: BuildKey,
     error: &RuntimeError,
 ) -> Map<String, Value> {
     let mut details = scheduler_state_details(subjects, completed, ready, in_flight);
@@ -596,9 +594,9 @@ fn scheduler_first_error_details(
 
 fn scheduler_wait_details(
     subjects: &SubjectGraph,
-    completed: &HashMap<GraphKey, RealizedObject>,
-    ready: &VecDeque<GraphKey>,
-    in_flight: &HashMap<GraphKey, JoinHandle<()>>,
+    completed: &HashMap<BuildKey, RealizedObject>,
+    ready: &VecDeque<BuildKey>,
+    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
     error: &RuntimeError,
 ) -> Map<String, Value> {
     let mut details = scheduler_state_details(subjects, completed, ready, in_flight);
@@ -619,9 +617,9 @@ fn scheduler_wait_details(
 
 fn scheduler_state_details(
     subjects: &SubjectGraph,
-    completed: &HashMap<GraphKey, RealizedObject>,
-    ready: &VecDeque<GraphKey>,
-    in_flight: &HashMap<GraphKey, JoinHandle<()>>,
+    completed: &HashMap<BuildKey, RealizedObject>,
+    ready: &VecDeque<BuildKey>,
+    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
 ) -> Map<String, Value> {
     let mut details = Map::new();
     details.insert(
@@ -645,7 +643,7 @@ fn scheduler_state_details(
 
 fn in_flight_summaries(
     subjects: &SubjectGraph,
-    in_flight: &HashMap<GraphKey, JoinHandle<()>>,
+    in_flight: &HashMap<BuildKey, JoinHandle<()>>,
 ) -> Vec<Value> {
     let mut entries = in_flight
         .keys()
@@ -655,24 +653,9 @@ fn in_flight_summaries(
     entries.into_iter().map(|(_, value)| value).collect()
 }
 
-fn subject_summary_value(subjects: &SubjectGraph, key: GraphKey) -> Value {
+fn subject_summary_value(subjects: &SubjectGraph, key: BuildKey) -> Value {
     let mut object = Map::new();
-    match key {
-        GraphKey::ObjectKey(object_hash) => {
-            object.insert("key_kind".to_string(), Value::String("object".to_string()));
-            object.insert(
-                "object_hash".to_string(),
-                Value::String(object_hash.to_string()),
-            );
-        }
-        GraphKey::BuildKey(build_key) => {
-            object.insert("key_kind".to_string(), Value::String("build".to_string()));
-            object.insert(
-                "build_key".to_string(),
-                Value::String(build_key.to_string()),
-            );
-        }
-    }
+    object.insert("build_key".to_string(), Value::String(key.to_string()));
     object.insert("short_key".to_string(), Value::String(key.short()));
     if let Some(subject) = subjects.get(&key) {
         object.insert("tag".to_string(), Value::String(subject.tag().to_string()));
@@ -800,15 +783,6 @@ mod tests {
         }
     }
 
-    fn expect_build_key(key: GraphKey) -> BuildKey {
-        match key {
-            GraphKey::BuildKey(build_key) => build_key,
-            GraphKey::ObjectKey(object_hash) => {
-                panic!("expected build graph key, got object key {object_hash}")
-            }
-        }
-    }
-
     #[test]
     fn planned_subject_canonical_lookup_uses_dependency_object_hashes() {
         let temp = tempdir().unwrap();
@@ -866,7 +840,7 @@ mod tests {
 
         let mut subjects = HashMap::new();
         let root_key = collect_graph(&request, &mut subjects).unwrap();
-        let root_build_key = expect_build_key(root_key);
+        let root_build_key = root_key;
         let dep_keys = {
             let subject = subjects.get(&root_key).unwrap().as_ref();
             match subject {
@@ -879,11 +853,11 @@ mod tests {
         assert_eq!(dep_keys.len(), 2);
 
         let rootfs_realized = sample_realized(
-            Some(expect_build_key(dep_keys[0])),
+            Some(dep_keys[0]),
             "1111111111111111111111111111111111111111111111111111111111111111",
         );
         let script_realized = sample_realized(
-            Some(expect_build_key(dep_keys[1])),
+            Some(dep_keys[1]),
             "2222222222222222222222222222222222222222222222222222222222222222",
         );
         let root_inputs = vec![

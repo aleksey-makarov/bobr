@@ -14,30 +14,27 @@ objects and canonical object records.
 
 ## Identity Model
 
-A builder node starts as a normalized build invocation. Its first store-facing
-identity is `build_key`, computed from:
+Every planned node has a `build_key`.
+
+For `Source`, `build_key` is the declared `object_hash` reinterpreted as a
+build key. Source nodes have no planned inputs.
+
+For a builder node, `build_key` is computed from:
 
 - builder tag
 - normalized config payload
-- ordered direct input identities
+- ordered direct dependency `build_key`s
 
-Each direct input identity is tagged by its domain:
-
-- builder dependencies contribute their `build_key`
-- source dependencies contribute their declared `object_hash`
-
-The domain tag is part of the build identity, so a build key and an object hash
-with the same 64-character text are still distinct inputs. Dependency order
-follows the builder input contract:
+Dependency order follows the builder input contract:
 
 - reserved inputs in spec order
 - extra inputs in lexical name order
 
 It does not follow the order of fields in JSON.
 
-`build_key` identifies a particular builder invocation and backs the public
-build-handle ref. A build-handle hit can be used before looking through the
-node's direct inputs.
+`build_key` identifies a planned graph node and backs the public build-handle
+ref. For builder nodes, a build-handle hit can be used before looking through
+the node's direct inputs.
 
 After a builder's direct inputs are realized, the builder-only canonical reuse
 identity, `reuse_key`, is computed from:
@@ -61,8 +58,8 @@ Different builder nodes can share one object record when they intentionally
 stage the same payload.
 
 Publication names do not participate in object identity, `build_key`, or
-`reuse_key`. The language-level realized object is `RealizedObject`. For
-builders it may also carry `build_key`; for `Source` it does not.
+`reuse_key`. The language-level realized object is `RealizedObject`; it carries
+the `build_key` that resolved to the object when that key is known.
 
 ## Reuse Model
 
@@ -75,7 +72,7 @@ For one planned builder node, builder reuse lookup uses this order:
 If a canonical builder object exists but the public build handle is missing,
 the missing build-handle ref is recreated and the object is reused.
 
-For `Source`, there is no `build_key` and no `reuse_key`.
+For `Source`, there is a `build_key` but no `reuse_key`.
 
 Source reuse lookup uses this order:
 
@@ -83,10 +80,13 @@ Source reuse lookup uses this order:
 2. existing object hit on `object_hash`
 3. actual source materialization
 
+On a source hit or successful materialization, the store creates or repairs the
+source build handle `builds/<object_hash>`.
+
 If source materialization produces a different object than the declared
 `object_hash`, the actual object is still imported into `objects/`, but the
-canonical `object-records/<object_hash>.json` record is not written and the source
-import fails with the actual hash.
+canonical `object-records/<object_hash>.json` record and source build handle are
+not written, and the source import fails with the actual hash.
 
 ## Store Layout
 
@@ -122,8 +122,7 @@ The filesystem layout mirrors the identity model:
 - `objects/` holds payloads addressed by `object_hash`.
 - `object-records/` holds canonical object records addressed by `object_hash`.
 - `reuses/` holds builder-only canonical reuse refs addressed by `reuse_key`.
-- `builds/` holds builder-only public build-handle refs addressed by
-  `build_key`.
+- `builds/` holds public build-handle refs addressed by `build_key`.
 - `object-record-refs/` holds human-facing refs from publication name to object
   record.
 - `object-refs/` holds human-facing refs from publication name to payload.
@@ -190,8 +189,8 @@ claimed that directory, `.1`, `.2`, and so on are appended. Each builder,
 source, or scheduler subject gets a store-allocated serial number for its log
 directory name. The serial is an internal allocation detail; the full original
 tag, recipe name, subject key, and workspace paths are stored in that subject's
-`meta.json`. Builder subject keys are build keys; source subject keys are
-declared object hashes.
+`meta.json`. Subject keys are build keys; for source subjects that build key is
+the declared object hash.
 
 The run-level event log records lifecycle events such as:
 

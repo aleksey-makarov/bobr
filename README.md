@@ -132,7 +132,7 @@ input targets and their normal `object-record-refs/` and `object-refs/` publicat
 
 - no `config`
 - no `inputs`
-- no `build_key`
+- a `build_key` equal to its declared `object_hash`
 
 In v1, `Source` supports three origins:
 
@@ -151,13 +151,14 @@ In v1, `Source` supports three origins:
 `Source` may also omit `origin`. In that shape, the payload object must
 already exist in the store under `objects/<object_hash>`. If the canonical
 `<store>/object-records/<object_hash>.json` record is missing, `mbuild` reconstructs
-it from the declared object hash.
+it from the declared object hash. A successful source lookup also creates or
+repairs `builds/<object_hash>`.
 
 If a source origin materializes a different object than the declared
 `object_hash`, `mbuild` still imports the actual object into
 `objects/<actual_hash>`, but it does not write the canonical object record or
-publish refs. The failing message includes the actual hash so the recipe can
-be updated and rerun without downloading again.
+source build handle for the declared hash. The failing message includes the
+actual hash so the recipe can be updated and rerun without downloading again.
 
 CLI contract:
 
@@ -182,7 +183,7 @@ The store layout is content-addressed:
   `object-indexes/`
 - `<store>/object-records/` stores canonical object records by `object_hash`
 - `<store>/reuses/` stores builder-only canonical reuse refs by `reuse_key`
-- `<store>/builds/` stores builder-only public build handles by `build_key`
+- `<store>/builds/` stores public build handles by `build_key`
 - `<store>/object-record-refs/` and `<store>/object-refs/` store published current refs
 
 `<store>/object-refs/<name>` always points at
@@ -195,6 +196,9 @@ directory. File and symlink manifest entries include required `h` leaf hashes.
 - builder tag
 - normalized config payload
 - ordered direct dependency `build_key`s
+
+For `Source`, `build_key` is the declared `object_hash` reinterpreted as a
+build key.
 
 `reuse_key` is computed from:
 

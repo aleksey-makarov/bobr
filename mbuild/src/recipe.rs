@@ -1,7 +1,7 @@
 use crate::builders;
 use crate::planned::{BuilderPlannedSubject, PlannedSubject};
 use crate::runtime::RuntimeError;
-use bobr_store::identity::GraphKey;
+use bobr_store::identity::BuildKey;
 #[cfg(test)]
 use bobr_store::identity::compute_build_key;
 use mbuild_source::parse_source_subject;
@@ -34,20 +34,26 @@ impl RecipeEnvelope {
 
 pub(crate) fn collect_graph(
     request: &BTreeMap<String, Value>,
-    subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
-) -> Result<GraphKey, RuntimeError> {
+    subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
+) -> Result<BuildKey, RuntimeError> {
     let mut visited_in_path = BTreeSet::new();
     let mut node_keys = HashMap::new();
-    collect_graph_inner(request, "root", subjects, &mut visited_in_path, &mut node_keys)
+    collect_graph_inner(
+        request,
+        "root",
+        subjects,
+        &mut visited_in_path,
+        &mut node_keys,
+    )
 }
 
 fn collect_graph_inner(
     request: &BTreeMap<String, Value>,
     node_id: &str,
-    subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
+    subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
     visited_in_path: &mut BTreeSet<String>,
-    node_keys: &mut HashMap<String, GraphKey>,
-) -> Result<GraphKey, RuntimeError> {
+    node_keys: &mut HashMap<String, BuildKey>,
+) -> Result<BuildKey, RuntimeError> {
     if let Some(existing) = node_keys.get(node_id) {
         return Ok(*existing);
     }
@@ -74,15 +80,19 @@ fn collect_graph_inner(
     let (key, subject) = if tag == "Source" {
         let subject = parse_source_subject(object, &node_path)
             .map_err(|error| RuntimeError::RecipeLoad(error.to_string()))?;
-        (
-            GraphKey::ObjectKey(subject.object_hash()),
-            Arc::new(PlannedSubject::Source(subject)),
-        )
+        let key = BuildKey::from_object_hash(subject.object_hash());
+        (key, Arc::new(PlannedSubject::Source(subject)))
     } else {
-        let builder_subject =
-            collect_builder_subject(request, object, &node_path, subjects, visited_in_path, node_keys)?;
+        let builder_subject = collect_builder_subject(
+            request,
+            object,
+            &node_path,
+            subjects,
+            visited_in_path,
+            node_keys,
+        )?;
         (
-            GraphKey::BuildKey(builder_subject.build_key()),
+            builder_subject.build_key(),
             Arc::new(PlannedSubject::Builder(builder_subject)),
         )
     };
@@ -98,9 +108,9 @@ fn collect_builder_subject(
     request: &BTreeMap<String, Value>,
     mut object: Map<String, Value>,
     path: &str,
-    subjects: &mut HashMap<GraphKey, Arc<PlannedSubject>>,
+    subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
     visited_in_path: &mut BTreeSet<String>,
-    node_keys: &mut HashMap<String, GraphKey>,
+    node_keys: &mut HashMap<String, BuildKey>,
 ) -> Result<BuilderPlannedSubject, RuntimeError> {
     let name = take_string(&mut object, path, "name")?;
     let tag = take_string(&mut object, path, "tag")?;
@@ -306,7 +316,7 @@ mod tests {
 
     fn collect_one(
         request: &Value,
-    ) -> Result<(GraphKey, HashMap<GraphKey, Arc<PlannedSubject>>), RuntimeError> {
+    ) -> Result<(BuildKey, HashMap<BuildKey, Arc<PlannedSubject>>), RuntimeError> {
         let request = parse_request_value(request.clone(), "$")?;
         let mut subjects = HashMap::new();
         let root_key = collect_graph(&request, &mut subjects)?;
@@ -384,7 +394,7 @@ mod tests {
         });
 
         let (root_key, subjects) = collect_one(&request).unwrap();
-        assert!(matches!(root_key, GraphKey::BuildKey(_)));
+        assert!(subjects.contains_key(&root_key));
         assert_eq!(subjects.len(), 1);
     }
 
@@ -501,7 +511,7 @@ mod tests {
         let object_hash = "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
             .unwrap();
-        let expected_key = GraphKey::ObjectKey(object_hash);
+        let expected_key = BuildKey::from_object_hash(object_hash);
         assert_eq!(root_key, expected_key);
         assert!(
             matches!(subject.as_ref(), PlannedSubject::Source(source) if source.object_hash() == object_hash)
@@ -612,21 +622,18 @@ mod tests {
         let (root_key, _) = collect_one(&request).unwrap();
         let rootfs_key = compute_build_key("Tree", &rootfs["config"], &[]).unwrap();
         let script_key = compute_build_key("Tree", &script["config"], &[]).unwrap();
-        let source_key = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        let source_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             .parse()
             .unwrap();
+        let source_key = BuildKey::from_object_hash(source_hash);
         let expected = compute_build_key(
             "Sandbox",
             &request["root"]["config"],
-            &[
-                GraphKey::BuildKey(rootfs_key),
-                GraphKey::BuildKey(script_key),
-                GraphKey::ObjectKey(source_key),
-            ],
+            &[rootfs_key, script_key, source_key],
         )
         .unwrap();
 
-        assert_eq!(root_key, GraphKey::BuildKey(expected));
+        assert_eq!(root_key, expected);
     }
 
     #[test]
@@ -648,7 +655,7 @@ mod tests {
         let (_root_key, subjects) = collect_one(&request).unwrap();
         let deduped_key =
             compute_build_key("Tree", &tree_config("same.txt", "same", false), &[]).unwrap();
-        let subject = subjects.get(&GraphKey::BuildKey(deduped_key)).unwrap();
+        let subject = subjects.get(&deduped_key).unwrap();
         assert_eq!(subject.name(), "binary-a");
         assert_eq!(subject.tag(), "Tree");
         assert!(

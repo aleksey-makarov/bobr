@@ -5,7 +5,7 @@ use crate::runtime::{
 };
 #[cfg(test)]
 use bobr_store::identity::ObjectHash;
-use bobr_store::identity::{BuildKey, GraphKey, compute_build_key};
+use bobr_store::identity::{BuildKey, compute_build_key};
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, SourceLookup, Store, create_workspace,
     import_source_object, lookup_source_object, remove_store_temp_dir_force,
@@ -53,14 +53,14 @@ pub(crate) struct PlannedLookupContext<'a> {
 
 pub(crate) struct PlannedDependencyLookupContext<'a> {
     pub(crate) store: &'a Store,
-    pub(crate) realized_inputs: &'a HashMap<GraphKey, RealizedObject>,
+    pub(crate) realized_inputs: &'a HashMap<BuildKey, RealizedObject>,
 }
 
 pub(crate) struct PlannedExecutionContext<'a> {
     pub(crate) store: &'a Store,
     pub(crate) run_logger: Arc<BuildRunLogger>,
     pub(crate) cancellation: CancellationToken,
-    pub(crate) realized_inputs: &'a HashMap<GraphKey, RealizedObject>,
+    pub(crate) realized_inputs: &'a HashMap<BuildKey, RealizedObject>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +85,7 @@ pub(crate) struct BuilderPlannedSubject {
     builder: &'static dyn Builder,
     name: String,
     config: Value,
-    inputs: BTreeMap<String, GraphKey>,
+    inputs: BTreeMap<String, BuildKey>,
     build_key: BuildKey,
 }
 
@@ -94,7 +94,7 @@ impl BuilderPlannedSubject {
         builder: &'static dyn Builder,
         name: String,
         config: Value,
-        inputs: BTreeMap<String, GraphKey>,
+        inputs: BTreeMap<String, BuildKey>,
     ) -> Result<Self, RuntimeError> {
         let tag = builder.tag();
         let spec = builder.spec();
@@ -150,7 +150,7 @@ impl BuilderPlannedSubject {
         self.build_key
     }
 
-    pub(crate) fn inputs(&self) -> &BTreeMap<String, GraphKey> {
+    pub(crate) fn inputs(&self) -> &BTreeMap<String, BuildKey> {
         &self.inputs
     }
 }
@@ -224,7 +224,10 @@ fn lookup_source_direct_reuse(
 ) -> Result<Option<ReuseDecision>, RuntimeError> {
     match lookup_source_object(cx.store, subject.object_hash()).map_err(map_store_error)? {
         SourceLookup::Hit(stored) => Ok(Some(ReuseDecision {
-            realized: realized_object_from_record(None, &stored.object_record),
+            realized: realized_object_from_record(
+                Some(source_build_key(subject)),
+                &stored.object_record,
+            ),
             origin: ReuseOrigin::CanonicalObject,
         })),
         SourceLookup::Missing => Ok(None),
@@ -259,18 +262,18 @@ fn execute_source_subject(
     subject: &SourcePlannedSubject,
     cx: PlannedExecutionContext<'_>,
 ) -> Result<SubjectExecution, RuntimeError> {
-    let object_key = subject.object_hash().to_string();
+    let build_key = source_build_key(subject);
     let workspace = create_workspace(
         cx.store,
         "Source",
         Some(subject.name().to_string()),
-        object_key.clone(),
+        build_key.to_string(),
     )
     .map(core_workspace)
     .map_err(map_store_error)?;
     let source_builder = SourceBuilderClass.create_object(SourceBuilderInit {
         recipe_name: subject.name().to_string(),
-        build_key: object_key,
+        build_key: build_key.to_string(),
         declared_object_hash: subject.object_hash(),
         origin: subject.clone_origin(),
         workspace,
@@ -302,7 +305,7 @@ fn execute_source_subject(
             );
             cleanup_workspace_temp_dir(cx.store, source_builder.temp_dir(), logger.as_ref());
             return Ok(SubjectExecution {
-                realized: realized_object_from_record(None, &stored.object_record),
+                realized: realized_object_from_record(Some(build_key), &stored.object_record),
                 logger,
             });
         }
@@ -377,7 +380,7 @@ fn execute_source_subject(
 
     match import_outcome {
         SourceImportOutcome::Matched(stored) => Ok(SubjectExecution {
-            realized: realized_object_from_record(None, &stored.object_record),
+            realized: realized_object_from_record(Some(build_key), &stored.object_record),
             logger,
         }),
         SourceImportOutcome::Mismatched { actual_hash } => {
@@ -393,9 +396,13 @@ fn execute_source_subject(
     }
 }
 
+fn source_build_key(subject: &SourcePlannedSubject) -> BuildKey {
+    BuildKey::from_object_hash(subject.object_hash())
+}
+
 fn builder_realized_input_identities(
     subject: &BuilderPlannedSubject,
-    realized_inputs: &HashMap<GraphKey, RealizedObject>,
+    realized_inputs: &HashMap<BuildKey, RealizedObject>,
 ) -> Result<Vec<bobr_store::ReuseInputIdentity>, RuntimeError> {
     let mut ordered = Vec::new();
     for input_name in subject
@@ -425,7 +432,7 @@ fn builder_realized_input_identities(
 fn builder_resolved_inputs(
     subject: &BuilderPlannedSubject,
     store: &Store,
-    realized_inputs: &HashMap<GraphKey, RealizedObject>,
+    realized_inputs: &HashMap<BuildKey, RealizedObject>,
 ) -> Result<ResolvedInputs, RuntimeError> {
     let mut inputs = ResolvedInputs::empty();
     for input_name in subject
@@ -495,11 +502,9 @@ mod tests {
     use serde_json::json;
     use std::str::FromStr;
 
-    fn sample_graph_key() -> GraphKey {
-        GraphKey::BuildKey(
-            BuildKey::from_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-                .unwrap(),
-        )
+    fn sample_build_key() -> BuildKey {
+        BuildKey::from_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .unwrap()
     }
 
     fn expect_builder_subject_error(
@@ -518,7 +523,7 @@ mod tests {
             builder,
             "tree".to_string(),
             json!({}),
-            BTreeMap::from([("unexpected".to_string(), sample_graph_key())]),
+            BTreeMap::from([("unexpected".to_string(), sample_build_key())]),
         ));
 
         assert!(
@@ -536,7 +541,7 @@ mod tests {
             builder,
             "sandbox".to_string(),
             json!({}),
-            BTreeMap::from([("script".to_string(), sample_graph_key())]),
+            BTreeMap::from([("script".to_string(), sample_build_key())]),
         ));
 
         assert!(

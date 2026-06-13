@@ -1,7 +1,5 @@
 use super::*;
-use crate::identity::{
-    BuildKey, GraphKey, ObjectHash, ReuseKey, compute_build_key, compute_reuse_key,
-};
+use crate::identity::{BuildKey, ObjectHash, ReuseKey, compute_build_key, compute_reuse_key};
 use fsobj_hash::hash_path;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -62,18 +60,11 @@ fn reuse_key_is_stable_for_identical_inputs() {
 }
 
 #[test]
-fn build_key_distinguishes_build_and_object_input_domains() {
+fn source_build_key_uses_object_hash_bytes() {
     let hex = "1111111111111111111111111111111111111111111111111111111111111111";
     let object_hash = parse_object_hash(hex);
-    let build_key = parse_build_key(hex);
-    let payload = json!({ "kind": "domain-test" });
 
-    let by_object =
-        compute_build_key("CasTest", &payload, &[GraphKey::ObjectKey(object_hash)]).unwrap();
-    let by_build =
-        compute_build_key("CasTest", &payload, &[GraphKey::BuildKey(build_key)]).unwrap();
-
-    assert_ne!(by_object, by_build);
+    assert_eq!(BuildKey::from_object_hash(object_hash).to_string(), hex);
 }
 
 #[test]
@@ -381,6 +372,11 @@ fn lookup_source_object_returns_missing_when_record_and_object_absent() {
 
     assert!(matches!(lookup, SourceLookup::Missing));
     assert!(!layout.object_record_path(object_hash).exists());
+    assert!(
+        load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -402,6 +398,10 @@ fn lookup_source_object_reuses_canonical_record() {
         stored.object_record.object_hash
     );
     assert_eq!(hit.object_record.run_id.as_deref(), Some(layout.run_id()));
+    let published = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
+        .unwrap()
+        .expect("expected source build handle");
+    assert_eq!(published.object_record.object_hash, object_hash);
 }
 
 #[test]
@@ -423,6 +423,10 @@ fn lookup_source_object_records_existing_object_as_source_object() {
     assert_eq!(hit.object_record.inputs, Vec::new());
     assert_eq!(hit.object_record.run_id.as_deref(), Some(layout.run_id()));
     assert!(object_record_path.exists());
+    let published = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
+        .unwrap()
+        .expect("expected source build handle");
+    assert_eq!(published.object_record.object_hash, object_hash);
 }
 
 #[test]
@@ -445,6 +449,10 @@ fn import_source_object_on_match_imports_object_and_writes_canonical_record() {
     );
     assert!(layout.object_path(object_hash).exists());
     assert!(layout.object_record_path(object_hash).exists());
+    let published = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
+        .unwrap()
+        .expect("expected source build handle");
+    assert_eq!(published.object_record.object_hash, object_hash);
     assert!(!stage.exists());
 }
 
@@ -471,6 +479,11 @@ fn import_source_object_on_mismatch_imports_actual_object_without_declared_recor
     assert!(layout.object_path(actual_hash).exists());
     assert!(!layout.object_record_path(declared_hash).exists());
     assert!(!layout.object_record_path(actual_hash).exists());
+    assert!(
+        load_build_handle(&layout, BuildKey::from_object_hash(declared_hash))
+            .unwrap()
+            .is_none()
+    );
     assert!(!stage.exists());
 }
 
@@ -1713,12 +1726,7 @@ fn sample_run_id() -> &'static str {
 }
 
 fn build_key_for(builder_tag: &str, payload: Value, input_builds: &[BuildKey]) -> BuildKey {
-    let input_keys = input_builds
-        .iter()
-        .copied()
-        .map(GraphKey::BuildKey)
-        .collect::<Vec<_>>();
-    compute_build_key(builder_tag, &payload, &input_keys).unwrap()
+    compute_build_key(builder_tag, &payload, input_builds).unwrap()
 }
 
 fn reuse_key_for(builder_tag: &str, payload: Value, inputs: &[ReuseInputIdentity]) -> ReuseKey {

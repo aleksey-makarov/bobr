@@ -119,19 +119,22 @@ to realize the root.
 
 For each `Source` node, Rust:
 
-1. checks `<store>/object-records/<object_hash>.json`
-2. if the object record is absent, checks whether
+1. derives `build_key` from `object_hash`
+2. checks `<store>/object-records/<object_hash>.json`
+3. if the object record is absent, checks whether
    `<store>/objects/<object_hash>` already exists
-3. if the object exists, reconstructs the missing canonical object record for
+4. if the object exists, reconstructs the missing canonical object record for
    `object_hash`
-4. if `origin` is missing and the object is absent, fails
-5. if `origin.tag = "Path"` is present, materializes `origin.path` directly
-6. if `origin.tag = "Http"` is present, downloads from `origin.url` in order
+5. creates or repairs `<store>/builds/<build_key>` on a hit
+6. if `origin` is missing and the object is absent, fails
+7. if `origin.tag = "Path"` is present, materializes `origin.path` directly
+8. if `origin.tag = "Http"` is present, downloads from `origin.url` in order
    and either stages one file object or unpacks one directory object
-7. imports the staged object into `objects/<actual_hash>`
-8. if `actual_hash != object_hash`, fails without writing the canonical
-   object record and reports the actual hash
-9. otherwise writes the canonical object record for `object_hash`
+9. imports the staged object into `objects/<actual_hash>`
+10. if `actual_hash != object_hash`, fails without writing the canonical
+    object record or source build handle and reports the actual hash
+11. otherwise writes the canonical object record for `object_hash` and creates
+    or repairs `<store>/builds/<build_key>`
 
 Execution then proceeds bottom-up:
 
@@ -143,9 +146,9 @@ Execution then proceeds bottom-up:
 
 The request is already a DAG-level representation rather than a fully nested
 tree. The runtime still keeps planner and executor state keyed by `build_key`,
-so identical builder graph fragments reuse the same internal state. `Source`
-participates in the same planner/executor flow, but does not have a public
-`build_key`.
+so identical graph fragments reuse the same internal state. `Source`
+participates in the same planner/executor flow with a public `build_key` equal
+to its declared `object_hash`.
 
 ## Builder Interface
 
