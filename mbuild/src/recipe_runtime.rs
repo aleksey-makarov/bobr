@@ -154,8 +154,7 @@ fn ensure_planned(
     };
 
     if let Some(reuse) = lookup_direct_reuse(subject.as_ref(), PlannedLookupContext { store })? {
-        set_planning_state(
-            states,
+        states.insert(
             key,
             PlanningState::Reused {
                 realized: reuse.realized,
@@ -166,7 +165,7 @@ fn ensure_planned(
     }
 
     let Some(builder) = subject.as_builder() else {
-        set_planning_state(states, key, PlanningState::NeedsBuild);
+        states.insert(key, PlanningState::NeedsBuild);
         return Ok(());
     };
 
@@ -175,7 +174,7 @@ fn ensure_planned(
     }
 
     let Some(realized_inputs) = reused_inputs_for_builder(states, builder)? else {
-        set_planning_state(states, key, PlanningState::NeedsBuild);
+        states.insert(key, PlanningState::NeedsBuild);
         return Ok(());
     };
 
@@ -186,8 +185,7 @@ fn ensure_planned(
             realized_inputs: &realized_inputs,
         },
     )? {
-        set_planning_state(
-            states,
+        states.insert(
             key,
             PlanningState::Reused {
                 realized: reuse.realized,
@@ -195,14 +193,10 @@ fn ensure_planned(
             },
         );
     } else {
-        set_planning_state(states, key, PlanningState::NeedsBuild);
+        states.insert(key, PlanningState::NeedsBuild);
     }
 
     Ok(())
-}
-
-fn set_planning_state(states: &mut PlanningStates, key: BuildKey, state: PlanningState) {
-    states.insert(key, state);
 }
 
 fn reused_inputs_for_builder(
