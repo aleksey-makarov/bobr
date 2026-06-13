@@ -10,8 +10,8 @@ use bobr_store::{
 };
 use mbuild_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase,
-    CancellationToken, ObjectHash, OriginContext, ReuseKey, SourceBuilderClass, SourceBuilderInit,
-    Workspace, compute_build_key, compute_reuse_key,
+    CancellationToken, OriginContext, SourceBuilderClass, SourceBuilderInit, Workspace,
+    compute_build_key,
 };
 use mbuild_source::SourcePlannedSubject;
 use serde_json::Value;
@@ -31,20 +31,6 @@ impl PlannedSubject {
         }
     }
 
-    pub(crate) fn tag(&self) -> &str {
-        match self {
-            Self::Source(subject) => subject.tag(),
-            Self::Builder(subject) => subject.tag(),
-        }
-    }
-
-    pub(crate) fn build_key(&self) -> BuildKey {
-        match self {
-            Self::Source(subject) => subject.build_key(),
-            Self::Builder(subject) => subject.build_key(),
-        }
-    }
-
     pub(crate) fn as_builder(&self) -> Option<&BuilderPlannedSubject> {
         match self {
             Self::Source(_) => None,
@@ -58,12 +44,6 @@ pub(crate) struct PlannedExecutionContext<'a> {
     pub(crate) run_logger: Arc<BuildRunLogger>,
     pub(crate) cancellation: CancellationToken,
     pub(crate) realized_inputs: &'a HashMap<BuildKey, RealizedObject>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReuseOrigin {
-    BuildHandle,
-    CanonicalObject,
 }
 
 #[derive(Debug, Clone)]
@@ -133,24 +113,12 @@ impl BuilderPlannedSubject {
         &self.name
     }
 
-    pub(crate) fn tag(&self) -> &str {
-        self.builder.tag()
-    }
-
     pub(crate) fn build_key(&self) -> BuildKey {
         self.build_key
     }
 
     pub(crate) fn inputs(&self) -> &BTreeMap<String, BuildKey> {
         &self.inputs
-    }
-
-    pub(crate) fn reuse_key_for_realized_inputs(
-        &self,
-        realized_inputs: &HashMap<BuildKey, RealizedObject>,
-    ) -> Result<ReuseKey, RuntimeError> {
-        let input_hashes = builder_realized_input_hashes(self, realized_inputs)?;
-        compute_reuse_key(self.tag(), &self.config, &input_hashes).map_err(map_identity_error)
     }
 }
 
@@ -339,33 +307,6 @@ fn execute_source_subject(
     }
 }
 
-fn builder_realized_input_hashes(
-    subject: &BuilderPlannedSubject,
-    realized_inputs: &HashMap<BuildKey, RealizedObject>,
-) -> Result<Vec<ObjectHash>, RuntimeError> {
-    let mut ordered = Vec::new();
-    for input_name in subject
-        .builder
-        .spec()
-        .ordered_present_input_names(&subject.inputs)
-    {
-        let key = subject.inputs.get(input_name).ok_or_else(|| {
-            RuntimeError::Store(format!(
-                "planned builder input '{}' is missing for '{}'",
-                input_name, subject.name
-            ))
-        })?;
-        let realized = realized_inputs.get(key).ok_or_else(|| {
-            RuntimeError::Build(format!(
-                "dependency object '{}' is not available for '{}'",
-                key, subject.name
-            ))
-        })?;
-        ordered.push(realized.object_hash);
-    }
-    Ok(ordered)
-}
-
 fn builder_resolved_inputs(
     subject: &BuilderPlannedSubject,
     store: &Store,
@@ -436,6 +377,7 @@ fn cleanup_workspace_temp_dir(store: &Store, temp_dir: &std::path::Path, logger:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mbuild_core::ObjectHash;
     use serde_json::json;
     use std::str::FromStr;
 
@@ -512,7 +454,6 @@ mod tests {
         let expected = compute_build_key("Tree", &config, &[]).unwrap();
 
         assert_eq!(builder_subject.name(), "tree");
-        assert_eq!(builder_subject.tag(), "Tree");
         assert_eq!(builder_subject.build_key(), expected);
         assert!(builder_subject.inputs().is_empty());
     }

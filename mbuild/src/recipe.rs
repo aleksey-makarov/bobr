@@ -376,7 +376,6 @@ mod tests {
         let (root_key, subjects) = collect_one(&request).unwrap();
         let subject = subjects.get(&root_key).unwrap();
         assert_eq!(subject.name(), "local-source");
-        assert_eq!(subject.tag(), "Source");
         assert!(matches!(subject.as_ref(), PlannedSubject::Source(_)));
     }
 
@@ -397,7 +396,6 @@ mod tests {
         let (root_key, subjects) = collect_one(&request).unwrap();
         let subject = subjects.get(&root_key).unwrap();
         assert_eq!(subject.name(), "local-source");
-        assert_eq!(subject.tag(), "Source");
         assert!(matches!(subject.as_ref(), PlannedSubject::Source(_)));
     }
 
@@ -413,7 +411,6 @@ mod tests {
         let (root_key, subjects) = collect_one(&request).unwrap();
         let subject = subjects.get(&root_key).unwrap();
         assert_eq!(subject.name(), "local-source");
-        assert_eq!(subject.tag(), "Source");
         assert!(matches!(subject.as_ref(), PlannedSubject::Source(_)));
     }
 
@@ -434,7 +431,7 @@ mod tests {
         let (root_key, subjects) = collect_one(&request).unwrap();
         let subject = subjects.get(&root_key).unwrap();
         assert_eq!(subject.name(), "base-image");
-        assert_eq!(subject.tag(), "Source");
+        assert!(matches!(subject.as_ref(), PlannedSubject::Source(_)));
     }
 
     #[test]
@@ -618,7 +615,6 @@ mod tests {
             compute_build_key("Tree", &tree_config("same.txt", "same", false), &[]).unwrap();
         let subject = subjects.get(&deduped_key).unwrap();
         assert_eq!(subject.name(), "binary-a");
-        assert_eq!(subject.tag(), "Tree");
         assert!(
             matches!(subject.as_ref(), PlannedSubject::Builder(builder) if builder.build_key() == deduped_key)
         );
