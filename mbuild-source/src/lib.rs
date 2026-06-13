@@ -2,6 +2,7 @@ mod http;
 pub mod oci_registry;
 mod origins;
 
+use bobr_store::identity::BuildKey;
 use mbuild_core::{ObjectHash, ParsedOrigin};
 use serde_json::{Map, Value};
 use std::fmt;
@@ -38,21 +39,24 @@ impl std::error::Error for SourceRecipeError {}
 #[derive(Debug, Clone)]
 pub struct SourcePlannedSubject {
     name: String,
-    object_hash: ObjectHash,
+    build_key: BuildKey,
+    declared_object_hash: ObjectHash,
     origin: Option<Box<dyn ParsedOrigin>>,
 }
 
 impl SourcePlannedSubject {
     /// Creates a parsed source subject from its recipe name, declared object
-    /// hash, and optional materialization origin.
+    /// hash, and optional materialization origin. The source build key is
+    /// derived from the declared object hash.
     pub fn new(
         name: String,
-        object_hash: ObjectHash,
+        declared_object_hash: ObjectHash,
         origin: Option<Box<dyn ParsedOrigin>>,
     ) -> Self {
         Self {
             name,
-            object_hash,
+            build_key: BuildKey::from_object_hash(declared_object_hash),
+            declared_object_hash,
             origin,
         }
     }
@@ -67,9 +71,14 @@ impl SourcePlannedSubject {
         "Source"
     }
 
+    /// Returns the source build key.
+    pub fn build_key(&self) -> BuildKey {
+        self.build_key
+    }
+
     /// Returns the declared object hash.
-    pub fn object_hash(&self) -> ObjectHash {
-        self.object_hash
+    pub fn declared_object_hash(&self) -> ObjectHash {
+        self.declared_object_hash
     }
 
     /// Clones the parsed origin when one was declared.
@@ -84,7 +93,7 @@ pub fn parse_source_subject(
     path: &str,
 ) -> Result<SourcePlannedSubject, SourceRecipeError> {
     let name = take_string(&mut object, path, "name")?;
-    let object_hash = take_string(&mut object, path, "object_hash")?
+    let declared_object_hash = take_string(&mut object, path, "object_hash")?
         .trim()
         .parse::<ObjectHash>()
         .map_err(|error| {
@@ -104,7 +113,11 @@ pub fn parse_source_subject(
         )));
     }
 
-    Ok(SourcePlannedSubject::new(name, object_hash, origin))
+    Ok(SourcePlannedSubject::new(
+        name,
+        declared_object_hash,
+        origin,
+    ))
 }
 
 fn take_string(
@@ -147,7 +160,11 @@ mod tests {
         assert_eq!(subject.name(), "local-source");
         assert_eq!(subject.tag(), "Source");
         assert_eq!(
-            subject.object_hash().to_string(),
+            subject.declared_object_hash().to_string(),
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        );
+        assert_eq!(
+            subject.build_key().to_string(),
             "1111111111111111111111111111111111111111111111111111111111111111"
         );
         assert!(subject.clone_origin().is_none());
@@ -226,7 +243,7 @@ mod tests {
         let subject = parse_source_subject(object, "$.nodes.root").unwrap();
 
         assert_eq!(
-            subject.object_hash().to_string(),
+            subject.declared_object_hash().to_string(),
             "1111111111111111111111111111111111111111111111111111111111111111"
         );
     }

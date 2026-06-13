@@ -77,7 +77,7 @@ fn collect_graph_inner(
     let (key, subject) = if tag == "Source" {
         let subject = parse_source_subject(object, &node_path)
             .map_err(|error| RuntimeError::RecipeLoad(error.to_string()))?;
-        let key = BuildKey::from_object_hash(subject.object_hash());
+        let key = subject.build_key();
         (key, Arc::new(PlannedSubject::Source(subject)))
     } else {
         let inputs_value = object.remove("inputs").ok_or_else(|| {
@@ -475,7 +475,7 @@ mod tests {
         let expected_key = BuildKey::from_object_hash(object_hash);
         assert_eq!(root_key, expected_key);
         assert!(
-            matches!(subject.as_ref(), PlannedSubject::Source(source) if source.object_hash() == object_hash)
+            matches!(subject.as_ref(), PlannedSubject::Source(source) if source.declared_object_hash() == object_hash)
         );
     }
 

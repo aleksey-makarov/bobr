@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bzip2 = "0.5"
+bobr-store = { path = "../bobr-store" }
 flate2 = "1.0"
 mbuild-core = { path = "../mbuild-core" }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }

@@ -222,12 +222,9 @@ fn lookup_source_direct_reuse(
     subject: &SourcePlannedSubject,
     cx: PlannedLookupContext<'_>,
 ) -> Result<Option<ReuseDecision>, RuntimeError> {
-    match lookup_source_object(cx.store, subject.object_hash()).map_err(map_store_error)? {
+    match lookup_source_object(cx.store, subject.declared_object_hash()).map_err(map_store_error)? {
         SourceLookup::Hit(stored) => Ok(Some(ReuseDecision {
-            realized: realized_object_from_record(
-                Some(source_build_key(subject)),
-                &stored.object_record,
-            ),
+            realized: realized_object_from_record(Some(subject.build_key()), &stored.object_record),
             origin: ReuseOrigin::CanonicalObject,
         })),
         SourceLookup::Missing => Ok(None),
@@ -262,7 +259,7 @@ fn execute_source_subject(
     subject: &SourcePlannedSubject,
     cx: PlannedExecutionContext<'_>,
 ) -> Result<SubjectExecution, RuntimeError> {
-    let build_key = source_build_key(subject);
+    let build_key = subject.build_key();
     let workspace = create_workspace(
         cx.store,
         "Source",
@@ -274,7 +271,7 @@ fn execute_source_subject(
     let source_builder = SourceBuilderClass.create_object(SourceBuilderInit {
         recipe_name: subject.name().to_string(),
         build_key: build_key.to_string(),
-        declared_object_hash: subject.object_hash(),
+        declared_object_hash: subject.declared_object_hash(),
         origin: subject.clone_origin(),
         workspace,
     });
@@ -394,10 +391,6 @@ fn execute_source_subject(
             Err(RuntimeError::Build(message))
         }
     }
-}
-
-fn source_build_key(subject: &SourcePlannedSubject) -> BuildKey {
-    BuildKey::from_object_hash(subject.object_hash())
 }
 
 fn builder_realized_input_identities(
@@ -581,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn source_subject_exposes_object_hash_without_inputs() {
+    fn source_subject_exposes_build_key_and_declared_hash() {
         let object_hash = ObjectHash::from_str(
             "1111111111111111111111111111111111111111111111111111111111111111",
         )
@@ -590,6 +583,7 @@ mod tests {
 
         assert_eq!(subject.name(), "source");
         assert_eq!(subject.tag(), "Source");
-        assert_eq!(subject.object_hash(), object_hash);
+        assert_eq!(subject.build_key(), BuildKey::from_object_hash(object_hash));
+        assert_eq!(subject.declared_object_hash(), object_hash);
     }
 }
