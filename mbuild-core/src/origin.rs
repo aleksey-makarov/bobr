@@ -15,6 +15,12 @@ pub struct OriginContext<'a> {
 pub trait ParsedOrigin: fmt::Debug + Send + Sync {
     fn spec(&self) -> &'static OriginSpec;
 
+    /// Materializes the origin and returns the staged path.
+    ///
+    /// The returned path MUST be located inside `cx.temp_root`. The runtime
+    /// only cleans up `temp_root` (including on error), so any staged data left
+    /// outside it would leak. Implementations should stage everything under
+    /// `cx.temp_root` and return a path within it.
     fn materialize(&self, cx: &OriginContext<'_>) -> Result<PathBuf, String>;
 
     fn clone_box(&self) -> Box<dyn ParsedOrigin>;
