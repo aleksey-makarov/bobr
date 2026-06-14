@@ -202,6 +202,10 @@ fn execute_graph(
             ));
         }
 
+        // Unreachable while this function holds its own `tx`: the channel can
+        // only disconnect once every sender is dropped, and disconnect would
+        // mean no worker can report a result anyway. The `?` is a defensive
+        // return for that impossible case (not an abandon: nothing to drain).
         let (key, result) = rx
             .recv()
             .map_err(|_| RuntimeError::Build("worker channel closed unexpectedly".to_string()))?;
