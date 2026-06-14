@@ -1,5 +1,7 @@
 use crate::{Build, ObjectRecord, PublishedBuild, Store, StoreError, StoredObjectRecord};
-use mbuild_core::{BuildKey, ObjectHash, ReuseKey};
+use mbuild_core::{
+    BuildKey, ObjectHash, ReuseKey, validate_publication_name as validate_core_publication_name,
+};
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
@@ -371,26 +373,8 @@ fn object_ref_target_for_record(object_record: &ObjectRecord) -> PathBuf {
 }
 
 fn validate_publication_name(name: &str) -> Result<(), StoreError> {
-    if name.is_empty() {
-        return Err(StoreError::InvalidInput(
-            "publication name must not be empty".to_string(),
-        ));
-    }
-    if name == "." || name == ".." {
-        return Err(StoreError::InvalidInput(format!(
-            "invalid publication name '{name}'"
-        )));
-    }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
-    {
-        return Err(StoreError::InvalidInput(format!(
-            "invalid publication name '{}'; allowed chars: [A-Za-z0-9._-]",
-            name
-        )));
-    }
-    Ok(())
+    validate_core_publication_name(name)
+        .map_err(|error| StoreError::InvalidInput(error.to_string()))
 }
 
 #[derive(Debug)]

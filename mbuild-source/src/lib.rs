@@ -2,7 +2,7 @@ mod http;
 pub mod oci_registry;
 mod origins;
 
-use mbuild_core::{BuildKey, ObjectHash, ParsedOrigin};
+use mbuild_core::{BuildKey, ObjectHash, ParsedOrigin, validate_publication_name};
 use serde_json::{Map, Value};
 use std::fmt;
 
@@ -92,6 +92,8 @@ pub fn parse_source_subject(
     path: &str,
 ) -> Result<SourcePlannedSubject, SourceRecipeError> {
     let name = take_string(&mut object, path, "name")?;
+    validate_publication_name(&name)
+        .map_err(|error| SourceRecipeError::new(format!("{path}.name: {error}")))?;
     let declared_object_hash = take_string(&mut object, path, "object_hash")?
         .trim()
         .parse::<ObjectHash>()
@@ -167,6 +169,20 @@ mod tests {
             "1111111111111111111111111111111111111111111111111111111111111111"
         );
         assert!(subject.clone_origin().is_none());
+    }
+
+    #[test]
+    fn source_publication_name_is_validated() {
+        let mut object = source_object(None);
+        object.insert("name".to_string(), Value::String("bad/name".to_string()));
+
+        let error = parse_source_subject(object, "$.nodes.root").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("$.nodes.root.name: invalid publication name"),
+            "{error}"
+        );
     }
 
     #[test]

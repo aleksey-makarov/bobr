@@ -10,6 +10,7 @@ pub mod initramfs;
 pub mod logging;
 pub mod oci;
 pub mod origin;
+pub mod publication;
 #[doc(hidden)]
 pub mod runtime_helper_protocol;
 
@@ -22,6 +23,7 @@ pub use identity::*;
 pub use initramfs::*;
 pub use logging::*;
 pub use origin::*;
+pub use publication::*;
 pub use runtime_helper_protocol::FsTreeArchiveEntrySource;
 
 #[derive(Debug)]

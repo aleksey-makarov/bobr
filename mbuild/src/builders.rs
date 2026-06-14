@@ -4,7 +4,7 @@ use mbuild_builder::{
     ErofsRootfsBuilder, GroupBuilder, InitramfsBuilder, OciExtractBuilder, TreeBuilder,
     TreeMergeBuilder, TreeSubsetBuilder,
 };
-use mbuild_core::{BuildKey, Builder};
+use mbuild_core::{BuildKey, Builder, validate_publication_name};
 use mbuild_sandbox::SandboxBuilder;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -68,6 +68,8 @@ pub(crate) fn parse_builder_subject(
     path: &str,
 ) -> Result<BuilderPlannedSubject, RuntimeError> {
     let name = take_string(&mut object, path, "name")?;
+    validate_publication_name(&name)
+        .map_err(|error| RuntimeError::RecipeLoad(format!("{path}.name: {error}")))?;
     let config = object.remove("config").ok_or_else(|| {
         RuntimeError::RecipeLoad(format!("{path}: missing required field 'config'"))
     })?;
