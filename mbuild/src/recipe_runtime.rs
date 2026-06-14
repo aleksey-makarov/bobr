@@ -126,6 +126,10 @@ fn execute_graph(
     let (tx, rx) = mpsc::channel::<(BuildKey, Result<SubjectExecution, RuntimeError>)>();
     let mut in_flight = 0usize;
 
+    // Workers run on detached threads tracked only by `in_flight`. Once a
+    // worker is spawned, every exit path must drain `in_flight` back to 0
+    // before returning: record failures in `first_error` and fall through to
+    // the drain, never `?` out of this loop while workers may still be running.
     while !completed.contains_key(&root_key) {
         if first_error.is_none() && cancellation.is_cancelled() {
             first_error = Some(RuntimeError::Cancelled(
@@ -137,16 +141,28 @@ fn execute_graph(
             let Some(key) = ready.pop_front() else {
                 break;
             };
-            let subject = subjects.get(&key).ok_or_else(|| {
-                RuntimeError::Store(format!("missing planned subject for key '{}'", key))
-            })?;
+            let subject = match subjects.get(&key) {
+                Some(subject) => subject.clone(),
+                None => {
+                    first_error = Some(RuntimeError::Store(format!(
+                        "missing planned subject for key '{}'",
+                        key
+                    )));
+                    break;
+                }
+            };
             let store = store.clone();
             let logger = logger.clone();
             let tx = tx.clone();
             let cancellation = cancellation.clone();
-            let subject = subject.clone();
             let realized_inputs = match subject.as_builder() {
-                Some(builder) => completed_inputs_for_builder(&completed, builder)?,
+                Some(builder) => match completed_inputs_for_builder(&completed, builder) {
+                    Ok(realized_inputs) => realized_inputs,
+                    Err(error) => {
+                        first_error = Some(error);
+                        break;
+                    }
+                },
                 None => HashMap::new(),
             };
             thread::spawn(move || {
@@ -198,12 +214,23 @@ fn execute_graph(
                 continue;
             }
         };
-        let subject = subjects.get(&key).ok_or_else(|| {
-            RuntimeError::Store(format!("missing planned subject for key '{}'", key))
-        })?;
+        let subject = match subjects.get(&key) {
+            Some(subject) => subject,
+            None => {
+                first_error.get_or_insert(RuntimeError::Store(format!(
+                    "missing planned subject for key '{}'",
+                    key
+                )));
+                continue;
+            }
+        };
         let publication_name = subject.name();
-        publish_stored_object(store, publication_name, executed.realized.object_hash)
-            .map_err(map_store_error)?;
+        if let Err(error) = publish_stored_object(store, publication_name, executed.realized.object_hash)
+            .map_err(map_store_error)
+        {
+            first_error.get_or_insert(error);
+            continue;
+        }
         log_runtime_event(
             executed.logger.as_ref(),
             BuildLogLevel::Info,
@@ -226,12 +253,13 @@ fn execute_graph(
             && let Some(parents) = reverse.get(&key)
         {
             for parent in parents {
-                let pending = remaining.get_mut(parent).ok_or_else(|| {
-                    RuntimeError::Store(format!(
+                let Some(pending) = remaining.get_mut(parent) else {
+                    first_error.get_or_insert(RuntimeError::Store(format!(
                         "missing pending-dependency counter for key '{}'",
                         parent
-                    ))
-                })?;
+                    )));
+                    break;
+                };
                 *pending -= 1;
                 if *pending == 0 {
                     ready.push_back(*parent);
@@ -365,5 +393,119 @@ mod tests {
         let metadata = workspace_metadata(temp.path(), "Source", "cancel-source");
         let temp_dir = PathBuf::from(metadata["temp_dir"].as_str().unwrap());
         assert!(!temp_dir.exists());
+    }
+
+    #[test]
+    fn execute_graph_drains_in_flight_workers_when_publish_fails() {
+        use crate::planned::{BuilderPlannedSubject, PlannedSubject};
+        use mbuild_core::{
+            BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
+        };
+        use serde::Deserialize;
+        use serde_json::json;
+        use std::collections::BTreeMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        // Set when the slow worker finishes; lets us prove execute_graph waited
+        // for it (drained) before returning the fast node's publish error.
+        static SLOW_FINISHED: AtomicBool = AtomicBool::new(false);
+
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct EmptyConfig {}
+
+        static DRAIN_SPEC: InputSpec = InputSpec {
+            required_inputs: &[],
+            optional_inputs: &[],
+            allow_extra_inputs: false,
+        };
+
+        fn stage_payload(cx: &mut BuildContext, body: &[u8]) -> StagedBuildResult {
+            fs::create_dir_all(cx.temp_dir.join("out")).unwrap();
+            fs::write(cx.temp_dir.join("out").join("payload"), body).unwrap();
+            StagedBuildResult {
+                staged_path: cx.temp_dir.join("out"),
+                object_hash: None,
+            }
+        }
+
+        #[derive(Debug)]
+        struct FastBuilder;
+        static FAST_BUILDER: FastBuilder = FastBuilder;
+        impl TypedBuilder for FastBuilder {
+            type Config = EmptyConfig;
+            fn tag(&self) -> &'static str {
+                "DrainFast"
+            }
+            fn spec(&self) -> &'static InputSpec {
+                &DRAIN_SPEC
+            }
+            fn build_typed(
+                &self,
+                _config: Self::Config,
+                _inputs: BuilderInputs,
+                cx: &mut BuildContext,
+            ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+                Ok(stage_payload(cx, b"fast\n"))
+            }
+        }
+
+        #[derive(Debug)]
+        struct SlowBuilder;
+        static SLOW_BUILDER: SlowBuilder = SlowBuilder;
+        impl TypedBuilder for SlowBuilder {
+            type Config = EmptyConfig;
+            fn tag(&self) -> &'static str {
+                "DrainSlow"
+            }
+            fn spec(&self) -> &'static InputSpec {
+                &DRAIN_SPEC
+            }
+            fn build_typed(
+                &self,
+                _config: Self::Config,
+                _inputs: BuilderInputs,
+                cx: &mut BuildContext,
+            ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+                std::thread::sleep(Duration::from_millis(300));
+                SLOW_FINISHED.store(true, Ordering::SeqCst);
+                Ok(stage_payload(cx, b"slow\n"))
+            }
+        }
+
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+        let logger = create_test_logger(&store);
+
+        // Fast node has an invalid publication name, so its publish fails after
+        // the build succeeds. Slow node is a sibling that is still in flight.
+        let fast = BuilderPlannedSubject::new(
+            &FAST_BUILDER,
+            "bad/name".to_string(),
+            json!({}),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let slow =
+            BuilderPlannedSubject::new(&SLOW_BUILDER, "good".to_string(), json!({}), BTreeMap::new())
+                .unwrap();
+        let fast_key = fast.build_key();
+        let slow_key = slow.build_key();
+
+        let mut subjects: SubjectGraph = HashMap::new();
+        subjects.insert(fast_key, Arc::new(PlannedSubject::Builder(fast)));
+        subjects.insert(slow_key, Arc::new(PlannedSubject::Builder(slow)));
+
+        // Root is the failing node, so the loop never completes through the root
+        // and must drain the in-flight slow worker before returning the error.
+        let error = execute_graph(&store, logger, &subjects, fast_key, 2, CancellationToken::new())
+            .expect_err("expected publish failure for invalid publication name");
+
+        assert_eq!(error.class(), "store");
+        assert!(
+            SLOW_FINISHED.load(Ordering::SeqCst),
+            "execute_graph returned before draining the in-flight worker"
+        );
     }
 }
