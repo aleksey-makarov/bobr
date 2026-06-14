@@ -1,4 +1,4 @@
-use crate::builders;
+use crate::builder_recipe;
 use crate::planned::PlannedSubject;
 use crate::runtime::RuntimeError;
 use mbuild_core::BuildKey;
@@ -97,7 +97,8 @@ fn collect_graph_inner(
             inputs.insert(input_name, child);
         }
 
-        let builder_subject = builders::parse_builder_subject(&tag, object, inputs, &node_path)?;
+        let builder_subject =
+            builder_recipe::parse_builder_subject(&tag, object, inputs, &node_path)?;
         (
             builder_subject.build_key(),
             Arc::new(PlannedSubject::Builder(builder_subject)),

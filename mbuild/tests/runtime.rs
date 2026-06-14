@@ -28,7 +28,7 @@ fn source_build_key(object_hash: fsobj_hash::ObjectHash) -> BuildKey {
 
 #[test]
 fn registered_builders_include_current_tags_only() {
-    let tags = mbuild::builders::supported_builder_tags();
+    let tags = mbuild_builder::supported_builder_tags();
     for tag in [
         "Group",
         "Tree",

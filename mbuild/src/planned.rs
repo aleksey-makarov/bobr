@@ -489,7 +489,7 @@ mod tests {
 
     #[test]
     fn builder_subject_rejects_extra_inputs() {
-        let builder = crate::builders::get_builder("Tree").unwrap();
+        let builder = mbuild_builder::get_builder("Tree").unwrap();
         let error = expect_builder_subject_error(BuilderPlannedSubject::new(
             builder,
             "tree".to_string(),
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn builder_subject_rejects_missing_required_inputs() {
-        let builder = crate::builders::get_builder("Sandbox").unwrap();
+        let builder = mbuild_builder::get_builder("Sandbox").unwrap();
         let error = expect_builder_subject_error(BuilderPlannedSubject::new(
             builder,
             "sandbox".to_string(),
@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn builder_subject_computes_build_key_from_ordered_inputs() {
-        let builder = crate::builders::get_builder("Tree").unwrap();
+        let builder = mbuild_builder::get_builder("Tree").unwrap();
         let config = json!({
             "tree": {
                 "entries": [{
