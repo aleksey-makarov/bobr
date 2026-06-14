@@ -366,6 +366,33 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone)]
+    struct EscapingOrigin;
+
+    impl ParsedOrigin for EscapingOrigin {
+        fn spec(&self) -> &'static OriginSpec {
+            static SPEC: OriginSpec = OriginSpec {
+                tag: "escaping-test",
+            };
+            &SPEC
+        }
+
+        fn materialize(&self, cx: &OriginContext<'_>) -> Result<std::path::PathBuf, String> {
+            let staged = cx
+                .temp_root
+                .parent()
+                .ok_or_else(|| "source temp root has no parent".to_string())?
+                .join("escaped-staged");
+            fs::create_dir_all(&staged).map_err(|error| error.to_string())?;
+            fs::write(staged.join("payload"), b"escaped\n").map_err(|error| error.to_string())?;
+            Ok(staged)
+        }
+
+        fn clone_box(&self) -> Box<dyn ParsedOrigin> {
+            Box::new(self.clone())
+        }
+    }
+
     #[test]
     fn source_temp_dir_is_removed_when_cancelled_after_materialize() {
         let temp = tempdir().unwrap();
@@ -397,6 +424,39 @@ mod tests {
 
         assert_eq!(error.class(), "cancelled");
         let metadata = workspace_metadata(temp.path(), "Source", "cancel-source");
+        let temp_dir = PathBuf::from(metadata["temp_dir"].as_str().unwrap());
+        assert!(!temp_dir.exists());
+    }
+
+    #[test]
+    fn source_origin_staged_path_must_remain_under_temp_root() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+        let logger = create_test_logger(&store);
+        let object_hash = "3333333333333333333333333333333333333333333333333333333333333333"
+            .parse()
+            .unwrap();
+        let subject = PlannedSubject::Source(SourcePlannedSubject::new(
+            "escaping-source".to_string(),
+            object_hash,
+            Some(Box::new(EscapingOrigin)),
+        ));
+
+        let realized_inputs = HashMap::new();
+        let error = execute_subject(
+            &subject,
+            PlannedExecutionContext {
+                store: &store,
+                run_logger: logger,
+                cancellation: CancellationToken::new(),
+                realized_inputs: &realized_inputs,
+            },
+        )
+        .expect_err("expected escaping origin to be rejected");
+
+        assert_eq!(error.class(), "build");
+        assert!(error.to_string().contains("outside temp root"), "{error}");
+        let metadata = workspace_metadata(temp.path(), "Source", "escaping-source");
         let temp_dir = PathBuf::from(metadata["temp_dir"].as_str().unwrap());
         assert!(!temp_dir.exists());
     }

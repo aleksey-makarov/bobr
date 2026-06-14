@@ -16,6 +16,7 @@ use mbuild_core::{
 use mbuild_source::SourcePlannedSubject;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::Arc;
 
 pub(crate) enum PlannedSubject {
@@ -351,6 +352,10 @@ fn execute_source_subject(
             );
             RuntimeError::Build(error)
         })?;
+    validate_origin_staged_path(&staged_path, &temp_root).map_err(|message| {
+        log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
+        RuntimeError::Build(message)
+    })?;
     check_cancelled(&cx.cancellation)?;
     log_runtime_event(
         logger.as_ref(),
@@ -383,6 +388,29 @@ fn execute_source_subject(
             Err(RuntimeError::Build(message))
         }
     }
+}
+
+fn validate_origin_staged_path(staged_path: &Path, temp_root: &Path) -> Result<(), String> {
+    let canonical_temp_root = temp_root.canonicalize().map_err(|error| {
+        format!(
+            "failed to canonicalize source temp root '{}': {error}",
+            temp_root.display()
+        )
+    })?;
+    let canonical_staged_path = staged_path.canonicalize().map_err(|error| {
+        format!(
+            "failed to canonicalize source staged path '{}': {error}",
+            staged_path.display()
+        )
+    })?;
+    if !canonical_staged_path.starts_with(&canonical_temp_root) {
+        return Err(format!(
+            "source origin returned staged path '{}' outside temp root '{}'",
+            staged_path.display(),
+            temp_root.display()
+        ));
+    }
+    Ok(())
 }
 
 fn builder_resolved_inputs(
