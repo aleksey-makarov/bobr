@@ -5,13 +5,13 @@ use crate::runtime::{
 };
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, Store, create_workspace,
-    import_source_object, load_build_handle, materialize_build, materialize_build_with_trusted_hash,
-    record_existing_source_object, resolve_reuse_for_build,
+    import_source_object, load_build_handle, materialize_build,
+    materialize_build_with_trusted_hash, record_existing_source_object, resolve_reuse_for_build,
 };
 use mbuild_core::{
-    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase, BuilderRunInit,
-    CancellationToken, NoopBuildLogger, OriginContext, SourceBuilderClass, SourceBuilderInit,
-    Workspace, compute_build_key, compute_reuse_key,
+    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase,
+    BuilderRunInit, CancellationToken, NoopBuildLogger, OriginContext, SourceBuilderClass,
+    SourceBuilderInit, Workspace, compute_build_key, compute_reuse_key,
 };
 use mbuild_source::SourcePlannedSubject;
 use serde_json::Value;
@@ -217,7 +217,11 @@ fn execute_builder_subject(
     );
     let staged = subject
         .builder
-        .build_erased(subject.config.clone(), inputs.into_builder_inputs(), &mut context)
+        .build_erased(
+            subject.config.clone(),
+            inputs.into_builder_inputs(),
+            &mut context,
+        )
         .map_err(|error| {
             log_runtime_event(
                 logger.as_ref(),
@@ -275,9 +279,8 @@ fn execute_source_subject(
             logger: Arc::new(NoopBuildLogger),
         });
     }
-    if let Some(stored) =
-        record_existing_source_object(cx.store, subject.declared_object_hash())
-            .map_err(map_store_error)?
+    if let Some(stored) = record_existing_source_object(cx.store, subject.declared_object_hash())
+        .map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
             realized: realized_object_from_record(Some(build_key), &stored.object_record),
@@ -303,7 +306,8 @@ fn execute_source_subject(
     });
     // Owns the temp dir from here on: every return path (bind error below, and
     // panics) cleans it via Drop.
-    let mut temp_guard = TempDirGuard::for_source(cx.store, source_builder.temp_dir().to_path_buf());
+    let mut temp_guard =
+        TempDirGuard::for_source(cx.store, source_builder.temp_dir().to_path_buf());
     let logger = cx
         .run_logger
         .bind_source(&source_builder)
