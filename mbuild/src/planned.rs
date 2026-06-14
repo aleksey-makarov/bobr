@@ -1,12 +1,11 @@
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
-    ExecuteBuilderNodeRequest, RuntimeError, check_cancelled, execute_builder_node,
+    ExecuteBuilderNodeRequest, RuntimeError, TempDirGuard, check_cancelled, execute_builder_node,
     log_runtime_event, map_identity_error, map_store_error,
 };
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, Store, create_workspace,
     import_source_object, load_build_handle, record_existing_source_object,
-    remove_store_temp_dir_force,
 };
 use mbuild_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase,
@@ -176,20 +175,21 @@ fn execute_source_subject(
         origin: subject.clone_origin(),
         workspace,
     });
+    // Owns the temp dir from here on: every return path (incl. bind/lookup
+    // errors below, and panics) cleans it via Drop.
+    let mut temp_guard = TempDirGuard::for_source(cx.store, source_builder.temp_dir().to_path_buf());
     let logger = cx
         .run_logger
         .bind_source(&source_builder)
         .map_err(RuntimeError::Store)?;
+    temp_guard.set_logger(logger.clone());
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
         "start",
         "starting builder node",
     );
-    if let Err(error) = check_cancelled(&cx.cancellation) {
-        cleanup_workspace_temp_dir(cx.store, source_builder.temp_dir(), logger.as_ref());
-        return Err(error);
-    }
+    check_cancelled(&cx.cancellation)?;
 
     if let Some(published) = load_build_handle(cx.store, build_key).map_err(map_store_error)? {
         log_runtime_event(
@@ -198,7 +198,6 @@ fn execute_source_subject(
             "cache-hit",
             "reusing existing source build ref",
         );
-        cleanup_workspace_temp_dir(cx.store, source_builder.temp_dir(), logger.as_ref());
         return Ok(SubjectExecution {
             realized: realized_object_from_record(Some(build_key), &published.object_record),
             logger,
@@ -215,7 +214,6 @@ fn execute_source_subject(
             "object-hit",
             "reusing existing source object",
         );
-        cleanup_workspace_temp_dir(cx.store, source_builder.temp_dir(), logger.as_ref());
         return Ok(SubjectExecution {
             realized: realized_object_from_record(Some(build_key), &stored.object_record),
             logger,
@@ -229,44 +227,32 @@ fn execute_source_subject(
         "materializing source",
     );
 
-    if source_builder.origin().is_none() {
+    let Some(origin) = source_builder.origin() else {
         let message = format!(
             "source '{}' has no origin and object '{}' is not present in store",
             source_builder.recipe_name(),
             source_builder.declared_object_hash()
         );
         log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
-        cleanup_workspace_temp_dir(cx.store, source_builder.temp_dir(), logger.as_ref());
         return Err(RuntimeError::Build(message));
-    }
+    };
 
     let temp_root = source_builder.temp_dir().to_path_buf();
-    if let Err(error) = check_cancelled(&cx.cancellation) {
-        cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
-        return Err(error);
-    }
-    let staged_path = match source_builder
-        .origin()
-        .expect("origin checked above")
+    check_cancelled(&cx.cancellation)?;
+    let staged_path = origin
         .materialize(&OriginContext {
             temp_root: temp_root.as_path(),
-        }) {
-        Ok(path) => path,
-        Err(error) => {
-            cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
+        })
+        .map_err(|error| {
             log_runtime_event(
                 logger.as_ref(),
                 BuildLogLevel::Error,
                 "fail",
                 error.to_string(),
             );
-            return Err(RuntimeError::Build(error));
-        }
-    };
-    if let Err(error) = check_cancelled(&cx.cancellation) {
-        cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
-        return Err(error);
-    }
+            RuntimeError::Build(error)
+        })?;
+    check_cancelled(&cx.cancellation)?;
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
@@ -279,15 +265,8 @@ fn execute_source_subject(
         source_builder.declared_object_hash(),
         &staged_path,
     )
-    .map_err(|error| {
-        cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
-        map_store_error(error)
-    })?;
-    if let Err(error) = check_cancelled(&cx.cancellation) {
-        cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
-        return Err(error);
-    }
-    cleanup_workspace_temp_dir(cx.store, &temp_root, logger.as_ref());
+    .map_err(map_store_error)?;
+    check_cancelled(&cx.cancellation)?;
 
     match import_outcome {
         SourceImportOutcome::Matched(stored) => Ok(SubjectExecution {
@@ -358,20 +337,6 @@ fn core_workspace(workspace: bobr_store::StoreWorkspace) -> Workspace {
         workspace.raw_log_dir().to_path_buf(),
         workspace.temp_dir().to_path_buf(),
     )
-}
-
-fn cleanup_workspace_temp_dir(store: &Store, temp_dir: &std::path::Path, logger: &dyn BuildLogger) {
-    if let Err(error) = remove_store_temp_dir_force(store, temp_dir) {
-        log_runtime_event(
-            logger,
-            BuildLogLevel::Warn,
-            "cleanup-warning",
-            format!(
-                "failed to remove temp dir '{}': {error}",
-                temp_dir.display()
-            ),
-        );
-    }
 }
 
 #[cfg(test)]

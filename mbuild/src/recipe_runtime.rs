@@ -402,6 +402,41 @@ mod tests {
     }
 
     #[test]
+    fn source_temp_dir_is_removed_when_origin_missing() {
+        // No origin and the object is not in the store: execute_source_subject
+        // returns a Build error after the workspace is created. The temp dir
+        // must still be cleaned — i.e. the RAII guard cleans this error path.
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+        let logger = create_test_logger(&store);
+        let object_hash = "2222222222222222222222222222222222222222222222222222222222222222"
+            .parse()
+            .unwrap();
+        let subject = PlannedSubject::Source(SourcePlannedSubject::new(
+            "no-origin-source".to_string(),
+            object_hash,
+            None,
+        ));
+
+        let realized_inputs = HashMap::new();
+        let error = execute_subject(
+            &subject,
+            PlannedExecutionContext {
+                store: &store,
+                run_logger: logger,
+                cancellation: CancellationToken::new(),
+                realized_inputs: &realized_inputs,
+            },
+        )
+        .expect_err("expected build error for missing origin");
+
+        assert_eq!(error.class(), "build");
+        let metadata = workspace_metadata(temp.path(), "Source", "no-origin-source");
+        let temp_dir = PathBuf::from(metadata["temp_dir"].as_str().unwrap());
+        assert!(!temp_dir.exists());
+    }
+
+    #[test]
     fn execute_graph_drains_in_flight_workers_when_publish_fails() {
         use crate::planned::{BuilderPlannedSubject, PlannedSubject};
         use mbuild_core::{

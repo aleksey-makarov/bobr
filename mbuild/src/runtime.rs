@@ -7,8 +7,8 @@ use bobr_store::{
 };
 use mbuild_core::{
     BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, Builder,
-    BuilderError, BuilderRun, BuilderRunInit, CancellationToken, IdentityError, Workspace,
-    compute_reuse_key,
+    BuilderError, BuilderRun, BuilderRunInit, CancellationToken, IdentityError, NoopBuildLogger,
+    Workspace, compute_reuse_key,
 };
 use serde_json::Value;
 use std::fmt;
@@ -106,9 +106,18 @@ pub(crate) fn execute_builder_node(
         build_key: build_key.to_string(),
         workspace,
     });
+    // Owns the temp dir from here on: every return path (cache/bind/lookup
+    // errors below, and panics) cleans it via Drop.
+    let mut temp_guard = TempDirGuard::for_builder(
+        store,
+        builder.tag(),
+        build_key,
+        builder_run.temp_dir().to_path_buf(),
+    );
     let logger = run_logger
         .bind_builder(&builder_run)
         .map_err(RuntimeError::Store)?;
+    temp_guard.set_logger(logger.clone());
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
@@ -122,11 +131,6 @@ pub(crate) fn execute_builder_node(
             BuildLogLevel::Info,
             "cache-hit",
             "reusing existing build ref",
-        );
-        cleanup_temp_dir(
-            builder_run.temp_dir(),
-            &TempCleanupContext::new(store, builder.tag(), build_key),
-            logger.as_ref(),
         );
         return Ok(ExecutedBuilderNode { published, logger });
     }
@@ -142,11 +146,6 @@ pub(crate) fn execute_builder_node(
             "object-hit",
             "reusing existing canonical object",
         );
-        cleanup_temp_dir(
-            builder_run.temp_dir(),
-            &TempCleanupContext::new(store, builder.tag(), build_key),
-            logger.as_ref(),
-        );
         return Ok(ExecutedBuilderNode { published, logger });
     }
 
@@ -157,7 +156,6 @@ pub(crate) fn execute_builder_node(
         "executing builder",
     );
     check_cancelled(&cancellation)?;
-    let cleanup = TempCleanupContext::new(store, builder.tag(), build_key);
     let mut context = build_context(
         store,
         &builder_run,
@@ -180,14 +178,9 @@ pub(crate) fn execute_builder_node(
                 "fail",
                 error.to_string(),
             );
-            let runtime_error = map_builder_error(error);
-            cleanup_temp_dir(&context.temp_dir, &cleanup, logger.as_ref());
-            runtime_error
+            map_builder_error(error)
         })?;
-    if let Err(error) = check_cancelled(&cancellation) {
-        cleanup_temp_dir(&context.temp_dir, &cleanup, logger.as_ref());
-        return Err(error);
-    }
+    check_cancelled(&cancellation)?;
     let published = match staged.object_hash {
         Some(object_hash) => materialize_build_with_trusted_hash(
             store,
@@ -213,9 +206,7 @@ pub(crate) fn execute_builder_node(
             error.to_string(),
         );
         map_store_error(error)
-    });
-    cleanup_temp_dir(&context.temp_dir, &cleanup, logger.as_ref());
-    let published = published?;
+    })?;
     Ok(ExecutedBuilderNode { published, logger })
 }
 
@@ -480,6 +471,81 @@ fn quarantine_temp_path(
         );
     }
     Ok(target)
+}
+
+enum TempCleanupPolicy {
+    /// Builders may leave files owned by another namespace's uids, so their
+    /// temp dirs are quarantined when they cannot be removed.
+    Builder(TempCleanupContext),
+    /// Sources materialize as the current user, so plain removal is enough.
+    Source(Store),
+}
+
+/// RAII owner of a node's temp directory.
+///
+/// Created right after `create_workspace` (before the node logger exists), so
+/// that every exit path — cache hit, error, success, or panic-unwind — cleans
+/// the temp dir exactly once via `Drop`. The builder/source asymmetry is kept:
+/// builders quarantine, sources remove. Until a node logger is attached with
+/// [`TempDirGuard::set_logger`], cleanup warnings go to a no-op logger.
+pub(crate) struct TempDirGuard {
+    temp_dir: PathBuf,
+    policy: TempCleanupPolicy,
+    logger: Arc<dyn BuildLogger>,
+}
+
+impl TempDirGuard {
+    pub(crate) fn for_builder(
+        store: &Store,
+        builder_tag: &str,
+        build_key: BuildKey,
+        temp_dir: PathBuf,
+    ) -> Self {
+        Self {
+            temp_dir,
+            policy: TempCleanupPolicy::Builder(TempCleanupContext::new(
+                store,
+                builder_tag,
+                build_key,
+            )),
+            logger: Arc::new(NoopBuildLogger),
+        }
+    }
+
+    pub(crate) fn for_source(store: &Store, temp_dir: PathBuf) -> Self {
+        Self {
+            temp_dir,
+            policy: TempCleanupPolicy::Source(store.clone()),
+            logger: Arc::new(NoopBuildLogger),
+        }
+    }
+
+    pub(crate) fn set_logger(&mut self, logger: Arc<dyn BuildLogger>) {
+        self.logger = logger;
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        match &self.policy {
+            TempCleanupPolicy::Builder(cleanup) => {
+                cleanup_temp_dir(&self.temp_dir, cleanup, self.logger.as_ref());
+            }
+            TempCleanupPolicy::Source(store) => {
+                if let Err(error) = remove_store_temp_dir_force(store, &self.temp_dir) {
+                    log_runtime_event(
+                        self.logger.as_ref(),
+                        BuildLogLevel::Warn,
+                        "cleanup-warning",
+                        format!(
+                            "failed to remove temp dir '{}': {error}",
+                            self.temp_dir.display()
+                        ),
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1024,6 +1090,29 @@ mod tests {
             "runtime-test",
             build_key,
         );
+    }
+
+    #[test]
+    fn temp_dir_guard_cleans_without_a_node_logger() {
+        // Simulates the pre-logger window: a failure (e.g. bind_builder) before
+        // a node logger is attached. The guard, created right after the
+        // workspace, must still clean the temp dir on drop via the no-op logger.
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+        let run_logger = create_test_logger(&store);
+        let build_key = compute_build_key("RuntimeTest", &json!({}), &[]).unwrap();
+        let (builder_run, _logger) =
+            create_test_builder_run(&store, &run_logger, "RuntimeTest", "guard-test", build_key);
+        let temp_dir = builder_run.temp_dir().to_path_buf();
+        assert!(temp_dir.is_dir());
+
+        {
+            // No set_logger call: the node logger was never bound.
+            let _guard =
+                TempDirGuard::for_builder(&store, "RuntimeTest", build_key, temp_dir.clone());
+        }
+
+        assert!(!temp_dir.exists());
     }
 
     #[test]
