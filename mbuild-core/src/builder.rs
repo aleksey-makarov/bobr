@@ -51,48 +51,6 @@ impl Workspace {
     }
 }
 
-/// Common base trait for concrete per-run builder objects.
-///
-/// This trait intentionally exposes only the builder tag. Workspace and serial
-/// allocation are store/runtime concerns and are not available through this
-/// trait.
-pub trait BuilderObjectBase: Send + Sync {
-    /// Returns the builder tag used for logging and recipe identity.
-    fn tag(&self) -> &str;
-}
-
-/// Common base trait for builder classes that create per-run objects.
-pub trait BuilderClassBase: Send + Sync {
-    /// Data needed to create one concrete per-run object.
-    type Init;
-    /// Concrete per-run object created by this builder class.
-    type Object: BuilderObjectBase;
-
-    /// Returns the builder tag advertised by this class.
-    fn tag(&self) -> &'static str;
-
-    /// Creates one concrete per-run object from runtime-allocated state.
-    fn create_object(&self, init: Self::Init) -> Self::Object;
-}
-
-/// Runtime-allocated state used to create a normal per-run builder object.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderRunInit {
-    pub recipe_name: Option<String>,
-    pub build_key: String,
-    pub workspace: Workspace,
-}
-
-/// Runtime-allocated state used to create a per-run source builder object.
-#[derive(Debug, Clone)]
-pub struct SourceBuilderInit {
-    pub recipe_name: String,
-    pub build_key: String,
-    pub declared_object_hash: ObjectHash,
-    pub origin: Option<Box<dyn ParsedOrigin>>,
-    pub workspace: Workspace,
-}
-
 /// Concrete per-run object for a normal builder node.
 #[derive(Debug, Clone)]
 pub struct BuilderRun {
@@ -146,12 +104,6 @@ impl BuilderRun {
     /// Returns the per-run temporary directory.
     pub fn temp_dir(&self) -> &Path {
         self.workspace.temp_dir()
-    }
-}
-
-impl BuilderObjectBase for BuilderRun {
-    fn tag(&self) -> &str {
-        &self.tag
     }
 }
 
@@ -219,35 +171,6 @@ impl SourceBuilder {
     /// Returns the per-run temporary directory.
     pub fn temp_dir(&self) -> &Path {
         self.run.temp_dir()
-    }
-}
-
-impl BuilderObjectBase for SourceBuilder {
-    fn tag(&self) -> &str {
-        self.run.tag()
-    }
-}
-
-/// Builder class for source nodes.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SourceBuilderClass;
-
-impl BuilderClassBase for SourceBuilderClass {
-    type Init = SourceBuilderInit;
-    type Object = SourceBuilder;
-
-    fn tag(&self) -> &'static str {
-        "Source"
-    }
-
-    fn create_object(&self, init: Self::Init) -> Self::Object {
-        SourceBuilder::new(
-            init.recipe_name,
-            init.build_key,
-            init.declared_object_hash,
-            init.origin,
-            init.workspace,
-        )
     }
 }
 
@@ -554,7 +477,9 @@ pub struct StagedBuildResult {
     pub object_hash: Option<ObjectHash>,
 }
 
-pub trait Builder: BuilderClassBase<Init = BuilderRunInit, Object = BuilderRun> {
+pub trait Builder: Send + Sync {
+    fn tag(&self) -> &'static str;
+
     fn spec(&self) -> &'static InputSpec;
 
     fn build_erased(
@@ -580,26 +505,14 @@ pub trait TypedBuilder: Send + Sync {
     ) -> Result<StagedBuildResult, BuilderError>;
 }
 
-impl<T> BuilderClassBase for T
-where
-    T: TypedBuilder,
-{
-    type Init = BuilderRunInit;
-    type Object = BuilderRun;
-
-    fn tag(&self) -> &'static str {
-        <T as TypedBuilder>::tag(self)
-    }
-
-    fn create_object(&self, init: Self::Init) -> Self::Object {
-        BuilderRun::new(self.tag(), init.recipe_name, init.build_key, init.workspace)
-    }
-}
-
 impl<T> Builder for T
 where
     T: TypedBuilder,
 {
+    fn tag(&self) -> &'static str {
+        <T as TypedBuilder>::tag(self)
+    }
+
     fn spec(&self) -> &'static InputSpec {
         <T as TypedBuilder>::spec(self)
     }
@@ -776,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_builder_class_creates_builder_run_object() {
+    fn builder_run_object_exposes_runtime_allocated_state() {
         let builder = DummyBuilder;
         let erased: &dyn Builder = &builder;
         let workspace = Workspace::new(
@@ -785,11 +698,12 @@ mod tests {
             PathBuf::from("/tmp/dummy/tmp"),
         );
 
-        let run = erased.create_object(BuilderRunInit {
-            recipe_name: Some("demo".to_string()),
-            build_key: "build-key".to_string(),
-            workspace: workspace.clone(),
-        });
+        let run = BuilderRun::new(
+            erased.tag(),
+            Some("demo".to_string()),
+            "build-key",
+            workspace.clone(),
+        );
 
         assert_eq!(run.tag(), "Dummy");
         assert_eq!(run.recipe_name(), Some("demo"));
@@ -800,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn source_builder_class_creates_source_object() {
+    fn source_builder_object_exposes_runtime_allocated_state() {
         let object_hash = "0000000000000000000000000000000000000000000000000000000000000000"
             .parse::<ObjectHash>()
             .unwrap();
@@ -810,13 +724,13 @@ mod tests {
             PathBuf::from("/tmp/source/tmp"),
         );
 
-        let source = SourceBuilderClass.create_object(SourceBuilderInit {
-            recipe_name: "source-demo".to_string(),
-            build_key: "source-key".to_string(),
-            declared_object_hash: object_hash,
-            origin: None,
-            workspace: workspace.clone(),
-        });
+        let source = SourceBuilder::new(
+            "source-demo".to_string(),
+            "source-key",
+            object_hash,
+            None,
+            workspace.clone(),
+        );
 
         assert_eq!(source.tag(), "Source");
         assert_eq!(source.recipe_name(), "source-demo");

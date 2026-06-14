@@ -9,9 +9,8 @@ use bobr_store::{
     materialize_build_with_trusted_hash, record_existing_source_object, resolve_reuse_for_build,
 };
 use mbuild_core::{
-    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase,
-    BuilderRunInit, CancellationToken, NoopBuildLogger, OriginContext, SourceBuilderClass,
-    SourceBuilderInit, Workspace, compute_build_key, compute_reuse_key,
+    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderRun, CancellationToken,
+    NoopBuildLogger, OriginContext, SourceBuilder, Workspace, compute_build_key, compute_reuse_key,
 };
 use mbuild_source::SourcePlannedSubject;
 use serde_json::Value;
@@ -172,11 +171,12 @@ fn execute_builder_subject(
     )
     .map(core_workspace)
     .map_err(map_store_error)?;
-    let builder_run = subject.builder.create_object(BuilderRunInit {
-        recipe_name: Some(subject.name.clone()),
-        build_key: build_key.to_string(),
+    let builder_run = BuilderRun::new(
+        subject.builder.tag(),
+        Some(subject.name.clone()),
+        build_key.to_string(),
         workspace,
-    });
+    );
     // Owns the temp dir from here on: every return path (bind error below, and
     // panics) cleans it via Drop.
     let mut temp_guard = TempDirGuard::for_builder(
@@ -298,13 +298,13 @@ fn execute_source_subject(
     )
     .map(core_workspace)
     .map_err(map_store_error)?;
-    let source_builder = SourceBuilderClass.create_object(SourceBuilderInit {
-        recipe_name: subject.name().to_string(),
-        build_key: build_key.to_string(),
-        declared_object_hash: subject.declared_object_hash(),
-        origin: subject.clone_origin(),
+    let source_builder = SourceBuilder::new(
+        subject.name().to_string(),
+        build_key.to_string(),
+        subject.declared_object_hash(),
+        subject.clone_origin(),
         workspace,
-    });
+    );
     // Owns the temp dir from here on: every return path (bind error below, and
     // panics) cleans it via Drop.
     let mut temp_guard =

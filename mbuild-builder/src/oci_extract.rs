@@ -960,7 +960,7 @@ mod tests {
     use super::*;
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use mbuild_core::{Builder, BuilderInputObject};
+    use mbuild_core::{Builder, BuilderInputObject, TypedBuilder};
     use sha2::{Digest, Sha256};
     use std::io::Cursor;
     use std::io::Write;
@@ -969,7 +969,7 @@ mod tests {
 
     #[test]
     fn input_spec_is_registered_shape() {
-        assert_eq!(OciExtractBuilder.tag(), "OciExtract");
+        assert_eq!(TypedBuilder::tag(&OciExtractBuilder), "OciExtract");
         assert_eq!(OCI_EXTRACT_SPEC.required_inputs, &["image"]);
         assert!(!OCI_EXTRACT_SPEC.allow_extra_inputs);
     }
