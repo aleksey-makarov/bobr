@@ -1,4 +1,4 @@
-use crate::{BuilderRun, ObjectHash, SourceBuilder};
+use crate::ObjectHash;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
@@ -98,49 +98,23 @@ impl BuildRunLogger {
         &self.run_log_dir
     }
 
-    pub fn bind_builder(
+    pub fn bind_subject(
         self: &Arc<Self>,
-        builder: &BuilderRun,
+        subject: BuildLogSubject,
     ) -> Result<Arc<dyn BuildLogger>, String> {
-        self.bind_subject(SubjectLogIdentity {
-            tag: builder.tag().to_string(),
-            name: builder.recipe_name().unwrap_or("").to_string(),
-            build_key: builder.build_key().to_string(),
-            log_dir: builder.log_dir().to_path_buf(),
-            raw_log_dir: builder.raw_log_dir().to_path_buf(),
-        })
-    }
-
-    pub fn bind_source(
-        self: &Arc<Self>,
-        source: &SourceBuilder,
-    ) -> Result<Arc<dyn BuildLogger>, String> {
-        self.bind_subject(SubjectLogIdentity {
-            tag: source.tag().to_string(),
-            name: source.recipe_name().to_string(),
-            build_key: source.build_key().to_string(),
-            log_dir: source.log_dir().to_path_buf(),
-            raw_log_dir: source.raw_log_dir().to_path_buf(),
-        })
-    }
-
-    fn bind_subject(
-        self: &Arc<Self>,
-        identity: SubjectLogIdentity,
-    ) -> Result<Arc<dyn BuildLogger>, String> {
-        fs::create_dir_all(&identity.log_dir).map_err(|error| {
+        fs::create_dir_all(&subject.log_dir).map_err(|error| {
             format!(
                 "failed to create subject log directory '{}': {error}",
-                identity.log_dir.display()
+                subject.log_dir.display()
             )
         })?;
-        fs::create_dir_all(&identity.raw_log_dir).map_err(|error| {
+        fs::create_dir_all(&subject.raw_log_dir).map_err(|error| {
             format!(
                 "failed to create raw log directory '{}': {error}",
-                identity.raw_log_dir.display()
+                subject.raw_log_dir.display()
             )
         })?;
-        let event_log_path = identity.log_dir.join("events.jsonl");
+        let event_log_path = subject.log_dir.join("events.jsonl");
         let event_file = create_event_log_file(&event_log_path).map_err(|error| {
             format!(
                 "failed to create subject event log '{}': {error}",
@@ -149,7 +123,7 @@ impl BuildRunLogger {
         })?;
         Ok(Arc::new(BoundBuildLogger {
             inner: self.clone(),
-            identity,
+            subject,
             event_log_path,
             writer: Mutex::new(BufWriter::new(event_file)),
             raw_log_counters: Mutex::new(BTreeMap::new()),
@@ -179,24 +153,24 @@ impl BuildRunLogger {
             })
     }
 
-    fn log_bound_event(&self, identity: &SubjectLogIdentity, event: &BuildLogEvent) {
+    fn log_bound_event(&self, subject: &BuildLogSubject, event: &BuildLogEvent) {
         if self.emit_progress {
             eprintln!(
                 "{}",
-                format_progress_line(&identity.tag, &identity.name, &identity.build_key, event)
+                format_progress_line(&subject.tag, &subject.name, &subject.build_key, event)
             );
         }
 
-        if let Err(error) =
-            self.write_event(&identity.tag, &identity.name, &identity.build_key, event)
+        if let Err(error) = self.write_event(&subject.tag, &subject.name, &subject.build_key, event)
         {
             eprintln!("warning: {error}");
         }
     }
 }
 
+/// Log identity and paths for one concrete builder or source run.
 #[derive(Debug, Clone)]
-struct SubjectLogIdentity {
+pub struct BuildLogSubject {
     tag: String,
     name: String,
     build_key: String,
@@ -204,10 +178,29 @@ struct SubjectLogIdentity {
     raw_log_dir: PathBuf,
 }
 
+impl BuildLogSubject {
+    /// Creates a log subject from runtime-allocated identity and log paths.
+    pub fn new(
+        tag: impl Into<String>,
+        name: impl Into<String>,
+        build_key: impl Into<String>,
+        log_dir: PathBuf,
+        raw_log_dir: PathBuf,
+    ) -> Self {
+        Self {
+            tag: tag.into(),
+            name: name.into(),
+            build_key: build_key.into(),
+            log_dir,
+            raw_log_dir,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct BoundBuildLogger {
     inner: Arc<BuildRunLogger>,
-    identity: SubjectLogIdentity,
+    subject: BuildLogSubject,
     event_log_path: PathBuf,
     writer: Mutex<BufWriter<File>>,
     raw_log_counters: Mutex<BTreeMap<String, usize>>,
@@ -215,22 +208,22 @@ struct BoundBuildLogger {
 
 impl BuildLogger for BoundBuildLogger {
     fn log_event(&self, event: BuildLogEvent) {
-        self.inner.log_bound_event(&self.identity, &event);
+        self.inner.log_bound_event(&self.subject, &event);
         if let Err(error) = self.write_event(&event) {
             eprintln!("warning: {error}");
         }
     }
 
     fn allocate_raw_log_path(&self, label: &str) -> Result<PathBuf, String> {
-        fs::create_dir_all(&self.identity.raw_log_dir).map_err(|error| {
+        fs::create_dir_all(&self.subject.raw_log_dir).map_err(|error| {
             format!(
                 "failed to create raw log directory '{}': {error}",
-                self.identity.raw_log_dir.display()
+                self.subject.raw_log_dir.display()
             )
         })?;
         let base = sanitize_component(label);
         unique_path(
-            &self.identity.raw_log_dir,
+            &self.subject.raw_log_dir,
             &base,
             "log",
             &self.raw_log_counters,
@@ -242,9 +235,9 @@ impl BoundBuildLogger {
     fn write_event(&self, event: &BuildLogEvent) -> Result<(), String> {
         let mut writer = self.writer.lock().map_err(|error| error.to_string())?;
         let line = serde_json::to_string(&EventLogRecord::from_event(
-            &self.identity.tag,
-            &self.identity.name,
-            &self.identity.build_key,
+            &self.subject.tag,
+            &self.subject.name,
+            &self.subject.build_key,
             event,
         ))
         .map_err(|error| format!("failed to serialize build event: {error}"))?;
@@ -409,7 +402,6 @@ fn create_event_log_file(path: &Path) -> Result<File, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Workspace;
     use serde_json::Value;
     use std::fs;
     use tempfile::tempdir;
@@ -423,18 +415,14 @@ mod tests {
         );
         let build_key = "1111111111111111111111111111111111111111111111111111111111111111";
         let subject_dir = run_log_dir.join("00000000-Sandbox-bash");
-        let workspace = Workspace::new(
+        let subject = BuildLogSubject::new(
+            "Sandbox",
+            "bash",
+            build_key,
             subject_dir.clone(),
             subject_dir.join("raw"),
-            subject_dir.join("tmp"),
         );
-        let builder = BuilderRun::new(
-            "Sandbox",
-            Some("bash".to_string()),
-            build_key.to_string(),
-            workspace,
-        );
-        let node_logger = logger.bind_builder(&builder).unwrap();
+        let node_logger = logger.bind_subject(subject).unwrap();
 
         node_logger.log_event(BuildLogEvent {
             level: BuildLogLevel::Info,
@@ -478,15 +466,14 @@ mod tests {
         let build_key = "2222222222222222222222222222222222222222222222222222222222222222";
         let subject_dir = run_log_dir.join("00000000-Sandbox-bash_debug_test");
         let raw_dir = subject_dir.join("raw");
-        let temp_dir = subject_dir.join("tmp");
-        let workspace = Workspace::new(subject_dir, raw_dir.clone(), temp_dir);
-        let builder = BuilderRun::new(
+        let subject = BuildLogSubject::new(
             "Sandbox",
-            Some("bash debug/test".to_string()),
-            build_key.to_string(),
-            workspace,
+            "bash debug/test",
+            build_key,
+            subject_dir,
+            raw_dir.clone(),
         );
-        let node_logger = logger.bind_builder(&builder).unwrap();
+        let node_logger = logger.bind_subject(subject).unwrap();
 
         let path = node_logger.allocate_raw_log_path("podman/run").unwrap();
         assert!(path.starts_with(&raw_dir));

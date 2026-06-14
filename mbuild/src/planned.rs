@@ -3,14 +3,15 @@ use crate::runtime::{
     RuntimeError, TempDirGuard, build_context, check_cancelled, log_runtime_event,
     map_builder_error, map_identity_error, map_store_error,
 };
+use crate::subject_run::{BuilderRun, SourceBuilder};
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, Store, create_workspace,
     import_source_object, load_build_handle, materialize_build,
     materialize_build_with_trusted_hash, record_existing_source_object, resolve_reuse_for_build,
 };
 use mbuild_core::{
-    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderRun, CancellationToken,
-    NoopBuildLogger, OriginContext, SourceBuilder, Workspace, compute_build_key, compute_reuse_key,
+    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, CancellationToken,
+    NoopBuildLogger, OriginContext, Workspace, compute_build_key, compute_reuse_key,
 };
 use mbuild_source::SourcePlannedSubject;
 use serde_json::Value;
@@ -187,7 +188,7 @@ fn execute_builder_subject(
     );
     let logger = cx
         .run_logger
-        .bind_builder(&builder_run)
+        .bind_subject(builder_run.log_subject())
         .map_err(RuntimeError::Store)?;
     temp_guard.set_logger(logger.clone());
     log_runtime_event(
@@ -311,7 +312,7 @@ fn execute_source_subject(
         TempDirGuard::for_source(cx.store, source_builder.temp_dir().to_path_buf());
     let logger = cx
         .run_logger
-        .bind_source(&source_builder)
+        .bind_subject(source_builder.log_subject())
         .map_err(RuntimeError::Store)?;
     temp_guard.set_logger(logger.clone());
     log_runtime_event(

@@ -1,9 +1,10 @@
+use crate::subject_run::BuilderRun;
 use bobr_store::{
     Store, StoreError, StoreTempQuarantineRequest, quarantine_store_temp,
     recreate_store_temp_dir_force, remove_store_temp_dir_force,
 };
 use mbuild_core::{
-    BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuilderError, BuilderRun,
+    BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuilderError,
     CancellationToken, IdentityError, NoopBuildLogger,
 };
 use std::fmt;
@@ -394,8 +395,8 @@ mod tests {
     };
     use bobr_store::{PublishRequest, create_workspace, publish_build, resolve_reuse_for_build};
     use mbuild_core::{
-        BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, BuilderRun, CancellationToken,
-        InputSpec, StagedBuildResult, TypedBuilder, compute_build_key, compute_reuse_key,
+        BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, CancellationToken, InputSpec,
+        StagedBuildResult, TypedBuilder, compute_build_key, compute_reuse_key,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
@@ -432,7 +433,7 @@ mod tests {
             build_key.to_string(),
             workspace,
         );
-        let logger = run_logger.bind_builder(&builder_run).unwrap();
+        let logger = run_logger.bind_subject(builder_run.log_subject()).unwrap();
         (builder_run, logger)
     }
 
@@ -944,7 +945,7 @@ mod tests {
 
     #[test]
     fn temp_dir_guard_cleans_without_a_node_logger() {
-        // Simulates the pre-logger window: a failure (e.g. bind_builder) before
+        // Simulates the pre-logger window: a failure (e.g. bind_subject) before
         // a node logger is attached. The guard, created right after the
         // workspace, must still clean the temp dir on drop via the no-op logger.
         let temp = tempdir().unwrap();

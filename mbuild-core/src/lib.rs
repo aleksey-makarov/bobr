@@ -13,6 +13,7 @@ pub mod origin;
 pub mod publication;
 #[doc(hidden)]
 pub mod runtime_helper_protocol;
+pub mod workspace;
 
 pub use builder::*;
 pub use cancellation::*;
@@ -25,6 +26,7 @@ pub use logging::*;
 pub use origin::*;
 pub use publication::*;
 pub use runtime_helper_protocol::FsTreeArchiveEntrySource;
+pub use workspace::*;
 
 #[derive(Debug)]
 pub enum BuilderError {
