@@ -512,6 +512,60 @@ fn second_run_reuses_root_without_source_materialization() {
     assert_eq!(first.build_key, second.build_key);
 }
 
+/// Counts per-node workspace dirs (those with a `meta.json`) across all runs.
+fn workspace_dir_count(workspace_root: &Path) -> usize {
+    let logs = store_root(workspace_root).join("logs");
+    let Ok(runs) = fs::read_dir(&logs) else {
+        return 0;
+    };
+    let mut count = 0;
+    for run in runs.flatten() {
+        let run_path = run.path();
+        if !run_path.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = fs::read_dir(&run_path) {
+            for entry in entries.flatten() {
+                if entry.path().join("meta.json").is_file() {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
+#[test]
+fn second_cached_run_creates_no_new_workspaces() {
+    let workspace = tempdir().unwrap();
+    let recipe = recipe_node(
+        "all-targets",
+        "Group",
+        json!({}),
+        json!({
+            "only": tree_file_recipe("only-target", "f.txt", "hi\n", false),
+        }),
+    );
+    let recipe_path = workspace.path().join("cached.json");
+    write_recipe(&recipe_path, &recipe);
+
+    let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let after_first = workspace_dir_count(workspace.path());
+    assert!(
+        after_first >= 2,
+        "expected per-node workspaces on the first (miss) run, got {after_first}"
+    );
+
+    let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let after_second = workspace_dir_count(workspace.path());
+
+    assert_eq!(first.object_hash, second.object_hash);
+    assert_eq!(
+        after_second, after_first,
+        "a fully cached run must not create new per-node workspaces"
+    );
+}
+
 #[test]
 fn identical_fetch_sources_are_deduped_by_object_hash() {
     let workspace = tempdir().unwrap();

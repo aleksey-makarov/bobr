@@ -93,6 +93,26 @@ pub(crate) fn execute_builder_node(
     let input_hashes = inputs
         .ordered_reuse_input_hashes(builder.spec())
         .map_err(map_builder_error)?;
+    // Resolve the caches before building a workspace: a hit needs no
+    // workspace, logger, or temp dir, and is left silent (NoopBuildLogger).
+    if let Some(published) = load_build_handle(store, build_key).map_err(map_store_error)? {
+        return Ok(ExecutedBuilderNode {
+            published,
+            logger: Arc::new(NoopBuildLogger),
+        });
+    }
+    let reuse_key =
+        compute_reuse_key(builder.tag(), &config, &input_hashes).map_err(map_identity_error)?;
+    if let Some(published) =
+        resolve_reuse_for_build(store, build_key, reuse_key).map_err(map_store_error)?
+    {
+        return Ok(ExecutedBuilderNode {
+            published,
+            logger: Arc::new(NoopBuildLogger),
+        });
+    }
+
+    // Miss: create the workspace and run the builder.
     let workspace = create_workspace(
         store,
         builder.tag(),
@@ -106,8 +126,8 @@ pub(crate) fn execute_builder_node(
         build_key: build_key.to_string(),
         workspace,
     });
-    // Owns the temp dir from here on: every return path (cache/bind/lookup
-    // errors below, and panics) cleans it via Drop.
+    // Owns the temp dir from here on: every return path (bind error below, and
+    // panics) cleans it via Drop.
     let mut temp_guard = TempDirGuard::for_builder(
         store,
         builder.tag(),
@@ -124,31 +144,6 @@ pub(crate) fn execute_builder_node(
         "start",
         "starting builder node",
     );
-
-    if let Some(published) = load_build_handle(store, build_key).map_err(map_store_error)? {
-        log_runtime_event(
-            logger.as_ref(),
-            BuildLogLevel::Info,
-            "cache-hit",
-            "reusing existing build ref",
-        );
-        return Ok(ExecutedBuilderNode { published, logger });
-    }
-
-    let reuse_key =
-        compute_reuse_key(builder.tag(), &config, &input_hashes).map_err(map_identity_error)?;
-    if let Some(published) =
-        resolve_reuse_for_build(store, build_key, reuse_key).map_err(map_store_error)?
-    {
-        log_runtime_event(
-            logger.as_ref(),
-            BuildLogLevel::Info,
-            "object-hit",
-            "reusing existing canonical object",
-        );
-        return Ok(ExecutedBuilderNode { published, logger });
-    }
-
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,

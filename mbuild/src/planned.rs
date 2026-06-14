@@ -9,8 +9,8 @@ use bobr_store::{
 };
 use mbuild_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase,
-    CancellationToken, OriginContext, SourceBuilderClass, SourceBuilderInit, Workspace,
-    compute_build_key,
+    CancellationToken, NoopBuildLogger, OriginContext, SourceBuilderClass, SourceBuilderInit,
+    Workspace, compute_build_key,
 };
 use mbuild_source::SourcePlannedSubject;
 use serde_json::Value;
@@ -160,6 +160,27 @@ fn execute_source_subject(
     cx: PlannedExecutionContext<'_>,
 ) -> Result<SubjectExecution, RuntimeError> {
     let build_key = subject.build_key();
+    check_cancelled(&cx.cancellation)?;
+
+    // Resolve the caches before building a workspace: a hit needs no
+    // workspace, logger, or temp dir, and is left silent (NoopBuildLogger).
+    if let Some(published) = load_build_handle(cx.store, build_key).map_err(map_store_error)? {
+        return Ok(SubjectExecution {
+            realized: realized_object_from_record(Some(build_key), &published.object_record),
+            logger: Arc::new(NoopBuildLogger),
+        });
+    }
+    if let Some(stored) =
+        record_existing_source_object(cx.store, subject.declared_object_hash())
+            .map_err(map_store_error)?
+    {
+        return Ok(SubjectExecution {
+            realized: realized_object_from_record(Some(build_key), &stored.object_record),
+            logger: Arc::new(NoopBuildLogger),
+        });
+    }
+
+    // Miss: create the workspace and materialize the source.
     let workspace = create_workspace(
         cx.store,
         "Source",
@@ -175,8 +196,8 @@ fn execute_source_subject(
         origin: subject.clone_origin(),
         workspace,
     });
-    // Owns the temp dir from here on: every return path (incl. bind/lookup
-    // errors below, and panics) cleans it via Drop.
+    // Owns the temp dir from here on: every return path (bind error below, and
+    // panics) cleans it via Drop.
     let mut temp_guard = TempDirGuard::for_source(cx.store, source_builder.temp_dir().to_path_buf());
     let logger = cx
         .run_logger
@@ -189,37 +210,6 @@ fn execute_source_subject(
         "start",
         "starting builder node",
     );
-    check_cancelled(&cx.cancellation)?;
-
-    if let Some(published) = load_build_handle(cx.store, build_key).map_err(map_store_error)? {
-        log_runtime_event(
-            logger.as_ref(),
-            BuildLogLevel::Info,
-            "cache-hit",
-            "reusing existing source build ref",
-        );
-        return Ok(SubjectExecution {
-            realized: realized_object_from_record(Some(build_key), &published.object_record),
-            logger,
-        });
-    }
-
-    if let Some(stored) =
-        record_existing_source_object(cx.store, source_builder.declared_object_hash())
-            .map_err(map_store_error)?
-    {
-        log_runtime_event(
-            logger.as_ref(),
-            BuildLogLevel::Info,
-            "object-hit",
-            "reusing existing source object",
-        );
-        return Ok(SubjectExecution {
-            realized: realized_object_from_record(Some(build_key), &stored.object_record),
-            logger,
-        });
-    }
-
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
