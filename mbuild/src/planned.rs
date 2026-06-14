@@ -1,16 +1,17 @@
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
-    ExecuteBuilderNodeRequest, RuntimeError, TempDirGuard, check_cancelled, execute_builder_node,
-    log_runtime_event, map_identity_error, map_store_error,
+    RuntimeError, TempDirGuard, build_context, check_cancelled, log_runtime_event,
+    map_builder_error, map_identity_error, map_store_error,
 };
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, Store, create_workspace,
-    import_source_object, load_build_handle, record_existing_source_object,
+    import_source_object, load_build_handle, materialize_build, materialize_build_with_trusted_hash,
+    record_existing_source_object, resolve_reuse_for_build,
 };
 use mbuild_core::{
-    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase,
+    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, BuilderClassBase, BuilderRunInit,
     CancellationToken, NoopBuildLogger, OriginContext, SourceBuilderClass, SourceBuilderInit,
-    Workspace, compute_build_key,
+    Workspace, compute_build_key, compute_reuse_key,
 };
 use mbuild_source::SourcePlannedSubject;
 use serde_json::Value;
@@ -135,23 +136,127 @@ fn execute_builder_subject(
     subject: &BuilderPlannedSubject,
     cx: PlannedExecutionContext<'_>,
 ) -> Result<SubjectExecution, RuntimeError> {
+    let build_key = subject.build_key;
     let inputs = builder_resolved_inputs(subject, cx.store, cx.realized_inputs)?;
-    let executed = execute_builder_node(ExecuteBuilderNodeRequest {
-        store: cx.store,
-        builder: subject.builder,
-        build_key: subject.build_key,
-        build_name: &subject.name,
-        run_logger: cx.run_logger,
-        cancellation: cx.cancellation,
-        config: subject.config.clone(),
-        inputs,
+    check_cancelled(&cx.cancellation)?;
+    let input_hashes = inputs
+        .ordered_reuse_input_hashes(subject.builder.spec())
+        .map_err(map_builder_error)?;
+
+    // Resolve the caches before building a workspace: a hit needs no
+    // workspace, logger, or temp dir, and is left silent (NoopBuildLogger).
+    if let Some(published) = load_build_handle(cx.store, build_key).map_err(map_store_error)? {
+        return Ok(SubjectExecution {
+            realized: realized_object_from_record(Some(build_key), &published.object_record),
+            logger: Arc::new(NoopBuildLogger),
+        });
+    }
+    let reuse_key = compute_reuse_key(subject.builder.tag(), &subject.config, &input_hashes)
+        .map_err(map_identity_error)?;
+    if let Some(published) =
+        resolve_reuse_for_build(cx.store, build_key, reuse_key).map_err(map_store_error)?
+    {
+        return Ok(SubjectExecution {
+            realized: realized_object_from_record(Some(build_key), &published.object_record),
+            logger: Arc::new(NoopBuildLogger),
+        });
+    }
+
+    // Miss: create the workspace and run the builder.
+    let workspace = create_workspace(
+        cx.store,
+        subject.builder.tag(),
+        Some(subject.name.clone()),
+        build_key.to_string(),
+    )
+    .map(core_workspace)
+    .map_err(map_store_error)?;
+    let builder_run = subject.builder.create_object(BuilderRunInit {
+        recipe_name: Some(subject.name.clone()),
+        build_key: build_key.to_string(),
+        workspace,
+    });
+    // Owns the temp dir from here on: every return path (bind error below, and
+    // panics) cleans it via Drop.
+    let mut temp_guard = TempDirGuard::for_builder(
+        cx.store,
+        subject.builder.tag(),
+        build_key,
+        builder_run.temp_dir().to_path_buf(),
+    );
+    let logger = cx
+        .run_logger
+        .bind_builder(&builder_run)
+        .map_err(RuntimeError::Store)?;
+    temp_guard.set_logger(logger.clone());
+    log_runtime_event(
+        logger.as_ref(),
+        BuildLogLevel::Info,
+        "start",
+        "starting builder node",
+    );
+    log_runtime_event(
+        logger.as_ref(),
+        BuildLogLevel::Info,
+        "cache-miss",
+        "executing builder",
+    );
+    check_cancelled(&cx.cancellation)?;
+    let mut context = build_context(
+        cx.store,
+        &builder_run,
+        build_key,
+        logger.clone(),
+        cx.cancellation.clone(),
+    )?;
+    log_runtime_event(
+        logger.as_ref(),
+        BuildLogLevel::Info,
+        "run",
+        "running builder implementation",
+    );
+    let staged = subject
+        .builder
+        .build_erased(subject.config.clone(), inputs.into_builder_inputs(), &mut context)
+        .map_err(|error| {
+            log_runtime_event(
+                logger.as_ref(),
+                BuildLogLevel::Error,
+                "fail",
+                error.to_string(),
+            );
+            map_builder_error(error)
+        })?;
+    check_cancelled(&cx.cancellation)?;
+    let published = match staged.object_hash {
+        Some(object_hash) => materialize_build_with_trusted_hash(
+            cx.store,
+            build_key,
+            reuse_key,
+            input_hashes,
+            &staged.staged_path,
+            object_hash,
+        ),
+        None => materialize_build(
+            cx.store,
+            build_key,
+            reuse_key,
+            input_hashes,
+            &staged.staged_path,
+        ),
+    }
+    .map_err(|error| {
+        log_runtime_event(
+            logger.as_ref(),
+            BuildLogLevel::Error,
+            "fail",
+            error.to_string(),
+        );
+        map_store_error(error)
     })?;
     Ok(SubjectExecution {
-        realized: realized_object_from_record(
-            Some(subject.build_key),
-            &executed.published.object_record,
-        ),
-        logger: executed.logger,
+        realized: realized_object_from_record(Some(build_key), &published.object_record),
+        logger,
     })
 }
 
@@ -321,7 +426,7 @@ pub(crate) fn realized_object_from_record(
     }
 }
 
-fn core_workspace(workspace: bobr_store::StoreWorkspace) -> Workspace {
+pub(crate) fn core_workspace(workspace: bobr_store::StoreWorkspace) -> Workspace {
     Workspace::new(
         workspace.log_dir().to_path_buf(),
         workspace.raw_log_dir().to_path_buf(),
