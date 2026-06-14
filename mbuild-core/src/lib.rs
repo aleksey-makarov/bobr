@@ -1,6 +1,5 @@
 use std::fmt;
 
-pub mod builder;
 pub mod cancellation;
 pub mod fs_tree_compose;
 pub mod fs_tree_manifest;
@@ -15,7 +14,6 @@ pub mod publication;
 pub mod runtime_helper_protocol;
 pub mod workspace;
 
-pub use builder::*;
 pub use cancellation::*;
 pub use fs_tree_compose::*;
 pub use fs_tree_manifest::*;

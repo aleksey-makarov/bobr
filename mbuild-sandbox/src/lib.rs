@@ -18,11 +18,11 @@
 //! 4. Build `SandboxBuildConfig` for `mbuild-runtime`.
 //! 5. Stage the runtime output directory as an fs-tree object.
 
-use mbuild_builder::BuilderRegistry;
-use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, InputSpec,
-    StagedBuildResult, TypedBuilder, load_fs_tree_object,
+use mbuild_builder::{
+    BuildContext, BuilderInputObject, BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult,
+    TypedBuilder,
 };
+use mbuild_core::{BuildLogLevel, BuilderError, load_fs_tree_object};
 use mbuild_runtime::{
     SandboxBuildConfig, SandboxInput, SandboxRunAs, SandboxStep, run_sandbox_build,
 };
@@ -915,7 +915,8 @@ fn write_script_config_node(path: &Path, value: &Value, debug_path: &str) -> BRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{Builder, BuilderInputs, FsTreeEntry, FsTreeManifest};
+    use mbuild_builder::{Builder, BuilderInputs};
+    use mbuild_core::{FsTreeEntry, FsTreeManifest};
     use serde_json::json;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -923,7 +924,10 @@ mod tests {
 
     #[test]
     fn sandbox_input_spec_uses_rootfs_required_input() {
-        assert_eq!(mbuild_core::TypedBuilder::tag(&SandboxBuilder), "Sandbox");
+        assert_eq!(
+            mbuild_builder::TypedBuilder::tag(&SandboxBuilder),
+            "Sandbox"
+        );
         assert_eq!(SANDBOX_SPEC.required_inputs, &["rootfs"]);
         assert!(SANDBOX_SPEC.allow_extra_inputs);
     }

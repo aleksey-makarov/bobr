@@ -1,8 +1,7 @@
 use crate::{
-    ErofsRootfsBuilder, GroupBuilder, InitramfsBuilder, OciExtractBuilder, TreeBuilder,
+    Builder, ErofsRootfsBuilder, GroupBuilder, InitramfsBuilder, OciExtractBuilder, TreeBuilder,
     TreeMergeBuilder, TreeSubsetBuilder,
 };
-use mbuild_core::Builder;
 
 static GROUP_BUILDER: GroupBuilder = GroupBuilder;
 static OCI_EXTRACT_BUILDER: OciExtractBuilder = OciExtractBuilder;
@@ -78,7 +77,8 @@ pub fn register_in_tree_builders(registry: &mut BuilderRegistry) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{BuildContext, BuilderError, BuilderInputs, InputSpec, StagedBuildResult};
+    use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult};
+    use mbuild_core::BuilderError;
     use serde_json::Value;
 
     static DUPLICATE_SPEC: InputSpec = InputSpec {

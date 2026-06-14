@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn execute_graph_drains_in_flight_workers_when_publish_fails() {
         use crate::planned::{BuilderPlannedSubject, PlannedSubject};
-        use mbuild_core::{
+        use mbuild_builder::{
             BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
         };
         use serde::Deserialize;

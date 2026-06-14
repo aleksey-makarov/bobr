@@ -1,9 +1,10 @@
 #![cfg(all(feature = "integration-tests", target_os = "linux"))]
 
-use mbuild_builder::{TreeBuilder, TreeMergeBuilder, TreeSubsetBuilder};
-use mbuild_core::{
-    BuildContext, Builder, BuilderInputObject, BuilderInputs, FsTreeEntry, FsTreeManifest,
+use mbuild_builder::{
+    BuildContext, Builder, BuilderInputObject, BuilderInputs, StagedBuildResult, TreeBuilder,
+    TreeMergeBuilder, TreeSubsetBuilder,
 };
+use mbuild_core::{FsTreeEntry, FsTreeManifest};
 use mbuild_runtime::{
     FsTreeArchiveEntrySource, FsTreeArchiveInput, write_fs_tree_tar_in_ownership_namespace,
 };
@@ -179,7 +180,7 @@ fn tree_merge_materializes_subuid_owned_file_under_restrictive_dir() -> TestResu
     Ok(())
 }
 
-fn build_restrictive_tree(root: &Path, name: &str) -> TestResult<mbuild_core::StagedBuildResult> {
+fn build_restrictive_tree(root: &Path, name: &str) -> TestResult<StagedBuildResult> {
     build_tree(
         root,
         name,
@@ -224,7 +225,7 @@ fn build_restrictive_tree(root: &Path, name: &str) -> TestResult<mbuild_core::St
     )
 }
 
-fn build_simple_tree(root: &Path, name: &str) -> TestResult<mbuild_core::StagedBuildResult> {
+fn build_simple_tree(root: &Path, name: &str) -> TestResult<StagedBuildResult> {
     build_tree(
         root,
         name,
@@ -258,18 +259,14 @@ fn build_simple_tree(root: &Path, name: &str) -> TestResult<mbuild_core::StagedB
     )
 }
 
-fn build_tree(
-    root: &Path,
-    name: &str,
-    config: serde_json::Value,
-) -> TestResult<mbuild_core::StagedBuildResult> {
+fn build_tree(root: &Path, name: &str, config: serde_json::Value) -> TestResult<StagedBuildResult> {
     let temp_dir = root.join(format!("{name}-tmp"));
     fs::create_dir(&temp_dir)?;
     let mut cx = BuildContext::with_noop_logger(temp_dir);
     Ok(TreeBuilder.build_erased(config, BuilderInputs::empty(), &mut cx)?)
 }
 
-fn single_tree_input(name: &'static str, result: &mbuild_core::StagedBuildResult) -> BuilderInputs {
+fn single_tree_input(name: &'static str, result: &StagedBuildResult) -> BuilderInputs {
     let mut inputs = BuilderInputs::empty();
     inputs.insert(
         name,
@@ -282,7 +279,7 @@ fn single_tree_input(name: &'static str, result: &mbuild_core::StagedBuildResult
 
 fn assert_file_contents_via_tar(
     root: &Path,
-    result: &mbuild_core::StagedBuildResult,
+    result: &StagedBuildResult,
     rel_path: &str,
     expected: &[u8],
 ) -> TestResult<()> {
@@ -327,7 +324,7 @@ fn assert_file_contents_via_tar(
 }
 
 fn assert_manifest_file_mode(
-    result: &mbuild_core::StagedBuildResult,
+    result: &StagedBuildResult,
     rel_path: &str,
     mode: u32,
 ) -> TestResult<()> {

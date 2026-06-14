@@ -9,9 +9,10 @@ use bobr_store::{
     import_source_object, load_build_handle, materialize_build,
     materialize_build_with_trusted_hash, record_existing_source_object, resolve_reuse_for_build,
 };
+use mbuild_builder::Builder;
 use mbuild_core::{
-    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, Builder, CancellationToken,
-    NoopBuildLogger, OriginContext, Workspace, compute_build_key, compute_reuse_key,
+    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, CancellationToken, NoopBuildLogger,
+    OriginContext, Workspace, compute_build_key, compute_reuse_key,
 };
 use mbuild_source::SourcePlannedSubject;
 use serde_json::Value;

@@ -2,10 +2,12 @@
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use mbuild_builder::{OciExtractBuilder, OciExtractConfig};
+use mbuild_builder::{
+    BuildContext, BuilderInputObject, BuilderInputs, OciExtractBuilder, OciExtractConfig,
+    TypedBuilder,
+};
 use mbuild_core::{
-    BuildContext, BuilderInputObject, BuilderInputs, FsTreeEntry, TypedBuilder,
-    load_fs_tree_object,
+    FsTreeEntry, load_fs_tree_object,
     oci::{self, OciDescriptor},
 };
 use sha2::{Digest, Sha256};

@@ -1,10 +1,11 @@
+use crate::{
+    BuildContext, BuilderInputObject, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
+};
 use fsobj_hash::{EntryKind, ObjectHash, hash_file_bytes, hash_path, hash_symlink_node};
 use globset::{Glob, GlobMatcher};
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, ComposedFsTree,
-    ComposedFsTreeEntry, FsTreeComposeInput, FsTreeEntry, FsTreeManifest, InputSpec,
-    StagedBuildResult, TypedBuilder, compose_fs_trees, create_fs_tree_staging_dir,
-    load_fs_tree_object,
+    BuildLogLevel, BuilderError, ComposedFsTree, ComposedFsTreeEntry, FsTreeComposeInput,
+    FsTreeEntry, FsTreeManifest, compose_fs_trees, create_fs_tree_staging_dir, load_fs_tree_object,
 };
 #[cfg(test)]
 use mbuild_core::{FsTreeOwnerMap, InitramfsEntrySource};
@@ -2268,9 +2269,9 @@ fn map_fs_tree_error(error: impl std::fmt::Display) -> BuilderError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Builder, BuilderInputObject, BuilderInputs};
     use mbuild_core::{
-        BuildLogEvent, BuildLogger, Builder, BuilderInputObject, BuilderInputs, FsTreeObjectError,
-        FsTreeOwnerMap, validate_fs_tree_object,
+        BuildLogEvent, BuildLogger, FsTreeObjectError, FsTreeOwnerMap, validate_fs_tree_object,
     };
     use std::cell::RefCell;
     #[cfg(unix)]

@@ -1,7 +1,5 @@
-use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputs, InputSpec, StagedBuildResult,
-    TypedBuilder,
-};
+use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
+use mbuild_core::{BuildLogLevel, BuilderError};
 use serde::Deserialize;
 use std::fs;
 #[cfg(unix)]
@@ -83,7 +81,7 @@ impl TypedBuilder for GroupBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{Builder, BuilderInputObject};
+    use crate::{Builder, BuilderInputObject};
     use std::collections::BTreeMap;
     use std::path::Path;
     use tempfile::tempdir;
@@ -104,9 +102,9 @@ mod tests {
     #[test]
     fn spec_accepts_extra_inputs_only() {
         let builder = GroupBuilder;
-        let spec = mbuild_core::TypedBuilder::spec(&builder);
+        let spec = crate::TypedBuilder::spec(&builder);
 
-        assert_eq!(mbuild_core::TypedBuilder::tag(&builder), "Group");
+        assert_eq!(crate::TypedBuilder::tag(&builder), "Group");
         assert!(spec.required_inputs.is_empty());
         assert!(spec.optional_inputs.is_empty());
         assert!(spec.allow_extra_inputs);

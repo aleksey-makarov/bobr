@@ -1,9 +1,11 @@
+use crate::{
+    BuildContext, BuilderInputObject, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
+};
 use flate2::read::GzDecoder;
 use fsobj_hash::{hash_file_bytes, hash_symlink_node};
 use mbuild_core::{
-    BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, FsTreeEntry,
-    FsTreeManifest, FsTreeObjectError, FsTreeObjectPaths, InputSpec, ObjectHash, StagedBuildResult,
-    TypedBuilder, create_fs_tree_staging_dir, hash_fs_tree_object_from_manifest_with_extra_files,
+    BuildLogLevel, BuilderError, FsTreeEntry, FsTreeManifest, FsTreeObjectError, FsTreeObjectPaths,
+    ObjectHash, create_fs_tree_staging_dir, hash_fs_tree_object_from_manifest_with_extra_files,
     oci::{self, OciDescriptor, OciManifest},
 };
 #[cfg(test)]
@@ -958,9 +960,9 @@ fn join_rel(parent: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Builder, BuilderInputObject, TypedBuilder};
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use mbuild_core::{Builder, BuilderInputObject, TypedBuilder};
     use sha2::{Digest, Sha256};
     use std::io::Cursor;
     use std::io::Write;

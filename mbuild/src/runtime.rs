@@ -3,9 +3,10 @@ use bobr_store::{
     Store, StoreError, StoreTempQuarantineRequest, quarantine_store_temp,
     recreate_store_temp_dir_force, remove_store_temp_dir_force,
 };
+use mbuild_builder::BuildContext;
 use mbuild_core::{
-    BuildContext, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuilderError,
-    CancellationToken, IdentityError, NoopBuildLogger,
+    BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuilderError, CancellationToken,
+    IdentityError, NoopBuildLogger,
 };
 use std::fmt;
 use std::fs;
@@ -394,9 +395,9 @@ mod tests {
         core_workspace, execute_subject,
     };
     use bobr_store::{PublishRequest, create_workspace, publish_build, resolve_reuse_for_build};
+    use mbuild_builder::{BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
     use mbuild_core::{
-        BuildContext, BuildLogger, BuildRunLogger, BuilderInputs, CancellationToken, InputSpec,
-        StagedBuildResult, TypedBuilder, compute_build_key, compute_reuse_key,
+        BuildLogger, BuildRunLogger, CancellationToken, compute_build_key, compute_reuse_key,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
@@ -440,7 +441,7 @@ mod tests {
     fn run_builder_subject(
         store: &Store,
         run_logger: Arc<BuildRunLogger>,
-        builder: &'static dyn mbuild_core::Builder,
+        builder: &'static dyn mbuild_builder::Builder,
         name: &str,
         config: Value,
         cancellation: CancellationToken,

@@ -1,4 +1,5 @@
-use mbuild_core::{BuilderError, BuilderInputObject, BuilderInputs, InputSpec, ObjectHash};
+use mbuild_builder::{BuilderInputObject, BuilderInputs, InputSpec};
+use mbuild_core::{BuilderError, ObjectHash};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
