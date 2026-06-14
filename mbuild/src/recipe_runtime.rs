@@ -249,7 +249,7 @@ fn execute_graph(
         executed.logger.log_event(BuildLogEvent {
             level: BuildLogLevel::Info,
             phase: "done".to_string(),
-            message: "builder node completed".to_string(),
+            message: "subject completed".to_string(),
             object_hash: Some(executed.realized.object_hash),
             raw_log_path: None,
             details: serde_json::Map::new(),

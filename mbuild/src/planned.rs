@@ -193,7 +193,7 @@ fn execute_builder_subject(
         logger.as_ref(),
         BuildLogLevel::Info,
         "start",
-        "starting builder node",
+        "starting subject",
     );
     log_runtime_event(
         logger.as_ref(),
@@ -313,7 +313,7 @@ fn execute_source_subject(
         logger.as_ref(),
         BuildLogLevel::Info,
         "start",
-        "starting builder node",
+        "starting subject",
     );
     log_runtime_event(
         logger.as_ref(),
