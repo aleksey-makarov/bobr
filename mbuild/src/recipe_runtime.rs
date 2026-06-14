@@ -127,9 +127,10 @@ fn execute_graph(
     let mut in_flight = 0usize;
 
     // Workers run on detached threads tracked only by `in_flight`. Once a
-    // worker is spawned, every exit path must drain `in_flight` back to 0
-    // before returning: record failures in `first_error` and fall through to
-    // the drain, never `?` out of this loop while workers may still be running.
+    // worker is spawned, scheduler-side failures should be recorded in
+    // `first_error` so the loop stops launching new work and drains already
+    // running workers before returning. The channel-disconnected case below is
+    // different: it means no sender remains, so no worker can report a result.
     while !completed.contains_key(&root_key) {
         if first_error.is_none() && cancellation.is_cancelled() {
             first_error = Some(RuntimeError::Cancelled(
@@ -225,8 +226,9 @@ fn execute_graph(
             }
         };
         let publication_name = subject.name();
-        if let Err(error) = publish_stored_object(store, publication_name, executed.realized.object_hash)
-            .map_err(map_store_error)
+        if let Err(error) =
+            publish_stored_object(store, publication_name, executed.realized.object_hash)
+                .map_err(map_store_error)
         {
             first_error.get_or_insert(error);
             continue;
@@ -487,9 +489,13 @@ mod tests {
             BTreeMap::new(),
         )
         .unwrap();
-        let slow =
-            BuilderPlannedSubject::new(&SLOW_BUILDER, "good".to_string(), json!({}), BTreeMap::new())
-                .unwrap();
+        let slow = BuilderPlannedSubject::new(
+            &SLOW_BUILDER,
+            "good".to_string(),
+            json!({}),
+            BTreeMap::new(),
+        )
+        .unwrap();
         let fast_key = fast.build_key();
         let slow_key = slow.build_key();
 
@@ -499,8 +505,15 @@ mod tests {
 
         // Root is the failing node, so the loop never completes through the root
         // and must drain the in-flight slow worker before returning the error.
-        let error = execute_graph(&store, logger, &subjects, fast_key, 2, CancellationToken::new())
-            .expect_err("expected publish failure for invalid publication name");
+        let error = execute_graph(
+            &store,
+            logger,
+            &subjects,
+            fast_key,
+            2,
+            CancellationToken::new(),
+        )
+        .expect_err("expected publish failure for invalid publication name");
 
         assert_eq!(error.class(), "store");
         assert!(
