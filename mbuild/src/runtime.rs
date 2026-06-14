@@ -319,10 +319,12 @@ enum TempCleanupPolicy {
 /// RAII owner of a node's temp directory.
 ///
 /// Created right after `create_workspace` (before the node logger exists), so
-/// that every exit path — cache hit, error, success, or panic-unwind — cleans
-/// the temp dir exactly once via `Drop`. The builder/source asymmetry is kept:
-/// builders quarantine, sources remove. Until a node logger is attached with
-/// [`TempDirGuard::set_logger`], cleanup warnings go to a no-op logger.
+/// that every post-workspace exit path — error, success, or panic-unwind —
+/// cleans the temp dir exactly once via `Drop`. Cache hits return before a
+/// workspace exists, so they do not need a temp guard. The builder/source
+/// asymmetry is kept: builders quarantine, sources remove. Until a node logger
+/// is attached with [`TempDirGuard::set_logger`], cleanup warnings go to a
+/// no-op logger.
 pub(crate) struct TempDirGuard {
     temp_dir: PathBuf,
     policy: TempCleanupPolicy,
