@@ -1,6 +1,7 @@
 use crate::builder_recipe;
 use crate::planned::PlannedSubject;
 use crate::runtime::RuntimeError;
+use mbuild_builder::BuilderRegistry;
 use mbuild_core::BuildKey;
 #[cfg(test)]
 use mbuild_core::compute_build_key;
@@ -34,6 +35,7 @@ impl RecipeEnvelope {
 
 pub(crate) fn collect_graph(
     request: &BTreeMap<String, Value>,
+    registry: &BuilderRegistry,
     subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
 ) -> Result<BuildKey, RuntimeError> {
     let mut visited_in_path = BTreeSet::new();
@@ -41,6 +43,7 @@ pub(crate) fn collect_graph(
     collect_graph_inner(
         request,
         "root",
+        registry,
         subjects,
         &mut visited_in_path,
         &mut node_keys,
@@ -50,6 +53,7 @@ pub(crate) fn collect_graph(
 fn collect_graph_inner(
     request: &BTreeMap<String, Value>,
     node_id: &str,
+    registry: &BuilderRegistry,
     subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
     visited_in_path: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, BuildKey>,
@@ -92,13 +96,19 @@ fn collect_graph_inner(
             validate_input_name(&input_name, &format!("{node_path}.inputs"))?;
             let input_path = format!("{node_path}.inputs.{input_name}");
             let child_id = parse_input_value(slot_value, &input_path)?;
-            let child =
-                collect_graph_inner(request, &child_id, subjects, visited_in_path, node_keys)?;
+            let child = collect_graph_inner(
+                request,
+                &child_id,
+                registry,
+                subjects,
+                visited_in_path,
+                node_keys,
+            )?;
             inputs.insert(input_name, child);
         }
 
         let builder_subject =
-            builder_recipe::parse_builder_subject(&tag, object, inputs, &node_path)?;
+            builder_recipe::parse_builder_subject(registry, &tag, object, inputs, &node_path)?;
         (
             builder_subject.build_key(),
             Arc::new(PlannedSubject::Builder(builder_subject)),
@@ -274,14 +284,16 @@ fn take_string(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builder_registry::create_builder_registry;
     use serde_json::json;
 
     fn collect_one(
         request: &Value,
     ) -> Result<(BuildKey, HashMap<BuildKey, Arc<PlannedSubject>>), RuntimeError> {
         let request = parse_request_value(request.clone(), "$")?;
+        let registry = create_builder_registry()?;
         let mut subjects = HashMap::new();
-        let root_key = collect_graph(&request, &mut subjects)?;
+        let root_key = collect_graph(&request, &registry, &mut subjects)?;
         Ok((root_key, subjects))
     }
 

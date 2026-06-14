@@ -470,6 +470,7 @@ pub(crate) fn core_workspace(workspace: bobr_store::StoreWorkspace) -> Workspace
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builder_registry::create_builder_registry;
     use mbuild_core::ObjectHash;
     use serde_json::json;
     use std::str::FromStr;
@@ -490,7 +491,8 @@ mod tests {
 
     #[test]
     fn builder_subject_rejects_extra_inputs() {
-        let builder = mbuild_builder::get_builder("Tree").unwrap();
+        let registry = create_builder_registry().unwrap();
+        let builder = registry.get("Tree").unwrap();
         let error = expect_builder_subject_error(BuilderPlannedSubject::new(
             builder,
             "tree".to_string(),
@@ -508,7 +510,8 @@ mod tests {
 
     #[test]
     fn builder_subject_rejects_missing_required_inputs() {
-        let builder = mbuild_builder::get_builder("Sandbox").unwrap();
+        let registry = create_builder_registry().unwrap();
+        let builder = registry.get("Sandbox").unwrap();
         let error = expect_builder_subject_error(BuilderPlannedSubject::new(
             builder,
             "sandbox".to_string(),
@@ -526,7 +529,8 @@ mod tests {
 
     #[test]
     fn builder_subject_computes_build_key_from_ordered_inputs() {
-        let builder = mbuild_builder::get_builder("Tree").unwrap();
+        let registry = create_builder_registry().unwrap();
+        let builder = registry.get("Tree").unwrap();
         let config = json!({
             "tree": {
                 "entries": [{

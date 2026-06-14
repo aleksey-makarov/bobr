@@ -18,6 +18,7 @@
 //! 4. Build `SandboxBuildConfig` for `mbuild-runtime`.
 //! 5. Stage the runtime output directory as an fs-tree object.
 
+use mbuild_builder::BuilderRegistry;
 use mbuild_core::{
     BuildContext, BuildLogLevel, BuilderError, BuilderInputObject, BuilderInputs, InputSpec,
     StagedBuildResult, TypedBuilder, load_fs_tree_object,
@@ -38,6 +39,14 @@ use std::path::{Path, PathBuf};
 
 /// Builder implementation registered for recipe nodes tagged `Sandbox`.
 pub struct SandboxBuilder;
+
+/// Static `Sandbox` builder class used by explicit registries.
+pub static SANDBOX_BUILDER: SandboxBuilder = SandboxBuilder;
+
+/// Registers the `Sandbox` builder into an explicit builder registry.
+pub fn register_builders(registry: &mut BuilderRegistry) -> Result<(), String> {
+    registry.register(&SANDBOX_BUILDER)
+}
 
 // Host-side name of the raw output directory before fs-tree staging.
 const OUTPUT_DIR_NAME: &str = "out";

@@ -1,3 +1,4 @@
+use crate::builder_registry::create_builder_registry;
 use crate::planned::{
     BuilderPlannedSubject, PlannedExecutionContext, PlannedSubject, SubjectExecution,
     execute_subject,
@@ -54,8 +55,9 @@ pub fn run_recipe_envelope(
     let store_path = options.store.as_ref().ok_or_else(|| {
         RuntimeError::InvalidRequest("recipe options.store or --store must be set".to_string())
     })?;
+    let builder_registry = create_builder_registry()?;
     let mut subjects = HashMap::new();
-    let root_key = collect_graph(&request, &mut subjects)?;
+    let root_key = collect_graph(&request, &builder_registry, &mut subjects)?;
 
     let store = Store::create(store_path).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> =

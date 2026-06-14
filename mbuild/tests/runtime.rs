@@ -28,7 +28,10 @@ fn source_build_key(object_hash: fsobj_hash::ObjectHash) -> BuildKey {
 
 #[test]
 fn registered_builders_include_current_tags_only() {
-    let tags = mbuild_builder::supported_builder_tags();
+    let mut registry = mbuild_builder::BuilderRegistry::new();
+    mbuild_builder::register_in_tree_builders(&mut registry).unwrap();
+    mbuild_sandbox::register_builders(&mut registry).unwrap();
+    let tags = registry.supported_tags();
     for tag in [
         "Group",
         "Tree",

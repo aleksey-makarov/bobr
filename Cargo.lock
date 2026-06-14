@@ -906,6 +906,7 @@ dependencies = [
  "libc",
  "mbuild-builder",
  "mbuild-core",
+ "mbuild-sandbox",
  "mbuild-source",
  "mockito",
  "serde",
@@ -927,7 +928,6 @@ dependencies = [
  "libc",
  "mbuild-core",
  "mbuild-runtime",
- "mbuild-sandbox",
  "serde",
  "serde_json",
  "sha2",
@@ -985,6 +985,7 @@ dependencies = [
 name = "mbuild-sandbox"
 version = "0.1.0"
 dependencies = [
+ "mbuild-builder",
  "mbuild-core",
  "mbuild-runtime",
  "mbuild-sandbox-runner-core",

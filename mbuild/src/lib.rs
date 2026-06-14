@@ -1,4 +1,5 @@
 mod builder_recipe;
+mod builder_registry;
 mod planned;
 mod recipe;
 pub mod recipe_runtime;

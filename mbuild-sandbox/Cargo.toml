@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+mbuild-builder = { path = "../mbuild-builder" }
 mbuild-core = { path = "../mbuild-core" }
 mbuild-runtime = { path = "../mbuild-runtime" }
 mbuild-sandbox-runner-core = { path = "../mbuild-sandbox-runner-core" }
