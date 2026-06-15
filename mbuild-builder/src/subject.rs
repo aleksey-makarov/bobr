@@ -3,7 +3,8 @@ use crate::{
 };
 use fsobj_hash::ObjectHash;
 use mbuild_core::{
-    BuildKey, BuilderError, IdentityError, ReuseKey, compute_build_key, compute_reuse_key,
+    BuildKey, BuildLogSubject, BuilderError, IdentityError, ReuseKey, SubjectRunContext, Workspace,
+    compute_build_key, compute_reuse_key,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -164,12 +165,116 @@ impl BuilderPlannedSubject {
             .map_err(BuilderPlanError::identity)
     }
 
-    /// Executes the underlying builder implementation.
+    /// Executes the underlying builder implementation (low-level; prefer
+    /// [`BuilderPlannedSubject::execute`]).
     pub fn build_erased(
         &self,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         self.builder.build_erased(self.config.clone(), inputs, cx)
+    }
+
+    /// Builds the per-run log subject from the runtime-allocated workspace.
+    pub fn log_subject(&self, workspace: &Workspace) -> BuildLogSubject {
+        BuildLogSubject::new(
+            self.tag(),
+            self.name(),
+            self.build_key().to_string(),
+            workspace.log_dir().to_path_buf(),
+            workspace.raw_log_dir().to_path_buf(),
+        )
+    }
+
+    /// Builds the artifact into the run's temp directory and returns the staged
+    /// result.
+    ///
+    /// This does not touch the object store: the caller resolves reuse and
+    /// inputs beforehand and materializes the staged result afterwards.
+    pub fn execute(
+        &self,
+        ctx: &SubjectRunContext,
+        inputs: BuilderInputs,
+    ) -> Result<StagedBuildResult, BuilderError> {
+        let mut context = BuildContext::with_noop_logger(ctx.temp_dir().to_path_buf())
+            .with_logger(ctx.logger().clone())
+            .with_cancellation_token(ctx.cancellation().clone());
+        self.build_erased(inputs, &mut context)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mbuild_core::{CancellationToken, NoopBuildLogger};
+    use serde::Deserialize;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    #[derive(Debug)]
+    struct StagingBuilder;
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct EmptyConfig {}
+
+    static STAGING_SPEC: InputSpec = InputSpec {
+        required_inputs: &[],
+        optional_inputs: &[],
+        allow_extra_inputs: false,
+    };
+    static STAGING_BUILDER: StagingBuilder = StagingBuilder;
+
+    impl crate::TypedBuilder for StagingBuilder {
+        type Config = EmptyConfig;
+
+        fn tag(&self) -> &'static str {
+            "Staging"
+        }
+
+        fn spec(&self) -> &'static InputSpec {
+            &STAGING_SPEC
+        }
+
+        fn build_typed(
+            &self,
+            _config: Self::Config,
+            _inputs: BuilderInputs,
+            cx: &mut BuildContext,
+        ) -> Result<StagedBuildResult, BuilderError> {
+            let out = cx.temp_dir.join("out");
+            std::fs::create_dir_all(&out)
+                .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+            std::fs::write(out.join("payload"), b"ok")
+                .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+            Ok(StagedBuildResult {
+                staged_path: out,
+                object_hash: None,
+            })
+        }
+    }
+
+    #[test]
+    fn execute_builds_into_ctx_temp_dir() {
+        let subject = BuilderPlannedSubject::new(
+            &STAGING_BUILDER,
+            "demo".to_string(),
+            serde_json::json!({}),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let temp = tempdir().unwrap();
+        let workspace = Workspace::new(
+            temp.path().join("log"),
+            temp.path().join("log/raw"),
+            temp.path().to_path_buf(),
+        );
+        let ctx =
+            SubjectRunContext::new(workspace, Arc::new(NoopBuildLogger), CancellationToken::new());
+
+        let staged = subject.execute(&ctx, BuilderInputs::empty()).unwrap();
+
+        assert_eq!(staged.staged_path, temp.path().join("out"));
+        assert!(staged.staged_path.join("payload").is_file());
     }
 }
