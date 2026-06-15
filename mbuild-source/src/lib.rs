@@ -2,9 +2,13 @@ mod http;
 pub mod oci_registry;
 mod origins;
 
-use mbuild_core::{BuildKey, ObjectHash, ParsedOrigin, validate_publication_name};
+use mbuild_core::{
+    BuildKey, BuildLogSubject, ObjectHash, OriginContext, ParsedOrigin, SubjectRunContext,
+    Workspace, validate_publication_name,
+};
 use serde_json::{Map, Value};
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 /// Error reported while parsing a source recipe node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +88,64 @@ impl SourcePlannedSubject {
     pub fn clone_origin(&self) -> Option<Box<dyn ParsedOrigin>> {
         self.origin.clone()
     }
+
+    /// Returns the parsed origin, when one was declared.
+    pub fn origin(&self) -> Option<&dyn ParsedOrigin> {
+        self.origin.as_deref()
+    }
+
+    /// Builds the per-run log subject from the runtime-allocated workspace.
+    pub fn log_subject(&self, workspace: &Workspace) -> BuildLogSubject {
+        BuildLogSubject::new(
+            self.tag(),
+            self.name(),
+            self.build_key().to_string(),
+            workspace.log_dir().to_path_buf(),
+            workspace.raw_log_dir().to_path_buf(),
+        )
+    }
+
+    /// Materializes the source into the run's temp directory and returns the
+    /// staged path.
+    ///
+    /// This does not touch the object store: the caller looks up reuse before
+    /// calling this, and imports the returned staged path afterwards.
+    pub fn execute(&self, ctx: &SubjectRunContext) -> Result<PathBuf, String> {
+        let Some(origin) = self.origin() else {
+            return Err(format!(
+                "source '{}' has no origin and object '{}' is not present in store",
+                self.name(),
+                self.declared_object_hash()
+            ));
+        };
+        let temp_root = ctx.temp_dir();
+        let staged_path = origin.materialize(&OriginContext { temp_root })?;
+        validate_origin_staged_path(&staged_path, temp_root)?;
+        Ok(staged_path)
+    }
+}
+
+fn validate_origin_staged_path(staged_path: &Path, temp_root: &Path) -> Result<(), String> {
+    let canonical_temp_root = temp_root.canonicalize().map_err(|error| {
+        format!(
+            "failed to canonicalize source temp root '{}': {error}",
+            temp_root.display()
+        )
+    })?;
+    let canonical_staged_path = staged_path.canonicalize().map_err(|error| {
+        format!(
+            "failed to canonicalize source staged path '{}': {error}",
+            staged_path.display()
+        )
+    })?;
+    if !canonical_staged_path.starts_with(&canonical_temp_root) {
+        return Err(format!(
+            "source origin returned staged path '{}' outside temp root '{}'",
+            staged_path.display(),
+            temp_root.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Parses a source recipe object whose tag was already removed by the caller.
@@ -130,7 +192,10 @@ fn take_string(object: &mut Map<String, Value>, field: &str) -> Result<String, S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mbuild_core::{CancellationToken, NoopBuildLogger, OriginSpec};
     use serde_json::json;
+    use std::sync::Arc;
+    use tempfile::tempdir;
 
     fn source_object(origin: Option<Value>) -> Map<String, Value> {
         let mut object = json!({
@@ -239,5 +304,81 @@ mod tests {
             subject.declared_object_hash().to_string(),
             "1111111111111111111111111111111111111111111111111111111111111111"
         );
+    }
+
+    #[derive(Debug, Clone)]
+    struct StagingOrigin {
+        target: PathBuf,
+    }
+
+    impl ParsedOrigin for StagingOrigin {
+        fn spec(&self) -> &'static OriginSpec {
+            static SPEC: OriginSpec = OriginSpec { tag: "Stub" };
+            &SPEC
+        }
+        fn materialize(&self, _cx: &OriginContext<'_>) -> Result<PathBuf, String> {
+            if let Some(parent) = self.target.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            std::fs::write(&self.target, b"payload").map_err(|error| error.to_string())?;
+            Ok(self.target.clone())
+        }
+        fn clone_box(&self) -> Box<dyn ParsedOrigin> {
+            Box::new(self.clone())
+        }
+    }
+
+    fn sample_hash() -> ObjectHash {
+        "1111111111111111111111111111111111111111111111111111111111111111"
+            .parse()
+            .unwrap()
+    }
+
+    fn run_ctx(temp_root: &Path) -> SubjectRunContext {
+        let workspace = Workspace::new(
+            temp_root.join("log"),
+            temp_root.join("log/raw"),
+            temp_root.to_path_buf(),
+        );
+        SubjectRunContext::new(workspace, Arc::new(NoopBuildLogger), CancellationToken::new())
+    }
+
+    #[test]
+    fn execute_without_origin_is_an_error() {
+        let subject = SourcePlannedSubject::new("src".to_string(), sample_hash(), None);
+        let temp = tempdir().unwrap();
+        let error = subject.execute(&run_ctx(temp.path())).unwrap_err();
+        assert!(error.contains("has no origin"), "{error}");
+    }
+
+    #[test]
+    fn execute_stages_under_temp_root() {
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("staged");
+        let subject = SourcePlannedSubject::new(
+            "src".to_string(),
+            sample_hash(),
+            Some(Box::new(StagingOrigin {
+                target: target.clone(),
+            })),
+        );
+        let staged = subject.execute(&run_ctx(temp.path())).unwrap();
+        assert_eq!(staged, target);
+        assert!(staged.is_file());
+    }
+
+    #[test]
+    fn execute_rejects_staged_path_outside_temp_root() {
+        let temp = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let subject = SourcePlannedSubject::new(
+            "src".to_string(),
+            sample_hash(),
+            Some(Box::new(StagingOrigin {
+                target: outside.path().join("escaped"),
+            })),
+        );
+        let error = subject.execute(&run_ctx(temp.path())).unwrap_err();
+        assert!(error.contains("outside temp root"), "{error}");
     }
 }
