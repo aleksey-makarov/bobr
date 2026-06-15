@@ -124,7 +124,13 @@ fn execute_builder_subject(
         "executing builder",
     );
     check_cancelled(&cx.cancellation)?;
-    prepare_temp(cx.store, subject.tag(), &temp_dir, build_key, logger.as_ref())?;
+    prepare_temp(
+        cx.store,
+        subject.tag(),
+        &temp_dir,
+        build_key,
+        logger.as_ref(),
+    )?;
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,

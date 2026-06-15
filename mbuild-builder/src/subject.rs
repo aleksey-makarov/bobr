@@ -269,8 +269,11 @@ mod tests {
             temp.path().join("log/raw"),
             temp.path().to_path_buf(),
         );
-        let ctx =
-            SubjectRunContext::new(workspace, Arc::new(NoopBuildLogger), CancellationToken::new());
+        let ctx = SubjectRunContext::new(
+            workspace,
+            Arc::new(NoopBuildLogger),
+            CancellationToken::new(),
+        );
 
         let staged = subject.execute(&ctx, BuilderInputs::empty()).unwrap();
 

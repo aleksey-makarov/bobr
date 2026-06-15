@@ -779,8 +779,13 @@ mod tests {
         let config = json!({});
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
         let run_logger = create_test_logger(&store);
-        let (workspace, logger) =
-            create_test_run(&store, &run_logger, "RuntimeTest", "runtime-test", build_key);
+        let (workspace, logger) = create_test_run(
+            &store,
+            &run_logger,
+            "RuntimeTest",
+            "runtime-test",
+            build_key,
+        );
         let temp_dir = workspace.temp_dir().to_path_buf();
         fs::remove_dir_all(&temp_dir).unwrap();
         let stale_target = temp.path().join("missing-stale-target");
@@ -906,8 +911,13 @@ mod tests {
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
         let build_key = compute_build_key("RuntimeTest", &json!({}), &[]).unwrap();
-        let (workspace, logger) =
-            create_test_run(&store, &run_logger, "RuntimeTest", "runtime-test", build_key);
+        let (workspace, logger) = create_test_run(
+            &store,
+            &run_logger,
+            "RuntimeTest",
+            "runtime-test",
+            build_key,
+        );
         let temp_dir = workspace.temp_dir().join("stale");
         fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
         fs::write(&temp_dir, b"not a directory\n").unwrap();

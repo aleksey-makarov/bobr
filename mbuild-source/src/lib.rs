@@ -340,7 +340,11 @@ mod tests {
             temp_root.join("log/raw"),
             temp_root.to_path_buf(),
         );
-        SubjectRunContext::new(workspace, Arc::new(NoopBuildLogger), CancellationToken::new())
+        SubjectRunContext::new(
+            workspace,
+            Arc::new(NoopBuildLogger),
+            CancellationToken::new(),
+        )
     }
 
     #[test]
