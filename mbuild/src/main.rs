@@ -65,6 +65,10 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
+    if let Some(exit_code) = run_runtime_worker_if_requested() {
+        return exit_code;
+    }
+
     init_tracing();
 
     let cli = Cli::parse();
@@ -81,6 +85,33 @@ fn main() -> ExitCode {
             } else {
                 ExitCode::from(1)
             }
+        }
+    }
+}
+
+fn run_runtime_worker_if_requested() -> Option<ExitCode> {
+    match bobr_runtime::runtime_ns::worker_invocation_from_env() {
+        Ok(Some(invocation)) => {
+            let result = bobr_runtime::runtime_ns::run_worker(
+                invocation,
+                mbuild_builder::runtime_functions(),
+            );
+            Some(runtime_worker_exit_code(result))
+        }
+        Ok(None) => None,
+        Err(error) => {
+            eprintln!("error[runtime-worker]: {error}");
+            Some(ExitCode::FAILURE)
+        }
+    }
+}
+
+fn runtime_worker_exit_code(result: bobr_runtime::runtime::RuntimeResult<()>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error[runtime-worker]: {error}");
+            ExitCode::FAILURE
         }
     }
 }

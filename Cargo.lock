@@ -899,6 +899,7 @@ dependencies = [
 name = "mbuild"
 version = "0.1.0"
 dependencies = [
+ "bobr-runtime",
  "bobr-store",
  "clap",
  "flate2",
@@ -922,6 +923,7 @@ dependencies = [
 name = "mbuild-builder"
 version = "0.1.0"
 dependencies = [
+ "bobr-runtime",
  "flate2",
  "fsobj-hash",
  "globset",

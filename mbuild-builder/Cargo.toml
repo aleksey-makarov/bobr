@@ -10,6 +10,7 @@ integration-tests = ["mbuild-runtime/integration-tests"]
 flate2 = "1.0"
 fsobj-hash = { path = "../fsobj-hash" }
 globset = "0.4"
+bobr-runtime = { path = "../bobr-runtime" }
 mbuild-core = { path = "../mbuild-core" }
 mbuild-runtime = { path = "../mbuild-runtime" }
 serde = { version = "1.0", features = ["derive"] }
