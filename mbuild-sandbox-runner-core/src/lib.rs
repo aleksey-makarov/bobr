@@ -1,3 +1,8 @@
+//! Shared types and implementation for the sandbox runner protocol.
+//!
+//! The current JSON format is runner protocol v4. Protocol v4 requires every
+//! runner step to carry an explicit `umask` field.
+
 use fsobj_hash::{ObjectHash, hash_fs_tree_object, hash_path, hash_symlink_node};
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
 #[cfg(not(test))]
@@ -20,8 +25,14 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Executable name expected for the sandbox runner binary.
 pub const RUNNER_BINARY_NAME: &str = "mbuild-sandbox-runner";
-pub const RUNNER_PROTOCOL_VERSION: u32 = 3;
+/// Version of the JSON protocol shared by the sandbox runtime and runner.
+///
+/// The runtime writes `RunnerConfig` and `SandboxLauncherConfig` files with
+/// this version, and the runner rejects configs with a different value.
+/// Version 4 requires an explicit per-step `umask`.
+pub const RUNNER_PROTOCOL_VERSION: u32 = 4;
 
 macro_rules! container_mbuild_dir {
     () => {
@@ -35,27 +46,42 @@ macro_rules! container_path {
     };
 }
 
+/// Container-private directory used for mbuild runtime state.
 pub const CONTAINER_MBUILD_DIR: &str = container_mbuild_dir!();
+/// Container path where the build working directory is mounted.
 pub const CONTAINER_BUILD_DIR: &str = container_path!("build");
+/// Container path where generated step configuration is mounted.
 pub const CONTAINER_CONFIG_DIR: &str = container_path!("config");
+/// Container path containing named input object mounts.
 pub const CONTAINER_INPUTS_DIR: &str = container_path!("inputs");
+/// Container path used for step log files.
 pub const CONTAINER_LOG_DIR: &str = container_path!("logs");
+/// Container path where build output is collected.
 pub const CONTAINER_OUT_DIR: &str = container_path!("out");
+/// Container path containing the copied runner executable.
 pub const CONTAINER_RUNNER_DIR: &str = container_path!("runner");
+/// Container path containing runner protocol files.
 pub const CONTAINER_RUNTIME_DIR: &str = container_path!("runtime");
+/// Container path of the runner config JSON file.
 pub const CONTAINER_RUNNER_CONFIG: &str = container_path!("runtime/runner-config.json");
+/// Container path of the success report JSON file.
 pub const CONTAINER_SUCCESS_REPORT: &str = container_path!("runtime/sandbox-success.json");
+/// Container path of the failure report JSON file.
 pub const CONTAINER_FAILURE_REPORT: &str = container_path!("runtime/sandbox-failure.json");
 
 const BUILD_USER_UID: u32 = 1;
 const BUILD_USER_GID: u32 = 1;
 
+/// Protocol information printed by the runner during preflight checks.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunnerProtocolInfo {
+    /// Runner binary name.
     pub name: String,
+    /// Runner protocol version.
     pub protocol_version: u32,
 }
 
+/// Returns the protocol information expected by the runtime.
 pub fn protocol_info() -> RunnerProtocolInfo {
     RunnerProtocolInfo {
         name: RUNNER_BINARY_NAME.to_string(),
@@ -63,39 +89,66 @@ pub fn protocol_info() -> RunnerProtocolInfo {
     }
 }
 
+/// Internal JSON config consumed by the sandbox runner inside the namespace.
+///
+/// This is not a recipe-facing format. `mbuild-runtime` writes it after it has
+/// prepared the sandbox filesystem and resolved recipe-level sandbox settings
+/// into concrete container paths, environment variables, and step policies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunnerConfig {
+    /// Runner protocol version. Must match [`RUNNER_PROTOCOL_VERSION`].
     pub protocol_version: u32,
+    /// Container paths that the runner creates before executing steps.
     pub prepare_paths: Vec<PathBuf>,
+    /// Ordered command steps to run.
     pub steps: Vec<RunnerStepConfig>,
+    /// Container path where final output is expected.
     pub output_dir: PathBuf,
+    /// Host-visible path where the success report is written.
     pub success_report: PathBuf,
+    /// Host-visible path where the failure report is written.
     pub failure_report: PathBuf,
 }
 
+/// JSON config consumed by the launcher before it execs the runner.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxLauncherConfig {
+    /// Runner protocol version. Must match [`RUNNER_PROTOCOL_VERSION`].
     pub protocol_version: u32,
+    /// Host path used as the sandbox root.
     pub root: PathBuf,
+    /// Mounts to create in the sandbox mount namespace.
     pub mounts: Vec<SandboxLauncherMount>,
+    /// Container path of the runner config JSON file.
     pub runner_config: PathBuf,
+    /// Host-visible path where launcher failures are reported.
     pub failure_report: PathBuf,
 }
 
+/// One mount entry in [`SandboxLauncherConfig`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SandboxLauncherMount {
+    /// Mount operation kind.
     pub kind: SandboxLauncherMountKind,
+    /// Host source path for bind mounts.
     pub source: Option<PathBuf>,
+    /// Absolute target path inside the sandbox.
     pub target: PathBuf,
+    /// Whether the mount is remounted read-only.
     pub readonly: bool,
+    /// Extra mount options.
     pub options: Vec<String>,
 }
 
+/// Mount operation kind used by the sandbox launcher.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxLauncherMountKind {
+    /// Bind mount from a host source path.
     Bind,
+    /// Procfs mount.
     Proc,
+    /// Tmpfs mount.
     Tmpfs,
 }
 
@@ -221,23 +274,44 @@ pub fn write_handshake_byte(fd: RawFd) -> io::Result<()> {
     }
 }
 
+/// One command step in the internal runner config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunnerStepConfig {
+    /// Step name used in reports and diagnostics.
     pub name: String,
+    /// User identity used to execute the step.
     pub run_as: RunnerRunAs,
+    /// Absolute working directory inside the sandbox.
     pub cwd: PathBuf,
+    /// Argument vector to execute.
     pub argv: Vec<String>,
+    /// Complete process environment for the step.
+    ///
+    /// This is already the effective environment written by the runtime, not
+    /// only recipe-level overrides.
     pub env: HashMap<String, String>,
+    /// File creation mask applied immediately before executing the step.
+    ///
+    /// This field is required in runner protocol v4. Values must be in
+    /// `0o000..=0o777`; invalid values make the runner reject the config.
+    pub umask: u32,
+    /// Container path where step stdout is captured.
     pub stdout_path: PathBuf,
+    /// Container path where step stderr is captured.
     pub stderr_path: PathBuf,
+    /// Host-visible stdout path recorded in the step report.
     pub report_stdout_path: PathBuf,
+    /// Host-visible stderr path recorded in the step report.
     pub report_stderr_path: PathBuf,
 }
 
+/// User identity used to execute one runner step.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunnerRunAs {
+    /// Run as the sandbox build user, currently numeric `1:1`.
     BuildUser,
+    /// Run as container root, currently numeric `0:0`.
     Root,
 }
 
@@ -523,6 +597,7 @@ struct SandboxRunnerStep {
     cwd: PathBuf,
     argv: Vec<String>,
     env: HashMap<String, String>,
+    umask: u32,
     report_stdout_path: PathBuf,
     report_stderr_path: PathBuf,
     stdout: Arc<File>,
@@ -531,12 +606,14 @@ struct SandboxRunnerStep {
 
 impl SandboxRunnerStep {
     fn new(step: RunnerStepConfig) -> io::Result<Self> {
+        validate_umask(step.umask)?;
         Ok(Self {
             name: step.name,
             run_as: step.run_as,
             cwd: step.cwd,
             argv: step.argv,
             env: step.env,
+            umask: step.umask,
             report_stdout_path: step.report_stdout_path,
             report_stderr_path: step.report_stderr_path,
             stdout: Arc::new(File::create(&step.stdout_path)?),
@@ -579,8 +656,12 @@ impl SandboxRunnerStep {
             .stderr(Stdio::from(stderr));
         let run_as = self.run_as;
         let setgroups_allowed = setgroups_allowed();
+        let umask = self.umask;
         unsafe {
-            command.pre_exec(move || apply_step_credentials(run_as, setgroups_allowed));
+            command.pre_exec(move || {
+                libc::umask(umask as libc::mode_t);
+                apply_step_credentials(run_as, setgroups_allowed)
+            });
         }
 
         let mut child = command.spawn().map_err(|error| {
@@ -784,6 +865,17 @@ fn reap_finished_children() {
     }
 }
 
+fn validate_umask(umask: u32) -> io::Result<()> {
+    if umask <= 0o777 {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("sandbox step umask must be in 0o000..=0o777, got {umask:#o}"),
+        ))
+    }
+}
+
 fn setgroups_allowed() -> bool {
     match fs::read_to_string("/proc/self/setgroups") {
         Ok(value) => value.trim() != "deny",
@@ -843,6 +935,7 @@ fn lchown(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     struct Pipe {
@@ -1042,6 +1135,62 @@ mod tests {
     }
 
     #[test]
+    fn run_config_applies_step_umask() {
+        let temp = tempdir().unwrap();
+        let output = temp.path().join("out");
+        fs::create_dir(&output).unwrap();
+        let stdout = temp.path().join("stdout.log");
+        let stderr = temp.path().join("stderr.log");
+        let config = test_config(temp.path())
+            .with_output(output.clone())
+            .with_step_umask(
+                "write-mode",
+                vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    ": > \"$OUT/file\"".to_string(),
+                ],
+                HashMap::from([("OUT".to_string(), output.display().to_string())]),
+                0o077,
+                stdout,
+                stderr,
+            );
+
+        let exit_code = run_config(config);
+
+        assert_eq!(exit_code, 0);
+        let mode = fs::metadata(output.join("file"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn run_config_rejects_invalid_step_umask() {
+        let temp = tempdir().unwrap();
+        let output = temp.path().join("out");
+        fs::create_dir(&output).unwrap();
+        let stdout = temp.path().join("stdout.log");
+        let stderr = temp.path().join("stderr.log");
+        let config = test_config(temp.path())
+            .with_output(output)
+            .with_step_umask(
+                "bad-umask",
+                vec!["true".to_string()],
+                HashMap::new(),
+                0o1000,
+                stdout,
+                stderr,
+            );
+
+        let exit_code = run_config(config);
+
+        assert_eq!(exit_code, 2);
+    }
+
+    #[test]
     fn run_config_path_rejects_malformed_json() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("runner-config.json");
@@ -1128,18 +1277,44 @@ mod tests {
             stdout_path: PathBuf,
             stderr_path: PathBuf,
         ) -> RunnerConfig {
+            self.push_step(name, argv, env, 0o022, stdout_path, stderr_path);
+            self.config
+        }
+
+        fn with_step_umask(
+            mut self,
+            name: &str,
+            argv: Vec<String>,
+            env: HashMap<String, String>,
+            umask: u32,
+            stdout_path: PathBuf,
+            stderr_path: PathBuf,
+        ) -> RunnerConfig {
+            self.push_step(name, argv, env, umask, stdout_path, stderr_path);
+            self.config
+        }
+
+        fn push_step(
+            &mut self,
+            name: &str,
+            argv: Vec<String>,
+            env: HashMap<String, String>,
+            umask: u32,
+            stdout_path: PathBuf,
+            stderr_path: PathBuf,
+        ) {
             self.config.steps.push(RunnerStepConfig {
                 name: name.to_string(),
                 run_as: RunnerRunAs::Root,
                 cwd: PathBuf::from("/"),
                 argv,
                 env,
+                umask,
                 stdout_path: stdout_path.clone(),
                 stderr_path: stderr_path.clone(),
                 report_stdout_path: stdout_path,
                 report_stderr_path: stderr_path,
             });
-            self.config
         }
     }
 

@@ -45,7 +45,7 @@ pub use ownership::apply_ownership_batch;
 #[cfg(unix)]
 pub use ownership::validate_fs_tree_file_attrs_in_ownership_namespace;
 pub use sandbox::{
-    SandboxBuildConfig, SandboxBuildOutcome, SandboxInput, SandboxRunAs, SandboxStep,
-    SandboxStepReport, run_sandbox_build,
+    DEFAULT_SANDBOX_UMASK, SandboxBuildConfig, SandboxBuildOutcome, SandboxInput, SandboxRunAs,
+    SandboxStep, SandboxStepReport, run_sandbox_build,
 };
 pub use tar_writer::write_fs_tree_tar_in_ownership_namespace;

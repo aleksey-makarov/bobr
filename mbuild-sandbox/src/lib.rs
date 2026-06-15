@@ -24,7 +24,8 @@ use mbuild_builder::{
 };
 use mbuild_core::{BuildLogLevel, BuilderError, load_fs_tree_object};
 use mbuild_runtime::{
-    SandboxBuildConfig, SandboxInput, SandboxRunAs, SandboxStep, run_sandbox_build,
+    DEFAULT_SANDBOX_UMASK, SandboxBuildConfig, SandboxInput, SandboxRunAs, SandboxStep,
+    run_sandbox_build,
 };
 use mbuild_sandbox_runner_core::{
     CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_INPUTS_DIR, CONTAINER_OUT_DIR,
@@ -261,7 +262,7 @@ fn build_sandbox_step(
 ) -> BResult<SandboxStep> {
     let cwd = PathBuf::from(resolve_step_cwd(step, inputs)?);
     let argv = resolve_step_argv(step, inputs)?;
-    let env = resolve_step_env(step, inputs)?
+    let env_overrides = resolve_step_env(step, inputs)?
         .into_iter()
         .collect::<HashMap<_, _>>();
     let logs = cx.temp_dir.join("step-logs");
@@ -291,7 +292,8 @@ fn build_sandbox_step(
         },
         cwd,
         argv,
-        env,
+        env_overrides,
+        umask: DEFAULT_SANDBOX_UMASK,
         stdout_path,
         stderr_path,
     })
@@ -1193,6 +1195,22 @@ mod tests {
             .to_string();
 
         assert!(error.contains("steps[0].env.CC must be a string"));
+    }
+
+    #[test]
+    fn build_sandbox_step_passes_recipe_env_as_runtime_overrides() {
+        let temp = tempdir().unwrap();
+        let mut step = minimal_step("build");
+        step.env.insert(
+            "SOURCE_DATE_EPOCH".to_string(),
+            Value::String("123".to_string()),
+        );
+        let cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+
+        let runtime_step = build_sandbox_step(&step, &[], &cx).unwrap();
+
+        assert_eq!(runtime_step.env_overrides["SOURCE_DATE_EPOCH"], "123");
+        assert_eq!(runtime_step.umask, DEFAULT_SANDBOX_UMASK);
     }
 
     #[test]

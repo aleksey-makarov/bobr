@@ -4,6 +4,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Default file creation mask for sandbox steps.
+pub const DEFAULT_SANDBOX_UMASK: u32 = 0o022;
+
 /// User identity used for a sandbox step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxRunAs {
@@ -33,8 +36,10 @@ pub struct SandboxStep {
     pub cwd: PathBuf,
     /// Argument vector to execute.
     pub argv: Vec<String>,
-    /// Environment variables for the step.
-    pub env: HashMap<String, String>,
+    /// Environment variables applied on top of the runtime base environment.
+    pub env_overrides: HashMap<String, String>,
+    /// File creation mask applied immediately before executing the step.
+    pub umask: u32,
     /// Host log path for stdout.
     pub stdout_path: PathBuf,
     /// Host log path for stderr.
@@ -139,6 +144,12 @@ fn validate_steps(steps: &[SandboxStep]) -> Result<(), RuntimeError> {
                 step.name
             )));
         }
+        if step.umask > 0o777 {
+            return Err(RuntimeError::InvalidInput(format!(
+                "sandbox step '{}' umask must be in 0o000..=0o777, got {:#o}",
+                step.name, step.umask
+            )));
+        }
         for (stream, path) in [("stdout", &step.stdout_path), ("stderr", &step.stderr_path)] {
             if !log_paths.insert(path.clone()) {
                 return Err(RuntimeError::InvalidInput(format!(
@@ -227,7 +238,8 @@ pub(super) fn runtime_step(temp: &tempfile::TempDir, name: &str) -> SandboxStep 
         run_as: SandboxRunAs::BuildUser,
         cwd: PathBuf::from("/"),
         argv: vec!["true".to_string()],
-        env: HashMap::new(),
+        env_overrides: HashMap::new(),
+        umask: DEFAULT_SANDBOX_UMASK,
         stdout_path: temp.path().join(format!("{name}.stdout")),
         stderr_path: temp.path().join(format!("{name}.stderr")),
     }

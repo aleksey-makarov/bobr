@@ -12,7 +12,9 @@ use lifecycle::SandboxLifecycle;
 use mounts::PreparedSandbox;
 use tracing::warn;
 
-pub use config::{SandboxBuildConfig, SandboxInput, SandboxRunAs, SandboxStep};
+pub use config::{
+    DEFAULT_SANDBOX_UMASK, SandboxBuildConfig, SandboxInput, SandboxRunAs, SandboxStep,
+};
 pub use reports::{SandboxBuildOutcome, SandboxStepReport};
 
 /// Execute a complete sandbox build and return the output hash.

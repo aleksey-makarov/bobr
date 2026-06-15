@@ -88,7 +88,8 @@ fn write_runner_config(
             },
             cwd: step.cwd.clone(),
             argv: step.argv.clone(),
-            env: step_env(step),
+            env: effective_step_env(step),
+            umask: step.umask,
             stdout_path: logs.container_stdout.clone(),
             stderr_path: logs.container_stderr.clone(),
             report_stdout_path: step.stdout_path.clone(),
@@ -376,7 +377,7 @@ fn tmpfs_mount(target: &Path, noexec: bool, extra_options: &[&str]) -> SandboxLa
     }
 }
 
-fn step_env(step: &SandboxStep) -> HashMap<String, String> {
+fn effective_step_env(step: &SandboxStep) -> HashMap<String, String> {
     let mut env = HashMap::from([
         (
             "PATH".to_string(),
@@ -385,6 +386,11 @@ fn step_env(step: &SandboxStep) -> HashMap<String, String> {
         ("HOME".to_string(), CONTAINER_BUILD_DIR.to_string()),
         ("TMPDIR".to_string(), "/tmp".to_string()),
         ("USER".to_string(), "mbuild".to_string()),
+        ("LC_ALL".to_string(), "C".to_string()),
+        ("LANG".to_string(), "C".to_string()),
+        ("TZ".to_string(), "UTC".to_string()),
+        ("SOURCE_DATE_EPOCH".to_string(), "0".to_string()),
+        ("PYTHONHASHSEED".to_string(), "0".to_string()),
         (
             "MBUILD_CONFIG_DIR".to_string(),
             CONTAINER_CONFIG_DIR.to_string(),
@@ -396,13 +402,13 @@ fn step_env(step: &SandboxStep) -> HashMap<String, String> {
         ("MBUILD_OUT_DIR".to_string(), CONTAINER_OUT_DIR.to_string()),
         ("MBUILD_STEP_NAME".to_string(), step.name.clone()),
     ]);
-    env.extend(step.env.clone());
+    env.extend(step.env_overrides.clone());
     env
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::config::{SandboxInput, SandboxRunAs};
+    use super::super::config::{DEFAULT_SANDBOX_UMASK, SandboxInput, SandboxRunAs, runtime_step};
     use super::*;
     use tempfile::tempdir;
 
@@ -638,20 +644,50 @@ mod tests {
     }
 
     #[test]
-    fn step_env_includes_defaults_and_overrides() {
+    fn effective_step_env_includes_reproducible_defaults_and_overrides() {
         let step = SandboxStep {
             name: "build".to_string(),
             run_as: SandboxRunAs::BuildUser,
             cwd: PathBuf::from("/"),
             argv: vec!["true".to_string()],
-            env: HashMap::from([("USER".to_string(), "custom".to_string())]),
+            env_overrides: HashMap::from([
+                ("USER".to_string(), "custom".to_string()),
+                ("SOURCE_DATE_EPOCH".to_string(), "123".to_string()),
+            ]),
+            umask: DEFAULT_SANDBOX_UMASK,
             stdout_path: PathBuf::from("/tmp/stdout"),
             stderr_path: PathBuf::from("/tmp/stderr"),
         };
 
-        let env = step_env(&step);
+        let env = effective_step_env(&step);
 
         assert_eq!(env["MBUILD_STEP_NAME"], "build");
+        assert_eq!(env["LC_ALL"], "C");
+        assert_eq!(env["LANG"], "C");
+        assert_eq!(env["TZ"], "UTC");
+        assert_eq!(env["PYTHONHASHSEED"], "0");
         assert_eq!(env["USER"], "custom");
+        assert_eq!(env["SOURCE_DATE_EPOCH"], "123");
+    }
+
+    #[test]
+    fn runner_config_serializes_effective_env_and_umask() {
+        let temp = tempdir().unwrap();
+        let mut config = valid_config(&temp);
+        let mut step = runtime_step(&temp, "build");
+        step.env_overrides
+            .insert("SOURCE_DATE_EPOCH".to_string(), "123".to_string());
+        step.umask = 0o077;
+        config.steps.push(step);
+        let runtime_files =
+            SandboxRuntimeFiles::create(&config.workspace.join("runtime-files"), &config).unwrap();
+
+        write_runner_config(&config, &runtime_files).unwrap();
+
+        let runner_config: RunnerConfig =
+            serde_json::from_slice(&fs::read(&runtime_files.runner_config).unwrap()).unwrap();
+        assert_eq!(runner_config.steps[0].umask, 0o077);
+        assert_eq!(runner_config.steps[0].env["SOURCE_DATE_EPOCH"], "123");
+        assert_eq!(runner_config.steps[0].env["LC_ALL"], "C");
     }
 }
