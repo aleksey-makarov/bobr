@@ -6,7 +6,7 @@ use bobr_store::{
 use mbuild_builder::BuildContext;
 use mbuild_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuilderError, CancellationToken,
-    IdentityError, NoopBuildLogger,
+    NoopBuildLogger,
 };
 use std::fmt;
 use std::fs;
@@ -80,10 +80,6 @@ pub(crate) fn map_builder_error(error: BuilderError) -> RuntimeError {
 
 pub(crate) fn map_store_error(error: StoreError) -> RuntimeError {
     RuntimeError::Store(error.to_string())
-}
-
-pub(crate) fn map_identity_error(error: IdentityError) -> RuntimeError {
-    RuntimeError::InvalidRequest(error.to_string())
 }
 
 pub(crate) fn log_runtime_event(
@@ -391,11 +387,12 @@ impl Drop for TempDirGuard {
 mod tests {
     use super::*;
     use crate::planned::{
-        BuilderPlannedSubject, PlannedExecutionContext, PlannedSubject, SubjectExecution,
-        core_workspace, execute_subject,
+        PlannedExecutionContext, PlannedSubject, SubjectExecution, core_workspace, execute_subject,
     };
     use bobr_store::{PublishRequest, create_workspace, publish_build, resolve_reuse_for_build};
-    use mbuild_builder::{BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
+    use mbuild_builder::{
+        BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult, TypedBuilder,
+    };
     use mbuild_core::{
         BuildLogger, BuildRunLogger, CancellationToken, compute_build_key, compute_reuse_key,
     };
@@ -446,8 +443,18 @@ mod tests {
         config: Value,
         cancellation: CancellationToken,
     ) -> Result<SubjectExecution, RuntimeError> {
-        let subject =
-            BuilderPlannedSubject::new(builder, name.to_string(), config, BTreeMap::new()).unwrap();
+        let mut registry = BuilderRegistry::new();
+        registry.register(builder).unwrap();
+        let subject = registry
+            .parse_subject(
+                builder.tag(),
+                json!({"name": name, "config": config})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                BTreeMap::new(),
+            )
+            .unwrap();
         let realized_inputs = HashMap::new();
         execute_subject(
             &PlannedSubject::Builder(subject),

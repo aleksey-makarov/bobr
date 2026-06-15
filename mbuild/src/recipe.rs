@@ -1,7 +1,6 @@
-use crate::builder_recipe;
 use crate::planned::PlannedSubject;
 use crate::runtime::RuntimeError;
-use mbuild_builder::BuilderRegistry;
+use mbuild_builder::{BuilderPlanError, BuilderRegistry};
 use mbuild_core::BuildKey;
 #[cfg(test)]
 use mbuild_core::compute_build_key;
@@ -107,8 +106,9 @@ fn collect_graph_inner(
             inputs.insert(input_name, child);
         }
 
-        let builder_subject =
-            builder_recipe::parse_builder_subject(registry, &tag, object, inputs, &node_path)?;
+        let builder_subject = registry
+            .parse_subject(&tag, object, inputs)
+            .map_err(|error| map_builder_plan_error(error, &node_path))?;
         (
             builder_subject.build_key(),
             Arc::new(PlannedSubject::Builder(builder_subject)),
@@ -120,6 +120,17 @@ fn collect_graph_inner(
     subjects.entry(key).or_insert_with(|| subject.clone());
     node_keys.insert(node_id.to_string(), key);
     Ok(key)
+}
+
+fn map_builder_plan_error(error: BuilderPlanError, node_path: &str) -> RuntimeError {
+    let message = format!("{node_path}: {error}");
+    match error {
+        BuilderPlanError::UnknownBuilder { .. } => RuntimeError::UnknownBuilder(message),
+        BuilderPlanError::Recipe(_) => RuntimeError::RecipeLoad(message),
+        BuilderPlanError::InvalidRequest(_) | BuilderPlanError::Identity(_) => {
+            RuntimeError::InvalidRequest(message)
+        }
+    }
 }
 
 fn parse_envelope_value(value: Value, path: &str) -> Result<RecipeEnvelope, RuntimeError> {
@@ -543,7 +554,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("$.nodes.root.name: invalid publication name"),
+                .contains("$.nodes.root: name: invalid publication name"),
             "{error}"
         );
     }

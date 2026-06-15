@@ -1,7 +1,7 @@
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
     RuntimeError, TempDirGuard, build_context, check_cancelled, log_runtime_event,
-    map_builder_error, map_identity_error, map_store_error,
+    map_builder_error, map_store_error,
 };
 use crate::subject_run::{BuilderRun, SourceBuilder};
 use bobr_store::{
@@ -9,14 +9,13 @@ use bobr_store::{
     import_source_object, load_build_handle, materialize_build,
     materialize_build_with_trusted_hash, record_existing_source_object, resolve_reuse_for_build,
 };
-use mbuild_builder::Builder;
+use mbuild_builder::{BuilderPlanError, BuilderPlannedSubject};
 use mbuild_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, CancellationToken, NoopBuildLogger,
-    OriginContext, Workspace, compute_build_key, compute_reuse_key,
+    OriginContext, Workspace,
 };
 use mbuild_source::SourcePlannedSubject;
-use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -54,76 +53,6 @@ pub(crate) struct SubjectExecution {
     pub(crate) logger: Arc<dyn BuildLogger>,
 }
 
-pub(crate) struct BuilderPlannedSubject {
-    builder: &'static dyn Builder,
-    name: String,
-    config: Value,
-    inputs: BTreeMap<String, BuildKey>,
-    build_key: BuildKey,
-}
-
-impl BuilderPlannedSubject {
-    pub(crate) fn new(
-        builder: &'static dyn Builder,
-        name: String,
-        config: Value,
-        inputs: BTreeMap<String, BuildKey>,
-    ) -> Result<Self, RuntimeError> {
-        let tag = builder.tag();
-        let spec = builder.spec();
-        let reserved_inputs = spec.reserved_input_names().collect::<Vec<_>>();
-        for input_name in inputs.keys() {
-            if !spec.allow_extra_inputs && !spec.is_reserved_input(input_name) {
-                return Err(RuntimeError::InvalidRequest(format!(
-                    "builder '{}' does not accept extra input '{}'; allowed inputs: {}",
-                    tag,
-                    input_name,
-                    reserved_inputs.join(", ")
-                )));
-            }
-        }
-
-        for required in spec.required_inputs {
-            if !inputs.contains_key(*required) {
-                return Err(RuntimeError::InvalidRequest(format!(
-                    "builder '{}' is missing required input '{}' in recipe '{}'",
-                    tag, required, name
-                )));
-            }
-        }
-
-        let ordered_direct_deps = spec
-            .ordered_present_input_names(&inputs)
-            .into_iter()
-            .filter_map(|input_name| inputs.get(input_name).copied())
-            .collect::<Vec<_>>();
-        let build_key =
-            compute_build_key(tag, &config, &ordered_direct_deps).map_err(map_identity_error)?;
-
-        Ok(Self {
-            builder,
-            name,
-            config,
-            inputs,
-            build_key,
-        })
-    }
-}
-
-impl BuilderPlannedSubject {
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub(crate) fn build_key(&self) -> BuildKey {
-        self.build_key
-    }
-
-    pub(crate) fn inputs(&self) -> &BTreeMap<String, BuildKey> {
-        &self.inputs
-    }
-}
-
 pub(crate) fn execute_subject(
     subject: &PlannedSubject,
     cx: PlannedExecutionContext<'_>,
@@ -138,11 +67,11 @@ fn execute_builder_subject(
     subject: &BuilderPlannedSubject,
     cx: PlannedExecutionContext<'_>,
 ) -> Result<SubjectExecution, RuntimeError> {
-    let build_key = subject.build_key;
+    let build_key = subject.build_key();
     let inputs = builder_resolved_inputs(subject, cx.store, cx.realized_inputs)?;
     check_cancelled(&cx.cancellation)?;
     let input_hashes = inputs
-        .ordered_reuse_input_hashes(subject.builder.spec())
+        .ordered_reuse_input_hashes(subject.input_spec())
         .map_err(map_builder_error)?;
 
     // Resolve the caches before building a workspace: a hit needs no
@@ -153,8 +82,9 @@ fn execute_builder_subject(
             logger: Arc::new(NoopBuildLogger),
         });
     }
-    let reuse_key = compute_reuse_key(subject.builder.tag(), &subject.config, &input_hashes)
-        .map_err(map_identity_error)?;
+    let reuse_key = subject
+        .compute_reuse_key(&input_hashes)
+        .map_err(map_builder_plan_error)?;
     if let Some(published) =
         resolve_reuse_for_build(cx.store, build_key, reuse_key).map_err(map_store_error)?
     {
@@ -167,15 +97,15 @@ fn execute_builder_subject(
     // Miss: create the workspace and run the builder.
     let workspace = create_workspace(
         cx.store,
-        subject.builder.tag(),
-        Some(subject.name.clone()),
+        subject.tag(),
+        Some(subject.name().to_string()),
         build_key.to_string(),
     )
     .map(core_workspace)
     .map_err(map_store_error)?;
     let builder_run = BuilderRun::new(
-        subject.builder.tag(),
-        Some(subject.name.clone()),
+        subject.tag(),
+        Some(subject.name().to_string()),
         build_key.to_string(),
         workspace,
     );
@@ -183,7 +113,7 @@ fn execute_builder_subject(
     // panics) cleans it via Drop.
     let mut temp_guard = TempDirGuard::for_builder(
         cx.store,
-        subject.builder.tag(),
+        subject.tag(),
         build_key,
         builder_run.temp_dir().to_path_buf(),
     );
@@ -219,12 +149,7 @@ fn execute_builder_subject(
         "running builder implementation",
     );
     let staged = subject
-        .builder
-        .build_erased(
-            subject.config.clone(),
-            inputs.into_builder_inputs(),
-            &mut context,
-        )
+        .build_erased(inputs.into_builder_inputs(), &mut context)
         .map_err(|error| {
             log_runtime_event(
                 logger.as_ref(),
@@ -422,14 +347,14 @@ fn builder_resolved_inputs(
 ) -> Result<ResolvedInputs, RuntimeError> {
     let mut inputs = ResolvedInputs::empty();
     for input_name in subject
-        .builder
-        .spec()
-        .ordered_present_input_names(&subject.inputs)
+        .input_spec()
+        .ordered_present_input_names(subject.inputs())
     {
-        let key = *subject.inputs.get(input_name).ok_or_else(|| {
+        let key = *subject.inputs().get(input_name).ok_or_else(|| {
             RuntimeError::Store(format!(
                 "planned builder input '{}' is missing for '{}'",
-                input_name, subject.name
+                input_name,
+                subject.name()
             ))
         })?;
         let realized = realized_inputs.get(&key).cloned().ok_or_else(|| {
@@ -447,6 +372,16 @@ fn builder_resolved_inputs(
         );
     }
     Ok(inputs)
+}
+
+fn map_builder_plan_error(error: BuilderPlanError) -> RuntimeError {
+    match error {
+        BuilderPlanError::UnknownBuilder { .. } => RuntimeError::UnknownBuilder(error.to_string()),
+        BuilderPlanError::Recipe(_) => RuntimeError::RecipeLoad(error.to_string()),
+        BuilderPlanError::InvalidRequest(_) | BuilderPlanError::Identity(_) => {
+            RuntimeError::InvalidRequest(error.to_string())
+        }
+    }
 }
 
 pub(crate) fn realized_object_from_record(
@@ -471,90 +406,8 @@ pub(crate) fn core_workspace(workspace: bobr_store::StoreWorkspace) -> Workspace
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder_registry::create_builder_registry;
     use mbuild_core::ObjectHash;
-    use serde_json::json;
     use std::str::FromStr;
-
-    fn sample_build_key() -> BuildKey {
-        BuildKey::from_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            .unwrap()
-    }
-
-    fn expect_builder_subject_error(
-        result: Result<BuilderPlannedSubject, RuntimeError>,
-    ) -> RuntimeError {
-        match result {
-            Ok(_) => panic!("expected builder subject error"),
-            Err(error) => error,
-        }
-    }
-
-    #[test]
-    fn builder_subject_rejects_extra_inputs() {
-        let registry = create_builder_registry().unwrap();
-        let builder = registry.get("Tree").unwrap();
-        let error = expect_builder_subject_error(BuilderPlannedSubject::new(
-            builder,
-            "tree".to_string(),
-            json!({}),
-            BTreeMap::from([("unexpected".to_string(), sample_build_key())]),
-        ));
-
-        assert!(
-            error
-                .to_string()
-                .contains("does not accept extra input 'unexpected'"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn builder_subject_rejects_missing_required_inputs() {
-        let registry = create_builder_registry().unwrap();
-        let builder = registry.get("Sandbox").unwrap();
-        let error = expect_builder_subject_error(BuilderPlannedSubject::new(
-            builder,
-            "sandbox".to_string(),
-            json!({}),
-            BTreeMap::from([("script".to_string(), sample_build_key())]),
-        ));
-
-        assert!(
-            error
-                .to_string()
-                .contains("builder 'Sandbox' is missing required input 'rootfs'"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn builder_subject_computes_build_key_from_ordered_inputs() {
-        let registry = create_builder_registry().unwrap();
-        let builder = registry.get("Tree").unwrap();
-        let config = json!({
-            "tree": {
-                "entries": [{
-                    "type": "file",
-                    "path": "hello.txt",
-                    "text": "hello",
-                    "executable": false
-                }]
-            }
-        });
-        let builder_subject = BuilderPlannedSubject::new(
-            builder,
-            "tree".to_string(),
-            config.clone(),
-            BTreeMap::new(),
-        )
-        .unwrap();
-        let expected = compute_build_key("Tree", &config, &[]).unwrap();
-
-        assert_eq!(builder_subject.name(), "tree");
-        assert_eq!(builder_subject.build_key(), expected);
-        assert!(builder_subject.inputs().is_empty());
-    }
 
     #[test]
     fn source_subject_exposes_build_key_and_declared_hash() {

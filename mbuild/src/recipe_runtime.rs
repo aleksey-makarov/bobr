@@ -1,11 +1,9 @@
 use crate::builder_registry::create_builder_registry;
-use crate::planned::{
-    BuilderPlannedSubject, PlannedExecutionContext, PlannedSubject, SubjectExecution,
-    execute_subject,
-};
+use crate::planned::{PlannedExecutionContext, PlannedSubject, SubjectExecution, execute_subject};
 use crate::recipe::{RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
 use bobr_store::{RealizedObject, Store, publish_stored_object};
+use mbuild_builder::BuilderPlannedSubject;
 use mbuild_core::{BuildKey, BuildLogEvent, BuildLogLevel, BuildRunLogger, CancellationToken};
 use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
@@ -500,9 +498,10 @@ mod tests {
 
     #[test]
     fn execute_graph_drains_in_flight_workers_when_publish_fails() {
-        use crate::planned::{BuilderPlannedSubject, PlannedSubject};
+        use crate::planned::PlannedSubject;
         use mbuild_builder::{
-            BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
+            BuildContext, BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult,
+            TypedBuilder,
         };
         use serde::Deserialize;
         use serde_json::json;
@@ -580,23 +579,41 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let logger = create_test_logger(&store);
+        fs::create_dir(
+            temp.path()
+                .join(".mbuild")
+                .join("object-record-refs")
+                .join("bad.json"),
+        )
+        .unwrap();
 
-        // Fast node has an invalid publication name, so its publish fails after
-        // the build succeeds. Slow node is a sibling that is still in flight.
-        let fast = BuilderPlannedSubject::new(
-            &FAST_BUILDER,
-            "bad/name".to_string(),
-            json!({}),
-            BTreeMap::new(),
-        )
-        .unwrap();
-        let slow = BuilderPlannedSubject::new(
-            &SLOW_BUILDER,
-            "good".to_string(),
-            json!({}),
-            BTreeMap::new(),
-        )
-        .unwrap();
+        let mut registry = BuilderRegistry::new();
+        registry.register(&FAST_BUILDER).unwrap();
+        registry.register(&SLOW_BUILDER).unwrap();
+
+        // Fast node publishes to a pre-existing non-symlink ref path, so its
+        // publish fails after the build succeeds. Slow node is a sibling that
+        // is still in flight.
+        let fast = registry
+            .parse_subject(
+                "DrainFast",
+                json!({"name": "bad", "config": {}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let slow = registry
+            .parse_subject(
+                "DrainSlow",
+                json!({"name": "good", "config": {}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                BTreeMap::new(),
+            )
+            .unwrap();
         let fast_key = fast.build_key();
         let slow_key = slow.build_key();
 
