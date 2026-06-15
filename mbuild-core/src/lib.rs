@@ -12,6 +12,7 @@ pub mod origin;
 pub mod publication;
 #[doc(hidden)]
 pub mod runtime_helper_protocol;
+pub mod subject_run_context;
 pub mod workspace;
 
 pub use cancellation::*;
@@ -24,6 +25,7 @@ pub use logging::*;
 pub use origin::*;
 pub use publication::*;
 pub use runtime_helper_protocol::FsTreeArchiveEntrySource;
+pub use subject_run_context::*;
 pub use workspace::*;
 
 #[derive(Debug)]
