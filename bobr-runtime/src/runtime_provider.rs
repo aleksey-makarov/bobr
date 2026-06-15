@@ -1,10 +1,11 @@
 //! Concrete runtime provider.
 //!
-//! [`RuntimeProvider`] is a cloneable handle that implements the typed
-//! [`crate::runtime::Runtime`] interface while hiding whether calls are
-//! executed in the host process or in a namespace worker. It is intended for
-//! application contexts that need to store a concrete runtime value, because
-//! [`crate::runtime::Runtime`] is not object-safe.
+//! [`RuntimeProvider`](crate::runtime_provider::RuntimeProvider) is a
+//! cloneable handle that implements the typed [`crate::runtime::Runtime`]
+//! interface while hiding whether calls are executed in the host process or in
+//! a namespace worker. It is intended for application contexts that need to
+//! store a concrete runtime value, because [`crate::runtime::Runtime`] is not
+//! object-safe.
 
 use crate::runtime::{Runtime, RuntimeError, RuntimeFunction, RuntimeResult};
 use crate::runtime_host::HostRuntime;
