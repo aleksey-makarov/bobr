@@ -1,9 +1,8 @@
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use crate::runtime::{
-    RuntimeError, TempDirGuard, build_context, check_cancelled, log_runtime_event,
-    map_builder_error, map_store_error,
+    RuntimeError, TempDirGuard, check_cancelled, log_runtime_event, map_builder_error,
+    map_store_error, prepare_temp,
 };
-use crate::subject_run::{BuilderRun, SourceBuilder};
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, Store, create_workspace,
     import_source_object, load_build_handle, materialize_build,
@@ -12,11 +11,10 @@ use bobr_store::{
 use mbuild_builder::{BuilderPlanError, BuilderPlannedSubject};
 use mbuild_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, CancellationToken, NoopBuildLogger,
-    OriginContext, Workspace,
+    SubjectRunContext, Workspace,
 };
 use mbuild_source::SourcePlannedSubject;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 pub(crate) enum PlannedSubject {
@@ -103,23 +101,14 @@ fn execute_builder_subject(
     )
     .map(core_workspace)
     .map_err(map_store_error)?;
-    let builder_run = BuilderRun::new(
-        subject.tag(),
-        Some(subject.name().to_string()),
-        build_key.to_string(),
-        workspace,
-    );
+    let temp_dir = workspace.temp_dir().to_path_buf();
     // Owns the temp dir from here on: every return path (bind error below, and
     // panics) cleans it via Drop.
-    let mut temp_guard = TempDirGuard::for_builder(
-        cx.store,
-        subject.tag(),
-        build_key,
-        builder_run.temp_dir().to_path_buf(),
-    );
+    let mut temp_guard =
+        TempDirGuard::for_builder(cx.store, subject.tag(), build_key, temp_dir.clone());
     let logger = cx
         .run_logger
-        .bind_subject(builder_run.log_subject())
+        .bind_subject(subject.log_subject(&workspace))
         .map_err(RuntimeError::Store)?;
     temp_guard.set_logger(logger.clone());
     log_runtime_event(
@@ -135,21 +124,16 @@ fn execute_builder_subject(
         "executing builder",
     );
     check_cancelled(&cx.cancellation)?;
-    let mut context = build_context(
-        cx.store,
-        &builder_run,
-        build_key,
-        logger.clone(),
-        cx.cancellation.clone(),
-    )?;
+    prepare_temp(cx.store, subject.tag(), &temp_dir, build_key, logger.as_ref())?;
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
         "run",
         "running builder implementation",
     );
+    let ctx = SubjectRunContext::new(workspace, logger.clone(), cx.cancellation.clone());
     let staged = subject
-        .build_erased(inputs.into_builder_inputs(), &mut context)
+        .execute(&ctx, inputs.into_builder_inputs())
         .map_err(|error| {
             log_runtime_event(
                 logger.as_ref(),
@@ -225,20 +209,13 @@ fn execute_source_subject(
     )
     .map(core_workspace)
     .map_err(map_store_error)?;
-    let source_builder = SourceBuilder::new(
-        subject.name().to_string(),
-        build_key.to_string(),
-        subject.declared_object_hash(),
-        subject.clone_origin(),
-        workspace,
-    );
+    let temp_dir = workspace.temp_dir().to_path_buf();
     // Owns the temp dir from here on: every return path (bind error below, and
     // panics) cleans it via Drop.
-    let mut temp_guard =
-        TempDirGuard::for_source(cx.store, source_builder.temp_dir().to_path_buf());
+    let mut temp_guard = TempDirGuard::for_source(cx.store, temp_dir);
     let logger = cx
         .run_logger
-        .bind_subject(source_builder.log_subject())
+        .bind_subject(subject.log_subject(&workspace))
         .map_err(RuntimeError::Store)?;
     temp_guard.set_logger(logger.clone());
     log_runtime_event(
@@ -254,35 +231,13 @@ fn execute_source_subject(
         "materializing source",
     );
 
-    let Some(origin) = source_builder.origin() else {
-        let message = format!(
-            "source '{}' has no origin and object '{}' is not present in store",
-            source_builder.recipe_name(),
-            source_builder.declared_object_hash()
-        );
-        log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
-        return Err(RuntimeError::Build(message));
-    };
-
-    let temp_root = source_builder.temp_dir().to_path_buf();
-    check_cancelled(&cx.cancellation)?;
-    let staged_path = origin
-        .materialize(&OriginContext {
-            temp_root: temp_root.as_path(),
-        })
-        .map_err(|error| {
-            log_runtime_event(
-                logger.as_ref(),
-                BuildLogLevel::Error,
-                "fail",
-                error.to_string(),
-            );
-            RuntimeError::Build(error)
-        })?;
-    validate_origin_staged_path(&staged_path, &temp_root).map_err(|message| {
-        log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
-        RuntimeError::Build(message)
+    let ctx = SubjectRunContext::new(workspace, logger.clone(), cx.cancellation.clone());
+    let staged_path = subject.execute(&ctx).map_err(|error| {
+        log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &error);
+        RuntimeError::Build(error)
     })?;
+    // `origin.materialize` has no cancellation hook, so honor a cancel that
+    // arrived while staging before publishing the imported object.
     check_cancelled(&cx.cancellation)?;
     log_runtime_event(
         logger.as_ref(),
@@ -291,12 +246,9 @@ fn execute_source_subject(
         "materializing source origin",
     );
 
-    let import_outcome = import_source_object(
-        cx.store,
-        source_builder.declared_object_hash(),
-        &staged_path,
-    )
-    .map_err(map_store_error)?;
+    let import_outcome =
+        import_source_object(cx.store, subject.declared_object_hash(), &staged_path)
+            .map_err(map_store_error)?;
     check_cancelled(&cx.cancellation)?;
 
     match import_outcome {
@@ -307,37 +259,14 @@ fn execute_source_subject(
         SourceImportOutcome::Mismatched { actual_hash } => {
             let message = format!(
                 "source '{}' materialized unexpected object hash: expected {}, got {}",
-                source_builder.recipe_name(),
-                source_builder.declared_object_hash(),
+                subject.name(),
+                subject.declared_object_hash(),
                 actual_hash
             );
             log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
             Err(RuntimeError::Build(message))
         }
     }
-}
-
-fn validate_origin_staged_path(staged_path: &Path, temp_root: &Path) -> Result<(), String> {
-    let canonical_temp_root = temp_root.canonicalize().map_err(|error| {
-        format!(
-            "failed to canonicalize source temp root '{}': {error}",
-            temp_root.display()
-        )
-    })?;
-    let canonical_staged_path = staged_path.canonicalize().map_err(|error| {
-        format!(
-            "failed to canonicalize source staged path '{}': {error}",
-            staged_path.display()
-        )
-    })?;
-    if !canonical_staged_path.starts_with(&canonical_temp_root) {
-        return Err(format!(
-            "source origin returned staged path '{}' outside temp root '{}'",
-            staged_path.display(),
-            temp_root.display()
-        ));
-    }
-    Ok(())
 }
 
 fn builder_resolved_inputs(

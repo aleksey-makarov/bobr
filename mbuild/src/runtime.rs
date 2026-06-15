@@ -1,9 +1,7 @@
-use crate::subject_run::BuilderRun;
 use bobr_store::{
     Store, StoreError, StoreTempQuarantineRequest, quarantine_store_temp,
     recreate_store_temp_dir_force, remove_store_temp_dir_force,
 };
-use mbuild_builder::BuildContext;
 use mbuild_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuilderError, CancellationToken,
     NoopBuildLogger,
@@ -55,20 +53,18 @@ impl fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
-pub(crate) fn build_context(
+/// Prepares an empty temp directory for a builder run, quarantining any stale
+/// contents first. Builders own their staging area, so this runs before
+/// `BuilderPlannedSubject::execute` constructs its `BuildContext`.
+pub(crate) fn prepare_temp(
     store: &Store,
-    builder_run: &BuilderRun,
+    tag: &str,
+    temp_dir: &Path,
     build_key: BuildKey,
-    logger: Arc<dyn BuildLogger>,
-    cancellation: CancellationToken,
-) -> Result<BuildContext, RuntimeError> {
-    let cleanup = TempCleanupContext::new(store, builder_run.tag(), build_key);
-    recreate_empty_temp_dir_with_quarantine(builder_run.temp_dir(), &cleanup, logger.as_ref())?;
-    Ok(
-        BuildContext::with_noop_logger(builder_run.temp_dir().to_path_buf())
-            .with_logger(logger)
-            .with_cancellation_token(cancellation),
-    )
+    logger: &dyn BuildLogger,
+) -> Result<(), RuntimeError> {
+    let cleanup = TempCleanupContext::new(store, tag, build_key);
+    recreate_empty_temp_dir_with_quarantine(temp_dir, &cleanup, logger)
 }
 
 pub(crate) fn map_builder_error(error: BuilderError) -> RuntimeError {
@@ -391,10 +387,11 @@ mod tests {
     };
     use bobr_store::{PublishRequest, create_workspace, publish_build, resolve_reuse_for_build};
     use mbuild_builder::{
-        BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult, TypedBuilder,
+        BuildContext, BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult, TypedBuilder,
     };
     use mbuild_core::{
-        BuildLogger, BuildRunLogger, CancellationToken, compute_build_key, compute_reuse_key,
+        BuildLogSubject, BuildLogger, BuildRunLogger, CancellationToken, Workspace,
+        compute_build_key, compute_reuse_key,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
@@ -415,24 +412,25 @@ mod tests {
         Arc::new(BuildRunLogger::new(locations.run_log_dir(), locations.run_id(), false).unwrap())
     }
 
-    fn create_test_builder_run(
+    fn create_test_run(
         store: &Store,
         run_logger: &Arc<BuildRunLogger>,
         tag: &str,
         name: &str,
         build_key: BuildKey,
-    ) -> (BuilderRun, Arc<dyn BuildLogger>) {
+    ) -> (Workspace, Arc<dyn BuildLogger>) {
         let workspace = create_workspace(store, tag, Some(name.to_string()), build_key.to_string())
             .map(core_workspace)
             .unwrap();
-        let builder_run = BuilderRun::new(
-            tag.to_string(),
-            Some(name.to_string()),
+        let subject = BuildLogSubject::new(
+            tag,
+            name,
             build_key.to_string(),
-            workspace,
+            workspace.log_dir().to_path_buf(),
+            workspace.raw_log_dir().to_path_buf(),
         );
-        let logger = run_logger.bind_subject(builder_run.log_subject()).unwrap();
-        (builder_run, logger)
+        let logger = run_logger.bind_subject(subject).unwrap();
+        (workspace, logger)
     }
 
     fn run_builder_subject(
@@ -781,36 +779,24 @@ mod tests {
         let config = json!({});
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
         let run_logger = create_test_logger(&store);
-        let (builder_run, logger) = create_test_builder_run(
-            &store,
-            &run_logger,
-            "RuntimeTest",
-            "runtime-test",
-            build_key,
-        );
-        let temp_dir = builder_run.temp_dir().to_path_buf();
+        let (workspace, logger) =
+            create_test_run(&store, &run_logger, "RuntimeTest", "runtime-test", build_key);
+        let temp_dir = workspace.temp_dir().to_path_buf();
         fs::remove_dir_all(&temp_dir).unwrap();
         let stale_target = temp.path().join("missing-stale-target");
         symlink(&stale_target, &temp_dir).unwrap();
 
-        let context = build_context(
-            &store,
-            &builder_run,
-            build_key,
-            logger,
-            CancellationToken::new(),
-        )
-        .unwrap();
+        prepare_temp(&store, "RuntimeTest", &temp_dir, build_key, logger.as_ref()).unwrap();
 
-        assert!(context.temp_dir.is_dir());
+        assert!(temp_dir.is_dir());
         assert!(
-            !fs::symlink_metadata(&context.temp_dir)
+            !fs::symlink_metadata(&temp_dir)
                 .unwrap()
                 .file_type()
                 .is_symlink()
         );
         assert_quarantine_event(
-            builder_run.log_dir(),
+            workspace.log_dir(),
             "warn",
             "RuntimeTest",
             "runtime-test",
@@ -862,30 +848,23 @@ mod tests {
         let run_logger = create_test_logger(&store);
         let config = json!({});
         let build_key = compute_build_key("Sandbox", &config, &[]).unwrap();
-        let (builder_run, logger) = create_test_builder_run(
+        let (workspace, logger) = create_test_run(
             &store,
             &run_logger,
             "Sandbox",
             "sandbox-runtime-test",
             build_key,
         );
-        let temp_dir = builder_run.temp_dir().to_path_buf();
+        let temp_dir = workspace.temp_dir().to_path_buf();
         fs::remove_dir_all(&temp_dir).unwrap();
         fs::create_dir_all(&temp_dir).unwrap();
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
-        let context = build_context(
-            &store,
-            &builder_run,
-            build_key,
-            logger,
-            CancellationToken::new(),
-        )
-        .unwrap();
+        prepare_temp(&store, "Sandbox", &temp_dir, build_key, logger.as_ref()).unwrap();
 
-        assert!(context.temp_dir.is_dir());
+        assert!(temp_dir.is_dir());
         let event = assert_quarantine_event(
-            builder_run.log_dir(),
+            workspace.log_dir(),
             "info",
             "Sandbox",
             "sandbox-runtime-test",
@@ -927,14 +906,9 @@ mod tests {
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
         let build_key = compute_build_key("RuntimeTest", &json!({}), &[]).unwrap();
-        let (builder_run, logger) = create_test_builder_run(
-            &store,
-            &run_logger,
-            "RuntimeTest",
-            "runtime-test",
-            build_key,
-        );
-        let temp_dir = builder_run.temp_dir().join("stale");
+        let (workspace, logger) =
+            create_test_run(&store, &run_logger, "RuntimeTest", "runtime-test", build_key);
+        let temp_dir = workspace.temp_dir().join("stale");
         fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
         fs::write(&temp_dir, b"not a directory\n").unwrap();
 
@@ -943,7 +917,7 @@ mod tests {
 
         assert!(fs::symlink_metadata(&temp_dir).is_err());
         assert_quarantine_event(
-            builder_run.log_dir(),
+            workspace.log_dir(),
             "warn",
             "RuntimeTest",
             "runtime-test",
@@ -960,9 +934,9 @@ mod tests {
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
         let build_key = compute_build_key("RuntimeTest", &json!({}), &[]).unwrap();
-        let (builder_run, _logger) =
-            create_test_builder_run(&store, &run_logger, "RuntimeTest", "guard-test", build_key);
-        let temp_dir = builder_run.temp_dir().to_path_buf();
+        let (workspace, _logger) =
+            create_test_run(&store, &run_logger, "RuntimeTest", "guard-test", build_key);
+        let temp_dir = workspace.temp_dir().to_path_buf();
         assert!(temp_dir.is_dir());
 
         {
