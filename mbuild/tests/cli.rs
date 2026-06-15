@@ -371,7 +371,7 @@ fn cli_reports_relative_source_path() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
     assert!(
-        stderr.contains("$.nodes.root.origin.path: expected absolute path"),
+        stderr.contains("$.nodes.root: origin.path: expected absolute path"),
         "{stderr}"
     );
 }

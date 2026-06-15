@@ -89,27 +89,23 @@ impl SourcePlannedSubject {
 /// Parses a source recipe object whose tag was already removed by the caller.
 pub fn parse_source_subject(
     mut object: Map<String, Value>,
-    path: &str,
 ) -> Result<SourcePlannedSubject, SourceRecipeError> {
-    let name = take_string(&mut object, path, "name")?;
+    let name = take_string(&mut object, "name")?;
     validate_publication_name(&name)
-        .map_err(|error| SourceRecipeError::new(format!("{path}.name: {error}")))?;
-    let declared_object_hash = take_string(&mut object, path, "object_hash")?
+        .map_err(|error| SourceRecipeError::new(format!("name: {error}")))?;
+    let declared_object_hash = take_string(&mut object, "object_hash")?
         .trim()
         .parse::<ObjectHash>()
         .map_err(|error| {
-            SourceRecipeError::new(format!("{path}.object_hash: invalid object hash: {error}"))
+            SourceRecipeError::new(format!("object_hash: invalid object hash: {error}"))
         })?;
     let origin = match object.remove("origin") {
-        Some(value) => Some(origins::parse_origin_value(
-            value,
-            &format!("{path}.origin"),
-        )?),
+        Some(value) => Some(origins::parse_origin_value(value, "origin")?),
         None => None,
     };
     if !object.is_empty() {
         return Err(SourceRecipeError::new(format!(
-            "{path}: unexpected fields: {}",
+            "unexpected fields: {}",
             object.keys().cloned().collect::<Vec<_>>().join(", ")
         )));
     }
@@ -121,18 +117,14 @@ pub fn parse_source_subject(
     ))
 }
 
-fn take_string(
-    object: &mut Map<String, Value>,
-    path: &str,
-    field: &str,
-) -> Result<String, SourceRecipeError> {
-    let value = object.remove(field).ok_or_else(|| {
-        SourceRecipeError::new(format!("{path}: missing required field '{field}'"))
-    })?;
+fn take_string(object: &mut Map<String, Value>, field: &str) -> Result<String, SourceRecipeError> {
+    let value = object
+        .remove(field)
+        .ok_or_else(|| SourceRecipeError::new(format!("missing required field '{field}'")))?;
     value
         .as_str()
         .map(ToOwned::to_owned)
-        .ok_or_else(|| SourceRecipeError::new(format!("{path}.{field}: expected string")))
+        .ok_or_else(|| SourceRecipeError::new(format!("{field}: expected string")))
 }
 
 #[cfg(test)]
@@ -156,7 +148,7 @@ mod tests {
 
     #[test]
     fn source_without_origin_is_accepted() {
-        let subject = parse_source_subject(source_object(None), "$.nodes.root").unwrap();
+        let subject = parse_source_subject(source_object(None)).unwrap();
 
         assert_eq!(subject.name(), "local-source");
         assert_eq!(subject.tag(), "Source");
@@ -176,25 +168,20 @@ mod tests {
         let mut object = source_object(None);
         object.insert("name".to_string(), Value::String("bad/name".to_string()));
 
-        let error = parse_source_subject(object, "$.nodes.root").unwrap_err();
+        let error = parse_source_subject(object).unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("$.nodes.root.name: invalid publication name"),
+            error.to_string().contains("name: invalid publication name"),
             "{error}"
         );
     }
 
     #[test]
     fn source_path_origin_is_accepted() {
-        let subject = parse_source_subject(
-            source_object(Some(json!({
-                "tag": "Path",
-                "path": "/tmp/source.tar",
-                "unpack": true
-            }))),
-            "$.nodes.root",
-        )
+        let subject = parse_source_subject(source_object(Some(json!({
+            "tag": "Path",
+            "path": "/tmp/source.tar",
+            "unpack": true
+        }))))
         .unwrap();
 
         assert_eq!(subject.clone_origin().unwrap().spec().tag, "Path");
@@ -202,14 +189,11 @@ mod tests {
 
     #[test]
     fn source_path_origin_requires_absolute_paths() {
-        let error = parse_source_subject(
-            source_object(Some(json!({
-                "tag": "Path",
-                "path": "source.tar",
-                "unpack": true
-            }))),
-            "$.nodes.root",
-        )
+        let error = parse_source_subject(source_object(Some(json!({
+            "tag": "Path",
+            "path": "source.tar",
+            "unpack": true
+        }))))
         .unwrap_err();
 
         assert!(error.to_string().contains("expected absolute path"));
@@ -217,14 +201,11 @@ mod tests {
 
     #[test]
     fn source_http_origin_is_accepted() {
-        let subject = parse_source_subject(
-            source_object(Some(json!({
-                "tag": "Http",
-                "url": "https://example.invalid/source.tar.gz",
-                "unpack": true
-            }))),
-            "$.nodes.root",
-        )
+        let subject = parse_source_subject(source_object(Some(json!({
+            "tag": "Http",
+            "url": "https://example.invalid/source.tar.gz",
+            "unpack": true
+        }))))
         .unwrap();
 
         assert_eq!(subject.clone_origin().unwrap().spec().tag, "Http");
@@ -232,14 +213,11 @@ mod tests {
 
     #[test]
     fn source_oci_registry_origin_is_accepted() {
-        let subject = parse_source_subject(
-            source_object(Some(json!({
-                "tag": "OciRegistry",
-                "image": "docker.io/library/alpine:3.20",
-                "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            }))),
-            "$.nodes.root",
-        )
+        let subject = parse_source_subject(source_object(Some(json!({
+            "tag": "OciRegistry",
+            "image": "docker.io/library/alpine:3.20",
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }))))
         .unwrap();
 
         assert_eq!(subject.clone_origin().unwrap().spec().tag, "OciRegistry");
@@ -255,7 +233,7 @@ mod tests {
             ),
         );
 
-        let subject = parse_source_subject(object, "$.nodes.root").unwrap();
+        let subject = parse_source_subject(object).unwrap();
 
         assert_eq!(
             subject.declared_object_hash().to_string(),

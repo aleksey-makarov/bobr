@@ -78,8 +78,8 @@ fn collect_graph_inner(
     let tag = take_string(&mut object, &node_path, "tag")?;
 
     let (key, subject) = if tag == "Source" {
-        let subject = parse_source_subject(object, &node_path)
-            .map_err(|error| RuntimeError::RecipeLoad(error.to_string()))?;
+        let subject = parse_source_subject(object)
+            .map_err(|error| RuntimeError::RecipeLoad(format!("{node_path}: {error}")))?;
         let key = subject.build_key();
         (key, Arc::new(PlannedSubject::Source(subject)))
     } else {
@@ -431,7 +431,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("$.nodes.root.name: invalid publication name"),
+                .contains("$.nodes.root: name: invalid publication name"),
             "{error}"
         );
     }
