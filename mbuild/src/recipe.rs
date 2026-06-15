@@ -92,7 +92,6 @@ fn collect_graph_inner(
         })?;
         let mut inputs = BTreeMap::new();
         for (input_name, slot_value) in inputs_object {
-            validate_input_name(&input_name, &format!("{node_path}.inputs"))?;
             let input_path = format!("{node_path}.inputs.{input_name}");
             let child_id = parse_input_value(slot_value, &input_path)?;
             let child = collect_graph_inner(
@@ -256,26 +255,6 @@ fn parse_input_value(value: Value, path: &str) -> Result<String, RuntimeError> {
             "{path}: expected node id string"
         ))),
     }
-}
-
-fn validate_input_name(name: &str, path: &str) -> Result<(), RuntimeError> {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "{path}: input name must not be empty"
-        )));
-    };
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "{path}: input name '{name}' must start with an ASCII letter or underscore"
-        )));
-    }
-    if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
-        return Err(RuntimeError::RecipeLoad(format!(
-            "{path}: input name '{name}' must contain only ASCII letters, digits, and underscores"
-        )));
-    }
-    Ok(())
 }
 
 fn take_string(

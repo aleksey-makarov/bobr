@@ -1,4 +1,6 @@
-use crate::{BuildContext, Builder, BuilderInputs, InputSpec, StagedBuildResult};
+use crate::{
+    BuildContext, Builder, BuilderInputs, InputSpec, StagedBuildResult, validate_input_name,
+};
 use fsobj_hash::ObjectHash;
 use mbuild_core::{
     BuildKey, BuilderError, IdentityError, ReuseKey, compute_build_key, compute_reuse_key,
@@ -89,6 +91,9 @@ impl BuilderPlannedSubject {
         let spec = builder.spec();
         let reserved_inputs = spec.reserved_input_names().collect::<Vec<_>>();
         for input_name in inputs.keys() {
+            validate_input_name(input_name).map_err(|error| {
+                BuilderPlanError::recipe(format!("invalid input '{input_name}': {error}"))
+            })?;
             if !spec.allow_extra_inputs && !spec.is_reserved_input(input_name) {
                 return Err(BuilderPlanError::invalid_request(format!(
                     "builder '{}' does not accept extra input '{}'; allowed inputs: {}",

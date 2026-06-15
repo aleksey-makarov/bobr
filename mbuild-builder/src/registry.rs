@@ -380,6 +380,33 @@ mod tests {
     }
 
     #[test]
+    fn parse_subject_rejects_invalid_actual_input_names() {
+        let mut registry = BuilderRegistry::new();
+        register_in_tree_builders(&mut registry).unwrap();
+        let input_key =
+            BuildKey::from_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap();
+
+        let error = registry
+            .parse_subject(
+                "Group",
+                serde_json::json!({"name": "group", "config": {}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                BTreeMap::from([("bad-name".to_string(), input_key)]),
+            )
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid input 'bad-name': input name 'bad-name'"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn parse_subject_rejects_missing_required_inputs() {
         let mut registry = BuilderRegistry::new();
         registry.register(&REQUIRED_INPUT).unwrap();

@@ -26,6 +26,12 @@ impl InputSpec {
     pub fn validate_for_builder(&self, builder_tag: &str) -> Result<(), String> {
         let mut required = BTreeSet::new();
         for name in self.required_inputs {
+            validate_input_name(name).map_err(|error| {
+                format!(
+                    "builder '{}' declares invalid required input '{}': {error}",
+                    builder_tag, name
+                )
+            })?;
             if !required.insert(*name) {
                 return Err(format!(
                     "builder '{}' declares duplicate required input '{}'",
@@ -36,6 +42,12 @@ impl InputSpec {
 
         let mut optional = BTreeSet::new();
         for name in self.optional_inputs {
+            validate_input_name(name).map_err(|error| {
+                format!(
+                    "builder '{}' declares invalid optional input '{}': {error}",
+                    builder_tag, name
+                )
+            })?;
             if !optional.insert(*name) {
                 return Err(format!(
                     "builder '{}' declares duplicate optional input '{}'",
@@ -94,6 +106,24 @@ impl InputSpec {
         }
         ordered
     }
+}
+
+pub(crate) fn validate_input_name(name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err("input name must not be empty".to_string());
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return Err(format!(
+            "input name '{name}' must start with an ASCII letter or underscore"
+        ));
+    }
+    if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        return Err(format!(
+            "input name '{name}' must contain only ASCII letters, digits, and underscores"
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -428,6 +458,29 @@ mod tests {
         assert_eq!(
             spec.validate_for_builder("Test").unwrap_err(),
             "builder 'Test' declares input 'rootfs' as both required and optional"
+        );
+    }
+
+    #[test]
+    fn input_spec_validate_rejects_invalid_declared_input_names() {
+        let required = InputSpec {
+            required_inputs: &["bad-name"],
+            optional_inputs: &[],
+            allow_extra_inputs: true,
+        };
+        let optional = InputSpec {
+            required_inputs: &[],
+            optional_inputs: &["1bad"],
+            allow_extra_inputs: true,
+        };
+
+        assert_eq!(
+            required.validate_for_builder("Test").unwrap_err(),
+            "builder 'Test' declares invalid required input 'bad-name': input name 'bad-name' must contain only ASCII letters, digits, and underscores"
+        );
+        assert_eq!(
+            optional.validate_for_builder("Test").unwrap_err(),
+            "builder 'Test' declares invalid optional input '1bad': input name '1bad' must start with an ASCII letter or underscore"
         );
     }
 
