@@ -38,6 +38,35 @@ impl fmt::Display for SourceRecipeError {
 
 impl std::error::Error for SourceRecipeError {}
 
+/// Error reported while executing a planned source subject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceExecutionError {
+    /// The run was cancelled before source materialization started.
+    Cancelled(String),
+    /// Source materialization failed.
+    Build(String),
+}
+
+impl SourceExecutionError {
+    fn cancelled() -> Self {
+        Self::Cancelled("build cancelled by signal".to_string())
+    }
+
+    fn build(message: impl Into<String>) -> Self {
+        Self::Build(message.into())
+    }
+}
+
+impl fmt::Display for SourceExecutionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled(message) | Self::Build(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for SourceExecutionError {}
+
 /// Parsed source node prepared for graph planning and source execution.
 #[derive(Debug, Clone)]
 pub struct SourcePlannedSubject {
@@ -110,17 +139,23 @@ impl SourcePlannedSubject {
     ///
     /// This does not touch the object store: the caller looks up reuse before
     /// calling this, and imports the returned staged path afterwards.
-    pub fn execute(&self, ctx: &SubjectRunContext) -> Result<PathBuf, String> {
+    pub fn execute(&self, ctx: &SubjectRunContext) -> Result<PathBuf, SourceExecutionError> {
         let Some(origin) = self.origin() else {
-            return Err(format!(
+            return Err(SourceExecutionError::build(format!(
                 "source '{}' has no origin and object '{}' is not present in store",
                 self.name(),
                 self.declared_object_hash()
-            ));
+            )));
         };
+        if ctx.cancellation().is_cancelled() {
+            return Err(SourceExecutionError::cancelled());
+        }
         let temp_root = ctx.temp_dir();
-        let staged_path = origin.materialize(&OriginContext { temp_root })?;
-        validate_origin_staged_path(&staged_path, temp_root)?;
+        let staged_path = origin
+            .materialize(&OriginContext { temp_root })
+            .map_err(SourceExecutionError::build)?;
+        validate_origin_staged_path(&staged_path, temp_root)
+            .map_err(SourceExecutionError::build)?;
         Ok(staged_path)
     }
 }
@@ -194,7 +229,10 @@ mod tests {
     use super::*;
     use mbuild_core::{CancellationToken, NoopBuildLogger, OriginSpec};
     use serde_json::json;
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     use tempfile::tempdir;
 
     fn source_object(origin: Option<Value>) -> Map<String, Value> {
@@ -311,6 +349,11 @@ mod tests {
         target: PathBuf,
     }
 
+    #[derive(Debug, Clone)]
+    struct RecordingOrigin {
+        called: Arc<AtomicBool>,
+    }
+
     impl ParsedOrigin for StagingOrigin {
         fn spec(&self) -> &'static OriginSpec {
             static SPEC: OriginSpec = OriginSpec { tag: "Stub" };
@@ -328,6 +371,20 @@ mod tests {
         }
     }
 
+    impl ParsedOrigin for RecordingOrigin {
+        fn spec(&self) -> &'static OriginSpec {
+            static SPEC: OriginSpec = OriginSpec { tag: "Recording" };
+            &SPEC
+        }
+        fn materialize(&self, cx: &OriginContext<'_>) -> Result<PathBuf, String> {
+            self.called.store(true, Ordering::SeqCst);
+            Ok(cx.temp_root.join("staged"))
+        }
+        fn clone_box(&self) -> Box<dyn ParsedOrigin> {
+            Box::new(self.clone())
+        }
+    }
+
     fn sample_hash() -> ObjectHash {
         "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
@@ -335,16 +392,19 @@ mod tests {
     }
 
     fn run_ctx(temp_root: &Path) -> SubjectRunContext {
+        run_ctx_with_cancellation(temp_root, CancellationToken::new())
+    }
+
+    fn run_ctx_with_cancellation(
+        temp_root: &Path,
+        cancellation: CancellationToken,
+    ) -> SubjectRunContext {
         let workspace = Workspace::new(
             temp_root.join("log"),
             temp_root.join("log/raw"),
             temp_root.to_path_buf(),
         );
-        SubjectRunContext::new(
-            workspace,
-            Arc::new(NoopBuildLogger),
-            CancellationToken::new(),
-        )
+        SubjectRunContext::new(workspace, Arc::new(NoopBuildLogger), cancellation)
     }
 
     #[test]
@@ -352,7 +412,7 @@ mod tests {
         let subject = SourcePlannedSubject::new("src".to_string(), sample_hash(), None);
         let temp = tempdir().unwrap();
         let error = subject.execute(&run_ctx(temp.path())).unwrap_err();
-        assert!(error.contains("has no origin"), "{error}");
+        assert!(error.to_string().contains("has no origin"), "{error}");
     }
 
     #[test]
@@ -372,6 +432,28 @@ mod tests {
     }
 
     #[test]
+    fn execute_does_not_materialize_when_cancelled() {
+        let temp = tempdir().unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let called = Arc::new(AtomicBool::new(false));
+        let subject = SourcePlannedSubject::new(
+            "src".to_string(),
+            sample_hash(),
+            Some(Box::new(RecordingOrigin {
+                called: called.clone(),
+            })),
+        );
+
+        let error = subject
+            .execute(&run_ctx_with_cancellation(temp.path(), cancellation))
+            .unwrap_err();
+
+        assert!(matches!(error, SourceExecutionError::Cancelled(_)));
+        assert!(!called.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn execute_rejects_staged_path_outside_temp_root() {
         let temp = tempdir().unwrap();
         let outside = tempdir().unwrap();
@@ -383,6 +465,6 @@ mod tests {
             })),
         );
         let error = subject.execute(&run_ctx(temp.path())).unwrap_err();
-        assert!(error.contains("outside temp root"), "{error}");
+        assert!(error.to_string().contains("outside temp root"), "{error}");
     }
 }

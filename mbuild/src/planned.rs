@@ -13,7 +13,7 @@ use mbuild_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, CancellationToken, NoopBuildLogger,
     SubjectRunContext, Workspace,
 };
-use mbuild_source::SourcePlannedSubject;
+use mbuild_source::{SourceExecutionError, SourcePlannedSubject};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -237,10 +237,16 @@ fn execute_source_subject(
         "materializing source",
     );
 
+    check_cancelled(&cx.cancellation)?;
     let ctx = SubjectRunContext::new(workspace, logger.clone(), cx.cancellation.clone());
     let staged_path = subject.execute(&ctx).map_err(|error| {
-        log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &error);
-        RuntimeError::Build(error)
+        log_runtime_event(
+            logger.as_ref(),
+            BuildLogLevel::Error,
+            "fail",
+            error.to_string(),
+        );
+        map_source_execution_error(error)
     })?;
     // `origin.materialize` has no cancellation hook, so honor a cancel that
     // arrived while staging before publishing the imported object.
@@ -316,6 +322,13 @@ fn map_builder_plan_error(error: BuilderPlanError) -> RuntimeError {
         BuilderPlanError::InvalidRequest(_) | BuilderPlanError::Identity(_) => {
             RuntimeError::InvalidRequest(error.to_string())
         }
+    }
+}
+
+fn map_source_execution_error(error: SourceExecutionError) -> RuntimeError {
+    match error {
+        SourceExecutionError::Cancelled(message) => RuntimeError::Cancelled(message),
+        SourceExecutionError::Build(message) => RuntimeError::Build(message),
     }
 }
 
