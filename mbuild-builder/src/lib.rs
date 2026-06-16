@@ -1,6 +1,7 @@
 pub mod builder;
-mod fs_tree;
+pub mod fs_tree;
 mod fs_tree_import;
+mod fs_tree_legacy;
 pub mod group;
 pub mod oci_extract;
 mod registry;
@@ -17,6 +18,7 @@ pub use group::{GroupBuilder, GroupConfig};
 pub use oci_extract::{OciExtractBuilder, OciExtractConfig};
 pub use registry::{BuilderRegistry, register_in_tree_builders};
 pub use subject::{BuilderPlanError, BuilderPlannedSubject};
+pub use tree::{TreeNewBuilder, TreeNewConfig};
 
 /// Return runtime functions supported by built-in builders.
 pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {

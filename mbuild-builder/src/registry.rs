@@ -1,7 +1,7 @@
 use crate::{
     Builder, BuilderPlanError, BuilderPlannedSubject, ErofsRootfsBuilder, FsTreeImportBuilder,
     GroupBuilder, InitramfsBuilder, OciExtractBuilder, TreeBuilder, TreeMergeBuilder,
-    TreeSubsetBuilder,
+    TreeNewBuilder, TreeSubsetBuilder,
 };
 use mbuild_core::{BuildKey, validate_publication_name};
 use serde_json::{Map, Value};
@@ -11,6 +11,7 @@ static GROUP_BUILDER: GroupBuilder = GroupBuilder;
 static FS_TREE_IMPORT_BUILDER: FsTreeImportBuilder = FsTreeImportBuilder;
 static OCI_EXTRACT_BUILDER: OciExtractBuilder = OciExtractBuilder;
 static TREE_BUILDER: TreeBuilder = TreeBuilder;
+static TREE_NEW_BUILDER: TreeNewBuilder = TreeNewBuilder;
 static TREE_SUBSET_BUILDER: TreeSubsetBuilder = TreeSubsetBuilder;
 static TREE_MERGE_BUILDER: TreeMergeBuilder = TreeMergeBuilder;
 static EROFS_ROOTFS_BUILDER: ErofsRootfsBuilder = ErofsRootfsBuilder;
@@ -110,6 +111,7 @@ pub fn register_in_tree_builders(registry: &mut BuilderRegistry) -> Result<(), S
     registry.register(&GROUP_BUILDER)?;
     registry.register(&FS_TREE_IMPORT_BUILDER)?;
     registry.register(&TREE_BUILDER)?;
+    registry.register(&TREE_NEW_BUILDER)?;
     registry.register(&TREE_SUBSET_BUILDER)?;
     registry.register(&TREE_MERGE_BUILDER)?;
     registry.register(&EROFS_ROOTFS_BUILDER)?;
@@ -264,6 +266,7 @@ mod tests {
                 "Group",
                 "FsTreeImport",
                 "Tree",
+                "TreeNew",
                 "TreeSubset",
                 "TreeMerge",
                 "ErofsRootfs",
@@ -462,6 +465,23 @@ mod tests {
 
         assert_eq!(subject.name(), "tree");
         assert_eq!(subject.tag(), "Tree");
+        assert_eq!(subject.build_key(), expected);
+        assert!(subject.inputs().is_empty());
+
+        let subject = registry
+            .parse_subject(
+                "TreeNew",
+                serde_json::json!({"name": "tree-new", "config": config.clone()})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let expected = mbuild_core::compute_build_key("TreeNew", &config, &[]).unwrap();
+
+        assert_eq!(subject.name(), "tree-new");
+        assert_eq!(subject.tag(), "TreeNew");
         assert_eq!(subject.build_key(), expected);
         assert!(subject.inputs().is_empty());
     }

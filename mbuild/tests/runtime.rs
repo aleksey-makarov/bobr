@@ -36,6 +36,7 @@ fn registered_builders_include_current_tags_only() {
         "Group",
         "FsTreeImport",
         "Tree",
+        "TreeNew",
         "TreeSubset",
         "TreeMerge",
         "ErofsRootfs",
