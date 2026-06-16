@@ -7,6 +7,8 @@
 #![deny(missing_docs)]
 
 use crate::StoreError;
+use globset::{Glob, GlobMatcher};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -89,6 +91,56 @@ pub enum FsTreeEntryKind {
 /// algorithm is deliberately not defined in this crate yet.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FsFileHash([u8; 32]);
+
+/// Install policy used when importing an existing filesystem tree into
+/// manifest v2.
+///
+/// Rules are evaluated in order. Every rule whose glob pattern matches a path
+/// contributes its explicitly specified attributes; later matching rules
+/// override earlier values field-by-field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FsTreeInstall {
+    /// Ordered install rules.
+    pub rules: Vec<FsTreeInstallRule>,
+}
+
+/// One glob-based install rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FsTreeInstallRule {
+    /// Glob pattern matched against manifest-relative UTF-8 paths.
+    ///
+    /// The root directory path is the empty string. A pattern ending in `/**`
+    /// also matches the prefix path itself.
+    pub path: String,
+    /// Attributes contributed by this rule.
+    pub attrs: FsTreeInstallAttrs,
+}
+
+/// Filesystem attributes contributed by an install rule.
+///
+/// Attribute values are optional so that more specific rules can override only
+/// selected fields while inheriting the rest from broader rules.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FsTreeInstallAttrs {
+    /// Logical uid for directories, files, and symlinks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    /// Logical gid for directories, files, and symlinks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
+    /// Directory mode, constrained to `0..=0o7777`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_mode: Option<u32>,
+    /// Regular non-executable file mode, constrained to `0..=0o7777`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regular_file_mode: Option<u32>,
+    /// Executable regular file mode, constrained to `0..=0o7777`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_file_mode: Option<u32>,
+}
 
 /// Error returned when parsing an [`FsFileHash`] from text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,6 +467,33 @@ pub fn scan_fs_tree(
         .map_err(|error| StoreError::InvalidData(error.to_string()))
 }
 
+/// Imports a filesystem tree into a manifest and `fs-files` using install
+/// rules.
+///
+/// Both root paths must be absolute existing real directories, not symlinks.
+/// Regular files are copied into `fs-files` with the installed uid, gid, and
+/// mode encoded into the fs-file hash. The source tree is never modified.
+pub fn import_fs_tree_with_install(
+    source_root: &Path,
+    fs_files_root: &Path,
+    install: &FsTreeInstall,
+) -> Result<FsTreeManifest, StoreError> {
+    require_existing_directory(source_root, "source root")?;
+    require_existing_directory(fs_files_root, "fs-files root")?;
+    let rules = compile_fs_tree_install_rules(install)?;
+
+    let mut entries = Vec::new();
+    import_installed_entry(
+        source_root,
+        source_root,
+        fs_files_root,
+        &rules,
+        &mut entries,
+    )?;
+    FsTreeManifest::from_entries(entries)
+        .map_err(|error| StoreError::InvalidData(error.to_string()))
+}
+
 /// Materializes a manifest from an `fs-files` directory into an empty output root.
 ///
 /// Both paths must be absolute existing real directories, not symlinks.
@@ -479,11 +558,15 @@ fn require_existing_empty_directory(path: &Path, label: &str) -> Result<(), Stor
 }
 
 fn validate_fs_file_mode(mode: u32) -> Result<(), StoreError> {
+    validate_mode("fs-file mode", mode)
+}
+
+fn validate_mode(label: &str, mode: u32) -> Result<(), StoreError> {
     if mode <= 0o7777 {
         Ok(())
     } else {
         Err(StoreError::InvalidInput(format!(
-            "fs-file mode is out of range: {mode}"
+            "{label} is out of range: {mode}"
         )))
     }
 }
@@ -572,6 +655,316 @@ fn scan_entry(
     }
     Ok(())
 }
+
+#[derive(Debug)]
+struct CompiledFsTreeInstallRule {
+    pattern: String,
+    matcher: GlobMatcher,
+    attrs: FsTreeInstallAttrs,
+}
+
+impl FsTreeInstallAttrs {
+    fn overlay(&mut self, attrs: &Self) {
+        if let Some(uid) = attrs.uid {
+            self.uid = Some(uid);
+        }
+        if let Some(gid) = attrs.gid {
+            self.gid = Some(gid);
+        }
+        if let Some(mode) = attrs.directory_mode {
+            self.directory_mode = Some(mode);
+        }
+        if let Some(mode) = attrs.regular_file_mode {
+            self.regular_file_mode = Some(mode);
+        }
+        if let Some(mode) = attrs.executable_file_mode {
+            self.executable_file_mode = Some(mode);
+        }
+    }
+}
+
+fn compile_fs_tree_install_rules(
+    install: &FsTreeInstall,
+) -> Result<Vec<CompiledFsTreeInstallRule>, StoreError> {
+    if install.rules.is_empty() {
+        return Err(StoreError::InvalidInput(
+            "fs-tree install rules must contain at least one rule".to_string(),
+        ));
+    }
+
+    install
+        .rules
+        .iter()
+        .map(|rule| {
+            validate_install_rule_attrs(rule)?;
+            let glob = Glob::new(&rule.path).map_err(|error| {
+                StoreError::InvalidInput(format!(
+                    "invalid fs-tree install rule pattern '{}': {error}",
+                    rule.path
+                ))
+            })?;
+            Ok(CompiledFsTreeInstallRule {
+                pattern: rule.path.clone(),
+                matcher: glob.compile_matcher(),
+                attrs: rule.attrs.clone(),
+            })
+        })
+        .collect()
+}
+
+fn validate_install_rule_attrs(rule: &FsTreeInstallRule) -> Result<(), StoreError> {
+    if let Some(mode) = rule.attrs.directory_mode {
+        validate_mode(
+            &format!("directory_mode in install rule '{}'", rule.path),
+            mode,
+        )?;
+    }
+    if let Some(mode) = rule.attrs.regular_file_mode {
+        validate_mode(
+            &format!("regular_file_mode in install rule '{}'", rule.path),
+            mode,
+        )?;
+    }
+    if let Some(mode) = rule.attrs.executable_file_mode {
+        validate_mode(
+            &format!("executable_file_mode in install rule '{}'", rule.path),
+            mode,
+        )?;
+    }
+    Ok(())
+}
+
+fn resolve_fs_tree_install_attrs(
+    rel_path: &str,
+    rules: &[CompiledFsTreeInstallRule],
+) -> Result<FsTreeInstallAttrs, StoreError> {
+    let mut resolved = FsTreeInstallAttrs::default();
+    let mut matched_any = false;
+    for rule in rules {
+        if install_rule_matches(rule, rel_path) {
+            matched_any = true;
+            resolved.overlay(&rule.attrs);
+        }
+    }
+
+    if matched_any {
+        Ok(resolved)
+    } else {
+        let known = rules
+            .iter()
+            .map(|rule| rule.pattern.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(StoreError::InvalidInput(format!(
+            "fs-tree path '{rel_path}' is not covered by any install rule (known patterns: {known})"
+        )))
+    }
+}
+
+fn install_rule_matches(rule: &CompiledFsTreeInstallRule, rel_path: &str) -> bool {
+    if rule.matcher.is_match(rel_path) {
+        return true;
+    }
+
+    if rel_path.is_empty() && rule.pattern == "**" {
+        return true;
+    }
+
+    if let Some(prefix) = rule.pattern.strip_suffix("/**") {
+        return rel_path == prefix;
+    }
+
+    false
+}
+
+fn required_install_attr(
+    value: Option<u32>,
+    rel_path: &str,
+    name: &str,
+) -> Result<u32, StoreError> {
+    value.ok_or_else(|| {
+        StoreError::InvalidInput(format!(
+            "fs-tree path '{rel_path}' is missing resolved {name}"
+        ))
+    })
+}
+
+fn import_installed_entry(
+    scan_root: &Path,
+    current_path: &Path,
+    fs_files_root: &Path,
+    rules: &[CompiledFsTreeInstallRule],
+    entries: &mut Vec<FsTreeEntry>,
+) -> Result<(), StoreError> {
+    let metadata = fs::symlink_metadata(current_path)
+        .map_err(|error| map_io(current_path, "inspect", error))?;
+    let file_type = metadata.file_type();
+    let rel_path = manifest_relative_path(scan_root, current_path)?;
+
+    if !(file_type.is_dir() || file_type.is_symlink() || file_type.is_file()) {
+        return Err(StoreError::Unsupported(format!(
+            "unsupported filesystem entry kind at '{}'",
+            current_path.display()
+        )));
+    }
+
+    let attrs = resolve_fs_tree_install_attrs(&rel_path, rules)?;
+    let uid = required_install_attr(attrs.uid, &rel_path, "uid")?;
+    let gid = required_install_attr(attrs.gid, &rel_path, "gid")?;
+
+    if file_type.is_dir() {
+        let mode = required_install_attr(attrs.directory_mode, &rel_path, "directory_mode")?;
+        entries.push(FsTreeEntry::directory(rel_path, uid, gid, mode));
+        let mut children = fs::read_dir(current_path)
+            .map_err(|error| map_io(current_path, "read directory", error))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| map_io(current_path, "read directory entry", error))?;
+        children.sort_by(|left, right| left.as_os_str().cmp(right.as_os_str()));
+        for child in children {
+            import_installed_entry(scan_root, &child, fs_files_root, rules, entries)?;
+        }
+    } else if file_type.is_symlink() {
+        let target = fs::read_link(current_path)
+            .map_err(|error| map_io(current_path, "read symlink", error))?;
+        let target = target.to_str().ok_or_else(|| {
+            StoreError::Unsupported(format!(
+                "symlink target for '{}' is not UTF-8",
+                current_path.display()
+            ))
+        })?;
+        entries.push(FsTreeEntry::symlink(rel_path, uid, gid, target));
+    } else if file_type.is_file() {
+        let source_mode = metadata.permissions().mode() & 0o7777;
+        let mode = if source_mode & 0o111 != 0 {
+            required_install_attr(
+                attrs.executable_file_mode,
+                &rel_path,
+                "executable_file_mode",
+            )?
+        } else {
+            required_install_attr(attrs.regular_file_mode, &rel_path, "regular_file_mode")?
+        };
+        let hash = import_fs_file_with_install(current_path, fs_files_root, uid, gid, mode)?;
+        entries.push(FsTreeEntry::file(rel_path, hash));
+    }
+    Ok(())
+}
+
+fn import_fs_file_with_install(
+    source_path: &Path,
+    fs_files_root: &Path,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+) -> Result<FsFileHash, StoreError> {
+    validate_fs_file_mode(mode)?;
+    let temp_path = copy_source_file_to_fs_files_temp(source_path, fs_files_root)?;
+    let result = publish_installed_temp_file(&temp_path, fs_files_root, uid, gid, mode);
+    match result {
+        Ok(hash) => {
+            fs::remove_file(&temp_path)
+                .map_err(|error| map_io(&temp_path, "remove temporary fs-file", error))?;
+            Ok(hash)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            Err(error)
+        }
+    }
+}
+
+fn publish_installed_temp_file(
+    temp_path: &Path,
+    fs_files_root: &Path,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+) -> Result<FsFileHash, StoreError> {
+    chown_if_needed(temp_path, uid, gid)?;
+    chmod(temp_path, mode)?;
+
+    let metadata =
+        fs::symlink_metadata(temp_path).map_err(|error| map_io(temp_path, "inspect", error))?;
+    let actual_mode = metadata.permissions().mode() & 0o7777;
+    if metadata.uid() != uid || metadata.gid() != gid || actual_mode != mode {
+        return Err(StoreError::Io(format!(
+            "temporary fs-file '{}' metadata mismatch after install: expected uid={uid} gid={gid} mode={mode:o}, got uid={} gid={} mode={actual_mode:o}",
+            temp_path.display(),
+            metadata.uid(),
+            metadata.gid()
+        )));
+    }
+
+    let content_sha256 = sha256_file(temp_path)?;
+    let hash = hash_fs_file_parts(uid, gid, mode, metadata.size(), content_sha256)?;
+    let object_path = fs_file_path(fs_files_root, hash)?;
+    match fs::symlink_metadata(&object_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            create_fs_file_shard_dir(&object_path)?;
+            match fs::hard_link(temp_path, &object_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(map_io(
+                        &object_path,
+                        &format!("hardlink fs-file from '{}'", temp_path.display()),
+                        error,
+                    ));
+                }
+            }
+        }
+        Err(error) => return Err(map_io(&object_path, "inspect fs-file object", error)),
+    }
+    Ok(hash)
+}
+
+fn copy_source_file_to_fs_files_temp(
+    source_path: &Path,
+    fs_files_root: &Path,
+) -> Result<PathBuf, StoreError> {
+    require_absolute(source_path, "source file path")?;
+    let mut source_file =
+        fs::File::open(source_path).map_err(|error| map_io(source_path, "open file", error))?;
+    let (temp_path, mut temp_file) = create_unique_fs_files_temp(fs_files_root)?;
+    let copy_result = io::copy(&mut source_file, &mut temp_file)
+        .map(|_| ())
+        .map_err(|error| {
+            map_io(
+                &temp_path,
+                &format!("copy fs-file from '{}'", source_path.display()),
+                error,
+            )
+        });
+    if let Err(error) = copy_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
+    }
+    Ok(temp_path)
+}
+
+fn create_unique_fs_files_temp(fs_files_root: &Path) -> Result<(PathBuf, fs::File), StoreError> {
+    for attempt in 0..1024 {
+        let temp_path =
+            fs_files_root.join(format!(".fs-file-import-{}-{attempt}", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => return Ok((temp_path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(map_io(&temp_path, "create temporary fs-file", error)),
+        }
+    }
+
+    Err(StoreError::Io(format!(
+        "failed to allocate temporary fs-file under '{}'",
+        fs_files_root.display()
+    )))
+}
+
 fn create_fs_file_shard_dir(object_path: &Path) -> Result<(), StoreError> {
     let Some(shard_dir) = object_path.parent() else {
         return Err(StoreError::InvalidInput(format!(
@@ -1125,6 +1518,12 @@ mod tests {
         FsTreeEntry::directory("", 0, 0, 0o755)
     }
 
+    fn expected_installed_hash(uid: u32, gid: u32, mode: u32, content: &[u8]) -> FsFileHash {
+        let mut content_hash = [0_u8; 32];
+        content_hash.copy_from_slice(&Sha256::digest(content));
+        hash_fs_file_parts(uid, gid, mode, content.len() as u64, content_hash).unwrap()
+    }
+
     fn manifest(entries: Vec<FsTreeEntry>) -> FsTreeManifest {
         FsTreeManifest::from_entries(entries).expect("valid manifest")
     }
@@ -1531,6 +1930,266 @@ mod tests {
         assert_eq!(rescanned, manifest);
         assert_eq!(fs::metadata(&object_path).unwrap().ino(), first_inode);
     }
+
+    #[test]
+    fn install_import_rejects_invalid_rules_uncovered_paths_and_missing_attrs() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = temp_dir.path().join("source");
+        let fs_files = temp_dir.path().join("fs-files");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&fs_files).unwrap();
+
+        assert!(matches!(
+            import_fs_tree_with_install(&source, &fs_files, &FsTreeInstall { rules: Vec::new() },),
+            Err(StoreError::InvalidInput(_))
+        ));
+
+        let invalid_glob = FsTreeInstall {
+            rules: vec![FsTreeInstallRule {
+                path: "[".to_string(),
+                attrs: FsTreeInstallAttrs::default(),
+            }],
+        };
+        assert!(matches!(
+            import_fs_tree_with_install(&source, &fs_files, &invalid_glob),
+            Err(StoreError::InvalidInput(_))
+        ));
+
+        let uncovered = FsTreeInstall {
+            rules: vec![FsTreeInstallRule {
+                path: "bin/**".to_string(),
+                attrs: FsTreeInstallAttrs {
+                    uid: Some(0),
+                    gid: Some(0),
+                    directory_mode: Some(0o755),
+                    regular_file_mode: Some(0o644),
+                    executable_file_mode: Some(0o755),
+                },
+            }],
+        };
+        assert!(matches!(
+            import_fs_tree_with_install(&source, &fs_files, &uncovered),
+            Err(StoreError::InvalidInput(_))
+        ));
+
+        let missing_directory_mode = FsTreeInstall {
+            rules: vec![FsTreeInstallRule {
+                path: "**".to_string(),
+                attrs: FsTreeInstallAttrs {
+                    uid: Some(0),
+                    gid: Some(0),
+                    directory_mode: None,
+                    regular_file_mode: Some(0o644),
+                    executable_file_mode: Some(0o755),
+                },
+            }],
+        };
+        assert!(matches!(
+            import_fs_tree_with_install(&source, &fs_files, &missing_directory_mode),
+            Err(StoreError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn install_import_rejects_missing_regular_and_executable_modes() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = temp_dir.path().join("source");
+        let fs_files = temp_dir.path().join("fs-files");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&fs_files).unwrap();
+        fs::write(source.join("data"), b"data").unwrap();
+        fs::write(source.join("tool"), b"tool").unwrap();
+        fs::set_permissions(source.join("data"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(source.join("tool"), fs::Permissions::from_mode(0o700)).unwrap();
+        let owner = fs::symlink_metadata(&source).unwrap();
+
+        let missing_regular_mode = FsTreeInstall {
+            rules: vec![FsTreeInstallRule {
+                path: "**".to_string(),
+                attrs: FsTreeInstallAttrs {
+                    uid: Some(owner.uid()),
+                    gid: Some(owner.gid()),
+                    directory_mode: Some(0o755),
+                    regular_file_mode: None,
+                    executable_file_mode: Some(0o755),
+                },
+            }],
+        };
+        assert!(matches!(
+            import_fs_tree_with_install(&source, &fs_files, &missing_regular_mode),
+            Err(StoreError::InvalidInput(_))
+        ));
+
+        let missing_executable_mode = FsTreeInstall {
+            rules: vec![FsTreeInstallRule {
+                path: "**".to_string(),
+                attrs: FsTreeInstallAttrs {
+                    uid: Some(owner.uid()),
+                    gid: Some(owner.gid()),
+                    directory_mode: Some(0o755),
+                    regular_file_mode: Some(0o644),
+                    executable_file_mode: None,
+                },
+            }],
+        };
+        assert!(matches!(
+            import_fs_tree_with_install(&source, &fs_files, &missing_executable_mode),
+            Err(StoreError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn install_import_applies_overlay_rules_and_preserves_source_metadata() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let source = temp_dir.path().join("source");
+        let fs_files = temp_dir.path().join("fs-files");
+        fs::create_dir(&fs_files).unwrap();
+        fs::create_dir_all(source.join("bin")).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(source.join("bin"), fs::Permissions::from_mode(0o701)).unwrap();
+        fs::write(source.join("bin/data"), b"data\n").unwrap();
+        fs::write(source.join("bin/tool"), b"tool\n").unwrap();
+        fs::set_permissions(source.join("bin/data"), fs::Permissions::from_mode(0o600)).unwrap();
+        fs::set_permissions(source.join("bin/tool"), fs::Permissions::from_mode(0o700)).unwrap();
+        symlink("bin/tool", source.join("tool-link")).unwrap();
+
+        let owner = fs::symlink_metadata(&source).unwrap();
+        let install = FsTreeInstall {
+            rules: vec![
+                FsTreeInstallRule {
+                    path: "**".to_string(),
+                    attrs: FsTreeInstallAttrs {
+                        uid: Some(owner.uid()),
+                        gid: Some(owner.gid()),
+                        directory_mode: Some(0o755),
+                        regular_file_mode: Some(0o644),
+                        executable_file_mode: Some(0o755),
+                    },
+                },
+                FsTreeInstallRule {
+                    path: "bin/**".to_string(),
+                    attrs: FsTreeInstallAttrs {
+                        uid: None,
+                        gid: None,
+                        directory_mode: Some(0o555),
+                        regular_file_mode: Some(0o444),
+                        executable_file_mode: None,
+                    },
+                },
+                FsTreeInstallRule {
+                    path: "bin/tool".to_string(),
+                    attrs: FsTreeInstallAttrs {
+                        uid: None,
+                        gid: None,
+                        directory_mode: None,
+                        regular_file_mode: None,
+                        executable_file_mode: Some(0o500),
+                    },
+                },
+            ],
+        };
+
+        let manifest = import_fs_tree_with_install(&source, &fs_files, &install).unwrap();
+        let data_hash = expected_installed_hash(owner.uid(), owner.gid(), 0o444, b"data\n");
+        let tool_hash = expected_installed_hash(owner.uid(), owner.gid(), 0o500, b"tool\n");
+        let data_object = fs_file_path(&fs_files, data_hash).unwrap();
+        let tool_object = fs_file_path(&fs_files, tool_hash).unwrap();
+
+        assert!(manifest.entries().contains(&FsTreeEntry::directory(
+            "",
+            owner.uid(),
+            owner.gid(),
+            0o755,
+        )));
+        assert!(manifest.entries().contains(&FsTreeEntry::directory(
+            "bin",
+            owner.uid(),
+            owner.gid(),
+            0o555,
+        )));
+        assert!(
+            manifest
+                .entries()
+                .contains(&FsTreeEntry::file("bin/data", data_hash))
+        );
+        assert!(
+            manifest
+                .entries()
+                .contains(&FsTreeEntry::file("bin/tool", tool_hash))
+        );
+        assert!(manifest.entries().contains(&FsTreeEntry::symlink(
+            "tool-link",
+            owner.uid(),
+            owner.gid(),
+            "bin/tool",
+        )));
+
+        assert_eq!(fs::read(&data_object).unwrap(), b"data\n");
+        assert_eq!(fs::read(&tool_object).unwrap(), b"tool\n");
+        assert_eq!(
+            fs::symlink_metadata(&data_object)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o444
+        );
+        assert_eq!(
+            fs::symlink_metadata(&tool_object)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o500
+        );
+        assert_eq!(
+            fs::symlink_metadata(source.join("bin/data"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600
+        );
+        assert_eq!(
+            fs::symlink_metadata(source.join("bin/tool"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+
+        let data_inode = fs::metadata(&data_object).unwrap().ino();
+        let tool_inode = fs::metadata(&tool_object).unwrap().ino();
+        let second = import_fs_tree_with_install(&source, &fs_files, &install).unwrap();
+        assert_eq!(second, manifest);
+        assert_eq!(fs::metadata(&data_object).unwrap().ino(), data_inode);
+        assert_eq!(fs::metadata(&tool_object).unwrap().ino(), tool_inode);
+    }
+
+    #[test]
+    fn install_import_rejects_symlink_mode_field() {
+        let value = serde_json::json!({
+            "rules": [{
+                "path": "**",
+                "attrs": {
+                    "uid": 0,
+                    "gid": 0,
+                    "directory_mode": 493,
+                    "regular_file_mode": 420,
+                    "executable_file_mode": 493,
+                    "symlink_mode": 511
+                }
+            }]
+        });
+
+        assert!(serde_json::from_value::<FsTreeInstall>(value).is_err());
+    }
+
     #[test]
     fn materialize_recreates_tree_and_hardlinks_fs_files() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};

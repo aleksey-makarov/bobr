@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 fsobj-hash = { path = "../fsobj-hash" }
+globset = "0.4"
 libc = "0.2"
 mbuild-core = { path = "../mbuild-core" }
 serde = { version = "1.0", features = ["derive"] }

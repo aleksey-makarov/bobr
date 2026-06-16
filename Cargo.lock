@@ -133,6 +133,7 @@ name = "bobr-store"
 version = "0.1.0"
 dependencies = [
  "fsobj-hash",
+ "globset",
  "libc",
  "mbuild-core",
  "serde",
