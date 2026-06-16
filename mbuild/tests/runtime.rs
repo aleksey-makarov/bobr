@@ -40,6 +40,7 @@ fn registered_builders_include_current_tags_only() {
         "TreeSubset",
         "TreeMerge",
         "ErofsRootfs",
+        "ErofsRootfsNew",
         "Initramfs",
         "Sandbox",
         "OciExtract",

@@ -1,4 +1,5 @@
 pub mod builder;
+mod erofs;
 pub mod fs_tree;
 mod fs_tree_import;
 mod fs_tree_legacy;
@@ -10,6 +11,7 @@ pub mod subject;
 pub mod tree;
 
 pub use builder::*;
+pub use erofs::{ErofsRootfsNewBuilder, ErofsRootfsNewConfig};
 pub use fs_tree::{
     ErofsRootfsBuilder, ErofsRootfsConfig, InitramfsBuilder, InitramfsConfig, TreeBuilder,
     TreeConfig, TreeMergeBuilder, TreeMergeConfig, TreeSubsetBuilder, TreeSubsetConfig,
@@ -25,6 +27,7 @@ pub use tree::{TreeNewBuilder, TreeNewConfig};
 /// Return runtime functions supported by built-in builders.
 pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
     vec![
+        bobr_runtime::runtime_ns::NsFunction::new(erofs::ErofsRootfsFunction),
         bobr_runtime::runtime_ns::NsFunction::new(fs_tree_import::FsTreeImportFunction),
         bobr_runtime::runtime_ns::NsFunction::new(oci_extract::OciExtractFunction),
     ]
@@ -36,8 +39,9 @@ mod tests {
     fn runtime_function_registry_includes_fs_tree_import() {
         let functions = crate::runtime_functions();
 
-        assert_eq!(functions.len(), 2);
-        assert_eq!(functions[0].name(), "fs-tree-import");
-        assert_eq!(functions[1].name(), "oci-extract");
+        assert_eq!(functions.len(), 3);
+        assert_eq!(functions[0].name(), "erofs-rootfs");
+        assert_eq!(functions[1].name(), "fs-tree-import");
+        assert_eq!(functions[2].name(), "oci-extract");
     }
 }

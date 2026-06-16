@@ -1,7 +1,7 @@
 use crate::{
-    Builder, BuilderPlanError, BuilderPlannedSubject, ErofsRootfsBuilder, FsTreeImportBuilder,
-    GroupBuilder, InitramfsBuilder, OciExtractBuilder, OciExtractNewBuilder, TreeBuilder,
-    TreeMergeBuilder, TreeNewBuilder, TreeSubsetBuilder,
+    Builder, BuilderPlanError, BuilderPlannedSubject, ErofsRootfsBuilder, ErofsRootfsNewBuilder,
+    FsTreeImportBuilder, GroupBuilder, InitramfsBuilder, OciExtractBuilder, OciExtractNewBuilder,
+    TreeBuilder, TreeMergeBuilder, TreeNewBuilder, TreeSubsetBuilder,
 };
 use mbuild_core::{BuildKey, validate_publication_name};
 use serde_json::{Map, Value};
@@ -16,6 +16,7 @@ static TREE_NEW_BUILDER: TreeNewBuilder = TreeNewBuilder;
 static TREE_SUBSET_BUILDER: TreeSubsetBuilder = TreeSubsetBuilder;
 static TREE_MERGE_BUILDER: TreeMergeBuilder = TreeMergeBuilder;
 static EROFS_ROOTFS_BUILDER: ErofsRootfsBuilder = ErofsRootfsBuilder;
+static EROFS_ROOTFS_NEW_BUILDER: ErofsRootfsNewBuilder = ErofsRootfsNewBuilder;
 static INITRAMFS_BUILDER: InitramfsBuilder = InitramfsBuilder;
 
 /// Explicit registry of builder classes available to one runtime invocation.
@@ -116,6 +117,7 @@ pub fn register_in_tree_builders(registry: &mut BuilderRegistry) -> Result<(), S
     registry.register(&TREE_SUBSET_BUILDER)?;
     registry.register(&TREE_MERGE_BUILDER)?;
     registry.register(&EROFS_ROOTFS_BUILDER)?;
+    registry.register(&EROFS_ROOTFS_NEW_BUILDER)?;
     registry.register(&INITRAMFS_BUILDER)?;
     registry.register(&OCI_EXTRACT_BUILDER)?;
     registry.register(&OCI_EXTRACT_NEW_BUILDER)?;
@@ -272,6 +274,7 @@ mod tests {
                 "TreeSubset",
                 "TreeMerge",
                 "ErofsRootfs",
+                "ErofsRootfsNew",
                 "Initramfs",
                 "OciExtract",
                 "OciExtractNew",
