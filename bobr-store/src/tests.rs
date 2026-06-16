@@ -1,10 +1,11 @@
 use super::*;
+use crate::fs_tree::{FsTree, FsTreeEntry, FsTreeInstall, FsTreeInstallAttrs, FsTreeInstallRule};
 use fsobj_hash::hash_path;
 use mbuild_core::{BuildKey, ObjectHash, ReuseKey, compute_build_key, compute_reuse_key};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::thread;
@@ -1284,6 +1285,80 @@ fn store_create_creates_full_layout() {
     assert!(layout.run_tmp_dir().is_dir());
     assert!(layout.run_log_dir().starts_with(temp.path().join(LOGS_DIR)));
     assert!(layout.run_tmp_dir().starts_with(temp.path().join(TMP_DIR)));
+}
+
+#[test]
+fn store_fs_tree_round_trips_through_serde() {
+    let temp = tempdir().unwrap();
+    let layout = Store::create(temp.path()).unwrap();
+    let fs_tree = layout.fs_tree();
+
+    let value = serde_json::to_value(&fs_tree).unwrap();
+    assert_eq!(value["root"], temp.path().display().to_string());
+
+    let decoded: FsTree = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded, fs_tree);
+}
+
+#[test]
+fn store_fs_tree_deserialize_rejects_bad_roots() {
+    let temp = tempdir().unwrap();
+
+    assert!(serde_json::from_value::<FsTree>(json!({"root": "relative"})).is_err());
+    assert!(
+        serde_json::from_value::<FsTree>(
+            json!({"root": temp.path().join("missing").display().to_string()})
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<FsTree>(json!({"root": temp.path().display().to_string()}))
+            .is_err()
+    );
+}
+
+#[test]
+fn store_fs_tree_imports_with_install_into_store_fs_files() {
+    let temp = tempdir().unwrap();
+    let layout = Store::create(temp.path()).unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("payload"), b"payload\n").unwrap();
+    let owner = fs::symlink_metadata(temp.path()).unwrap();
+    let install = FsTreeInstall {
+        rules: vec![FsTreeInstallRule {
+            path: "**".to_string(),
+            attrs: FsTreeInstallAttrs {
+                uid: Some(owner.uid()),
+                gid: Some(owner.gid()),
+                directory_mode: Some(0o755),
+                regular_file_mode: Some(0o644),
+                executable_file_mode: Some(0o755),
+            },
+        }],
+    };
+
+    let manifest = layout
+        .fs_tree()
+        .import_with_install(&source, &install)
+        .unwrap();
+
+    assert!(manifest.entries().contains(&FsTreeEntry::directory(
+        "",
+        owner.uid(),
+        owner.gid(),
+        0o755,
+    )));
+    let hash = manifest
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            FsTreeEntry::File { path, hash } if path == "payload" => Some(*hash),
+            _ => None,
+        })
+        .expect("payload file entry");
+    let hex = hash.to_hex();
+    assert!(layout.fs_files_dir().join(&hex[..2]).join(hex).is_file());
 }
 
 #[test]

@@ -7,8 +7,9 @@
 #![deny(missing_docs)]
 
 use crate::StoreError;
+use crate::store::{FS_FILES_DIR, FS_TREES_DIR};
 use globset::{Glob, GlobMatcher};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -25,6 +26,17 @@ const SCHEMA: &str = "bobr-fs-tree-manifest-v2";
 const CANONICAL_SCHEMA_LINE: &[u8] = br#"{"schema":"bobr-fs-tree-manifest-v2"}
 "#;
 const FS_FILE_HASH_TAG: &[u8] = b"bobr:fs-file:v1\0";
+
+/// Store-scoped access to fs-tree v2 operations.
+///
+/// This value is intentionally opaque: callers can obtain it from
+/// [`crate::Store::fs_tree`] or through serde deserialization, but cannot
+/// construct it directly. It carries only enough store context for fs-tree v2
+/// operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FsTree {
+    root: PathBuf,
+}
 
 /// Canonical `fs-tree manifest v2`.
 ///
@@ -142,6 +154,12 @@ pub struct FsTreeInstallAttrs {
     pub executable_file_mode: Option<u32>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FsTreeWire {
+    root: PathBuf,
+}
+
 /// Error returned when parsing an [`FsFileHash`] from text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseFsFileHashError {
@@ -161,6 +179,81 @@ impl fmt::Display for ParseFsFileHashError {
 }
 
 impl std::error::Error for ParseFsFileHashError {}
+
+impl FsTree {
+    pub(crate) fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn fs_files_dir(&self) -> PathBuf {
+        self.root.join(FS_FILES_DIR)
+    }
+
+    /// Scans an immutable filesystem tree into a manifest and imports regular
+    /// files into this store's `fs-files` directory using hardlinks.
+    ///
+    /// The source root must be an absolute existing real directory, not a
+    /// symlink. Regular files are hardlinked into `fs-files`; if the target
+    /// object already exists, it is trusted as a cache hit. Shard directories
+    /// are created lazily for objects that need to be imported.
+    pub fn scan(&self, source_root: &Path) -> Result<FsTreeManifest, StoreError> {
+        scan_fs_tree_with_root(source_root, &self.fs_files_dir())
+    }
+
+    /// Imports a filesystem tree into a manifest and this store's `fs-files`
+    /// directory using install rules.
+    ///
+    /// The source root must be an absolute existing real directory, not a
+    /// symlink. Regular files are copied into `fs-files` with the installed
+    /// uid, gid, and mode encoded into the fs-file hash. The source tree is
+    /// never modified.
+    pub fn import_with_install(
+        &self,
+        source_root: &Path,
+        install: &FsTreeInstall,
+    ) -> Result<FsTreeManifest, StoreError> {
+        import_fs_tree_with_install_root(source_root, &self.fs_files_dir(), install)
+    }
+
+    /// Materializes a manifest from this store's `fs-files` directory into an
+    /// empty output root.
+    ///
+    /// The output root must be an absolute existing real directory, not a
+    /// symlink, and must be empty. Regular files are hardlinked from
+    /// `fs-files`, symlinks are recreated from manifest targets, and directory
+    /// ownership and modes are applied after all children have been created.
+    /// On error, partial output is left for the caller to inspect or remove.
+    pub fn materialize(
+        &self,
+        manifest: &FsTreeManifest,
+        output_root: &Path,
+    ) -> Result<(), StoreError> {
+        materialize_fs_tree_with_root(manifest, &self.fs_files_dir(), output_root)
+    }
+}
+
+impl Serialize for FsTree {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        FsTreeWire {
+            root: self.root.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for FsTree {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = FsTreeWire::deserialize(deserializer)?;
+        validate_fs_tree_root(&wire.root).map_err(de::Error::custom)?;
+        Ok(Self::new(wire.root))
+    }
+}
 
 impl FsTreeManifest {
     /// Builds a manifest from entries.
@@ -447,14 +540,7 @@ fn hash_fs_file_parts(
     Ok(FsFileHash(bytes))
 }
 
-/// Scans an immutable filesystem tree into a manifest and imports regular
-/// files into an `fs-files` directory using hardlinks.
-///
-/// Both paths must be absolute existing real directories, not symlinks. Regular
-/// files are hardlinked into `fs-files`; if the target object already exists,
-/// it is trusted as a cache hit. Shard directories are created lazily for
-/// objects that need to be imported.
-pub fn scan_fs_tree(
+fn scan_fs_tree_with_root(
     source_root: &Path,
     fs_files_root: &Path,
 ) -> Result<FsTreeManifest, StoreError> {
@@ -467,13 +553,7 @@ pub fn scan_fs_tree(
         .map_err(|error| StoreError::InvalidData(error.to_string()))
 }
 
-/// Imports a filesystem tree into a manifest and `fs-files` using install
-/// rules.
-///
-/// Both root paths must be absolute existing real directories, not symlinks.
-/// Regular files are copied into `fs-files` with the installed uid, gid, and
-/// mode encoded into the fs-file hash. The source tree is never modified.
-pub fn import_fs_tree_with_install(
+fn import_fs_tree_with_install_root(
     source_root: &Path,
     fs_files_root: &Path,
     install: &FsTreeInstall,
@@ -494,14 +574,7 @@ pub fn import_fs_tree_with_install(
         .map_err(|error| StoreError::InvalidData(error.to_string()))
 }
 
-/// Materializes a manifest from an `fs-files` directory into an empty output root.
-///
-/// Both paths must be absolute existing real directories, not symlinks.
-/// `output_root` must be empty. Regular files are hardlinked from `fs-files`,
-/// symlinks are recreated from manifest targets, and directory ownership and
-/// modes are applied after all children have been created. On error, partial
-/// output is left for the caller to inspect or remove.
-pub fn materialize_fs_tree(
+fn materialize_fs_tree_with_root(
     manifest: &FsTreeManifest,
     fs_files_root: &Path,
     output_root: &Path,
@@ -540,6 +613,13 @@ fn require_existing_directory(path: &Path, label: &str) -> Result<(), StoreError
             path.display()
         )))
     }
+}
+
+fn validate_fs_tree_root(root: &Path) -> Result<(), StoreError> {
+    require_existing_directory(root, "store root")?;
+    require_existing_directory(&root.join(FS_FILES_DIR), "store fs-files directory")?;
+    require_existing_directory(&root.join(FS_TREES_DIR), "store fs-trees directory")?;
+    Ok(())
 }
 
 fn require_existing_empty_directory(path: &Path, label: &str) -> Result<(), StoreError> {
@@ -1853,7 +1933,7 @@ mod tests {
         fs::create_dir(&source).unwrap();
 
         assert!(matches!(
-            scan_fs_tree(&source, &fs_files),
+            scan_fs_tree_with_root(&source, &fs_files),
             Err(StoreError::InvalidInput(_))
         ));
     }
@@ -1871,7 +1951,7 @@ mod tests {
         let object_path = fs_file_path(&fs_files, hash).unwrap();
         assert!(!object_path.parent().unwrap().exists());
 
-        scan_fs_tree(&source, &fs_files).unwrap();
+        scan_fs_tree_with_root(&source, &fs_files).unwrap();
 
         assert!(object_path.parent().unwrap().is_dir());
         assert!(object_path.is_file());
@@ -1893,7 +1973,7 @@ mod tests {
         symlink("bin/tool", source.join("tool-link")).unwrap();
 
         let owner = fs::symlink_metadata(&source).unwrap();
-        let manifest = scan_fs_tree(&source, &fs_files).unwrap();
+        let manifest = scan_fs_tree_with_root(&source, &fs_files).unwrap();
         let file_hash = hash_fs_file_path(&source.join("bin/tool")).unwrap();
         let object_path = fs_file_path(&fs_files, file_hash).unwrap();
 
@@ -1926,7 +2006,7 @@ mod tests {
         );
 
         let first_inode = fs::metadata(&object_path).unwrap().ino();
-        let rescanned = scan_fs_tree(&source, &fs_files).unwrap();
+        let rescanned = scan_fs_tree_with_root(&source, &fs_files).unwrap();
         assert_eq!(rescanned, manifest);
         assert_eq!(fs::metadata(&object_path).unwrap().ino(), first_inode);
     }
@@ -1940,7 +2020,11 @@ mod tests {
         fs::create_dir(&fs_files).unwrap();
 
         assert!(matches!(
-            import_fs_tree_with_install(&source, &fs_files, &FsTreeInstall { rules: Vec::new() },),
+            import_fs_tree_with_install_root(
+                &source,
+                &fs_files,
+                &FsTreeInstall { rules: Vec::new() },
+            ),
             Err(StoreError::InvalidInput(_))
         ));
 
@@ -1951,7 +2035,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            import_fs_tree_with_install(&source, &fs_files, &invalid_glob),
+            import_fs_tree_with_install_root(&source, &fs_files, &invalid_glob),
             Err(StoreError::InvalidInput(_))
         ));
 
@@ -1968,7 +2052,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            import_fs_tree_with_install(&source, &fs_files, &uncovered),
+            import_fs_tree_with_install_root(&source, &fs_files, &uncovered),
             Err(StoreError::InvalidInput(_))
         ));
 
@@ -1985,7 +2069,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            import_fs_tree_with_install(&source, &fs_files, &missing_directory_mode),
+            import_fs_tree_with_install_root(&source, &fs_files, &missing_directory_mode),
             Err(StoreError::InvalidInput(_))
         ));
     }
@@ -2018,7 +2102,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            import_fs_tree_with_install(&source, &fs_files, &missing_regular_mode),
+            import_fs_tree_with_install_root(&source, &fs_files, &missing_regular_mode),
             Err(StoreError::InvalidInput(_))
         ));
 
@@ -2035,7 +2119,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            import_fs_tree_with_install(&source, &fs_files, &missing_executable_mode),
+            import_fs_tree_with_install_root(&source, &fs_files, &missing_executable_mode),
             Err(StoreError::InvalidInput(_))
         ));
     }
@@ -2093,7 +2177,7 @@ mod tests {
             ],
         };
 
-        let manifest = import_fs_tree_with_install(&source, &fs_files, &install).unwrap();
+        let manifest = import_fs_tree_with_install_root(&source, &fs_files, &install).unwrap();
         let data_hash = expected_installed_hash(owner.uid(), owner.gid(), 0o444, b"data\n");
         let tool_hash = expected_installed_hash(owner.uid(), owner.gid(), 0o500, b"tool\n");
         let data_object = fs_file_path(&fs_files, data_hash).unwrap();
@@ -2165,7 +2249,7 @@ mod tests {
 
         let data_inode = fs::metadata(&data_object).unwrap().ino();
         let tool_inode = fs::metadata(&tool_object).unwrap().ino();
-        let second = import_fs_tree_with_install(&source, &fs_files, &install).unwrap();
+        let second = import_fs_tree_with_install_root(&source, &fs_files, &install).unwrap();
         assert_eq!(second, manifest);
         assert_eq!(fs::metadata(&data_object).unwrap().ino(), data_inode);
         assert_eq!(fs::metadata(&tool_object).unwrap().ino(), tool_inode);
@@ -2211,11 +2295,11 @@ mod tests {
         .unwrap();
         symlink("locked/file", source.join("link")).unwrap();
 
-        let manifest = scan_fs_tree(&source, &fs_files).unwrap();
+        let manifest = scan_fs_tree_with_root(&source, &fs_files).unwrap();
         let file_hash = hash_fs_file_path(&source.join("locked/file")).unwrap();
         let object_path = fs_file_path(&fs_files, file_hash).unwrap();
 
-        materialize_fs_tree(&manifest, &fs_files, &output).unwrap();
+        materialize_fs_tree_with_root(&manifest, &fs_files, &output).unwrap();
 
         assert_eq!(fs::read(output.join("locked/file")).unwrap(), b"data");
         assert_eq!(
@@ -2263,7 +2347,7 @@ mod tests {
             FsTreeEntry::file("locked/file", hash),
         ]);
 
-        materialize_fs_tree(&manifest, &fs_files, &output).unwrap();
+        materialize_fs_tree_with_root(&manifest, &fs_files, &output).unwrap();
 
         assert_eq!(fs::metadata(&source_file).unwrap().nlink(), 3);
         assert_eq!(
@@ -2289,14 +2373,14 @@ mod tests {
         fs::create_dir(&source).unwrap();
 
         assert!(matches!(
-            scan_fs_tree(Path::new("relative"), &fs_files),
+            scan_fs_tree_with_root(Path::new("relative"), &fs_files),
             Err(StoreError::InvalidInput(_))
         ));
 
         let root_link = temp_dir.path().join("source-link");
         symlink(&source, &root_link).unwrap();
         assert!(matches!(
-            scan_fs_tree(&root_link, &fs_files),
+            scan_fs_tree_with_root(&root_link, &fs_files),
             Err(StoreError::InvalidInput(_))
         ));
 
@@ -2305,7 +2389,7 @@ mod tests {
         let non_utf8_name = std::ffi::OsString::from_vec(vec![b'b', 0xff]);
         fs::write(source.join(non_utf8_name), b"x").unwrap();
         assert!(matches!(
-            scan_fs_tree(&source, &fs_files),
+            scan_fs_tree_with_root(&source, &fs_files),
             Err(StoreError::Unsupported(_))
         ));
         fs::remove_file(source.join(std::ffi::OsString::from_vec(vec![b'b', 0xff]))).unwrap();
@@ -2316,7 +2400,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            scan_fs_tree(&source, &fs_files),
+            scan_fs_tree_with_root(&source, &fs_files),
             Err(StoreError::Unsupported(_))
         ));
         fs::remove_file(source.join("bad-link")).unwrap();
@@ -2326,7 +2410,7 @@ mod tests {
         let result = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
         assert_eq!(result, 0);
         assert!(matches!(
-            scan_fs_tree(&source, &fs_files),
+            scan_fs_tree_with_root(&source, &fs_files),
             Err(StoreError::Unsupported(_))
         ));
     }
@@ -2355,15 +2439,15 @@ mod tests {
         )]);
 
         assert!(matches!(
-            materialize_fs_tree(&manifest, &fs_files, &missing_output),
+            materialize_fs_tree_with_root(&manifest, &fs_files, &missing_output),
             Err(StoreError::InvalidInput(_))
         ));
         assert!(matches!(
-            materialize_fs_tree(&manifest, &fs_files, &non_empty_output),
+            materialize_fs_tree_with_root(&manifest, &fs_files, &non_empty_output),
             Err(StoreError::InvalidInput(_))
         ));
         assert!(matches!(
-            materialize_fs_tree(&manifest, &fs_files, &symlink_output),
+            materialize_fs_tree_with_root(&manifest, &fs_files, &symlink_output),
             Err(StoreError::InvalidInput(_))
         ));
     }
@@ -2385,7 +2469,7 @@ mod tests {
             FsTreeEntry::file("partial/missing", missing_hash),
         ]);
 
-        assert!(materialize_fs_tree(&manifest, &fs_files, &output).is_err());
+        assert!(materialize_fs_tree_with_root(&manifest, &fs_files, &output).is_err());
         assert!(output.exists());
         assert!(output.join("partial").is_dir());
     }

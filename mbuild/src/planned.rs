@@ -145,7 +145,7 @@ fn execute_builder_subject(
         cx.runtime_provider.clone(),
     );
     let staged = subject
-        .execute(&ctx, inputs.into_builder_inputs())
+        .execute(&ctx, inputs.into_builder_inputs(), Some(cx.store.fs_tree()))
         .map_err(|error| {
             log_runtime_event(
                 logger.as_ref(),

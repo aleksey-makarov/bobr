@@ -1,4 +1,5 @@
 use crate::StoreError;
+use crate::fs_tree::FsTree;
 use crate::fsutil as private_fs;
 use mbuild_core::{BuildKey, ObjectHash, ReuseKey};
 use serde_json::{Map, Value, json};
@@ -165,6 +166,11 @@ impl Store {
             run_log_dir: self.run_log_dir(),
             run_id: self.inner.run_id.clone(),
         }
+    }
+
+    /// Returns store-scoped fs-tree v2 operations.
+    pub fn fs_tree(&self) -> FsTree {
+        FsTree::new(self.root().to_path_buf())
     }
 
     /// Returns the content-addressed legacy object directory.

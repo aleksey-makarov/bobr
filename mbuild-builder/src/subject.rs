@@ -1,6 +1,7 @@
 use crate::{
     BuildContext, Builder, BuilderInputs, InputSpec, StagedBuildResult, validate_input_name,
 };
+use bobr_store::fs_tree::FsTree;
 use fsobj_hash::ObjectHash;
 use mbuild_core::{
     BuildKey, BuildLogSubject, BuilderError, IdentityError, ReuseKey, SubjectRunContext, Workspace,
@@ -165,8 +166,7 @@ impl BuilderPlannedSubject {
             .map_err(BuilderPlanError::identity)
     }
 
-    /// Executes the underlying builder implementation (low-level; prefer
-    /// [`BuilderPlannedSubject::execute`]).
+    /// Executes the underlying builder implementation.
     pub fn build_erased(
         &self,
         inputs: BuilderInputs,
@@ -195,11 +195,15 @@ impl BuilderPlannedSubject {
         &self,
         ctx: &SubjectRunContext,
         inputs: BuilderInputs,
+        fs_tree: Option<FsTree>,
     ) -> Result<StagedBuildResult, BuilderError> {
         let mut context = BuildContext::with_noop_logger(ctx.temp_dir().to_path_buf())
             .with_logger(ctx.logger().clone())
             .with_cancellation_token(ctx.cancellation().clone())
             .with_runtime_provider(ctx.runtime().clone());
+        if let Some(fs_tree) = fs_tree {
+            context = context.with_fs_tree(fs_tree);
+        }
         self.build_erased(inputs, &mut context)
     }
 }
@@ -279,7 +283,7 @@ mod tests {
             RuntimeProvider::namespace(),
         );
 
-        let staged = subject.execute(&ctx, BuilderInputs::empty()).unwrap();
+        let staged = subject.execute(&ctx, BuilderInputs::empty(), None).unwrap();
 
         assert_eq!(staged.staged_path, temp.path().join("out"));
         assert!(staged.staged_path.join("payload").is_file());

@@ -1,4 +1,5 @@
 use bobr_runtime::runtime_provider::RuntimeProvider;
+use bobr_store::fs_tree::FsTree;
 use fsobj_hash::ObjectHash;
 use mbuild_core::{
     BuildLogEvent, BuildLogLevel, BuildLogger, BuilderError, CancellationToken, NoopBuildLogger,
@@ -206,6 +207,7 @@ pub struct BuildContext {
     logger: Arc<dyn BuildLogger>,
     cancellation: CancellationToken,
     runtime: RuntimeProvider,
+    fs_tree: Option<FsTree>,
 }
 
 impl fmt::Debug for BuildContext {
@@ -213,6 +215,7 @@ impl fmt::Debug for BuildContext {
         f.debug_struct("BuildContext")
             .field("temp_dir", &self.temp_dir)
             .field("runtime_backend", &self.runtime.backend())
+            .field("has_fs_tree", &self.fs_tree.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -224,6 +227,7 @@ impl BuildContext {
             logger: Arc::new(NoopBuildLogger),
             cancellation: CancellationToken::new(),
             runtime: RuntimeProvider::host(),
+            fs_tree: None,
         }
     }
 
@@ -242,12 +246,25 @@ impl BuildContext {
         self
     }
 
+    pub fn with_fs_tree(mut self, fs_tree: FsTree) -> Self {
+        self.fs_tree = Some(fs_tree);
+        self
+    }
+
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation
     }
 
     pub fn runtime(&self) -> &RuntimeProvider {
         &self.runtime
+    }
+
+    pub fn fs_tree(&self) -> Result<FsTree, BuilderError> {
+        self.fs_tree.clone().ok_or_else(|| {
+            BuilderError::ExecutionFailed(
+                "builder requires store fs-tree operations, but none were provided".to_string(),
+            )
+        })
     }
 
     pub fn check_cancelled(&self) -> Result<(), BuilderError> {
@@ -594,6 +611,19 @@ mod tests {
             .with_runtime_provider(RuntimeProvider::namespace());
 
         assert_eq!(cx.runtime().backend(), RuntimeBackend::Namespace);
+    }
+
+    #[test]
+    fn build_context_reports_missing_fs_tree() {
+        let cx = BuildContext::with_noop_logger(PathBuf::from("/tmp/tmp"));
+
+        let error = cx.fs_tree().unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("requires store fs-tree operations")
+        );
     }
 
     #[test]

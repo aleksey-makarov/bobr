@@ -34,6 +34,7 @@ fn registered_builders_include_current_tags_only() {
     let tags = registry.supported_tags();
     for tag in [
         "Group",
+        "FsTreeImport",
         "Tree",
         "TreeSubset",
         "TreeMerge",

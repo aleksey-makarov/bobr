@@ -925,6 +925,7 @@ name = "mbuild-builder"
 version = "0.1.0"
 dependencies = [
  "bobr-runtime",
+ "bobr-store",
  "flate2",
  "fsobj-hash",
  "globset",

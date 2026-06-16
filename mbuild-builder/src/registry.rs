@@ -1,12 +1,14 @@
 use crate::{
-    Builder, BuilderPlanError, BuilderPlannedSubject, ErofsRootfsBuilder, GroupBuilder,
-    InitramfsBuilder, OciExtractBuilder, TreeBuilder, TreeMergeBuilder, TreeSubsetBuilder,
+    Builder, BuilderPlanError, BuilderPlannedSubject, ErofsRootfsBuilder, FsTreeImportBuilder,
+    GroupBuilder, InitramfsBuilder, OciExtractBuilder, TreeBuilder, TreeMergeBuilder,
+    TreeSubsetBuilder,
 };
 use mbuild_core::{BuildKey, validate_publication_name};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 static GROUP_BUILDER: GroupBuilder = GroupBuilder;
+static FS_TREE_IMPORT_BUILDER: FsTreeImportBuilder = FsTreeImportBuilder;
 static OCI_EXTRACT_BUILDER: OciExtractBuilder = OciExtractBuilder;
 static TREE_BUILDER: TreeBuilder = TreeBuilder;
 static TREE_SUBSET_BUILDER: TreeSubsetBuilder = TreeSubsetBuilder;
@@ -106,6 +108,7 @@ impl Default for BuilderRegistry {
 /// Registers builders that currently live inside the `mbuild-builder` crate.
 pub fn register_in_tree_builders(registry: &mut BuilderRegistry) -> Result<(), String> {
     registry.register(&GROUP_BUILDER)?;
+    registry.register(&FS_TREE_IMPORT_BUILDER)?;
     registry.register(&TREE_BUILDER)?;
     registry.register(&TREE_SUBSET_BUILDER)?;
     registry.register(&TREE_MERGE_BUILDER)?;
@@ -259,6 +262,7 @@ mod tests {
             registry.supported_tags(),
             vec![
                 "Group",
+                "FsTreeImport",
                 "Tree",
                 "TreeSubset",
                 "TreeMerge",

@@ -11,6 +11,7 @@ flate2 = "1.0"
 fsobj-hash = { path = "../fsobj-hash" }
 globset = "0.4"
 bobr-runtime = { path = "../bobr-runtime" }
+bobr-store = { path = "../bobr-store" }
 mbuild-core = { path = "../mbuild-core" }
 mbuild-runtime = { path = "../mbuild-runtime" }
 serde = { version = "1.0", features = ["derive"] }
