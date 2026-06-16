@@ -1,7 +1,7 @@
 use crate::{
     Builder, BuilderPlanError, BuilderPlannedSubject, ErofsRootfsBuilder, FsTreeImportBuilder,
-    GroupBuilder, InitramfsBuilder, OciExtractBuilder, TreeBuilder, TreeMergeBuilder,
-    TreeNewBuilder, TreeSubsetBuilder,
+    GroupBuilder, InitramfsBuilder, OciExtractBuilder, OciExtractNewBuilder, TreeBuilder,
+    TreeMergeBuilder, TreeNewBuilder, TreeSubsetBuilder,
 };
 use mbuild_core::{BuildKey, validate_publication_name};
 use serde_json::{Map, Value};
@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 static GROUP_BUILDER: GroupBuilder = GroupBuilder;
 static FS_TREE_IMPORT_BUILDER: FsTreeImportBuilder = FsTreeImportBuilder;
 static OCI_EXTRACT_BUILDER: OciExtractBuilder = OciExtractBuilder;
+static OCI_EXTRACT_NEW_BUILDER: OciExtractNewBuilder = OciExtractNewBuilder;
 static TREE_BUILDER: TreeBuilder = TreeBuilder;
 static TREE_NEW_BUILDER: TreeNewBuilder = TreeNewBuilder;
 static TREE_SUBSET_BUILDER: TreeSubsetBuilder = TreeSubsetBuilder;
@@ -117,6 +118,7 @@ pub fn register_in_tree_builders(registry: &mut BuilderRegistry) -> Result<(), S
     registry.register(&EROFS_ROOTFS_BUILDER)?;
     registry.register(&INITRAMFS_BUILDER)?;
     registry.register(&OCI_EXTRACT_BUILDER)?;
+    registry.register(&OCI_EXTRACT_NEW_BUILDER)?;
     Ok(())
 }
 
@@ -272,6 +274,7 @@ mod tests {
                 "ErofsRootfs",
                 "Initramfs",
                 "OciExtract",
+                "OciExtractNew",
             ]
         );
         assert!(registry.get("Sandbox").is_none());

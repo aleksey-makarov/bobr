@@ -43,6 +43,7 @@ fn registered_builders_include_current_tags_only() {
         "Initramfs",
         "Sandbox",
         "OciExtract",
+        "OciExtractNew",
     ] {
         assert!(tags.contains(&tag), "missing registered builder tag {tag}");
     }

@@ -1,37 +1,40 @@
 use crate::{
     BuildContext, BuilderInputObject, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
 };
-use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
-use bobr_store::fs_tree::FsTree;
 use flate2::read::GzDecoder;
+use fsobj_hash::{hash_file_bytes, hash_symlink_node};
 use mbuild_core::{
-    BuildLogLevel, BuilderError,
+    BuildLogLevel, BuilderError, FsTreeEntry, FsTreeManifest, FsTreeObjectError, FsTreeObjectPaths,
+    ObjectHash, create_fs_tree_staging_dir, hash_fs_tree_object_from_manifest_with_extra_files,
     oci::{self, OciDescriptor, OciManifest},
 };
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use mbuild_core::{FsTreeOwnerMap, ValidatedFsTreeObject, validate_fs_tree_object};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::ffi::CString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
-use std::os::unix::ffi::OsStrExt;
+#[cfg(test)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::fs::symlink;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use tar::{Archive, EntryType};
 use tracing::warn;
 
-const OUTPUT_MANIFEST_FILE_NAME: &str = "fs-tree-manifest-v2.jsonl";
+const OCI_CONFIG_FILE_NAME: &str = "oci-config.json";
+const OUTPUT_DIR_NAME: &str = "oci-extract";
 const EXTRACT_ROOT_DIR_NAME: &str = "oci-extract-root";
 const MEDIA_TYPE_DOCKER_LAYER_GZIP: &str = "application/vnd.docker.image.rootfs.diff.tar.gzip";
 const MEDIA_TYPE_OCI_LAYER_TAR: &str = "application/vnd.oci.image.layer.v1.tar";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OciExtractNewConfig {}
+pub struct OciExtractConfig {}
 
-pub struct OciExtractNewBuilder;
+pub struct OciExtractBuilder;
 
 static OCI_EXTRACT_SPEC: InputSpec = InputSpec {
     required_inputs: &["image"],
@@ -39,11 +42,11 @@ static OCI_EXTRACT_SPEC: InputSpec = InputSpec {
     allow_extra_inputs: false,
 };
 
-impl TypedBuilder for OciExtractNewBuilder {
-    type Config = OciExtractNewConfig;
+impl TypedBuilder for OciExtractBuilder {
+    type Config = OciExtractConfig;
 
     fn tag(&self) -> &'static str {
-        "OciExtractNew"
+        "OciExtract"
     }
 
     fn spec(&self) -> &'static InputSpec {
@@ -56,196 +59,147 @@ impl TypedBuilder for OciExtractNewBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
-        self.build_typed_inner(config, inputs, cx)
+        self.build_with_materializer(config, inputs, cx, &RuntimeOwnershipMaterializer)
     }
 }
 
-impl OciExtractNewBuilder {
-    fn build_typed_inner(
+impl OciExtractBuilder {
+    fn build_with_materializer(
         &self,
-        _config: OciExtractNewConfig,
+        _config: OciExtractConfig,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
+        materializer: &impl OwnershipMaterializer,
     ) -> Result<StagedBuildResult, BuilderError> {
         let image = inputs.required("image")?;
         validate_oci_layout_input(image).map_err(map_error)?;
 
-        let output_manifest = cx.temp_dir.join(OUTPUT_MANIFEST_FILE_NAME);
+        let staged = cx.temp_dir.join(OUTPUT_DIR_NAME);
         let extract_root = cx.temp_dir.join(EXTRACT_ROOT_DIR_NAME);
-        if output_manifest.exists() || extract_root.exists() {
+        if staged.exists() || extract_root.exists() {
             return Err(map_error(OciExtractError::InvalidInput(format!(
-                "OciExtractNew staging paths already exist under '{}'",
+                "OciExtract staging paths already exist under '{}'",
                 cx.temp_dir.display()
             ))));
         }
-        let fs_tree = cx.fs_tree()?;
 
         cx.log_event(
             BuildLogLevel::Info,
             "extract",
-            format!(
-                "extracting OCI image '{}' into fs-tree v2",
-                image.path.display()
-            ),
+            format!("extracting OCI image '{}'", image.path.display()),
         );
 
-        let output = cx
-            .runtime()
-            .run(
-                &OciExtractFunction,
-                OciExtractInput {
-                    oci_layout_dir: image.path.clone(),
-                    extract_root,
-                    output_manifest: output_manifest.clone(),
-                    fs_tree,
-                },
-            )
-            .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+        fs::create_dir(&extract_root).map_err(|error| {
+            map_error(OciExtractError::Io(format!(
+                "failed to create extraction root '{}': {error}",
+                extract_root.display()
+            )))
+        })?;
 
-        cx.log_event(
-            BuildLogLevel::Info,
-            "extract",
-            format!("wrote fs-tree manifest with {} entries", output.entries),
-        );
+        let records = extract_oci_image_layers(&image.path, &extract_root).map_err(map_error)?;
+        let manifest =
+            build_manifest_from_tar_records(&records, &extract_root).map_err(map_error)?;
+        let config_bytes = read_oci_config_bytes(&image.path).map_err(map_error)?;
+        let paths =
+            create_oci_fs_tree_staging_dir(&staged, &manifest, &config_bytes).map_err(map_error)?;
+
+        fs::remove_dir(&paths.fs_tree.root_dir).map_err(|error| {
+            map_error(OciExtractError::Io(format!(
+                "failed to replace OCI fs-tree root '{}': {error}",
+                paths.fs_tree.root_dir.display()
+            )))
+        })?;
+        fs::rename(&extract_root, &paths.fs_tree.root_dir).map_err(|error| {
+            map_error(OciExtractError::Io(format!(
+                "failed to move extracted root '{}' to '{}': {error}",
+                extract_root.display(),
+                paths.fs_tree.root_dir.display()
+            )))
+        })?;
+
+        let object_hash =
+            hash_oci_fs_tree_object_from_manifest(&manifest, &config_bytes).map_err(map_error)?;
+        materializer
+            .materialize_and_validate(&paths.fs_tree.root_dir, &manifest, &cx.temp_dir)
+            .map_err(map_error)?;
 
         Ok(StagedBuildResult {
-            staged_path: output_manifest,
-            object_hash: None,
+            staged_path: staged,
+            object_hash: Some(object_hash),
         })
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct OciExtractFunction;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct OciExtractInput {
-    oci_layout_dir: PathBuf,
-    extract_root: PathBuf,
-    output_manifest: PathBuf,
-    fs_tree: FsTree,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct OciExtractOutput {
-    entries: usize,
-}
-
-impl RuntimeFunction for OciExtractFunction {
-    type Input = OciExtractInput;
-    type Output = OciExtractOutput;
-
-    fn name(&self) -> &'static str {
-        "oci-extract"
-    }
-
-    fn call(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {
-        extract_oci_image_to_fs_tree(input).map_err(|error| RuntimeError::new(error.to_string()))
-    }
-}
-
-fn extract_oci_image_to_fs_tree(
-    input: OciExtractInput,
-) -> Result<OciExtractOutput, OciExtractError> {
-    validate_oci_layout_path(&input.oci_layout_dir)?;
-    if input.extract_root.exists() || input.output_manifest.exists() {
-        return Err(OciExtractError::InvalidInput(format!(
-            "OciExtractNew runtime paths already exist under '{}' or '{}'",
-            input.extract_root.display(),
-            input.output_manifest.display()
-        )));
-    }
-
-    fs::create_dir(&input.extract_root).map_err(|error| {
-        OciExtractError::Io(format!(
-            "failed to create extraction root '{}': {error}",
-            input.extract_root.display()
-        ))
-    })?;
-
-    let output = extract_oci_image_to_fs_tree_inner(&input);
-    let cleanup = remove_extraction_root(&input.extract_root);
-    match (output, cleanup) {
-        (Ok(output), Ok(())) => Ok(output),
-        (Ok(_), Err(error)) => Err(error),
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(cleanup_error)) => Err(OciExtractError::Io(format!(
-            "{error}; additionally failed to clean OCI extraction root '{}': {cleanup_error}",
-            input.extract_root.display()
-        ))),
-    }
-}
-
-fn extract_oci_image_to_fs_tree_inner(
-    input: &OciExtractInput,
-) -> Result<OciExtractOutput, OciExtractError> {
-    let records = extract_oci_image_layers(&input.oci_layout_dir, &input.extract_root)?;
-    read_oci_config_bytes(&input.oci_layout_dir)?;
-    apply_extracted_metadata(&input.extract_root, &records)?;
-    let manifest = input.fs_tree.scan(&input.extract_root).map_err(|error| {
-        OciExtractError::Object(format!(
-            "failed to scan extracted OCI filesystem '{}': {error}",
-            input.extract_root.display()
-        ))
-    })?;
-    let entries = manifest.entries().len();
-    manifest
-        .write_canonical(&input.output_manifest)
-        .map_err(|error| OciExtractError::Object(error.to_string()))?;
-    Ok(OciExtractOutput { entries })
-}
-
-fn remove_extraction_root(path: &Path) -> Result<(), OciExtractError> {
-    match fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(OciExtractError::Io(format!(
-            "failed to remove OCI extraction root '{}': {error}",
-            path.display()
-        ))),
-    }
-}
-
 fn validate_oci_layout_input(image: &BuilderInputObject) -> Result<(), OciExtractError> {
-    validate_oci_layout_path(&image.path)
-}
-
-fn validate_oci_layout_path(path: &Path) -> Result<(), OciExtractError> {
-    if !path.is_dir() {
+    if !image.path.is_dir() {
         return Err(OciExtractError::InvalidInput(format!(
             "image input must resolve to an OCI layout directory: {}",
-            path.display()
+            image.path.display()
         )));
     }
     for name in ["oci-layout", "index.json"] {
-        let child = path.join(name);
-        if !child.is_file() {
+        let path = image.path.join(name);
+        if !path.is_file() {
             return Err(OciExtractError::InvalidInput(format!(
                 "image input is missing OCI layout file '{}'",
-                child.display()
+                path.display()
             )));
         }
     }
-    let blobs = path.join("blobs").join("sha256");
+    let blobs = image.path.join("blobs").join("sha256");
     if !blobs.is_dir() {
         return Err(OciExtractError::InvalidInput(format!(
             "image input is missing OCI blobs directory '{}'",
             blobs.display()
         )));
     }
-    oci::read_oci_manifest(path)
+    oci::read_oci_manifest(&image.path)
         .map_err(|error| OciExtractError::InvalidInput(error.to_string()))?;
     Ok(())
 }
 
+trait OwnershipMaterializer {
+    fn materialize_and_validate(
+        &self,
+        root_dir: &Path,
+        manifest: &FsTreeManifest,
+        workspace: &Path,
+    ) -> Result<(), OciExtractError>;
+}
+
+struct RuntimeOwnershipMaterializer;
+
+impl OwnershipMaterializer for RuntimeOwnershipMaterializer {
+    fn materialize_and_validate(
+        &self,
+        root_dir: &Path,
+        manifest: &FsTreeManifest,
+        workspace: &Path,
+    ) -> Result<(), OciExtractError> {
+        mbuild_runtime::apply_ownership_batch(root_dir, manifest, workspace)
+            .map_err(|error| OciExtractError::Runtime(error.to_string()))
+    }
+}
+
+fn hash_oci_fs_tree_object_from_manifest(
+    manifest: &FsTreeManifest,
+    config_bytes: &[u8],
+) -> Result<ObjectHash, OciExtractError> {
+    hash_fs_tree_object_from_manifest_with_extra_files(
+        manifest,
+        &[(OCI_CONFIG_FILE_NAME.as_bytes(), config_bytes)],
+    )
+    .map_err(|error| OciExtractError::Object(error.to_string()))
+}
+
 #[derive(Debug)]
-enum OciExtractError {
+pub enum OciExtractError {
     InvalidInput(String),
     InvalidLayer(String),
     Io(String),
+    Manifest(String),
     Object(String),
+    Runtime(String),
 }
 
 impl fmt::Display for OciExtractError {
@@ -254,22 +208,114 @@ impl fmt::Display for OciExtractError {
             Self::InvalidInput(message)
             | Self::InvalidLayer(message)
             | Self::Io(message)
-            | Self::Object(message) => formatter.write_str(message),
+            | Self::Manifest(message)
+            | Self::Object(message)
+            | Self::Runtime(message) => formatter.write_str(message),
         }
+    }
+}
+
+impl From<FsTreeObjectError> for OciExtractError {
+    fn from(error: FsTreeObjectError) -> Self {
+        Self::Object(error.to_string())
     }
 }
 
 fn map_error(error: OciExtractError) -> BuilderError {
     match error {
-        OciExtractError::InvalidInput(message) => BuilderError::InvalidRecipe(message),
+        OciExtractError::InvalidInput(message) | OciExtractError::Manifest(message) => {
+            BuilderError::InvalidRecipe(message)
+        }
         OciExtractError::InvalidLayer(message)
         | OciExtractError::Io(message)
-        | OciExtractError::Object(message) => BuilderError::ExecutionFailed(message),
+        | OciExtractError::Object(message)
+        | OciExtractError::Runtime(message) => BuilderError::ExecutionFailed(message),
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct TarEntryRecord {
+pub(crate) struct ValidatedOciFsTreeObject {
+    pub(crate) fs_tree: ValidatedFsTreeObject,
+    pub(crate) oci_config: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OciFsTreeObjectPaths {
+    pub fs_tree: FsTreeObjectPaths,
+    pub oci_config_path: PathBuf,
+}
+
+#[cfg(test)]
+pub(crate) fn validate_oci_fs_tree_object(
+    object_dir: &Path,
+    owner_map: &impl FsTreeOwnerMap,
+) -> Result<ValidatedOciFsTreeObject, OciExtractError> {
+    let config_path = object_dir.join(OCI_CONFIG_FILE_NAME);
+    let metadata = fs::symlink_metadata(&config_path).map_err(|error| {
+        OciExtractError::Object(format!(
+            "failed to inspect OCI config '{}': {error}",
+            config_path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(OciExtractError::Object(format!(
+            "OCI fs-tree config '{}' must be a regular file",
+            config_path.display()
+        )));
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o111 != 0 {
+        return Err(OciExtractError::Object(format!(
+            "OCI fs-tree config '{}' must not be executable",
+            config_path.display()
+        )));
+    }
+
+    let config_bytes = fs::read(&config_path).map_err(|error| {
+        OciExtractError::Object(format!(
+            "failed to read OCI config '{}': {error}",
+            config_path.display()
+        ))
+    })?;
+    let oci_config = serde_json::from_slice(&config_bytes).map_err(|error| {
+        OciExtractError::Object(format!(
+            "failed to parse OCI config '{}': {error}",
+            config_path.display()
+        ))
+    })?;
+
+    let fs_tree = validate_fs_tree_object(object_dir, owner_map)?;
+    Ok(ValidatedOciFsTreeObject {
+        fs_tree,
+        oci_config,
+    })
+}
+
+pub fn create_oci_fs_tree_staging_dir(
+    object_dir: &Path,
+    manifest: &FsTreeManifest,
+    oci_config_bytes: &[u8],
+) -> Result<OciFsTreeObjectPaths, OciExtractError> {
+    serde_json::from_slice::<Value>(oci_config_bytes).map_err(|error| {
+        OciExtractError::Object(format!("failed to parse OCI config bytes: {error}"))
+    })?;
+    let fs_tree = create_fs_tree_staging_dir(object_dir, manifest)?;
+    let oci_config_path = object_dir.join(OCI_CONFIG_FILE_NAME);
+    fs::write(&oci_config_path, oci_config_bytes).map_err(|error| {
+        OciExtractError::Io(format!(
+            "failed to write OCI config '{}': {error}",
+            oci_config_path.display()
+        ))
+    })?;
+    Ok(OciFsTreeObjectPaths {
+        fs_tree,
+        oci_config_path,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TarEntryRecord {
     path: String,
     kind: TarRecordKind,
     uid: u32,
@@ -285,7 +331,7 @@ enum TarRecordKind {
     Symlink,
 }
 
-fn extract_oci_image_layers(
+pub fn extract_oci_image_layers(
     oci_layout_dir: &Path,
     target_root: &Path,
 ) -> Result<Vec<TarEntryRecord>, OciExtractError> {
@@ -776,101 +822,70 @@ fn ensure_parent_directories(
     Ok(())
 }
 
-fn apply_extracted_metadata(
-    root: &Path,
+pub fn build_manifest_from_tar_records(
     records: &[TarEntryRecord],
-) -> Result<(), OciExtractError> {
-    let mut directories = Vec::new();
+    root_dir: &Path,
+) -> Result<FsTreeManifest, OciExtractError> {
+    let mut by_path = BTreeMap::<String, FsTreeEntry>::new();
+    by_path.insert(String::new(), FsTreeEntry::directory("", 0, 0, 0o755));
+
     for record in records {
-        let path = root.join(&record.path);
-        match record.kind {
+        add_implicit_manifest_parents(&record.path, &mut by_path);
+        let entry = match record.kind {
             TarRecordKind::File => {
-                chown_if_needed(&path, record.uid, record.gid)?;
-                chmod(&path, record.mode.expect("file record has mode"))?;
-            }
-            TarRecordKind::Symlink => {
-                lchown_if_needed(&path, record.uid, record.gid)?;
-            }
-            TarRecordKind::Directory => {
-                directories.push((
-                    record.path.clone(),
+                let mode = record.mode.expect("file record has mode");
+                let bytes = fs::read(root_dir.join(&record.path)).map_err(|error| {
+                    OciExtractError::Io(format!(
+                        "failed to read extracted file '{}': {error}",
+                        root_dir.join(&record.path).display()
+                    ))
+                })?;
+                FsTreeEntry::file_with_hash(
+                    &record.path,
                     record.uid,
                     record.gid,
-                    record.mode.expect("directory record has mode"),
-                ));
+                    mode,
+                    hash_file_bytes(mode & 0o111 != 0, &bytes),
+                )
             }
-        }
+            TarRecordKind::Directory => FsTreeEntry::directory(
+                &record.path,
+                record.uid,
+                record.gid,
+                record.mode.expect("directory record has mode"),
+            ),
+            TarRecordKind::Symlink => {
+                let target = record
+                    .symlink_target
+                    .as_deref()
+                    .expect("symlink record has target");
+                FsTreeEntry::symlink_with_hash(
+                    &record.path,
+                    record.uid,
+                    record.gid,
+                    target,
+                    hash_symlink_node(target.as_bytes()),
+                )
+            }
+        };
+        by_path.insert(record.path.clone(), entry);
     }
 
-    directories.sort_by_key(|(path, _, _, _)| std::cmp::Reverse(path_depth(path)));
-    for (path, uid, gid, mode) in directories {
-        let dir = root.join(path);
-        chown_if_needed(&dir, uid, gid)?;
-        chmod(&dir, mode)?;
+    FsTreeManifest::from_entries(by_path.into_values().collect())
+        .map_err(|error| OciExtractError::Manifest(error.to_string()))
+}
+
+fn add_implicit_manifest_parents(path: &str, by_path: &mut BTreeMap<String, FsTreeEntry>) {
+    let mut current = String::new();
+    for component in path
+        .split('/')
+        .take(path.split('/').count().saturating_sub(1))
+    {
+        current = join_rel(&current, component);
+        by_path
+            .entry(current.clone())
+            .or_insert_with(|| FsTreeEntry::directory(&current, 0, 0, 0o755));
     }
-    chmod(root, 0o755)?;
-    Ok(())
-}
-
-fn path_depth(path: &str) -> usize {
-    if path.is_empty() {
-        0
-    } else {
-        path.split('/').count()
-    }
-}
-
-fn chown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), OciExtractError> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| map_io(path, "inspect before chown", error))?;
-    if metadata.uid() == uid && metadata.gid() == gid {
-        return Ok(());
-    }
-    chown(path, uid, gid, "chown")
-}
-
-fn lchown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), OciExtractError> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| map_io(path, "inspect before lchown", error))?;
-    if metadata.uid() == uid && metadata.gid() == gid {
-        return Ok(());
-    }
-    chown(path, uid, gid, "lchown")
-}
-
-fn chown(path: &Path, uid: u32, gid: u32, operation: &str) -> Result<(), OciExtractError> {
-    let c_path = c_path(path, operation)?;
-    let result = if operation == "lchown" {
-        unsafe { libc::lchown(c_path.as_ptr(), uid, gid) }
-    } else {
-        unsafe { libc::chown(c_path.as_ptr(), uid, gid) }
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(map_io(path, operation, io::Error::last_os_error()))
-    }
-}
-
-fn c_path(path: &Path, operation: &str) -> Result<CString, OciExtractError> {
-    CString::new(path.as_os_str().as_bytes()).map_err(|error| {
-        OciExtractError::Io(format!(
-            "failed to convert path '{}' for {operation}: {error}",
-            path.display()
-        ))
-    })
-}
-
-fn chmod(path: &Path, mode: u32) -> Result<(), OciExtractError> {
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .map_err(|error| map_io(path, "chmod", error))
-}
-
-fn map_io(path: &Path, operation: &str, error: io::Error) -> OciExtractError {
-    OciExtractError::Io(format!(
-        "failed to {operation} '{}': {error}",
-        path.display()
-    ))
 }
 
 fn read_oci_config_bytes(oci_layout_dir: &Path) -> Result<Vec<u8>, OciExtractError> {
@@ -946,8 +961,6 @@ fn join_rel(parent: &str, name: &str) -> String {
 mod tests {
     use super::*;
     use crate::{Builder, BuilderInputObject, TypedBuilder};
-    use bobr_store::Store;
-    use bobr_store::fs_tree::{FsTreeEntry as FsTreeV2Entry, FsTreeManifest as FsTreeV2Manifest};
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use sha2::{Digest, Sha256};
@@ -958,9 +971,25 @@ mod tests {
 
     #[test]
     fn input_spec_is_registered_shape() {
-        assert_eq!(TypedBuilder::tag(&OciExtractNewBuilder), "OciExtractNew");
+        assert_eq!(TypedBuilder::tag(&OciExtractBuilder), "OciExtract");
         assert_eq!(OCI_EXTRACT_SPEC.required_inputs, &["image"]);
         assert!(!OCI_EXTRACT_SPEC.allow_extra_inputs);
+    }
+
+    #[test]
+    fn oci_fs_tree_validator_requires_config_and_accepts_extra_sidecars() {
+        let temp = tempdir().unwrap();
+        let object = temp.path().join("object");
+        let manifest =
+            FsTreeManifest::from_entries(vec![FsTreeEntry::directory("", 0, 0, 0o755)]).unwrap();
+        let paths =
+            create_oci_fs_tree_staging_dir(&object, &manifest, br#"{"config":{}}"#).unwrap();
+        fs::write(object.join("extra.txt"), b"extra").unwrap();
+
+        validate_oci_fs_tree_object(&object, &CurrentOwnerMap).unwrap();
+
+        fs::remove_file(paths.oci_config_path).unwrap();
+        assert!(validate_oci_fs_tree_object(&object, &CurrentOwnerMap).is_err());
     }
 
     #[test]
@@ -976,25 +1005,27 @@ mod tests {
         fs::create_dir(&root).unwrap();
 
         let records = extract_oci_image_layers(&oci, &root).unwrap();
+        let manifest = build_manifest_from_tar_records(&records, &root).unwrap();
 
         assert_eq!(fs::read(root.join("bin/tool")).unwrap(), b"hello\n");
         assert_eq!(
             fs::read_link(root.join("tool-link")).unwrap(),
             Path::new("bin/tool")
         );
-        assert!(records.iter().any(|record| {
-            record.path == "bin/tool"
-                && record.kind == TarRecordKind::File
-                && record.uid == 1
-                && record.gid == 2
-                && record.mode == Some(0o755)
+        assert!(manifest.entries().iter().any(|entry| {
+            matches!(entry, FsTreeEntry::File { path, uid: 1, gid: 2, mode: 0o755, .. } if path == "bin/tool")
         }));
-        assert!(records.iter().any(|record| {
-            record.path == "tool-link"
-                && record.kind == TarRecordKind::Symlink
-                && record.uid == 3
-                && record.gid == 4
-                && record.symlink_target.as_deref() == Some("bin/tool")
+        assert!(manifest.entries().iter().any(|entry| {
+            matches!(
+                entry,
+                FsTreeEntry::Symlink {
+                    path,
+                    uid: 3,
+                    gid: 4,
+                    target,
+                    ..
+                } if path == "tool-link" && target == "bin/tool"
+            )
         }));
     }
 
@@ -1111,6 +1142,30 @@ mod tests {
     }
 
     #[test]
+    fn manifest_builder_adds_implicit_parent_directories() {
+        let records = vec![TarEntryRecord {
+            path: "usr/bin/tool".to_string(),
+            kind: TarRecordKind::File,
+            uid: 0,
+            gid: 0,
+            mode: Some(0o755),
+            symlink_target: None,
+        }];
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("usr/bin")).unwrap();
+        fs::write(root.path().join("usr/bin/tool"), b"tool").unwrap();
+
+        let manifest = build_manifest_from_tar_records(&records, root.path()).unwrap();
+
+        assert!(manifest.entries().iter().any(|entry| {
+            matches!(entry, FsTreeEntry::Directory { path, uid: 0, gid: 0, mode: 0o755 } if path == "usr")
+        }));
+        assert!(manifest.entries().iter().any(|entry| {
+            matches!(entry, FsTreeEntry::Directory { path, uid: 0, gid: 0, mode: 0o755 } if path == "usr/bin")
+        }));
+    }
+
+    #[test]
     fn preserves_compatible_tar_hardlinks() {
         let temp = tempdir().unwrap();
         let tar = make_tar(|builder| {
@@ -1146,125 +1201,54 @@ mod tests {
     }
 
     #[test]
-    fn builder_imports_as_fs_tree_v2_manifest() {
+    fn builder_materializes_with_fake_owner_materializer() {
         let temp = tempdir().unwrap();
-        let store_root = temp.path().join("store");
-        fs::create_dir(&store_root).unwrap();
-        let store = Store::create(&store_root).unwrap();
-        let owner = fs::symlink_metadata(temp.path()).unwrap();
-        let mut cx = build_context(temp.path()).with_fs_tree(store.fs_tree());
-        let tar = make_tar(|builder| {
-            append_dir(
-                builder,
-                "bin",
-                owner.uid() as u64,
-                owner.gid() as u64,
-                0o755,
-            );
-            append_file(
-                builder,
-                "bin/tool",
-                b"tool",
-                owner.uid() as u64,
-                owner.gid() as u64,
-                0o755,
-            );
-            append_symlink(
-                builder,
-                "tool-link",
-                "bin/tool",
-                owner.uid() as u64,
-                owner.gid() as u64,
-            );
-        });
+        let mut cx = build_context(temp.path());
+        let tar = make_tar(|builder| append_file(builder, "bin/tool", b"tool", 0, 0, 0o755));
         let oci = create_oci_layout(temp.path(), vec![(oci::MEDIA_TYPE_OCI_LAYER, gzip(&tar))]);
         let mut inputs = BuilderInputs::empty();
         inputs.insert("image", BuilderInputObject { path: oci });
 
-        let result = OciExtractNewBuilder
-            .build_typed(OciExtractNewConfig {}, inputs, &mut cx)
+        let result = OciExtractBuilder
+            .build_with_materializer(
+                OciExtractConfig {},
+                inputs,
+                &mut cx,
+                &CurrentOwnerMaterializer,
+            )
             .unwrap();
+        assert!(result.staged_path.join("manifest.jsonl").is_file());
+        assert!(result.staged_path.join("root/bin/tool").is_file());
+        assert!(result.staged_path.join("oci-config.json").is_file());
         assert_eq!(
-            result.staged_path,
-            temp.path().join("tmp").join(OUTPUT_MANIFEST_FILE_NAME)
+            result.object_hash,
+            Some(expected_oci_object_hash(&result.staged_path))
         );
-        assert!(result.object_hash.is_none());
-        assert!(!temp.path().join("tmp").join(EXTRACT_ROOT_DIR_NAME).exists());
-
-        let manifest = FsTreeV2Manifest::read_canonical(&result.staged_path).unwrap();
-        assert!(manifest.entries().contains(&FsTreeV2Entry::directory(
-            "",
-            owner.uid(),
-            owner.gid(),
-            0o755,
-        )));
-        assert!(manifest.entries().contains(&FsTreeV2Entry::directory(
-            "bin",
-            owner.uid(),
-            owner.gid(),
-            0o755,
-        )));
-        assert!(manifest.entries().contains(&FsTreeV2Entry::symlink(
-            "tool-link",
-            owner.uid(),
-            owner.gid(),
-            "bin/tool",
-        )));
-        let hash = manifest
-            .entries()
-            .iter()
-            .find_map(|entry| match entry {
-                FsTreeV2Entry::File { path, hash } if path == "bin/tool" => Some(*hash),
-                _ => None,
-            })
-            .expect("tool file entry");
-        let hex = hash.to_hex();
-        assert!(store.fs_files_dir().join(&hex[..2]).join(hex).is_file());
     }
 
     #[test]
-    fn metadata_application_applies_directory_modes_last() {
+    fn builder_does_not_host_validate_after_precomputing_hash() {
         let temp = tempdir().unwrap();
-        let root = temp.path().join("root");
-        let private = root.join("private");
-        fs::create_dir(&root).unwrap();
-        fs::create_dir(&private).unwrap();
-        fs::write(private.join("file"), b"secret").unwrap();
-        let owner = fs::symlink_metadata(temp.path()).unwrap();
-        let records = vec![
-            TarEntryRecord {
-                path: "private".to_string(),
-                kind: TarRecordKind::Directory,
-                uid: owner.uid(),
-                gid: owner.gid(),
-                mode: Some(0o000),
-                symlink_target: None,
-            },
-            TarEntryRecord {
-                path: "private/file".to_string(),
-                kind: TarRecordKind::File,
-                uid: owner.uid(),
-                gid: owner.gid(),
-                mode: Some(0o600),
-                symlink_target: None,
-            },
-        ];
+        let mut cx = build_context(temp.path());
+        let tar = make_tar(|builder| append_dir(builder, "private", 0, 0, 0o000));
+        let oci = create_oci_layout(temp.path(), vec![(oci::MEDIA_TYPE_OCI_LAYER, gzip(&tar))]);
+        let mut inputs = BuilderInputs::empty();
+        inputs.insert("image", BuilderInputObject { path: oci });
 
-        apply_extracted_metadata(&root, &records).unwrap();
+        let result = OciExtractBuilder
+            .build_with_materializer(
+                OciExtractConfig {},
+                inputs,
+                &mut cx,
+                &UnreadableOwnerMaterializer,
+            )
+            .unwrap();
 
         assert_eq!(
-            fs::symlink_metadata(&private).unwrap().permissions().mode() & 0o7777,
-            0o000
+            result.object_hash,
+            Some(expected_oci_object_hash(&result.staged_path))
         );
-        fs::set_permissions(&private, fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(
-            fs::symlink_metadata(private.join("file"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o7777,
-            0o600
-        );
+        assert!(result.staged_path.join("root/private").is_dir());
     }
 
     #[test]
@@ -1275,11 +1259,87 @@ mod tests {
         let image = create_oci_layout(temp.path(), vec![]);
         inputs.insert("image", BuilderInputObject { path: image });
 
-        let error = OciExtractNewBuilder
+        let error = OciExtractBuilder
             .build_erased(serde_json::json!({ "unexpected": true }), inputs, &mut cx)
             .unwrap_err();
 
         assert!(matches!(error, BuilderError::InvalidRecipe(_)));
+    }
+
+    struct CurrentOwnerMaterializer;
+
+    impl OwnershipMaterializer for CurrentOwnerMaterializer {
+        fn materialize_and_validate(
+            &self,
+            root_dir: &Path,
+            manifest: &FsTreeManifest,
+            _: &Path,
+        ) -> Result<(), OciExtractError> {
+            apply_manifest_modes(root_dir, manifest);
+            Ok(())
+        }
+    }
+
+    struct UnreadableOwnerMaterializer;
+
+    impl OwnershipMaterializer for UnreadableOwnerMaterializer {
+        fn materialize_and_validate(
+            &self,
+            root_dir: &Path,
+            manifest: &FsTreeManifest,
+            _: &Path,
+        ) -> Result<(), OciExtractError> {
+            apply_manifest_modes(root_dir, manifest);
+            fs::set_permissions(root_dir.join("private"), fs::Permissions::from_mode(0o000))
+                .unwrap();
+            Ok(())
+        }
+    }
+
+    fn apply_manifest_modes(root: &Path, manifest: &FsTreeManifest) {
+        for entry in manifest.entries() {
+            if let FsTreeEntry::File { path, mode, .. } = entry {
+                fs::set_permissions(root.join(path), fs::Permissions::from_mode(*mode)).unwrap();
+            }
+        }
+        let mut dirs = manifest
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                FsTreeEntry::Directory { path, mode, .. } => Some((path, mode)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        dirs.sort_by_key(|(path, _)| std::cmp::Reverse(path.len()));
+        for (path, mode) in dirs {
+            fs::set_permissions(root.join(path), fs::Permissions::from_mode(*mode)).unwrap();
+        }
+    }
+
+    struct CurrentOwnerMap;
+
+    impl FsTreeOwnerMap for CurrentOwnerMap {
+        fn physical_uid(&self, logical_uid: u32) -> Result<u32, FsTreeObjectError> {
+            if logical_uid == 0 {
+                Ok(unsafe { libc::geteuid() })
+            } else {
+                Err(FsTreeObjectError::Invalid("non-current uid".to_string()))
+            }
+        }
+
+        fn physical_gid(&self, logical_gid: u32) -> Result<u32, FsTreeObjectError> {
+            if logical_gid == 0 {
+                Ok(unsafe { libc::getegid() })
+            } else {
+                Err(FsTreeObjectError::Invalid("non-current gid".to_string()))
+            }
+        }
+    }
+
+    fn expected_oci_object_hash(object_dir: &Path) -> ObjectHash {
+        let manifest = FsTreeManifest::read_canonical(&object_dir.join("manifest.jsonl")).unwrap();
+        let config_bytes = fs::read(object_dir.join(OCI_CONFIG_FILE_NAME)).unwrap();
+        hash_oci_fs_tree_object_from_manifest(&manifest, &config_bytes).unwrap()
     }
 
     fn build_context(root: &Path) -> BuildContext {
