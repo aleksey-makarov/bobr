@@ -41,6 +41,7 @@ impl PlannedSubject {
 pub(crate) struct PlannedExecutionContext<'a> {
     pub(crate) store: &'a Store,
     pub(crate) run_logger: Arc<BuildRunLogger>,
+    pub(crate) runtime_provider: mbuild_core::RuntimeProvider,
     pub(crate) cancellation: CancellationToken,
     pub(crate) realized_inputs: &'a HashMap<BuildKey, RealizedObject>,
 }
@@ -137,7 +138,12 @@ fn execute_builder_subject(
         "run",
         "running builder implementation",
     );
-    let ctx = SubjectRunContext::new(workspace, logger.clone(), cx.cancellation.clone());
+    let ctx = SubjectRunContext::new(
+        workspace,
+        logger.clone(),
+        cx.cancellation.clone(),
+        cx.runtime_provider.clone(),
+    );
     let staged = subject
         .execute(&ctx, inputs.into_builder_inputs())
         .map_err(|error| {
@@ -238,7 +244,12 @@ fn execute_source_subject(
     );
 
     check_cancelled(&cx.cancellation)?;
-    let ctx = SubjectRunContext::new(workspace, logger.clone(), cx.cancellation.clone());
+    let ctx = SubjectRunContext::new(
+        workspace,
+        logger.clone(),
+        cx.cancellation.clone(),
+        cx.runtime_provider.clone(),
+    );
     let staged_path = subject.execute(&ctx).map_err(|error| {
         log_runtime_event(
             logger.as_ref(),

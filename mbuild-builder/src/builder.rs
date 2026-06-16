@@ -1,3 +1,4 @@
+use bobr_runtime::runtime_provider::RuntimeProvider;
 use fsobj_hash::ObjectHash;
 use mbuild_core::{
     BuildLogEvent, BuildLogLevel, BuildLogger, BuilderError, CancellationToken, NoopBuildLogger,
@@ -204,12 +205,14 @@ pub struct BuildContext {
     pub temp_dir: PathBuf,
     logger: Arc<dyn BuildLogger>,
     cancellation: CancellationToken,
+    runtime: RuntimeProvider,
 }
 
 impl fmt::Debug for BuildContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BuildContext")
             .field("temp_dir", &self.temp_dir)
+            .field("runtime_backend", &self.runtime.backend())
             .finish_non_exhaustive()
     }
 }
@@ -220,6 +223,7 @@ impl BuildContext {
             temp_dir,
             logger: Arc::new(NoopBuildLogger),
             cancellation: CancellationToken::new(),
+            runtime: RuntimeProvider::host(),
         }
     }
 
@@ -233,8 +237,17 @@ impl BuildContext {
         self
     }
 
+    pub fn with_runtime_provider(mut self, runtime: RuntimeProvider) -> Self {
+        self.runtime = runtime;
+        self
+    }
+
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation
+    }
+
+    pub fn runtime(&self) -> &RuntimeProvider {
+        &self.runtime
     }
 
     pub fn check_cancelled(&self) -> Result<(), BuilderError> {
@@ -400,6 +413,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bobr_runtime::runtime_provider::{RuntimeBackend, RuntimeProvider};
     use serde::Deserialize;
 
     fn sample_builder_object() -> BuilderInputObject {
@@ -565,6 +579,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.staged_path, PathBuf::from("/tmp/out"));
+    }
+
+    #[test]
+    fn build_context_defaults_to_host_runtime() {
+        let cx = BuildContext::with_noop_logger(PathBuf::from("/tmp/tmp"));
+
+        assert_eq!(cx.runtime().backend(), RuntimeBackend::Host);
+    }
+
+    #[test]
+    fn build_context_can_override_runtime_provider() {
+        let cx = BuildContext::with_noop_logger(PathBuf::from("/tmp/tmp"))
+            .with_runtime_provider(RuntimeProvider::namespace());
+
+        assert_eq!(cx.runtime().backend(), RuntimeBackend::Namespace);
     }
 
     #[test]

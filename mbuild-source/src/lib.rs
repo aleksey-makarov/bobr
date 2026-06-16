@@ -227,7 +227,7 @@ fn take_string(object: &mut Map<String, Value>, field: &str) -> Result<String, S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{CancellationToken, NoopBuildLogger, OriginSpec};
+    use mbuild_core::{CancellationToken, NoopBuildLogger, OriginSpec, RuntimeProvider};
     use serde_json::json;
     use std::sync::{
         Arc,
@@ -404,7 +404,12 @@ mod tests {
             temp_root.join("log/raw"),
             temp_root.to_path_buf(),
         );
-        SubjectRunContext::new(workspace, Arc::new(NoopBuildLogger), cancellation)
+        SubjectRunContext::new(
+            workspace,
+            Arc::new(NoopBuildLogger),
+            cancellation,
+            RuntimeProvider::host(),
+        )
     }
 
     #[test]

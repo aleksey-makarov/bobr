@@ -942,6 +942,7 @@ dependencies = [
 name = "mbuild-core"
 version = "0.1.0"
 dependencies = [
+ "bobr-runtime",
  "fsobj-hash",
  "libc",
  "serde",

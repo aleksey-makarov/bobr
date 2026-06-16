@@ -2,9 +2,12 @@ use crate::builder_registry::create_builder_registry;
 use crate::planned::{PlannedExecutionContext, PlannedSubject, SubjectExecution, execute_subject};
 use crate::recipe::{RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
+use crate::runtime_policy::runtime_provider_for_current_process;
 use bobr_store::{RealizedObject, Store, publish_stored_object};
 use mbuild_builder::BuilderPlannedSubject;
-use mbuild_core::{BuildKey, BuildLogEvent, BuildLogLevel, BuildRunLogger, CancellationToken};
+use mbuild_core::{
+    BuildKey, BuildLogEvent, BuildLogLevel, BuildRunLogger, CancellationToken, RuntimeProvider,
+};
 use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -60,8 +63,17 @@ pub fn run_recipe_envelope(
     let store = Store::create(store_path).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> =
         Arc::new(build_run_logger_for_store(&store, emit_progress).map_err(RuntimeError::Store)?);
+    let runtime_provider = runtime_provider_for_current_process();
 
-    execute_graph(&store, logger, &subjects, root_key, jobs, cancellation)
+    execute_graph(
+        &store,
+        logger,
+        runtime_provider,
+        &subjects,
+        root_key,
+        jobs,
+        cancellation,
+    )
 }
 
 pub fn render_object_as_json(object: &RealizedObject) -> Result<String, RuntimeError> {
@@ -98,6 +110,7 @@ fn completed_inputs_for_builder(
 fn execute_graph(
     store: &Store,
     logger: Arc<BuildRunLogger>,
+    runtime_provider: RuntimeProvider,
     subjects: &SubjectGraph,
     root_key: BuildKey,
     jobs: usize,
@@ -154,6 +167,7 @@ fn execute_graph(
             };
             let store = store.clone();
             let logger = logger.clone();
+            let runtime_provider = runtime_provider.clone();
             let tx = tx.clone();
             let cancellation = cancellation.clone();
             let realized_inputs = match subject.as_builder() {
@@ -173,6 +187,7 @@ fn execute_graph(
                         PlannedExecutionContext {
                             store: &store,
                             run_logger: logger,
+                            runtime_provider,
                             cancellation,
                             realized_inputs: &realized_inputs,
                         },
@@ -416,6 +431,7 @@ mod tests {
             PlannedExecutionContext {
                 store: &store,
                 run_logger: logger,
+                runtime_provider: RuntimeProvider::host(),
                 cancellation,
                 realized_inputs: &realized_inputs,
             },
@@ -448,6 +464,7 @@ mod tests {
             PlannedExecutionContext {
                 store: &store,
                 run_logger: logger,
+                runtime_provider: RuntimeProvider::host(),
                 cancellation: CancellationToken::new(),
                 realized_inputs: &realized_inputs,
             },
@@ -484,6 +501,7 @@ mod tests {
             PlannedExecutionContext {
                 store: &store,
                 run_logger: logger,
+                runtime_provider: RuntimeProvider::host(),
                 cancellation: CancellationToken::new(),
                 realized_inputs: &realized_inputs,
             },
@@ -626,6 +644,7 @@ mod tests {
         let error = execute_graph(
             &store,
             logger,
+            RuntimeProvider::host(),
             &subjects,
             fast_key,
             2,

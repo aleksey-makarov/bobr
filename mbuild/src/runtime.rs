@@ -390,8 +390,8 @@ mod tests {
         BuildContext, BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult, TypedBuilder,
     };
     use mbuild_core::{
-        BuildLogSubject, BuildLogger, BuildRunLogger, CancellationToken, Workspace,
-        compute_build_key, compute_reuse_key,
+        BuildLogSubject, BuildLogger, BuildRunLogger, CancellationToken, RuntimeProvider,
+        Workspace, compute_build_key, compute_reuse_key,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
@@ -459,6 +459,7 @@ mod tests {
             PlannedExecutionContext {
                 store,
                 run_logger,
+                runtime_provider: RuntimeProvider::host(),
                 cancellation,
                 realized_inputs: &realized_inputs,
             },

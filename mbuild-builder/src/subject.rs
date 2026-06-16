@@ -198,7 +198,8 @@ impl BuilderPlannedSubject {
     ) -> Result<StagedBuildResult, BuilderError> {
         let mut context = BuildContext::with_noop_logger(ctx.temp_dir().to_path_buf())
             .with_logger(ctx.logger().clone())
-            .with_cancellation_token(ctx.cancellation().clone());
+            .with_cancellation_token(ctx.cancellation().clone())
+            .with_runtime_provider(ctx.runtime().clone());
         self.build_erased(inputs, &mut context)
     }
 }
@@ -206,6 +207,7 @@ impl BuilderPlannedSubject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bobr_runtime::runtime_provider::{RuntimeBackend, RuntimeProvider};
     use mbuild_core::{CancellationToken, NoopBuildLogger};
     use serde::Deserialize;
     use std::sync::Arc;
@@ -242,6 +244,7 @@ mod tests {
             _inputs: BuilderInputs,
             cx: &mut BuildContext,
         ) -> Result<StagedBuildResult, BuilderError> {
+            assert_eq!(cx.runtime().backend(), RuntimeBackend::Namespace);
             let out = cx.temp_dir.join("out");
             std::fs::create_dir_all(&out)
                 .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
@@ -273,6 +276,7 @@ mod tests {
             workspace,
             Arc::new(NoopBuildLogger),
             CancellationToken::new(),
+            RuntimeProvider::namespace(),
         );
 
         let staged = subject.execute(&ctx, BuilderInputs::empty()).unwrap();
