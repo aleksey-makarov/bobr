@@ -81,7 +81,7 @@ impl TypedBuilder for GroupBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Builder, BuilderInputObject};
+    use crate::{Builder, BuilderInputPath};
     use std::collections::BTreeMap;
     use std::path::Path;
     use tempfile::tempdir;
@@ -93,8 +93,8 @@ mod tests {
         BuildContext::with_noop_logger(temp_dir)
     }
 
-    fn sample_input() -> BuilderInputObject {
-        BuilderInputObject {
+    fn sample_input() -> BuilderInputPath {
+        BuilderInputPath {
             path: std::path::PathBuf::from("/tmp/object"),
         }
     }

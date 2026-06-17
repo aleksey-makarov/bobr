@@ -13,10 +13,38 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKind {
+    Object,
+    FsTreeRoot,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputSlot {
+    pub name: &'static str,
+    pub kind: InputKind,
+}
+
+impl InputSlot {
+    pub const fn object(name: &'static str) -> Self {
+        Self {
+            name,
+            kind: InputKind::Object,
+        }
+    }
+
+    pub const fn fs_tree_root(name: &'static str) -> Self {
+        Self {
+            name,
+            kind: InputKind::FsTreeRoot,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct InputSpec {
-    pub required_inputs: &'static [&'static str],
-    pub optional_inputs: &'static [&'static str],
+    pub required_inputs: &'static [InputSlot],
+    pub optional_inputs: &'static [InputSlot],
     pub allow_extra_inputs: bool,
 }
 
@@ -27,14 +55,15 @@ impl InputSpec {
 
     pub fn validate_for_builder(&self, builder_tag: &str) -> Result<(), String> {
         let mut required = BTreeSet::new();
-        for name in self.required_inputs {
+        for slot in self.required_inputs {
+            let name = slot.name;
             validate_input_name(name).map_err(|error| {
                 format!(
                     "builder '{}' declares invalid required input '{}': {error}",
                     builder_tag, name
                 )
             })?;
-            if !required.insert(*name) {
+            if !required.insert(name) {
                 return Err(format!(
                     "builder '{}' declares duplicate required input '{}'",
                     builder_tag, name
@@ -43,14 +72,15 @@ impl InputSpec {
         }
 
         let mut optional = BTreeSet::new();
-        for name in self.optional_inputs {
+        for slot in self.optional_inputs {
+            let name = slot.name;
             validate_input_name(name).map_err(|error| {
                 format!(
                     "builder '{}' declares invalid optional input '{}': {error}",
                     builder_tag, name
                 )
             })?;
-            if !optional.insert(*name) {
+            if !optional.insert(name) {
                 return Err(format!(
                     "builder '{}' declares duplicate optional input '{}'",
                     builder_tag, name
@@ -70,16 +100,23 @@ impl InputSpec {
     pub fn reserved_input_names(&self) -> impl Iterator<Item = &'static str> {
         self.required_inputs
             .iter()
-            .copied()
-            .chain(self.optional_inputs.iter().copied())
+            .map(|slot| slot.name)
+            .chain(self.optional_inputs.iter().map(|slot| slot.name))
+    }
+
+    pub fn input_kind(&self, name: &str) -> Option<InputKind> {
+        self.required_inputs
+            .iter()
+            .chain(self.optional_inputs.iter())
+            .find_map(|slot| (slot.name == name).then_some(slot.kind))
     }
 
     pub fn is_required_input(&self, name: &str) -> bool {
-        self.required_inputs.contains(&name)
+        self.required_inputs.iter().any(|slot| slot.name == name)
     }
 
     pub fn is_optional_input(&self, name: &str) -> bool {
-        self.optional_inputs.contains(&name)
+        self.optional_inputs.iter().any(|slot| slot.name == name)
     }
 
     pub fn is_reserved_input(&self, name: &str) -> bool {
@@ -91,14 +128,14 @@ impl InputSpec {
         inputs: &'a BTreeMap<String, T>,
     ) -> Vec<&'a str> {
         let mut ordered = Vec::new();
-        for name in self.required_inputs {
-            if inputs.contains_key(*name) {
-                ordered.push(*name);
+        for slot in self.required_inputs {
+            if inputs.contains_key(slot.name) {
+                ordered.push(slot.name);
             }
         }
-        for name in self.optional_inputs {
-            if inputs.contains_key(*name) {
-                ordered.push(*name);
+        for slot in self.optional_inputs {
+            if inputs.contains_key(slot.name) {
+                ordered.push(slot.name);
             }
         }
         for name in inputs.keys() {
@@ -129,13 +166,13 @@ pub(crate) fn validate_input_name(name: &str) -> Result<(), String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderInputObject {
+pub struct BuilderInputPath {
     pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct BuilderInputs {
-    slots: BTreeMap<String, BuilderInputObject>,
+    slots: BTreeMap<String, BuilderInputPath>,
 }
 
 impl BuilderInputs {
@@ -143,7 +180,7 @@ impl BuilderInputs {
         Self::default()
     }
 
-    pub fn new(slots: BTreeMap<String, BuilderInputObject>) -> Self {
+    pub fn new(slots: BTreeMap<String, BuilderInputPath>) -> Self {
         Self { slots }
     }
 
@@ -151,11 +188,11 @@ impl BuilderInputs {
         self.slots.is_empty()
     }
 
-    pub fn insert(&mut self, name: impl Into<String>, value: BuilderInputObject) {
+    pub fn insert(&mut self, name: impl Into<String>, value: BuilderInputPath) {
         self.slots.insert(name.into(), value);
     }
 
-    pub fn required(&self, name: &str) -> Result<&BuilderInputObject, BuilderError> {
+    pub fn required(&self, name: &str) -> Result<&BuilderInputPath, BuilderError> {
         match self.slots.get(name) {
             Some(object) => Ok(object),
             None => Err(BuilderError::ExecutionFailed(format!(
@@ -164,15 +201,15 @@ impl BuilderInputs {
         }
     }
 
-    pub fn optional(&self, name: &str) -> Option<&BuilderInputObject> {
+    pub fn optional(&self, name: &str) -> Option<&BuilderInputPath> {
         self.slots.get(name)
     }
 
-    pub fn get(&self, name: &str) -> Option<&BuilderInputObject> {
+    pub fn get(&self, name: &str) -> Option<&BuilderInputPath> {
         self.slots.get(name)
     }
 
-    pub fn extra<'a>(&'a self, spec: &InputSpec, name: &str) -> Option<&'a BuilderInputObject> {
+    pub fn extra<'a>(&'a self, spec: &InputSpec, name: &str) -> Option<&'a BuilderInputPath> {
         if spec.is_reserved_input(name) {
             None
         } else {
@@ -183,7 +220,7 @@ impl BuilderInputs {
     pub fn extras<'a>(
         &'a self,
         spec: &'a InputSpec,
-    ) -> impl Iterator<Item = (&'a str, &'a BuilderInputObject)> + 'a {
+    ) -> impl Iterator<Item = (&'a str, &'a BuilderInputPath)> + 'a {
         self.slots.iter().filter_map(move |(name, object)| {
             if spec.is_reserved_input(name) {
                 None
@@ -433,84 +470,84 @@ mod tests {
     use bobr_runtime::runtime_provider::{RuntimeBackend, RuntimeProvider};
     use serde::Deserialize;
 
-    fn sample_builder_object() -> BuilderInputObject {
-        BuilderInputObject {
+    fn sample_builder_object() -> BuilderInputPath {
+        BuilderInputPath {
             path: PathBuf::from("/tmp/object"),
         }
     }
 
     #[test]
     fn input_spec_validate_accepts_distinct_inputs() {
-        let spec = InputSpec {
-            required_inputs: &["rootfs", "toolchain"],
-            optional_inputs: &["source"],
+        static SPEC: InputSpec = InputSpec {
+            required_inputs: &[InputSlot::object("rootfs"), InputSlot::object("toolchain")],
+            optional_inputs: &[InputSlot::object("source")],
             allow_extra_inputs: true,
         };
 
-        spec.validate_for_builder("Test").unwrap();
+        SPEC.validate_for_builder("Test").unwrap();
     }
 
     #[test]
     fn input_spec_validate_rejects_duplicate_required_inputs() {
-        let spec = InputSpec {
-            required_inputs: &["rootfs", "rootfs"],
+        static SPEC: InputSpec = InputSpec {
+            required_inputs: &[InputSlot::object("rootfs"), InputSlot::object("rootfs")],
             optional_inputs: &[],
             allow_extra_inputs: true,
         };
 
         assert_eq!(
-            spec.validate_for_builder("Test").unwrap_err(),
+            SPEC.validate_for_builder("Test").unwrap_err(),
             "builder 'Test' declares duplicate required input 'rootfs'"
         );
     }
 
     #[test]
     fn input_spec_validate_rejects_duplicate_optional_inputs() {
-        let spec = InputSpec {
+        static SPEC: InputSpec = InputSpec {
             required_inputs: &[],
-            optional_inputs: &["source", "source"],
+            optional_inputs: &[InputSlot::object("source"), InputSlot::object("source")],
             allow_extra_inputs: true,
         };
 
         assert_eq!(
-            spec.validate_for_builder("Test").unwrap_err(),
+            SPEC.validate_for_builder("Test").unwrap_err(),
             "builder 'Test' declares duplicate optional input 'source'"
         );
     }
 
     #[test]
     fn input_spec_validate_rejects_required_optional_overlap() {
-        let spec = InputSpec {
-            required_inputs: &["rootfs"],
-            optional_inputs: &["rootfs"],
+        static SPEC: InputSpec = InputSpec {
+            required_inputs: &[InputSlot::object("rootfs")],
+            optional_inputs: &[InputSlot::object("rootfs")],
             allow_extra_inputs: true,
         };
 
         assert_eq!(
-            spec.validate_for_builder("Test").unwrap_err(),
+            SPEC.validate_for_builder("Test").unwrap_err(),
             "builder 'Test' declares input 'rootfs' as both required and optional"
         );
     }
 
     #[test]
     fn input_spec_validate_rejects_invalid_declared_input_names() {
-        let required = InputSpec {
-            required_inputs: &["bad-name"],
+        static REQUIRED: InputSpec = InputSpec {
+            required_inputs: &[InputSlot::object("bad-name")],
             optional_inputs: &[],
             allow_extra_inputs: true,
         };
-        let optional = InputSpec {
+        static OPTIONAL: InputSpec = InputSpec {
             required_inputs: &[],
-            optional_inputs: &["1bad"],
+            optional_inputs: &[InputSlot::object("1bad")],
             allow_extra_inputs: true,
         };
 
         assert_eq!(
-            required.validate_for_builder("Test").unwrap_err(),
+            REQUIRED.validate_for_builder("Test").unwrap_err(),
             "builder 'Test' declares invalid required input 'bad-name': input name 'bad-name' must contain only ASCII letters, digits, and underscores"
         );
         assert_eq!(
-            optional.validate_for_builder("Test").unwrap_err(),
+            OPTIONAL.validate_for_builder("Test").unwrap_err(),
             "builder 'Test' declares invalid optional input '1bad': input name '1bad' must start with an ASCII letter or underscore"
         );
     }
@@ -523,16 +560,16 @@ mod tests {
         inputs.insert("source", object.clone());
         inputs.insert("patch", object.clone());
 
-        let spec = InputSpec {
-            required_inputs: &["image"],
-            optional_inputs: &["base"],
+        static SPEC: InputSpec = InputSpec {
+            required_inputs: &[InputSlot::object("image")],
+            optional_inputs: &[InputSlot::object("base")],
             allow_extra_inputs: true,
         };
 
         assert_eq!(inputs.required("script").unwrap().path, object.path);
         assert!(inputs.optional("base").is_none());
-        assert!(inputs.extra(&spec, "source").is_some());
-        assert_eq!(inputs.extras(&spec).count(), 3);
+        assert!(inputs.extra(&SPEC, "source").is_some());
+        assert_eq!(inputs.extras(&SPEC).count(), 3);
     }
 
     #[derive(Debug)]

@@ -208,7 +208,7 @@ impl Store {
         self.root().join(FS_FILES_DIR)
     }
 
-    /// Returns the future fs-tree manifest directory.
+    /// Returns the fs-tree materialization cache directory.
     pub fn fs_trees_dir(&self) -> PathBuf {
         self.root().join(FS_TREES_DIR)
     }

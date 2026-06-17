@@ -17,7 +17,7 @@ use super::tree::{
     TreeBuilder, TreeConfig, TreeEntry, TreePayload, apply_directory_modes_post_order, build_tree,
     fs_tree_manifest_for_entries, normalize_entries,
 };
-use crate::{BuildContext, Builder, BuilderInputObject, BuilderInputs, StagedBuildResult};
+use crate::{BuildContext, Builder, BuilderInputPath, BuilderInputs, StagedBuildResult};
 use fsobj_hash::{hash_file_bytes, hash_path, hash_symlink_node};
 use mbuild_core::{
     BuildLogEvent, BuildLogger, BuilderError, ComposedFsTree, ComposedFsTreeEntry,
@@ -411,7 +411,7 @@ fn tree_merge_inputs(inputs: &[(&str, &StagedBuildResult)]) -> BuilderInputs {
     for (name, result) in inputs {
         builder_inputs.insert(
             *name,
-            BuilderInputObject {
+            BuilderInputPath {
                 path: result.staged_path.clone(),
             },
         );
@@ -760,7 +760,7 @@ fn tree_subset_rejects_invalid_config_and_input() {
     let not_tree = temp.path().join("not-tree");
     fs::write(&not_tree, b"not a tree").unwrap();
     let mut inputs = BuilderInputs::empty();
-    inputs.insert("tree", BuilderInputObject { path: not_tree });
+    inputs.insert("tree", BuilderInputPath { path: not_tree });
     let mut cx = build_context(&temp.path().join("not-tree-cx"));
     let error = builder
         .build_typed_for_tests(tree_subset_config(&["lib/*"]), inputs, &mut cx)
@@ -822,7 +822,7 @@ fn tree_subset_uses_manifest_without_discovering_input_tree() {
     .unwrap();
 
     let mut inputs = BuilderInputs::empty();
-    inputs.insert("tree", BuilderInputObject { path: object_dir });
+    inputs.insert("tree", BuilderInputPath { path: object_dir });
     let mut cx = build_context(&temp.path().join("subset"));
 
     let result = builder
@@ -1302,7 +1302,7 @@ fn tree_merge_rejects_non_fs_tree_input() {
     let not_tree = temp.path().join("not-tree");
     fs::write(&not_tree, b"not a tree").unwrap();
     let mut inputs = tree_merge_inputs(&[("left", &left)]);
-    inputs.insert("bad", BuilderInputObject { path: not_tree });
+    inputs.insert("bad", BuilderInputPath { path: not_tree });
     let mut cx = build_context(&temp.path().join("merge"));
 
     let error = builder
@@ -1465,7 +1465,7 @@ fn tree_merge_does_not_scan_input_directories_during_manifest_compose() {
         sample_install(),
     );
     let mut inputs = tree_merge_inputs(&[("right", &right)]);
-    inputs.insert("base", BuilderInputObject { path: base_object });
+    inputs.insert("base", BuilderInputPath { path: base_object });
     let mut cx = build_context(&temp.path().join("merge"));
 
     let result =
@@ -1525,7 +1525,7 @@ fn tree_merge_rejects_hardlink_source_attr_mismatch_without_mutating_source() {
         sample_install(),
     );
     let mut inputs = tree_merge_inputs(&[("right", &right)]);
-    inputs.insert("base", BuilderInputObject { path: base_object });
+    inputs.insert("base", BuilderInputPath { path: base_object });
     let mut cx = build_context(&temp.path().join("merge"));
 
     let error = build_tree_merge(
@@ -2626,7 +2626,7 @@ fn tree_builder_rejects_non_empty_inputs() {
     let mut inputs = BuilderInputs::empty();
     inputs.insert(
         "unexpected",
-        BuilderInputObject {
+        BuilderInputPath {
             path: std::path::PathBuf::from("/tmp/unexpected"),
         },
     );

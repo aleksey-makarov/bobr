@@ -4,7 +4,8 @@ use super::legacy_object::{
     materialize_composed_tree_output, tree_subset_compose_details,
 };
 use crate::{
-    BuildContext, BuilderInputObject, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
+    BuildContext, BuilderInputPath, BuilderInputs, InputSlot, InputSpec, StagedBuildResult,
+    TypedBuilder,
 };
 use globset::{Glob, GlobMatcher};
 use mbuild_core::{
@@ -25,7 +26,7 @@ pub struct TreeSubsetConfig {
 }
 
 static TREE_SUBSET_SPEC: InputSpec = InputSpec {
-    required_inputs: &["tree"],
+    required_inputs: &[InputSlot::object("tree")],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
@@ -255,7 +256,7 @@ pub(super) fn add_tree_subset_parent_dirs(
 }
 
 pub(super) fn tree_subset_input(
-    object: &BuilderInputObject,
+    object: &BuilderInputPath,
 ) -> Result<IndexedTreeMergeInput, BuilderError> {
     let compose = load_fs_tree_compose_input(&object.path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(

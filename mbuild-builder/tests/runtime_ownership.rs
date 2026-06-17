@@ -1,7 +1,7 @@
 #![cfg(all(feature = "integration-tests", target_os = "linux"))]
 
 use mbuild_builder::{
-    BuildContext, Builder, BuilderInputObject, BuilderInputs, StagedBuildResult, TreeBuilder,
+    BuildContext, Builder, BuilderInputPath, BuilderInputs, StagedBuildResult, TreeBuilder,
     TreeMergeBuilder, TreeSubsetBuilder,
 };
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
@@ -162,7 +162,7 @@ fn tree_merge_materializes_subuid_owned_file_under_restrictive_dir() -> TestResu
     let mut inputs = single_tree_input("left", &left);
     inputs.insert(
         "right",
-        BuilderInputObject {
+        BuilderInputPath {
             path: right.staged_path.clone(),
         },
     );
@@ -270,7 +270,7 @@ fn single_tree_input(name: &'static str, result: &StagedBuildResult) -> BuilderI
     let mut inputs = BuilderInputs::empty();
     inputs.insert(
         name,
-        BuilderInputObject {
+        BuilderInputPath {
             path: result.staged_path.clone(),
         },
     );

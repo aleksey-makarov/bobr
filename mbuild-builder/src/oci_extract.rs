@@ -1,5 +1,6 @@
 use crate::{
-    BuildContext, BuilderInputObject, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
+    BuildContext, BuilderInputPath, BuilderInputs, InputSlot, InputSpec, StagedBuildResult,
+    TypedBuilder,
 };
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use bobr_store::fs_tree::FsTree;
@@ -34,7 +35,7 @@ pub struct OciExtractNewConfig {}
 pub struct OciExtractNewBuilder;
 
 static OCI_EXTRACT_SPEC: InputSpec = InputSpec {
-    required_inputs: &["image"],
+    required_inputs: &[InputSlot::object("image")],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
@@ -208,7 +209,7 @@ fn remove_extraction_root(path: &Path) -> Result<(), OciExtractError> {
     }
 }
 
-fn validate_oci_layout_input(image: &BuilderInputObject) -> Result<(), OciExtractError> {
+fn validate_oci_layout_input(image: &BuilderInputPath) -> Result<(), OciExtractError> {
     validate_oci_layout_path(&image.path)
 }
 
@@ -945,7 +946,7 @@ fn join_rel(parent: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Builder, BuilderInputObject, TypedBuilder};
+    use crate::{Builder, BuilderInputPath, TypedBuilder};
     use bobr_store::Store;
     use bobr_store::fs_tree::{FsTreeEntry as FsTreeV2Entry, FsTreeManifest as FsTreeV2Manifest};
     use flate2::Compression;
@@ -959,7 +960,10 @@ mod tests {
     #[test]
     fn input_spec_is_registered_shape() {
         assert_eq!(TypedBuilder::tag(&OciExtractNewBuilder), "OciExtractNew");
-        assert_eq!(OCI_EXTRACT_SPEC.required_inputs, &["image"]);
+        assert_eq!(
+            OCI_EXTRACT_SPEC.required_inputs,
+            &[InputSlot::object("image")]
+        );
         assert!(!OCI_EXTRACT_SPEC.allow_extra_inputs);
     }
 
@@ -1179,7 +1183,7 @@ mod tests {
         });
         let oci = create_oci_layout(temp.path(), vec![(oci::MEDIA_TYPE_OCI_LAYER, gzip(&tar))]);
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("image", BuilderInputObject { path: oci });
+        inputs.insert("image", BuilderInputPath { path: oci });
 
         let result = OciExtractNewBuilder
             .build_typed(OciExtractNewConfig {}, inputs, &mut cx)
@@ -1273,7 +1277,7 @@ mod tests {
         let mut cx = build_context(temp.path());
         let mut inputs = BuilderInputs::empty();
         let image = create_oci_layout(temp.path(), vec![]);
-        inputs.insert("image", BuilderInputObject { path: image });
+        inputs.insert("image", BuilderInputPath { path: image });
 
         let error = OciExtractNewBuilder
             .build_erased(serde_json::json!({ "unexpected": true }), inputs, &mut cx)

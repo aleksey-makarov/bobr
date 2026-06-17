@@ -19,8 +19,8 @@
 //! 5. Stage the runtime output directory as an fs-tree object.
 
 use mbuild_builder::{
-    BuildContext, BuilderInputObject, BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult,
-    TypedBuilder,
+    BuildContext, BuilderInputPath, BuilderInputs, BuilderRegistry, InputSlot, InputSpec,
+    StagedBuildResult, TypedBuilder,
 };
 use mbuild_core::{BuildLogLevel, BuilderError, load_fs_tree_object};
 use mbuild_runtime::{
@@ -100,7 +100,7 @@ struct BuildStep {
 
 // Static builder contract advertised to the mbuild recipe runtime.
 static SANDBOX_SPEC: InputSpec = InputSpec {
-    required_inputs: &["rootfs"],
+    required_inputs: &[InputSlot::object("rootfs")],
     optional_inputs: &[],
     allow_extra_inputs: true,
 };
@@ -257,7 +257,7 @@ fn stage_fs_tree_output(
 /// Build one runtime step config consumed by `mbuild-runtime`.
 fn build_sandbox_step(
     step: &BuildStep,
-    inputs: &[(String, BuilderInputObject)],
+    inputs: &[(String, BuilderInputPath)],
     cx: &BuildContext,
 ) -> BResult<SandboxStep> {
     let cwd = PathBuf::from(resolve_step_cwd(step, inputs)?);
@@ -392,7 +392,7 @@ fn validate_sandbox_config(config: &SandboxConfig) -> BResult<()> {
 }
 
 /// Ensure the required `rootfs` input is a valid fs-tree object.
-fn validate_rootfs(rootfs: &BuilderInputObject) -> BResult<PathBuf> {
+fn validate_rootfs(rootfs: &BuilderInputPath) -> BResult<PathBuf> {
     load_fs_tree_object(&rootfs.path)
         .map(|loaded| loaded.paths.root_dir)
         .map_err(|error| {
@@ -515,7 +515,7 @@ fn input_mount_path(name: &str) -> String {
 ///
 /// Extra inputs are mounted as complete store objects. They do not interpret
 /// fs-tree layout files such as `manifest.jsonl` or `root/`.
-fn build_sandbox_input(name: &str, input: &BuilderInputObject) -> BResult<SandboxInput> {
+fn build_sandbox_input(name: &str, input: &BuilderInputPath) -> BResult<SandboxInput> {
     let host_path = input.path.clone();
     if !host_path.is_dir() && !host_path.is_file() {
         return Err(SandboxError::InputResolutionFailed(format!(
@@ -538,7 +538,7 @@ fn collect_extra_inputs(
     spec: &InputSpec,
     builder_name: &str,
     inputs: &BuilderInputs,
-) -> BResult<Vec<(String, BuilderInputObject)>> {
+) -> BResult<Vec<(String, BuilderInputPath)>> {
     let mut named = Vec::new();
     for (name, object) in inputs.extras(spec) {
         validate_input_name(name)?;
@@ -557,10 +557,7 @@ fn collect_extra_inputs(
 /// `@@{name}` is an escape that produces a literal `@{name}`. The renderer is
 /// byte-index based, but it advances by UTF-8 char width for non-syntax text so
 /// non-ASCII literals remain valid even though interpolation names are ASCII.
-fn interpolate_step_string(
-    value: &str,
-    inputs: &[(String, BuilderInputObject)],
-) -> BResult<String> {
+fn interpolate_step_string(value: &str, inputs: &[(String, BuilderInputPath)]) -> BResult<String> {
     let mut rendered = String::new();
     let mut index = 0;
 
@@ -630,7 +627,7 @@ fn validate_interpolation_name(key: &str, value: &str, escaped: bool) -> BResult
 }
 
 /// Resolve a built-in or named-input interpolation variable.
-fn interpolation_value(key: &str, inputs: &[(String, BuilderInputObject)]) -> BResult<String> {
+fn interpolation_value(key: &str, inputs: &[(String, BuilderInputPath)]) -> BResult<String> {
     match key {
         "build" => Ok(CONTAINER_BUILD_DIR.to_string()),
         "out" => Ok(CONTAINER_OUT_DIR.to_string()),
@@ -651,7 +648,7 @@ fn interpolation_value(key: &str, inputs: &[(String, BuilderInputObject)]) -> BR
 }
 
 /// Resolve and validate a step working directory.
-fn resolve_step_cwd(step: &BuildStep, inputs: &[(String, BuilderInputObject)]) -> BResult<String> {
+fn resolve_step_cwd(step: &BuildStep, inputs: &[(String, BuilderInputPath)]) -> BResult<String> {
     let cwd = interpolate_step_string(&step.cwd, inputs)?;
     if cwd.is_empty() || !cwd.starts_with('/') {
         return Err(SandboxError::InvalidConfig(format!(
@@ -665,7 +662,7 @@ fn resolve_step_cwd(step: &BuildStep, inputs: &[(String, BuilderInputObject)]) -
 /// Resolve all argv entries for a step.
 fn resolve_step_argv(
     step: &BuildStep,
-    inputs: &[(String, BuilderInputObject)],
+    inputs: &[(String, BuilderInputPath)],
 ) -> BResult<Vec<String>> {
     step.argv
         .iter()
@@ -676,7 +673,7 @@ fn resolve_step_argv(
 /// Resolve all environment values for a step.
 fn resolve_step_env(
     step: &BuildStep,
-    inputs: &[(String, BuilderInputObject)],
+    inputs: &[(String, BuilderInputPath)],
 ) -> BResult<Vec<(String, String)>> {
     let mut rendered = Vec::new();
     for (key, value) in &step.env {
@@ -697,7 +694,7 @@ fn resolve_step_env(
 /// errors are reported as recipe errors rather than partial execution failures.
 fn validate_step_interpolations(
     steps: &[BuildStep],
-    inputs: &[(String, BuilderInputObject)],
+    inputs: &[(String, BuilderInputPath)],
 ) -> BResult<()> {
     for step in steps {
         let _ = resolve_step_cwd(step, inputs)?;
@@ -930,7 +927,7 @@ mod tests {
             mbuild_builder::TypedBuilder::tag(&SandboxBuilder),
             "Sandbox"
         );
-        assert_eq!(SANDBOX_SPEC.required_inputs, &["rootfs"]);
+        assert_eq!(SANDBOX_SPEC.required_inputs, &[InputSlot::object("rootfs")]);
         assert!(SANDBOX_SPEC.allow_extra_inputs);
     }
 
@@ -1019,8 +1016,8 @@ mod tests {
         assert!(!output.exists());
     }
 
-    fn input_object(object_path: PathBuf) -> BuilderInputObject {
-        BuilderInputObject { path: object_path }
+    fn input_object(object_path: PathBuf) -> BuilderInputPath {
+        BuilderInputPath { path: object_path }
     }
 
     #[cfg(unix)]
@@ -1242,13 +1239,13 @@ mod tests {
         let inputs = vec![
             (
                 "script".to_string(),
-                BuilderInputObject {
+                BuilderInputPath {
                     path: temp.path().join("script"),
                 },
             ),
             (
                 "source".to_string(),
-                BuilderInputObject {
+                BuilderInputPath {
                     path: temp.path().join("source"),
                 },
             ),

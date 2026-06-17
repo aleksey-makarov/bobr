@@ -1,5 +1,6 @@
 use crate::{
-    BuildContext, BuilderInputObject, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
+    BuildContext, BuilderInputPath, BuilderInputs, InputSlot, InputSpec, StagedBuildResult,
+    TypedBuilder,
 };
 use flate2::read::GzDecoder;
 use fsobj_hash::{hash_file_bytes, hash_symlink_node};
@@ -37,7 +38,7 @@ pub struct OciExtractConfig {}
 pub struct OciExtractBuilder;
 
 static OCI_EXTRACT_SPEC: InputSpec = InputSpec {
-    required_inputs: &["image"],
+    required_inputs: &[InputSlot::object("image")],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
@@ -130,7 +131,7 @@ impl OciExtractBuilder {
     }
 }
 
-fn validate_oci_layout_input(image: &BuilderInputObject) -> Result<(), OciExtractError> {
+fn validate_oci_layout_input(image: &BuilderInputPath) -> Result<(), OciExtractError> {
     if !image.path.is_dir() {
         return Err(OciExtractError::InvalidInput(format!(
             "image input must resolve to an OCI layout directory: {}",
@@ -960,7 +961,7 @@ fn join_rel(parent: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Builder, BuilderInputObject, TypedBuilder};
+    use crate::{Builder, BuilderInputPath, TypedBuilder};
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use sha2::{Digest, Sha256};
@@ -972,7 +973,10 @@ mod tests {
     #[test]
     fn input_spec_is_registered_shape() {
         assert_eq!(TypedBuilder::tag(&OciExtractBuilder), "OciExtract");
-        assert_eq!(OCI_EXTRACT_SPEC.required_inputs, &["image"]);
+        assert_eq!(
+            OCI_EXTRACT_SPEC.required_inputs,
+            &[InputSlot::object("image")]
+        );
         assert!(!OCI_EXTRACT_SPEC.allow_extra_inputs);
     }
 
@@ -1207,7 +1211,7 @@ mod tests {
         let tar = make_tar(|builder| append_file(builder, "bin/tool", b"tool", 0, 0, 0o755));
         let oci = create_oci_layout(temp.path(), vec![(oci::MEDIA_TYPE_OCI_LAYER, gzip(&tar))]);
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("image", BuilderInputObject { path: oci });
+        inputs.insert("image", BuilderInputPath { path: oci });
 
         let result = OciExtractBuilder
             .build_with_materializer(
@@ -1233,7 +1237,7 @@ mod tests {
         let tar = make_tar(|builder| append_dir(builder, "private", 0, 0, 0o000));
         let oci = create_oci_layout(temp.path(), vec![(oci::MEDIA_TYPE_OCI_LAYER, gzip(&tar))]);
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("image", BuilderInputObject { path: oci });
+        inputs.insert("image", BuilderInputPath { path: oci });
 
         let result = OciExtractBuilder
             .build_with_materializer(
@@ -1257,7 +1261,7 @@ mod tests {
         let mut cx = build_context(temp.path());
         let mut inputs = BuilderInputs::empty();
         let image = create_oci_layout(temp.path(), vec![]);
-        inputs.insert("image", BuilderInputObject { path: image });
+        inputs.insert("image", BuilderInputPath { path: image });
 
         let error = OciExtractBuilder
             .build_erased(serde_json::json!({ "unexpected": true }), inputs, &mut cx)

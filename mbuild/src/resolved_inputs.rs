@@ -1,5 +1,9 @@
-use mbuild_builder::{BuilderInputObject, BuilderInputs, InputSpec};
-use mbuild_core::{BuilderError, ObjectHash};
+use crate::runtime::{RuntimeError, map_store_error};
+use bobr_store::Store;
+use mbuild_builder::{
+    BuilderInputPath, BuilderInputs, InputKind, InputSpec, materialize_fs_tree_root,
+};
+use mbuild_core::{BuilderError, ObjectHash, RuntimeProvider};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -89,25 +93,54 @@ impl ResolvedInputs {
         Ok(ordered)
     }
 
-    pub(crate) fn into_builder_inputs(self) -> BuilderInputs {
-        let slots = self
-            .slots
-            .into_iter()
-            .map(|(name, value)| {
-                let value = BuilderInputObject {
-                    path: value.object_path,
-                };
-                (name, value)
-            })
-            .collect();
-        BuilderInputs::new(slots)
+    pub(crate) fn prepare_builder_inputs(
+        self,
+        spec: &InputSpec,
+        store: &Store,
+        runtime: &RuntimeProvider,
+    ) -> Result<BuilderInputs, RuntimeError> {
+        let mut slots = BTreeMap::new();
+        for (name, value) in self.slots {
+            let path = match spec.input_kind(&name).unwrap_or(InputKind::Object) {
+                InputKind::Object => value.object_path,
+                InputKind::FsTreeRoot => {
+                    prepare_fs_tree_root_input(store, runtime, value.object_hash)?
+                }
+            };
+            slots.insert(name, BuilderInputPath { path });
+        }
+        Ok(BuilderInputs::new(slots))
     }
+}
+
+fn prepare_fs_tree_root_input(
+    store: &Store,
+    runtime: &RuntimeProvider,
+    object_hash: ObjectHash,
+) -> Result<PathBuf, RuntimeError> {
+    let fs_tree = store.fs_tree();
+    if let Some(root) = fs_tree
+        .lookup_materialized_root(object_hash)
+        .map_err(map_store_error)?
+    {
+        return Ok(root);
+    }
+    materialize_fs_tree_root(runtime, fs_tree, object_hash).map_err(|error| {
+        RuntimeError::Build(format!(
+            "failed to materialize fs-tree input '{}': {error}",
+            object_hash
+        ))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bobr_store::{Store, import_object};
+    use mbuild_builder::InputSlot;
+    use std::fs;
     use std::str::FromStr;
+    use tempfile::tempdir;
 
     fn sample_object() -> ResolvedDependency {
         ResolvedDependency {
@@ -126,9 +159,9 @@ mod tests {
         inputs.insert("script", object.clone());
         inputs.insert("source", object.clone());
 
-        let spec = InputSpec {
-            required_inputs: &["rootfs"],
-            optional_inputs: &["base"],
+        static SPEC: InputSpec = InputSpec {
+            required_inputs: &[InputSlot::object("rootfs")],
+            optional_inputs: &[InputSlot::object("base")],
             allow_extra_inputs: true,
         };
 
@@ -137,8 +170,8 @@ mod tests {
             object.object_path
         );
         assert!(inputs.optional("base").is_none());
-        assert!(inputs.extra(&spec, "source").is_some());
-        assert_eq!(inputs.extras(&spec).count(), 2);
+        assert!(inputs.extra(&SPEC, "source").is_some());
+        assert_eq!(inputs.extras(&SPEC).count(), 2);
     }
 
     #[test]
@@ -159,8 +192,8 @@ mod tests {
         let first = sample_object();
         let second = sample_object();
 
-        let spec = InputSpec {
-            required_inputs: &["rootfs"],
+        static SPEC: InputSpec = InputSpec {
+            required_inputs: &[InputSlot::object("rootfs")],
             optional_inputs: &[],
             allow_extra_inputs: true,
         };
@@ -169,7 +202,7 @@ mod tests {
             ("source_a".to_string(), first.clone()),
         ]));
 
-        let extras = inputs.extras(&spec).collect::<Vec<_>>();
+        let extras = inputs.extras(&SPEC).collect::<Vec<_>>();
         assert_eq!(extras[0].0, "source_a");
         assert_eq!(extras[0].1.object_path, first.object_path);
         assert_eq!(extras[1].0, "source_b");
@@ -195,17 +228,103 @@ mod tests {
 
     #[test]
     fn resolved_inputs_convert_to_builder_inputs() {
+        let temp = tempdir().unwrap();
+        let store_root = temp.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = Store::create(&store_root).unwrap();
         let object = sample_object();
         let inputs = ResolvedInputs::new(BTreeMap::from([("script".to_string(), object.clone())]));
+        static SPEC: InputSpec = InputSpec {
+            required_inputs: &[InputSlot::object("script")],
+            optional_inputs: &[],
+            allow_extra_inputs: false,
+        };
 
-        let builder_inputs = inputs.into_builder_inputs();
+        let builder_inputs = inputs
+            .prepare_builder_inputs(&SPEC, &store, &RuntimeProvider::host())
+            .unwrap();
         let resolved = builder_inputs.required("script").unwrap();
         assert_eq!(resolved.path, object.object_path);
     }
 
+    #[test]
+    fn resolved_inputs_prepare_fs_tree_root_materializes_cache() {
+        let temp = tempdir().unwrap();
+        let store_root = temp.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = Store::create(&store_root).unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("file"), b"hello\n").unwrap();
+        let manifest = store.fs_tree().scan(&source).unwrap();
+        let staged_manifest = temp.path().join("manifest.jsonl");
+        manifest.write_canonical(&staged_manifest).unwrap();
+        let object_hash = import_object(&store, &staged_manifest).unwrap();
+        let inputs = ResolvedInputs::new(BTreeMap::from([(
+            "tree".to_string(),
+            ResolvedDependency {
+                object_hash,
+                object_path: store.object_path(object_hash),
+            },
+        )]));
+        static SPEC: InputSpec = InputSpec {
+            required_inputs: &[InputSlot::fs_tree_root("tree")],
+            optional_inputs: &[],
+            allow_extra_inputs: false,
+        };
+
+        let builder_inputs = inputs
+            .prepare_builder_inputs(&SPEC, &store, &RuntimeProvider::host())
+            .unwrap();
+
+        let resolved = builder_inputs.required("tree").unwrap();
+        assert_eq!(
+            resolved.path,
+            store.fs_trees_dir().join(object_hash.to_hex())
+        );
+        assert_eq!(fs::read(resolved.path.join("file")).unwrap(), b"hello\n");
+    }
+
+    #[test]
+    fn resolved_inputs_prepare_fs_tree_root_reuses_cache_without_runtime_setup() {
+        let temp = tempdir().unwrap();
+        let store_root = temp.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = Store::create(&store_root).unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("file"), b"hello\n").unwrap();
+        let manifest = store.fs_tree().scan(&source).unwrap();
+        let staged_manifest = temp.path().join("manifest.jsonl");
+        manifest.write_canonical(&staged_manifest).unwrap();
+        let object_hash = import_object(&store, &staged_manifest).unwrap();
+        let root = store
+            .fs_tree()
+            .ensure_materialized_root(object_hash)
+            .unwrap();
+        let inputs = ResolvedInputs::new(BTreeMap::from([(
+            "tree".to_string(),
+            ResolvedDependency {
+                object_hash,
+                object_path: store.object_path(object_hash),
+            },
+        )]));
+        static SPEC: InputSpec = InputSpec {
+            required_inputs: &[InputSlot::fs_tree_root("tree")],
+            optional_inputs: &[],
+            allow_extra_inputs: false,
+        };
+
+        let builder_inputs = inputs
+            .prepare_builder_inputs(&SPEC, &store, &RuntimeProvider::namespace())
+            .unwrap();
+
+        assert_eq!(builder_inputs.required("tree").unwrap().path, root);
+    }
+
     static ORDERED_SPEC: InputSpec = InputSpec {
-        required_inputs: &["first"],
-        optional_inputs: &["optional"],
+        required_inputs: &[InputSlot::object("first")],
+        optional_inputs: &[InputSlot::object("optional")],
         allow_extra_inputs: true,
     };
 

@@ -4,7 +4,7 @@ use super::legacy_object::{
     load_fs_tree_compose_input, materialize_composed_tree_output, tree_merge_compose_details,
 };
 use crate::{
-    BuildContext, BuilderInputObject, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
+    BuildContext, BuilderInputPath, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
 };
 use mbuild_core::{BuildLogLevel, BuilderError};
 use serde::Deserialize;
@@ -115,7 +115,7 @@ pub(super) fn build_tree_merge(
 
 pub(super) fn tree_merge_input(
     name: &str,
-    object: &BuilderInputObject,
+    object: &BuilderInputPath,
 ) -> Result<IndexedTreeMergeInput, BuilderError> {
     let compose = load_fs_tree_compose_input(&object.path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(

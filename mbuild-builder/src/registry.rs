@@ -127,7 +127,7 @@ pub fn register_in_tree_builders(registry: &mut BuilderRegistry) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult};
+    use crate::{BuildContext, BuilderInputs, InputSlot, InputSpec, StagedBuildResult};
     use mbuild_core::BuilderError;
     use serde_json::Value;
     use std::str::FromStr;
@@ -139,13 +139,13 @@ mod tests {
     };
 
     static INVALID_SPEC: InputSpec = InputSpec {
-        required_inputs: &["input", "input"],
+        required_inputs: &[InputSlot::object("input"), InputSlot::object("input")],
         optional_inputs: &[],
         allow_extra_inputs: false,
     };
 
     static REQUIRED_SPEC: InputSpec = InputSpec {
-        required_inputs: &["rootfs"],
+        required_inputs: &[InputSlot::object("rootfs")],
         optional_inputs: &[],
         allow_extra_inputs: false,
     };

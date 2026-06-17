@@ -1,4 +1,4 @@
-use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
+use crate::{BuildContext, BuilderInputs, InputSlot, InputSpec, StagedBuildResult, TypedBuilder};
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use bobr_store::fs_tree::{FsTree, FsTreeManifest};
 use mbuild_core::{BuildLogLevel, BuilderError};
@@ -26,7 +26,7 @@ pub struct ErofsRootfsNewConfig {
 }
 
 static EROFS_ROOTFS_NEW_SPEC: InputSpec = InputSpec {
-    required_inputs: &["tree"],
+    required_inputs: &[InputSlot::object("tree")],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
@@ -297,7 +297,7 @@ impl std::fmt::Display for ErofsRootfsError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BuilderInputObject;
+    use crate::BuilderInputPath;
     use bobr_store::Store;
     use std::fs;
     use std::io;
@@ -307,7 +307,10 @@ mod tests {
     #[test]
     fn input_spec_is_single_tree_input() {
         assert_eq!(TypedBuilder::tag(&ErofsRootfsNewBuilder), "ErofsRootfsNew");
-        assert_eq!(EROFS_ROOTFS_NEW_SPEC.required_inputs, &["tree"]);
+        assert_eq!(
+            EROFS_ROOTFS_NEW_SPEC.required_inputs,
+            &[InputSlot::object("tree")]
+        );
         assert!(!EROFS_ROOTFS_NEW_SPEC.allow_extra_inputs);
     }
 
@@ -337,7 +340,7 @@ mod tests {
         let mut inputs = BuilderInputs::empty();
         inputs.insert(
             "tree",
-            BuilderInputObject {
+            BuilderInputPath {
                 path: temp.path().join("manifest.jsonl"),
             },
         );

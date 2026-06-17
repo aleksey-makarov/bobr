@@ -4,7 +4,7 @@ use super::legacy_object::{
     current_epoch_nanos, load_fs_tree_compose_input,
 };
 use crate::{
-    BuildContext, BuilderInputObject, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
+    BuildContext, BuilderInputPath, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
 };
 use mbuild_core::{BuildLogLevel, BuilderError, ComposedFsTree, FsTreeComposeInput};
 use mbuild_runtime::FsTreeArchiveInput;
@@ -137,7 +137,7 @@ pub(super) fn validate_erofs_config(config: &ErofsRootfsConfig) -> Result<(), Bu
 
 pub(super) fn erofs_rootfs_input(
     name: &str,
-    object: &BuilderInputObject,
+    object: &BuilderInputPath,
 ) -> Result<IndexedTreeMergeInput, BuilderError> {
     let compose = load_fs_tree_compose_input(&object.path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(

@@ -92,6 +92,8 @@ fn execute_builder_subject(
             logger: Arc::new(NoopBuildLogger),
         });
     }
+    let builder_inputs =
+        inputs.prepare_builder_inputs(subject.input_spec(), cx.store, &cx.runtime_provider)?;
 
     // Miss: create the workspace and run the builder.
     let workspace = create_workspace(
@@ -145,7 +147,7 @@ fn execute_builder_subject(
         cx.runtime_provider.clone(),
     );
     let staged = subject
-        .execute(&ctx, inputs.into_builder_inputs(), Some(cx.store.fs_tree()))
+        .execute(&ctx, builder_inputs, Some(cx.store.fs_tree()))
         .map_err(|error| {
             log_runtime_event(
                 logger.as_ref(),

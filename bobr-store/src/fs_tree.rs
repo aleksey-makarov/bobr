@@ -7,8 +7,9 @@
 #![deny(missing_docs)]
 
 use crate::StoreError;
-use crate::store::{FS_FILES_DIR, FS_TREES_DIR};
+use crate::store::{FS_FILES_DIR, FS_TREES_DIR, OBJECTS_DIR};
 use globset::{Glob, GlobMatcher};
+use mbuild_core::ObjectHash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -189,6 +190,18 @@ impl FsTree {
         self.root.join(FS_FILES_DIR)
     }
 
+    fn fs_trees_dir(&self) -> PathBuf {
+        self.root.join(FS_TREES_DIR)
+    }
+
+    fn object_path(&self, object_hash: ObjectHash) -> PathBuf {
+        self.root.join(OBJECTS_DIR).join(object_hash.to_hex())
+    }
+
+    fn materialized_root_path(&self, manifest_hash: ObjectHash) -> PathBuf {
+        self.fs_trees_dir().join(manifest_hash.to_hex())
+    }
+
     /// Scans an immutable filesystem tree into a manifest and imports regular
     /// files into this store's `fs-files` directory using hardlinks.
     ///
@@ -213,6 +226,68 @@ impl FsTree {
         install: &FsTreeInstall,
     ) -> Result<FsTreeManifest, StoreError> {
         import_fs_tree_with_install_root(source_root, &self.fs_files_dir(), install)
+    }
+
+    /// Returns the materialized cache root for `manifest_hash` if it already
+    /// exists.
+    ///
+    /// The cache root is `<store>/fs-trees/<manifest_hash>`. This method does
+    /// not read or validate the manifest object; it only checks whether the
+    /// cache path already contains a real directory. Any other existing file
+    /// type at the cache path is treated as corrupt store data.
+    pub fn lookup_materialized_root(
+        &self,
+        manifest_hash: ObjectHash,
+    ) -> Result<Option<PathBuf>, StoreError> {
+        validate_fs_tree_root(&self.root)?;
+        let root = self.materialized_root_path(manifest_hash);
+        match fs::symlink_metadata(&root) {
+            Ok(metadata) if metadata.file_type().is_dir() => Ok(Some(root)),
+            Ok(_) => Err(StoreError::InvalidData(format!(
+                "fs-tree materialization cache path exists but is not a real directory: '{}'",
+                root.display()
+            ))),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(map_io(
+                &root,
+                "inspect fs-tree materialization cache",
+                error,
+            )),
+        }
+    }
+
+    /// Ensures that `<store>/fs-trees/<manifest_hash>` contains the
+    /// materialized filesystem tree for the canonical manifest object.
+    ///
+    /// On cache hit this returns the existing cache root without reading the
+    /// manifest. On miss it reads `<store>/objects/<manifest_hash>`, parses it
+    /// as a canonical [`FsTreeManifest`], materializes it from `fs-files` into
+    /// a store-owned staging directory, and publishes that directory as the
+    /// cache root.
+    pub fn ensure_materialized_root(
+        &self,
+        manifest_hash: ObjectHash,
+    ) -> Result<PathBuf, StoreError> {
+        if let Some(root) = self.lookup_materialized_root(manifest_hash)? {
+            return Ok(root);
+        }
+
+        let manifest = FsTreeManifest::read_canonical(&self.object_path(manifest_hash))?;
+        let final_root = self.materialized_root_path(manifest_hash);
+        let staging_root = create_unique_fs_tree_staging_dir(&self.fs_trees_dir(), manifest_hash)?;
+        let result = materialize_fs_tree_with_root(&manifest, &self.fs_files_dir(), &staging_root)
+            .and_then(|()| publish_materialized_fs_tree(&staging_root, &final_root));
+        match result {
+            Ok(()) => Ok(final_root),
+            Err(error) => {
+                let _ = fs::remove_dir_all(&staging_root);
+                if let Some(root) = self.lookup_materialized_root(manifest_hash)? {
+                    Ok(root)
+                } else {
+                    Err(error)
+                }
+            }
+        }
     }
 
     /// Materializes a manifest from this store's `fs-files` directory into an
@@ -657,6 +732,48 @@ fn create_dir_all(path: &Path, label: &str) -> Result<(), StoreError> {
             "failed to create {label} '{}': {error}",
             path.display()
         ))
+    })
+}
+
+fn create_unique_fs_tree_staging_dir(
+    fs_trees_root: &Path,
+    manifest_hash: ObjectHash,
+) -> Result<PathBuf, StoreError> {
+    for attempt in 0..1024 {
+        let path = fs_trees_root.join(format!(
+            ".fs-tree-materialize-{}-{}-{attempt}",
+            manifest_hash.to_hex(),
+            std::process::id()
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(map_io(
+                    &path,
+                    "create fs-tree materialization staging directory",
+                    error,
+                ));
+            }
+        }
+    }
+
+    Err(StoreError::Io(format!(
+        "failed to allocate fs-tree materialization staging directory under '{}'",
+        fs_trees_root.display()
+    )))
+}
+
+fn publish_materialized_fs_tree(staging_root: &Path, final_root: &Path) -> Result<(), StoreError> {
+    fs::rename(staging_root, final_root).map_err(|error| {
+        map_io(
+            final_root,
+            &format!(
+                "publish fs-tree materialization from '{}'",
+                staging_root.display()
+            ),
+            error,
+        )
     })
 }
 
@@ -2472,5 +2589,99 @@ mod tests {
         assert!(materialize_fs_tree_with_root(&manifest, &fs_files, &output).is_err());
         assert!(output.exists());
         assert!(output.join("partial").is_dir());
+    }
+
+    #[test]
+    fn ensure_materialized_root_creates_fs_tree_cache_from_manifest_object() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_root = temp_dir.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = crate::Store::create(&store_root).unwrap();
+        let source = temp_dir.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("file"), b"hello\n").unwrap();
+        let manifest = store.fs_tree().scan(&source).unwrap();
+        let staged_manifest = temp_dir.path().join("manifest.jsonl");
+        manifest.write_canonical(&staged_manifest).unwrap();
+        let manifest_hash = crate::import_object(&store, &staged_manifest).unwrap();
+
+        let root = store
+            .fs_tree()
+            .ensure_materialized_root(manifest_hash)
+            .unwrap();
+
+        assert_eq!(root, store.fs_trees_dir().join(manifest_hash.to_hex()));
+        assert_eq!(fs::read(root.join("file")).unwrap(), b"hello\n");
+        assert_eq!(
+            store
+                .fs_tree()
+                .lookup_materialized_root(manifest_hash)
+                .unwrap(),
+            Some(root)
+        );
+    }
+
+    #[test]
+    fn ensure_materialized_root_reuses_existing_cache_without_manifest_object() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_root = temp_dir.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = crate::Store::create(&store_root).unwrap();
+        let manifest_hash = ObjectHash::from_str(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let root = store.fs_trees_dir().join(manifest_hash.to_hex());
+        fs::create_dir(&root).unwrap();
+
+        assert_eq!(
+            store
+                .fs_tree()
+                .ensure_materialized_root(manifest_hash)
+                .unwrap(),
+            root
+        );
+    }
+
+    #[test]
+    fn lookup_materialized_root_rejects_non_directory_cache_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_root = temp_dir.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = crate::Store::create(&store_root).unwrap();
+        let manifest_hash = ObjectHash::from_str(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+        fs::write(
+            store.fs_trees_dir().join(manifest_hash.to_hex()),
+            b"not a dir",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            store.fs_tree().lookup_materialized_root(manifest_hash),
+            Err(StoreError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn ensure_materialized_root_does_not_publish_cache_on_missing_fs_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_root = temp_dir.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = crate::Store::create(&store_root).unwrap();
+        let manifest = manifest(vec![root(), FsTreeEntry::file("missing", hash())]);
+        let staged_manifest = temp_dir.path().join("manifest.jsonl");
+        manifest.write_canonical(&staged_manifest).unwrap();
+        let manifest_hash = crate::import_object(&store, &staged_manifest).unwrap();
+
+        assert!(
+            store
+                .fs_tree()
+                .ensure_materialized_root(manifest_hash)
+                .is_err()
+        );
+        assert!(!store.fs_trees_dir().join(manifest_hash.to_hex()).exists());
     }
 }

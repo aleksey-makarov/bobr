@@ -107,10 +107,10 @@ impl BuilderPlannedSubject {
         }
 
         for required in spec.required_inputs {
-            if !inputs.contains_key(*required) {
+            if !inputs.contains_key(required.name) {
                 return Err(BuilderPlanError::invalid_request(format!(
                     "builder '{}' is missing required input '{}' in recipe '{}'",
-                    tag, required, name
+                    tag, required.name, name
                 )));
             }
         }

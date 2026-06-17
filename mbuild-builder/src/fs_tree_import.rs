@@ -1,4 +1,4 @@
-use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
+use crate::{BuildContext, BuilderInputs, InputSlot, InputSpec, StagedBuildResult, TypedBuilder};
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use bobr_store::fs_tree::{FsTree, FsTreeInstall};
 use mbuild_core::{BuildLogLevel, BuilderError};
@@ -14,7 +14,7 @@ pub struct FsTreeImportConfig {
 pub struct FsTreeImportBuilder;
 
 static FS_TREE_IMPORT_SPEC: InputSpec = InputSpec {
-    required_inputs: &["input"],
+    required_inputs: &[InputSlot::object("input")],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
@@ -117,7 +117,7 @@ impl RuntimeFunction for FsTreeImportFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Builder, BuilderInputObject};
+    use crate::{Builder, BuilderInputPath};
     use bobr_store::Store;
     use bobr_store::fs_tree::{FsTreeEntry, FsTreeInstallAttrs, FsTreeInstallRule, FsTreeManifest};
     use std::collections::BTreeMap;
@@ -143,7 +143,7 @@ mod tests {
     fn input_object(path: PathBuf) -> BuilderInputs {
         BuilderInputs::new(BTreeMap::from([(
             "input".to_string(),
-            BuilderInputObject { path },
+            BuilderInputPath { path },
         )]))
     }
 
