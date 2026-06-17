@@ -289,22 +289,6 @@ impl FsTree {
             }
         }
     }
-
-    /// Materializes a manifest from this store's `fs-files` directory into an
-    /// empty output root.
-    ///
-    /// The output root must be an absolute existing real directory, not a
-    /// symlink, and must be empty. Regular files are hardlinked from
-    /// `fs-files`, symlinks are recreated from manifest targets, and directory
-    /// ownership and modes are applied after all children have been created.
-    /// On error, partial output is left for the caller to inspect or remove.
-    pub fn materialize(
-        &self,
-        manifest: &FsTreeManifest,
-        output_root: &Path,
-    ) -> Result<(), StoreError> {
-        materialize_fs_tree_with_root(manifest, &self.fs_files_dir(), output_root)
-    }
 }
 
 impl Serialize for FsTree {
