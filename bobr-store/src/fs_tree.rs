@@ -13,7 +13,7 @@ use mbuild_core::ObjectHash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::CString;
 use std::fmt;
 use std::fs;
@@ -426,6 +426,92 @@ impl FsTreeManifest {
     pub fn entries(&self) -> &[FsTreeEntry] {
         &self.entries
     }
+}
+
+/// Selects a subset of a canonical fs-tree manifest.
+///
+/// `include` contains relative glob patterns matched against manifest paths.
+/// A pattern ending in `/**` also matches the prefix path itself. The root
+/// entry is not selected as a payload entry, but required parent directories
+/// are added automatically for every selected non-root path.
+///
+/// This is a pure manifest operation. It does not inspect `fs-files`, does not
+/// materialize an fs-tree root, and does not verify that regular file payloads
+/// exist in any store.
+pub fn subset_manifest(
+    manifest: &FsTreeManifest,
+    include: &[String],
+) -> Result<FsTreeManifest, StoreError> {
+    let patterns = compile_fs_tree_subset_patterns(include)?;
+    let by_path = manifest
+        .entries()
+        .iter()
+        .map(|entry| (entry.path(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = BTreeSet::<String>::new();
+
+    for entry in manifest.entries() {
+        let path = entry.path();
+        if path.is_empty() {
+            continue;
+        }
+        if fs_tree_subset_path_matches(path, &patterns) {
+            selected.insert(path.to_string());
+            add_fs_tree_subset_parent_dirs(path, &by_path, &mut selected)?;
+        }
+    }
+
+    if !selected.iter().any(|path| !path.is_empty()) {
+        return Err(StoreError::InvalidInput(
+            "fs-tree subset include patterns selected no paths".to_string(),
+        ));
+    }
+
+    let entries = manifest
+        .entries()
+        .iter()
+        .filter(|entry| selected.contains(entry.path()))
+        .cloned()
+        .collect();
+    FsTreeManifest::from_entries(entries)
+}
+
+/// Merges canonical fs-tree manifests.
+///
+/// Entries are merged by path. Identical overlaps are allowed, including
+/// matching directory entries with the same uid, gid, and mode. Any kind,
+/// metadata, symlink target, or regular file hash conflict is rejected.
+///
+/// This is a pure manifest operation. It does not inspect `fs-files`, does not
+/// materialize an fs-tree root, and does not verify that regular file payloads
+/// exist in any store.
+pub fn merge_manifests(manifests: &[FsTreeManifest]) -> Result<FsTreeManifest, StoreError> {
+    if manifests.is_empty() {
+        return Err(StoreError::InvalidInput(
+            "fs-tree merge requires at least one manifest".to_string(),
+        ));
+    }
+
+    let mut by_path = BTreeMap::<String, FsTreeEntry>::new();
+    for manifest in manifests {
+        for entry in manifest.entries() {
+            match by_path.get(entry.path()) {
+                Some(existing) if existing == entry => {}
+                Some(existing) => {
+                    return Err(StoreError::InvalidInput(format!(
+                        "conflicting fs-tree entries at '{}': {}",
+                        entry.path(),
+                        fs_tree_merge_conflict_reason(existing, entry)
+                    )));
+                }
+                None => {
+                    by_path.insert(entry.path().to_string(), entry.clone());
+                }
+            }
+        }
+    }
+
+    FsTreeManifest::from_entries(by_path.into_values().collect())
 }
 
 impl FsTreeEntry {
@@ -891,6 +977,101 @@ fn compile_fs_tree_install_rules(
             })
         })
         .collect()
+}
+
+#[derive(Debug)]
+struct CompiledFsTreeSubsetPattern {
+    pattern: String,
+    matcher: GlobMatcher,
+}
+
+fn compile_fs_tree_subset_patterns(
+    patterns: &[String],
+) -> Result<Vec<CompiledFsTreeSubsetPattern>, StoreError> {
+    if patterns.is_empty() {
+        return Err(StoreError::InvalidInput(
+            "fs-tree subset include patterns must contain at least one pattern".to_string(),
+        ));
+    }
+
+    patterns
+        .iter()
+        .map(|pattern| {
+            validate_fs_tree_subset_pattern(pattern)?;
+            let glob = Glob::new(pattern).map_err(|error| {
+                StoreError::InvalidInput(format!(
+                    "invalid fs-tree subset include pattern '{}': {error}",
+                    pattern
+                ))
+            })?;
+            Ok(CompiledFsTreeSubsetPattern {
+                pattern: pattern.clone(),
+                matcher: glob.compile_matcher(),
+            })
+        })
+        .collect()
+}
+
+fn validate_fs_tree_subset_pattern(pattern: &str) -> Result<(), StoreError> {
+    if pattern.is_empty() {
+        return Err(StoreError::InvalidInput(
+            "fs-tree subset include pattern must not be empty".to_string(),
+        ));
+    }
+    let path = Path::new(pattern);
+    if path.is_absolute() {
+        return Err(StoreError::InvalidInput(format!(
+            "fs-tree subset include pattern '{pattern}' must be relative"
+        )));
+    }
+    if pattern.contains('\\') {
+        return Err(StoreError::InvalidInput(format!(
+            "fs-tree subset include pattern '{pattern}' must use '/' separators"
+        )));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(StoreError::InvalidInput(format!(
+            "fs-tree subset include pattern '{pattern}' must not contain '..'"
+        )));
+    }
+    Ok(())
+}
+
+fn fs_tree_subset_path_matches(path: &str, patterns: &[CompiledFsTreeSubsetPattern]) -> bool {
+    patterns.iter().any(|pattern| {
+        pattern.matcher.is_match(path)
+            || pattern
+                .pattern
+                .strip_suffix("/**")
+                .is_some_and(|prefix| path == prefix)
+    })
+}
+
+fn add_fs_tree_subset_parent_dirs(
+    path: &str,
+    by_path: &BTreeMap<&str, &FsTreeEntry>,
+    selected: &mut BTreeSet<String>,
+) -> Result<(), StoreError> {
+    selected.insert(String::new());
+    let mut remainder = path;
+    while let Some((parent, _)) = remainder.rsplit_once('/') {
+        let entry = by_path.get(parent).ok_or_else(|| {
+            StoreError::InvalidData(format!(
+                "fs-tree manifest is missing parent directory '{parent}' for '{path}'"
+            ))
+        })?;
+        if !matches!(entry, FsTreeEntry::Directory { .. }) {
+            return Err(StoreError::InvalidData(format!(
+                "fs-tree manifest parent '{parent}' for '{path}' is not a directory"
+            )));
+        }
+        selected.insert(parent.to_string());
+        remainder = parent;
+    }
+    Ok(())
 }
 
 fn validate_install_rule_attrs(rule: &FsTreeInstallRule) -> Result<(), StoreError> {
@@ -1381,6 +1562,69 @@ fn validate_entries(entries: &[FsTreeEntry]) -> Result<(), StoreError> {
     Ok(())
 }
 
+fn fs_tree_merge_conflict_reason(existing: &FsTreeEntry, new: &FsTreeEntry) -> String {
+    if existing.kind() != new.kind() {
+        return format!(
+            "entry kind differs (existing {}, new {})",
+            fs_tree_entry_kind_name(existing.kind()),
+            fs_tree_entry_kind_name(new.kind())
+        );
+    }
+
+    match (existing, new) {
+        (
+            FsTreeEntry::File {
+                hash: existing_hash,
+                ..
+            },
+            FsTreeEntry::File { hash: new_hash, .. },
+        ) => format!("file hash differs ({existing_hash} vs {new_hash})"),
+        (
+            FsTreeEntry::Directory {
+                uid: existing_uid,
+                gid: existing_gid,
+                mode: existing_mode,
+                ..
+            },
+            FsTreeEntry::Directory {
+                uid: new_uid,
+                gid: new_gid,
+                mode: new_mode,
+                ..
+            },
+        ) => format!(
+            "directory metadata differs ({}:{} {:o} vs {}:{} {:o})",
+            existing_uid, existing_gid, existing_mode, new_uid, new_gid, new_mode
+        ),
+        (
+            FsTreeEntry::Symlink {
+                uid: existing_uid,
+                gid: existing_gid,
+                target: existing_target,
+                ..
+            },
+            FsTreeEntry::Symlink {
+                uid: new_uid,
+                gid: new_gid,
+                target: new_target,
+                ..
+            },
+        ) => format!(
+            "symlink metadata differs ({}:{} '{}' vs {}:{} '{}')",
+            existing_uid, existing_gid, existing_target, new_uid, new_gid, new_target
+        ),
+        _ => "entry differs".to_string(),
+    }
+}
+
+fn fs_tree_entry_kind_name(kind: FsTreeEntryKind) -> &'static str {
+    match kind {
+        FsTreeEntryKind::File => "file",
+        FsTreeEntryKind::Directory => "directory",
+        FsTreeEntryKind::Symlink => "symlink",
+    }
+}
+
 fn validate_entry_strings(entry: &FsTreeEntry) -> Result<(), StoreError> {
     if let FsTreeEntry::Symlink { target, .. } = entry {
         validate_canonical_string("fs-tree symlink target", target)?;
@@ -1731,6 +1975,14 @@ mod tests {
         r#"{"schema":"bobr-fs-tree-manifest-v2"}"#
     }
 
+    fn patterns(patterns: &[&str]) -> Vec<String> {
+        patterns.iter().map(|pattern| pattern.to_string()).collect()
+    }
+
+    fn paths(manifest: &FsTreeManifest) -> Vec<&str> {
+        manifest.entries().iter().map(FsTreeEntry::path).collect()
+    }
+
     #[test]
     fn writer_emits_exact_canonical_jsonl() {
         let manifest = manifest(vec![
@@ -1767,6 +2019,153 @@ mod tests {
 
         let paths: Vec<&str> = manifest.entries().iter().map(FsTreeEntry::path).collect();
         assert_eq!(paths, vec!["", "a", "b"]);
+    }
+
+    #[test]
+    fn subset_manifest_selects_matches_and_parent_directories() {
+        let input = manifest(vec![
+            root(),
+            FsTreeEntry::directory("usr", 0, 0, 0o755),
+            FsTreeEntry::directory("usr/bin", 0, 0, 0o755),
+            FsTreeEntry::file("usr/bin/tool", hash()),
+            FsTreeEntry::directory("usr/lib", 0, 0, 0o755),
+            FsTreeEntry::file("usr/lib/libx.so", other_hash()),
+            FsTreeEntry::symlink("tool-link", 1, 2, "usr/bin/tool"),
+        ]);
+
+        let subset = subset_manifest(&input, &patterns(&["usr/bin/*", "tool-link"])).unwrap();
+        let entries = subset.entries();
+
+        assert_eq!(
+            paths(&subset),
+            vec!["", "tool-link", "usr", "usr/bin", "usr/bin/tool"]
+        );
+        assert!(entries.contains(&FsTreeEntry::symlink("tool-link", 1, 2, "usr/bin/tool")));
+        assert!(entries.contains(&FsTreeEntry::file("usr/bin/tool", hash())));
+    }
+
+    #[test]
+    fn subset_manifest_double_star_matches_prefix_path() {
+        let input = manifest(vec![
+            root(),
+            FsTreeEntry::directory("usr", 0, 0, 0o755),
+            FsTreeEntry::directory("usr/bin", 0, 0, 0o755),
+            FsTreeEntry::file("usr/bin/tool", hash()),
+            FsTreeEntry::file("usr/readme", other_hash()),
+        ]);
+
+        let subset = subset_manifest(&input, &patterns(&["usr/bin/**"])).unwrap();
+
+        assert_eq!(paths(&subset), vec!["", "usr", "usr/bin", "usr/bin/tool"]);
+    }
+
+    #[test]
+    fn subset_manifest_rejects_invalid_patterns_and_empty_result() {
+        let input = manifest(vec![root(), FsTreeEntry::file("a", hash())]);
+
+        for include in [
+            Vec::<String>::new(),
+            patterns(&[""]),
+            patterns(&["/abs"]),
+            patterns(&["a\\b"]),
+            patterns(&["../a"]),
+        ] {
+            assert!(matches!(
+                subset_manifest(&input, &include),
+                Err(StoreError::InvalidInput(_))
+            ));
+        }
+
+        assert!(matches!(
+            subset_manifest(&input, &patterns(&["missing/**"])),
+            Err(StoreError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn merge_manifests_combines_disjoint_manifests() {
+        let left = manifest(vec![
+            root(),
+            FsTreeEntry::directory("usr", 0, 0, 0o755),
+            FsTreeEntry::file("usr/tool", hash()),
+        ]);
+        let right = manifest(vec![
+            root(),
+            FsTreeEntry::directory("etc", 1, 2, 0o750),
+            FsTreeEntry::symlink("etc/tool", 1, 2, "../usr/tool"),
+        ]);
+
+        let merged = merge_manifests(&[left, right]).unwrap();
+
+        assert_eq!(
+            paths(&merged),
+            vec!["", "etc", "etc/tool", "usr", "usr/tool"]
+        );
+        assert!(
+            merged
+                .entries()
+                .contains(&FsTreeEntry::directory("etc", 1, 2, 0o750))
+        );
+    }
+
+    #[test]
+    fn merge_manifests_allows_identical_overlaps() {
+        let left = manifest(vec![
+            root(),
+            FsTreeEntry::directory("bin", 0, 0, 0o755),
+            FsTreeEntry::file("bin/tool", hash()),
+            FsTreeEntry::symlink("tool-link", 0, 0, "bin/tool"),
+        ]);
+        let right = left.clone();
+
+        assert_eq!(merge_manifests(&[left.clone(), right]).unwrap(), left);
+    }
+
+    #[test]
+    fn merge_manifests_rejects_conflicts_and_empty_input() {
+        assert!(matches!(
+            merge_manifests(&[]),
+            Err(StoreError::InvalidInput(_))
+        ));
+
+        let base = manifest(vec![
+            root(),
+            FsTreeEntry::directory("bin", 0, 0, 0o755),
+            FsTreeEntry::file("bin/tool", hash()),
+            FsTreeEntry::symlink("tool-link", 0, 0, "bin/tool"),
+        ]);
+
+        for conflicting in [
+            manifest(vec![
+                root(),
+                FsTreeEntry::directory("bin", 0, 0, 0o700),
+                FsTreeEntry::file("bin/tool", hash()),
+                FsTreeEntry::symlink("tool-link", 0, 0, "bin/tool"),
+            ]),
+            manifest(vec![
+                root(),
+                FsTreeEntry::directory("bin", 0, 0, 0o755),
+                FsTreeEntry::file("bin/tool", other_hash()),
+                FsTreeEntry::symlink("tool-link", 0, 0, "bin/tool"),
+            ]),
+            manifest(vec![
+                root(),
+                FsTreeEntry::directory("bin", 0, 0, 0o755),
+                FsTreeEntry::file("bin/tool", hash()),
+                FsTreeEntry::symlink("tool-link", 0, 0, "bin/other"),
+            ]),
+            manifest(vec![
+                root(),
+                FsTreeEntry::directory("bin", 0, 0, 0o755),
+                FsTreeEntry::directory("bin/tool", 0, 0, 0o755),
+                FsTreeEntry::symlink("tool-link", 0, 0, "bin/tool"),
+            ]),
+        ] {
+            assert!(matches!(
+                merge_manifests(&[base.clone(), conflicting]),
+                Err(StoreError::InvalidInput(_))
+            ));
+        }
     }
 
     #[test]
