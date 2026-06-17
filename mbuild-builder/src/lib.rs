@@ -11,6 +11,7 @@ mod oci_extract_legacy;
 mod registry;
 pub mod subject;
 pub mod tree;
+mod tree_merge;
 
 pub use builder::*;
 pub use erofs::{ErofsRootfsNewBuilder, ErofsRootfsNewConfig};
@@ -27,6 +28,7 @@ pub use oci_extract_legacy::{OciExtractBuilder, OciExtractConfig};
 pub use registry::{BuilderRegistry, register_in_tree_builders};
 pub use subject::{BuilderPlanError, BuilderPlannedSubject};
 pub use tree::{TreeNewBuilder, TreeNewConfig};
+pub use tree_merge::{TreeMergeNewBuilder, TreeMergeNewConfig};
 
 /// Return runtime functions supported by built-in builders.
 pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
