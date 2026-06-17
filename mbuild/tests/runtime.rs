@@ -38,6 +38,7 @@ fn registered_builders_include_current_tags_only() {
         "Tree",
         "TreeNew",
         "TreeSubset",
+        "TreeSubsetNew",
         "TreeMerge",
         "TreeMergeNew",
         "ErofsRootfs",

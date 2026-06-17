@@ -12,6 +12,7 @@ mod registry;
 pub mod subject;
 pub mod tree;
 mod tree_merge;
+mod tree_subset;
 
 pub use builder::*;
 pub use erofs::{ErofsRootfsNewBuilder, ErofsRootfsNewConfig};
@@ -29,6 +30,7 @@ pub use registry::{BuilderRegistry, register_in_tree_builders};
 pub use subject::{BuilderPlanError, BuilderPlannedSubject};
 pub use tree::{TreeNewBuilder, TreeNewConfig};
 pub use tree_merge::{TreeMergeNewBuilder, TreeMergeNewConfig};
+pub use tree_subset::{TreeSubsetNewBuilder, TreeSubsetNewConfig};
 
 /// Return runtime functions supported by built-in builders.
 pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {

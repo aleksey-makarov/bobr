@@ -2,7 +2,7 @@ use crate::{
     Builder, BuilderPlanError, BuilderPlannedSubject, ErofsRootfsBuilder, ErofsRootfsNewBuilder,
     FsTreeImportBuilder, GroupBuilder, InitramfsBuilder, InitramfsNewBuilder, OciExtractBuilder,
     OciExtractNewBuilder, TreeBuilder, TreeMergeBuilder, TreeMergeNewBuilder, TreeNewBuilder,
-    TreeSubsetBuilder,
+    TreeSubsetBuilder, TreeSubsetNewBuilder,
 };
 use mbuild_core::{BuildKey, validate_publication_name};
 use serde_json::{Map, Value};
@@ -15,6 +15,7 @@ static OCI_EXTRACT_NEW_BUILDER: OciExtractNewBuilder = OciExtractNewBuilder;
 static TREE_BUILDER: TreeBuilder = TreeBuilder;
 static TREE_NEW_BUILDER: TreeNewBuilder = TreeNewBuilder;
 static TREE_SUBSET_BUILDER: TreeSubsetBuilder = TreeSubsetBuilder;
+static TREE_SUBSET_NEW_BUILDER: TreeSubsetNewBuilder = TreeSubsetNewBuilder;
 static TREE_MERGE_BUILDER: TreeMergeBuilder = TreeMergeBuilder;
 static TREE_MERGE_NEW_BUILDER: TreeMergeNewBuilder = TreeMergeNewBuilder;
 static EROFS_ROOTFS_BUILDER: ErofsRootfsBuilder = ErofsRootfsBuilder;
@@ -118,6 +119,7 @@ pub fn register_in_tree_builders(registry: &mut BuilderRegistry) -> Result<(), S
     registry.register(&TREE_BUILDER)?;
     registry.register(&TREE_NEW_BUILDER)?;
     registry.register(&TREE_SUBSET_BUILDER)?;
+    registry.register(&TREE_SUBSET_NEW_BUILDER)?;
     registry.register(&TREE_MERGE_BUILDER)?;
     registry.register(&TREE_MERGE_NEW_BUILDER)?;
     registry.register(&EROFS_ROOTFS_BUILDER)?;
@@ -277,6 +279,7 @@ mod tests {
                 "Tree",
                 "TreeNew",
                 "TreeSubset",
+                "TreeSubsetNew",
                 "TreeMerge",
                 "TreeMergeNew",
                 "ErofsRootfs",
