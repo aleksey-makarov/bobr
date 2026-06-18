@@ -1,9 +1,10 @@
 //! Shared types and implementation for the sandbox runner protocol.
 //!
-//! The current JSON format is runner protocol v4. Protocol v4 requires every
-//! runner step to carry an explicit `umask` field.
+//! The current JSON format is runner protocol v5. Protocol v5 requires an
+//! explicit output mode in addition to the per-step `umask` field introduced
+//! by protocol v4.
 
-use fsobj_hash::{ObjectHash, hash_fs_tree_object, hash_path, hash_symlink_node};
+use fsobj_hash::{hash_fs_tree_object, hash_path, hash_symlink_node};
 use mbuild_core::{FsTreeEntry, FsTreeManifest};
 #[cfg(not(test))]
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
@@ -31,8 +32,8 @@ pub const RUNNER_BINARY_NAME: &str = "mbuild-sandbox-runner";
 ///
 /// The runtime writes `RunnerConfig` and `SandboxLauncherConfig` files with
 /// this version, and the runner rejects configs with a different value.
-/// Version 4 requires an explicit per-step `umask`.
-pub const RUNNER_PROTOCOL_VERSION: u32 = 4;
+/// Version 5 requires an explicit runner output mode.
+pub const RUNNER_PROTOCOL_VERSION: u32 = 5;
 
 macro_rules! container_mbuild_dir {
     () => {
@@ -104,10 +105,23 @@ pub struct RunnerConfig {
     pub steps: Vec<RunnerStepConfig>,
     /// Container path where final output is expected.
     pub output_dir: PathBuf,
+    /// Output reporting mode used after all steps have completed.
+    pub output_mode: RunnerOutputMode,
     /// Host-visible path where the success report is written.
     pub success_report: PathBuf,
     /// Host-visible path where the failure report is written.
     pub failure_report: PathBuf,
+}
+
+/// Post-step output handling performed by the runner.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunnerOutputMode {
+    /// Scan the output directory as a legacy fs-tree object and report its
+    /// manifest/hash in the success report.
+    LegacyFsTreeReport,
+    /// Report only step status. The caller owns any output scan/import.
+    StepsOnly,
 }
 
 /// JSON config consumed by the launcher before it execs the runner.
@@ -292,7 +306,7 @@ pub struct RunnerStepConfig {
     pub env: HashMap<String, String>,
     /// File creation mask applied immediately before executing the step.
     ///
-    /// This field is required in runner protocol v4. Values must be in
+    /// This field is required since runner protocol v4. Values must be in
     /// `0o000..=0o777`; invalid values make the runner reject the config.
     pub umask: u32,
     /// Container path where step stdout is captured.
@@ -336,9 +350,14 @@ pub struct SandboxStepReport {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SandboxRunnerSuccessReport {
+    pub legacy: Option<SandboxRunnerLegacyOutput>,
+    pub steps: Vec<SandboxStepReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxRunnerLegacyOutput {
     pub object_hash: String,
     pub manifest_jsonl: String,
-    pub steps: Vec<SandboxStepReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -475,6 +494,7 @@ struct SandboxRunner {
     prepare_paths: Vec<PathBuf>,
     steps: Vec<SandboxRunnerStep>,
     output_dir: PathBuf,
+    output_mode: RunnerOutputMode,
     success_report: Arc<File>,
     failure_report: Arc<File>,
 }
@@ -498,6 +518,7 @@ impl SandboxRunner {
             prepare_paths: config.prepare_paths,
             steps,
             output_dir: config.output_dir,
+            output_mode: config.output_mode,
             success_report,
             failure_report,
         })
@@ -532,23 +553,37 @@ impl SandboxRunner {
             reports.push(step.run()?);
         }
 
-        let manifest = scan_output_manifest(&self.output_dir)?;
-        let manifest_bytes = manifest.to_canonical_bytes().map_err(|error| {
-            runner_error(SandboxRunnerFailureReport::runtime(
-                "sandbox-manifest-output",
-                error.to_string(),
-            ))
-        })?;
-        let object_hash =
-            hash_fs_tree_object(&manifest_bytes, &self.output_dir).map_err(|error| {
-                runner_error(SandboxRunnerFailureReport::runtime(
-                    "sandbox-hash-output",
-                    error.to_string(),
-                ))
-            })?;
+        let legacy = match self.output_mode {
+            RunnerOutputMode::LegacyFsTreeReport => {
+                let manifest = scan_output_manifest(&self.output_dir)?;
+                let manifest_bytes = manifest.to_canonical_bytes().map_err(|error| {
+                    runner_error(SandboxRunnerFailureReport::runtime(
+                        "sandbox-manifest-output",
+                        error.to_string(),
+                    ))
+                })?;
+                let object_hash =
+                    hash_fs_tree_object(&manifest_bytes, &self.output_dir).map_err(|error| {
+                        runner_error(SandboxRunnerFailureReport::runtime(
+                            "sandbox-hash-output",
+                            error.to_string(),
+                        ))
+                    })?;
+                let manifest_jsonl = String::from_utf8(manifest_bytes).map_err(|error| {
+                    runner_error(SandboxRunnerFailureReport::runtime(
+                        "sandbox-manifest-output",
+                        error.to_string(),
+                    ))
+                })?;
+                Some(SandboxRunnerLegacyOutput {
+                    object_hash: object_hash.to_string(),
+                    manifest_jsonl,
+                })
+            }
+            RunnerOutputMode::StepsOnly => None,
+        };
         Ok(SandboxRunnerOutcome {
-            object_hash,
-            manifest,
+            legacy,
             steps: reports,
         })
     }
@@ -563,16 +598,8 @@ impl SandboxRunner {
     }
 
     fn write_success(&self, outcome: &SandboxRunnerOutcome) -> io::Result<()> {
-        let manifest_jsonl = String::from_utf8(
-            outcome
-                .manifest
-                .to_canonical_bytes()
-                .map_err(io::Error::other)?,
-        )
-        .map_err(io::Error::other)?;
         let report = SandboxRunnerSuccessReport {
-            object_hash: outcome.object_hash.to_string(),
-            manifest_jsonl,
+            legacy: outcome.legacy.clone(),
             steps: outcome.steps.clone(),
         };
         serde_json::to_writer(&*self.success_report, &report).map_err(io::Error::other)?;
@@ -585,8 +612,7 @@ impl SandboxRunner {
 }
 
 struct SandboxRunnerOutcome {
-    object_hash: ObjectHash,
-    manifest: FsTreeManifest,
+    legacy: Option<SandboxRunnerLegacyOutput>,
     steps: Vec<SandboxStepReport>,
 }
 
@@ -1094,14 +1120,48 @@ mod tests {
         let report = read_success_report(&config.success_report);
         assert_eq!(report.steps.len(), 1);
         assert_eq!(report.steps[0].name, "write-output");
+        let legacy = report.legacy.expect("legacy output report");
         let manifest =
-            FsTreeManifest::parse_canonical_bytes(report.manifest_jsonl.as_bytes()).unwrap();
+            FsTreeManifest::parse_canonical_bytes(legacy.manifest_jsonl.as_bytes()).unwrap();
         assert!(
             manifest
                 .entries()
                 .iter()
                 .any(|entry| matches!(entry, FsTreeEntry::File { path, .. } if path == "file"))
         );
+    }
+
+    #[test]
+    fn run_config_steps_only_success_report_skips_legacy_output_scan() {
+        let temp = tempdir().unwrap();
+        let output = temp.path().join("out");
+        fs::create_dir(&output).unwrap();
+        let stdout = temp.path().join("stdout.log");
+        let stderr = temp.path().join("stderr.log");
+        let fifo = output.join("fifo");
+        let c_fifo = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        let result = unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o644) };
+        assert_eq!(result, 0, "mkfifo failed: {}", io::Error::last_os_error());
+        let config = test_config(temp.path())
+            .with_output(output)
+            .with_output_mode(RunnerOutputMode::StepsOnly)
+            .with_step(
+                "no-output-scan",
+                vec!["/bin/sh".to_string(), "-c".to_string(), ":".to_string()],
+                HashMap::new(),
+                stdout,
+                stderr,
+            );
+
+        let exit_code = run_config(config.clone());
+
+        if exit_code != 0 {
+            panic!("{:?}", read_failure_report(&config.failure_report));
+        }
+        let report = read_success_report(&config.success_report);
+        assert!(report.legacy.is_none());
+        assert_eq!(report.steps.len(), 1);
+        assert_eq!(report.steps[0].name, "no-output-scan");
     }
 
     #[test]
@@ -1269,6 +1329,11 @@ mod tests {
             self
         }
 
+        fn with_output_mode(mut self, output_mode: RunnerOutputMode) -> Self {
+            self.config.output_mode = output_mode;
+            self
+        }
+
         fn with_step(
             mut self,
             name: &str,
@@ -1325,6 +1390,7 @@ mod tests {
                 prepare_paths: Vec::new(),
                 steps: Vec::new(),
                 output_dir: root.join("out"),
+                output_mode: RunnerOutputMode::LegacyFsTreeReport,
                 success_report: root.join("success.json"),
                 failure_report: root.join("failure.json"),
             },

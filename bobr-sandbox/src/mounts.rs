@@ -4,9 +4,9 @@ use mbuild_sandbox_runner_core::{
     CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_FAILURE_REPORT, CONTAINER_INPUTS_DIR,
     CONTAINER_LOG_DIR, CONTAINER_MBUILD_DIR, CONTAINER_OUT_DIR, CONTAINER_RUNNER_CONFIG,
     CONTAINER_RUNNER_DIR, CONTAINER_RUNTIME_DIR, CONTAINER_SUCCESS_REPORT, RUNNER_BINARY_NAME,
-    RUNNER_PROTOCOL_VERSION, RunnerConfig, RunnerRunAs, RunnerStepConfig, SandboxLauncherConfig,
-    SandboxLauncherMount, SandboxLauncherMountKind, relative_launcher_target,
-    validate_launcher_config,
+    RUNNER_PROTOCOL_VERSION, RunnerConfig, RunnerOutputMode, RunnerRunAs, RunnerStepConfig,
+    SandboxLauncherConfig, SandboxLauncherMount, SandboxLauncherMountKind,
+    relative_launcher_target, validate_launcher_config,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -217,6 +217,7 @@ fn write_runner_config(
         prepare_paths: vec![PathBuf::from(CONTAINER_BUILD_DIR)],
         steps,
         output_dir: PathBuf::from(CONTAINER_OUT_DIR),
+        output_mode: RunnerOutputMode::StepsOnly,
         success_report: PathBuf::from(CONTAINER_SUCCESS_REPORT),
         failure_report: PathBuf::from(CONTAINER_FAILURE_REPORT),
     };
@@ -716,6 +717,7 @@ mod tests {
 
         let runner_config: RunnerConfig =
             serde_json::from_slice(&fs::read(&runtime_files.runner_config).unwrap()).unwrap();
+        assert_eq!(runner_config.output_mode, RunnerOutputMode::StepsOnly);
         assert_eq!(runner_config.steps[0].umask, 0o077);
         assert_eq!(runner_config.steps[0].env["SOURCE_DATE_EPOCH"], "123");
         assert_eq!(runner_config.steps[0].env["LC_ALL"], "C");

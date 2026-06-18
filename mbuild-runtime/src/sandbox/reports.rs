@@ -36,13 +36,19 @@ pub(super) fn read_sandbox_success_report(
             path.display()
         ))
     })?;
-    let object_hash = ObjectHash::from_str(&report.object_hash).map_err(|error| {
+    let legacy = report.legacy.ok_or_else(|| {
+        RuntimeError::Executor(format!(
+            "sandbox success report '{}' does not contain legacy output data",
+            path.display()
+        ))
+    })?;
+    let object_hash = ObjectHash::from_str(&legacy.object_hash).map_err(|error| {
         RuntimeError::Executor(format!(
             "failed to parse sandbox output hash '{}': {error}",
             path.display()
         ))
     })?;
-    let manifest = FsTreeManifest::parse_canonical_bytes(report.manifest_jsonl.as_bytes())
+    let manifest = FsTreeManifest::parse_canonical_bytes(legacy.manifest_jsonl.as_bytes())
         .map_err(|error| {
             RuntimeError::Executor(format!(
                 "failed to parse sandbox output manifest '{}': {error}",
@@ -166,8 +172,10 @@ mod tests {
         let object_hash = hash_fs_tree_object(manifest_jsonl.as_bytes(), &out).unwrap();
         let path = temp.path().join("success.json");
         let report = SandboxRunnerSuccessReport {
-            object_hash: object_hash.to_string(),
-            manifest_jsonl,
+            legacy: Some(mbuild_sandbox_runner_core::SandboxRunnerLegacyOutput {
+                object_hash: object_hash.to_string(),
+                manifest_jsonl,
+            }),
             steps: vec![SandboxStepReport {
                 name: "install".to_string(),
                 run_as: "build-user".to_string(),

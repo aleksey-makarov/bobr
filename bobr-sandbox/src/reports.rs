@@ -94,8 +94,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let path = temp.path().join("success.json");
         let report = SandboxRunnerSuccessReport {
-            object_hash: "00".repeat(32),
-            manifest_jsonl: "legacy manifest ignored".to_string(),
+            legacy: None,
             steps: vec![SandboxStepReport {
                 name: "install".to_string(),
                 run_as: "build-user".to_string(),
