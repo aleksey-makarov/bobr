@@ -243,8 +243,9 @@ mod tests {
     use super::*;
     use crate::BuilderInputPath;
     use std::fs;
-    use std::io;
+    use std::io::{self, Write};
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::OnceLock;
     use tempfile::tempdir;
 
     #[test]
@@ -320,9 +321,9 @@ mod tests {
         fs::create_dir(&source).unwrap();
         fs::write(source.join("tool"), b"tool\n").unwrap();
         fs::set_permissions(source.join("tool"), fs::Permissions::from_mode(0o644)).unwrap();
-        let log_path = temp.path().join("mkfs-args.txt");
-        let mkfs = install_fake_mkfs_erofs(temp.path(), &log_path, false);
+        let mkfs = fake_mkfs_erofs(false);
         let output_path = temp.path().join("rootfs.erofs");
+        let log_path = fake_mkfs_log_path(&output_path);
 
         build_erofs_rootfs_image(ErofsRootfsInput {
             source_root: source.clone(),
@@ -352,7 +353,7 @@ mod tests {
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("tool"), b"tool\n").unwrap();
-        let mkfs = install_fake_mkfs_erofs(temp.path(), &temp.path().join("mkfs-args.txt"), true);
+        let mkfs = fake_mkfs_erofs(true);
 
         let error = build_erofs_rootfs_image(ErofsRootfsInput {
             source_root: source,
@@ -367,39 +368,43 @@ mod tests {
         assert!(error.to_string().contains("fake mkfs failure"));
     }
 
-    fn install_fake_mkfs_erofs(root: &Path, log_path: &Path, fail: bool) -> PathBuf {
-        let script_path = root.join(if fail {
+    fn fake_mkfs_erofs(fail: bool) -> PathBuf {
+        static FAKE_MKFS_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+        let dir = FAKE_MKFS_DIR.get_or_init(|| {
+            let dir = tempdir().unwrap();
+            write_fake_mkfs_script(&dir, "mkfs.erofs", false);
+            write_fake_mkfs_script(&dir, "mkfs.erofs.fail", true);
+            dir
+        });
+        dir.path().join(if fail {
             "mkfs.erofs.fail"
         } else {
             "mkfs.erofs"
-        });
-        let failure = if fail {
-            "printf '%s\\n' 'fake mkfs failure' >&2\nexit 42\n"
-        } else {
-            ""
-        };
-        fs::write(
-            &script_path,
-            format!(
-                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" > {}\n{failure}last=''\nprev=''\nfor arg in \"$@\"; do\n  prev=\"$last\"\n  last=\"$arg\"\ndone\nprintf 'fake erofs image\\n' > \"$prev\"\n",
-                shell_quote(log_path)
-            ),
-        )
-        .unwrap();
-        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
-        script_path
+        })
     }
 
-    fn shell_quote(path: &Path) -> String {
-        let raw = path.to_str().unwrap();
-        format!("'{}'", raw.replace('\'', "'\\''"))
+    fn write_fake_mkfs_script(dir: &tempfile::TempDir, name: &str, fail: bool) {
+        let script_path = dir.path().join(name);
+        let failure = fail.then_some("printf '%s\\n' 'fake mkfs failure' >&2\nexit 42\n");
+        let mut script = fs::File::create(&script_path).unwrap();
+        write!(
+            script,
+            "#!/bin/sh\nset -eu\nlast=''\nprev=''\nfor arg in \"$@\"; do\n  prev=\"$last\"\n  last=\"$arg\"\ndone\nprintf '%s\\n' \"$@\" > \"$prev.args\"\n{}printf 'fake erofs image\\n' > \"$prev\"\n",
+            failure.unwrap_or_default()
+        )
+        .unwrap();
+        script.sync_all().unwrap();
+        drop(script);
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn fake_mkfs_log_path(output_path: &Path) -> PathBuf {
+        PathBuf::from(format!("{}.args", output_path.display()))
     }
 
     #[test]
     fn fake_mkfs_script_quotes_paths() -> io::Result<()> {
-        let temp = tempdir().unwrap();
-        let log_path = temp.path().join("path with spaces");
-        let script = install_fake_mkfs_erofs(temp.path(), &log_path, false);
+        let script = fake_mkfs_erofs(false);
         assert!(script.is_file());
         Ok(())
     }
