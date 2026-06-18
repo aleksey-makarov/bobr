@@ -148,21 +148,7 @@ fn run_mkfs_erofs(
     compression: Option<&str>,
     label: Option<&str>,
 ) -> Result<(), ErofsRootfsError> {
-    let mut command = Command::new(mkfs_erofs);
-    command
-        .arg("--sort=path")
-        .arg("-T")
-        .arg("0")
-        .arg("-U")
-        .arg("clear");
-    if let Some(label) = label {
-        command.arg("-L").arg(label);
-    }
-    if let Some(compression) = compression {
-        command.arg("-z").arg(compression);
-    }
-    command.arg(output_path).arg(source_root);
-
+    let mut command = mkfs_erofs_command(mkfs_erofs, output_path, source_root, compression, label);
     let output = command.output().map_err(|error| {
         ErofsRootfsError::Io(format!(
             "failed to execute '{}': {error}",
@@ -179,6 +165,30 @@ fn run_mkfs_erofs(
         output.status,
         stderr.trim_end()
     )))
+}
+
+fn mkfs_erofs_command(
+    mkfs_erofs: &Path,
+    output_path: &Path,
+    source_root: &Path,
+    compression: Option<&str>,
+    label: Option<&str>,
+) -> Command {
+    let mut command = Command::new(mkfs_erofs);
+    command
+        .arg("--sort=path")
+        .arg("-T")
+        .arg("0")
+        .arg("-U")
+        .arg("clear");
+    if let Some(label) = label {
+        command.arg("-L").arg(label);
+    }
+    if let Some(compression) = compression {
+        command.arg("-z").arg(compression);
+    }
+    command.arg(output_path).arg(source_root);
+    command
 }
 
 fn find_program_in_path(program: &str) -> Option<PathBuf> {
@@ -242,10 +252,8 @@ impl std::fmt::Display for ErofsRootfsError {
 mod tests {
     use super::*;
     use crate::BuilderInputPath;
+    use std::ffi::OsString;
     use std::fs;
-    use std::io::{self, Write};
-    use std::os::unix::fs::PermissionsExt;
-    use std::sync::OnceLock;
     use tempfile::tempdir;
 
     #[test]
@@ -315,36 +323,53 @@ mod tests {
     }
 
     #[test]
-    fn runtime_function_runs_mkfs_on_materialized_root() {
+    fn runtime_function_runs_successful_mkfs_command() {
         let temp = tempdir().unwrap();
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("tool"), b"tool\n").unwrap();
-        fs::set_permissions(source.join("tool"), fs::Permissions::from_mode(0o644)).unwrap();
-        let mkfs = fake_mkfs_erofs(false);
+        let mkfs = true_program_for_success_test();
         let output_path = temp.path().join("rootfs.erofs");
-        let log_path = fake_mkfs_log_path(&output_path);
 
         build_erofs_rootfs_image(ErofsRootfsInput {
-            source_root: source.clone(),
+            source_root: source,
             mkfs_erofs: mkfs,
-            output_path: output_path.clone(),
+            output_path,
             compression: Some("lz4".to_string()),
             label: Some("root".to_string()),
         })
         .unwrap();
+    }
 
+    #[test]
+    fn mkfs_command_uses_reproducible_arguments() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        let output_path = temp.path().join("rootfs.erofs");
+        let mkfs = PathBuf::from("/test/mkfs.erofs");
+        let command = mkfs_erofs_command(&mkfs, &output_path, &source, Some("lz4"), Some("root"));
+
+        assert_eq!(command.get_program(), mkfs.as_os_str());
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_os_string())
+            .collect::<Vec<_>>();
         assert_eq!(
-            fs::read_to_string(&output_path).unwrap(),
-            "fake erofs image\n"
+            args,
+            vec![
+                OsString::from("--sort=path"),
+                OsString::from("-T"),
+                OsString::from("0"),
+                OsString::from("-U"),
+                OsString::from("clear"),
+                OsString::from("-L"),
+                OsString::from("root"),
+                OsString::from("-z"),
+                OsString::from("lz4"),
+                output_path.as_os_str().to_os_string(),
+                source.as_os_str().to_os_string(),
+            ]
         );
-        let args = fs::read_to_string(log_path).unwrap();
-        assert!(args.contains("--sort=path\n"));
-        assert!(args.contains("-T\n0\n"));
-        assert!(args.contains("-U\nclear\n"));
-        assert!(args.contains("-L\nroot\n"));
-        assert!(args.contains("-z\nlz4\n"));
-        assert!(args.contains(&format!("{}\n", source.display())));
     }
 
     #[test]
@@ -353,7 +378,7 @@ mod tests {
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("tool"), b"tool\n").unwrap();
-        let mkfs = fake_mkfs_erofs(true);
+        let mkfs = env_program_for_failure_test();
 
         let error = build_erofs_rootfs_image(ErofsRootfsInput {
             source_root: source,
@@ -364,48 +389,37 @@ mod tests {
         })
         .unwrap_err();
 
-        assert!(error.to_string().contains("mkfs.erofs failed"));
-        assert!(error.to_string().contains("fake mkfs failure"));
+        let message = error.to_string();
+        assert!(message.contains("mkfs.erofs failed"), "{message}");
+        assert!(message.contains("--sort=path"), "{message}");
     }
 
-    fn fake_mkfs_erofs(fail: bool) -> PathBuf {
-        static FAKE_MKFS_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-        let dir = FAKE_MKFS_DIR.get_or_init(|| {
-            let dir = tempdir().unwrap();
-            write_fake_mkfs_script(&dir, "mkfs.erofs", false);
-            write_fake_mkfs_script(&dir, "mkfs.erofs.fail", true);
-            dir
-        });
-        dir.path().join(if fail {
-            "mkfs.erofs.fail"
-        } else {
-            "mkfs.erofs"
-        })
-    }
-
-    fn write_fake_mkfs_script(dir: &tempfile::TempDir, name: &str, fail: bool) {
-        let script_path = dir.path().join(name);
-        let failure = fail.then_some("printf '%s\\n' 'fake mkfs failure' >&2\nexit 42\n");
-        let mut script = fs::File::create(&script_path).unwrap();
-        write!(
-            script,
-            "#!/bin/sh\nset -eu\nlast=''\nprev=''\nfor arg in \"$@\"; do\n  prev=\"$last\"\n  last=\"$arg\"\ndone\nprintf '%s\\n' \"$@\" > \"$prev.args\"\n{}printf 'fake erofs image\\n' > \"$prev\"\n",
-            failure.unwrap_or_default()
+    fn true_program_for_success_test() -> PathBuf {
+        program_for_test(
+            "true",
+            &[
+                "/usr/bin/true",
+                "/bin/true",
+                "/run/current-system/sw/bin/true",
+            ],
         )
-        .unwrap();
-        script.sync_all().unwrap();
-        drop(script);
-        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    fn fake_mkfs_log_path(output_path: &Path) -> PathBuf {
-        PathBuf::from(format!("{}.args", output_path.display()))
+    fn env_program_for_failure_test() -> PathBuf {
+        program_for_test(
+            "env",
+            &["/usr/bin/env", "/bin/env", "/run/current-system/sw/bin/env"],
+        )
     }
 
-    #[test]
-    fn fake_mkfs_script_quotes_paths() -> io::Result<()> {
-        let script = fake_mkfs_erofs(false);
-        assert!(script.is_file());
-        Ok(())
+    fn program_for_test(program: &str, absolute_paths: &[&str]) -> PathBuf {
+        for path in absolute_paths {
+            let path = PathBuf::from(path);
+            if fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+                return path;
+            }
+        }
+        find_program_in_path(program)
+            .unwrap_or_else(|| panic!("test environment must provide {program}"))
     }
 }
