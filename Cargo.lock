@@ -133,8 +133,11 @@ name = "bobr-sandbox"
 version = "0.1.0"
 dependencies = [
  "bobr-runtime",
+ "bobr-store",
+ "libc",
  "mbuild-builder",
  "mbuild-core",
+ "mbuild-sandbox-runner-core",
  "serde",
  "serde_json",
  "tempfile",
