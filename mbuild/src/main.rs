@@ -92,10 +92,7 @@ fn main() -> ExitCode {
 fn run_runtime_worker_if_requested() -> Option<ExitCode> {
     match bobr_runtime::runtime_ns::worker_invocation_from_env() {
         Ok(Some(invocation)) => {
-            let result = bobr_runtime::runtime_ns::run_worker(
-                invocation,
-                mbuild_builder::runtime_functions(),
-            );
+            let result = bobr_runtime::runtime_ns::run_worker(invocation, runtime_functions());
             Some(runtime_worker_exit_code(result))
         }
         Ok(None) => None,
@@ -104,6 +101,12 @@ fn run_runtime_worker_if_requested() -> Option<ExitCode> {
             Some(ExitCode::FAILURE)
         }
     }
+}
+
+fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
+    let mut functions = mbuild_builder::runtime_functions();
+    functions.extend(bobr_sandbox::runtime_functions());
+    functions
 }
 
 fn runtime_worker_exit_code(result: bobr_runtime::runtime::RuntimeResult<()>) -> ExitCode {

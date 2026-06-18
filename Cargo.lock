@@ -129,6 +129,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "bobr-sandbox"
+version = "0.1.0"
+dependencies = [
+ "bobr-runtime",
+ "mbuild-builder",
+ "mbuild-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "bobr-store"
 version = "0.1.0"
 dependencies = [
@@ -901,6 +913,7 @@ name = "mbuild"
 version = "0.1.0"
 dependencies = [
  "bobr-runtime",
+ "bobr-sandbox",
  "bobr-store",
  "clap",
  "flate2",

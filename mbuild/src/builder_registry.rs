@@ -6,5 +6,6 @@ pub(crate) fn create_builder_registry() -> Result<BuilderRegistry, RuntimeError>
     mbuild_builder::register_in_tree_builders(&mut registry)
         .map_err(RuntimeError::InvalidRequest)?;
     mbuild_sandbox::register_builders(&mut registry).map_err(RuntimeError::InvalidRequest)?;
+    bobr_sandbox::register_builders(&mut registry).map_err(RuntimeError::InvalidRequest)?;
     Ok(registry)
 }

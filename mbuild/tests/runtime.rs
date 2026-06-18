@@ -31,6 +31,7 @@ fn registered_builders_include_current_tags_only() {
     let mut registry = mbuild_builder::BuilderRegistry::new();
     mbuild_builder::register_in_tree_builders(&mut registry).unwrap();
     mbuild_sandbox::register_builders(&mut registry).unwrap();
+    bobr_sandbox::register_builders(&mut registry).unwrap();
     let tags = registry.supported_tags();
     for tag in [
         "Group",
@@ -45,6 +46,7 @@ fn registered_builders_include_current_tags_only() {
         "ErofsRootfsNew",
         "Initramfs",
         "Sandbox",
+        "SandboxNew",
         "OciExtract",
         "OciExtractNew",
     ] {

@@ -12,6 +12,7 @@ members = [
   "bobr-store",
   "fsobj-hash",
   "bobr-runtime",
+  "bobr-sandbox",
 ]
 
 resolver = "3"

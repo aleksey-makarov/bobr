@@ -8,6 +8,7 @@ integration-tests = ["mbuild-builder/integration-tests"]
 
 [dependencies]
 bobr-runtime = { path = "../bobr-runtime" }
+bobr-sandbox = { path = "../bobr-sandbox" }
 bobr-store = { path = "../bobr-store" }
 clap = { version = "4.5", features = ["derive"] }
 fsobj-hash = { path = "../fsobj-hash" }
