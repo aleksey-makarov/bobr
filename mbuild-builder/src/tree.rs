@@ -88,7 +88,7 @@ impl TypedBuilder for TreeNewBuilder {
     type Config = TreeNewConfig;
 
     fn tag(&self) -> &'static str {
-        "TreeNew"
+        "Tree"
     }
 
     fn spec(&self) -> &'static InputSpec {
@@ -112,7 +112,7 @@ fn build_tree(
 ) -> Result<StagedBuildResult, BuilderError> {
     if !inputs.is_empty() {
         return Err(BuilderError::ExecutionFailed(
-            "TreeNew builder does not accept input objects".to_string(),
+            "Tree builder does not accept input objects".to_string(),
         ));
     }
 

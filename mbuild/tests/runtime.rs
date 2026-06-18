@@ -1,5 +1,7 @@
 mod support;
 
+#[cfg(feature = "integration-tests")]
+use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
 use bobr_store::{Store, load_build_handle, load_object_record, load_publication};
 use mbuild::recipe_runtime::run_recipe_json_in_workspace;
 use mbuild_core::BuildKey;
@@ -8,6 +10,8 @@ use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
+#[cfg(feature = "integration-tests")]
+use std::process::Command;
 #[cfg(feature = "integration-tests")]
 use std::sync::{Mutex, OnceLock};
 use std::thread;
@@ -26,29 +30,39 @@ fn source_build_key(object_hash: fsobj_hash::ObjectHash) -> BuildKey {
     BuildKey::from_object_hash(object_hash)
 }
 
+#[cfg(feature = "integration-tests")]
+fn run_recipe_json_via_cli(recipe_path: &Path) -> bobr_store::RealizedObject {
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg("--quiet")
+        .arg(recipe_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "mbuild failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
 #[test]
 fn registered_builders_include_current_tags_only() {
     let mut registry = mbuild_builder::BuilderRegistry::new();
     mbuild_builder::register_in_tree_builders(&mut registry).unwrap();
-    mbuild_sandbox::register_builders(&mut registry).unwrap();
     bobr_sandbox::register_builders(&mut registry).unwrap();
     let tags = registry.supported_tags();
     for tag in [
         "Group",
         "FsTreeImport",
         "Tree",
-        "TreeNew",
         "TreeSubset",
-        "TreeSubsetNew",
         "TreeMerge",
-        "TreeMergeNew",
         "ErofsRootfs",
-        "ErofsRootfsNew",
         "Initramfs",
         "Sandbox",
-        "SandboxNew",
         "OciExtract",
-        "OciExtractNew",
     ] {
         assert!(tags.contains(&tag), "missing registered builder tag {tag}");
     }
@@ -650,15 +664,14 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
     let recipe_path = workspace.path().join("tree-dir.json");
     write_recipe(&recipe_path, &tree_directory_recipe("runtime-tree"));
 
-    let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let build = run_recipe_json_via_cli(&recipe_path);
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Tree Build to exist in store");
 
-    assert!(published.object_path.is_dir());
-    assert!(published.object_path.join("manifest.jsonl").is_file());
+    assert!(published.object_path.is_file());
     let publication = load_publication(&layout, "runtime-tree")
         .unwrap()
         .expect("expected publication");
@@ -667,12 +680,27 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
         published.build.object_hash
     );
     assert_eq!(publication.object_path, published.object_path);
-    let root = published.object_path.join("root");
-    assert!(root.is_dir());
-    assert!(root.join("dev").is_dir());
-    assert_eq!(
-        fs::read_to_string(root.join("etc/hostname")).unwrap(),
-        "mbuild\n"
+    let manifest = FsTreeManifest::read_canonical(&published.object_path).unwrap();
+    assert!(
+        manifest
+            .entries()
+            .contains(&FsTreeEntry::directory("", 0, 0, 0o755))
+    );
+    assert!(
+        manifest
+            .entries()
+            .contains(&FsTreeEntry::directory("dev", 0, 0, 0o755))
+    );
+    assert!(
+        manifest
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry, FsTreeEntry::File { path, .. } if path == "etc/hostname"))
+    );
+    assert!(
+        manifest
+            .entries()
+            .contains(&FsTreeEntry::symlink("bin", 0, 0, "usr/bin"))
     );
 }
 
@@ -686,24 +714,26 @@ fn tree_symlink_recipe_builds_successfully_via_runtime() {
     let recipe_path = workspace.path().join("recipe.json");
     write_recipe(&recipe_path, &tree_symlink_recipe("runtime-tree-symlink"));
 
-    let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let build = run_recipe_json_via_cli(&recipe_path);
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
         .unwrap()
         .expect("expected Tree Build to exist in store");
 
-    assert!(published.object_path.is_dir());
-    assert!(published.object_path.join("manifest.jsonl").is_file());
-    let root = published.object_path.join("root");
-    assert_eq!(
-        fs::read_link(root.join("bin")).unwrap(),
-        Path::new("usr/bin")
+    assert!(published.object_path.is_file());
+    let manifest = FsTreeManifest::read_canonical(&published.object_path).unwrap();
+    assert!(
+        manifest
+            .entries()
+            .contains(&FsTreeEntry::symlink("bin", 0, 0, "usr/bin"))
     );
-    assert_eq!(
-        fs::read_link(root.join("etc/mtab")).unwrap(),
-        Path::new("/proc/self/mounts")
-    );
+    assert!(manifest.entries().contains(&FsTreeEntry::symlink(
+        "etc/mtab",
+        0,
+        0,
+        "/proc/self/mounts"
+    )));
 }
 
 #[test]

@@ -32,7 +32,7 @@ impl TypedBuilder for ErofsRootfsNewBuilder {
     type Config = ErofsRootfsNewConfig;
 
     fn tag(&self) -> &'static str {
-        "ErofsRootfsNew"
+        "ErofsRootfs"
     }
 
     fn spec(&self) -> &'static InputSpec {
@@ -127,7 +127,7 @@ impl RuntimeFunction for ErofsRootfsFunction {
 fn build_erofs_rootfs_image(input: ErofsRootfsInput) -> Result<(), ErofsRootfsError> {
     if input.output_path.exists() {
         return Err(ErofsRootfsError::InvalidInput(format!(
-            "ErofsRootfsNew output path already exists: '{}'",
+            "ErofsRootfs output path already exists: '{}'",
             input.output_path.display()
         )));
     }
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn input_spec_is_single_tree_input() {
-        assert_eq!(TypedBuilder::tag(&ErofsRootfsNewBuilder), "ErofsRootfsNew");
+        assert_eq!(TypedBuilder::tag(&ErofsRootfsNewBuilder), "ErofsRootfs");
         assert_eq!(
             EROFS_ROOTFS_NEW_SPEC.required_inputs,
             &[InputSlot::fs_tree_root("tree")]

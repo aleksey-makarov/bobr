@@ -44,7 +44,7 @@ impl TypedBuilder for OciExtractNewBuilder {
     type Config = OciExtractNewConfig;
 
     fn tag(&self) -> &'static str {
-        "OciExtractNew"
+        "OciExtract"
     }
 
     fn spec(&self) -> &'static InputSpec {
@@ -75,7 +75,7 @@ impl OciExtractNewBuilder {
         let extract_root = cx.temp_dir.join(EXTRACT_ROOT_DIR_NAME);
         if output_manifest.exists() || extract_root.exists() {
             return Err(map_error(OciExtractError::InvalidInput(format!(
-                "OciExtractNew staging paths already exist under '{}'",
+                "OciExtract staging paths already exist under '{}'",
                 cx.temp_dir.display()
             ))));
         }
@@ -153,7 +153,7 @@ fn extract_oci_image_to_fs_tree(
     validate_oci_layout_path(&input.oci_layout_dir)?;
     if input.extract_root.exists() || input.output_manifest.exists() {
         return Err(OciExtractError::InvalidInput(format!(
-            "OciExtractNew runtime paths already exist under '{}' or '{}'",
+            "OciExtract runtime paths already exist under '{}' or '{}'",
             input.extract_root.display(),
             input.output_manifest.display()
         )));
@@ -959,7 +959,7 @@ mod tests {
 
     #[test]
     fn input_spec_is_registered_shape() {
-        assert_eq!(TypedBuilder::tag(&OciExtractNewBuilder), "OciExtractNew");
+        assert_eq!(TypedBuilder::tag(&OciExtractNewBuilder), "OciExtract");
         assert_eq!(
             OCI_EXTRACT_SPEC.required_inputs,
             &[InputSlot::object("image")]

@@ -27,7 +27,7 @@ impl TypedBuilder for InitramfsNewBuilder {
     type Config = InitramfsNewConfig;
 
     fn tag(&self) -> &'static str {
-        "InitramfsNew"
+        "Initramfs"
     }
 
     fn spec(&self) -> &'static InputSpec {
@@ -96,7 +96,7 @@ impl RuntimeFunction for InitramfsFunction {
 fn write_initramfs_image(input: InitramfsInput) -> Result<(), InitramfsError> {
     if input.output_path.exists() {
         return Err(InitramfsError::InvalidInput(format!(
-            "InitramfsNew output path already exists: '{}'",
+            "Initramfs output path already exists: '{}'",
             input.output_path.display()
         )));
     }
@@ -281,7 +281,7 @@ mod tests {
 
     #[test]
     fn input_spec_is_single_fs_tree_root_input() {
-        assert_eq!(TypedBuilder::tag(&InitramfsNewBuilder), "InitramfsNew");
+        assert_eq!(TypedBuilder::tag(&InitramfsNewBuilder), "Initramfs");
         assert_eq!(
             INITRAMFS_NEW_SPEC.required_inputs,
             &[InputSlot::fs_tree_root("tree")]

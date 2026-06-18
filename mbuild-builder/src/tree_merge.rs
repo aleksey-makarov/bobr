@@ -19,7 +19,7 @@ impl TypedBuilder for TreeMergeNewBuilder {
     type Config = TreeMergeNewConfig;
 
     fn tag(&self) -> &'static str {
-        "TreeMergeNew"
+        "TreeMerge"
     }
 
     fn spec(&self) -> &'static InputSpec {
@@ -44,7 +44,7 @@ fn build_tree_merge(
     let inputs = inputs.extras(&TREE_MERGE_NEW_SPEC).collect::<Vec<_>>();
     if inputs.len() < 2 {
         return Err(BuilderError::ExecutionFailed(
-            "TreeMergeNew builder requires at least two fs-tree manifest inputs".to_string(),
+            "TreeMerge builder requires at least two fs-tree manifest inputs".to_string(),
         ));
     }
 
@@ -59,7 +59,7 @@ fn build_tree_merge(
         .map(|(name, input)| {
             FsTreeManifest::read_canonical(&input.path).map_err(|error| {
                 BuilderError::ExecutionFailed(format!(
-                    "TreeMergeNew input '{name}' is not a valid fs-tree v2 manifest: {error}"
+                    "TreeMerge input '{name}' is not a valid fs-tree v2 manifest: {error}"
                 ))
             })
         })
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn spec_accepts_extra_inputs_only() {
-        assert_eq!(TypedBuilder::tag(&TreeMergeNewBuilder), "TreeMergeNew");
+        assert_eq!(TypedBuilder::tag(&TreeMergeNewBuilder), "TreeMerge");
         assert!(TREE_MERGE_NEW_SPEC.required_inputs.is_empty());
         assert!(TREE_MERGE_NEW_SPEC.optional_inputs.is_empty());
         assert!(TREE_MERGE_NEW_SPEC.allow_extra_inputs);

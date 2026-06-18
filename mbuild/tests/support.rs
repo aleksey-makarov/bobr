@@ -185,6 +185,89 @@ pub fn tree_file_recipe(name: &str, path: &str, text: &str, executable: bool) ->
 }
 
 pub fn tree_directory_recipe(name: &str) -> Value {
+    let files_name = format!("{name}-files");
+    recipe_node(
+        name,
+        "FsTreeImport",
+        root_install_config(),
+        json!({
+            "input": recipe_node(
+                &files_name,
+                "Tree",
+                json!({
+                    "tree": {
+                        "entries": [
+                            { "type": "dir", "path": "dev" },
+                            {
+                                "type": "file",
+                                "path": "etc/hostname",
+                                "text": "mbuild\n",
+                                "executable": false,
+                            },
+                            {
+                                "type": "file",
+                                "path": "init",
+                                "text": "#!/bin/sh\nexit 0\n",
+                                "executable": true,
+                            },
+                            {
+                                "type": "symlink",
+                                "path": "bin",
+                                "target": "usr/bin",
+                            }
+                        ]
+                    }
+                }),
+                json!({}),
+            )
+        }),
+    )
+}
+
+pub fn tree_symlink_recipe(name: &str) -> Value {
+    let files_name = format!("{name}-files");
+    recipe_node(
+        name,
+        "FsTreeImport",
+        root_install_config(),
+        json!({
+            "input": recipe_node(
+                &files_name,
+                "Tree",
+                json!({
+                    "tree": {
+                        "entries": [
+                            { "type": "dir", "path": "usr/bin" },
+                            { "type": "symlink", "path": "bin", "target": "usr/bin" },
+                            { "type": "symlink", "path": "etc/mtab", "target": "/proc/self/mounts" }
+                        ]
+                    }
+                }),
+                json!({}),
+            )
+        }),
+    )
+}
+
+fn root_install_config() -> Value {
+    json!({
+        "install": {
+            "rules": [{
+                "path": "**",
+                "attrs": {
+                    "uid": 0,
+                    "gid": 0,
+                    "directory_mode": 493,
+                    "regular_file_mode": 420,
+                    "executable_file_mode": 493
+                }
+            }]
+        }
+    })
+}
+
+#[allow(dead_code)]
+pub fn legacy_tree_directory_recipe(name: &str) -> Value {
     recipe_node(
         name,
         "Tree",
@@ -229,7 +312,8 @@ pub fn tree_directory_recipe(name: &str) -> Value {
     )
 }
 
-pub fn tree_symlink_recipe(name: &str) -> Value {
+#[allow(dead_code)]
+pub fn legacy_tree_symlink_recipe(name: &str) -> Value {
     recipe_node(
         name,
         "Tree",

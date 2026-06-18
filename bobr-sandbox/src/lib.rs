@@ -1,7 +1,7 @@
 //! New sandbox builder backed by `bobr-runtime`.
 //!
 //! This crate intentionally does not reuse or refactor the existing
-//! `mbuild-sandbox` implementation. It provides a fresh `SandboxNew` builder
+//! `mbuild-sandbox` implementation. It provides a fresh `Sandbox` builder
 //! that executes the existing `mbuild-sandbox-runner` through a
 //! `bobr-runtime` function and publishes fs-tree v2 manifests.
 
@@ -37,13 +37,13 @@ const RUNTIME_DIR_NAME: &str = "runtime";
 const STEP_LOG_DIR_NAME: &str = "step-logs";
 const OUTPUT_MANIFEST_NAME: &str = "sandbox-fs-tree-v2.jsonl";
 
-/// Builder implementation registered for recipe nodes tagged `SandboxNew`.
+/// Builder implementation registered for recipe nodes tagged `Sandbox`.
 pub struct SandboxNewBuilder;
 
-/// Static `SandboxNew` builder class used by explicit registries.
+/// Static `Sandbox` builder class used by explicit registries.
 pub static SANDBOX_NEW_BUILDER: SandboxNewBuilder = SandboxNewBuilder;
 
-/// Registers the `SandboxNew` builder into an explicit builder registry.
+/// Registers the `Sandbox` builder into an explicit builder registry.
 pub fn register_builders(registry: &mut BuilderRegistry) -> Result<(), String> {
     registry.register(&SANDBOX_NEW_BUILDER)
 }
@@ -53,7 +53,7 @@ pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
     vec![bobr_runtime::runtime_ns::NsFunction::new(SandboxFunction)]
 }
 
-/// Recipe-facing `SandboxNew` builder config.
+/// Recipe-facing `Sandbox` builder config.
 ///
 /// This shape intentionally matches the existing `Sandbox` config. The input
 /// contract differs: `rootfs` is a materialized fs-tree v2 root.
@@ -95,7 +95,7 @@ impl TypedBuilder for SandboxNewBuilder {
     type Config = SandboxNewConfig;
 
     fn tag(&self) -> &'static str {
-        "SandboxNew"
+        "Sandbox"
     }
 
     fn spec(&self) -> &'static InputSpec {
@@ -123,7 +123,7 @@ fn build_sandbox_new(
     let fs_tree = cx.fs_tree()?;
 
     let extra_inputs =
-        collect_extra_inputs(&SANDBOX_NEW_SPEC, "SandboxNew", &inputs).map_err(map_error)?;
+        collect_extra_inputs(&SANDBOX_NEW_SPEC, "Sandbox", &inputs).map_err(map_error)?;
     validate_step_interpolations(&config.steps, &extra_inputs).map_err(map_error)?;
 
     let runner_path = tools::resolve_and_preflight_sandbox_runner()
@@ -136,7 +136,7 @@ fn build_sandbox_new(
         BuildLogLevel::Info,
         "sandbox",
         format!(
-            "running SandboxNew with {} step(s) and {} extra input(s)",
+            "running Sandbox with {} step(s) and {} extra input(s)",
             runtime_input.steps.len(),
             runtime_input.extra_inputs.len()
         ),
@@ -191,7 +191,7 @@ fn prepare_sandbox_input(
     if output_manifest.exists() {
         fs::remove_file(&output_manifest).map_err(|error| {
             SandboxError::FsFailed(format!(
-                "failed to remove previous SandboxNew manifest '{}': {error}",
+                "failed to remove previous Sandbox manifest '{}': {error}",
                 output_manifest.display()
             ))
         })?;
@@ -511,7 +511,7 @@ fn build_sandbox_input(
     })
 }
 
-/// Collect and validate all extra inputs accepted by the `SandboxNew` spec.
+/// Collect and validate all extra inputs accepted by the `Sandbox` spec.
 fn collect_extra_inputs(
     spec: &InputSpec,
     builder_name: &str,
@@ -936,7 +936,7 @@ impl RuntimeFunction for SandboxFunction {
     fn call(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {
         if !input.rootfs.is_dir() {
             return Err(RuntimeError::new(format!(
-                "SandboxNew rootfs must be a directory: '{}'",
+                "Sandbox rootfs must be a directory: '{}'",
                 input.rootfs.display()
             )));
         }
@@ -993,7 +993,7 @@ mod tests {
 
     #[test]
     fn spec_requires_fs_tree_root_rootfs_and_allows_extra_inputs() {
-        assert_eq!(TypedBuilder::tag(&SandboxNewBuilder), "SandboxNew");
+        assert_eq!(TypedBuilder::tag(&SandboxNewBuilder), "Sandbox");
         assert_eq!(SANDBOX_NEW_SPEC.required_inputs.len(), 1);
         assert_eq!(
             SANDBOX_NEW_SPEC.required_inputs[0],
@@ -1078,7 +1078,7 @@ mod tests {
         fs::create_dir(&cx.temp_dir).unwrap();
         let extra_inputs = collect_extra_inputs(
             &SANDBOX_NEW_SPEC,
-            "SandboxNew",
+            "Sandbox",
             &BuilderInputs::new(BTreeMap::from([
                 (
                     "rootfs".to_string(),

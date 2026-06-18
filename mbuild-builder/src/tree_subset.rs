@@ -24,7 +24,7 @@ impl TypedBuilder for TreeSubsetNewBuilder {
     type Config = TreeSubsetNewConfig;
 
     fn tag(&self) -> &'static str {
-        "TreeSubsetNew"
+        "TreeSubset"
     }
 
     fn spec(&self) -> &'static InputSpec {
@@ -49,7 +49,7 @@ fn build_tree_subset(
     let input = inputs.required("tree")?;
     let manifest = FsTreeManifest::read_canonical(&input.path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
-            "TreeSubsetNew input 'tree' is not a valid fs-tree v2 manifest: {error}"
+            "TreeSubset input 'tree' is not a valid fs-tree v2 manifest: {error}"
         ))
     })?;
 
@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn spec_requires_tree_input_only() {
-        assert_eq!(TypedBuilder::tag(&TreeSubsetNewBuilder), "TreeSubsetNew");
+        assert_eq!(TypedBuilder::tag(&TreeSubsetNewBuilder), "TreeSubset");
         assert_eq!(TREE_SUBSET_NEW_SPEC.required_inputs.len(), 1);
         assert_eq!(
             TREE_SUBSET_NEW_SPEC.required_inputs[0],

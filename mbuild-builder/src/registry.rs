@@ -1,8 +1,7 @@
 use crate::{
-    Builder, BuilderPlanError, BuilderPlannedSubject, ErofsRootfsBuilder, ErofsRootfsNewBuilder,
-    FsTreeImportBuilder, GroupBuilder, InitramfsBuilder, InitramfsNewBuilder, OciExtractBuilder,
-    OciExtractNewBuilder, TreeBuilder, TreeMergeBuilder, TreeMergeNewBuilder, TreeNewBuilder,
-    TreeSubsetBuilder, TreeSubsetNewBuilder,
+    Builder, BuilderPlanError, BuilderPlannedSubject, ErofsRootfsNewBuilder, FsTreeImportBuilder,
+    GroupBuilder, InitramfsNewBuilder, OciExtractNewBuilder, TreeMergeNewBuilder, TreeNewBuilder,
+    TreeSubsetNewBuilder,
 };
 use mbuild_core::{BuildKey, validate_publication_name};
 use serde_json::{Map, Value};
@@ -10,17 +9,11 @@ use std::collections::BTreeMap;
 
 static GROUP_BUILDER: GroupBuilder = GroupBuilder;
 static FS_TREE_IMPORT_BUILDER: FsTreeImportBuilder = FsTreeImportBuilder;
-static OCI_EXTRACT_BUILDER: OciExtractBuilder = OciExtractBuilder;
 static OCI_EXTRACT_NEW_BUILDER: OciExtractNewBuilder = OciExtractNewBuilder;
-static TREE_BUILDER: TreeBuilder = TreeBuilder;
 static TREE_NEW_BUILDER: TreeNewBuilder = TreeNewBuilder;
-static TREE_SUBSET_BUILDER: TreeSubsetBuilder = TreeSubsetBuilder;
 static TREE_SUBSET_NEW_BUILDER: TreeSubsetNewBuilder = TreeSubsetNewBuilder;
-static TREE_MERGE_BUILDER: TreeMergeBuilder = TreeMergeBuilder;
 static TREE_MERGE_NEW_BUILDER: TreeMergeNewBuilder = TreeMergeNewBuilder;
-static EROFS_ROOTFS_BUILDER: ErofsRootfsBuilder = ErofsRootfsBuilder;
 static EROFS_ROOTFS_NEW_BUILDER: ErofsRootfsNewBuilder = ErofsRootfsNewBuilder;
-static INITRAMFS_BUILDER: InitramfsBuilder = InitramfsBuilder;
 static INITRAMFS_NEW_BUILDER: InitramfsNewBuilder = InitramfsNewBuilder;
 
 /// Explicit registry of builder classes available to one runtime invocation.
@@ -116,17 +109,11 @@ impl Default for BuilderRegistry {
 pub fn register_in_tree_builders(registry: &mut BuilderRegistry) -> Result<(), String> {
     registry.register(&GROUP_BUILDER)?;
     registry.register(&FS_TREE_IMPORT_BUILDER)?;
-    registry.register(&TREE_BUILDER)?;
     registry.register(&TREE_NEW_BUILDER)?;
-    registry.register(&TREE_SUBSET_BUILDER)?;
     registry.register(&TREE_SUBSET_NEW_BUILDER)?;
-    registry.register(&TREE_MERGE_BUILDER)?;
     registry.register(&TREE_MERGE_NEW_BUILDER)?;
-    registry.register(&EROFS_ROOTFS_BUILDER)?;
     registry.register(&EROFS_ROOTFS_NEW_BUILDER)?;
-    registry.register(&INITRAMFS_BUILDER)?;
     registry.register(&INITRAMFS_NEW_BUILDER)?;
-    registry.register(&OCI_EXTRACT_BUILDER)?;
     registry.register(&OCI_EXTRACT_NEW_BUILDER)?;
     Ok(())
 }
@@ -277,17 +264,11 @@ mod tests {
                 "Group",
                 "FsTreeImport",
                 "Tree",
-                "TreeNew",
                 "TreeSubset",
-                "TreeSubsetNew",
                 "TreeMerge",
-                "TreeMergeNew",
                 "ErofsRootfs",
-                "ErofsRootfsNew",
                 "Initramfs",
-                "InitramfsNew",
                 "OciExtract",
-                "OciExtractNew",
             ]
         );
         assert!(registry.get("Sandbox").is_none());
@@ -481,23 +462,6 @@ mod tests {
 
         assert_eq!(subject.name(), "tree");
         assert_eq!(subject.tag(), "Tree");
-        assert_eq!(subject.build_key(), expected);
-        assert!(subject.inputs().is_empty());
-
-        let subject = registry
-            .parse_subject(
-                "TreeNew",
-                serde_json::json!({"name": "tree-new", "config": config.clone()})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-                BTreeMap::new(),
-            )
-            .unwrap();
-        let expected = mbuild_core::compute_build_key("TreeNew", &config, &[]).unwrap();
-
-        assert_eq!(subject.name(), "tree-new");
-        assert_eq!(subject.tag(), "TreeNew");
         assert_eq!(subject.build_key(), expected);
         assert!(subject.inputs().is_empty());
     }
