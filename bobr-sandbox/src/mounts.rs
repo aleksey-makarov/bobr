@@ -504,7 +504,11 @@ fn effective_step_env(step: &SandboxRuntimeStep) -> HashMap<String, String> {
         ("LC_ALL".to_string(), "C".to_string()),
         ("LANG".to_string(), "C".to_string()),
         ("TZ".to_string(), "UTC".to_string()),
-        ("SOURCE_DATE_EPOCH".to_string(), "0".to_string()),
+        // 1980-01-01 UTC, not 0: tools like groff's mdate.pl treat
+        // SOURCE_DATE_EPOCH=0 as unset (`$ENV{...} || mtime`; "0" is falsy in
+        // Perl) and fall back to the build-time file mtime; pre-1980 dates also
+        // break DOS-derived tools (zip). Matches nixpkgs.
+        ("SOURCE_DATE_EPOCH".to_string(), "315532800".to_string()),
         ("PYTHONHASHSEED".to_string(), "0".to_string()),
         (
             "MBUILD_CONFIG_DIR".to_string(),
