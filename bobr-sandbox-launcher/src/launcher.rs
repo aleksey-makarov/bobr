@@ -130,6 +130,15 @@ fn run_supervisor(config: &SandboxLauncherConfig, failure_report: &File) -> io::
         return Err(io::Error::last_os_error());
     }
     if pid == 0 {
+        // Tie the sandbox lifetime to the supervisor: if it dies, the kernel
+        // SIGKILLs pid1, and a dying namespace init tears down every step.
+        // SIGKILL because pid1 (the namespace init) ignores unhandled signals
+        // like SIGTERM. getppid() can't detect an already-dead parent here
+        // (pid1's parent lives outside this namespace), so the tiny
+        // fork->prctl race is accepted; best effort on failure.
+        unsafe {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
+        }
         let code = match run_pid1(config) {
             Ok(code) => code,
             Err(error) => {
