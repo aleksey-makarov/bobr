@@ -162,8 +162,9 @@ builder reuse index.
 
 `logs/<run-id>/<serial>-<tag>[-<name>]/raw/` stores raw per-subject log files
 such as captured tool output. `tmp/<run-id>/<serial>-<tag>[-<name>]/` is the
-matching per-subject scratch directory. Scratch directories may be removed or
-quarantined after execution; they are not part of the log record.
+matching per-subject scratch directory. Scratch directories are removed after
+execution on a best-effort basis; cleanup failures are logged as warnings and
+the scratch directory is left in place.
 
 ## Publication
 

@@ -9,13 +9,11 @@ name, so that build/reuse refs cannot resurrect the dropped object.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import shutil
 import stat
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -69,9 +67,7 @@ def main() -> int:
         plan = build_drop_plan(args.store, args.name)
         print_plan(plan, deleting=args.yes)
         if args.yes:
-            quarantine_path = execute_drop_plan(plan)
-            if quarantine_path is not None:
-                print(f"object payload moved to quarantine: {quarantine_path}")
+            execute_drop_plan(plan)
             print("deleted")
         else:
             print("dry-run only; pass --yes to delete")
@@ -236,15 +232,11 @@ def print_paths(label: str, paths: Iterable[Path]) -> None:
         print(f"  {path}")
 
 
-def execute_drop_plan(plan: DropPlan) -> Path | None:
-    quarantine_path = None
+def execute_drop_plan(plan: DropPlan) -> None:
     if plan.object_path.is_symlink():
         raise StoreDropError(f"object path '{plan.object_path}' is unexpectedly a symlink")
     if plan.object_path.is_dir():
-        try:
-            remove_dir_force(plan.object_path)
-        except OSError as error:
-            quarantine_path = quarantine_object_path(plan, error)
+        remove_dir_force(plan.object_path)
     elif plan.object_path.exists():
         plan.object_path.unlink()
 
@@ -256,7 +248,6 @@ def execute_drop_plan(plan: DropPlan) -> Path | None:
         *plan.object_record_paths,
     ):
         remove_file_or_symlink(path)
-    return quarantine_path
 
 
 def remove_file_or_symlink(path: Path) -> None:
@@ -286,43 +277,6 @@ def make_tree_dirs_writable(path: Path) -> None:
     with os.scandir(path) as entries:
         for entry in entries:
             make_tree_dirs_writable(Path(entry.path))
-
-
-def quarantine_object_path(plan: DropPlan, error: OSError) -> Path:
-    quarantine_dir = plan.store / "quarantine"
-    quarantine_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%y%m%d%H%M%S", time.localtime())
-    base = f"{timestamp}-drop-object-{plan.object_hash}"
-    for index in range(1, 1000):
-        suffix = "" if index == 1 else f"-{index}"
-        target = quarantine_dir / f"{base}{suffix}"
-        try:
-            plan.object_path.rename(target)
-        except FileExistsError:
-            continue
-        except OSError as rename_error:
-            raise StoreDropError(
-                "failed to remove object payload "
-                f"'{plan.object_path}': {error}; "
-                f"also failed to quarantine it at '{target}': {rename_error}"
-            ) from rename_error
-        write_quarantine_metadata(target, plan, str(error))
-        return target
-    raise StoreDropError(
-        f"failed to allocate quarantine path for object '{plan.object_hash}'"
-    )
-
-
-def write_quarantine_metadata(target: Path, plan: DropPlan, reason: str) -> None:
-    metadata = {
-        "schema": "bobr-store-drop-quarantine-v1",
-        "object_hash": plan.object_hash,
-        "original_object_path": str(plan.object_path),
-        "quarantine_path": str(target),
-        "reason": reason,
-    }
-    metadata_path = target.with_name(f"{target.name}.json")
-    metadata_path.write_text(json.dumps(metadata, sort_keys=True, indent=2) + "\n")
 
 
 if __name__ == "__main__":

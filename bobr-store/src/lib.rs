@@ -43,8 +43,7 @@ pub use refs::{
 };
 pub use source::{SourceImportOutcome, import_source_object, record_existing_source_object};
 pub use store::{
-    QuarantinedStoreTemp, Store, StoreRunLogLocations, StoreTempQuarantineRequest, StoreWorkspace,
-    create_workspace, quarantine_store_temp, recreate_store_temp_dir_force,
+    Store, StoreRunLogLocations, StoreWorkspace, create_workspace, recreate_store_temp_dir_force,
     remove_store_temp_dir_force,
 };
 

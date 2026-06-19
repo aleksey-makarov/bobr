@@ -107,8 +107,7 @@ fn execute_builder_subject(
     let temp_dir = workspace.temp_dir().to_path_buf();
     // Owns the temp dir from here on: every return path (bind error below, and
     // panics) cleans it via Drop.
-    let mut temp_guard =
-        TempDirGuard::for_builder(cx.store, subject.tag(), build_key, temp_dir.clone());
+    let mut temp_guard = TempDirGuard::for_builder(cx.store, temp_dir.clone());
     let logger = cx
         .run_logger
         .bind_subject(subject.log_subject(&workspace))
@@ -127,13 +126,7 @@ fn execute_builder_subject(
         "executing builder",
     );
     check_cancelled(&cx.cancellation)?;
-    prepare_temp(
-        cx.store,
-        subject.tag(),
-        &temp_dir,
-        build_key,
-        logger.as_ref(),
-    )?;
+    prepare_temp(cx.store, &temp_dir)?;
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,

@@ -8,7 +8,6 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
@@ -20,7 +19,6 @@ pub(crate) const OBJECT_REFS_DIR: &str = "object-refs";
 pub(crate) const OBJECT_RECORD_REFS_DIR: &str = "object-record-refs";
 pub(crate) const FS_FILES_DIR: &str = "fs-files";
 pub(crate) const FS_TREES_DIR: &str = "fs-trees";
-pub(crate) const QUARANTINE_DIR: &str = "quarantine";
 pub(crate) const LOGS_DIR: &str = "logs";
 pub(crate) const TMP_DIR: &str = "tmp";
 
@@ -74,28 +72,6 @@ impl StoreWorkspace {
     pub fn temp_dir(&self) -> &Path {
         &self.temp_dir
     }
-}
-
-/// Request to move a store-owned temporary path into quarantine.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoreTempQuarantineRequest {
-    /// Existing store-owned temporary path to quarantine.
-    pub temp_path: PathBuf,
-    /// Builder tag associated with the temporary path.
-    pub builder_tag: String,
-    /// Build key associated with the temporary path.
-    pub build_key: BuildKey,
-    /// Human-readable reason stored in quarantine metadata.
-    pub reason: String,
-}
-
-/// Result of quarantining a store-owned temporary path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuarantinedStoreTemp {
-    /// Final quarantine path.
-    pub path: PathBuf,
-    /// Metadata write failure, when the temp path was moved but metadata failed.
-    pub metadata_error: Option<String>,
 }
 
 /// Immutable handle to a `bobr` store.
@@ -203,10 +179,6 @@ impl Store {
         self.root().join(OBJECT_RECORD_REFS_DIR)
     }
 
-    fn quarantine_dir(&self) -> PathBuf {
-        self.root().join(QUARANTINE_DIR)
-    }
-
     /// Returns the canonical path of an imported legacy object.
     ///
     /// The path is `<store>/objects/<64-lowercase-object-hash>`. The function
@@ -285,75 +257,6 @@ pub fn create_workspace(
     append_workspace_index(store, &record)?;
 
     Ok(StoreWorkspace::new(log_dir, raw_log_dir, temp_dir))
-}
-
-/// Moves a store-owned temporary path into the store quarantine directory.
-pub fn quarantine_store_temp(
-    store: &Store,
-    request: StoreTempQuarantineRequest,
-) -> Result<QuarantinedStoreTemp, StoreError> {
-    validate_store_temp_dir(store, &request.temp_path)?;
-    let name = request
-        .temp_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            StoreError::InvalidInput(format!(
-                "invalid temp path '{}'",
-                request.temp_path.display()
-            ))
-        })?;
-    let quarantine_dir = store.quarantine_dir();
-    fs::create_dir_all(&quarantine_dir).map_err(|error| {
-        StoreError::Io(format!(
-            "failed to create quarantine directory '{}': {error}",
-            quarantine_dir.display()
-        ))
-    })?;
-    let stamp = current_epoch_nanos()?;
-    let timestamp = human_quarantine_timestamp(stamp)?;
-
-    for counter in 1..1000 {
-        let suffix = if counter == 1 {
-            timestamp.clone()
-        } else {
-            format!("{timestamp}.{counter}")
-        };
-        let target = quarantine_dir.join(format!(
-            "{}-{}-{}-{name}",
-            suffix,
-            safe_quarantine_component(&request.builder_tag),
-            request.build_key.to_hex(),
-        ));
-        if target.exists() || target.is_symlink() {
-            continue;
-        }
-        match fs::rename(&request.temp_path, &target) {
-            Ok(()) => {
-                let metadata_error = write_quarantine_metadata(&target, &request, stamp)
-                    .err()
-                    .map(|error| error.to_string());
-                return Ok(QuarantinedStoreTemp {
-                    path: target,
-                    metadata_error,
-                });
-            }
-            Err(_) if target.exists() || target.is_symlink() => continue,
-            Err(error) => {
-                return Err(StoreError::Io(format!(
-                    "failed to move temp path '{}' to '{}': {error}",
-                    request.temp_path.display(),
-                    target.display()
-                )));
-            }
-        }
-    }
-
-    Err(StoreError::Io(format!(
-        "failed to find quarantine target for temp path '{}' under '{}'",
-        request.temp_path.display(),
-        quarantine_dir.display()
-    )))
 }
 
 fn validate_root(root: &Path) -> Result<(), StoreError> {
@@ -642,75 +545,4 @@ fn validate_store_temp_dir(store: &Store, temp_dir: &Path) -> Result<(), StoreEr
     }
 
     Ok(())
-}
-
-fn current_epoch_nanos() -> Result<u128, StoreError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .map_err(|error| StoreError::Io(format!("system time before UNIX_EPOCH: {error}")))
-}
-
-fn human_quarantine_timestamp(stamp: u128) -> Result<String, StoreError> {
-    let nanos = i128::try_from(stamp)
-        .map_err(|_| StoreError::Io(format!("quarantine timestamp is out of range: {stamp}")))?;
-    let parsed = OffsetDateTime::from_unix_timestamp_nanos(nanos).map_err(|error| {
-        StoreError::Io(format!(
-            "failed to parse quarantine timestamp {stamp}: {error}"
-        ))
-    })?;
-    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    let local = parsed.to_offset(offset);
-    let format = format_description!("[year repr:last_two][month][day][hour][minute][second]");
-    local
-        .format(&format)
-        .map_err(|error| StoreError::Io(format!("failed to format quarantine timestamp: {error}")))
-}
-
-fn safe_quarantine_component(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-fn write_quarantine_metadata(
-    target: &Path,
-    request: &StoreTempQuarantineRequest,
-    stamp: u128,
-) -> Result<(), StoreError> {
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            StoreError::InvalidInput(format!("invalid quarantine path '{}'", target.display()))
-        })?;
-    let metadata_path = target.with_file_name(format!("{file_name}.json"));
-    let metadata = json!({
-        "schema": "bobr-quarantine-v1",
-        "builder_tag": &request.builder_tag,
-        "build_key": request.build_key.to_hex(),
-        "original_path": request.temp_path.display().to_string(),
-        "quarantine_path": target.display().to_string(),
-        "reason": &request.reason,
-        "quarantined_at_unix_nanos": stamp.to_string(),
-    });
-    serde_json::to_vec_pretty(&metadata)
-        .map_err(|error| {
-            StoreError::InvalidData(format!("failed to encode quarantine metadata: {error}"))
-        })
-        .and_then(|bytes| {
-            fs::write(&metadata_path, bytes).map_err(|error| {
-                StoreError::Io(format!(
-                    "failed to write quarantine metadata '{}': {error}",
-                    metadata_path.display()
-                ))
-            })
-        })
 }

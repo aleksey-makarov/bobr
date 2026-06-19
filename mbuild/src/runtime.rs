@@ -1,13 +1,8 @@
-use bobr_store::{
-    Store, StoreError, StoreTempQuarantineRequest, quarantine_store_temp,
-    recreate_store_temp_dir_force, remove_store_temp_dir_force,
-};
+use bobr_store::{Store, StoreError, recreate_store_temp_dir_force, remove_store_temp_dir_force};
 use mbuild_core::{
-    BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuilderError, CancellationToken,
-    NoopBuildLogger,
+    BuildLogEvent, BuildLogLevel, BuildLogger, BuilderError, CancellationToken, NoopBuildLogger,
 };
 use std::fmt;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -53,18 +48,11 @@ impl fmt::Display for RuntimeError {
 
 impl std::error::Error for RuntimeError {}
 
-/// Prepares an empty temp directory for a builder run, quarantining any stale
-/// contents first. Builders own their staging area, so this runs before
+/// Prepares an empty temp directory for a builder run. Builders own their
+/// staging area, so this runs before
 /// `BuilderPlannedSubject::execute` constructs its `BuildContext`.
-pub(crate) fn prepare_temp(
-    store: &Store,
-    tag: &str,
-    temp_dir: &Path,
-    build_key: BuildKey,
-    logger: &dyn BuildLogger,
-) -> Result<(), RuntimeError> {
-    let cleanup = TempCleanupContext::new(store, tag, build_key);
-    recreate_empty_temp_dir_with_quarantine(temp_dir, &cleanup, logger)
+pub(crate) fn prepare_temp(store: &Store, temp_dir: &Path) -> Result<(), RuntimeError> {
+    recreate_store_temp_dir_force(store, temp_dir).map_err(map_store_error)
 }
 
 pub(crate) fn map_builder_error(error: BuilderError) -> RuntimeError {
@@ -104,151 +92,21 @@ pub(crate) fn check_cancelled(cancellation: &CancellationToken) -> Result<(), Ru
     }
 }
 
-fn recreate_empty_temp_dir_with_quarantine(
-    temp_dir: &Path,
-    cleanup: &TempCleanupContext,
-    logger: &dyn BuildLogger,
-) -> Result<(), RuntimeError> {
-    if cleanup.mode == TempCleanupMode::DirectQuarantine {
-        if fs::symlink_metadata(temp_dir).is_ok() && !is_empty_directory(temp_dir) {
-            quarantine_temp_path(
-                temp_dir,
-                cleanup,
-                logger,
-                "stale sandbox temp dir may contain userns-owned files".to_string(),
-            )
-            .map_err(RuntimeError::Store)?;
-        }
-        return fs::create_dir_all(temp_dir).map_err(|error| {
-            RuntimeError::Store(format!(
-                "failed to create directory '{}': {error}",
-                temp_dir.display()
-            ))
-        });
-    }
-
-    match recreate_store_temp_dir_force(&cleanup.store, temp_dir) {
-        Ok(()) => return Ok(()),
-        Err(error) if fs::symlink_metadata(temp_dir).is_ok() => {
-            quarantine_temp_path(temp_dir, cleanup, logger, error.to_string())
-                .map_err(RuntimeError::Store)?;
-        }
-        Err(error) => return Err(RuntimeError::Store(error.to_string())),
-    }
-
-    fs::create_dir_all(temp_dir).map_err(|error| {
-        RuntimeError::Store(format!(
-            "failed to create directory '{}': {error}",
-            temp_dir.display()
-        ))
-    })
-}
-
-fn is_empty_directory(path: &Path) -> bool {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return false;
-    };
-    if !metadata.file_type().is_dir() {
-        return false;
-    }
-    fs::read_dir(path)
-        .map(|mut entries| entries.next().is_none())
-        .unwrap_or(false)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TempCleanupMode {
-    RemoveThenQuarantine,
-    DirectQuarantine,
-}
-
 #[derive(Debug)]
 struct TempCleanupContext {
     store: Store,
-    builder_tag: String,
-    build_key: BuildKey,
-    mode: TempCleanupMode,
 }
 
 impl TempCleanupContext {
-    fn new(store: &Store, builder_tag: &str, build_key: BuildKey) -> Self {
+    fn new(store: &Store) -> Self {
         Self {
             store: store.clone(),
-            builder_tag: builder_tag.to_string(),
-            build_key,
-            mode: cleanup_mode_for_builder(builder_tag),
         }
-    }
-}
-
-fn cleanup_mode_for_builder(builder_tag: &str) -> TempCleanupMode {
-    if builder_tag.eq_ignore_ascii_case("Sandbox") {
-        TempCleanupMode::DirectQuarantine
-    } else {
-        TempCleanupMode::RemoveThenQuarantine
     }
 }
 
 fn cleanup_temp_dir(temp_dir: &Path, cleanup: &TempCleanupContext, logger: &dyn BuildLogger) {
-    if cleanup.mode == TempCleanupMode::DirectQuarantine {
-        if fs::symlink_metadata(temp_dir).is_ok() {
-            if is_empty_directory(temp_dir) {
-                if let Err(error) = remove_store_temp_dir_force(&cleanup.store, temp_dir) {
-                    log_runtime_event(
-                        logger,
-                        BuildLogLevel::Warn,
-                        "cleanup-warning",
-                        format!(
-                            "failed to remove empty sandbox temp dir '{}': {error}",
-                            temp_dir.display()
-                        ),
-                    );
-                }
-                return;
-            }
-            match quarantine_temp_path(
-                temp_dir,
-                cleanup,
-                logger,
-                "sandbox temp may contain userns-owned files".to_string(),
-            ) {
-                Ok(_) => return,
-                Err(quarantine_error) => {
-                    log_runtime_event(
-                        logger,
-                        BuildLogLevel::Warn,
-                        "cleanup-warning",
-                        format!(
-                            "failed to quarantine sandbox temp dir '{}': {quarantine_error}",
-                            temp_dir.display()
-                        ),
-                    );
-                    return;
-                }
-            }
-        }
-        return;
-    }
-
     if let Err(error) = remove_store_temp_dir_force(&cleanup.store, temp_dir) {
-        if fs::symlink_metadata(temp_dir).is_ok() {
-            match quarantine_temp_path(temp_dir, cleanup, logger, error.to_string()) {
-                Ok(_) => return,
-                Err(quarantine_error) => {
-                    log_runtime_event(
-                        logger,
-                        BuildLogLevel::Warn,
-                        "cleanup-warning",
-                        format!(
-                            "failed to remove temp dir '{}': {error}; failed to quarantine it: {quarantine_error}",
-                            temp_dir.display()
-                        ),
-                    );
-                    return;
-                }
-            }
-        }
-
         log_runtime_event(
             logger,
             BuildLogLevel::Warn,
@@ -261,50 +119,9 @@ fn cleanup_temp_dir(temp_dir: &Path, cleanup: &TempCleanupContext, logger: &dyn 
     }
 }
 
-fn quarantine_temp_path(
-    temp_dir: &Path,
-    cleanup: &TempCleanupContext,
-    logger: &dyn BuildLogger,
-    reason: String,
-) -> Result<PathBuf, String> {
-    let quarantined = quarantine_store_temp(
-        &cleanup.store,
-        StoreTempQuarantineRequest {
-            temp_path: temp_dir.to_path_buf(),
-            builder_tag: cleanup.builder_tag.clone(),
-            build_key: cleanup.build_key,
-            reason: reason.clone(),
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    let target = quarantined.path;
-    log_runtime_event(
-        logger,
-        match cleanup.mode {
-            TempCleanupMode::DirectQuarantine => BuildLogLevel::Info,
-            TempCleanupMode::RemoveThenQuarantine => BuildLogLevel::Warn,
-        },
-        "temp-quarantine",
-        format!(
-            "moved temp dir '{}' to global quarantine '{}': {reason}",
-            temp_dir.display(),
-            target.display()
-        ),
-    );
-    if let Some(metadata_error) = quarantined.metadata_error {
-        log_runtime_event(
-            logger,
-            BuildLogLevel::Warn,
-            "cleanup-warning",
-            metadata_error,
-        );
-    }
-    Ok(target)
-}
-
 enum TempCleanupPolicy {
-    /// Builders may leave files owned by another namespace's uids, so their
-    /// temp dirs are quarantined when they cannot be removed.
+    /// Builders are expected to leave their temporary directories removable.
+    /// Cleanup is best-effort and only logs a warning if removal fails.
     Builder(TempCleanupContext),
     /// Sources materialize as the current user, so plain removal is enough.
     Source(Store),
@@ -315,10 +132,9 @@ enum TempCleanupPolicy {
 /// Created right after `create_workspace` (before the node logger exists), so
 /// that every post-workspace exit path — error, success, or panic-unwind —
 /// cleans the temp dir exactly once via `Drop`. Cache hits return before a
-/// workspace exists, so they do not need a temp guard. The builder/source
-/// asymmetry is kept: builders quarantine, sources remove. Until a node logger
-/// is attached with [`TempDirGuard::set_logger`], cleanup warnings go to a
-/// no-op logger.
+/// workspace exists, so they do not need a temp guard. Until a node logger is
+/// attached with [`TempDirGuard::set_logger`], cleanup warnings go to a no-op
+/// logger.
 pub(crate) struct TempDirGuard {
     temp_dir: PathBuf,
     policy: TempCleanupPolicy,
@@ -326,19 +142,10 @@ pub(crate) struct TempDirGuard {
 }
 
 impl TempDirGuard {
-    pub(crate) fn for_builder(
-        store: &Store,
-        builder_tag: &str,
-        build_key: BuildKey,
-        temp_dir: PathBuf,
-    ) -> Self {
+    pub(crate) fn for_builder(store: &Store, temp_dir: PathBuf) -> Self {
         Self {
             temp_dir,
-            policy: TempCleanupPolicy::Builder(TempCleanupContext::new(
-                store,
-                builder_tag,
-                build_key,
-            )),
+            policy: TempCleanupPolicy::Builder(TempCleanupContext::new(store)),
             logger: Arc::new(NoopBuildLogger),
         }
     }
@@ -390,7 +197,7 @@ mod tests {
         BuildContext, BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult, TypedBuilder,
     };
     use mbuild_core::{
-        BuildLogSubject, BuildLogger, BuildRunLogger, CancellationToken, RuntimeProvider,
+        BuildKey, BuildLogSubject, BuildLogger, BuildRunLogger, CancellationToken, RuntimeProvider,
         Workspace, compute_build_key, compute_reuse_key,
     };
     use serde::Deserialize;
@@ -507,28 +314,27 @@ mod tests {
             .collect()
     }
 
-    fn assert_quarantine_event(
+    fn assert_cleanup_warning_event(
         log_dir: &Path,
-        level: &str,
         builder: &str,
         name: &str,
         build_key: BuildKey,
+        message_fragment: &str,
     ) -> Value {
         let events = event_log_records(log_dir)
             .into_iter()
-            .filter(|event| event["phase"] == "temp-quarantine")
+            .filter(|event| event["phase"] == "cleanup-warning")
             .collect::<Vec<_>>();
         assert_eq!(events.len(), 1);
 
         let event = events.into_iter().next().unwrap();
-        assert_eq!(event["level"], level);
+        assert_eq!(event["level"], "warn");
         assert_eq!(event["builder"], builder);
         assert_eq!(event["name"], name);
         assert_eq!(event["details"]["full_build_key"], build_key.to_string());
 
         let message = event["message"].as_str().unwrap();
-        assert!(message.contains("moved temp dir"));
-        assert!(message.contains("to global quarantine"));
+        assert!(message.contains(message_fragment));
         event
     }
 
@@ -620,7 +426,7 @@ mod tests {
 
             fs::create_dir_all(cx.temp_dir.join("out")).unwrap();
             fs::write(cx.temp_dir.join("out").join("payload"), b"ok\n").unwrap();
-            fs::write(cx.temp_dir.join("sandbox-scratch"), b"keep in quarantine\n").unwrap();
+            fs::write(cx.temp_dir.join("sandbox-scratch"), b"sandbox scratch\n").unwrap();
 
             Ok(StagedBuildResult {
                 staged_path: cx.temp_dir.join("out"),
@@ -769,7 +575,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn build_context_quarantines_stale_temp_dir_when_recreate_fails() {
+    fn prepare_temp_reports_stale_temp_recreate_failure() {
         use std::os::unix::fs::symlink;
 
         let temp = tempdir().unwrap();
@@ -777,7 +583,7 @@ mod tests {
         let config = json!({});
         let build_key = compute_build_key("RuntimeTest", &config, &[]).unwrap();
         let run_logger = create_test_logger(&store);
-        let (workspace, logger) = create_test_run(
+        let (workspace, _logger) = create_test_run(
             &store,
             &run_logger,
             "RuntimeTest",
@@ -789,30 +595,24 @@ mod tests {
         let stale_target = temp.path().join("missing-stale-target");
         symlink(&stale_target, &temp_dir).unwrap();
 
-        prepare_temp(&store, "RuntimeTest", &temp_dir, build_key, logger.as_ref()).unwrap();
+        let error = prepare_temp(&store, &temp_dir).unwrap_err();
 
-        assert!(temp_dir.is_dir());
+        assert_eq!(error.class(), "store");
+        assert!(error.message().contains("failed to create directory"));
         assert!(
-            !fs::symlink_metadata(&temp_dir)
+            fs::symlink_metadata(&temp_dir)
                 .unwrap()
                 .file_type()
                 .is_symlink()
         );
-        assert_quarantine_event(
-            workspace.log_dir(),
-            "warn",
-            "RuntimeTest",
-            "runtime-test",
-            build_key,
-        );
+        assert!(event_log_records(workspace.log_dir()).is_empty());
     }
 
     #[test]
-    fn execute_sandbox_builder_quarantines_temp_without_removing_it() {
+    fn execute_sandbox_builder_removes_temp_on_success() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let logger = create_test_logger(&store);
-        let build_key = compute_build_key("Sandbox", &json!({}), &[]).unwrap();
 
         let executed = run_builder_subject(
             &store,
@@ -829,29 +629,21 @@ mod tests {
         assert!(!temp_dir.exists());
         let object_path = store.object_path(executed.realized.object_hash);
         assert!(object_path.join("payload").is_file());
-        let event = assert_quarantine_event(
-            &metadata_log_dir(&metadata),
-            "info",
-            "Sandbox",
-            "sandbox-runtime-test",
-            build_key,
-        );
         assert!(
-            event["message"]
-                .as_str()
-                .unwrap()
-                .contains("sandbox temp may contain userns-owned files")
+            event_log_records(&metadata_log_dir(&metadata))
+                .iter()
+                .all(|event| event["phase"] != "cleanup-warning")
         );
     }
 
     #[test]
-    fn build_context_quarantines_stale_sandbox_temp_before_recreate() {
+    fn prepare_temp_removes_stale_sandbox_temp_before_recreate() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
         let config = json!({});
         let build_key = compute_build_key("Sandbox", &config, &[]).unwrap();
-        let (workspace, logger) = create_test_run(
+        let (workspace, _logger) = create_test_run(
             &store,
             &run_logger,
             "Sandbox",
@@ -863,22 +655,11 @@ mod tests {
         fs::create_dir_all(&temp_dir).unwrap();
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
-        prepare_temp(&store, "Sandbox", &temp_dir, build_key, logger.as_ref()).unwrap();
+        prepare_temp(&store, &temp_dir).unwrap();
 
         assert!(temp_dir.is_dir());
-        let event = assert_quarantine_event(
-            workspace.log_dir(),
-            "info",
-            "Sandbox",
-            "sandbox-runtime-test",
-            build_key,
-        );
-        assert!(
-            event["message"]
-                .as_str()
-                .unwrap()
-                .contains("stale sandbox temp dir may contain userns-owned files")
-        );
+        assert_eq!(fs::read_dir(&temp_dir).unwrap().count(), 0);
+        assert!(event_log_records(workspace.log_dir()).is_empty());
     }
 
     #[test]
@@ -904,7 +685,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cleanup_temp_dir_quarantines_when_remove_fails() {
+    fn cleanup_temp_dir_warns_when_remove_fails() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
@@ -920,16 +701,16 @@ mod tests {
         fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
         fs::write(&temp_dir, b"not a directory\n").unwrap();
 
-        let cleanup = TempCleanupContext::new(&store, "RuntimeTest", build_key);
+        let cleanup = TempCleanupContext::new(&store);
         cleanup_temp_dir(&temp_dir, &cleanup, logger.as_ref());
 
-        assert!(fs::symlink_metadata(&temp_dir).is_err());
-        assert_quarantine_event(
+        assert!(temp_dir.is_file());
+        assert_cleanup_warning_event(
             workspace.log_dir(),
-            "warn",
             "RuntimeTest",
             "runtime-test",
             build_key,
+            "failed to remove temp dir",
         );
     }
 
@@ -949,8 +730,7 @@ mod tests {
 
         {
             // No set_logger call: the node logger was never bound.
-            let _guard =
-                TempDirGuard::for_builder(&store, "RuntimeTest", build_key, temp_dir.clone());
+            let _guard = TempDirGuard::for_builder(&store, temp_dir.clone());
         }
 
         assert!(!temp_dir.exists());

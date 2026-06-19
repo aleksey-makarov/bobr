@@ -1510,51 +1510,6 @@ fn store_temp_force_helpers_reject_paths_outside_store_tmp_root() {
 }
 
 #[test]
-fn quarantine_store_temp_moves_path_and_writes_metadata() {
-    let temp = tempdir().unwrap();
-    let layout = Store::create(temp.path()).unwrap();
-    let workspace =
-        create_workspace(&layout, "Tree", Some("demo".to_string()), "build-demo").unwrap();
-    let original_temp_dir = workspace.temp_dir().to_path_buf();
-    fs::write(original_temp_dir.join("scratch"), b"temp\n").unwrap();
-    let build_key = compute_build_key("Tree", &json!({}), &[]).unwrap();
-
-    let quarantined = quarantine_store_temp(
-        &layout,
-        StoreTempQuarantineRequest {
-            temp_path: original_temp_dir.clone(),
-            builder_tag: "Tree".to_string(),
-            build_key,
-            reason: "test quarantine".to_string(),
-        },
-    )
-    .unwrap();
-
-    assert!(!original_temp_dir.exists());
-    assert!(
-        quarantined
-            .path
-            .starts_with(layout.root().join(crate::store::QUARANTINE_DIR))
-    );
-    assert!(quarantined.path.join("scratch").is_file());
-    let file_name = quarantined.path.file_name().unwrap().to_str().unwrap();
-    let metadata_path = quarantined.path.with_file_name(format!("{file_name}.json"));
-    let metadata: Value = serde_json::from_slice(&fs::read(metadata_path).unwrap()).unwrap();
-    assert_eq!(metadata["schema"], "bobr-quarantine-v1");
-    assert_eq!(metadata["builder_tag"], "Tree");
-    assert_eq!(metadata["build_key"], build_key.to_hex());
-    assert_eq!(
-        metadata["original_path"],
-        original_temp_dir.display().to_string()
-    );
-    assert_eq!(
-        metadata["quarantine_path"],
-        quarantined.path.display().to_string()
-    );
-    assert_eq!(metadata["reason"], "test quarantine");
-}
-
-#[test]
 fn parallel_workspace_allocation_does_not_reuse_serials() {
     let temp = tempdir().unwrap();
     let layout = Store::create(temp.path()).unwrap();
