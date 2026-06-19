@@ -46,11 +46,11 @@ impl StoreRunLogLocations {
 pub struct StoreWorkspace {
     log_dir: PathBuf,
     raw_log_dir: PathBuf,
-    temp_dir: PathBuf,
+    temp_dir: StoreTempDir,
 }
 
 impl StoreWorkspace {
-    fn new(log_dir: PathBuf, raw_log_dir: PathBuf, temp_dir: PathBuf) -> Self {
+    fn new(log_dir: PathBuf, raw_log_dir: PathBuf, temp_dir: StoreTempDir) -> Self {
         Self {
             log_dir,
             raw_log_dir,
@@ -70,9 +70,50 @@ impl StoreWorkspace {
 
     /// Returns the per-subject temporary directory.
     pub fn temp_dir(&self) -> &Path {
+        self.temp_dir.path()
+    }
+
+    /// Returns the store-owned temporary directory handle.
+    pub fn temp_dir_handle(&self) -> &StoreTempDir {
         &self.temp_dir
     }
 }
+
+/// Store-owned temporary directory allocated for one run subject.
+#[derive(Debug, Clone)]
+pub struct StoreTempDir {
+    store: Store,
+    path: PathBuf,
+}
+
+impl StoreTempDir {
+    fn new(store: Store, path: PathBuf) -> Self {
+        Self { store, path }
+    }
+
+    /// Returns the temporary directory path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Removes any existing contents and recreates the directory as empty.
+    pub fn prepare_empty(&self) -> Result<(), StoreError> {
+        recreate_store_temp_dir_force(&self.store, &self.path)
+    }
+
+    /// Removes the temporary directory if it exists.
+    pub fn remove_force(&self) -> Result<(), StoreError> {
+        remove_store_temp_dir_force(&self.store, &self.path)
+    }
+}
+
+impl PartialEq for StoreTempDir {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+    }
+}
+
+impl Eq for StoreTempDir {}
 
 /// Immutable handle to a `bobr` store.
 ///
@@ -256,6 +297,7 @@ pub fn create_workspace(
     write_workspace_metadata(store, &record)?;
     append_workspace_index(store, &record)?;
 
+    let temp_dir = StoreTempDir::new(store.clone(), temp_dir);
     Ok(StoreWorkspace::new(log_dir, raw_log_dir, temp_dir))
 }
 
@@ -510,7 +552,10 @@ fn append_workspace_index(
 /// The directory must be below the store temporary root. This guard keeps
 /// force-removal scoped to temporary directories that belong to the store.
 /// The resulting directory exists and is empty.
-pub fn recreate_store_temp_dir_force(store: &Store, temp_dir: &Path) -> Result<(), StoreError> {
+pub(crate) fn recreate_store_temp_dir_force(
+    store: &Store,
+    temp_dir: &Path,
+) -> Result<(), StoreError> {
     validate_store_temp_dir(store, temp_dir)?;
     private_fs::recreate_empty_dir_force(temp_dir).map_err(crate::error::map_fsutil_error)
 }
@@ -519,7 +564,10 @@ pub fn recreate_store_temp_dir_force(store: &Store, temp_dir: &Path) -> Result<(
 ///
 /// The directory must be below the store temporary root. Missing directories are
 /// treated as success.
-pub fn remove_store_temp_dir_force(store: &Store, temp_dir: &Path) -> Result<(), StoreError> {
+pub(crate) fn remove_store_temp_dir_force(
+    store: &Store,
+    temp_dir: &Path,
+) -> Result<(), StoreError> {
     validate_store_temp_dir(store, temp_dir)?;
     private_fs::remove_dir_force(temp_dir).map_err(crate::error::map_fsutil_error)
 }

@@ -96,18 +96,18 @@ fn execute_builder_subject(
         inputs.prepare_builder_inputs(subject.input_spec(), cx.store, &cx.runtime_provider)?;
 
     // Miss: create the workspace and run the builder.
-    let workspace = create_workspace(
+    let store_workspace = create_workspace(
         cx.store,
         subject.tag(),
         Some(subject.name().to_string()),
         build_key.to_string(),
     )
-    .map(core_workspace)
     .map_err(map_store_error)?;
-    let temp_dir = workspace.temp_dir().to_path_buf();
+    let temp_dir_handle = store_workspace.temp_dir_handle().clone();
+    let workspace = core_workspace(store_workspace);
     // Owns the temp dir from here on: every return path (bind error below, and
     // panics) cleans it via Drop.
-    let mut temp_guard = TempDirGuard::for_builder(cx.store, temp_dir.clone());
+    let mut temp_guard = TempDirGuard::for_builder(temp_dir_handle.clone());
     let logger = cx
         .run_logger
         .bind_subject(subject.log_subject(&workspace))
@@ -126,7 +126,7 @@ fn execute_builder_subject(
         "executing builder",
     );
     check_cancelled(&cx.cancellation)?;
-    prepare_temp(cx.store, &temp_dir)?;
+    prepare_temp(&temp_dir_handle)?;
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
@@ -198,18 +198,18 @@ fn execute_source_subject(
     }
 
     // Miss: create the workspace and materialize the source.
-    let workspace = create_workspace(
+    let store_workspace = create_workspace(
         cx.store,
         "Source",
         Some(subject.name().to_string()),
         build_key.to_string(),
     )
-    .map(core_workspace)
     .map_err(map_store_error)?;
-    let temp_dir = workspace.temp_dir().to_path_buf();
+    let temp_dir_handle = store_workspace.temp_dir_handle().clone();
+    let workspace = core_workspace(store_workspace);
     // Owns the temp dir from here on: every return path (bind error below, and
     // panics) cleans it via Drop.
-    let mut temp_guard = TempDirGuard::for_source(cx.store, temp_dir);
+    let mut temp_guard = TempDirGuard::for_source(temp_dir_handle);
     let logger = cx
         .run_logger
         .bind_subject(subject.log_subject(&workspace))

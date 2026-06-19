@@ -1,9 +1,8 @@
-use bobr_store::{Store, StoreError, recreate_store_temp_dir_force, remove_store_temp_dir_force};
+use bobr_store::{StoreError, StoreTempDir};
 use mbuild_core::{
     BuildLogEvent, BuildLogLevel, BuildLogger, BuilderError, CancellationToken, NoopBuildLogger,
 };
 use std::fmt;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -51,8 +50,8 @@ impl std::error::Error for RuntimeError {}
 /// Prepares an empty temp directory for a builder run. Builders own their
 /// staging area, so this runs before
 /// `BuilderPlannedSubject::execute` constructs its `BuildContext`.
-pub(crate) fn prepare_temp(store: &Store, temp_dir: &Path) -> Result<(), RuntimeError> {
-    recreate_store_temp_dir_force(store, temp_dir).map_err(map_store_error)
+pub(crate) fn prepare_temp(temp_dir: &StoreTempDir) -> Result<(), RuntimeError> {
+    temp_dir.prepare_empty().map_err(map_store_error)
 }
 
 pub(crate) fn map_builder_error(error: BuilderError) -> RuntimeError {
@@ -92,39 +91,18 @@ pub(crate) fn check_cancelled(cancellation: &CancellationToken) -> Result<(), Ru
     }
 }
 
-#[derive(Debug)]
-struct TempCleanupContext {
-    store: Store,
-}
-
-impl TempCleanupContext {
-    fn new(store: &Store) -> Self {
-        Self {
-            store: store.clone(),
-        }
-    }
-}
-
-fn cleanup_temp_dir(temp_dir: &Path, cleanup: &TempCleanupContext, logger: &dyn BuildLogger) {
-    if let Err(error) = remove_store_temp_dir_force(&cleanup.store, temp_dir) {
+fn cleanup_temp_dir(temp_dir: &StoreTempDir, logger: &dyn BuildLogger) {
+    if let Err(error) = temp_dir.remove_force() {
         log_runtime_event(
             logger,
             BuildLogLevel::Warn,
             "cleanup-warning",
             format!(
                 "failed to remove temp dir '{}': {error}",
-                temp_dir.display()
+                temp_dir.path().display()
             ),
         );
     }
-}
-
-enum TempCleanupPolicy {
-    /// Builders are expected to leave their temporary directories removable.
-    /// Cleanup is best-effort and only logs a warning if removal fails.
-    Builder(TempCleanupContext),
-    /// Sources materialize as the current user, so plain removal is enough.
-    Source(Store),
 }
 
 /// RAII owner of a node's temp directory.
@@ -136,24 +114,21 @@ enum TempCleanupPolicy {
 /// attached with [`TempDirGuard::set_logger`], cleanup warnings go to a no-op
 /// logger.
 pub(crate) struct TempDirGuard {
-    temp_dir: PathBuf,
-    policy: TempCleanupPolicy,
+    temp_dir: StoreTempDir,
     logger: Arc<dyn BuildLogger>,
 }
 
 impl TempDirGuard {
-    pub(crate) fn for_builder(store: &Store, temp_dir: PathBuf) -> Self {
+    pub(crate) fn for_builder(temp_dir: StoreTempDir) -> Self {
         Self {
             temp_dir,
-            policy: TempCleanupPolicy::Builder(TempCleanupContext::new(store)),
             logger: Arc::new(NoopBuildLogger),
         }
     }
 
-    pub(crate) fn for_source(store: &Store, temp_dir: PathBuf) -> Self {
+    pub(crate) fn for_source(temp_dir: StoreTempDir) -> Self {
         Self {
             temp_dir,
-            policy: TempCleanupPolicy::Source(store.clone()),
             logger: Arc::new(NoopBuildLogger),
         }
     }
@@ -165,24 +140,7 @@ impl TempDirGuard {
 
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
-        match &self.policy {
-            TempCleanupPolicy::Builder(cleanup) => {
-                cleanup_temp_dir(&self.temp_dir, cleanup, self.logger.as_ref());
-            }
-            TempCleanupPolicy::Source(store) => {
-                if let Err(error) = remove_store_temp_dir_force(store, &self.temp_dir) {
-                    log_runtime_event(
-                        self.logger.as_ref(),
-                        BuildLogLevel::Warn,
-                        "cleanup-warning",
-                        format!(
-                            "failed to remove temp dir '{}': {error}",
-                            self.temp_dir.display()
-                        ),
-                    );
-                }
-            }
-        }
+        cleanup_temp_dir(&self.temp_dir, self.logger.as_ref());
     }
 }
 
@@ -190,20 +148,24 @@ impl Drop for TempDirGuard {
 mod tests {
     use super::*;
     use crate::planned::{
-        PlannedExecutionContext, PlannedSubject, SubjectExecution, core_workspace, execute_subject,
+        PlannedExecutionContext, PlannedSubject, SubjectExecution, execute_subject,
     };
-    use bobr_store::{PublishRequest, create_workspace, publish_build, resolve_reuse_for_build};
+    use bobr_store::{
+        PublishRequest, Store, StoreWorkspace, create_workspace, publish_build,
+        resolve_reuse_for_build,
+    };
     use mbuild_builder::{
         BuildContext, BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult, TypedBuilder,
     };
     use mbuild_core::{
         BuildKey, BuildLogSubject, BuildLogger, BuildRunLogger, CancellationToken, RuntimeProvider,
-        Workspace, compute_build_key, compute_reuse_key,
+        compute_build_key, compute_reuse_key,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
     use std::collections::{BTreeMap, HashMap};
     use std::fs;
+    use std::path::{Path, PathBuf};
     use std::str::FromStr;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -225,10 +187,9 @@ mod tests {
         tag: &str,
         name: &str,
         build_key: BuildKey,
-    ) -> (Workspace, Arc<dyn BuildLogger>) {
-        let workspace = create_workspace(store, tag, Some(name.to_string()), build_key.to_string())
-            .map(core_workspace)
-            .unwrap();
+    ) -> (StoreWorkspace, Arc<dyn BuildLogger>) {
+        let workspace =
+            create_workspace(store, tag, Some(name.to_string()), build_key.to_string()).unwrap();
         let subject = BuildLogSubject::new(
             tag,
             name,
@@ -595,7 +556,7 @@ mod tests {
         let stale_target = temp.path().join("missing-stale-target");
         symlink(&stale_target, &temp_dir).unwrap();
 
-        let error = prepare_temp(&store, &temp_dir).unwrap_err();
+        let error = prepare_temp(workspace.temp_dir_handle()).unwrap_err();
 
         assert_eq!(error.class(), "store");
         assert!(error.message().contains("failed to create directory"));
@@ -655,7 +616,7 @@ mod tests {
         fs::create_dir_all(&temp_dir).unwrap();
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
-        prepare_temp(&store, &temp_dir).unwrap();
+        prepare_temp(workspace.temp_dir_handle()).unwrap();
 
         assert!(temp_dir.is_dir());
         assert_eq!(fs::read_dir(&temp_dir).unwrap().count(), 0);
@@ -697,12 +658,11 @@ mod tests {
             "runtime-test",
             build_key,
         );
-        let temp_dir = workspace.temp_dir().join("stale");
-        fs::create_dir_all(temp_dir.parent().unwrap()).unwrap();
+        let temp_dir = workspace.temp_dir().to_path_buf();
+        fs::remove_dir_all(&temp_dir).unwrap();
         fs::write(&temp_dir, b"not a directory\n").unwrap();
 
-        let cleanup = TempCleanupContext::new(&store);
-        cleanup_temp_dir(&temp_dir, &cleanup, logger.as_ref());
+        cleanup_temp_dir(workspace.temp_dir_handle(), logger.as_ref());
 
         assert!(temp_dir.is_file());
         assert_cleanup_warning_event(
@@ -730,7 +690,7 @@ mod tests {
 
         {
             // No set_logger call: the node logger was never bound.
-            let _guard = TempDirGuard::for_builder(&store, temp_dir.clone());
+            let _guard = TempDirGuard::for_builder(workspace.temp_dir_handle().clone());
         }
 
         assert!(!temp_dir.exists());

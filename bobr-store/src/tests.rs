@@ -1490,23 +1490,23 @@ fn workspace_allocation_writes_metadata_index_and_sanitized_paths() {
 }
 
 #[test]
-fn store_temp_force_helpers_reject_paths_outside_store_tmp_root() {
+fn store_temp_dir_handle_prepares_and_removes_temp() {
     let temp = tempdir().unwrap();
     let layout = Store::create(temp.path()).unwrap();
-    let old_log_tmp = layout.run_log_dir().join("00000000-Tree-demo").join("tmp");
+    let workspace =
+        create_workspace(&layout, "Tree", Some("demo".to_string()), "build-demo").unwrap();
+    let temp_dir = workspace.temp_dir().to_path_buf();
+    fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
-    assert!(matches!(
-        remove_store_temp_dir_force(&layout, &old_log_tmp),
-        Err(StoreError::InvalidInput(message))
-            if message.contains("must be under store temp root")
-    ));
+    workspace.temp_dir_handle().prepare_empty().unwrap();
 
-    let traversal = layout.run_tmp_dir().join("..").join("logs").join("oops");
-    assert!(matches!(
-        remove_store_temp_dir_force(&layout, &traversal),
-        Err(StoreError::InvalidInput(message))
-            if message.contains("must not contain '..'")
-    ));
+    assert!(temp_dir.is_dir());
+    assert_eq!(fs::read_dir(&temp_dir).unwrap().count(), 0);
+
+    workspace.temp_dir_handle().remove_force().unwrap();
+
+    assert!(!temp_dir.exists());
+    workspace.temp_dir_handle().remove_force().unwrap();
 }
 
 #[test]

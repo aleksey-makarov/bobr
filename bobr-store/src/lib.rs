@@ -42,10 +42,7 @@ pub use refs::{
     resolve_reuse_for_build,
 };
 pub use source::{SourceImportOutcome, import_source_object, record_existing_source_object};
-pub use store::{
-    Store, StoreRunLogLocations, StoreWorkspace, create_workspace, recreate_store_temp_dir_force,
-    remove_store_temp_dir_force,
-};
+pub use store::{Store, StoreRunLogLocations, StoreTempDir, StoreWorkspace, create_workspace};
 
 #[cfg(test)]
 pub(crate) use json::canonical_json_bytes;
