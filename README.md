@@ -179,17 +179,21 @@ directory is the store root itself. A request may still choose a path named
 The store layout is content-addressed:
 
 - `<store>/objects/` stores payload objects by `object_hash`
-- fs-tree leaf hashes live in `manifest.jsonl`; the store does not maintain
-  `object-indexes/`
+- `<store>/fs-files/` stores regular-file payloads referenced by fs-tree
+  manifest v2 objects
+- `<store>/fs-trees/` caches materialized fs-tree roots by manifest
+  `object_hash`
 - `<store>/object-records/` stores canonical object records by `object_hash`
 - `<store>/reuses/` stores builder-only canonical reuse refs by `reuse_key`
 - `<store>/builds/` stores public build handles by `build_key`
 - `<store>/object-record-refs/` and `<store>/object-refs/` store published current refs
 
 `<store>/object-refs/<name>` always points at
-`../objects/<object_hash>`, regardless of object kind. Filesystem tree objects
-still store their payload as `manifest.jsonl` plus `root/` inside that object
-directory. File and symlink manifest entries include required `h` leaf hashes.
+`../objects/<object_hash>`, regardless of object kind. Filesystem tree builder
+results store the canonical fs-tree manifest v2 text as the object payload.
+Referenced regular-file payloads live under `<store>/fs-files/`, and
+materialized roots under `<store>/fs-trees/` are cache entries rather than
+publication targets.
 
 `build_key` is computed from:
 

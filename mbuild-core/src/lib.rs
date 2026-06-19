@@ -3,11 +3,7 @@ use std::fmt;
 pub use bobr_runtime::runtime_provider::{RuntimeBackend, RuntimeProvider};
 
 pub mod cancellation;
-pub mod fs_tree_compose;
-pub mod fs_tree_manifest;
-pub mod fs_tree_object;
 pub mod identity;
-pub mod initramfs;
 pub mod logging;
 pub mod oci;
 pub mod origin;
@@ -16,11 +12,7 @@ pub mod subject_run_context;
 pub mod workspace;
 
 pub use cancellation::*;
-pub use fs_tree_compose::*;
-pub use fs_tree_manifest::*;
-pub use fs_tree_object::*;
 pub use identity::*;
-pub use initramfs::*;
 pub use logging::*;
 pub use origin::*;
 pub use publication::*;

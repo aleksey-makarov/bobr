@@ -7,9 +7,11 @@ OCI and rootfs-backed execution path consists of:
 
 - `Source` with `origin.tag = "OciRegistry"`: import one pinned external
   image from a registry into the store as an OCI image layout directory
-- `OciExtract`: extract one OCI image layout input into an fs-tree object
-- `Sandbox`: execute an explicit step plan against a readonly fs-tree rootfs
-  input with the `bobr-runtime` sandbox function and `bobr-sandbox-launcher`
+- `OciExtract`: extract one OCI image layout input into an fs-tree manifest v2
+  object
+- `Sandbox`: execute an explicit step plan against a readonly rootfs
+  materialized from an fs-tree manifest v2 input with the `bobr-runtime`
+  sandbox function and `bobr-sandbox-launcher`
 
 There is no active builder for producing derived OCI image layouts from fs-tree
 inputs. Root filesystem composition is performed through fs-tree builders such
@@ -71,18 +73,17 @@ The result can be consumed by `TreeMerge`, `ErofsRootfs`, `Initramfs`, or
 
 `Sandbox` accepts:
 
-- required `rootfs`: one fs-tree object used as the readonly root filesystem
+- required `rootfs`: one fs-tree manifest v2 object materialized as the
+  readonly root filesystem before builder execution
 - extra named inputs mounted read-only under `/__mbuild/inputs/<name>`
 
-The `rootfs` input must be a valid fs-tree object. Sandbox execution consumes
-that object's `root/` directory as the container root filesystem after
-validating it against `manifest.jsonl`.
+The `rootfs` input must be a valid fs-tree manifest v2 object. Runtime
+materializes it under `<store>/fs-trees/<manifest-object-hash>/` and passes the
+materialized root to `Sandbox`.
 
 Extra inputs are ordinary store objects from the sandbox point of view. They
-are mounted as the whole realized object path. If an extra input is a directory
-that happens to contain `manifest.jsonl` and `root/`, `Sandbox` does not treat
-it as an fs-tree payload and does not mount `root/` instead of the object
-directory.
+are mounted as the whole realized object path. Only the `rootfs` slot has
+fs-tree-root semantics.
 
 Extra input names are also interpolation variable names. They must start with
 an ASCII letter or `_`, and the remaining characters must be ASCII letters,
@@ -153,7 +154,7 @@ Example:
 }
 ```
 
-The published `Sandbox` result is an fs-tree object.
+The published `Sandbox` result is an fs-tree manifest v2 object.
 
 Package-aware synthetic recipe helpers lower to `Sandbox`:
 
@@ -200,5 +201,5 @@ The common native toolchain is `linux_headers`, `glibc`, `binutils`, `gcc`,
 - `Source/OciRegistry` currently selects only `linux/amd64`
 - `mbuild` does not currently provide a builder for producing derived OCI
   image layouts from fs-tree inputs
-- Rust-side `Sandbox` requests require a prepared fs-tree rootfs object and use
-  its validated `root/` directory as the execution root
+- Rust-side `Sandbox` requests require a prepared fs-tree manifest v2 rootfs
+  object; the runtime materializes it before sandbox execution

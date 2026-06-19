@@ -106,6 +106,10 @@ The filesystem layout mirrors the identity model:
     <name>.json -> ../object-records/<object_hash>.json
   object-refs/
     <name> -> ../objects/<object_hash>
+  fs-files/
+    ...
+  fs-trees/
+    <manifest-object-hash>/
   logs/
     <YYMMDDhhmmss>[.N]/
       events.jsonl
@@ -126,16 +130,20 @@ The filesystem layout mirrors the identity model:
 - `object-record-refs/` holds human-facing refs from publication name to object
   record.
 - `object-refs/` holds human-facing refs from publication name to payload.
+- `fs-files/` holds regular-file payloads referenced by fs-tree manifest v2
+  objects.
+- `fs-trees/` caches materialized filesystem roots for fs-tree manifest v2
+  objects.
 
 `objects/<object_hash>` is the payload itself, either a file or a directory.
 Concrete directory payload formats are builder-specific. For example, the
 OCI registry source handler realizes imported images as OCI image layout
 directories.
 
-Fs-tree objects store leaf hashes directly in `manifest.jsonl`. There is no
-store-level derived leaf index: if a file or symlink entry in an fs-tree
-manifest omits its `h` field, the object is invalid and consumers fail while
-reading the manifest.
+Filesystem tree builder results store a canonical fs-tree manifest v2 text file
+as the object payload. Regular file entries in that manifest reference payloads
+stored under `fs-files/`. Materialized roots under `fs-trees/` are cache
+entries created on demand for builders that need a filesystem root path.
 
 Generic CAS objects may contain non-UTF-8 filesystem names. Such objects can
 still be imported and addressed by `object_hash`. Fs-tree objects are
@@ -167,10 +175,9 @@ After a node is reused or built, the current publication refs are updated:
 - `object-refs/<name> -> ../objects/<object_hash>`
 
 This `object-refs/` rule is the same for every object kind. Filesystem tree
-objects still store their payload as an object directory containing
-`manifest.jsonl` and `root/`; optional top-level metadata files are part of
-the object layout for builders that define them. `root/` is part of the object
-layout, not the publication symlink target.
+builder results store the manifest itself as the object payload. The
+publication symlink never points directly at `fs-files/` or at a materialized
+`fs-trees/` cache directory.
 
 If the current publication name already points at a different object, the old
 current refs are rotated into timestamp-suffixed history refs.

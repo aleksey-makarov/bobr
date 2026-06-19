@@ -2,29 +2,29 @@
 
 ## Summary
 
-`fs-tree manifest v2` is the canonical manifest format for the future
-manifest-addressed fs-tree subsystem. It describes filesystem tree structure,
-directory metadata, symlink metadata, and references to regular file objects.
+`fs-tree manifest v2` is the canonical manifest format for manifest-addressed
+filesystem trees. It describes filesystem tree structure, directory metadata,
+symlink metadata, and references to regular file payloads stored in
+`<store>/fs-files/`.
 
-This document defines the manifest format only. It does not define the
-`fs-files` store layout, fs-tree materialization cache, scanner, materializer,
-or builder migration path.
-
-The current production fs-tree object format remains unchanged until builders
-are migrated explicitly.
+The manifest itself is an ordinary store object, usually published through
+builders such as `FsTreeImport`, `OciExtract`, `TreeMerge`, `TreeSubset`, and
+`Sandbox`. Materialized roots are cache entries under
+`<store>/fs-trees/<manifest-object-hash>/`, not the payload stored in
+`<store>/objects/`.
 
 ## Canonical JSONL Format
 
 The manifest is UTF-8 JSON Lines. The first line is a mandatory schema header:
 
 ```json
-{"schema":"mbuild-fs-tree-manifest-v2"}
+{"schema":"bobr-fs-tree-manifest-v2"}
 ```
 
 Each following line is one filesystem entry:
 
 ```jsonl
-{"schema":"mbuild-fs-tree-manifest-v2"}
+{"schema":"bobr-fs-tree-manifest-v2"}
 {"p":"","t":"d","u":0,"g":0,"m":493}
 {"p":"bin","t":"d","u":0,"g":0,"m":493}
 {"p":"bin/tool","t":"f","h":"1111111111111111111111111111111111111111111111111111111111111111"}
@@ -84,7 +84,7 @@ are stored directly in the manifest.
 The schema header must be byte-for-byte canonical:
 
 ```json
-{"schema":"mbuild-fs-tree-manifest-v2"}
+{"schema":"bobr-fs-tree-manifest-v2"}
 ```
 
 Filesystem entries are sorted by path bytes after UTF-8 encoding. The root
@@ -123,6 +123,19 @@ Paths are always relative UTF-8 strings:
 - no `.` or `..` components;
 - no control characters.
 
+## Store Integration
+
+Regular file entries reference opaque fs-file hashes. The file bytes and file
+metadata represented by those hashes live in `<store>/fs-files/`; the manifest
+does not inline them. Directory and symlink metadata are stored directly in the
+manifest.
+
+The runtime materializes a manifest object only when a builder input asks for a
+filesystem root. The cache path is `<store>/fs-trees/<manifest-object-hash>/`.
+Builders that only need to read or transform manifests, such as `TreeMerge`
+and `TreeSubset`, consume the manifest object directly and do not materialize
+the tree.
+
 ## Scope Boundaries
 
 Manifest v2 intentionally does not preserve original inode topology. Future
@@ -132,7 +145,3 @@ and `st_nlink` are not semantic fs-tree identity.
 The first manifest v2 implementation does not model xattrs, POSIX ACLs, or
 file capabilities. Those must be added before claiming complete Linux rootfs
 metadata preservation.
-
-The initial `mbuild-fs-tree` crate implements parser, writer, validation, and
-the typed `FsFileHash` string reference. It does not implement fs-file storage,
-fs-file hashing, scanner, materializer, or builder integration.

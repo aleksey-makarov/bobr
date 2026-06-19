@@ -2,73 +2,25 @@
 
 ## Summary
 
-`mbuild` currently implements five filesystem-related builders:
+`mbuild` currently implements filesystem-related builders around fs-tree
+manifest v2:
 
-- `Tree`: realize text files, symlinks, and explicit directories as one file object or
-  one fs-tree directory object
-- `TreeSubset`: select a manifest-defined subset of one fs-tree directory object
-  into another fs-tree directory object
-- `TreeMerge`: compose fs-tree directory objects into one fs-tree directory object
-- `ErofsRootfs`: compose fs-tree directory objects into one EROFS rootfs image
-- `Initramfs`: compose fs-tree directory objects into one Linux `newc`
-  initramfs image
+- `Tree`: realize generated text files, symlinks, and directories as one plain
+  file object or one ordinary directory object
+- `FsTreeImport`: import one ordinary directory object into an fs-tree manifest
+  v2 object using install rules
+- `TreeSubset`: select a subset of one fs-tree manifest v2 object
+- `TreeMerge`: merge two or more fs-tree manifest v2 objects
+- `OciExtract`: extract one OCI image layout into an fs-tree manifest v2 object
+- `ErofsRootfs`: build one EROFS image from one fs-tree input
+- `Initramfs`: build one Linux `newc` initramfs image from one fs-tree input
 
-`Tree` is a direct authoring path:
-
-- the builder accepts generated tree data in `config.tree`
-- generated `*-tree.ncl` modules import UTF-8 text from the adjacent `*-tree-src`
-  tree instead of embedding file contents inline
-- it stages UTF-8 text files, symlinks, and explicit directories
-- it publishes either one file object or one fs-tree directory object,
-  depending on the tree shape
-
-`TreeSubset` is the manifest-based selection path for fs-tree objects:
-
-- the builder reads the input `manifest.jsonl` and never discovers paths by
-  walking the input `root/` tree
-- include globs select manifest paths and parent directories are included
-  automatically
-- unmatched individual include globs are allowed, but an empty final subset is
-  rejected
-- regular files are hardlinked from the input fs-tree; copying is not allowed
-- symlinks are recreated with the same target
-- the output object hash is computed from the output manifest and the selected
-  input leaf hashes stored in manifest `h` fields
-
-`TreeMerge` is the manifest-based composition path for fs-tree objects:
-
-- the builder reads canonical `manifest.jsonl` files from fs-tree inputs
-- it validates each input `root/` directory against its manifest
-- it merges manifest entries with strict conflict checking
-- it writes a new fs-tree directory object
-- regular files are hardlinked from input fs-trees inside the ownership user
-  namespace; copying is not allowed
-- symlinks are recreated from manifest targets inside the ownership user
-  namespace
-
-`ErofsRootfs` is the image-producing counterpart to `TreeMerge`:
-
-- the builder reads canonical `manifest.jsonl` files from fs-tree inputs
-- it merges manifest entries with the same conflict semantics as `TreeMerge`
-- it writes a deterministic tar stream from the merged manifest
-- regular file bytes are read from the selected input fs-tree roots inside the
-  ownership user namespace
-- tar headers use logical `uid`, `gid`, mode, symlink targets, and `mtime=0`
-  from the merged manifest
-- it runs `mkfs.erofs --tar=f` on the host to produce one EROFS image file
-
-`Initramfs` is the cpio-producing counterpart to `TreeMerge`:
-
-- the builder reads canonical `manifest.jsonl` files from fs-tree inputs
-- it merges manifest entries with the same conflict semantics as `TreeMerge`
-- it writes one deterministic Linux `newc` cpio archive directly, without
-  invoking a host or target `cpio` program
-- regular file bytes are read from the selected input fs-tree roots inside the
-  ownership user namespace
-- cpio headers use logical `uid`, `gid`, mode, symlink targets, and `mtime=0`
-  from the merged manifest
-- symlink mode is encoded as `0777` because fs-tree manifests do not carry
-  symlink mode
+An fs-tree manifest v2 object is a normal store object whose payload is the
+canonical manifest text. Regular file payloads referenced by that manifest live
+in `<store>/fs-files/`. When a builder asks for a filesystem root rather than
+the manifest file, the runtime materializes the manifest into the cache under
+`<store>/fs-trees/<manifest-object-hash>/` and passes that root path to the
+builder.
 
 ## `Tree`
 
@@ -94,21 +46,6 @@
         "executable": false
       }
     ]
-  },
-  "install": {
-    "rules": [
-      {
-        "path": "**",
-        "attrs": {
-          "uid": 0,
-          "gid": 0,
-          "directory_mode": 493,
-          "regular_file_mode": 420,
-          "executable_file_mode": 493,
-          "symlink_mode": 511
-        }
-      }
-    ]
   }
 }
 ```
@@ -123,32 +60,56 @@ Current behavior:
 - file entries carry UTF-8 text and one `executable` flag
 - symlink entries carry one literal target string
 - parent directories for file entries are created automatically
-- if the tree contains exactly one top-level file entry, the result is a file object
-- otherwise the result is an fs-tree directory object:
-  ```text
-  manifest.jsonl
-  root/
-  ```
-- `manifest.jsonl` is canonical JSONL; file and symlink entries carry required
-  `h` fields containing their fsobj node hashes, and directory entries must not
-  carry `h`
-- `install` is rejected for file output and required for directory output
-- `install.rules` uses path selectors with partial field overrides
-- directory output consumes `install.rules` into `manifest.jsonl`
-- directory output supports logical owners that fit the configured runtime
-  idmap; out-of-range `uid` or `gid` values are rejected before helper launch
-- `symlink_mode` is accepted in `install.rules` for config compatibility, but
-  symlink modes are not represented in the fs-tree manifest
-- authoring usually starts with one broad `**` rule carrying full defaults, then
-  adds narrower overrides
-- when authoring `*-tree-src`, empty directories must contain `.gitkeep`; the generator ignores `.gitkeep` and still emits an empty `dir` entry
-- codegen staleness checks cover tree structure, symlink targets, and executable bits;
-  text file contents are read at Nickel import time
+- if the tree contains exactly one top-level file entry, the result is a file
+  object
+- otherwise the result is an ordinary directory object
+- `install` is not accepted; use `FsTreeImport` to turn a directory object into
+  an fs-tree manifest with logical ownership and mode metadata
 
 Current limitations:
 
-- tree entries currently support only UTF-8 text files, symlinks, and explicit directories
+- tree entries currently support only UTF-8 text files, symlinks, and explicit
+  directories
 - binary files and richer file mode control are not yet supported
+
+## `FsTreeImport`
+
+`FsTreeImport` accepts this config:
+
+```json
+{
+  "install": {
+    "rules": [
+      {
+        "path": "**",
+        "attrs": {
+          "uid": 0,
+          "gid": 0,
+          "directory_mode": 493,
+          "regular_file_mode": 420,
+          "executable_file_mode": 493
+        }
+      }
+    ]
+  }
+}
+```
+
+Inputs:
+
+- required `input`: one ordinary file or directory object
+
+Current behavior:
+
+- imports the input directory into `<store>/fs-files/`
+- writes one canonical fs-tree manifest v2 object
+- evaluates install rules in order; later matching rules override earlier
+  attributes field-by-field
+- directory, regular file, and executable file modes are represented by install
+  attributes
+- symlink mode is not represented by fs-tree manifest v2
+- runs as a `bobr-runtime` namespace function because importing needs
+  namespace-root access to ownership metadata
 
 ## `TreeMerge`
 
@@ -160,39 +121,22 @@ Current limitations:
 
 Inputs:
 
-- two or more named fs-tree directory inputs
+- two or more named fs-tree manifest v2 inputs
 - input order follows the standard builder input order: required inputs,
   optional inputs, then extra inputs in lexical input-name order
 
 Current behavior:
 
-- requires every input to be a valid fs-tree directory object:
-  ```text
-  manifest.jsonl
-  root/
-  ```
-- reads canonical manifests and treats them as the source of truth
-- validates each input `root/` directory against its manifest before merging
+- reads canonical manifest inputs directly from their object paths
+- merges manifest entries with strict conflict checking
 - allows overlapping directory paths only when `uid`, `gid`, and `mode` match
-- allows duplicate file or symlink paths only when manifest metadata and
-  manifest `h` leaf hashes match
-- rejects file-vs-directory, symlink-vs-directory, and parent/child leaf conflicts
-- writes one fs-tree directory object with a canonical merged manifest
+- allows duplicate file paths only when the referenced fs-file hash matches
+- allows duplicate symlink paths only when `uid`, `gid`, and target match
+- rejects file-vs-directory, symlink-vs-directory, and parent/child leaf
+  conflicts
+- writes one canonical fs-tree manifest v2 object
 
-Physical materialization:
-
-- the runtime helper creates the fs-tree object, canonical manifest, and
-  `root/` tree inside the ownership user namespace
-- directories are created before children and receive final owner/mode metadata
-  after descendants are materialized
-- regular files are hardlinked from their source fs-tree; hardlink failure is a
-  build error and file bytes are not copied
-- hardlinked files are validated against manifest kind, owner, and mode inside
-  the ownership user namespace
-- symlinks are recreated from manifest targets, without reading source symlink
-  paths
-
-The realized result payload is one fs-tree directory object.
+`TreeMerge` is manifest-only; it does not materialize the input trees.
 
 ## `TreeSubset`
 
@@ -209,18 +153,12 @@ The realized result payload is one fs-tree directory object.
 
 Inputs:
 
-- required `tree`: one fs-tree directory object
+- required `tree`: one fs-tree manifest v2 object
 
 Current behavior:
 
-- requires the input to have fs-tree object shape:
-  ```text
-  manifest.jsonl
-  root/
-  ```
-- reads the canonical input manifest and treats it as the source of truth
-- matches `include` globs against manifest paths using the same glob semantics
-  as `Tree` install rules
+- reads the canonical input manifest directly from its object path
+- matches `include` globs against manifest paths
 - rejects empty include lists, empty patterns, absolute patterns, and patterns
   containing `..`
 - allows individual include patterns to match no paths
@@ -229,24 +167,9 @@ Current behavior:
   directories
 - selecting a directory directly includes only that directory; recursive
   selection requires a pattern such as `dir/**`
-- writes one fs-tree directory object with a canonical selected manifest
+- writes one canonical fs-tree manifest v2 object
 
-Physical materialization:
-
-- the runtime helper creates the fs-tree object, canonical manifest, and
-  `root/` tree inside the ownership user namespace
-- directories are created before children and receive final owner/mode metadata
-  after descendants are materialized
-- regular files are hardlinked from the input fs-tree
-- hardlink failure is a build error; `TreeSubset` does not copy file bytes
-- hardlinked files are validated against manifest kind, owner, and mode inside
-  the ownership user namespace
-- symlinks are recreated from manifest targets, without reading source symlink
-  paths
-- the output object hash is computed from the selected manifest and selected
-  manifest `h` leaf hashes instead of hashing the staged tree
-
-The realized result payload is one fs-tree directory object.
+`TreeSubset` is manifest-only; it does not materialize the input tree.
 
 ## `ErofsRootfs`
 
@@ -261,38 +184,19 @@ The realized result payload is one fs-tree directory object.
 
 Inputs:
 
-- one or more named fs-tree directory inputs
-- input order follows the standard builder input order: required inputs,
-  optional inputs, then extra inputs in lexical input-name order
+- required `tree`: one fs-tree manifest v2 object, materialized by the runtime
+  before builder execution
 
 Current behavior:
 
-- requires every input to have fs-tree object shape:
-  ```text
-  manifest.jsonl
-  root/
-  ```
-- reads canonical manifests and treats them as the source of truth
-- allows overlapping directory paths only when `uid`, `gid`, and `mode` match
-- allows duplicate file or symlink paths only when manifest metadata and
-  manifest `h` leaf hashes match
-- rejects file-vs-directory, symlink-vs-directory, and parent/child leaf conflicts
-- writes a deterministic tar stream in canonical manifest order, excluding the
-  implicit root entry
-- sets tar directory and file `uid`, `gid`, `mode`, and `mtime=0` from the
-  merged manifest
-- sets tar symlink `uid`, `gid`, target, and `mtime=0` from the merged manifest;
-  symlink mode is encoded as `0777` because fs-tree manifests do not carry
-  symlink mode
-- reads file bytes from helper-visible input `root/` directories inside the
-  ownership user namespace, so files owned through the configured idmap remain
-  readable
-- runs `mkfs.erofs` from `PATH` on the host:
+- receives a materialized filesystem root path for `tree`
+- runs `mkfs.erofs` from `PATH` through a `bobr-runtime` namespace function:
   ```sh
-  mkfs.erofs --tar=f --sort=path -T 0 -U clear \
+  mkfs.erofs --sort=path -T 0 -U clear \
     [ -L label ] [ -z compression ] \
-    rootfs.erofs rootfs.tar
+    rootfs.erofs <materialized-root>
   ```
+- produces one regular file containing an EROFS filesystem image
 
 Config fields:
 
@@ -300,9 +204,6 @@ Config fields:
 - non-null `compression` must be a non-empty string and is passed as
   `-z <compression>`
 - non-null `label` must be a non-empty string and is passed as `-L <label>`
-
-The realized result payload is one regular file containing an EROFS filesystem
-image.
 
 ## `Initramfs`
 
@@ -314,31 +215,20 @@ image.
 
 Inputs:
 
-- one or more named fs-tree directory inputs
-- input order follows the standard builder input order: required inputs,
-  optional inputs, then extra inputs in lexical input-name order
+- required `tree`: one fs-tree manifest v2 object, materialized by the runtime
+  before builder execution
 
 Current behavior:
 
-- requires every input to have fs-tree object shape:
-  ```text
-  manifest.jsonl
-  root/
-  ```
-- reads canonical manifests and treats them as the source of truth
-- allows overlapping directory paths only when `uid`, `gid`, and `mode` match
-- allows duplicate file or symlink paths only when manifest metadata and
-  manifest `h` leaf hashes match
-- rejects file-vs-directory, symlink-vs-directory, and parent/child leaf conflicts
-- writes an uncompressed Linux `newc` cpio archive in canonical manifest order
-- encodes the fs-tree root entry as `.`
+- receives a materialized filesystem root path for `tree`
+- scans that root inside a `bobr-runtime` namespace function
+- writes one deterministic Linux `newc` cpio archive directly, without
+  invoking a host or target `cpio` program
+- encodes the materialized root directory as `.`
 - sets cpio directory and file `uid`, `gid`, `mode`, and `mtime=0` from the
-  merged manifest
-- sets cpio symlink `uid`, `gid`, target payload, and `mtime=0` from the merged
-  manifest; symlink mode is encoded as `0777`
-- reads file bytes from helper-visible input `root/` directories inside the
-  ownership user namespace, so files owned through the configured idmap remain
-  readable
+  materialized filesystem metadata
+- sets cpio symlink `uid`, `gid`, target payload, and `mtime=0`; symlink mode
+  is encoded as `0777`
 - terminates the archive with `TRAILER!!!`
 
 The realized result payload is one regular file containing an uncompressed
@@ -346,13 +236,14 @@ initramfs archive suitable for Linux `-initrd` users such as QEMU.
 
 ## Current Limitations
 
-`Tree` fs-tree directory outputs currently support:
+Fs-tree manifest v2 currently supports:
 
 - regular files
 - directories
 - symlinks
-- logical `uid=0,gid=0` ownership only
 
 Current limitations:
 
-- special files such as block devices, character devices, FIFOs, and sockets are not supported
+- special files such as block devices, character devices, FIFOs, and sockets
+  are not supported
+- xattrs, POSIX ACLs, file capabilities, and hardlink identity are not modeled

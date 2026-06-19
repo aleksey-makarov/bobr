@@ -79,29 +79,10 @@ path. The index records only regular file and symlink node hashes, keyed by
 object-relative path. Directory entries are intentionally not part of that
 leaf set.
 
-Fs-tree objects do not persist a separate leaf-index file. Their canonical
-`manifest.jsonl` stores the fsobj node hash for every file and symlink entry in
-the required `h` field. Directory entries do not have `h`.
-
-Directory hashes are recomputed from structure:
-
-- regular file and symlink hashes come from manifest `h` fields
-- directory entries come from the manifest tree structure
-- empty directories are represented by hashing a directory with no children
-
-Synthetic fs-tree objects use the same fsobj hash algorithm. Their object hash
-is the directory hash of at least these entries:
-
-- `manifest.jsonl`
-- `root`
-
-Builders may define additional top-level metadata files. Those files are part
-of the object hash when present. For example, `OciExtract` includes
-`oci-config.json`.
-
-The manifest file node hash can be computed directly from canonical manifest
-bytes. The `root` directory hash can be recomputed bottom-up from the
-fs-tree manifest plus leaf hashes.
+Current fs-tree manifest v2 objects do not use this leaf index as their object
+format. The manifest text is a normal store object payload. Regular file
+payloads referenced by the manifest live under `<store>/fs-files/` and use
+their own fs-file hashes.
 
 ## Ignored Metadata
 
@@ -177,7 +158,6 @@ fsobj-hash - --mode=tar
 The generic `fsobj-hash` algorithm treats directory entry names and symlink
 targets as raw Unix bytes. It can hash paths that are not valid UTF-8.
 
-`mbuild` fs-tree objects are stricter: `manifest.jsonl` stores paths and
-symlink targets as JSON strings, so fs-tree manifests are UTF-8-only. This is a
-property of the mbuild fs-tree object format, not of the generic fsobj hash
-algorithm.
+`mbuild` fs-tree manifest v2 paths and symlink targets are UTF-8-only because
+they are serialized as JSON strings. This is a property of the fs-tree manifest
+format, not of the generic fsobj hash algorithm.
