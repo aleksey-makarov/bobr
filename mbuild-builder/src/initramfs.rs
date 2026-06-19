@@ -70,7 +70,6 @@ impl TypedBuilder for InitramfsBuilder {
 
         Ok(StagedBuildResult {
             staged_path: output_path,
-            object_hash: None,
         })
     }
 }

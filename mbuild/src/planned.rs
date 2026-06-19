@@ -5,8 +5,8 @@ use crate::runtime::{
 };
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, Store, create_workspace,
-    import_source_object, load_build_handle, materialize_build,
-    materialize_build_with_trusted_hash, record_existing_source_object, resolve_reuse_for_build,
+    import_source_object, load_build_handle, materialize_build, record_existing_source_object,
+    resolve_reuse_for_build,
 };
 use mbuild_builder::{BuilderPlanError, BuilderPlannedSubject};
 use mbuild_core::{
@@ -158,23 +158,13 @@ fn execute_builder_subject(
             map_builder_error(error)
         })?;
     check_cancelled(&cx.cancellation)?;
-    let published = match staged.object_hash {
-        Some(object_hash) => materialize_build_with_trusted_hash(
-            cx.store,
-            build_key,
-            reuse_key,
-            input_hashes,
-            &staged.staged_path,
-            object_hash,
-        ),
-        None => materialize_build(
-            cx.store,
-            build_key,
-            reuse_key,
-            input_hashes,
-            &staged.staged_path,
-        ),
-    }
+    let published = materialize_build(
+        cx.store,
+        build_key,
+        reuse_key,
+        input_hashes,
+        &staged.staged_path,
+    )
     .map_err(|error| {
         log_runtime_event(
             logger.as_ref(),

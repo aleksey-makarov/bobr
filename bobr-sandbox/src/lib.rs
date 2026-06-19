@@ -148,7 +148,6 @@ fn build_sandbox(
 
     Ok(StagedBuildResult {
         staged_path: output_manifest,
-        object_hash: None,
     })
 }
 

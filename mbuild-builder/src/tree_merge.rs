@@ -85,7 +85,6 @@ fn build_tree_merge(
 
     Ok(StagedBuildResult {
         staged_path: output_path,
-        object_hash: None,
     })
 }
 
@@ -186,7 +185,6 @@ mod tests {
             result.staged_path,
             temp.path().join("tmp").join("fs-tree-merge-manifest.jsonl")
         );
-        assert!(result.object_hash.is_none());
         let merged = FsTreeManifest::read_canonical(&result.staged_path).unwrap();
         let paths = merged
             .entries()

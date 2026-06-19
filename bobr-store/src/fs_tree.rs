@@ -2989,7 +2989,10 @@ mod tests {
             .ensure_materialized_root(manifest_hash)
             .unwrap();
 
-        assert_eq!(root, store.fs_trees_dir().join(manifest_hash.to_hex()));
+        assert_eq!(
+            root,
+            store.root().join(FS_TREES_DIR).join(manifest_hash.to_hex())
+        );
         assert_eq!(fs::read(root.join("file")).unwrap(), b"hello\n");
         assert_eq!(
             store
@@ -3010,7 +3013,7 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .unwrap();
-        let root = store.fs_trees_dir().join(manifest_hash.to_hex());
+        let root = store.root().join(FS_TREES_DIR).join(manifest_hash.to_hex());
         fs::create_dir(&root).unwrap();
 
         assert_eq!(
@@ -3033,7 +3036,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            store.fs_trees_dir().join(manifest_hash.to_hex()),
+            store.root().join(FS_TREES_DIR).join(manifest_hash.to_hex()),
             b"not a dir",
         )
         .unwrap();
@@ -3061,6 +3064,12 @@ mod tests {
                 .ensure_materialized_root(manifest_hash)
                 .is_err()
         );
-        assert!(!store.fs_trees_dir().join(manifest_hash.to_hex()).exists());
+        assert!(
+            !store
+                .root()
+                .join(FS_TREES_DIR)
+                .join(manifest_hash.to_hex())
+                .exists()
+        );
     }
 }

@@ -546,7 +546,6 @@ mod tests {
             fs::write(cx.temp_dir.join("out").join("payload"), body).unwrap();
             StagedBuildResult {
                 staged_path: cx.temp_dir.join("out"),
-                object_hash: None,
             }
         }
 

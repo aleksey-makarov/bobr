@@ -135,7 +135,6 @@ fn build_tree(
 
     Ok(StagedBuildResult {
         staged_path: output_path,
-        object_hash: None,
     })
 }
 
@@ -455,7 +454,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(fs::read_to_string(&result.staged_path).unwrap(), "hello\n");
-        assert!(result.object_hash.is_none());
         assert_eq!(
             fs::metadata(&result.staged_path)
                 .unwrap()
@@ -497,7 +495,6 @@ mod tests {
             .unwrap();
 
         assert!(result.staged_path.is_dir());
-        assert!(result.object_hash.is_none());
         assert!(!result.staged_path.join("manifest.jsonl").exists());
         assert!(!result.staged_path.join("root").exists());
         assert_eq!(

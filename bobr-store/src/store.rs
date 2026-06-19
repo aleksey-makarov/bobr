@@ -203,16 +203,6 @@ impl Store {
         self.root().join(OBJECT_RECORD_REFS_DIR)
     }
 
-    /// Returns the content-addressed future fs-file object directory.
-    pub fn fs_files_dir(&self) -> PathBuf {
-        self.root().join(FS_FILES_DIR)
-    }
-
-    /// Returns the fs-tree materialization cache directory.
-    pub fn fs_trees_dir(&self) -> PathBuf {
-        self.root().join(FS_TREES_DIR)
-    }
-
     fn quarantine_dir(&self) -> PathBuf {
         self.root().join(QUARANTINE_DIR)
     }

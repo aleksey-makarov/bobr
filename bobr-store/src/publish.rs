@@ -106,42 +106,7 @@ pub fn materialize_build(
     inputs: Vec<ObjectHash>,
     staged_path: &Path,
 ) -> Result<PublishedBuild, StoreError> {
-    materialize_build_impl(store, build_key, reuse_key, inputs, staged_path, None)
-}
-
-/// Imports a staged object under a trusted precomputed hash.
-///
-/// This is a workspace-internal fast path for builders that have already
-/// validated the staged output against a canonical model. Normal callers should
-/// use [`materialize_build`], which hashes `staged_path` inside the store API.
-#[doc(hidden)]
-pub fn materialize_build_with_trusted_hash(
-    store: &Store,
-    build_key: BuildKey,
-    reuse_key: ReuseKey,
-    inputs: Vec<ObjectHash>,
-    staged_path: &Path,
-    trusted_object_hash: ObjectHash,
-) -> Result<PublishedBuild, StoreError> {
-    materialize_build_impl(
-        store,
-        build_key,
-        reuse_key,
-        inputs,
-        staged_path,
-        Some(trusted_object_hash),
-    )
-}
-
-fn materialize_build_impl(
-    store: &Store,
-    build_key: BuildKey,
-    reuse_key: ReuseKey,
-    inputs: Vec<ObjectHash>,
-    staged_path: &Path,
-    object_hash: Option<ObjectHash>,
-) -> Result<PublishedBuild, StoreError> {
-    let object_hash = crate::object::import_object_with_hash(store, staged_path, object_hash)?;
+    let object_hash = crate::object::import_object(store, staged_path)?;
     let object_record = ObjectRecord {
         object_hash,
         run_id: Some(store.run_id().to_string()),

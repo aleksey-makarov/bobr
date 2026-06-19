@@ -280,7 +280,11 @@ mod tests {
         let resolved = builder_inputs.required("tree").unwrap();
         assert_eq!(
             resolved.path,
-            store.fs_trees_dir().join(object_hash.to_hex())
+            store
+                .fs_tree()
+                .lookup_materialized_root(object_hash)
+                .unwrap()
+                .unwrap()
         );
         assert_eq!(fs::read(resolved.path.join("file")).unwrap(), b"hello\n");
     }

@@ -79,7 +79,6 @@ impl TypedBuilder for ErofsRootfsBuilder {
 
         Ok(StagedBuildResult {
             staged_path: output_path,
-            object_hash: None,
         })
     }
 }

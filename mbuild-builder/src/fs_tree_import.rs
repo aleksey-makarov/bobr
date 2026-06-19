@@ -70,7 +70,6 @@ impl TypedBuilder for FsTreeImportBuilder {
 
         Ok(StagedBuildResult {
             staged_path: output_manifest,
-            object_hash: None,
         })
     }
 }
@@ -118,8 +117,8 @@ impl RuntimeFunction for FsTreeImportFunction {
 mod tests {
     use super::*;
     use crate::{Builder, BuilderInputPath};
-    use bobr_store::Store;
     use bobr_store::fs_tree::{FsTreeEntry, FsTreeInstallAttrs, FsTreeInstallRule, FsTreeManifest};
+    use bobr_store::{Store, import_object};
     use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -177,7 +176,6 @@ mod tests {
             result.staged_path,
             temp.path().join("tmp").join("fs-tree-manifest.jsonl")
         );
-        assert!(result.object_hash.is_none());
         let manifest = FsTreeManifest::read_canonical(&result.staged_path).unwrap();
         assert!(manifest.entries().contains(&FsTreeEntry::directory(
             "",
@@ -197,16 +195,20 @@ mod tests {
             owner.gid(),
             "bin/tool",
         )));
-        let hash = manifest
-            .entries()
-            .iter()
-            .find_map(|entry| match entry {
-                FsTreeEntry::File { path, hash } if path == "bin/tool" => Some(*hash),
-                _ => None,
-            })
-            .expect("tool file entry");
-        let hex = hash.to_hex();
-        assert!(store.fs_files_dir().join(&hex[..2]).join(hex).is_file());
+        assert!(manifest.entries().iter().any(|entry| matches!(
+            entry,
+            FsTreeEntry::File { path, .. } if path == "bin/tool"
+        )));
+        let manifest_hash = import_object(&store, &result.staged_path).unwrap();
+        let root = store
+            .fs_tree()
+            .ensure_materialized_root(manifest_hash)
+            .unwrap();
+        assert_eq!(fs::read(root.join("bin/tool")).unwrap(), b"tool\n");
+        assert_eq!(
+            fs::read_link(root.join("tool-link")).unwrap(),
+            PathBuf::from("bin/tool")
+        );
         assert_eq!(
             fs::symlink_metadata(source.join("bin/tool"))
                 .unwrap()

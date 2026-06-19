@@ -408,7 +408,6 @@ fn write_raw_log_atomic(path: &Path, content: &str) -> Result<(), String> {
 #[derive(Debug, Clone)]
 pub struct StagedBuildResult {
     pub staged_path: PathBuf,
-    pub object_hash: Option<ObjectHash>,
 }
 
 pub trait Builder: Send + Sync {
@@ -614,7 +613,6 @@ mod tests {
             assert_eq!(cx.temp_dir, PathBuf::from("/tmp/tmp"));
             Ok(StagedBuildResult {
                 staged_path: PathBuf::from("/tmp/out"),
-                object_hash: None,
             })
         }
     }

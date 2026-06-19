@@ -111,7 +111,6 @@ impl OciExtractBuilder {
 
         Ok(StagedBuildResult {
             staged_path: output_manifest,
-            object_hash: None,
         })
     }
 }
@@ -947,8 +946,8 @@ fn join_rel(parent: &str, name: &str) -> String {
 mod tests {
     use super::*;
     use crate::{Builder, BuilderInputPath, TypedBuilder};
-    use bobr_store::Store;
     use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
+    use bobr_store::{Store, import_object};
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use sha2::{Digest, Sha256};
@@ -1192,7 +1191,6 @@ mod tests {
             result.staged_path,
             temp.path().join("tmp").join(OUTPUT_MANIFEST_FILE_NAME)
         );
-        assert!(result.object_hash.is_none());
         assert!(!temp.path().join("tmp").join(EXTRACT_ROOT_DIR_NAME).exists());
 
         let manifest = FsTreeManifest::read_canonical(&result.staged_path).unwrap();
@@ -1214,16 +1212,20 @@ mod tests {
             owner.gid(),
             "bin/tool",
         )));
-        let hash = manifest
-            .entries()
-            .iter()
-            .find_map(|entry| match entry {
-                FsTreeEntry::File { path, hash } if path == "bin/tool" => Some(*hash),
-                _ => None,
-            })
-            .expect("tool file entry");
-        let hex = hash.to_hex();
-        assert!(store.fs_files_dir().join(&hex[..2]).join(hex).is_file());
+        assert!(manifest.entries().iter().any(|entry| matches!(
+            entry,
+            FsTreeEntry::File { path, .. } if path == "bin/tool"
+        )));
+        let manifest_hash = import_object(&store, &result.staged_path).unwrap();
+        let root = store
+            .fs_tree()
+            .ensure_materialized_root(manifest_hash)
+            .unwrap();
+        assert_eq!(fs::read(root.join("bin/tool")).unwrap(), b"tool");
+        assert_eq!(
+            fs::read_link(root.join("tool-link")).unwrap(),
+            Path::new("bin/tool")
+        );
     }
 
     #[test]

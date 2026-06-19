@@ -15,37 +15,21 @@ use std::path::Path;
 /// `staged_path` is consumed on success. It may also be removed when the store
 /// already contains the object.
 pub fn import_object(store: &Store, staged_path: &Path) -> Result<ObjectHash, StoreError> {
-    import_object_with_hash(store, staged_path, None)
-}
-
-pub(crate) fn import_object_with_hash(
-    store: &Store,
-    staged_path: &Path,
-    object_hash: Option<ObjectHash>,
-) -> Result<ObjectHash, StoreError> {
-    let precomputed = object_hash.is_some();
-    let object_hash = match object_hash {
-        Some(object_hash) => object_hash,
-        None => hash_path(staged_path).map_err(|error| {
-            StoreError::Hashing(format!(
-                "failed to hash staged object '{}': {error}",
-                staged_path.display()
-            ))
-        })?,
-    };
+    let object_hash = hash_path(staged_path).map_err(|error| {
+        StoreError::Hashing(format!(
+            "failed to hash staged object '{}': {error}",
+            staged_path.display()
+        ))
+    })?;
     let destination = store.object_path(object_hash);
     if destination.exists() {
-        if !precomputed {
-            remove_path_force(staged_path)?;
-        }
+        remove_path_force(staged_path)?;
         return Ok(object_hash);
     }
 
     if let Err(error) = fs::rename(staged_path, &destination) {
         if destination.exists() {
-            if !precomputed {
-                remove_path_force(staged_path)?;
-            }
+            remove_path_force(staged_path)?;
             return Ok(object_hash);
         }
         return Err(StoreError::Io(format!(

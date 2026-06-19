@@ -89,7 +89,11 @@ mod tests {
 
         assert_eq!(
             output.root_path,
-            store.fs_trees_dir().join(manifest_hash.to_hex())
+            store
+                .fs_tree()
+                .lookup_materialized_root(manifest_hash)
+                .unwrap()
+                .unwrap()
         );
         assert_eq!(fs::read(output.root_path.join("file")).unwrap(), b"hello\n");
     }

@@ -32,8 +32,6 @@ mod store;
 
 pub use error::StoreError;
 pub use object::import_object;
-#[doc(hidden)]
-pub use publish::materialize_build_with_trusted_hash;
 pub use publish::{Publication, PublishRequest, materialize_build, publish_build};
 pub use record::{
     Build, ObjectRecord, PublishedBuild, RealizedObject, StoredObjectRecord, load_object_record,

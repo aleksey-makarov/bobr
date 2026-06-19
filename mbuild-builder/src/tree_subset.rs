@@ -82,7 +82,6 @@ fn build_tree_subset(
 
     Ok(StagedBuildResult {
         staged_path: output_path,
-        object_hash: None,
     })
 }
 
@@ -186,7 +185,6 @@ mod tests {
                 .join("tmp")
                 .join("fs-tree-subset-manifest.jsonl")
         );
-        assert!(result.object_hash.is_none());
         let subset = FsTreeManifest::read_canonical(&result.staged_path).unwrap();
         let paths = subset
             .entries()

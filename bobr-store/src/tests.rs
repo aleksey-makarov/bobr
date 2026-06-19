@@ -17,6 +17,14 @@ fn create_test_store(root: &Path) -> Store {
     Store::create(&store_root).unwrap()
 }
 
+fn fs_files_dir(store: &Store) -> PathBuf {
+    store.root().join(crate::store::FS_FILES_DIR)
+}
+
+fn fs_trees_dir(store: &Store) -> PathBuf {
+    store.root().join(crate::store::FS_TREES_DIR)
+}
+
 #[test]
 fn canonical_json_hash_is_stable_across_key_order() {
     let object_hash =
@@ -1062,40 +1070,6 @@ fn publish_build_accepts_directory_objects() {
 }
 
 #[test]
-fn materialize_build_trusted_hash_accepts_unreadable_object() {
-    let temp = tempdir().unwrap();
-    let layout = create_test_store(temp.path());
-
-    let stage_dir = temp.path().join("tree");
-    fs::create_dir_all(stage_dir.join("private")).unwrap();
-    fs::write(stage_dir.join("private").join("secret"), b"secret\n").unwrap();
-    let object_hash = hash_path(&stage_dir).unwrap();
-    fs::set_permissions(stage_dir.join("private"), fs::Permissions::from_mode(0o000)).unwrap();
-
-    let build_key = build_key_for("Tree", json!({ "kind": "private-tree" }), &[]);
-    let reuse_key = reuse_key_for("Tree", json!({ "kind": "private-tree" }), &[]);
-    let published = materialize_build_with_trusted_hash(
-        &layout,
-        build_key,
-        reuse_key,
-        vec![],
-        &stage_dir,
-        object_hash,
-    )
-    .unwrap();
-
-    assert_eq!(published.build.object_hash, object_hash);
-    let object_path = layout.object_path(object_hash);
-    assert!(object_path.join("private").exists());
-
-    fs::set_permissions(
-        object_path.join("private"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
-}
-
-#[test]
 fn publish_build_points_fs_tree_object_ref_at_object_root() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
@@ -1186,40 +1160,6 @@ fn existing_object_reuse_removes_staged_path() {
 }
 
 #[test]
-fn existing_trusted_object_reuse_leaves_staged_path_for_runtime_cleanup() {
-    let temp = tempdir().unwrap();
-    let layout = create_test_store(temp.path());
-
-    let first_stage = temp.path().join("first.txt");
-    fs::write(&first_stage, b"hello").unwrap();
-    let object_hash = hash_path(&first_stage).unwrap();
-    materialize_build_with_trusted_hash(
-        &layout,
-        build_key_for("CasTest", json!({ "kind": "first" }), &[]),
-        reuse_key_for("CasTest", json!({ "kind": "first" }), &[]),
-        vec![],
-        &first_stage,
-        object_hash,
-    )
-    .unwrap();
-
-    let second_stage = temp.path().join("second.txt");
-    fs::write(&second_stage, b"hello").unwrap();
-    let second_stage_path = second_stage.clone();
-    materialize_build_with_trusted_hash(
-        &layout,
-        build_key_for("CasTest", json!({ "kind": "second" }), &[]),
-        reuse_key_for("CasTest", json!({ "kind": "second" }), &[]),
-        vec![],
-        &second_stage,
-        object_hash,
-    )
-    .unwrap();
-
-    assert!(second_stage_path.exists());
-}
-
-#[test]
 fn build_key_changes_when_input_order_changes() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
@@ -1277,8 +1217,8 @@ fn store_create_creates_full_layout() {
     assert!(layout.builds_dir().is_dir());
     assert!(layout.object_record_refs_dir().is_dir());
     assert!(layout.object_refs_dir().is_dir());
-    assert!(layout.fs_files_dir().is_dir());
-    assert!(layout.fs_trees_dir().is_dir());
+    assert!(fs_files_dir(&layout).is_dir());
+    assert!(fs_trees_dir(&layout).is_dir());
     assert!(temp.path().join(LOGS_DIR).is_dir());
     assert!(temp.path().join(TMP_DIR).is_dir());
     assert!(layout.run_log_dir().is_dir());
@@ -1358,7 +1298,7 @@ fn store_fs_tree_imports_with_install_into_store_fs_files() {
         })
         .expect("payload file entry");
     let hex = hash.to_hex();
-    assert!(layout.fs_files_dir().join(&hex[..2]).join(hex).is_file());
+    assert!(fs_files_dir(&layout).join(&hex[..2]).join(hex).is_file());
 }
 
 #[test]

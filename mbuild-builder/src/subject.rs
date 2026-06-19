@@ -254,10 +254,7 @@ mod tests {
                 .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
             std::fs::write(out.join("payload"), b"ok")
                 .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-            Ok(StagedBuildResult {
-                staged_path: out,
-                object_hash: None,
-            })
+            Ok(StagedBuildResult { staged_path: out })
         }
     }
 
