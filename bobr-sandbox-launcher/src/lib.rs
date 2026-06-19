@@ -4,9 +4,9 @@
 //! legacy output scan from the launcher; callers own output import/reporting.
 //!
 //! Modules:
-//! - [`protocol`]: shared types, constants, validation, and the handshake.
-//! - [`runner`]: the in-namespace runner that executes steps as pid 1.
-//! - [`launcher`]: the privileged setup (namespaces, mounts, caps, chroot).
+//! - `protocol`: shared types, constants, validation, and the handshake.
+//! - `runner`: the in-namespace runner that executes steps as pid 1.
+//! - `launcher`: the privileged setup (namespaces, mounts, caps, chroot).
 
 mod launcher;
 mod protocol;
