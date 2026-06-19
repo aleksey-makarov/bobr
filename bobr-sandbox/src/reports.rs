@@ -1,5 +1,5 @@
 use bobr_runtime::runtime::RuntimeError;
-use mbuild_sandbox_runner_core::{
+use bobr_sandbox_launcher::{
     SandboxRunnerFailureReport, SandboxRunnerSuccessReport, SandboxStepReport,
 };
 use std::fs;
@@ -94,7 +94,6 @@ mod tests {
         let temp = tempdir().unwrap();
         let path = temp.path().join("success.json");
         let report = SandboxRunnerSuccessReport {
-            legacy: None,
             steps: vec![SandboxStepReport {
                 name: "install".to_string(),
                 run_as: "build-user".to_string(),

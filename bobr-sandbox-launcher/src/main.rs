@@ -1,7 +1,7 @@
-use mbuild_sandbox_runner_core::{
-    RUNNER_PROTOCOL_VERSION, SandboxLauncherConfig, SandboxLauncherMount, SandboxLauncherMountKind,
-    SandboxRunnerFailureReport, path_cstring, protocol_info, read_handshake_byte,
-    relative_launcher_target, run_config_path, validate_launcher_config,
+use bobr_sandbox_launcher::{
+    SANDBOX_PROTOCOL_VERSION, SandboxLauncherConfig, SandboxLauncherMount,
+    SandboxLauncherMountKind, SandboxRunnerFailureReport, path_cstring, protocol_info,
+    read_handshake_byte, relative_launcher_target, run_config_path, validate_launcher_config,
 };
 use std::ffi::CString;
 use std::fs::{self, File};
@@ -75,7 +75,7 @@ fn main() {
 
 fn parse_launch_args(args: &[String]) -> Result<(RawFd, PathBuf), String> {
     if args.len() != 6 || args[1] != "launch" || args[2] != "--wait-fd" || args[4] != "--config" {
-        return Err("usage: mbuild-sandbox-runner launch --wait-fd FD --config PATH".to_string());
+        return Err("usage: bobr-sandbox-launcher launch --wait-fd FD --config PATH".to_string());
     }
     let wait_fd = args[3]
         .parse::<RawFd>()
@@ -129,10 +129,10 @@ fn read_launcher_config(path: &Path) -> Result<SandboxLauncherConfig, String> {
             path.display()
         )
     })?;
-    if config.protocol_version != RUNNER_PROTOCOL_VERSION {
+    if config.protocol_version != SANDBOX_PROTOCOL_VERSION {
         return Err(format!(
             "unsupported launcher protocol {}; expected {}",
-            config.protocol_version, RUNNER_PROTOCOL_VERSION
+            config.protocol_version, SANDBOX_PROTOCOL_VERSION
         ));
     }
     validate_launcher_config(&config)
@@ -175,7 +175,7 @@ fn run_pid1(config: &SandboxLauncherConfig) -> io::Result<i32> {
     std::env::set_current_dir("/")
         .map_err(|error| context_error("chdir '/' after chroot", error))?;
     drop_capabilities().map_err(|error| context_error("drop capabilities", error))?;
-    // After this handoff, runner core owns the report contents. Launcher code
+    // After this handoff, inner runner owns the report contents. Launcher code
     // must not write the failure report on paths where run_config_path ran.
     Ok(run_config_path(&config.runner_config))
 }
@@ -458,12 +458,12 @@ fn write_launcher_failure(file: &File, label: &str, error: impl std::fmt::Displa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_sandbox_runner_core::{CONTAINER_OUT_DIR, CONTAINER_RUNNER_CONFIG};
+    use bobr_sandbox_launcher::{CONTAINER_OUT_DIR, CONTAINER_RUNNER_CONFIG};
 
     #[test]
     fn parses_launch_args() {
         let args = vec![
-            "mbuild-sandbox-runner".to_string(),
+            "bobr-sandbox-launcher".to_string(),
             "launch".to_string(),
             "--wait-fd".to_string(),
             "7".to_string(),
@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn rejects_old_bare_runner_config_mode() {
         let args = vec![
-            "mbuild-sandbox-runner".to_string(),
+            "bobr-sandbox-launcher".to_string(),
             "/tmp/runner-config.json".to_string(),
         ];
 
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn launcher_config_validation_rejects_duplicate_mount_targets() {
         let config = SandboxLauncherConfig {
-            protocol_version: RUNNER_PROTOCOL_VERSION,
+            protocol_version: SANDBOX_PROTOCOL_VERSION,
             root: PathBuf::from("/tmp/root"),
             mounts: vec![
                 SandboxLauncherMount {

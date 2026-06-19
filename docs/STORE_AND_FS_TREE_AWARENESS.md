@@ -15,7 +15,7 @@ store objects, fs-tree manifests, logical ownership, and extended ids.
 | `TreeMerge` | One fs-tree v2 manifest object | Reads input manifests, validates overlapping entries, and merges logical uid/gid/mode metadata. | Manifest-only operation. |
 | `ErofsRootfs` | One EROFS image file | Consumes one fs-tree input materialized as a filesystem root by the runtime before builder execution. | Uses a `bobr-runtime` namespace function to run `mkfs.erofs` on the materialized root. |
 | `Initramfs` | One Linux `newc` cpio archive file | Consumes one fs-tree input materialized as a filesystem root by the runtime before builder execution. | Uses a `bobr-runtime` namespace function to read the materialized root and write the archive. |
-| `Sandbox` | One fs-tree v2 manifest object | Reads a prepared fs-tree rootfs as input and scans the produced output manifest after execution. Extended ids are handled by the sandbox launcher user namespace. | Uses a `bobr-runtime` function plus the dedicated `mbuild-sandbox-runner` launcher path. |
+| `Sandbox` | One fs-tree v2 manifest object | Reads a prepared fs-tree rootfs as input and scans the produced output manifest after execution. Extended ids are handled by the sandbox launcher user namespace. | Uses a `bobr-runtime` function plus the dedicated `bobr-sandbox-launcher` launcher path. |
 | `OciExtract` | One fs-tree v2 manifest object | Reads uid/gid/mode information from OCI layer tar headers into the fs-tree manifest, including non-host logical ids. | Uses a `bobr-runtime` namespace function to extract layers and import the resulting tree into fs-tree v2 storage. |
 
 `Sandbox` runs through a dedicated launcher because it needs step execution,

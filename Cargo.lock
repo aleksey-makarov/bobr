@@ -133,11 +133,22 @@ name = "bobr-sandbox"
 version = "0.1.0"
 dependencies = [
  "bobr-runtime",
+ "bobr-sandbox-launcher",
  "bobr-store",
  "libc",
  "mbuild-builder",
  "mbuild-core",
- "mbuild-sandbox-runner-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "bobr-sandbox-launcher"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nix",
  "serde",
  "serde_json",
  "tempfile",
@@ -966,28 +977,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "time",
-]
-
-[[package]]
-name = "mbuild-sandbox-runner"
-version = "0.1.0"
-dependencies = [
- "libc",
- "mbuild-sandbox-runner-core",
- "serde_json",
-]
-
-[[package]]
-name = "mbuild-sandbox-runner-core"
-version = "0.1.0"
-dependencies = [
- "fsobj-hash",
- "libc",
- "mbuild-core",
- "nix",
- "serde",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]

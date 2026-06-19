@@ -1,5 +1,5 @@
 use bobr_runtime::runtime::RuntimeError;
-use mbuild_sandbox_runner_core::{RUNNER_BINARY_NAME, RUNNER_PROTOCOL_VERSION, RunnerProtocolInfo};
+use bobr_sandbox_launcher::{LAUNCHER_BINARY_NAME, LauncherProtocolInfo, SANDBOX_PROTOCOL_VERSION};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -7,54 +7,54 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub(crate) fn resolve_and_preflight_sandbox_runner() -> Result<PathBuf, RuntimeError> {
-    let path = resolve_sandbox_runner_path()?;
-    require_executable_file(&path, "sandbox runner")?;
+pub(crate) fn resolve_and_preflight_sandbox_launcher() -> Result<PathBuf, RuntimeError> {
+    let path = resolve_sandbox_launcher_path()?;
+    require_executable_file(&path, "sandbox launcher")?;
     require_static_elf(&path)?;
     let output = Command::new(&path)
         .arg("--protocol-info")
         .output()
         .map_err(|error| {
             RuntimeError::new(format!(
-                "failed to run sandbox runner preflight '{} --protocol-info': {error}",
+                "failed to run sandbox launcher preflight '{} --protocol-info': {error}",
                 path.display()
             ))
         })?;
     if !output.status.success() {
         return Err(RuntimeError::new(format!(
-            "sandbox runner preflight '{} --protocol-info' failed with status {}: {}",
+            "sandbox launcher preflight '{} --protocol-info' failed with status {}: {}",
             path.display(),
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    let info = serde_json::from_slice::<RunnerProtocolInfo>(&output.stdout).map_err(|error| {
+    let info = serde_json::from_slice::<LauncherProtocolInfo>(&output.stdout).map_err(|error| {
         RuntimeError::new(format!(
-            "failed to parse sandbox runner protocol info from '{}': {error}",
+            "failed to parse sandbox launcher protocol info from '{}': {error}",
             path.display()
         ))
     })?;
-    if info.name != RUNNER_BINARY_NAME || info.protocol_version != RUNNER_PROTOCOL_VERSION {
+    if info.name != LAUNCHER_BINARY_NAME || info.protocol_version != SANDBOX_PROTOCOL_VERSION {
         return Err(RuntimeError::new(format!(
-            "sandbox runner '{}' has incompatible protocol {:?}; expected name '{}' protocol {}",
+            "sandbox launcher '{}' has incompatible protocol {:?}; expected name '{}' protocol {}",
             path.display(),
             info,
-            RUNNER_BINARY_NAME,
-            RUNNER_PROTOCOL_VERSION
+            LAUNCHER_BINARY_NAME,
+            SANDBOX_PROTOCOL_VERSION
         )));
     }
     Ok(path)
 }
 
-fn resolve_sandbox_runner_path() -> Result<PathBuf, RuntimeError> {
-    resolve_sandbox_runner_path_from(
-        env::var_os("MBUILD_SANDBOX_RUNNER").map(PathBuf::from),
+fn resolve_sandbox_launcher_path() -> Result<PathBuf, RuntimeError> {
+    resolve_sandbox_launcher_path_from(
+        env::var_os("BOBR_SANDBOX_LAUNCHER").map(PathBuf::from),
         env::current_exe().ok().as_deref(),
         env::var_os("PATH"),
     )
 }
 
-fn resolve_sandbox_runner_path_from(
+fn resolve_sandbox_launcher_path_from(
     env_override: Option<PathBuf>,
     current_exe: Option<&Path>,
     path_env: Option<OsString>,
@@ -72,14 +72,14 @@ fn resolve_sandbox_runner_path_from(
             let candidate = target_dir
                 .join("x86_64-unknown-linux-musl")
                 .join(profile)
-                .join(RUNNER_BINARY_NAME);
+                .join(LAUNCHER_BINARY_NAME);
             checked.push(candidate.clone());
             if candidate.exists() {
                 return Ok(candidate);
             }
         }
         if let Some(parent) = current_exe.parent() {
-            let sibling = parent.join(RUNNER_BINARY_NAME);
+            let sibling = parent.join(LAUNCHER_BINARY_NAME);
             checked.push(sibling.clone());
             if sibling.exists() {
                 return Ok(sibling);
@@ -91,7 +91,7 @@ fn resolve_sandbox_runner_path_from(
                 let candidate = target_dir
                     .join("x86_64-unknown-linux-musl")
                     .join(profile)
-                    .join(RUNNER_BINARY_NAME);
+                    .join(LAUNCHER_BINARY_NAME);
                 checked.push(candidate.clone());
                 if candidate.exists() {
                     return Ok(candidate);
@@ -102,7 +102,7 @@ fn resolve_sandbox_runner_path_from(
 
     if let Some(path) = path_env {
         for dir in env::split_paths(&path) {
-            let candidate = dir.join(OsStr::new(RUNNER_BINARY_NAME));
+            let candidate = dir.join(OsStr::new(LAUNCHER_BINARY_NAME));
             checked.push(candidate.clone());
             if candidate.exists() {
                 return Ok(candidate);
@@ -111,8 +111,8 @@ fn resolve_sandbox_runner_path_from(
     }
 
     Err(RuntimeError::new(format!(
-        "failed to find sandbox runner '{}'; checked {}",
-        RUNNER_BINARY_NAME,
+        "failed to find sandbox launcher '{}'; checked {}",
+        LAUNCHER_BINARY_NAME,
         checked
             .iter()
             .map(|path| path.display().to_string())
@@ -163,18 +163,18 @@ fn require_executable_file(path: &Path, label: &str) -> Result<(), RuntimeError>
 fn require_static_elf(path: &Path) -> Result<(), RuntimeError> {
     let bytes = fs::read(path).map_err(|error| {
         RuntimeError::new(format!(
-            "failed to read sandbox runner '{}': {error}",
+            "failed to read sandbox launcher '{}': {error}",
             path.display()
         ))
     })?;
     match elf_has_interpreter(&bytes) {
         Ok(true) => Err(RuntimeError::new(format!(
-            "sandbox runner '{}' is dynamically linked; build a static musl runner",
+            "sandbox launcher '{}' is dynamically linked; build a static musl launcher",
             path.display()
         ))),
         Ok(false) => Ok(()),
         Err(message) => Err(RuntimeError::new(format!(
-            "failed to inspect sandbox runner ELF '{}': {message}",
+            "failed to inspect sandbox launcher ELF '{}': {message}",
             path.display()
         ))),
     }
@@ -247,7 +247,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn sandbox_runner_resolution_prefers_musl_runner_in_cargo_dev_tree() {
+    fn sandbox_launcher_resolution_prefers_musl_runner_in_cargo_dev_tree() {
         let temp = tempdir().unwrap();
         let target = temp.path().join("target");
         let debug = target.join("debug");
@@ -255,28 +255,28 @@ mod tests {
         fs::create_dir_all(&debug).unwrap();
         fs::create_dir_all(&musl_debug).unwrap();
         let current_exe = debug.join("mbuild");
-        let dynamic_sibling = debug.join(RUNNER_BINARY_NAME);
-        let static_runner = musl_debug.join(RUNNER_BINARY_NAME);
+        let dynamic_sibling = debug.join(LAUNCHER_BINARY_NAME);
+        let static_runner = musl_debug.join(LAUNCHER_BINARY_NAME);
         fs::write(&current_exe, "").unwrap();
         fs::write(&dynamic_sibling, "").unwrap();
         fs::write(&static_runner, "").unwrap();
 
-        let resolved = resolve_sandbox_runner_path_from(None, Some(&current_exe), None).unwrap();
+        let resolved = resolve_sandbox_launcher_path_from(None, Some(&current_exe), None).unwrap();
 
         assert_eq!(resolved, static_runner);
     }
 
     #[test]
-    fn sandbox_runner_resolution_uses_installed_sibling_outside_cargo_tree() {
+    fn sandbox_launcher_resolution_uses_installed_sibling_outside_cargo_tree() {
         let temp = tempdir().unwrap();
         let bin = temp.path().join("bin");
         fs::create_dir(&bin).unwrap();
         let current_exe = bin.join("mbuild");
-        let sibling = bin.join(RUNNER_BINARY_NAME);
+        let sibling = bin.join(LAUNCHER_BINARY_NAME);
         fs::write(&current_exe, "").unwrap();
         fs::write(&sibling, "").unwrap();
 
-        let resolved = resolve_sandbox_runner_path_from(None, Some(&current_exe), None).unwrap();
+        let resolved = resolve_sandbox_launcher_path_from(None, Some(&current_exe), None).unwrap();
 
         assert_eq!(resolved, sibling);
     }

@@ -2,24 +2,24 @@ use crate::reports::{
     command_context, read_sandbox_failure_report, read_sandbox_success_steps, status_message,
 };
 use bobr_runtime::runtime::RuntimeError;
-use mbuild_sandbox_runner_core::{SandboxStepReport, write_handshake_byte};
+use bobr_sandbox_launcher::{SandboxStepReport, write_handshake_byte};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
-const RUNNER_WAIT_FD: RawFd = 3;
+const LAUNCHER_WAIT_FD: RawFd = 3;
 
-pub(crate) fn run_sandbox_runner(
-    runner_path: &Path,
+pub(crate) fn run_sandbox_launcher(
+    launcher_path: &Path,
     launcher_config: &Path,
     success_report: &Path,
     failure_report: &Path,
 ) -> Result<Vec<SandboxStepReport>, RuntimeError> {
     let wait_pipe = Pipe::new().map_err(|error| {
         RuntimeError::new(format!(
-            "failed to create sandbox runner wait pipe: {error}"
+            "failed to create sandbox launcher wait pipe: {error}"
         ))
     })?;
     let Pipe {
@@ -27,11 +27,11 @@ pub(crate) fn run_sandbox_runner(
         write: wait_write,
     } = wait_pipe;
     let wait_read_fd = wait_read.as_raw_fd();
-    let mut command = Command::new(runner_path);
+    let mut command = Command::new(launcher_path);
     command
         .arg("launch")
         .arg("--wait-fd")
-        .arg(RUNNER_WAIT_FD.to_string())
+        .arg(LAUNCHER_WAIT_FD.to_string())
         .arg("--config")
         .arg(launcher_config)
         .stdin(Stdio::null())
@@ -43,13 +43,13 @@ pub(crate) fn run_sandbox_runner(
     // callbacks. The launcher needs exactly one inherited fd for the start
     // handshake; all other transport state stays in the parent.
     unsafe {
-        command.pre_exec(move || prepare_runner_wait_fd(wait_read_fd));
+        command.pre_exec(move || prepare_launcher_wait_fd(wait_read_fd));
     }
 
     let child = command.spawn().map_err(|error| {
         RuntimeError::new(format!(
-            "failed to spawn sandbox runner '{}': {error}",
-            runner_path.display()
+            "failed to spawn sandbox launcher '{}': {error}",
+            launcher_path.display()
         ))
     })?;
     drop(wait_read);
@@ -57,7 +57,7 @@ pub(crate) fn run_sandbox_runner(
     if let Err(error) = write_handshake_byte(wait_write.as_raw_fd()) {
         let stderr = terminate_child_with_output(child).unwrap_or_default();
         return Err(RuntimeError::new(format!(
-            "failed to signal sandbox runner readiness: {error}{}",
+            "failed to signal sandbox launcher readiness: {error}{}",
             command_context(&stderr)
         )));
     }
@@ -65,8 +65,8 @@ pub(crate) fn run_sandbox_runner(
 
     let output = child.wait_with_output().map_err(|error| {
         RuntimeError::new(format!(
-            "failed to wait for sandbox runner '{}': {error}",
-            runner_path.display()
+            "failed to wait for sandbox launcher '{}': {error}",
+            launcher_path.display()
         ))
     })?;
     if output.status.success() {
@@ -75,7 +75,7 @@ pub(crate) fn run_sandbox_runner(
         Err(read_sandbox_failure_report(
             failure_report,
             format!(
-                "sandbox runner exited with {}{}",
+                "sandbox launcher exited with {}{}",
                 status_message(output.status),
                 command_context(&output.stderr)
             ),
@@ -88,11 +88,11 @@ fn terminate_child_with_output(mut child: Child) -> io::Result<Vec<u8>> {
     child.wait_with_output().map(|output| output.stderr)
 }
 
-fn prepare_runner_wait_fd(fd: RawFd) -> io::Result<()> {
-    duplicate_runner_wait_fd(fd, RUNNER_WAIT_FD)
+fn prepare_launcher_wait_fd(fd: RawFd) -> io::Result<()> {
+    duplicate_launcher_wait_fd(fd, LAUNCHER_WAIT_FD)
 }
 
-fn duplicate_runner_wait_fd(fd: RawFd, target_fd: RawFd) -> io::Result<()> {
+fn duplicate_launcher_wait_fd(fd: RawFd, target_fd: RawFd) -> io::Result<()> {
     if fd == target_fd {
         clear_cloexec(fd)
     } else if unsafe { libc::dup2(fd, target_fd) } < 0 {
@@ -154,23 +154,23 @@ mod tests {
     }
 
     #[test]
-    fn prepare_runner_wait_fd_duplicates_without_cloexec() {
+    fn prepare_launcher_wait_fd_duplicates_without_cloexec() {
         let source = Pipe::new().unwrap();
         let target = Pipe::new().unwrap();
         let target_fd = target.write.as_raw_fd();
 
-        duplicate_runner_wait_fd(source.read.as_raw_fd(), target_fd).unwrap();
+        duplicate_launcher_wait_fd(source.read.as_raw_fd(), target_fd).unwrap();
 
         assert!(!cloexec_is_set(target_fd));
     }
 
     #[test]
-    fn prepare_runner_wait_fd_clears_cloexec_when_fd_already_matches() {
+    fn prepare_launcher_wait_fd_clears_cloexec_when_fd_already_matches() {
         let pipe = Pipe::new().unwrap();
         let fd = pipe.read.as_raw_fd();
         assert!(cloexec_is_set(fd));
 
-        duplicate_runner_wait_fd(fd, fd).unwrap();
+        duplicate_launcher_wait_fd(fd, fd).unwrap();
 
         assert!(!cloexec_is_set(fd));
     }

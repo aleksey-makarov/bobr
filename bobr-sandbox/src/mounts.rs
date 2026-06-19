@@ -1,12 +1,12 @@
 use crate::{SandboxInput, SandboxRuntimeStep, StepUser};
 use bobr_runtime::runtime::RuntimeError;
-use mbuild_sandbox_runner_core::{
+use bobr_sandbox_launcher::{
     CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_FAILURE_REPORT, CONTAINER_INPUTS_DIR,
-    CONTAINER_LOG_DIR, CONTAINER_MBUILD_DIR, CONTAINER_OUT_DIR, CONTAINER_RUNNER_CONFIG,
-    CONTAINER_RUNNER_DIR, CONTAINER_RUNTIME_DIR, CONTAINER_SUCCESS_REPORT, RUNNER_BINARY_NAME,
-    RUNNER_PROTOCOL_VERSION, RunnerConfig, RunnerOutputMode, RunnerRunAs, RunnerStepConfig,
-    SandboxLauncherConfig, SandboxLauncherMount, SandboxLauncherMountKind,
-    relative_launcher_target, validate_launcher_config,
+    CONTAINER_LAUNCHER_DIR, CONTAINER_LOG_DIR, CONTAINER_MBUILD_DIR, CONTAINER_OUT_DIR,
+    CONTAINER_RUNNER_CONFIG, CONTAINER_RUNTIME_DIR, CONTAINER_SUCCESS_REPORT, LAUNCHER_BINARY_NAME,
+    RunnerConfig, RunnerRunAs, RunnerStepConfig, SANDBOX_PROTOCOL_VERSION, SandboxLauncherConfig,
+    SandboxLauncherMount, SandboxLauncherMountKind, relative_launcher_target,
+    validate_launcher_config,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -213,11 +213,9 @@ fn write_runner_config(
         })
         .collect::<Vec<_>>();
     let runner_config = RunnerConfig {
-        protocol_version: RUNNER_PROTOCOL_VERSION,
+        protocol_version: SANDBOX_PROTOCOL_VERSION,
         prepare_paths: vec![PathBuf::from(CONTAINER_BUILD_DIR)],
         steps,
-        output_dir: PathBuf::from(CONTAINER_OUT_DIR),
-        output_mode: RunnerOutputMode::StepsOnly,
         success_report: PathBuf::from(CONTAINER_SUCCESS_REPORT),
         failure_report: PathBuf::from(CONTAINER_FAILURE_REPORT),
     };
@@ -290,8 +288,8 @@ fn build_launcher_config(
         bind_mount(&config.config_dir, Path::new(CONTAINER_CONFIG_DIR), true),
         bind_mount(&config.out_dir, Path::new(CONTAINER_OUT_DIR), false),
         bind_mount(
-            &config.runner_path,
-            &Path::new(CONTAINER_RUNNER_DIR).join(RUNNER_BINARY_NAME),
+            &config.launcher_path,
+            &Path::new(CONTAINER_LAUNCHER_DIR).join(LAUNCHER_BINARY_NAME),
             true,
         ),
         bind_mount(&runtime_files.root, Path::new(CONTAINER_RUNTIME_DIR), false),
@@ -310,7 +308,7 @@ fn build_launcher_config(
         ));
     }
     let launcher = SandboxLauncherConfig {
-        protocol_version: RUNNER_PROTOCOL_VERSION,
+        protocol_version: SANDBOX_PROTOCOL_VERSION,
         root: dirs.rootfs.clone(),
         mounts,
         runner_config: PathBuf::from(CONTAINER_RUNNER_CONFIG),
@@ -404,7 +402,7 @@ fn populate_root_skeleton(
         relative_container_path(CONTAINER_INPUTS_DIR)?,
         relative_container_path(CONTAINER_LOG_DIR)?,
         relative_container_path(CONTAINER_OUT_DIR)?,
-        relative_container_path(CONTAINER_RUNNER_DIR)?,
+        relative_container_path(CONTAINER_LAUNCHER_DIR)?,
         relative_container_path(CONTAINER_RUNTIME_DIR)?,
         PathBuf::from("dev"),
         PathBuf::from("proc"),
@@ -419,8 +417,8 @@ fn populate_root_skeleton(
     create_dev_symlink(sandbox_root, "stderr", "/proc/self/fd/2")?;
     File::create(
         sandbox_root
-            .join(relative_container_path(CONTAINER_RUNNER_DIR)?)
-            .join(RUNNER_BINARY_NAME),
+            .join(relative_container_path(CONTAINER_LAUNCHER_DIR)?)
+            .join(LAUNCHER_BINARY_NAME),
     )?;
     for log in &runtime_files.step_logs {
         create_mount_target(sandbox_root, &log.container_stdout)?;
@@ -563,7 +561,7 @@ mod tests {
                 fs::create_dir(&store_root).unwrap();
                 bobr_store::Store::create(&store_root).unwrap().fs_tree()
             },
-            runner_path: temp.path().join(RUNNER_BINARY_NAME),
+            launcher_path: temp.path().join(LAUNCHER_BINARY_NAME),
             extra_inputs: Vec::new(),
             steps: Vec::new(),
         }
@@ -586,12 +584,12 @@ mod tests {
         });
         let dirs = SandboxDirs::create(&input.workspace).unwrap();
         let runtime_files = SandboxRuntimeFiles::create(&dirs.runtime_files, &input).unwrap();
-        fs::write(&input.runner_path, "#!/bin/sh\n").unwrap();
+        fs::write(&input.launcher_path, "#!/bin/sh\n").unwrap();
 
         let launcher = build_launcher_config(&input, &dirs, &runtime_files).unwrap();
         let mounts = &launcher.mounts;
 
-        assert_eq!(launcher.protocol_version, RUNNER_PROTOCOL_VERSION);
+        assert_eq!(launcher.protocol_version, SANDBOX_PROTOCOL_VERSION);
         assert_eq!(launcher.root, dirs.rootfs);
         for name in ["usr", "etc", "var"] {
             let destination = Path::new("/").join(name);
@@ -626,10 +624,10 @@ mod tests {
         assert!(source_bind.readonly);
         assert!(mounts.iter().any(|mount| {
             mount.target
-                == Path::new(CONTAINER_RUNNER_DIR)
-                    .join(RUNNER_BINARY_NAME)
+                == Path::new(CONTAINER_LAUNCHER_DIR)
+                    .join(LAUNCHER_BINARY_NAME)
                     .as_path()
-                && mount.source.as_deref() == Some(input.runner_path.as_path())
+                && mount.source.as_deref() == Some(input.launcher_path.as_path())
                 && mount.readonly
         }));
     }
@@ -641,7 +639,7 @@ mod tests {
             bind_mount(Path::new("/dev/null"), Path::new("/tmp"), true),
         ];
         let config = SandboxLauncherConfig {
-            protocol_version: RUNNER_PROTOCOL_VERSION,
+            protocol_version: SANDBOX_PROTOCOL_VERSION,
             root: PathBuf::from("/tmp/root"),
             mounts,
             runner_config: PathBuf::from(CONTAINER_RUNNER_CONFIG),
@@ -721,7 +719,6 @@ mod tests {
 
         let runner_config: RunnerConfig =
             serde_json::from_slice(&fs::read(&runtime_files.runner_config).unwrap()).unwrap();
-        assert_eq!(runner_config.output_mode, RunnerOutputMode::StepsOnly);
         assert_eq!(runner_config.steps[0].umask, 0o077);
         assert_eq!(runner_config.steps[0].env["SOURCE_DATE_EPOCH"], "123");
         assert_eq!(runner_config.steps[0].env["LC_ALL"], "C");

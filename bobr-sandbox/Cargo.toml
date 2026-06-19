@@ -9,7 +9,7 @@ bobr-store = { path = "../bobr-store" }
 libc = "0.2"
 mbuild-builder = { path = "../mbuild-builder" }
 mbuild-core = { path = "../mbuild-core" }
-mbuild-sandbox-runner-core = { path = "../mbuild-sandbox-runner-core" }
+bobr-sandbox-launcher = { path = "../bobr-sandbox-launcher" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 

@@ -1,6 +1,6 @@
 //! New sandbox builder backed by `bobr-runtime`.
 //!
-//! It provides the `Sandbox` builder that executes `mbuild-sandbox-runner`
+//! It provides the `Sandbox` builder that executes `bobr-sandbox-launcher`
 //! through a `bobr-runtime` function and publishes fs-tree v2 manifests.
 
 mod lifecycle;
@@ -9,16 +9,16 @@ mod reports;
 mod tools;
 
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
+use bobr_sandbox_launcher::{
+    CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_INPUTS_DIR, CONTAINER_OUT_DIR,
+    SandboxStepReport,
+};
 use bobr_store::fs_tree::FsTree;
 use mbuild_builder::{
     BuildContext, BuilderInputPath, BuilderInputs, BuilderRegistry, InputSlot, InputSpec,
     StagedBuildResult, TypedBuilder,
 };
 use mbuild_core::{BuildLogLevel, BuilderError};
-use mbuild_sandbox_runner_core::{
-    CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_INPUTS_DIR, CONTAINER_OUT_DIR,
-    SandboxStepReport,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -124,10 +124,10 @@ fn build_sandbox_new(
         collect_extra_inputs(&SANDBOX_NEW_SPEC, "Sandbox", &inputs).map_err(map_error)?;
     validate_step_interpolations(&config.steps, &extra_inputs).map_err(map_error)?;
 
-    let runner_path = tools::resolve_and_preflight_sandbox_runner()
+    let launcher_path = tools::resolve_and_preflight_sandbox_launcher()
         .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
     let (runtime_input, output_manifest) =
-        prepare_sandbox_input(&config, rootfs, extra_inputs, cx, fs_tree, runner_path)
+        prepare_sandbox_input(&config, rootfs, extra_inputs, cx, fs_tree, launcher_path)
             .map_err(map_error)?;
 
     cx.log_event(
@@ -158,7 +158,7 @@ fn prepare_sandbox_input(
     extra_inputs: Vec<(String, BuilderInputPath)>,
     cx: &BuildContext,
     fs_tree: FsTree,
-    runner_path: PathBuf,
+    launcher_path: PathBuf,
 ) -> Result<(SandboxInput, PathBuf), SandboxError> {
     let output_path = cx.temp_dir.join(OUTPUT_DIR_NAME);
     recreate_empty_dir_force(&output_path)?;
@@ -203,7 +203,7 @@ fn prepare_sandbox_input(
             workspace,
             output_manifest: output_manifest.clone(),
             fs_tree,
-            runner_path,
+            launcher_path,
             extra_inputs: sandbox_inputs,
             steps: sandbox_steps,
         },
@@ -891,7 +891,7 @@ pub struct SandboxInput {
     workspace: PathBuf,
     output_manifest: PathBuf,
     fs_tree: FsTree,
-    runner_path: PathBuf,
+    launcher_path: PathBuf,
     extra_inputs: Vec<SandboxRuntimeInput>,
     steps: Vec<SandboxRuntimeStep>,
 }
@@ -940,8 +940,8 @@ impl RuntimeFunction for SandboxFunction {
         }
 
         let prepared = mounts::PreparedSandbox::create(&input)?;
-        let steps = lifecycle::run_sandbox_runner(
-            &input.runner_path,
+        let steps = lifecycle::run_sandbox_launcher(
+            &input.launcher_path,
             &prepared.launcher_config,
             &prepared.runtime_files.success_report,
             &prepared.runtime_files.failure_report,

@@ -2,5 +2,4 @@
 target-dir = "target"
 
 [alias]
-build-sandbox-runner = "build -p mbuild-sandbox-runner --target x86_64-unknown-linux-musl"
-build-runtime-helper = "build -p mbuild-runtime-helper --target x86_64-unknown-linux-musl"
+build-sandbox-launcher = "build -p bobr-sandbox-launcher --target x86_64-unknown-linux-musl"
