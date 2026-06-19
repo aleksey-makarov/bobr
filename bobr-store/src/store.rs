@@ -16,7 +16,6 @@ pub(crate) const BUILDS_DIR: &str = "builds";
 pub(crate) const OBJECT_RECORDS_DIR: &str = "object-records";
 pub(crate) const REUSES_DIR: &str = "reuses";
 pub(crate) const OBJECT_REFS_DIR: &str = "object-refs";
-pub(crate) const OBJECT_RECORD_REFS_DIR: &str = "object-record-refs";
 pub(crate) const FS_FILES_DIR: &str = "fs-files";
 pub(crate) const FS_TREES_DIR: &str = "fs-trees";
 pub(crate) const FS_TREE_REFS_DIR: &str = "fs-tree-refs";
@@ -216,11 +215,6 @@ impl Store {
         self.root().join(OBJECT_REFS_DIR)
     }
 
-    /// Returns the public object-record reference directory.
-    pub(crate) fn object_record_refs_dir(&self) -> PathBuf {
-        self.root().join(OBJECT_RECORD_REFS_DIR)
-    }
-
     /// Returns the canonical path of an imported legacy object.
     ///
     /// The path is `<store>/objects/<64-lowercase-object-hash>`. The function
@@ -359,7 +353,6 @@ fn ensure_store_layout(root: &Path) -> Result<(), StoreError> {
     ensure_store_dir(&root.join(REUSES_DIR), "reuses")?;
     ensure_store_dir(&root.join(OBJECT_RECORDS_DIR), "object-records")?;
     ensure_store_dir(&root.join(OBJECT_REFS_DIR), "object-refs")?;
-    ensure_store_dir(&root.join(OBJECT_RECORD_REFS_DIR), "object-record-refs")?;
     ensure_store_dir(&root.join(FS_FILES_DIR), "fs-files")?;
     ensure_store_dir(&root.join(FS_TREES_DIR), "fs-trees")?;
     ensure_store_dir(&root.join(FS_TREE_REFS_DIR), "fs-tree-refs")?;

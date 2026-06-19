@@ -151,8 +151,7 @@ mod tests {
         PlannedExecutionContext, PlannedSubject, SubjectExecution, execute_subject,
     };
     use bobr_store::{
-        PublishRequest, Store, StoreWorkspace, create_workspace, publish_build,
-        resolve_reuse_for_build,
+        Store, StoreWorkspace, create_workspace, materialize_build, resolve_reuse_for_build,
     };
     use mbuild_builder::{
         BuildContext, BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult, TypedBuilder,
@@ -478,23 +477,22 @@ mod tests {
                 .unwrap();
         let stage = temp.path().join("script.sh");
         fs::write(&stage, b"echo hi\n").unwrap();
-        publish_build(
+        materialize_build(
             &store,
-            PublishRequest {
-                publication_name: "script".to_string(),
-                build_key: build_key_for_object,
-                reuse_key,
-                staged_path: stage,
-                inputs: matching_inputs.clone(),
-            },
+            build_key_for_object,
+            reuse_key,
+            matching_inputs.clone(),
+            &stage,
+            Some("script"),
         )
         .unwrap();
 
         let matching_reuse_key =
             compute_reuse_key("RuntimeLookupTest", &payload, &matching_inputs).unwrap();
-        let hit = resolve_reuse_for_build(&store, lookup_build_key, matching_reuse_key)
-            .unwrap()
-            .expect("expected canonical object hit");
+        let hit =
+            resolve_reuse_for_build(&store, lookup_build_key, matching_reuse_key, Some("script"))
+                .unwrap()
+                .expect("expected canonical object hit");
         assert_eq!(hit.build.build_key, lookup_build_key);
 
         let mismatching_inputs = vec![
@@ -505,9 +503,14 @@ mod tests {
         let mismatching_reuse_key =
             compute_reuse_key("RuntimeLookupTest", &payload, &mismatching_inputs).unwrap();
         assert!(
-            resolve_reuse_for_build(&store, lookup_build_key, mismatching_reuse_key)
-                .unwrap()
-                .is_none()
+            resolve_reuse_for_build(
+                &store,
+                lookup_build_key,
+                mismatching_reuse_key,
+                Some("script")
+            )
+            .unwrap()
+            .is_none()
         );
     }
 

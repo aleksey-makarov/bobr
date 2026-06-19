@@ -99,7 +99,7 @@ or more arbitrary inputs:
 `Group` does not merge or inspect input payloads. It stages a constant
 zero-byte marker file after all inputs have been realized, so the root
 `RealizedObject` is only a completion marker. The meaningful artifacts are the
-input targets and their normal `object-record-refs/` and `object-refs/` publications.
+input targets and their normal `object-refs/`.
 
 `Source` is a separate execution class with its own shape:
 
@@ -187,14 +187,14 @@ The store layout is content-addressed:
 - `<store>/object-records/` stores canonical object records by `object_hash`
 - `<store>/reuses/` stores builder-only canonical reuse refs by `reuse_key`
 - `<store>/builds/` stores public build handles by `build_key`
-- `<store>/object-record-refs/` and `<store>/object-refs/` store published current refs
+- `<store>/object-refs/` stores user-facing refs to named successful objects
 
 `<store>/object-refs/<name>` always points at
 `../objects/<object_hash>`, regardless of object kind. Filesystem tree builder
 results store the canonical fs-tree manifest text as the object payload.
 Referenced regular-file payloads live under `<store>/fs-files/`, and
 materialized roots under `<store>/fs-trees/` are cache entries rather than
-publication targets.
+object-ref targets.
 Named fs-tree materializations also update `<store>/fs-tree-refs/<name>` for
 inspection. Runtime cache lookup does not read these refs.
 

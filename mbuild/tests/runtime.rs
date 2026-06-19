@@ -2,9 +2,9 @@ mod support;
 
 #[cfg(feature = "integration-tests")]
 use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
-use bobr_store::{Store, load_build_handle, load_object_record, load_publication};
+use bobr_store::{Store, load_build_handle, load_object_record};
 use mbuild::recipe_runtime::run_recipe_json_in_workspace;
-use mbuild_core::BuildKey;
+use mbuild_core::{BuildKey, ObjectHash};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -28,6 +28,27 @@ use tempfile::tempdir;
 
 fn source_build_key(object_hash: fsobj_hash::ObjectHash) -> BuildKey {
     BuildKey::from_object_hash(object_hash)
+}
+
+fn object_ref_path(workspace_root: &Path, name: &str) -> std::path::PathBuf {
+    store_root(workspace_root).join("object-refs").join(name)
+}
+
+fn object_ref_hash(workspace_root: &Path, name: &str) -> ObjectHash {
+    let target = fs::read_link(object_ref_path(workspace_root, name)).unwrap();
+    target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+fn assert_object_ref_exists(workspace_root: &Path, name: &str) {
+    assert!(
+        object_ref_path(workspace_root, name).is_symlink(),
+        "missing object ref {name}"
+    );
 }
 
 #[cfg(feature = "integration-tests")]
@@ -97,35 +118,23 @@ fn group_root_builds_independent_inputs() {
 
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let root_publication = load_publication(&layout, "all-targets")
+    let root_hash = object_ref_hash(workspace.path(), "all-targets");
+    let root_record = load_object_record(&layout, root_hash)
         .unwrap()
-        .expect("expected root publication");
-    assert_eq!(
-        root_publication.object_record.object_hash,
-        realized.object_hash
-    );
-    assert_eq!(fs::read(&root_publication.object_path).unwrap(), b"");
+        .expect("expected root object record");
+    assert_eq!(root_record.object_hash, realized.object_hash);
+    assert_eq!(fs::read(layout.object_path(root_hash)).unwrap(), b"");
 
     for name in ["all-targets", "first-target", "second-target"] {
-        assert!(
-            load_publication(&layout, name).unwrap().is_some(),
-            "missing publication {name}"
-        );
+        assert_object_ref_exists(workspace.path(), name);
     }
 }
 
-fn remove_publication_refs(workspace_root: &Path, name: &str) {
+fn remove_object_ref(workspace_root: &Path, name: &str) {
     let store = store_root(workspace_root);
-    let refs = [
-        store
-            .join("object-record-refs")
-            .join(format!("{name}.json")),
-        store.join("object-refs").join(name),
-    ];
-    for path in refs {
-        if path.exists() || path.is_symlink() {
-            fs::remove_file(path).unwrap();
-        }
+    let path = store.join("object-refs").join(name);
+    if path.exists() || path.is_symlink() {
+        fs::remove_file(path).unwrap();
     }
 }
 
@@ -387,10 +396,7 @@ fn json_recipe_executes_source_and_group_graph() {
     assert!(published.object_path.is_file());
 
     for name in ["source", "base-image", "final-group"] {
-        assert!(
-            load_publication(&layout, name).unwrap().is_some(),
-            "missing publication {name}"
-        );
+        assert_object_ref_exists(workspace.path(), name);
     }
 
     let objects_dir = store_root(workspace.path()).join("objects");
@@ -442,8 +448,8 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
             .is_some()
     );
     assert_eq!(build_ref_count(workspace.path()), 2);
-    assert!(load_publication(&layout, "source-a").unwrap().is_some());
-    assert!(load_publication(&layout, "source-b").unwrap().is_none());
+    assert_object_ref_exists(workspace.path(), "source-a");
+    assert!(!object_ref_path(workspace.path(), "source-b").exists());
 }
 
 #[test]
@@ -487,17 +493,16 @@ fn second_run_reuses_root_and_republishes_dependency_refs() {
     );
 
     for name in ["source", "final-group"] {
-        remove_publication_refs(workspace.path(), name);
+        remove_object_ref(workspace.path(), name);
     }
 
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
     assert_eq!(first.build_key, second.build_key);
-    let layout = Store::create(&store_root(workspace.path())).unwrap();
     // Every node now runs through the executor on each run, so reused
-    // dependencies republish their refs alongside the root.
-    assert!(load_publication(&layout, "final-group").unwrap().is_some());
-    assert!(load_publication(&layout, "source").unwrap().is_some());
+    // dependencies recreate their object refs alongside the root.
+    assert_object_ref_exists(workspace.path(), "final-group");
+    assert_object_ref_exists(workspace.path(), "source");
 }
 
 #[test]
@@ -671,14 +676,10 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
         .expect("expected Tree Build to exist in store");
 
     assert!(published.object_path.is_file());
-    let publication = load_publication(&layout, "runtime-tree")
-        .unwrap()
-        .expect("expected publication");
     assert_eq!(
-        publication.object_record.object_hash,
+        object_ref_hash(workspace.path(), "runtime-tree"),
         published.build.object_hash
     );
-    assert_eq!(publication.object_path, published.object_path);
     let manifest = FsTreeManifest::read_canonical(&published.object_path).unwrap();
     assert!(
         manifest
@@ -801,14 +802,12 @@ fn source_path_tar_materializes_unpacked_tree_with_source_build_handle() {
     let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let publication = load_publication(&layout, "source-tar")
-        .unwrap()
-        .expect("expected publication");
-    let object_path = publication.object_path;
+    let ref_hash = object_ref_hash(workspace.path(), "source-tar");
+    let object_path = layout.object_path(ref_hash);
     let build_key = source_build_key(object_hash);
     assert_eq!(realized.build_key, Some(build_key));
     assert_eq!(realized.object_hash, object_hash);
-    assert_eq!(publication.object_record.object_hash, object_hash);
+    assert_eq!(ref_hash, object_hash);
     let published = load_build_handle(&layout, build_key)
         .unwrap()
         .expect("expected source build handle");

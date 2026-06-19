@@ -57,7 +57,7 @@ The same `object_hash` also keys the canonical object record for that payload.
 Different builder nodes can share one object record when they intentionally
 stage the same payload.
 
-Publication names do not participate in object identity, `build_key`, or
+Recipe names do not participate in object identity, `build_key`, or
 `reuse_key`. The language-level realized object is `RealizedObject`; it carries
 the `build_key` that resolved to the object when that key is known.
 
@@ -102,8 +102,6 @@ The filesystem layout mirrors the identity model:
     <build_key> -> ../object-records/<object_hash>.json
   object-records/
     <object_hash>.json
-  object-record-refs/
-    <name>.json -> ../object-records/<object_hash>.json
   object-refs/
     <name> -> ../objects/<object_hash>
   fs-files/
@@ -129,9 +127,8 @@ The filesystem layout mirrors the identity model:
 - `object-records/` holds canonical object records addressed by `object_hash`.
 - `reuses/` holds builder-only canonical reuse refs addressed by `reuse_key`.
 - `builds/` holds public build-handle refs addressed by `build_key`.
-- `object-record-refs/` holds human-facing refs from publication name to object
-  record.
-- `object-refs/` holds human-facing refs from publication name to payload.
+- `object-refs/` holds human-facing refs from recipe name to the latest
+  successful object for that name.
 - `fs-files/` holds regular-file payloads referenced by fs-tree manifest
   objects.
 - `fs-trees/` caches materialized filesystem roots for fs-tree manifest
@@ -177,25 +174,27 @@ matching per-subject scratch directory. Scratch directories are removed after
 execution on a best-effort basis; cleanup failures are logged as warnings and
 the scratch directory is left in place.
 
-## Publication
+## Object Refs
 
-Every recipe node carries a publication name.
+Every recipe node carries a name.
 
-After a node is reused or built, the current publication refs are updated:
+When a named node successfully resolves to an object, the current object ref is
+updated:
 
-- `object-record-refs/<name>.json -> ../object-records/<object_hash>.json`
 - `object-refs/<name> -> ../objects/<object_hash>`
 
 This `object-refs/` rule is the same for every object kind. Filesystem tree
 builder results store the manifest itself as the object payload. The
-publication symlink never points directly at `fs-files/` or at a materialized
-`fs-trees/` cache directory.
+object ref never points directly at `fs-files/` or at a materialized
+`fs-trees/` cache directory. Object records remain available by adding
+`.json` to the referenced object hash and reading
+`object-records/<object_hash>.json`.
 
 `fs-tree-refs/` are not publication refs. They are created only when a
 filesystem root is actually materialized for a named input.
 
-If the current publication name already points at a different object, the old
-current refs are rotated into timestamp-suffixed history refs.
+If the current object ref already points at a different object, the old current
+ref is rotated into a timestamp-suffixed history ref.
 
 ## Logging
 

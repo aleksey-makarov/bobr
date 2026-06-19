@@ -5,7 +5,7 @@ use crate::runtime::{
 };
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, Store, create_workspace,
-    import_source_object, load_build_handle, materialize_build, record_existing_source_object,
+    import_source_object, materialize_build, record_existing_source_object, resolve_build_handle,
     resolve_reuse_for_build,
 };
 use mbuild_builder::{BuilderPlanError, BuilderPlannedSubject};
@@ -81,7 +81,9 @@ fn execute_builder_subject(
 
     // Resolve the caches before building a workspace: a hit needs no
     // workspace, logger, or temp dir, and is left silent (NoopBuildLogger).
-    if let Some(published) = load_build_handle(cx.store, build_key).map_err(map_store_error)? {
+    if let Some(published) =
+        resolve_build_handle(cx.store, build_key, Some(subject.name())).map_err(map_store_error)?
+    {
         return Ok(SubjectExecution {
             realized: realized_object_from_record(Some(build_key), &published.object_record),
             logger: Arc::new(NoopBuildLogger),
@@ -91,7 +93,8 @@ fn execute_builder_subject(
         .compute_reuse_key(&input_hashes)
         .map_err(map_builder_plan_error)?;
     if let Some(published) =
-        resolve_reuse_for_build(cx.store, build_key, reuse_key).map_err(map_store_error)?
+        resolve_reuse_for_build(cx.store, build_key, reuse_key, Some(subject.name()))
+            .map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
             realized: realized_object_from_record(Some(build_key), &published.object_record),
@@ -163,6 +166,7 @@ fn execute_builder_subject(
         reuse_key,
         input_hashes,
         &staged.staged_path,
+        Some(subject.name()),
     )
     .map_err(|error| {
         log_runtime_event(
@@ -188,14 +192,20 @@ fn execute_source_subject(
 
     // Resolve the caches before building a workspace: a hit needs no
     // workspace, logger, or temp dir, and is left silent (NoopBuildLogger).
-    if let Some(published) = load_build_handle(cx.store, build_key).map_err(map_store_error)? {
+    if let Some(published) =
+        resolve_build_handle(cx.store, build_key, Some(subject.name())).map_err(map_store_error)?
+    {
         return Ok(SubjectExecution {
             realized: realized_object_from_record(Some(build_key), &published.object_record),
             logger: Arc::new(NoopBuildLogger),
         });
     }
-    if let Some(stored) = record_existing_source_object(cx.store, subject.declared_object_hash())
-        .map_err(map_store_error)?
+    if let Some(stored) = record_existing_source_object(
+        cx.store,
+        subject.declared_object_hash(),
+        Some(subject.name()),
+    )
+    .map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
             realized: realized_object_from_record(Some(build_key), &stored.object_record),
@@ -260,9 +270,13 @@ fn execute_source_subject(
         "materializing source origin",
     );
 
-    let import_outcome =
-        import_source_object(cx.store, subject.declared_object_hash(), &staged_path)
-            .map_err(map_store_error)?;
+    let import_outcome = import_source_object(
+        cx.store,
+        subject.declared_object_hash(),
+        &staged_path,
+        Some(subject.name()),
+    )
+    .map_err(map_store_error)?;
     check_cancelled(&cx.cancellation)?;
 
     match import_outcome {

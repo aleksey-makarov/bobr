@@ -5,7 +5,7 @@ use crate::planned::{
 use crate::recipe::{RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
 use crate::runtime_policy::runtime_provider_for_current_process;
-use bobr_store::{RealizedObject, Store, publish_stored_object};
+use bobr_store::{RealizedObject, Store};
 use mbuild_builder::BuilderPlannedSubject;
 use mbuild_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildRunLogger, CancellationToken, RuntimeProvider,
@@ -262,13 +262,6 @@ fn execute_graph(
             }
         };
         let publication_name = subject.name();
-        if let Err(error) =
-            publish_stored_object(store, publication_name, executed.realized.object_hash)
-                .map_err(map_store_error)
-        {
-            first_error.get_or_insert(error);
-            continue;
-        }
         log_runtime_event(
             executed.logger.as_ref(),
             BuildLogLevel::Info,
@@ -613,13 +606,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let logger = create_test_logger(&store);
-        fs::create_dir(
-            temp.path()
-                .join(".mbuild")
-                .join("object-record-refs")
-                .join("bad.json"),
-        )
-        .unwrap();
+        fs::create_dir(temp.path().join(".mbuild").join("object-refs").join("bad")).unwrap();
 
         let mut registry = BuilderRegistry::new();
         registry.register(&FAST_BUILDER).unwrap();

@@ -1,4 +1,4 @@
-use crate::{Build, ObjectRecord, PublishedBuild, Store, StoreError, StoredObjectRecord};
+use crate::{Build, ObjectRecord, PublishedBuild, Store, StoreError};
 use mbuild_core::{
     BuildKey, ObjectHash, ReuseKey, validate_publication_name as validate_core_publication_name,
 };
@@ -161,6 +161,25 @@ pub fn load_build_handle(
     }))
 }
 
+/// Resolves the build reached by a build key and optionally updates its object ref.
+///
+/// This is the normal runtime-facing build-handle resolver. When `object_ref_name`
+/// is provided, a successful hit also updates `object-refs/<name>` to point at
+/// the resolved object.
+pub fn resolve_build_handle(
+    store: &Store,
+    build_key: BuildKey,
+    object_ref_name: Option<&str>,
+) -> Result<Option<PublishedBuild>, StoreError> {
+    let Some(published) = load_build_handle(store, build_key)? else {
+        return Ok(None);
+    };
+    if let Some(name) = object_ref_name {
+        update_object_ref(store, name, published.object_record.object_hash)?;
+    }
+    Ok(Some(published))
+}
+
 /// Loads the reusable object record reached by a reuse key.
 ///
 /// Returns `Ok(None)` when the reuse ref does not exist. Existing refs must be
@@ -200,12 +219,16 @@ pub fn resolve_reuse_for_build(
     store: &Store,
     build_key: BuildKey,
     reuse_key: ReuseKey,
+    object_ref_name: Option<&str>,
 ) -> Result<Option<PublishedBuild>, StoreError> {
     let Some(object_record) = load_reuse_object_record(store, reuse_key)? else {
         return Ok(None);
     };
     let stored = crate::record::stored_object_record_from_record(store, object_record)?;
     store_build_handle_ref(store, build_key, stored.object_record.object_hash)?;
+    if let Some(name) = object_ref_name {
+        update_object_ref(store, name, stored.object_record.object_hash)?;
+    }
     Ok(Some(PublishedBuild {
         build: crate::record::build_from_object_record(build_key, &stored.object_record),
         object_record: stored.object_record,
@@ -221,240 +244,73 @@ pub fn load_public_build(store: &Store, build_key: BuildKey) -> Result<Option<Bu
     Ok(load_build_handle(store, build_key)?.map(|published| published.build))
 }
 
-/// Loads a publication by name.
+/// Updates the current object ref for `object_ref_name`.
 ///
-/// Returns `Ok(None)` when neither publication ref exists for
-/// `publication_name`. Existing publications must have both object-record and
-/// object refs, both refs must use canonical targets, and the object ref must
-/// point to the same object recorded by the object record.
-pub fn load_publication(
+/// If the current ref points at a different object, the previous symlink target
+/// is preserved as an mtime-suffixed generation ref before the current ref is
+/// replaced.
+pub(crate) fn update_object_ref(
     store: &Store,
-    publication_name: &str,
-) -> Result<Option<StoredObjectRecord>, StoreError> {
-    validate_publication_name(publication_name)?;
-
-    let object_record_ref_path = store
-        .object_record_refs_dir()
-        .join(format!("{publication_name}.json"));
-    let object_ref_path = store.object_refs_dir().join(publication_name);
-    let object_record_ref_exists =
-        object_record_ref_path.exists() || object_record_ref_path.is_symlink();
-    let object_ref_exists = object_ref_path.exists() || object_ref_path.is_symlink();
-
-    match (object_record_ref_exists, object_ref_exists) {
-        (false, false) => return Ok(None),
-        (true, false) => {
-            return Err(StoreError::InvalidData(format!(
-                "publication '{publication_name}' has object record ref '{}' but missing object ref '{}'",
-                object_record_ref_path.display(),
-                object_ref_path.display()
-            )));
-        }
-        (false, true) => {
-            return Err(StoreError::InvalidData(format!(
-                "publication '{publication_name}' has object ref '{}' but missing object record ref '{}'",
-                object_ref_path.display(),
-                object_record_ref_path.display()
-            )));
-        }
-        (true, true) => {}
-    }
-
-    let object_record_target = fs::read_link(&object_record_ref_path).map_err(|error| {
-        StoreError::Io(format!(
-            "failed to read publication object record ref '{}': {error}",
-            object_record_ref_path.display()
-        ))
-    })?;
-    let object_record_hash = parse_object_record_ref_target(
-        "publication object record",
-        &object_record_ref_path,
-        &object_record_target,
-    )?;
-    let stored =
-        crate::record::load_stored_object_record(store, object_record_hash)?.ok_or_else(|| {
-            StoreError::InvalidData(format!(
-                "publication object record ref '{}' points to missing object record for object '{}'",
-                object_record_ref_path.display(),
-                object_record_hash
-            ))
-        })?;
-
-    let object_target = fs::read_link(&object_ref_path).map_err(|error| {
-        StoreError::Io(format!(
-            "failed to read publication object ref '{}': {error}",
-            object_ref_path.display()
-        ))
-    })?;
-    let object_hash =
-        parse_object_ref_target("publication object", &object_ref_path, &object_target)?;
-    if object_hash != stored.object_record.object_hash {
-        return Err(StoreError::InvalidData(format!(
-            "publication '{publication_name}' object ref points to '{}' but object record points to '{}'",
-            object_hash, stored.object_record.object_hash
-        )));
-    }
-
-    Ok(Some(stored))
-}
-
-/// Publishes a stored object under a publication name.
-///
-/// The object record must already exist and must point to an existing object in
-/// the store. The checked object record is returned to callers that need the resolved
-/// record and object path.
-pub fn publish_stored_object(
-    store: &Store,
-    publication_name: &str,
+    object_ref_name: &str,
     object_hash: ObjectHash,
-) -> Result<StoredObjectRecord, StoreError> {
-    let stored =
-        crate::record::load_stored_object_record(store, object_hash)?.ok_or_else(|| {
-            StoreError::InvalidData(format!(
-                "cannot publish missing object record for object '{}'",
-                object_hash
-            ))
-        })?;
-    publish_publication_refs(store, publication_name, &stored.object_record)?;
-    Ok(stored)
-}
-
-/// Publishes an object record under a publication name.
-///
-/// The current object and object-record refs for `publication_name` are
-/// replaced with refs to `object_record`. If the publication already points at
-/// a different object record, the previous refs are preserved as timestamped
-/// generation refs before the current refs are updated.
-///
-/// Publication names must be non-empty and contain only ASCII letters, digits,
-/// `.`, `_`, or `-`.
-pub(crate) fn publish_publication_refs(
-    store: &Store,
-    publication_name: &str,
-    object_record: &ObjectRecord,
 ) -> Result<(), StoreError> {
-    validate_publication_name(publication_name)?;
+    validate_object_ref_name(object_ref_name)?;
 
-    let current_object_record_ref_path = store
-        .object_record_refs_dir()
-        .join(format!("{publication_name}.json"));
-    let current_object_ref_path = store.object_refs_dir().join(publication_name);
-    let object_hash = object_record.object_hash;
+    let current_object_ref_path = store.object_refs_dir().join(object_ref_name);
+    let new_target = object_ref_target(object_hash);
 
-    if let Some(current) = load_current_publication(store, publication_name)?
-        && current.object_record.object_hash != object_hash
-    {
-        let generation_name =
-            allocate_generation_name(store, publication_name, &generation_suffix(&current)?)?;
-
-        if let Some(target) = current.object_record_target {
+    match fs::symlink_metadata(&current_object_ref_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let current_target = fs::read_link(&current_object_ref_path).map_err(|error| {
+                StoreError::Io(format!(
+                    "failed to read current object ref '{}': {error}",
+                    current_object_ref_path.display()
+                ))
+            })?;
+            let current_hash = parse_object_ref_target(
+                "current object",
+                &current_object_ref_path,
+                &current_target,
+            )?;
+            if current_hash == object_hash {
+                return Ok(());
+            }
+            let suffix = generation_suffix_from_symlink_metadata(&metadata)?;
+            let generation_name = allocate_generation_name(store, object_ref_name, &suffix)?;
             create_generation_ref(
-                &target,
-                &store
-                    .object_record_refs_dir()
-                    .join(format!("{generation_name}.json")),
+                &current_target,
+                &store.object_refs_dir().join(&generation_name),
             )?;
         }
-        if let Some(target) = current.object_target {
-            create_generation_ref(&target, &store.object_refs_dir().join(&generation_name))?;
+        Ok(_) => {
+            return Err(StoreError::InvalidData(format!(
+                "object ref '{}' exists but is not a symlink",
+                current_object_ref_path.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(StoreError::Io(format!(
+                "failed to inspect object ref '{}': {error}",
+                current_object_ref_path.display()
+            )));
         }
     }
 
-    let object_ref_target = object_ref_target_for_record(object_record);
-    replace_symlink(&object_ref_target, &current_object_ref_path)?;
-
-    let target = object_record_ref_target(object_hash);
-    replace_symlink(&target, &current_object_record_ref_path)?;
-    Ok(())
+    replace_symlink(&new_target, &current_object_ref_path)
 }
 
-fn object_ref_target_for_record(object_record: &ObjectRecord) -> PathBuf {
-    object_ref_target(object_record.object_hash)
-}
-
-fn validate_publication_name(name: &str) -> Result<(), StoreError> {
+pub(crate) fn validate_object_ref_name(name: &str) -> Result<(), StoreError> {
     validate_core_publication_name(name)
         .map_err(|error| StoreError::InvalidInput(error.to_string()))
 }
 
-#[derive(Debug)]
-pub(crate) struct CurrentPublication {
-    object_record: ObjectRecord,
-    object_record_path: PathBuf,
-    object_record_target: Option<PathBuf>,
-    object_target: Option<PathBuf>,
-}
-
-pub(crate) fn load_current_publication(
-    store: &Store,
-    publication_name: &str,
-) -> Result<Option<CurrentPublication>, StoreError> {
-    let object_record_ref_path = store
-        .object_record_refs_dir()
-        .join(format!("{publication_name}.json"));
-    if !object_record_ref_path.exists() && !object_record_ref_path.is_symlink() {
-        return Ok(None);
-    }
-
-    let object_record_target = fs::read_link(&object_record_ref_path).map_err(|error| {
+fn generation_suffix_from_symlink_metadata(metadata: &fs::Metadata) -> Result<String, StoreError> {
+    let modified = metadata.modified().map_err(|error| {
         StoreError::Io(format!(
-            "failed to read current object record ref '{}': {error}",
-            object_record_ref_path.display()
+            "failed to read object ref mtime for generation: {error}"
         ))
     })?;
-    let object_hash = parse_object_record_ref_target(
-        "current object record",
-        &object_record_ref_path,
-        &object_record_target,
-    )?;
-    let object_record =
-        crate::record::load_object_record(store, object_hash)?.ok_or_else(|| {
-            StoreError::InvalidData(format!(
-                "current object record ref '{}' points to missing object record for object '{}'",
-                object_record_ref_path.display(),
-                object_hash
-            ))
-        })?;
-
-    let object_ref_path = store.object_refs_dir().join(publication_name);
-    let object_target = if object_ref_path.exists() || object_ref_path.is_symlink() {
-        Some(fs::read_link(&object_ref_path).map_err(|error| {
-            StoreError::Io(format!(
-                "failed to read current object ref '{}': {error}",
-                object_ref_path.display()
-            ))
-        })?)
-    } else {
-        None
-    };
-
-    Ok(Some(CurrentPublication {
-        object_record_path: store.object_record_path(object_record.object_hash),
-        object_record,
-        object_record_target: Some(object_record_target),
-        object_target,
-    }))
-}
-
-pub(crate) fn generation_suffix(current: &CurrentPublication) -> Result<String, StoreError> {
-    if let Some(run_id) = &current.object_record.run_id {
-        return Ok(run_id.clone());
-    }
-
-    let modified = fs::metadata(&current.object_record_path)
-        .map_err(|error| {
-            StoreError::Io(format!(
-                "failed to stat object record '{}' for generation timestamp: {error}",
-                current.object_record_path.display()
-            ))
-        })?
-        .modified()
-        .map_err(|error| {
-            StoreError::Io(format!(
-                "failed to read mtime for object record '{}': {error}",
-                current.object_record_path.display()
-            ))
-        })?;
     let parsed = OffsetDateTime::from(modified);
     human_timestamp_from_datetime(parsed)
 }
@@ -470,30 +326,23 @@ fn human_timestamp_from_datetime(parsed: OffsetDateTime) -> Result<String, Store
 
 fn allocate_generation_name(
     store: &Store,
-    publication_name: &str,
+    object_ref_name: &str,
     suffix: &str,
 ) -> Result<String, StoreError> {
     for counter in 1..1000 {
         let candidate = if counter == 1 {
-            format!("{publication_name}.{suffix}")
+            format!("{object_ref_name}.{suffix}")
         } else {
-            format!("{publication_name}.{suffix}.{counter}")
+            format!("{object_ref_name}.{suffix}.{counter}")
         };
-        let object_record_ref_path = store
-            .object_record_refs_dir()
-            .join(format!("{candidate}.json"));
         let object_path = store.object_refs_dir().join(&candidate);
-        if !(object_record_ref_path.exists()
-            || object_record_ref_path.is_symlink()
-            || object_path.exists()
-            || object_path.is_symlink())
-        {
+        if !(object_path.exists() || object_path.is_symlink()) {
             return Ok(candidate);
         }
     }
 
     Err(StoreError::Io(format!(
-        "failed to allocate generation ref name for '{publication_name}.{suffix}'"
+        "failed to allocate generation ref name for '{object_ref_name}.{suffix}'"
     )))
 }
 

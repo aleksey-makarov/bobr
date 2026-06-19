@@ -32,14 +32,13 @@ mod store;
 
 pub use error::StoreError;
 pub use object::import_object;
-pub use publish::{Publication, PublishRequest, materialize_build, publish_build};
+pub use publish::materialize_build;
 pub use record::{
     Build, ObjectRecord, PublishedBuild, RealizedObject, StoredObjectRecord, load_object_record,
     load_stored_object_record,
 };
 pub use refs::{
-    load_build_handle, load_public_build, load_publication, publish_stored_object,
-    resolve_reuse_for_build,
+    load_build_handle, load_public_build, resolve_build_handle, resolve_reuse_for_build,
 };
 pub use source::{SourceImportOutcome, import_source_object, record_existing_source_object};
 pub use store::{Store, StoreRunLogLocations, StoreTempDir, StoreWorkspace, create_workspace};
@@ -52,7 +51,7 @@ pub(crate) use record::{
     parse_object_record_value,
 };
 #[cfg(test)]
-pub(crate) use refs::{load_current_publication, load_reuse_object_record, replace_symlink};
+pub(crate) use refs::{load_reuse_object_record, replace_symlink};
 #[cfg(test)]
 pub(crate) use store::{LOGS_DIR, OBJECT_RECORDS_DIR, OBJECTS_DIR, TMP_DIR};
 

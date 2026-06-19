@@ -26,13 +26,20 @@ pub enum SourceImportOutcome {
 pub fn record_existing_source_object(
     store: &Store,
     declared_hash: ObjectHash,
+    object_ref_name: Option<&str>,
 ) -> Result<Option<StoredObjectRecord>, StoreError> {
+    if let Some(name) = object_ref_name {
+        crate::refs::validate_object_ref_name(name)?;
+    }
     if !store.object_path(declared_hash).exists() {
         return Ok(None);
     }
 
     let stored = record_existing_source_object_record(store, declared_hash)?;
     record_source_build_handle(store, declared_hash)?;
+    if let Some(name) = object_ref_name {
+        crate::refs::update_object_ref(store, name, declared_hash)?;
+    }
     Ok(Some(stored))
 }
 
@@ -46,7 +53,11 @@ pub fn import_source_object(
     store: &Store,
     declared_hash: ObjectHash,
     staged_path: &Path,
+    object_ref_name: Option<&str>,
 ) -> Result<SourceImportOutcome, StoreError> {
+    if let Some(name) = object_ref_name {
+        crate::refs::validate_object_ref_name(name)?;
+    }
     let actual_hash = import_object(store, staged_path)?;
     if actual_hash != declared_hash {
         return Ok(SourceImportOutcome::Mismatched { actual_hash });
@@ -54,6 +65,9 @@ pub fn import_source_object(
 
     let stored = record_existing_source_object_record(store, declared_hash)?;
     record_source_build_handle(store, declared_hash)?;
+    if let Some(name) = object_ref_name {
+        crate::refs::update_object_ref(store, name, declared_hash)?;
+    }
     Ok(SourceImportOutcome::Matched(stored))
 }
 

@@ -29,6 +29,12 @@ fn fs_tree_refs_dir(store: &Store) -> PathBuf {
     store.root().join(crate::store::FS_TREE_REFS_DIR)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TestBuild {
+    object_hash: ObjectHash,
+    build_key: BuildKey,
+}
+
 #[test]
 fn canonical_json_hash_is_stable_across_key_order() {
     let object_hash =
@@ -110,7 +116,7 @@ fn parse_object_record_rejects_mismatched_path_key() {
 }
 
 #[test]
-fn publish_build_reuses_existing_object_record_via_new_build_handle_ref() {
+fn materialize_build_reuses_existing_object_record_via_new_build_handle_ref() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -118,39 +124,33 @@ fn publish_build_reuses_existing_object_record_via_new_build_handle_ref() {
         compute_reuse_key("CasTest", &json!({ "kind": "sandbox-script" }), &[]).unwrap();
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
-    let first = publish_build(
+    let first = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "hello".to_string(),
-            build_key: build_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "hello-1" }),
-                &[],
-            ),
-            reuse_key,
-            staged_path: first_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "hello",
+        build_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "hello-1" }),
+            &[],
+        ),
+        reuse_key,
+        &first_stage,
+        vec![],
+    );
 
     let second_stage = temp.path().join("second.txt");
     fs::write(&second_stage, b"hello").unwrap();
-    let second = publish_build(
+    let second = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "hello-copy".to_string(),
-            build_key: build_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "hello-2" }),
-                &[],
-            ),
-            reuse_key,
-            staged_path: second_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "hello-copy",
+        build_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "hello-2" }),
+            &[],
+        ),
+        reuse_key,
+        &second_stage,
+        vec![],
+    );
 
     assert_eq!(first.object_hash, second.object_hash);
     assert_ne!(first.build_key, second.build_key);
@@ -170,42 +170,39 @@ fn publish_build_reuses_existing_object_record_via_new_build_handle_ref() {
             .join(format!("{}.json", second.object_hash.to_hex()))
     );
     assert_eq!(
-        fs::read_link(layout.object_record_refs_dir().join("hello-copy.json")).unwrap(),
+        fs::read_link(layout.object_refs_dir().join("hello-copy")).unwrap(),
         PathBuf::from("..")
-            .join(OBJECT_RECORDS_DIR)
-            .join(format!("{}.json", second.object_hash.to_hex()))
+            .join(OBJECTS_DIR)
+            .join(second.object_hash.to_hex())
     );
 }
 
 #[test]
-fn publish_build_writes_build_record_and_refs() {
+fn materialize_build_writes_build_record_and_object_ref() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
     let stage = temp.path().join("script.sh");
     fs::write(&stage, b"echo hi\n").unwrap();
-    let published = publish_build(
+    let published = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "script".to_string(),
-            build_key: build_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
-                &[parse_build_key(
-                    "1111111111111111111111111111111111111111111111111111111111111111",
-                )],
-            ),
-            reuse_key: compute_reuse_key(
-                "CasTest",
-                &json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
-                &[],
-            )
-            .unwrap(),
-            staged_path: stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "script",
+        build_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
+            &[parse_build_key(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )],
+        ),
+        compute_reuse_key(
+            "CasTest",
+            &json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
+            &[],
+        )
+        .unwrap(),
+        &stage,
+        vec![],
+    );
 
     let build_ref_path = layout.build_ref_path(published.build_key);
     let object_record_path = layout.object_record_path(published.object_hash);
@@ -235,12 +232,6 @@ fn publish_build_writes_build_record_and_refs() {
     assert_eq!(build_json["inputs"], Value::Array(vec![]));
 
     assert_eq!(
-        fs::read_link(layout.object_record_refs_dir().join("script.json")).unwrap(),
-        PathBuf::from("..")
-            .join(OBJECT_RECORDS_DIR)
-            .join(format!("{}.json", published.object_hash.to_hex()))
-    );
-    assert_eq!(
         fs::read_link(layout.object_refs_dir().join("script")).unwrap(),
         PathBuf::from("..")
             .join(OBJECTS_DIR)
@@ -257,17 +248,8 @@ fn object_record_ref_loaders_reject_non_canonical_targets() {
     fs::write(&stage, b"echo hi\n").unwrap();
     let build_key = build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]);
     let reuse_key = reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]);
-    let published = publish_build(
-        &layout,
-        PublishRequest {
-            publication_name: "script".to_string(),
-            build_key,
-            reuse_key,
-            staged_path: stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+    let published =
+        materialize_named_test_build(&layout, "script", build_key, reuse_key, &stage, vec![]);
     let non_canonical_target = PathBuf::from("..")
         .join("not-object-records")
         .join(format!("{}.json", published.object_hash.to_hex()));
@@ -284,19 +266,6 @@ fn object_record_ref_loaders_reject_non_canonical_targets() {
     replace_symlink(&non_canonical_target, &layout.reuse_ref_path(reuse_key)).unwrap();
     let error = load_reuse_object_record(&layout, reuse_key).unwrap_err();
     assert!(error.to_string().contains("reuse ref"));
-    assert!(
-        error
-            .to_string()
-            .contains("non-canonical object record target")
-    );
-
-    replace_symlink(
-        &non_canonical_target,
-        &layout.object_record_refs_dir().join("script.json"),
-    )
-    .unwrap();
-    let error = load_current_publication(&layout, "script").unwrap_err();
-    assert!(error.to_string().contains("current object record ref"));
     assert!(
         error
             .to_string()
@@ -322,21 +291,18 @@ fn object_record_round_trips_inputs() {
 
     let stage = temp.path().join("script.sh");
     fs::write(&stage, b"echo hi\n").unwrap();
-    let published = publish_build(
+    let published = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "script".to_string(),
-            build_key: build_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
-                &[],
-            ),
-            reuse_key,
-            staged_path: stage,
-            inputs: inputs.clone(),
-        },
-    )
-    .unwrap();
+        "script",
+        build_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
+            &[],
+        ),
+        reuse_key,
+        &stage,
+        inputs.clone(),
+    );
 
     let loaded = load_object_record(&layout, published.object_hash)
         .unwrap()
@@ -379,7 +345,7 @@ fn record_existing_source_object_returns_none_when_object_absent() {
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
 
-    let recorded = record_existing_source_object(&layout, object_hash).unwrap();
+    let recorded = record_existing_source_object(&layout, object_hash, Some("source")).unwrap();
 
     assert!(recorded.is_none());
     assert!(!layout.object_record_path(object_hash).exists());
@@ -399,7 +365,7 @@ fn record_existing_source_object_reuses_canonical_record() {
     let object_hash = import_object(&layout, &stage).unwrap();
     let stored = crate::record::record_existing_source_object(&layout, object_hash).unwrap();
 
-    let hit = record_existing_source_object(&layout, object_hash)
+    let hit = record_existing_source_object(&layout, object_hash, Some("source"))
         .unwrap()
         .expect("expected source hit");
     assert_eq!(
@@ -411,6 +377,12 @@ fn record_existing_source_object_reuses_canonical_record() {
         .unwrap()
         .expect("expected source build handle");
     assert_eq!(published.object_record.object_hash, object_hash);
+    assert_eq!(
+        fs::read_link(layout.object_refs_dir().join("source")).unwrap(),
+        PathBuf::from("..")
+            .join(OBJECTS_DIR)
+            .join(object_hash.to_hex())
+    );
 }
 
 #[test]
@@ -423,7 +395,7 @@ fn record_existing_source_object_records_existing_object_as_source_object() {
     let object_record_path = layout.object_record_path(object_hash);
     assert!(!object_record_path.exists());
 
-    let hit = record_existing_source_object(&layout, object_hash)
+    let hit = record_existing_source_object(&layout, object_hash, Some("source"))
         .unwrap()
         .expect("expected source hit");
     assert_eq!(hit.object_record.object_hash, object_hash);
@@ -434,6 +406,12 @@ fn record_existing_source_object_records_existing_object_as_source_object() {
         .unwrap()
         .expect("expected source build handle");
     assert_eq!(published.object_record.object_hash, object_hash);
+    assert_eq!(
+        fs::read_link(layout.object_refs_dir().join("source")).unwrap(),
+        PathBuf::from("..")
+            .join(OBJECTS_DIR)
+            .join(object_hash.to_hex())
+    );
 }
 
 #[test]
@@ -444,7 +422,7 @@ fn import_source_object_on_match_imports_object_and_writes_canonical_record() {
     fs::write(&stage, b"hello").unwrap();
     let object_hash = hash_path(&stage).unwrap();
 
-    let outcome = import_source_object(&layout, object_hash, &stage).unwrap();
+    let outcome = import_source_object(&layout, object_hash, &stage, Some("source")).unwrap();
 
     let SourceImportOutcome::Matched(stored) = outcome else {
         panic!("expected source import match");
@@ -460,6 +438,12 @@ fn import_source_object_on_match_imports_object_and_writes_canonical_record() {
         .unwrap()
         .expect("expected source build handle");
     assert_eq!(published.object_record.object_hash, object_hash);
+    assert_eq!(
+        fs::read_link(layout.object_refs_dir().join("source")).unwrap(),
+        PathBuf::from("..")
+            .join(OBJECTS_DIR)
+            .join(object_hash.to_hex())
+    );
     assert!(!stage.exists());
 }
 
@@ -474,7 +458,7 @@ fn import_source_object_on_mismatch_imports_actual_object_without_declared_recor
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
     assert_ne!(actual_hash, declared_hash);
 
-    let outcome = import_source_object(&layout, declared_hash, &stage).unwrap();
+    let outcome = import_source_object(&layout, declared_hash, &stage, Some("source")).unwrap();
 
     let SourceImportOutcome::Mismatched {
         actual_hash: imported_hash,
@@ -491,135 +475,35 @@ fn import_source_object_on_mismatch_imports_actual_object_without_declared_recor
             .unwrap()
             .is_none()
     );
+    assert!(!layout.object_refs_dir().join("source").exists());
     assert!(!stage.exists());
 }
 
 #[test]
-fn publish_stored_object_rejects_record_with_missing_object_without_refs() {
+fn object_ref_update_rejects_non_canonical_current_target() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
-    let object_hash =
-        parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
-    let object_record = ObjectRecord {
-        object_hash,
-        run_id: Some(sample_run_id().to_string()),
-        inputs: Vec::new(),
-    };
-    crate::record::store_object_record(&layout, &object_record).unwrap();
-
-    let error = publish_stored_object(&layout, "missing", object_hash).unwrap_err();
-
-    assert!(matches!(error, StoreError::Io(message) if message.contains("missing object")));
-    assert!(!layout.object_refs_dir().join("missing").exists());
-    assert!(
-        !layout
-            .object_record_refs_dir()
-            .join("missing.json")
-            .exists()
-    );
-}
-
-#[test]
-fn load_publication_returns_none_when_refs_are_absent() {
-    let temp = tempdir().unwrap();
-    let layout = create_test_store(temp.path());
-
-    assert!(load_publication(&layout, "missing").unwrap().is_none());
-}
-
-#[test]
-fn load_publication_loads_publication() {
-    let temp = tempdir().unwrap();
-    let layout = create_test_store(temp.path());
-    let published = publish_text_output(&layout, temp.path(), "script", "hello");
-
-    let loaded = load_publication(&layout, "script")
-        .unwrap()
-        .expect("expected publication");
-
-    assert_eq!(loaded.object_record.object_hash, published.object_hash);
-    assert_eq!(loaded.object_record.object_hash, published.object_hash);
-    assert!(loaded.object_path.exists());
-}
-
-#[test]
-fn load_publication_rejects_missing_object_ref() {
-    let temp = tempdir().unwrap();
-    let layout = create_test_store(temp.path());
-    publish_text_output(&layout, temp.path(), "script", "hello");
-    fs::remove_file(layout.object_refs_dir().join("script")).unwrap();
-
-    let error = load_publication(&layout, "script").unwrap_err();
-
-    assert!(matches!(
-        error,
-        StoreError::InvalidData(message)
-            if message.contains("publication 'script'")
-                && message.contains("missing object ref")
-    ));
-}
-
-#[test]
-fn load_publication_rejects_object_ref_hash_mismatch() {
-    let temp = tempdir().unwrap();
-    let layout = create_test_store(temp.path());
-    let published = publish_text_output(&layout, temp.path(), "script", "hello");
-    let other_stage = temp.path().join("other.txt");
-    fs::write(&other_stage, b"other").unwrap();
-    let other_hash = import_object(&layout, &other_stage).unwrap();
-    assert_ne!(published.object_hash, other_hash);
-
-    replace_symlink(
-        &PathBuf::from("..")
-            .join(OBJECTS_DIR)
-            .join(other_hash.to_hex()),
-        &layout.object_refs_dir().join("script"),
-    )
-    .unwrap();
-
-    let error = load_publication(&layout, "script").unwrap_err();
-
-    assert!(matches!(
-        error,
-        StoreError::InvalidData(message)
-            if message.contains("object ref points to")
-                && message.contains("object record points to")
-    ));
-}
-
-#[test]
-fn load_publication_rejects_non_canonical_object_record_and_object_refs() {
-    let temp = tempdir().unwrap();
-    let layout = create_test_store(temp.path());
-    let published = publish_text_output(&layout, temp.path(), "script", "hello");
-    let object_record_ref_path = layout.object_record_refs_dir().join("script.json");
+    materialize_text_object(&layout, temp.path(), "script", "hello");
     let object_ref_path = layout.object_refs_dir().join("script");
 
-    let non_canonical_object_record = PathBuf::from("..")
-        .join("not-object-records")
-        .join(format!("{}.json", published.object_hash.to_hex()));
-    replace_symlink(&non_canonical_object_record, &object_record_ref_path).unwrap();
-    let error = load_publication(&layout, "script").unwrap_err();
-    assert!(error.to_string().contains("publication object record ref"));
-    assert!(
-        error
-            .to_string()
-            .contains("non-canonical object record target")
-    );
-
-    replace_symlink(
-        &PathBuf::from("..")
-            .join(OBJECT_RECORDS_DIR)
-            .join(format!("{}.json", published.object_hash.to_hex())),
-        &object_record_ref_path,
-    )
-    .unwrap();
     let non_canonical_object = PathBuf::from("..")
         .join("not-objects")
-        .join(published.object_hash.to_hex());
+        .join("1111111111111111111111111111111111111111111111111111111111111111");
     replace_symlink(&non_canonical_object, &object_ref_path).unwrap();
-    let error = load_publication(&layout, "script").unwrap_err();
-    assert!(error.to_string().contains("publication object ref"));
+
+    let next_stage = temp.path().join("script-next.txt");
+    fs::write(&next_stage, b"next").unwrap();
+    let error = materialize_build(
+        &layout,
+        build_key_for("CasTest", json!({ "kind": "next" }), &[]),
+        reuse_key_for("CasTest", json!({ "kind": "next" }), &[]),
+        vec![],
+        &next_stage,
+        Some("script"),
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("current object ref"));
     assert!(error.to_string().contains("non-canonical object target"));
 }
 
@@ -630,47 +514,41 @@ fn same_object_different_payload_produces_different_build_key() {
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
-    let first = publish_build(
+    let first = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "first".to_string(),
-            build_key: build_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "hello" }),
-                &[],
-            ),
-            reuse_key: reuse_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "hello" }),
-                &[],
-            ),
-            staged_path: first_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "first",
+        build_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "hello" }),
+            &[],
+        ),
+        reuse_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "hello" }),
+            &[],
+        ),
+        &first_stage,
+        vec![],
+    );
 
     let second_stage = temp.path().join("second.txt");
     fs::write(&second_stage, b"hello").unwrap();
-    let second = publish_build(
+    let second = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "second".to_string(),
-            build_key: build_key_for(
-                "CasTest",
-                json!({ "kind": "source-tree", "source": "hello" }),
-                &[],
-            ),
-            reuse_key: reuse_key_for(
-                "CasTest",
-                json!({ "kind": "source-tree", "source": "hello" }),
-                &[],
-            ),
-            staged_path: second_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "second",
+        build_key_for(
+            "CasTest",
+            json!({ "kind": "source-tree", "source": "hello" }),
+            &[],
+        ),
+        reuse_key_for(
+            "CasTest",
+            json!({ "kind": "source-tree", "source": "hello" }),
+            &[],
+        ),
+        &second_stage,
+        vec![],
+    );
 
     assert_eq!(first.object_hash, second.object_hash);
     assert_ne!(first.build_key, second.build_key);
@@ -683,31 +561,25 @@ fn build_key_changes_when_kind_changes() {
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
-    let first = publish_build(
+    let first = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "kind-a".to_string(),
-            build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-            reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-            staged_path: first_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "kind-a",
+        build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+        reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+        &first_stage,
+        vec![],
+    );
 
     let second_stage = temp.path().join("second.txt");
     fs::write(&second_stage, b"hello").unwrap();
-    let second = publish_build(
+    let second = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "kind-b".to_string(),
-            build_key: build_key_for("CasTest", json!({ "kind": "source-tree" }), &[]),
-            reuse_key: reuse_key_for("CasTest", json!({ "kind": "source-tree" }), &[]),
-            staged_path: second_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "kind-b",
+        build_key_for("CasTest", json!({ "kind": "source-tree" }), &[]),
+        reuse_key_for("CasTest", json!({ "kind": "source-tree" }), &[]),
+        &second_stage,
+        vec![],
+    );
 
     assert_eq!(first.object_hash, second.object_hash);
     assert_ne!(first.build_key, second.build_key);
@@ -720,86 +592,73 @@ fn build_key_changes_when_builder_tag_changes() {
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
-    let first = publish_build(
+    let first = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "producer-a".to_string(),
-            build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-            reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-            staged_path: first_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "producer-a",
+        build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+        reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+        &first_stage,
+        vec![],
+    );
 
     let second_stage = temp.path().join("second.txt");
     fs::write(&second_stage, b"hello").unwrap();
-    let second = publish_build(
+    let second = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "producer-b".to_string(),
-            build_key: build_key_for("Sandbox", json!({ "kind": "sandbox-script" }), &[]),
-            reuse_key: reuse_key_for("Sandbox", json!({ "kind": "sandbox-script" }), &[]),
-            staged_path: second_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "producer-b",
+        build_key_for("Sandbox", json!({ "kind": "sandbox-script" }), &[]),
+        reuse_key_for("Sandbox", json!({ "kind": "sandbox-script" }), &[]),
+        &second_stage,
+        vec![],
+    );
 
     assert_eq!(first.object_hash, second.object_hash);
     assert_ne!(first.build_key, second.build_key);
 }
 
 #[test]
-fn publish_build_rotates_existing_refs_into_generations() {
+fn materialize_build_rotates_existing_object_refs_into_generations() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
-    let first = publish_build(
+    let first = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "shared".to_string(),
-            build_key: build_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "hello" }),
-                &[],
-            ),
-            reuse_key: reuse_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "hello" }),
-                &[],
-            ),
-            staged_path: first_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "shared",
+        build_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "hello" }),
+            &[],
+        ),
+        reuse_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "hello" }),
+            &[],
+        ),
+        &first_stage,
+        vec![],
+    );
 
     let second_stage = temp.path().join("second.txt");
     fs::write(&second_stage, b"hello world").unwrap();
-    let second = publish_build(
+    let second = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "shared".to_string(),
-            build_key: build_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "hello world" }),
-                &[],
-            ),
-            reuse_key: reuse_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "hello world" }),
-                &[],
-            ),
-            staged_path: second_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "shared",
+        build_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "hello world" }),
+            &[],
+        ),
+        reuse_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "hello world" }),
+            &[],
+        ),
+        &second_stage,
+        vec![],
+    );
 
-    let suffix = layout.run_id();
     assert_ne!(first.object_hash, second.object_hash);
     assert_ne!(first.build_key, second.build_key);
     assert_eq!(
@@ -808,33 +667,18 @@ fn publish_build_rotates_existing_refs_into_generations() {
             .join(OBJECTS_DIR)
             .join(second.object_hash.to_hex())
     );
+    let generations = object_ref_generations(&layout, "shared");
+    assert_eq!(generations.len(), 1);
     assert_eq!(
-        fs::read_link(layout.object_record_refs_dir().join("shared.json")).unwrap(),
-        PathBuf::from("..")
-            .join(OBJECT_RECORDS_DIR)
-            .join(format!("{}.json", second.object_hash.to_hex()))
-    );
-    assert_eq!(
-        fs::read_link(layout.object_refs_dir().join(format!("shared.{suffix}"))).unwrap(),
+        fs::read_link(&generations[0]).unwrap(),
         PathBuf::from("..")
             .join(OBJECTS_DIR)
             .join(first.object_hash.to_hex())
     );
-    assert_eq!(
-        fs::read_link(
-            layout
-                .object_record_refs_dir()
-                .join(format!("shared.{suffix}.json"))
-        )
-        .unwrap(),
-        PathBuf::from("..")
-            .join(OBJECT_RECORDS_DIR)
-            .join(format!("{}.json", first.object_hash.to_hex()))
-    );
 }
 
 #[test]
-fn publish_build_same_build_key_does_not_create_generation_refs() {
+fn materialize_build_same_object_ref_target_does_not_create_generation_refs() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -850,132 +694,109 @@ fn publish_build_same_build_key_does_not_create_generation_refs() {
         json!({ "kind": "sandbox-script", "source": "hello" }),
         &[],
     );
-    let first = publish_build(
+    let first = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "shared".to_string(),
-            build_key,
-            reuse_key,
-            staged_path: first_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "shared",
+        build_key,
+        reuse_key,
+        &first_stage,
+        vec![],
+    );
 
     let second_stage = temp.path().join("second.txt");
     fs::write(&second_stage, b"hello").unwrap();
-    let second = publish_build(
+    let second = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "shared".to_string(),
-            build_key,
-            reuse_key,
-            staged_path: second_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "shared",
+        build_key,
+        reuse_key,
+        &second_stage,
+        vec![],
+    );
 
     assert_eq!(first.build_key, second.build_key);
     assert_eq!(first.object_hash, second.object_hash);
-    let suffix = layout.run_id();
-    assert!(
-        !layout
-            .object_refs_dir()
-            .join(format!("shared.{suffix}"))
-            .exists()
-    );
-    assert!(
-        !layout
-            .object_record_refs_dir()
-            .join(format!("shared.{suffix}.json"))
-            .exists()
-    );
+    assert!(object_ref_generations(&layout, "shared").is_empty());
 }
 
 #[test]
-fn publish_build_generation_suffix_collisions_get_numeric_suffixes() {
+fn materialize_build_generation_suffix_collisions_get_numeric_suffixes() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"one").unwrap();
-    let first = publish_build(
+    let first = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "shared".to_string(),
-            build_key: build_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "one" }),
-                &[],
-            ),
-            reuse_key: reuse_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "one" }),
-                &[],
-            ),
-            staged_path: first_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "shared",
+        build_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "one" }),
+            &[],
+        ),
+        reuse_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "one" }),
+            &[],
+        ),
+        &first_stage,
+        vec![],
+    );
 
     let second_stage = temp.path().join("second.txt");
     fs::write(&second_stage, b"two").unwrap();
-    let second = publish_build(
+    let second = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "shared".to_string(),
-            build_key: build_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "two" }),
-                &[],
-            ),
-            reuse_key: reuse_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "two" }),
-                &[],
-            ),
-            staged_path: second_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "shared",
+        build_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "two" }),
+            &[],
+        ),
+        reuse_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "two" }),
+            &[],
+        ),
+        &second_stage,
+        vec![],
+    );
 
     let third_stage = temp.path().join("third.txt");
     fs::write(&third_stage, b"three").unwrap();
-    let third = publish_build(
+    let third = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "shared".to_string(),
-            build_key: build_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "three" }),
-                &[],
-            ),
-            reuse_key: reuse_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "three" }),
-                &[],
-            ),
-            staged_path: third_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
-
-    let suffix = layout.run_id();
-    assert_eq!(
-        fs::read_link(layout.object_refs_dir().join(format!("shared.{suffix}"))).unwrap(),
-        PathBuf::from("..")
-            .join(OBJECTS_DIR)
-            .join(first.object_hash.to_hex())
+        "shared",
+        build_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "three" }),
+            &[],
+        ),
+        reuse_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "three" }),
+            &[],
+        ),
+        &third_stage,
+        vec![],
     );
+
+    let generations = object_ref_generations(&layout, "shared");
+    assert_eq!(generations.len(), 2);
+    let targets = generations
+        .iter()
+        .map(|path| fs::read_link(path).unwrap())
+        .collect::<BTreeSet<_>>();
     assert_eq!(
-        fs::read_link(layout.object_refs_dir().join(format!("shared.{suffix}.2"))).unwrap(),
-        PathBuf::from("..")
-            .join(OBJECTS_DIR)
-            .join(second.object_hash.to_hex())
+        targets,
+        BTreeSet::from([
+            PathBuf::from("..")
+                .join(OBJECTS_DIR)
+                .join(first.object_hash.to_hex()),
+            PathBuf::from("..")
+                .join(OBJECTS_DIR)
+                .join(second.object_hash.to_hex()),
+        ])
     );
     assert_eq!(
         fs::read_link(layout.object_refs_dir().join("shared")).unwrap(),
@@ -1030,15 +851,13 @@ fn invalid_publication_name_is_rejected() {
         ));
         fs::write(&stage, b"hello").unwrap();
 
-        let error = publish_build(
+        let error = materialize_build(
             &layout,
-            PublishRequest {
-                publication_name: invalid_name.to_string(),
-                build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-                reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-                staged_path: stage,
-                inputs: vec![],
-            },
+            build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+            reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+            vec![],
+            &stage,
+            Some(invalid_name),
         )
         .unwrap_err();
 
@@ -1047,7 +866,7 @@ fn invalid_publication_name_is_rejected() {
 }
 
 #[test]
-fn publish_build_accepts_directory_objects() {
+fn materialize_build_accepts_directory_objects() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -1055,17 +874,14 @@ fn publish_build_accepts_directory_objects() {
     fs::create_dir_all(stage_dir.join("bin")).unwrap();
     fs::write(stage_dir.join("bin").join("tool"), b"echo hi\n").unwrap();
 
-    let published = publish_build(
+    let published = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "tree".to_string(),
-            build_key: build_key_for("Tree", json!({ "kind": "source-tree" }), &[]),
-            reuse_key: reuse_key_for("Tree", json!({ "kind": "source-tree" }), &[]),
-            staged_path: stage_dir,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "tree",
+        build_key_for("Tree", json!({ "kind": "source-tree" }), &[]),
+        reuse_key_for("Tree", json!({ "kind": "source-tree" }), &[]),
+        &stage_dir,
+        vec![],
+    );
 
     let object_path = layout.object_path(published.object_hash);
     assert!(object_path.is_dir());
@@ -1074,7 +890,7 @@ fn publish_build_accepts_directory_objects() {
 }
 
 #[test]
-fn publish_build_points_fs_tree_object_ref_at_object_root() {
+fn materialize_build_points_fs_tree_object_ref_at_object_root() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -1083,17 +899,14 @@ fn publish_build_points_fs_tree_object_ref_at_object_root() {
     fs::write(stage_dir.join("manifest.jsonl"), b"{\"schema\":\"test\"}\n").unwrap();
     fs::create_dir(stage_dir.join("root")).unwrap();
 
-    let published = publish_build(
+    let published = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "tree".to_string(),
-            build_key: build_key_for("Tree", json!({ "kind": "fs-tree" }), &[]),
-            reuse_key: reuse_key_for("Tree", json!({ "kind": "fs-tree" }), &[]),
-            staged_path: stage_dir,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "tree",
+        build_key_for("Tree", json!({ "kind": "fs-tree" }), &[]),
+        reuse_key_for("Tree", json!({ "kind": "fs-tree" }), &[]),
+        &stage_dir,
+        vec![],
+    );
 
     assert_eq!(
         fs::read_link(layout.object_refs_dir().join("tree")).unwrap(),
@@ -1133,32 +946,26 @@ fn existing_object_reuse_removes_staged_path() {
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
-    publish_build(
+    materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "first".to_string(),
-            build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-            reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-            staged_path: first_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "first",
+        build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+        reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+        &first_stage,
+        vec![],
+    );
 
     let second_stage = temp.path().join("second.txt");
     fs::write(&second_stage, b"hello").unwrap();
     let second_stage_path = second_stage.clone();
-    publish_build(
+    materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "second".to_string(),
-            build_key: build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-            reuse_key: reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
-            staged_path: second_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "second",
+        build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+        reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
+        &second_stage,
+        vec![],
+    );
 
     assert!(!second_stage_path.exists());
 }
@@ -1172,39 +979,33 @@ fn build_key_changes_when_input_order_changes() {
 
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
-    let first = publish_build(
+    let first = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "ordered-ab".to_string(),
-            build_key: build_key_for(
-                "Sandbox",
-                json!({ "kind": "sandbox-output" }),
-                &[key_a, key_b],
-            ),
-            reuse_key: reuse_key_for("Sandbox", json!({ "kind": "sandbox-output" }), &[]),
-            staged_path: first_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "ordered-ab",
+        build_key_for(
+            "Sandbox",
+            json!({ "kind": "sandbox-output" }),
+            &[key_a, key_b],
+        ),
+        reuse_key_for("Sandbox", json!({ "kind": "sandbox-output" }), &[]),
+        &first_stage,
+        vec![],
+    );
 
     let second_stage = temp.path().join("second.txt");
     fs::write(&second_stage, b"hello").unwrap();
-    let second = publish_build(
+    let second = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "ordered-ba".to_string(),
-            build_key: build_key_for(
-                "Sandbox",
-                json!({ "kind": "sandbox-output" }),
-                &[key_b, key_a],
-            ),
-            reuse_key: reuse_key_for("Sandbox", json!({ "kind": "sandbox-output" }), &[]),
-            staged_path: second_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "ordered-ba",
+        build_key_for(
+            "Sandbox",
+            json!({ "kind": "sandbox-output" }),
+            &[key_b, key_a],
+        ),
+        reuse_key_for("Sandbox", json!({ "kind": "sandbox-output" }), &[]),
+        &second_stage,
+        vec![],
+    );
 
     assert_eq!(first.object_hash, second.object_hash);
     assert_ne!(first.build_key, second.build_key);
@@ -1219,7 +1020,6 @@ fn store_create_creates_full_layout() {
     assert_eq!(layout.root(), temp.path());
     assert!(layout.objects_dir().is_dir());
     assert!(layout.builds_dir().is_dir());
-    assert!(layout.object_record_refs_dir().is_dir());
     assert!(layout.object_refs_dir().is_dir());
     assert!(fs_files_dir(&layout).is_dir());
     assert!(fs_trees_dir(&layout).is_dir());
@@ -1609,77 +1409,111 @@ fn executable_bit_changes_object_hash_for_distinct_invocations() {
 
     let first_stage = temp.path().join("plain.txt");
     fs::write(&first_stage, b"hello").unwrap();
-    let first = publish_build(
+    let first = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "plain".to_string(),
-            build_key: build_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "hello", "variant": "plain" }),
-                &[],
-            ),
-            reuse_key: reuse_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "hello", "variant": "plain" }),
-                &[],
-            ),
-            staged_path: first_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "plain",
+        build_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "hello", "variant": "plain" }),
+            &[],
+        ),
+        reuse_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "hello", "variant": "plain" }),
+            &[],
+        ),
+        &first_stage,
+        vec![],
+    );
 
     let exec_stage = temp.path().join("exec.txt");
     fs::write(&exec_stage, b"hello").unwrap();
     fs::set_permissions(&exec_stage, fs::Permissions::from_mode(0o755)).unwrap();
-    let second = publish_build(
+    let second = materialize_named_test_build(
         &layout,
-        PublishRequest {
-            publication_name: "exec".to_string(),
-            build_key: build_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "hello", "variant": "exec" }),
-                &[],
-            ),
-            reuse_key: reuse_key_for(
-                "CasTest",
-                json!({ "kind": "sandbox-script", "source": "hello", "variant": "exec" }),
-                &[],
-            ),
-            staged_path: exec_stage,
-            inputs: vec![],
-        },
-    )
-    .unwrap();
+        "exec",
+        build_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "hello", "variant": "exec" }),
+            &[],
+        ),
+        reuse_key_for(
+            "CasTest",
+            json!({ "kind": "sandbox-script", "source": "hello", "variant": "exec" }),
+            &[],
+        ),
+        &exec_stage,
+        vec![],
+    );
 
     assert_ne!(first.object_hash, second.object_hash);
     assert_ne!(first.build_key, second.build_key);
 }
 
-fn publish_text_output(
+fn materialize_text_object(
     layout: &Store,
     temp_root: &Path,
-    publication_name: &str,
+    object_ref_name: &str,
     text: &str,
-) -> Publication {
-    let stage = temp_root.join(format!("{publication_name}.txt"));
+) -> TestBuild {
+    let stage = temp_root.join(format!("{object_ref_name}.txt"));
     fs::write(&stage, text.as_bytes()).unwrap();
     let payload = json!({
         "kind": "text-output",
-        "name": publication_name,
+        "name": object_ref_name,
         "text": text,
     });
-    publish_build(
+    let published = materialize_build(
         layout,
-        PublishRequest {
-            publication_name: publication_name.to_string(),
-            build_key: build_key_for("CasTest", payload.clone(), &[]),
-            reuse_key: reuse_key_for("CasTest", payload, &[]),
-            staged_path: stage,
-            inputs: vec![],
-        },
+        build_key_for("CasTest", payload.clone(), &[]),
+        reuse_key_for("CasTest", payload, &[]),
+        vec![],
+        &stage,
+        Some(object_ref_name),
     )
-    .unwrap()
+    .unwrap();
+    TestBuild {
+        object_hash: published.object_record.object_hash,
+        build_key: published.build.build_key,
+    }
+}
+
+fn materialize_named_test_build(
+    layout: &Store,
+    object_ref_name: &str,
+    build_key: BuildKey,
+    reuse_key: ReuseKey,
+    staged_path: &Path,
+    inputs: Vec<ObjectHash>,
+) -> TestBuild {
+    let published = materialize_build(
+        layout,
+        build_key,
+        reuse_key,
+        inputs,
+        staged_path,
+        Some(object_ref_name),
+    )
+    .unwrap();
+    TestBuild {
+        object_hash: published.object_record.object_hash,
+        build_key: published.build.build_key,
+    }
+}
+
+fn object_ref_generations(layout: &Store, name: &str) -> Vec<PathBuf> {
+    let mut generations = fs::read_dir(layout.object_refs_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(&format!("{name}."))
+        })
+        .collect::<Vec<_>>();
+    generations.sort();
+    generations
 }
 
 fn parse_object_hash(value: &str) -> ObjectHash {
