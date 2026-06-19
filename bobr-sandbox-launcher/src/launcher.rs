@@ -386,13 +386,13 @@ fn set_interface_up(sock: libc::c_int, name: &[u8]) -> io::Result<()> {
     for (slot, &byte) in request.ifr_name.iter_mut().zip(name) {
         *slot = byte as libc::c_char;
     }
-    if unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as libc::c_ulong, &mut request) } != 0 {
+    if unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as libc::Ioctl, &mut request) } != 0 {
         return Err(io::Error::last_os_error());
     }
     unsafe {
         request.ifr_ifru.ifru_flags |= libc::IFF_UP as libc::c_short;
     }
-    if unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as libc::c_ulong, &mut request) } != 0 {
+    if unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as libc::Ioctl, &mut request) } != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
