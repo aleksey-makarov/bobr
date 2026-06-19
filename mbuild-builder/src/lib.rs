@@ -1,13 +1,10 @@
 pub mod builder;
 mod erofs;
-pub mod fs_tree;
 mod fs_tree_import;
-mod fs_tree_legacy;
 mod fs_tree_materialize;
 pub mod group;
 mod initramfs;
 mod oci_extract;
-mod oci_extract_legacy;
 mod registry;
 pub mod subject;
 pub mod tree;
@@ -16,16 +13,11 @@ mod tree_subset;
 
 pub use builder::*;
 pub use erofs::{ErofsRootfsNewBuilder, ErofsRootfsNewConfig};
-pub use fs_tree::{
-    ErofsRootfsBuilder, ErofsRootfsConfig, InitramfsBuilder, InitramfsConfig, TreeBuilder,
-    TreeConfig, TreeMergeBuilder, TreeMergeConfig, TreeSubsetBuilder, TreeSubsetConfig,
-};
 pub use fs_tree_import::{FsTreeImportBuilder, FsTreeImportConfig};
 pub use fs_tree_materialize::materialize_fs_tree_root;
 pub use group::{GroupBuilder, GroupConfig};
 pub use initramfs::{InitramfsNewBuilder, InitramfsNewConfig};
 pub use oci_extract::{OciExtractNewBuilder, OciExtractNewConfig};
-pub use oci_extract_legacy::{OciExtractBuilder, OciExtractConfig};
 pub use registry::{BuilderRegistry, register_in_tree_builders};
 pub use subject::{BuilderPlanError, BuilderPlannedSubject};
 pub use tree::{TreeNewBuilder, TreeNewConfig};

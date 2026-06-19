@@ -9,18 +9,19 @@ store objects, fs-tree manifests, logical ownership, and extended ids.
 | --- | --- | --- | --- |
 | `Text` | One regular file object | Not fs-tree aware. The object has file bytes and executable state, but no manifest, idmap, logical uid, or logical gid. | Direct host-side file staging. |
 | `Group` | One completion marker object | Not fs-tree aware. It does not inspect or rewrite filesystem ownership. | Metadata-only grouping. |
-| `Tree` | Either one regular file object or one fs-tree directory object with `manifest.jsonl` and `root/` | File output is not fs-tree aware. Directory output writes an fs-tree manifest from `install` metadata and materializes ownership through the runtime helper. Authored ownership is limited to logical ids that fit the configured runtime idmap. | Uses `mbuild-runtime-helper` through the local helper path for directory ownership materialization. |
-| `TreeSubset` | One fs-tree directory object | Reads the input manifest as the source of truth, selects manifest entries, preserves logical uid/gid/mode metadata, and materializes the selected tree in the ownership namespace. Regular files are hardlinked; copying is not allowed. | Uses the runtime helper for complete fs-tree object materialization. |
-| `TreeMerge` | One fs-tree directory object | Reads input manifests, validates each input root against its manifest, merges logical uid/gid/mode metadata, and materializes the merged tree in the ownership namespace. Regular files are hardlinked; copying is not allowed. | Uses the runtime helper for complete fs-tree object materialization. |
-| `ErofsRootfs` | One EROFS image file | Consumes fs-tree manifests. Tar headers used as the EROFS input carry logical uid, gid, mode, symlink targets, and deterministic mtimes from the merged manifest. | Uses the runtime helper to write the tar stream in the ownership namespace, then runs `mkfs.erofs` on the host. |
-| `Initramfs` | One Linux `newc` cpio archive file | Consumes fs-tree manifests. Cpio headers carry logical uid, gid, mode, symlink targets, and deterministic mtimes from the merged manifest. | Uses the runtime helper to read input file bytes in the ownership namespace and write the archive. |
-| `Sandbox` | One fs-tree directory object | Reads a prepared fs-tree rootfs as input and scans the produced output manifest after execution. Extended ids are handled by the sandbox launcher user namespace. | Uses the dedicated `mbuild-sandbox-runner` launcher path. |
-| `OciExtract` | One fs-tree directory object plus `oci-config.json` | Reads uid/gid/mode information from OCI layer tar headers into the fs-tree manifest, including non-host logical ids, then materializes the extracted root. | Uses the runtime helper for ownership materialization where host ownership must be applied. |
+| `Tree` | One regular file object or one ordinary directory object | Not fs-tree aware. It stages exactly the file or directory described by its `tree` config. | Direct host-side staging. |
+| `FsTreeImport` | One fs-tree v2 manifest object | Reads one staged input tree plus install rules, imports file payloads into `fs-files`, and writes a canonical fs-tree v2 manifest object. | Uses a `bobr-runtime` namespace function because import may need root-visible ownership metadata. |
+| `TreeSubset` | One fs-tree v2 manifest object | Reads the input manifest as the source of truth, selects manifest entries, and preserves logical uid/gid/mode metadata. | Manifest-only operation. |
+| `TreeMerge` | One fs-tree v2 manifest object | Reads input manifests, validates overlapping entries, and merges logical uid/gid/mode metadata. | Manifest-only operation. |
+| `ErofsRootfs` | One EROFS image file | Consumes one fs-tree input materialized as a filesystem root by the runtime before builder execution. | Uses a `bobr-runtime` namespace function to run `mkfs.erofs` on the materialized root. |
+| `Initramfs` | One Linux `newc` cpio archive file | Consumes one fs-tree input materialized as a filesystem root by the runtime before builder execution. | Uses a `bobr-runtime` namespace function to read the materialized root and write the archive. |
+| `Sandbox` | One fs-tree v2 manifest object | Reads a prepared fs-tree rootfs as input and scans the produced output manifest after execution. Extended ids are handled by the sandbox launcher user namespace. | Uses a `bobr-runtime` function plus the dedicated `mbuild-sandbox-runner` launcher path. |
+| `OciExtract` | One fs-tree v2 manifest object | Reads uid/gid/mode information from OCI layer tar headers into the fs-tree manifest, including non-host logical ids. | Uses a `bobr-runtime` namespace function to extract layers and import the resulting tree into fs-tree v2 storage. |
 
 `Sandbox` runs through a dedicated launcher because it needs step execution,
-mount isolation, and output scanning inside one prepared root filesystem.
-The parent-side fs-tree authoring and archive paths continue to use the local
-runtime helper operations.
+mount isolation, and output scanning inside one prepared root filesystem. Other
+operations that need namespace-root filesystem access run through typed
+`bobr-runtime` functions.
 
 ## Source and Origins
 

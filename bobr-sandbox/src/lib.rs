@@ -1,9 +1,7 @@
 //! New sandbox builder backed by `bobr-runtime`.
 //!
-//! This crate intentionally does not reuse or refactor the existing
-//! `mbuild-sandbox` implementation. It provides a fresh `Sandbox` builder
-//! that executes the existing `mbuild-sandbox-runner` through a
-//! `bobr-runtime` function and publishes fs-tree v2 manifests.
+//! It provides the `Sandbox` builder that executes `mbuild-sandbox-runner`
+//! through a `bobr-runtime` function and publishes fs-tree v2 manifests.
 
 mod lifecycle;
 mod mounts;

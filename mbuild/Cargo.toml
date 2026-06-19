@@ -15,7 +15,6 @@ fsobj-hash = { path = "../fsobj-hash" }
 libc = "0.2"
 mbuild-core = { path = "../mbuild-core" }
 mbuild-builder = { path = "../mbuild-builder" }
-mbuild-sandbox = { path = "../mbuild-sandbox" }
 mbuild-source = { path = "../mbuild-source" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -9,7 +9,7 @@ OCI and rootfs-backed execution path consists of:
   image from a registry into the store as an OCI image layout directory
 - `OciExtract`: extract one OCI image layout input into an fs-tree object
 - `Sandbox`: execute an explicit step plan against a readonly fs-tree rootfs
-  input with the `mbuild-runtime` sandbox launcher
+  input with the `bobr-runtime` sandbox function and `mbuild-sandbox-runner`
 
 There is no active builder for producing derived OCI image layouts from fs-tree
 inputs. Root filesystem composition is performed through fs-tree builders such
@@ -53,17 +53,16 @@ Current behavior:
 ## `OciExtract`
 
 `OciExtract` accepts one `image` input that resolves to an OCI layout
-directory. It extracts the image root filesystem into an fs-tree object:
+directory. It extracts the image root filesystem into an fs-tree v2 manifest
+object:
 
 ```text
-manifest.jsonl
-root/
-oci-config.json
+<canonical fs-tree v2 manifest JSONL>
 ```
 
-`manifest.jsonl` carries required `h` fields for file and symlink entries.
-`oci-config.json` is top-level metadata: rootfs composition ignores it, but it
-participates in the published object hash.
+The manifest carries required file content hashes, symlink targets, logical
+ownership, and mode metadata. Referenced file payloads are stored in the
+store's fs-tree file storage.
 
 The result can be consumed by `TreeMerge`, `ErofsRootfs`, `Initramfs`, or
 `Sandbox` as a rootfs/tree input.

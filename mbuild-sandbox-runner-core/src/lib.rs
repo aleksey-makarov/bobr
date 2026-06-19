@@ -92,7 +92,7 @@ pub fn protocol_info() -> RunnerProtocolInfo {
 
 /// Internal JSON config consumed by the sandbox runner inside the namespace.
 ///
-/// This is not a recipe-facing format. `mbuild-runtime` writes it after it has
+/// This is not a recipe-facing format. The sandbox parent writes it after it has
 /// prepared the sandbox filesystem and resolved recipe-level sandbox settings
 /// into concrete container paths, environment variables, and step policies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
