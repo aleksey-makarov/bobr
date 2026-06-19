@@ -2,8 +2,8 @@
 //! success/failure reports.
 
 use crate::protocol::{
-    RunnerConfig, RunnerRunAs, RunnerStepConfig, SANDBOX_PROTOCOL_VERSION, SandboxRunnerFailureReport,
-    SandboxRunnerSuccessReport, SandboxStepReport,
+    RunnerConfig, RunnerRunAs, RunnerStepConfig, SANDBOX_PROTOCOL_VERSION,
+    SandboxRunnerFailureReport, SandboxRunnerSuccessReport, SandboxStepReport,
 };
 use nix::dir::Dir;
 use nix::errno::Errno;
@@ -436,8 +436,14 @@ fn chown_dir_contents(mut dir: Dir, owner: Option<Uid>, group: Option<Gid>) -> i
         if bytes == b"." || bytes == b".." {
             continue;
         }
-        fchownat(Some(dir_fd), name, owner, group, AtFlags::AT_SYMLINK_NOFOLLOW)
-            .map_err(io::Error::other)?;
+        fchownat(
+            Some(dir_fd),
+            name,
+            owner,
+            group,
+            AtFlags::AT_SYMLINK_NOFOLLOW,
+        )
+        .map_err(io::Error::other)?;
         // Descend only into real subdirectories: O_NOFOLLOW makes a symlink
         // entry fail with ELOOP and a non-directory fail with ENOTDIR.
         match Dir::openat(Some(dir_fd), name, dir_open_flags(), Mode::empty()) {
