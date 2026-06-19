@@ -145,14 +145,16 @@ impl Store {
     /// `root` must be an absolute path to an existing directory. Missing store
     /// subdirectories are created. Existing store subdirectories must be
     /// directories. The function does not validate existing records or
-    /// references inside those directories.
+    /// references inside those directories. Symlink roots are accepted and
+    /// resolved to their canonical target for the lifetime of the returned
+    /// handle.
     pub fn create(root: &Path) -> Result<Self, StoreError> {
-        validate_root(root)?;
-        ensure_store_layout(root)?;
-        let run_id = allocate_store_run_id(root)?;
+        let root = validate_root(root)?;
+        ensure_store_layout(&root)?;
+        let run_id = allocate_store_run_id(&root)?;
         Ok(Self {
             inner: Arc::new(StoreInner {
-                root: root.to_path_buf(),
+                root,
                 run_id,
                 next_serial: AtomicU64::new(0),
                 workspace_index_lock: Mutex::new(()),
@@ -296,22 +298,28 @@ pub fn create_workspace(
     Ok(StoreWorkspace::new(log_dir, raw_log_dir, temp_dir))
 }
 
-fn validate_root(root: &Path) -> Result<(), StoreError> {
+fn validate_root(root: &Path) -> Result<PathBuf, StoreError> {
     if !root.is_absolute() {
         return Err(StoreError::InvalidInput(format!(
             "store root must be absolute: '{}'",
             root.display()
         )));
     }
-    let metadata = fs::metadata(root).map_err(|error| {
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             StoreError::InvalidInput(format!("store root must exist: '{}'", root.display()))
         } else {
             StoreError::Io(format!(
-                "failed to inspect store root '{}': {error}",
+                "failed to resolve store root '{}': {error}",
                 root.display()
             ))
         }
+    })?;
+    let metadata = fs::metadata(&canonical_root).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to inspect store root '{}': {error}",
+            canonical_root.display()
+        ))
     })?;
     if !metadata.is_dir() {
         return Err(StoreError::InvalidInput(format!(
@@ -319,7 +327,7 @@ fn validate_root(root: &Path) -> Result<(), StoreError> {
             root.display()
         )));
     }
-    Ok(())
+    Ok(canonical_root)
 }
 
 fn ensure_store_dir(path: &Path, label: &str) -> Result<(), StoreError> {

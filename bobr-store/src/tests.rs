@@ -5,7 +5,7 @@ use mbuild_core::{BuildKey, ObjectHash, ReuseKey, compute_build_key, compute_reu
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::thread;
@@ -1372,6 +1372,71 @@ fn store_create_requires_existing_absolute_root() {
         Err(StoreError::InvalidInput(message))
             if message.contains("store root must exist")
     ));
+}
+
+#[test]
+fn store_create_rejects_dangling_symlink_root() {
+    let temp = tempdir().unwrap();
+    let dangling = temp.path().join("current-store");
+    symlink(temp.path().join("missing-store"), &dangling).unwrap();
+
+    assert!(matches!(
+        Store::create(&dangling),
+        Err(StoreError::InvalidInput(message))
+            if message.contains("store root must exist")
+    ));
+}
+
+#[test]
+fn store_create_rejects_symlink_to_file_root() {
+    let temp = tempdir().unwrap();
+    let file = temp.path().join("not-a-store");
+    fs::write(&file, b"not a directory").unwrap();
+    let link = temp.path().join("current-store");
+    symlink(&file, &link).unwrap();
+
+    assert!(matches!(
+        Store::create(&link),
+        Err(StoreError::InvalidInput(message))
+            if message.contains("store root must be a directory")
+    ));
+}
+
+#[test]
+fn store_create_pins_symlink_root_to_initial_target() {
+    let temp = tempdir().unwrap();
+    let store_a = temp.path().join("store-a");
+    let store_b = temp.path().join("store-b");
+    fs::create_dir(&store_a).unwrap();
+    fs::create_dir(&store_b).unwrap();
+
+    let link = temp.path().join("current-store");
+    symlink(&store_a, &link).unwrap();
+    let store = Store::create(&link).unwrap();
+    let run_id = store.run_id().to_string();
+
+    fs::remove_file(&link).unwrap();
+    symlink(&store_b, &link).unwrap();
+
+    create_workspace(&store, "Tree", Some("node".to_string()), "build-key").unwrap();
+
+    let workspace_dir = format!("00000000-Tree-node");
+    assert!(
+        store_a
+            .join(LOGS_DIR)
+            .join(&run_id)
+            .join(&workspace_dir)
+            .is_dir()
+    );
+    assert!(
+        store_a
+            .join(TMP_DIR)
+            .join(&run_id)
+            .join(&workspace_dir)
+            .is_dir()
+    );
+    assert!(!store_b.join(LOGS_DIR).exists());
+    assert!(!store_b.join(TMP_DIR).exists());
 }
 
 #[test]
