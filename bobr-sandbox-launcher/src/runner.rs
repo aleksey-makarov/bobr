@@ -362,6 +362,7 @@ fn reap_finished_children() {
         match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::StillAlive) => break,
             Ok(_) => continue,
+            Err(nix::errno::Errno::EINTR) => continue,
             Err(nix::errno::Errno::ECHILD) => break,
             Err(_) => break,
         }

@@ -76,6 +76,11 @@ pub fn launch(wait_fd: RawFd, config_path: &Path) -> i32 {
         write_launcher_failure(&launcher_failure_report, "launcher-handshake", error);
         return 1;
     }
+    // The handshake pipe is no longer needed; close it so it is not inherited
+    // by the runner or any build step.
+    unsafe {
+        libc::close(wait_fd);
+    }
 
     match run_supervisor(&config, &launcher_failure_report) {
         Ok(code) => code,
@@ -113,6 +118,7 @@ fn read_launcher_config(path: &Path) -> Result<SandboxLauncherConfig, String> {
 fn run_supervisor(config: &SandboxLauncherConfig, failure_report: &File) -> io::Result<i32> {
     unshare_namespace("mount namespace", libc::CLONE_NEWNS)?;
     unshare_namespace("network namespace", libc::CLONE_NEWNET)?;
+    bring_loopback_up().map_err(|error| context_error("bring up loopback", error))?;
     unshare_namespace("UTS namespace", libc::CLONE_NEWUTS)?;
     unshare_namespace("IPC namespace", libc::CLONE_NEWIPC)?;
     set_hostname("mbuild").map_err(|error| context_error("set hostname", error))?;
@@ -232,7 +238,11 @@ fn bind_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
 
 fn proc_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
     let target = root.join(relative_launcher_target(&mount.target)?);
-    mount_syscall(Some(Path::new("proc")), &target, Some("proc"), 0, None)
+    let mut flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+    if mount.readonly {
+        flags |= libc::MS_RDONLY;
+    }
+    mount_syscall(Some(Path::new("proc")), &target, Some("proc"), flags, None)
         .map_err(|error| context_error(format!("mount proc '{}'", mount.target.display()), error))
 }
 
@@ -247,6 +257,9 @@ fn tmpfs_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
             "noexec" => flags |= libc::MS_NOEXEC,
             option => data_options.push(option),
         }
+    }
+    if mount.readonly {
+        flags |= libc::MS_RDONLY;
     }
     let data = data_options.join(",");
     let data = if data.is_empty() {
@@ -341,6 +354,41 @@ fn set_hostname(name: &str) -> io::Result<()> {
     }
 }
 
+/// Brings the loopback interface up in the current network namespace.
+///
+/// A fresh netns has only `lo`, administratively down with no address, so even
+/// `127.0.0.1` is unreachable. This does not grant any external connectivity:
+/// the namespace has no other interface or route. It must run before
+/// capabilities are dropped (it needs CAP_NET_ADMIN in the netns).
+fn bring_loopback_up() -> io::Result<()> {
+    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+    if sock < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let result = set_interface_up(sock, b"lo");
+    unsafe {
+        libc::close(sock);
+    }
+    result
+}
+
+fn set_interface_up(sock: libc::c_int, name: &[u8]) -> io::Result<()> {
+    let mut request: libc::ifreq = unsafe { std::mem::zeroed() };
+    for (slot, &byte) in request.ifr_name.iter_mut().zip(name) {
+        *slot = byte as libc::c_char;
+    }
+    if unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as libc::c_ulong, &mut request) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe {
+        request.ifr_ifru.ifru_flags |= libc::IFF_UP as libc::c_short;
+    }
+    if unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as libc::c_ulong, &mut request) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn set_no_new_privs() -> io::Result<()> {
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == 0 {
         Ok(())
@@ -364,16 +412,18 @@ fn drop_capabilities() -> io::Result<()> {
         version: LINUX_CAPABILITY_VERSION_3,
         pid: 0,
     };
+    // Inheritable is left empty: steps must not gain capabilities across
+    // execve. (It is inert anyway without ambient or file capabilities.)
     let data = [
         CapData {
             effective: mask[0],
             permitted: mask[0],
-            inheritable: mask[0],
+            inheritable: 0,
         },
         CapData {
             effective: mask[1],
             permitted: mask[1],
-            inheritable: mask[1],
+            inheritable: 0,
         },
     ];
     let result = unsafe {
