@@ -31,9 +31,9 @@ use std::time::{Duration, Instant};
 
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 const MAX_IDMAP_HELPER_STDERR_LEN: usize = 64 * 1024;
-const WORKER_ARG: &str = "--ns-runtime-worker";
-const WORKER_PROTOCOL_READ_ARG: &str = "--ns-runtime-protocol-read-fd";
-const WORKER_PROTOCOL_WRITE_ARG: &str = "--ns-runtime-protocol-write-fd";
+const WORKER_ARG: &str = "--bobr-runtime-worker";
+const WORKER_PROTOCOL_READ_ARG: &str = "--protocol-read-fd";
+const WORKER_PROTOCOL_WRITE_ARG: &str = "--protocol-write-fd";
 const SELF_EXE_PATH: &str = "/proc/self/exe";
 const SUBUID_PATH: &str = "/etc/subuid";
 const SUBGID_PATH: &str = "/etc/subgid";
@@ -435,7 +435,7 @@ where
 
     if let Some(extra) = args.next() {
         return Err(RuntimeError::new(format!(
-            "unexpected namespace runtime worker argument '{}'",
+            "unexpected bobr runtime worker argument '{}'",
             extra.to_string_lossy()
         )));
     }
@@ -452,7 +452,7 @@ fn expect_worker_arg(
         Ok(())
     } else {
         Err(RuntimeError::new(format!(
-            "expected namespace runtime worker argument {expected}, got '{}'",
+            "expected bobr runtime worker argument {expected}, got '{}'",
             actual.to_string_lossy()
         )))
     }
@@ -463,22 +463,20 @@ fn next_worker_arg(
     expected: &'static str,
 ) -> RuntimeResult<OsString> {
     args.next().ok_or_else(|| {
-        RuntimeError::new(format!(
-            "missing namespace runtime worker argument {expected}"
-        ))
+        RuntimeError::new(format!("missing bobr runtime worker argument {expected}"))
     })
 }
 
 fn parse_worker_fd_arg(value: OsString) -> RuntimeResult<RawFd> {
     let value = value.into_string().map_err(|value| {
         RuntimeError::new(format!(
-            "namespace runtime worker fd '{}' is not valid UTF-8",
+            "bobr runtime worker fd '{}' is not valid UTF-8",
             value.to_string_lossy()
         ))
     })?;
     value.parse::<RawFd>().map_err(|error| {
         RuntimeError::new(format!(
-            "namespace runtime worker fd '{value}' is not an integer: {error}"
+            "bobr runtime worker fd '{value}' is not an integer: {error}"
         ))
     })
 }
@@ -549,7 +547,7 @@ where
     }
 
     let request = read_frame(reader)?
-        .ok_or_else(|| RuntimeError::new("namespace runtime worker received no request"))?;
+        .ok_or_else(|| RuntimeError::new("bobr runtime worker received no request"))?;
     let ParentToChild::Call { id, function } = C::decode::<ParentToChild>(&request)?;
     let input = read_frame(reader)?
         .ok_or_else(|| RuntimeError::new(format!("missing input frame for call id {id}")))?;
@@ -861,7 +859,7 @@ fn fork_ns_worker(executable: &File) -> RuntimeResult<NsLaunch> {
     let userns_ready = Pipe::new()?;
     let idmap_ready = Pipe::new()?;
     let executable_fd = executable.as_raw_fd();
-    let arg0 = CString::new("ns-runtime-worker").unwrap();
+    let arg0 = CString::new("bobr-runtime-worker").unwrap();
     let worker_arg = CString::new(WORKER_ARG).unwrap();
     let protocol_read_arg = CString::new(WORKER_PROTOCOL_READ_ARG).unwrap();
     let protocol_read_fd_arg = CString::new(protocol_request_read.as_raw_fd().to_string()).unwrap();
@@ -1029,7 +1027,7 @@ fn child_exec_ns_worker(
         child_close_fd(fds.idmap_ready_read);
         libc::fexecve(executable_fd, args.as_ptr(), env.as_ptr());
     }
-    child_write_stderr(b"failed to exec namespace runtime worker\n");
+    child_write_stderr(b"failed to exec bobr runtime worker\n");
     unsafe { libc::_exit(127) };
 }
 

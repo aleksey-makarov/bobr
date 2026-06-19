@@ -61,35 +61,27 @@ fn cli_accepts_explicit_recipe_path() {
 }
 
 #[test]
-fn cli_store_flag_supplies_missing_recipe_store() {
+fn cli_rejects_more_than_one_recipe_argument() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("store-from-cli.json");
-    let store = store_root(workspace.path());
-    fs::create_dir_all(&store).unwrap();
-    fs::write(
+    let recipe_path = workspace.path().join("one.json");
+    let extra_path = workspace.path().join("two.json");
+    write_recipe(
         &recipe_path,
-        serde_json::to_vec_pretty(&json!({
-            "nodes": {
-                "root": tree_file_recipe("store-from-cli", "store.txt", "hello store", false)
-            }
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+        &tree_file_recipe("one-recipe", "one.txt", "hello", false),
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg("--store")
-        .arg(&store)
         .arg(&recipe_path)
+        .arg(&extra_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "{output:?}");
+    assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let _build: RealizedObject = serde_json::from_str(&stdout).unwrap();
-    assert!(stderr.contains("[start] Tree store-from-cli"), "{stderr}");
+    assert!(stderr.contains("error[invalid-input]"), "{stderr}");
+    assert!(stderr.contains("unexpected argument"), "{stderr}");
+    assert!(stderr.contains("usage: mbuild [recipe.json]"), "{stderr}");
 }
 
 #[test]
@@ -117,66 +109,18 @@ fn cli_reports_missing_store_option() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
     assert!(
-        stderr.contains("recipe options.store or --store must be set"),
+        stderr.contains("recipe options.store must be set"),
         "{stderr}"
     );
 }
 
 #[test]
-fn cli_quiet_suppresses_live_progress() {
+fn recipe_options_quiet_suppresses_live_progress() {
     let workspace = tempdir().unwrap();
     let recipe_path = workspace.path().join("quiet.json");
-    write_recipe(
+    write_recipe_with_options(
         &recipe_path,
         &tree_file_recipe("quiet-recipe", "quiet.txt", "hello quiet", false),
-    );
-
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg("--quiet")
-        .arg(&recipe_path)
-        .current_dir(workspace.path())
-        .output()
-        .unwrap();
-
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let _build: RealizedObject = serde_json::from_str(&stdout).unwrap();
-}
-
-#[test]
-fn cli_flags_override_recipe_options() {
-    let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("override-options.json");
-    write_recipe_with_options(
-        &recipe_path,
-        &tree_file_recipe("override-recipe", "override.txt", "hello override", false),
-        &json!({
-            "quiet": false,
-            "jobs": 0,
-        }),
-    );
-
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg("--jobs")
-        .arg("1")
-        .arg(&recipe_path)
-        .current_dir(workspace.path())
-        .output()
-        .unwrap();
-
-    assert!(output.status.success(), "{output:?}");
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("[start] Tree override-recipe"), "{stderr}");
-}
-
-#[test]
-fn recipe_options_apply_when_cli_flags_are_absent() {
-    let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("recipe-options.json");
-    write_recipe_with_options(
-        &recipe_path,
-        &tree_file_recipe("recipe-quiet", "quiet.txt", "hello recipe quiet", false),
         &json!({
             "quiet": true,
         }),
@@ -190,6 +134,35 @@ fn recipe_options_apply_when_cli_flags_are_absent() {
 
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let _build: RealizedObject = serde_json::from_str(&stdout).unwrap();
+}
+
+#[test]
+fn recipe_options_jobs_zero_is_rejected() {
+    let workspace = tempdir().unwrap();
+    let recipe_path = workspace.path().join("zero-jobs.json");
+    write_recipe_with_options(
+        &recipe_path,
+        &tree_file_recipe("zero-jobs-recipe", "zero.txt", "hello zero", false),
+        &json!({
+            "jobs": 0,
+        }),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+        .arg(&recipe_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("error[invalid-input]"), "{stderr}");
+    assert!(
+        stderr.contains("recipe options.jobs must be greater than zero"),
+        "{stderr}"
+    );
 }
 
 #[test]

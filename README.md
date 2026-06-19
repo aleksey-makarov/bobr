@@ -6,16 +6,15 @@
 
 The input document is a JSON envelope with:
 
-- `options` (optional when `--store` supplies the store path)
+- `options`
 - `nodes`
 
 `nodes` is a table of recipe nodes keyed by technical ids. The root build
 target is the entry with the reserved id `root`. Dependencies are encoded as
-id references in input slots. `options.store` or `--store` points at the store
-root that `mbuild` should use for this request. `mbuild` parses that DAG request,
-validates each node, performs top-down store lookups, and materializes only
-the missing nodes. Missing leaves and other ready nodes may execute in
-parallel.
+id references in input slots. `options.store` points at the store root that
+`mbuild` should use for this request. `mbuild` parses that DAG request,
+validates each node, performs top-down store lookups, and materializes only the
+missing nodes. Missing leaves and other ready nodes may execute in parallel.
 
 There are two node classes.
 
@@ -165,12 +164,12 @@ CLI contract:
 - `mbuild [recipe.json]`
 - if `recipe.json` is omitted, the JSON envelope is read from `stdin`
 - on success, `stdout` receives the realized root `RealizedObject` as JSON
-- live progress goes to `stderr` unless `--quiet` is set
-- `--jobs/-j` limits parallel builder execution; the default is the available
-  CPU parallelism
-- `--store` sets the store root for the request
-- recipe-level `options.store`, `options.quiet`, and `options.jobs` provide
-  per-request defaults that are overridden by explicit CLI flags
+- live progress goes to `stderr` unless `options.quiet` is true
+- `options.jobs` limits parallel builder execution; if omitted, the default is
+  the available CPU parallelism
+- `options.store` sets the store root for the request
+- command-line arguments do not override JSON options; to change build options,
+  change the input JSON envelope
 
 The final store path must be an absolute path to an existing directory. That
 directory is the store root itself. A request may still choose a path named

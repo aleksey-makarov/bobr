@@ -33,7 +33,6 @@ fn source_build_key(object_hash: fsobj_hash::ObjectHash) -> BuildKey {
 #[cfg(feature = "integration-tests")]
 fn run_recipe_json_via_cli(recipe_path: &Path) -> bobr_store::RealizedObject {
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg("--quiet")
         .arg(recipe_path)
         .output()
         .unwrap();

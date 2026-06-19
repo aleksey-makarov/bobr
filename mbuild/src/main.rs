@@ -1,4 +1,4 @@
-use clap::{ArgAction, Parser};
+use std::env;
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
@@ -43,27 +43,6 @@ impl fmt::Display for MbuildError {
     }
 }
 
-#[derive(Parser, Debug)]
-#[command(name = "mbuild")]
-#[command(about = "mbuild runtime for JSON recipe graphs")]
-struct Cli {
-    #[arg(long, action = ArgAction::SetTrue, help = "Suppress live build progress on stderr")]
-    quiet: bool,
-
-    #[arg(
-        short = 'j',
-        long = "jobs",
-        help = "Set the maximum number of parallel jobs"
-    )]
-    jobs: Option<usize>,
-
-    #[arg(long = "store", help = "Use this store root for the build")]
-    store: Option<PathBuf>,
-
-    #[arg(help = "Read recipe JSON from this file instead of stdin")]
-    recipe_file: Option<PathBuf>,
-}
-
 fn main() -> ExitCode {
     if let Some(exit_code) = run_runtime_worker_if_requested() {
         return exit_code;
@@ -71,10 +50,9 @@ fn main() -> ExitCode {
 
     init_tracing();
 
-    let cli = Cli::parse();
     let cancellation = CancellationToken::new();
     signal::install_handlers(cancellation.clone());
-    let result = build(cli, cancellation);
+    let result = build(cancellation);
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -97,7 +75,7 @@ fn run_runtime_worker_if_requested() -> Option<ExitCode> {
         }
         Ok(None) => None,
         Err(error) => {
-            eprintln!("error[runtime-worker]: {error}");
+            eprintln!("error[bobr-runtime-worker]: {error}");
             Some(ExitCode::FAILURE)
         }
     }
@@ -113,7 +91,7 @@ fn runtime_worker_exit_code(result: bobr_runtime::runtime::RuntimeResult<()>) ->
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error[runtime-worker]: {error}");
+            eprintln!("error[bobr-runtime-worker]: {error}");
             ExitCode::FAILURE
         }
     }
@@ -127,25 +105,31 @@ fn init_tracing() {
         .try_init();
 }
 
-fn build(cli: Cli, cancellation: CancellationToken) -> MResult<()> {
-    let recipe_bytes = read_recipe_bytes(cli.recipe_file.as_ref())?;
-    let mut envelope = RecipeEnvelope::parse_json(&recipe_bytes).map_err(map_runtime_error)?;
-
-    if let Some(store) = cli.store {
-        envelope.options.store = Some(store);
-    }
-    if cli.quiet {
-        envelope.options.quiet = Some(true);
-    }
-    if let Some(jobs) = cli.jobs {
-        envelope.options.jobs = Some(jobs);
-    }
+fn build(cancellation: CancellationToken) -> MResult<()> {
+    let recipe_file = recipe_file_from_args()?;
+    let recipe_bytes = read_recipe_bytes(recipe_file.as_ref())?;
+    let envelope = RecipeEnvelope::parse_json(&recipe_bytes).map_err(map_runtime_error)?;
 
     let build =
         recipe_runtime::run_recipe_envelope(envelope, cancellation).map_err(map_runtime_error)?;
     let rendered = recipe_runtime::render_object_as_json(&build).map_err(map_runtime_error)?;
     print!("{rendered}");
     Ok(())
+}
+
+fn recipe_file_from_args() -> MResult<Option<PathBuf>> {
+    let mut args = env::args_os();
+    let _program = args.next();
+    let Some(recipe_file) = args.next() else {
+        return Ok(None);
+    };
+    if let Some(extra) = args.next() {
+        return Err(MbuildError::InvalidInput(format!(
+            "unexpected argument '{}'; usage: mbuild [recipe.json]",
+            extra.to_string_lossy()
+        )));
+    }
+    Ok(Some(PathBuf::from(recipe_file)))
 }
 
 fn read_recipe_bytes(recipe_file: Option<&PathBuf>) -> MResult<Vec<u8>> {

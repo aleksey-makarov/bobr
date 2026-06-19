@@ -54,7 +54,7 @@ pub fn run_recipe_envelope(
     check_cancelled(&cancellation)?;
 
     let store_path = options.store.as_ref().ok_or_else(|| {
-        RuntimeError::InvalidRequest("recipe options.store or --store must be set".to_string())
+        RuntimeError::InvalidRequest("recipe options.store must be set".to_string())
     })?;
     let builder_registry = create_builder_registry()?;
     let mut subjects = HashMap::new();
