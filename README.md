@@ -182,6 +182,8 @@ The store layout is content-addressed:
   manifest objects
 - `<store>/fs-trees/` caches materialized fs-tree roots by manifest
   `object_hash`
+- `<store>/fs-tree-refs/` stores user-facing refs to named materialized
+  fs-tree roots
 - `<store>/object-records/` stores canonical object records by `object_hash`
 - `<store>/reuses/` stores builder-only canonical reuse refs by `reuse_key`
 - `<store>/builds/` stores public build handles by `build_key`
@@ -193,6 +195,8 @@ results store the canonical fs-tree manifest text as the object payload.
 Referenced regular-file payloads live under `<store>/fs-files/`, and
 materialized roots under `<store>/fs-trees/` are cache entries rather than
 publication targets.
+Named fs-tree materializations also update `<store>/fs-tree-refs/<name>` for
+inspection. Runtime cache lookup does not read these refs.
 
 `build_key` is computed from:
 

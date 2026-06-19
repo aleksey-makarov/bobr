@@ -110,6 +110,8 @@ The filesystem layout mirrors the identity model:
     ...
   fs-trees/
     <manifest-object-hash>/
+  fs-tree-refs/
+    <name> -> ../fs-trees/<manifest-object-hash>
   logs/
     <YYMMDDhhmmss>[.N]/
       events.jsonl
@@ -134,6 +136,8 @@ The filesystem layout mirrors the identity model:
   objects.
 - `fs-trees/` caches materialized filesystem roots for fs-tree manifest
   objects.
+- `fs-tree-refs/` holds human-facing refs from recipe name to the latest
+  materialized filesystem root for that name.
 
 `objects/<object_hash>` is the payload itself, either a file or a directory.
 Concrete directory payload formats are builder-specific. For example, the
@@ -144,6 +148,13 @@ Filesystem tree builder results store a canonical fs-tree manifest text file
 as the object payload. Regular file entries in that manifest reference payloads
 stored under `fs-files/`. Materialized roots under `fs-trees/` are cache
 entries created on demand for builders that need a filesystem root path.
+When a named builder input asks for a filesystem root, the runtime also updates
+`fs-tree-refs/<name> -> ../fs-trees/<manifest-object-hash>`. These refs are
+for inspection only. Runtime lookup uses object identity and the
+`fs-trees/` cache directly; it does not read `fs-tree-refs/`. If the same name
+is later materialized from a different manifest object, the old current ref is
+rotated into an mtime-suffixed generation ref before the new current ref is
+installed.
 
 Generic CAS objects may contain non-UTF-8 filesystem names. Such objects can
 still be imported and addressed by `object_hash`. Fs-tree objects are
@@ -179,6 +190,9 @@ This `object-refs/` rule is the same for every object kind. Filesystem tree
 builder results store the manifest itself as the object payload. The
 publication symlink never points directly at `fs-files/` or at a materialized
 `fs-trees/` cache directory.
+
+`fs-tree-refs/` are not publication refs. They are created only when a
+filesystem root is actually materialized for a named input.
 
 If the current publication name already points at a different object, the old
 current refs are rotated into timestamp-suffixed history refs.

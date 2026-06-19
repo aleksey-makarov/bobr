@@ -1219,7 +1219,7 @@ mod tests {
         let manifest_hash = import_object(&store, &result.staged_path).unwrap();
         let root = store
             .fs_tree()
-            .ensure_materialized_root(manifest_hash)
+            .ensure_materialized_root(None, manifest_hash)
             .unwrap();
         assert_eq!(fs::read(root.join("bin/tool")).unwrap(), b"tool");
         assert_eq!(

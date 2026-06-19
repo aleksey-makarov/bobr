@@ -1,5 +1,7 @@
 use crate::builder_registry::create_builder_registry;
-use crate::planned::{PlannedExecutionContext, PlannedSubject, SubjectExecution, execute_subject};
+use crate::planned::{
+    PlannedExecutionContext, PlannedSubject, RealizedInput, SubjectExecution, execute_subject,
+};
 use crate::recipe::{RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
 use crate::runtime_policy::runtime_provider_for_current_process;
@@ -92,8 +94,9 @@ fn default_jobs() -> usize {
 
 fn completed_inputs_for_builder(
     completed: &HashMap<BuildKey, RealizedObject>,
+    subjects: &SubjectGraph,
     builder: &BuilderPlannedSubject,
-) -> Result<HashMap<BuildKey, RealizedObject>, RuntimeError> {
+) -> Result<HashMap<BuildKey, RealizedInput>, RuntimeError> {
     let mut realized_inputs = HashMap::new();
     for dep in builder.inputs().values() {
         let realized = completed.get(dep).cloned().ok_or_else(|| {
@@ -102,7 +105,19 @@ fn completed_inputs_for_builder(
                 dep
             ))
         })?;
-        realized_inputs.insert(*dep, realized);
+        let subject = subjects.get(dep).ok_or_else(|| {
+            RuntimeError::Build(format!(
+                "dependency subject '{}' is not available in planned graph",
+                dep
+            ))
+        })?;
+        realized_inputs.insert(
+            *dep,
+            RealizedInput {
+                realized,
+                materialization_name: subject.name().to_string(),
+            },
+        );
     }
     Ok(realized_inputs)
 }
@@ -171,13 +186,15 @@ fn execute_graph(
             let tx = tx.clone();
             let cancellation = cancellation.clone();
             let realized_inputs = match subject.as_builder() {
-                Some(builder) => match completed_inputs_for_builder(&completed, builder) {
-                    Ok(realized_inputs) => realized_inputs,
-                    Err(error) => {
-                        first_error = Some(error);
-                        break;
+                Some(builder) => {
+                    match completed_inputs_for_builder(&completed, subjects, builder) {
+                        Ok(realized_inputs) => realized_inputs,
+                        Err(error) => {
+                            first_error = Some(error);
+                            break;
+                        }
                     }
-                },
+                }
                 None => HashMap::new(),
             };
             thread::spawn(move || {

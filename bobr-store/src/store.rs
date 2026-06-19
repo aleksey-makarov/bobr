@@ -19,6 +19,7 @@ pub(crate) const OBJECT_REFS_DIR: &str = "object-refs";
 pub(crate) const OBJECT_RECORD_REFS_DIR: &str = "object-record-refs";
 pub(crate) const FS_FILES_DIR: &str = "fs-files";
 pub(crate) const FS_TREES_DIR: &str = "fs-trees";
+pub(crate) const FS_TREE_REFS_DIR: &str = "fs-tree-refs";
 pub(crate) const LOGS_DIR: &str = "logs";
 pub(crate) const TMP_DIR: &str = "tmp";
 
@@ -361,6 +362,7 @@ fn ensure_store_layout(root: &Path) -> Result<(), StoreError> {
     ensure_store_dir(&root.join(OBJECT_RECORD_REFS_DIR), "object-record-refs")?;
     ensure_store_dir(&root.join(FS_FILES_DIR), "fs-files")?;
     ensure_store_dir(&root.join(FS_TREES_DIR), "fs-trees")?;
+    ensure_store_dir(&root.join(FS_TREE_REFS_DIR), "fs-tree-refs")?;
     ensure_store_dir(&root.join(LOGS_DIR), "logs")?;
     ensure_store_dir(&root.join(TMP_DIR), "tmp")?;
     Ok(())

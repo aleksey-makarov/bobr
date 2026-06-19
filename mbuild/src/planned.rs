@@ -43,13 +43,19 @@ pub(crate) struct PlannedExecutionContext<'a> {
     pub(crate) run_logger: Arc<BuildRunLogger>,
     pub(crate) runtime_provider: mbuild_core::RuntimeProvider,
     pub(crate) cancellation: CancellationToken,
-    pub(crate) realized_inputs: &'a HashMap<BuildKey, RealizedObject>,
+    pub(crate) realized_inputs: &'a HashMap<BuildKey, RealizedInput>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct SubjectExecution {
     pub(crate) realized: RealizedObject,
     pub(crate) logger: Arc<dyn BuildLogger>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RealizedInput {
+    pub(crate) realized: RealizedObject,
+    pub(crate) materialization_name: String,
 }
 
 pub(crate) fn execute_subject(
@@ -280,7 +286,7 @@ fn execute_source_subject(
 fn builder_resolved_inputs(
     subject: &BuilderPlannedSubject,
     store: &Store,
-    realized_inputs: &HashMap<BuildKey, RealizedObject>,
+    realized_inputs: &HashMap<BuildKey, RealizedInput>,
 ) -> Result<ResolvedInputs, RuntimeError> {
     let mut inputs = ResolvedInputs::empty();
     for input_name in subject
@@ -294,7 +300,7 @@ fn builder_resolved_inputs(
                 subject.name()
             ))
         })?;
-        let realized = realized_inputs.get(&key).cloned().ok_or_else(|| {
+        let input = realized_inputs.get(&key).cloned().ok_or_else(|| {
             RuntimeError::Build(format!(
                 "dependency object '{}' is not available in completed set",
                 key
@@ -303,8 +309,9 @@ fn builder_resolved_inputs(
         inputs.insert(
             input_name,
             ResolvedDependency {
-                object_hash: realized.object_hash,
-                object_path: store.object_path(realized.object_hash),
+                object_hash: input.realized.object_hash,
+                object_path: store.object_path(input.realized.object_hash),
+                materialization_name: Some(input.materialization_name),
             },
         );
     }

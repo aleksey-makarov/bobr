@@ -7,9 +7,9 @@
 #![deny(missing_docs)]
 
 use crate::StoreError;
-use crate::store::{FS_FILES_DIR, FS_TREES_DIR, OBJECTS_DIR};
+use crate::store::{FS_FILES_DIR, FS_TREE_REFS_DIR, FS_TREES_DIR, OBJECTS_DIR};
 use globset::{Glob, GlobMatcher};
-use mbuild_core::ObjectHash;
+use mbuild_core::{ObjectHash, validate_publication_name as validate_core_publication_name};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -22,6 +22,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use time::macros::format_description;
+use time::{OffsetDateTime, UtcOffset};
 
 const SCHEMA: &str = "bobr-fs-tree-manifest";
 const CANONICAL_SCHEMA_LINE: &[u8] = br#"{"schema":"bobr-fs-tree-manifest"}
@@ -194,6 +196,10 @@ impl FsTree {
         self.root.join(FS_TREES_DIR)
     }
 
+    fn fs_tree_refs_dir(&self) -> PathBuf {
+        self.root.join(FS_TREE_REFS_DIR)
+    }
+
     fn object_path(&self, object_hash: ObjectHash) -> PathBuf {
         self.root.join(OBJECTS_DIR).join(object_hash.to_hex())
     }
@@ -263,31 +269,82 @@ impl FsTree {
     /// manifest. On miss it reads `<store>/objects/<manifest_hash>`, parses it
     /// as a canonical [`FsTreeManifest`], materializes it from `fs-files` into
     /// a store-owned staging directory, and publishes that directory as the
-    /// cache root.
+    /// cache root. When `name` is provided, the method also updates
+    /// `<store>/fs-tree-refs/<name>` to point at the materialized cache root.
     pub fn ensure_materialized_root(
         &self,
+        name: Option<&str>,
         manifest_hash: ObjectHash,
     ) -> Result<PathBuf, StoreError> {
-        if let Some(root) = self.lookup_materialized_root(manifest_hash)? {
-            return Ok(root);
+        if let Some(name) = name {
+            validate_fs_tree_ref_name(name)?;
         }
-
-        let manifest = FsTreeManifest::read_canonical(&self.object_path(manifest_hash))?;
-        let final_root = self.materialized_root_path(manifest_hash);
-        let staging_root = create_unique_fs_tree_staging_dir(&self.fs_trees_dir(), manifest_hash)?;
-        let result = materialize_fs_tree_with_root(&manifest, &self.fs_files_dir(), &staging_root)
-            .and_then(|()| publish_materialized_fs_tree(&staging_root, &final_root));
-        match result {
-            Ok(()) => Ok(final_root),
-            Err(error) => {
-                let _ = fs::remove_dir_all(&staging_root);
-                if let Some(root) = self.lookup_materialized_root(manifest_hash)? {
-                    Ok(root)
-                } else {
-                    Err(error)
+        let root = if let Some(root) = self.lookup_materialized_root(manifest_hash)? {
+            root
+        } else {
+            let manifest = FsTreeManifest::read_canonical(&self.object_path(manifest_hash))?;
+            let final_root = self.materialized_root_path(manifest_hash);
+            let staging_root =
+                create_unique_fs_tree_staging_dir(&self.fs_trees_dir(), manifest_hash)?;
+            let result =
+                materialize_fs_tree_with_root(&manifest, &self.fs_files_dir(), &staging_root)
+                    .and_then(|()| publish_materialized_fs_tree(&staging_root, &final_root));
+            match result {
+                Ok(()) => final_root,
+                Err(error) => {
+                    let _ = fs::remove_dir_all(&staging_root);
+                    if let Some(root) = self.lookup_materialized_root(manifest_hash)? {
+                        root
+                    } else {
+                        return Err(error);
+                    }
                 }
             }
+        };
+        if let Some(name) = name {
+            self.update_materialized_root_ref(name, manifest_hash)?;
         }
+        Ok(root)
+    }
+
+    fn update_materialized_root_ref(
+        &self,
+        name: &str,
+        manifest_hash: ObjectHash,
+    ) -> Result<(), StoreError> {
+        validate_fs_tree_ref_name(name)?;
+        let ref_path = self.fs_tree_refs_dir().join(name);
+        let new_target = fs_tree_ref_target(manifest_hash);
+
+        match fs::symlink_metadata(&ref_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let current_target = fs::read_link(&ref_path).map_err(|error| {
+                    StoreError::Io(format!(
+                        "failed to read fs-tree ref '{}': {error}",
+                        ref_path.display()
+                    ))
+                })?;
+                if current_target == new_target {
+                    return Ok(());
+                }
+                let suffix = fs_tree_ref_generation_suffix(&metadata)?;
+                let generation_path =
+                    allocate_fs_tree_ref_generation_path(&self.fs_tree_refs_dir(), name, &suffix)?;
+                create_fs_tree_generation_ref(&current_target, &generation_path)?;
+            }
+            Ok(_) => {
+                return Err(StoreError::InvalidData(format!(
+                    "fs-tree ref '{}' exists but is not a symlink",
+                    ref_path.display()
+                )));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(map_io(&ref_path, "inspect fs-tree ref", error));
+            }
+        }
+
+        crate::refs::replace_symlink(&new_target, &ref_path)
     }
 }
 
@@ -764,6 +821,7 @@ fn validate_fs_tree_root(root: &Path) -> Result<(), StoreError> {
     require_existing_directory(root, "store root")?;
     require_existing_directory(&root.join(FS_FILES_DIR), "store fs-files directory")?;
     require_existing_directory(&root.join(FS_TREES_DIR), "store fs-trees directory")?;
+    require_existing_directory(&root.join(FS_TREE_REFS_DIR), "store fs-tree-refs directory")?;
     Ok(())
 }
 
@@ -844,6 +902,71 @@ fn publish_materialized_fs_tree(staging_root: &Path, final_root: &Path) -> Resul
             ),
             error,
         )
+    })
+}
+
+fn fs_tree_ref_target(manifest_hash: ObjectHash) -> PathBuf {
+    PathBuf::from("..")
+        .join(FS_TREES_DIR)
+        .join(manifest_hash.to_hex())
+}
+
+fn validate_fs_tree_ref_name(name: &str) -> Result<(), StoreError> {
+    validate_core_publication_name(name)
+        .map_err(|error| StoreError::InvalidInput(error.to_string()))
+}
+
+fn fs_tree_ref_generation_suffix(metadata: &fs::Metadata) -> Result<String, StoreError> {
+    let modified = metadata.modified().map_err(|error| {
+        StoreError::Io(format!(
+            "failed to read mtime for fs-tree ref generation: {error}"
+        ))
+    })?;
+    let parsed = OffsetDateTime::from(modified);
+    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    let local = parsed.to_offset(offset);
+    let format = format_description!("[year repr:last_two][month][day][hour][minute][second]");
+    local.format(&format).map_err(|error| {
+        StoreError::InvalidData(format!(
+            "failed to format fs-tree ref generation suffix: {error}"
+        ))
+    })
+}
+
+fn allocate_fs_tree_ref_generation_path(
+    fs_tree_refs_dir: &Path,
+    name: &str,
+    suffix: &str,
+) -> Result<PathBuf, StoreError> {
+    for counter in 1..1000 {
+        let candidate = if counter == 1 {
+            fs_tree_refs_dir.join(format!("{name}.{suffix}"))
+        } else {
+            fs_tree_refs_dir.join(format!("{name}.{suffix}.{counter}"))
+        };
+        if !(candidate.exists() || candidate.is_symlink()) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(StoreError::Io(format!(
+        "failed to allocate fs-tree generation ref name for '{name}.{suffix}'"
+    )))
+}
+
+fn create_fs_tree_generation_ref(target: &Path, link_path: &Path) -> Result<(), StoreError> {
+    if link_path.exists() || link_path.is_symlink() {
+        return Err(StoreError::Io(format!(
+            "fs-tree generation ref collision at '{}'",
+            link_path.display()
+        )));
+    }
+    symlink(target, link_path).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to create fs-tree generation ref '{}' -> '{}': {error}",
+            link_path.display(),
+            target.display()
+        ))
     })
 }
 
@@ -1953,6 +2076,21 @@ mod tests {
         FsTreeManifest::from_entries(entries).expect("valid manifest")
     }
 
+    fn import_scanned_manifest(
+        store: &crate::Store,
+        temp_root: &Path,
+        name: &str,
+        content: &[u8],
+    ) -> ObjectHash {
+        let source = temp_root.join(format!("source-{name}"));
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("file"), content).unwrap();
+        let manifest = store.fs_tree().scan(&source).unwrap();
+        let staged_manifest = temp_root.join(format!("manifest-{name}.jsonl"));
+        manifest.write_canonical(&staged_manifest).unwrap();
+        crate::import_object(store, &staged_manifest).unwrap()
+    }
+
     fn assert_parse_rejects(input: &str) {
         assert!(
             FsTreeManifest::parse_canonical_bytes(input.as_bytes()).is_err(),
@@ -2986,7 +3124,7 @@ mod tests {
 
         let root = store
             .fs_tree()
-            .ensure_materialized_root(manifest_hash)
+            .ensure_materialized_root(None, manifest_hash)
             .unwrap();
 
         assert_eq!(
@@ -3000,6 +3138,148 @@ mod tests {
                 .lookup_materialized_root(manifest_hash)
                 .unwrap(),
             Some(root)
+        );
+    }
+
+    #[test]
+    fn ensure_materialized_root_without_name_does_not_create_fs_tree_ref() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_root = temp_dir.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = crate::Store::create(&store_root).unwrap();
+        let manifest_hash = import_scanned_manifest(&store, temp_dir.path(), "unnamed", b"hello\n");
+
+        store
+            .fs_tree()
+            .ensure_materialized_root(None, manifest_hash)
+            .unwrap();
+
+        assert_eq!(
+            fs::read_dir(store.root().join(FS_TREE_REFS_DIR))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn ensure_materialized_root_with_name_creates_fs_tree_ref_on_cache_hit() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_root = temp_dir.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = crate::Store::create(&store_root).unwrap();
+        let manifest_hash = import_scanned_manifest(&store, temp_dir.path(), "named", b"hello\n");
+
+        store
+            .fs_tree()
+            .ensure_materialized_root(None, manifest_hash)
+            .unwrap();
+        store
+            .fs_tree()
+            .ensure_materialized_root(Some("rootfs"), manifest_hash)
+            .unwrap();
+
+        assert_eq!(
+            fs::read_link(store.root().join(FS_TREE_REFS_DIR).join("rootfs")).unwrap(),
+            fs_tree_ref_target(manifest_hash)
+        );
+    }
+
+    #[test]
+    fn ensure_materialized_root_reuses_same_fs_tree_ref_without_generation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_root = temp_dir.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = crate::Store::create(&store_root).unwrap();
+        let manifest_hash = import_scanned_manifest(&store, temp_dir.path(), "repeat", b"hello\n");
+
+        store
+            .fs_tree()
+            .ensure_materialized_root(Some("rootfs"), manifest_hash)
+            .unwrap();
+        store
+            .fs_tree()
+            .ensure_materialized_root(Some("rootfs"), manifest_hash)
+            .unwrap();
+
+        let generation_count = fs::read_dir(store.root().join(FS_TREE_REFS_DIR))
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("rootfs.")
+            })
+            .count();
+        assert_eq!(generation_count, 0);
+    }
+
+    #[test]
+    fn ensure_materialized_root_rotates_changed_fs_tree_ref() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_root = temp_dir.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = crate::Store::create(&store_root).unwrap();
+        let first_hash = import_scanned_manifest(&store, temp_dir.path(), "first", b"one\n");
+        let second_hash = import_scanned_manifest(&store, temp_dir.path(), "second", b"two\n");
+        assert_ne!(first_hash, second_hash);
+        let refs_dir = store.root().join(FS_TREE_REFS_DIR);
+
+        store
+            .fs_tree()
+            .ensure_materialized_root(Some("rootfs"), first_hash)
+            .unwrap();
+        store
+            .fs_tree()
+            .ensure_materialized_root(Some("rootfs"), second_hash)
+            .unwrap();
+
+        assert_eq!(
+            fs::read_link(refs_dir.join("rootfs")).unwrap(),
+            fs_tree_ref_target(second_hash)
+        );
+        let generations = fs::read_dir(&refs_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("rootfs.")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(generations.len(), 1);
+        assert_eq!(
+            fs::read_link(&generations[0]).unwrap(),
+            fs_tree_ref_target(first_hash)
+        );
+    }
+
+    #[test]
+    fn ensure_materialized_root_rejects_invalid_fs_tree_ref_name() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_root = temp_dir.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = crate::Store::create(&store_root).unwrap();
+        let manifest_hash = ObjectHash::from_str(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            store
+                .fs_tree()
+                .ensure_materialized_root(Some("bad/name"), manifest_hash),
+            Err(StoreError::InvalidInput(_))
+        ));
+        assert!(
+            store
+                .fs_tree()
+                .lookup_materialized_root(manifest_hash)
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -3019,7 +3299,7 @@ mod tests {
         assert_eq!(
             store
                 .fs_tree()
-                .ensure_materialized_root(manifest_hash)
+                .ensure_materialized_root(None, manifest_hash)
                 .unwrap(),
             root
         );
@@ -3061,7 +3341,7 @@ mod tests {
         assert!(
             store
                 .fs_tree()
-                .ensure_materialized_root(manifest_hash)
+                .ensure_materialized_root(None, manifest_hash)
                 .is_err()
         );
         assert!(

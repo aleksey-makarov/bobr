@@ -132,6 +132,9 @@ manifest.
 
 The runtime materializes a manifest object only when a builder input asks for a
 filesystem root. The cache path is `<store>/fs-trees/<manifest-object-hash>/`.
+For named materializations, the runtime also updates
+`<store>/fs-tree-refs/<name>` to point at that cache root. These refs are
+user-facing inspection aids; runtime cache lookup does not read them.
 Builders that only need to read or transform manifests, such as `TreeMerge`
 and `TreeSubset`, consume the manifest object directly and do not materialize
 the tree.

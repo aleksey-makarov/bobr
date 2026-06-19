@@ -11,6 +11,7 @@ use std::path::PathBuf;
 pub(crate) struct ResolvedDependency {
     pub(crate) object_hash: ObjectHash,
     pub(crate) object_path: PathBuf,
+    pub(crate) materialization_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -103,9 +104,12 @@ impl ResolvedInputs {
         for (name, value) in self.slots {
             let path = match spec.input_kind(&name).unwrap_or(InputKind::Object) {
                 InputKind::Object => value.object_path,
-                InputKind::FsTreeRoot => {
-                    prepare_fs_tree_root_input(store, runtime, value.object_hash)?
-                }
+                InputKind::FsTreeRoot => prepare_fs_tree_root_input(
+                    store,
+                    runtime,
+                    value.object_hash,
+                    value.materialization_name.as_deref(),
+                )?,
             };
             slots.insert(name, BuilderInputPath { path });
         }
@@ -117,15 +121,21 @@ fn prepare_fs_tree_root_input(
     store: &Store,
     runtime: &RuntimeProvider,
     object_hash: ObjectHash,
+    materialization_name: Option<&str>,
 ) -> Result<PathBuf, RuntimeError> {
     let fs_tree = store.fs_tree();
     if let Some(root) = fs_tree
         .lookup_materialized_root(object_hash)
         .map_err(map_store_error)?
     {
+        if let Some(name) = materialization_name {
+            fs_tree
+                .ensure_materialized_root(Some(name), object_hash)
+                .map_err(map_store_error)?;
+        }
         return Ok(root);
     }
-    materialize_fs_tree_root(runtime, fs_tree, object_hash).map_err(|error| {
+    materialize_fs_tree_root(runtime, fs_tree, object_hash, materialization_name).map_err(|error| {
         RuntimeError::Build(format!(
             "failed to materialize fs-tree input '{}': {error}",
             object_hash
@@ -149,6 +159,7 @@ mod tests {
             )
             .unwrap(),
             object_path: PathBuf::from("/tmp/object"),
+            materialization_name: Some("sample".to_string()),
         }
     }
 
@@ -265,6 +276,7 @@ mod tests {
             ResolvedDependency {
                 object_hash,
                 object_path: store.object_path(object_hash),
+                materialization_name: Some("source-tree".to_string()),
             },
         )]));
         static SPEC: InputSpec = InputSpec {
@@ -287,6 +299,12 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(fs::read(resolved.path.join("file")).unwrap(), b"hello\n");
+        assert_eq!(
+            fs::read_link(store_root.join("fs-tree-refs").join("source-tree")).unwrap(),
+            PathBuf::from("..")
+                .join("fs-trees")
+                .join(object_hash.to_string())
+        );
     }
 
     #[test]
@@ -304,13 +322,14 @@ mod tests {
         let object_hash = import_object(&store, &staged_manifest).unwrap();
         let root = store
             .fs_tree()
-            .ensure_materialized_root(object_hash)
+            .ensure_materialized_root(None, object_hash)
             .unwrap();
         let inputs = ResolvedInputs::new(BTreeMap::from([(
             "tree".to_string(),
             ResolvedDependency {
                 object_hash,
                 object_path: store.object_path(object_hash),
+                materialization_name: Some("cached-tree".to_string()),
             },
         )]));
         static SPEC: InputSpec = InputSpec {
@@ -324,6 +343,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(builder_inputs.required("tree").unwrap().path, root);
+        assert_eq!(
+            fs::read_link(store_root.join("fs-tree-refs").join("cached-tree")).unwrap(),
+            PathBuf::from("..")
+                .join("fs-trees")
+                .join(object_hash.to_string())
+        );
     }
 
     static ORDERED_SPEC: InputSpec = InputSpec {

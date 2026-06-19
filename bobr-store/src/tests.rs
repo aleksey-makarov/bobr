@@ -25,6 +25,10 @@ fn fs_trees_dir(store: &Store) -> PathBuf {
     store.root().join(crate::store::FS_TREES_DIR)
 }
 
+fn fs_tree_refs_dir(store: &Store) -> PathBuf {
+    store.root().join(crate::store::FS_TREE_REFS_DIR)
+}
+
 #[test]
 fn canonical_json_hash_is_stable_across_key_order() {
     let object_hash =
@@ -1219,6 +1223,7 @@ fn store_create_creates_full_layout() {
     assert!(layout.object_refs_dir().is_dir());
     assert!(fs_files_dir(&layout).is_dir());
     assert!(fs_trees_dir(&layout).is_dir());
+    assert!(fs_tree_refs_dir(&layout).is_dir());
     assert!(temp.path().join(LOGS_DIR).is_dir());
     assert!(temp.path().join(TMP_DIR).is_dir());
     assert!(layout.run_log_dir().is_dir());

@@ -10,6 +10,7 @@ pub fn materialize_fs_tree_root<R>(
     runtime: &R,
     fs_tree: FsTree,
     manifest_hash: ObjectHash,
+    name: Option<&str>,
 ) -> Result<PathBuf, RuntimeError>
 where
     R: Runtime,
@@ -19,6 +20,7 @@ where
         FsTreeMaterializeInput {
             fs_tree,
             manifest_hash,
+            name: name.map(str::to_string),
         },
     )?;
     Ok(output.root_path)
@@ -32,6 +34,8 @@ pub(crate) struct FsTreeMaterializeFunction;
 pub(crate) struct FsTreeMaterializeInput {
     pub fs_tree: FsTree,
     pub manifest_hash: ObjectHash,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +55,7 @@ impl RuntimeFunction for FsTreeMaterializeFunction {
     fn call(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {
         let root_path = input
             .fs_tree
-            .ensure_materialized_root(input.manifest_hash)
+            .ensure_materialized_root(input.name.as_deref(), input.manifest_hash)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
         Ok(FsTreeMaterializeOutput { root_path })
     }
@@ -84,6 +88,7 @@ mod tests {
             .call(FsTreeMaterializeInput {
                 fs_tree: store.fs_tree(),
                 manifest_hash,
+                name: Some("materialized-root".to_string()),
             })
             .unwrap();
 
@@ -96,5 +101,11 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(fs::read(output.root_path.join("file")).unwrap(), b"hello\n");
+        assert_eq!(
+            fs::read_link(store_root.join("fs-tree-refs").join("materialized-root")).unwrap(),
+            PathBuf::from("..")
+                .join("fs-trees")
+                .join(manifest_hash.to_string())
+        );
     }
 }
