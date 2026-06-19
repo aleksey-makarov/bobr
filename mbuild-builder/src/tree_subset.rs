@@ -6,29 +6,29 @@ use bobr_store::{
 use mbuild_core::{BuildLogLevel, BuilderError};
 use serde::Deserialize;
 
-pub struct TreeSubsetNewBuilder;
+pub struct TreeSubsetBuilder;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TreeSubsetNewConfig {
+pub struct TreeSubsetConfig {
     include: Vec<String>,
 }
 
-static TREE_SUBSET_NEW_SPEC: InputSpec = InputSpec {
+static TREE_SUBSET_SPEC: InputSpec = InputSpec {
     required_inputs: &[InputSlot::object("tree")],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
 
-impl TypedBuilder for TreeSubsetNewBuilder {
-    type Config = TreeSubsetNewConfig;
+impl TypedBuilder for TreeSubsetBuilder {
+    type Config = TreeSubsetConfig;
 
     fn tag(&self) -> &'static str {
         "TreeSubset"
     }
 
     fn spec(&self) -> &'static InputSpec {
-        &TREE_SUBSET_NEW_SPEC
+        &TREE_SUBSET_SPEC
     }
 
     fn build_typed(
@@ -42,14 +42,14 @@ impl TypedBuilder for TreeSubsetNewBuilder {
 }
 
 fn build_tree_subset(
-    config: TreeSubsetNewConfig,
+    config: TreeSubsetConfig,
     inputs: BuilderInputs,
     cx: &mut BuildContext,
 ) -> Result<StagedBuildResult, BuilderError> {
     let input = inputs.required("tree")?;
     let manifest = FsTreeManifest::read_canonical(&input.path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
-            "TreeSubset input 'tree' is not a valid fs-tree v2 manifest: {error}"
+            "TreeSubset input 'tree' is not a valid fs-tree manifest: {error}"
         ))
     })?;
 
@@ -63,7 +63,7 @@ fn build_tree_subset(
     );
 
     let subset = subset_manifest(&manifest, &config.include).map_err(map_subset_error)?;
-    let output_path = cx.temp_dir.join("fs-tree-subset-manifest-v2.jsonl");
+    let output_path = cx.temp_dir.join("fs-tree-subset-manifest.jsonl");
     subset.write_canonical(&output_path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
             "failed to write fs-tree subset manifest '{}': {error}",
@@ -141,14 +141,14 @@ mod tests {
 
     #[test]
     fn spec_requires_tree_input_only() {
-        assert_eq!(TypedBuilder::tag(&TreeSubsetNewBuilder), "TreeSubset");
-        assert_eq!(TREE_SUBSET_NEW_SPEC.required_inputs.len(), 1);
+        assert_eq!(TypedBuilder::tag(&TreeSubsetBuilder), "TreeSubset");
+        assert_eq!(TREE_SUBSET_SPEC.required_inputs.len(), 1);
         assert_eq!(
-            TREE_SUBSET_NEW_SPEC.required_inputs[0],
+            TREE_SUBSET_SPEC.required_inputs[0],
             InputSlot::object("tree")
         );
-        assert!(TREE_SUBSET_NEW_SPEC.optional_inputs.is_empty());
-        assert!(!TREE_SUBSET_NEW_SPEC.allow_extra_inputs);
+        assert!(TREE_SUBSET_SPEC.optional_inputs.is_empty());
+        assert!(!TREE_SUBSET_SPEC.allow_extra_inputs);
     }
 
     #[test]
@@ -167,9 +167,9 @@ mod tests {
             FsTreeEntry::symlink("etc/tool", 0, 0, "../usr/bin/tool"),
         ]);
 
-        let result = TreeSubsetNewBuilder
+        let result = TreeSubsetBuilder
             .build_typed(
-                TreeSubsetNewConfig {
+                TreeSubsetConfig {
                     include: vec!["usr/bin/*".to_string(), "etc/tool".to_string()],
                 },
                 inputs(vec![(
@@ -184,7 +184,7 @@ mod tests {
             result.staged_path,
             temp.path()
                 .join("tmp")
-                .join("fs-tree-subset-manifest-v2.jsonl")
+                .join("fs-tree-subset-manifest.jsonl")
         );
         assert!(result.object_hash.is_none());
         let subset = FsTreeManifest::read_canonical(&result.staged_path).unwrap();
@@ -211,9 +211,9 @@ mod tests {
             FsTreeEntry::file("usr/bin/tool", hash()),
         ]);
 
-        let result = TreeSubsetNewBuilder
+        let result = TreeSubsetBuilder
             .build_typed(
-                TreeSubsetNewConfig {
+                TreeSubsetConfig {
                     include: vec!["usr/bin/**".to_string()],
                 },
                 inputs(vec![(
@@ -240,9 +240,9 @@ mod tests {
         std::fs::create_dir(&cx.temp_dir).unwrap();
         let input = manifest(vec![root(), FsTreeEntry::file("a", hash())]);
 
-        let error = TreeSubsetNewBuilder
+        let error = TreeSubsetBuilder
             .build_typed(
-                TreeSubsetNewConfig { include: vec![] },
+                TreeSubsetConfig { include: vec![] },
                 inputs(vec![(
                     "tree",
                     write_manifest(temp.path(), "tree.jsonl", &input),
@@ -262,9 +262,9 @@ mod tests {
         std::fs::create_dir(&cx.temp_dir).unwrap();
         let input = manifest(vec![root(), FsTreeEntry::file("a", hash())]);
 
-        let error = TreeSubsetNewBuilder
+        let error = TreeSubsetBuilder
             .build_typed(
-                TreeSubsetNewConfig {
+                TreeSubsetConfig {
                     include: vec!["missing/**".to_string()],
                 },
                 inputs(vec![(
@@ -287,9 +287,9 @@ mod tests {
         let invalid_path = temp.path().join("invalid.jsonl");
         std::fs::write(&invalid_path, b"not a manifest\n").unwrap();
 
-        let error = TreeSubsetNewBuilder
+        let error = TreeSubsetBuilder
             .build_typed(
-                TreeSubsetNewConfig {
+                TreeSubsetConfig {
                     include: vec!["**".to_string()],
                 },
                 inputs(vec![("tree", BuilderInputPath { path: invalid_path })]),
@@ -305,7 +305,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
 
-        let error = TreeSubsetNewBuilder
+        let error = TreeSubsetBuilder
             .build_erased(
                 serde_json::json!({"include": ["**"], "extra": true}),
                 BuilderInputs::empty(),

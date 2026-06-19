@@ -7,10 +7,10 @@ OCI and rootfs-backed execution path consists of:
 
 - `Source` with `origin.tag = "OciRegistry"`: import one pinned external
   image from a registry into the store as an OCI image layout directory
-- `OciExtract`: extract one OCI image layout input into an fs-tree manifest v2
+- `OciExtract`: extract one OCI image layout input into an fs-tree manifest
   object
 - `Sandbox`: execute an explicit step plan against a readonly rootfs
-  materialized from an fs-tree manifest v2 input with the `bobr-runtime`
+  materialized from an fs-tree manifest input with the `bobr-runtime`
   sandbox function and `bobr-sandbox-launcher`
 
 There is no active builder for producing derived OCI image layouts from fs-tree
@@ -55,11 +55,11 @@ Current behavior:
 ## `OciExtract`
 
 `OciExtract` accepts one `image` input that resolves to an OCI layout
-directory. It extracts the image root filesystem into an fs-tree v2 manifest
+directory. It extracts the image root filesystem into an fs-tree manifest
 object:
 
 ```text
-<canonical fs-tree v2 manifest JSONL>
+<canonical fs-tree manifest JSONL>
 ```
 
 The manifest carries required file content hashes, symlink targets, logical
@@ -73,11 +73,11 @@ The result can be consumed by `TreeMerge`, `ErofsRootfs`, `Initramfs`, or
 
 `Sandbox` accepts:
 
-- required `rootfs`: one fs-tree manifest v2 object materialized as the
+- required `rootfs`: one fs-tree manifest object materialized as the
   readonly root filesystem before builder execution
 - extra named inputs mounted read-only under `/__mbuild/inputs/<name>`
 
-The `rootfs` input must be a valid fs-tree manifest v2 object. Runtime
+The `rootfs` input must be a valid fs-tree manifest object. Runtime
 materializes it under `<store>/fs-trees/<manifest-object-hash>/` and passes the
 materialized root to `Sandbox`.
 
@@ -154,7 +154,7 @@ Example:
 }
 ```
 
-The published `Sandbox` result is an fs-tree manifest v2 object.
+The published `Sandbox` result is an fs-tree manifest object.
 
 Package-aware synthetic recipe helpers lower to `Sandbox`:
 
@@ -201,5 +201,5 @@ The common native toolchain is `linux_headers`, `glibc`, `binutils`, `gcc`,
 - `Source/OciRegistry` currently selects only `linux/amd64`
 - `mbuild` does not currently provide a builder for producing derived OCI
   image layouts from fs-tree inputs
-- Rust-side `Sandbox` requests require a prepared fs-tree manifest v2 rootfs
+- Rust-side `Sandbox` requests require a prepared fs-tree manifest rootfs
   object; the runtime materializes it before sandbox execution

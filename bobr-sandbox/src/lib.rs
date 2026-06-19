@@ -1,7 +1,7 @@
-//! New sandbox builder backed by `bobr-runtime`.
+//! Sandbox builder backed by `bobr-runtime`.
 //!
 //! It provides the `Sandbox` builder that executes `bobr-sandbox-launcher`
-//! through a `bobr-runtime` function and publishes fs-tree v2 manifests.
+//! through a `bobr-runtime` function and publishes fs-tree manifests.
 
 mod lifecycle;
 mod mounts;
@@ -33,17 +33,17 @@ const OUTPUT_DIR_NAME: &str = "out";
 const CONFIG_DIR_NAME: &str = "config";
 const RUNTIME_DIR_NAME: &str = "runtime";
 const STEP_LOG_DIR_NAME: &str = "step-logs";
-const OUTPUT_MANIFEST_NAME: &str = "sandbox-fs-tree-v2.jsonl";
+const OUTPUT_MANIFEST_NAME: &str = "sandbox-fs-tree.jsonl";
 
 /// Builder implementation registered for recipe nodes tagged `Sandbox`.
-pub struct SandboxNewBuilder;
+pub struct SandboxBuilder;
 
 /// Static `Sandbox` builder class used by explicit registries.
-pub static SANDBOX_NEW_BUILDER: SandboxNewBuilder = SandboxNewBuilder;
+pub static SANDBOX_BUILDER: SandboxBuilder = SandboxBuilder;
 
 /// Registers the `Sandbox` builder into an explicit builder registry.
 pub fn register_builders(registry: &mut BuilderRegistry) -> Result<(), String> {
-    registry.register(&SANDBOX_NEW_BUILDER)
+    registry.register(&SANDBOX_BUILDER)
 }
 
 /// Return runtime functions supported by `bobr-sandbox`.
@@ -54,10 +54,10 @@ pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
 /// Recipe-facing `Sandbox` builder config.
 ///
 /// This shape intentionally matches the existing `Sandbox` config. The input
-/// contract differs: `rootfs` is a materialized fs-tree v2 root.
+/// contract differs: `rootfs` is a materialized fs-tree root.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SandboxNewConfig {
+pub struct SandboxConfig {
     /// Optional tree of config files exposed to build steps.
     #[serde(default)]
     script_config: Option<Value>,
@@ -83,21 +83,21 @@ struct BuildStep {
     env: Map<String, Value>,
 }
 
-static SANDBOX_NEW_SPEC: InputSpec = InputSpec {
+static SANDBOX_SPEC: InputSpec = InputSpec {
     required_inputs: &[InputSlot::fs_tree_root("rootfs")],
     optional_inputs: &[],
     allow_extra_inputs: true,
 };
 
-impl TypedBuilder for SandboxNewBuilder {
-    type Config = SandboxNewConfig;
+impl TypedBuilder for SandboxBuilder {
+    type Config = SandboxConfig;
 
     fn tag(&self) -> &'static str {
         "Sandbox"
     }
 
     fn spec(&self) -> &'static InputSpec {
-        &SANDBOX_NEW_SPEC
+        &SANDBOX_SPEC
     }
 
     fn build_typed(
@@ -106,12 +106,12 @@ impl TypedBuilder for SandboxNewBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
-        build_sandbox_new(config, inputs, cx)
+        build_sandbox(config, inputs, cx)
     }
 }
 
-fn build_sandbox_new(
-    config: SandboxNewConfig,
+fn build_sandbox(
+    config: SandboxConfig,
     inputs: BuilderInputs,
     cx: &mut BuildContext,
 ) -> Result<StagedBuildResult, BuilderError> {
@@ -121,7 +121,7 @@ fn build_sandbox_new(
     let fs_tree = cx.fs_tree()?;
 
     let extra_inputs =
-        collect_extra_inputs(&SANDBOX_NEW_SPEC, "Sandbox", &inputs).map_err(map_error)?;
+        collect_extra_inputs(&SANDBOX_SPEC, "Sandbox", &inputs).map_err(map_error)?;
     validate_step_interpolations(&config.steps, &extra_inputs).map_err(map_error)?;
 
     let launcher_path = tools::resolve_and_preflight_sandbox_launcher()
@@ -153,7 +153,7 @@ fn build_sandbox_new(
 }
 
 fn prepare_sandbox_input(
-    config: &SandboxNewConfig,
+    config: &SandboxConfig,
     rootfs: PathBuf,
     extra_inputs: Vec<(String, BuilderInputPath)>,
     cx: &BuildContext,
@@ -325,7 +325,7 @@ fn write_build_report(cx: &BuildContext, output: &SandboxOutput) {
             BuildLogLevel::Info,
             "sandbox-result",
             format!(
-                "sandbox wrote fs-tree v2 manifest with {} entries",
+                "sandbox wrote fs-tree manifest with {} entries",
                 output.entries
             ),
             None,
@@ -368,7 +368,7 @@ fn map_error(error: SandboxError) -> BuilderError {
 }
 
 /// Validate the full recipe-facing config before host paths are prepared.
-fn validate_sandbox_config(config: &SandboxNewConfig) -> Result<(), SandboxError> {
+fn validate_sandbox_config(config: &SandboxConfig) -> Result<(), SandboxError> {
     validate_script_config(config.script_config.as_ref())?;
     validate_steps(&config.steps)
 }
@@ -969,8 +969,8 @@ mod tests {
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 
-    fn valid_config() -> SandboxNewConfig {
-        SandboxNewConfig {
+    fn valid_config() -> SandboxConfig {
+        SandboxConfig {
             script_config: None,
             steps: vec![BuildStep {
                 name: "build".to_string(),
@@ -991,14 +991,14 @@ mod tests {
 
     #[test]
     fn spec_requires_fs_tree_root_rootfs_and_allows_extra_inputs() {
-        assert_eq!(TypedBuilder::tag(&SandboxNewBuilder), "Sandbox");
-        assert_eq!(SANDBOX_NEW_SPEC.required_inputs.len(), 1);
+        assert_eq!(TypedBuilder::tag(&SandboxBuilder), "Sandbox");
+        assert_eq!(SANDBOX_SPEC.required_inputs.len(), 1);
         assert_eq!(
-            SANDBOX_NEW_SPEC.required_inputs[0],
+            SANDBOX_SPEC.required_inputs[0],
             InputSlot::fs_tree_root("rootfs")
         );
-        assert!(SANDBOX_NEW_SPEC.optional_inputs.is_empty());
-        assert!(SANDBOX_NEW_SPEC.allow_extra_inputs);
+        assert!(SANDBOX_SPEC.optional_inputs.is_empty());
+        assert!(SANDBOX_SPEC.allow_extra_inputs);
     }
 
     #[test]
@@ -1014,7 +1014,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
 
-        let error = SandboxNewBuilder
+        let error = SandboxBuilder
             .build_erased(
                 json!({"steps": [], "unexpected": true}),
                 BuilderInputs::empty(),
@@ -1032,9 +1032,9 @@ mod tests {
         fs::create_dir(&rootfs).unwrap();
         let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
 
-        let error = SandboxNewBuilder
+        let error = SandboxBuilder
             .build_typed(
-                SandboxNewConfig {
+                SandboxConfig {
                     script_config: None,
                     steps: Vec::new(),
                 },
@@ -1061,7 +1061,7 @@ mod tests {
         let source = temp.path().join("source");
         fs::create_dir(&rootfs).unwrap();
         fs::create_dir(&source).unwrap();
-        let config = SandboxNewConfig {
+        let config = SandboxConfig {
             script_config: Some(json!({"args": ["--flag"], "env": {"CC": "cc"}})),
             steps: vec![BuildStep {
                 name: "compile/test".to_string(),
@@ -1075,7 +1075,7 @@ mod tests {
             BuildContext::with_noop_logger(temp.path().join("tmp")).with_fs_tree(store.fs_tree());
         fs::create_dir(&cx.temp_dir).unwrap();
         let extra_inputs = collect_extra_inputs(
-            &SANDBOX_NEW_SPEC,
+            &SANDBOX_SPEC,
             "Sandbox",
             &BuilderInputs::new(BTreeMap::from([
                 (
@@ -1102,7 +1102,7 @@ mod tests {
         assert_eq!(input.rootfs, rootfs);
         assert_eq!(
             output_manifest,
-            temp.path().join("tmp").join("sandbox-fs-tree-v2.jsonl")
+            temp.path().join("tmp").join("sandbox-fs-tree.jsonl")
         );
         assert_eq!(input.steps.len(), 1);
         assert_eq!(
@@ -1130,7 +1130,7 @@ mod tests {
         fs::create_dir(&rootfs).unwrap();
         let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
 
-        let error = SandboxNewBuilder
+        let error = SandboxBuilder
             .build_typed(valid_config(), inputs(rootfs), &mut cx)
             .unwrap_err();
 
@@ -1147,7 +1147,7 @@ mod tests {
         let rootfs = temp.path().join("missing-rootfs");
         let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
 
-        let error = SandboxNewBuilder
+        let error = SandboxBuilder
             .build_typed(valid_config(), inputs(rootfs), &mut cx)
             .unwrap_err();
 

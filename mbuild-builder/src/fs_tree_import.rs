@@ -38,7 +38,7 @@ impl TypedBuilder for FsTreeImportBuilder {
     ) -> Result<StagedBuildResult, BuilderError> {
         let source_root = inputs.required("input")?.path.clone();
         let fs_tree = cx.fs_tree()?;
-        let output_manifest = cx.temp_dir.join("fs-tree-manifest-v2.jsonl");
+        let output_manifest = cx.temp_dir.join("fs-tree-manifest.jsonl");
 
         cx.log_event(
             BuildLogLevel::Info,
@@ -175,7 +175,7 @@ mod tests {
 
         assert_eq!(
             result.staged_path,
-            temp.path().join("tmp").join("fs-tree-manifest-v2.jsonl")
+            temp.path().join("tmp").join("fs-tree-manifest.jsonl")
         );
         assert!(result.object_hash.is_none());
         let manifest = FsTreeManifest::read_canonical(&result.staged_path).unwrap();

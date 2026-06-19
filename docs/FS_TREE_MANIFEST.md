@@ -1,8 +1,8 @@
-# fs-tree Manifest v2
+# fs-tree Manifest
 
 ## Summary
 
-`fs-tree manifest v2` is the canonical manifest format for manifest-addressed
+`fs-tree manifest` is the canonical manifest format for manifest-addressed
 filesystem trees. It describes filesystem tree structure, directory metadata,
 symlink metadata, and references to regular file payloads stored in
 `<store>/fs-files/`.
@@ -18,13 +18,13 @@ builders such as `FsTreeImport`, `OciExtract`, `TreeMerge`, `TreeSubset`, and
 The manifest is UTF-8 JSON Lines. The first line is a mandatory schema header:
 
 ```json
-{"schema":"bobr-fs-tree-manifest-v2"}
+{"schema":"bobr-fs-tree-manifest"}
 ```
 
 Each following line is one filesystem entry:
 
 ```jsonl
-{"schema":"bobr-fs-tree-manifest-v2"}
+{"schema":"bobr-fs-tree-manifest"}
 {"p":"","t":"d","u":0,"g":0,"m":493}
 {"p":"bin","t":"d","u":0,"g":0,"m":493}
 {"p":"bin/tool","t":"f","h":"1111111111111111111111111111111111111111111111111111111111111111"}
@@ -60,7 +60,7 @@ Regular file entry:
 - `h`: opaque future fs-file object hash, encoded as exactly 64 lowercase hex
   digits.
 
-Regular file bytes, uid, gid, and mode are not stored in manifest v2. They are
+Regular file bytes, uid, gid, and mode are not stored in manifest. They are
 part of the referenced fs-file object. The fs-file hash algorithm is not
 defined by this document.
 
@@ -84,7 +84,7 @@ are stored directly in the manifest.
 The schema header must be byte-for-byte canonical:
 
 ```json
-{"schema":"bobr-fs-tree-manifest-v2"}
+{"schema":"bobr-fs-tree-manifest"}
 ```
 
 Filesystem entries are sorted by path bytes after UTF-8 encoding. The root
@@ -138,10 +138,10 @@ the tree.
 
 ## Scope Boundaries
 
-Manifest v2 intentionally does not preserve original inode topology. Future
+Manifest intentionally does not preserve original inode topology. Future
 materialization may hardlink equal fs-file objects to the same inode. `st_ino`
 and `st_nlink` are not semantic fs-tree identity.
 
-The first manifest v2 implementation does not model xattrs, POSIX ACLs, or
+The first manifest implementation does not model xattrs, POSIX ACLs, or
 file capabilities. Those must be added before claiming complete Linux rootfs
 metadata preservation.

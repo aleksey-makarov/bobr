@@ -130,9 +130,9 @@ The filesystem layout mirrors the identity model:
 - `object-record-refs/` holds human-facing refs from publication name to object
   record.
 - `object-refs/` holds human-facing refs from publication name to payload.
-- `fs-files/` holds regular-file payloads referenced by fs-tree manifest v2
+- `fs-files/` holds regular-file payloads referenced by fs-tree manifest
   objects.
-- `fs-trees/` caches materialized filesystem roots for fs-tree manifest v2
+- `fs-trees/` caches materialized filesystem roots for fs-tree manifest
   objects.
 
 `objects/<object_hash>` is the payload itself, either a file or a directory.
@@ -140,7 +140,7 @@ Concrete directory payload formats are builder-specific. For example, the
 OCI registry source handler realizes imported images as OCI image layout
 directories.
 
-Filesystem tree builder results store a canonical fs-tree manifest v2 text file
+Filesystem tree builder results store a canonical fs-tree manifest text file
 as the object payload. Regular file entries in that manifest reference payloads
 stored under `fs-files/`. Materialized roots under `fs-trees/` are cache
 entries created on demand for builders that need a filesystem root path.

@@ -179,7 +179,7 @@ The store layout is content-addressed:
 
 - `<store>/objects/` stores payload objects by `object_hash`
 - `<store>/fs-files/` stores regular-file payloads referenced by fs-tree
-  manifest v2 objects
+  manifest objects
 - `<store>/fs-trees/` caches materialized fs-tree roots by manifest
   `object_hash`
 - `<store>/object-records/` stores canonical object records by `object_hash`
@@ -189,7 +189,7 @@ The store layout is content-addressed:
 
 `<store>/object-refs/<name>` always points at
 `../objects/<object_hash>`, regardless of object kind. Filesystem tree builder
-results store the canonical fs-tree manifest v2 text as the object payload.
+results store the canonical fs-tree manifest text as the object payload.
 Referenced regular-file payloads live under `<store>/fs-files/`, and
 materialized roots under `<store>/fs-trees/` are cache entries rather than
 publication targets.

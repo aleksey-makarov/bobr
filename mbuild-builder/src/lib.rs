@@ -12,17 +12,17 @@ mod tree_merge;
 mod tree_subset;
 
 pub use builder::*;
-pub use erofs::{ErofsRootfsNewBuilder, ErofsRootfsNewConfig};
+pub use erofs::{ErofsRootfsBuilder, ErofsRootfsConfig};
 pub use fs_tree_import::{FsTreeImportBuilder, FsTreeImportConfig};
 pub use fs_tree_materialize::materialize_fs_tree_root;
 pub use group::{GroupBuilder, GroupConfig};
-pub use initramfs::{InitramfsNewBuilder, InitramfsNewConfig};
-pub use oci_extract::{OciExtractNewBuilder, OciExtractNewConfig};
+pub use initramfs::{InitramfsBuilder, InitramfsConfig};
+pub use oci_extract::{OciExtractBuilder, OciExtractConfig};
 pub use registry::{BuilderRegistry, register_in_tree_builders};
 pub use subject::{BuilderPlanError, BuilderPlannedSubject};
-pub use tree::{TreeNewBuilder, TreeNewConfig};
-pub use tree_merge::{TreeMergeNewBuilder, TreeMergeNewConfig};
-pub use tree_subset::{TreeSubsetNewBuilder, TreeSubsetNewConfig};
+pub use tree::{TreeBuilder, TreeConfig};
+pub use tree_merge::{TreeMergeBuilder, TreeMergeConfig};
+pub use tree_subset::{TreeSubsetBuilder, TreeSubsetConfig};
 
 /// Return runtime functions supported by built-in builders.
 pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {

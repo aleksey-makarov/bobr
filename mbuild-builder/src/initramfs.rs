@@ -16,27 +16,27 @@ const S_IFDIR: u32 = 0o040000;
 const S_IFLNK: u32 = 0o120000;
 const SYMLINK_MODE: u32 = 0o777;
 
-pub struct InitramfsNewBuilder;
+pub struct InitramfsBuilder;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct InitramfsNewConfig {}
+pub struct InitramfsConfig {}
 
-static INITRAMFS_NEW_SPEC: InputSpec = InputSpec {
+static INITRAMFS_SPEC: InputSpec = InputSpec {
     required_inputs: &[InputSlot::fs_tree_root("tree")],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
 
-impl TypedBuilder for InitramfsNewBuilder {
-    type Config = InitramfsNewConfig;
+impl TypedBuilder for InitramfsBuilder {
+    type Config = InitramfsConfig;
 
     fn tag(&self) -> &'static str {
         "Initramfs"
     }
 
     fn spec(&self) -> &'static InputSpec {
-        &INITRAMFS_NEW_SPEC
+        &INITRAMFS_SPEC
     }
 
     fn build_typed(
@@ -514,12 +514,12 @@ mod tests {
 
     #[test]
     fn input_spec_is_single_fs_tree_root_input() {
-        assert_eq!(TypedBuilder::tag(&InitramfsNewBuilder), "Initramfs");
+        assert_eq!(TypedBuilder::tag(&InitramfsBuilder), "Initramfs");
         assert_eq!(
-            INITRAMFS_NEW_SPEC.required_inputs,
+            INITRAMFS_SPEC.required_inputs,
             &[InputSlot::fs_tree_root("tree")]
         );
-        assert!(!INITRAMFS_NEW_SPEC.allow_extra_inputs);
+        assert!(!INITRAMFS_SPEC.allow_extra_inputs);
     }
 
     #[test]
@@ -527,8 +527,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
 
-        let error = InitramfsNewBuilder
-            .build_typed(InitramfsNewConfig {}, BuilderInputs::empty(), &mut cx)
+        let error = InitramfsBuilder
+            .build_typed(InitramfsConfig {}, BuilderInputs::empty(), &mut cx)
             .unwrap_err();
 
         assert!(error.to_string().contains("required input slot 'tree'"));
@@ -650,7 +650,7 @@ mod tests {
 
     #[test]
     fn build_rejects_unknown_config_field() {
-        let error = InitramfsNewBuilder
+        let error = InitramfsBuilder
             .build_erased(
                 serde_json::json!({"extra": true}),
                 BuilderInputs::empty(),

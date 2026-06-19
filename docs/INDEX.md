@@ -25,5 +25,5 @@
 6. [Filesystem Object Hashing](./FSOBJ_HASH.md)
    Structural hashing rules shared by filesystem paths and tar archives.
 
-7. [fs-tree Manifest v2](./FS_TREE_MANIFEST_V2.md)
+7. [fs-tree Manifest](./FS_TREE_MANIFEST.md)
    Canonical manifest format for manifest-addressed fs-tree artifacts.

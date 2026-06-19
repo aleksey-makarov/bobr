@@ -3,19 +3,19 @@
 ## Summary
 
 `mbuild` currently implements filesystem-related builders around fs-tree
-manifest v2:
+manifest:
 
 - `Tree`: realize generated text files, symlinks, and directories as one plain
   file object or one ordinary directory object
 - `FsTreeImport`: import one ordinary directory object into an fs-tree manifest
-  v2 object using install rules
-- `TreeSubset`: select a subset of one fs-tree manifest v2 object
-- `TreeMerge`: merge two or more fs-tree manifest v2 objects
-- `OciExtract`: extract one OCI image layout into an fs-tree manifest v2 object
+  object using install rules
+- `TreeSubset`: select a subset of one fs-tree manifest object
+- `TreeMerge`: merge two or more fs-tree manifest objects
+- `OciExtract`: extract one OCI image layout into an fs-tree manifest object
 - `ErofsRootfs`: build one EROFS image from one fs-tree input
 - `Initramfs`: build one Linux `newc` initramfs image from one fs-tree input
 
-An fs-tree manifest v2 object is a normal store object whose payload is the
+An fs-tree manifest object is a normal store object whose payload is the
 canonical manifest text. Regular file payloads referenced by that manifest live
 in `<store>/fs-files/`. When a builder asks for a filesystem root rather than
 the manifest file, the runtime materializes the manifest into the cache under
@@ -102,12 +102,12 @@ Inputs:
 Current behavior:
 
 - imports the input directory into `<store>/fs-files/`
-- writes one canonical fs-tree manifest v2 object
+- writes one canonical fs-tree manifest object
 - evaluates install rules in order; later matching rules override earlier
   attributes field-by-field
 - directory, regular file, and executable file modes are represented by install
   attributes
-- symlink mode is not represented by fs-tree manifest v2
+- symlink mode is not represented by fs-tree manifest
 - runs as a `bobr-runtime` namespace function because importing needs
   namespace-root access to ownership metadata
 
@@ -121,7 +121,7 @@ Current behavior:
 
 Inputs:
 
-- two or more named fs-tree manifest v2 inputs
+- two or more named fs-tree manifest inputs
 - input order follows the standard builder input order: required inputs,
   optional inputs, then extra inputs in lexical input-name order
 
@@ -134,7 +134,7 @@ Current behavior:
 - allows duplicate symlink paths only when `uid`, `gid`, and target match
 - rejects file-vs-directory, symlink-vs-directory, and parent/child leaf
   conflicts
-- writes one canonical fs-tree manifest v2 object
+- writes one canonical fs-tree manifest object
 
 `TreeMerge` is manifest-only; it does not materialize the input trees.
 
@@ -153,7 +153,7 @@ Current behavior:
 
 Inputs:
 
-- required `tree`: one fs-tree manifest v2 object
+- required `tree`: one fs-tree manifest object
 
 Current behavior:
 
@@ -167,7 +167,7 @@ Current behavior:
   directories
 - selecting a directory directly includes only that directory; recursive
   selection requires a pattern such as `dir/**`
-- writes one canonical fs-tree manifest v2 object
+- writes one canonical fs-tree manifest object
 
 `TreeSubset` is manifest-only; it does not materialize the input tree.
 
@@ -184,7 +184,7 @@ Current behavior:
 
 Inputs:
 
-- required `tree`: one fs-tree manifest v2 object, materialized by the runtime
+- required `tree`: one fs-tree manifest object, materialized by the runtime
   before builder execution
 
 Current behavior:
@@ -215,7 +215,7 @@ Config fields:
 
 Inputs:
 
-- required `tree`: one fs-tree manifest v2 object, materialized by the runtime
+- required `tree`: one fs-tree manifest object, materialized by the runtime
   before builder execution
 
 Current behavior:
@@ -236,7 +236,7 @@ initramfs archive suitable for Linux `-initrd` users such as QEMU.
 
 ## Current Limitations
 
-Fs-tree manifest v2 currently supports:
+Fs-tree manifest currently supports:
 
 - regular files
 - directories

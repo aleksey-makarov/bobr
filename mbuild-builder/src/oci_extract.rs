@@ -23,16 +23,16 @@ use std::path::{Path, PathBuf};
 use tar::{Archive, EntryType};
 use tracing::warn;
 
-const OUTPUT_MANIFEST_FILE_NAME: &str = "fs-tree-manifest-v2.jsonl";
+const OUTPUT_MANIFEST_FILE_NAME: &str = "fs-tree-manifest.jsonl";
 const EXTRACT_ROOT_DIR_NAME: &str = "oci-extract-root";
 const MEDIA_TYPE_DOCKER_LAYER_GZIP: &str = "application/vnd.docker.image.rootfs.diff.tar.gzip";
 const MEDIA_TYPE_OCI_LAYER_TAR: &str = "application/vnd.oci.image.layer.v1.tar";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OciExtractNewConfig {}
+pub struct OciExtractConfig {}
 
-pub struct OciExtractNewBuilder;
+pub struct OciExtractBuilder;
 
 static OCI_EXTRACT_SPEC: InputSpec = InputSpec {
     required_inputs: &[InputSlot::object("image")],
@@ -40,8 +40,8 @@ static OCI_EXTRACT_SPEC: InputSpec = InputSpec {
     allow_extra_inputs: false,
 };
 
-impl TypedBuilder for OciExtractNewBuilder {
-    type Config = OciExtractNewConfig;
+impl TypedBuilder for OciExtractBuilder {
+    type Config = OciExtractConfig;
 
     fn tag(&self) -> &'static str {
         "OciExtract"
@@ -61,10 +61,10 @@ impl TypedBuilder for OciExtractNewBuilder {
     }
 }
 
-impl OciExtractNewBuilder {
+impl OciExtractBuilder {
     fn build_typed_inner(
         &self,
-        _config: OciExtractNewConfig,
+        _config: OciExtractConfig,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
@@ -85,7 +85,7 @@ impl OciExtractNewBuilder {
             BuildLogLevel::Info,
             "extract",
             format!(
-                "extracting OCI image '{}' into fs-tree v2",
+                "extracting OCI image '{}' into fs-tree",
                 image.path.display()
             ),
         );
@@ -948,7 +948,7 @@ mod tests {
     use super::*;
     use crate::{Builder, BuilderInputPath, TypedBuilder};
     use bobr_store::Store;
-    use bobr_store::fs_tree::{FsTreeEntry as FsTreeV2Entry, FsTreeManifest as FsTreeV2Manifest};
+    use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use sha2::{Digest, Sha256};
@@ -959,7 +959,7 @@ mod tests {
 
     #[test]
     fn input_spec_is_registered_shape() {
-        assert_eq!(TypedBuilder::tag(&OciExtractNewBuilder), "OciExtract");
+        assert_eq!(TypedBuilder::tag(&OciExtractBuilder), "OciExtract");
         assert_eq!(
             OCI_EXTRACT_SPEC.required_inputs,
             &[InputSlot::object("image")]
@@ -1150,7 +1150,7 @@ mod tests {
     }
 
     #[test]
-    fn builder_imports_as_fs_tree_v2_manifest() {
+    fn builder_imports_as_fs_tree_manifest() {
         let temp = tempdir().unwrap();
         let store_root = temp.path().join("store");
         fs::create_dir(&store_root).unwrap();
@@ -1185,8 +1185,8 @@ mod tests {
         let mut inputs = BuilderInputs::empty();
         inputs.insert("image", BuilderInputPath { path: oci });
 
-        let result = OciExtractNewBuilder
-            .build_typed(OciExtractNewConfig {}, inputs, &mut cx)
+        let result = OciExtractBuilder
+            .build_typed(OciExtractConfig {}, inputs, &mut cx)
             .unwrap();
         assert_eq!(
             result.staged_path,
@@ -1195,20 +1195,20 @@ mod tests {
         assert!(result.object_hash.is_none());
         assert!(!temp.path().join("tmp").join(EXTRACT_ROOT_DIR_NAME).exists());
 
-        let manifest = FsTreeV2Manifest::read_canonical(&result.staged_path).unwrap();
-        assert!(manifest.entries().contains(&FsTreeV2Entry::directory(
+        let manifest = FsTreeManifest::read_canonical(&result.staged_path).unwrap();
+        assert!(manifest.entries().contains(&FsTreeEntry::directory(
             "",
             owner.uid(),
             owner.gid(),
             0o755,
         )));
-        assert!(manifest.entries().contains(&FsTreeV2Entry::directory(
+        assert!(manifest.entries().contains(&FsTreeEntry::directory(
             "bin",
             owner.uid(),
             owner.gid(),
             0o755,
         )));
-        assert!(manifest.entries().contains(&FsTreeV2Entry::symlink(
+        assert!(manifest.entries().contains(&FsTreeEntry::symlink(
             "tool-link",
             owner.uid(),
             owner.gid(),
@@ -1218,7 +1218,7 @@ mod tests {
             .entries()
             .iter()
             .find_map(|entry| match entry {
-                FsTreeV2Entry::File { path, hash } if path == "bin/tool" => Some(*hash),
+                FsTreeEntry::File { path, hash } if path == "bin/tool" => Some(*hash),
                 _ => None,
             })
             .expect("tool file entry");
@@ -1279,7 +1279,7 @@ mod tests {
         let image = create_oci_layout(temp.path(), vec![]);
         inputs.insert("image", BuilderInputPath { path: image });
 
-        let error = OciExtractNewBuilder
+        let error = OciExtractBuilder
             .build_erased(serde_json::json!({ "unexpected": true }), inputs, &mut cx)
             .unwrap_err();
 

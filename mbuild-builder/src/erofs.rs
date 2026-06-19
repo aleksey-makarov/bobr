@@ -11,32 +11,32 @@ use std::process::Command;
 
 const OUTPUT_FILE_NAME: &str = "erofs-rootfs.erofs";
 
-pub struct ErofsRootfsNewBuilder;
+pub struct ErofsRootfsBuilder;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ErofsRootfsNewConfig {
+pub struct ErofsRootfsConfig {
     #[serde(default)]
     pub compression: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
 }
 
-static EROFS_ROOTFS_NEW_SPEC: InputSpec = InputSpec {
+static EROFS_ROOTFS_SPEC: InputSpec = InputSpec {
     required_inputs: &[InputSlot::fs_tree_root("tree")],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
 
-impl TypedBuilder for ErofsRootfsNewBuilder {
-    type Config = ErofsRootfsNewConfig;
+impl TypedBuilder for ErofsRootfsBuilder {
+    type Config = ErofsRootfsConfig;
 
     fn tag(&self) -> &'static str {
         "ErofsRootfs"
     }
 
     fn spec(&self) -> &'static InputSpec {
-        &EROFS_ROOTFS_NEW_SPEC
+        &EROFS_ROOTFS_SPEC
     }
 
     fn build_typed(
@@ -84,7 +84,7 @@ impl TypedBuilder for ErofsRootfsNewBuilder {
     }
 }
 
-fn validate_erofs_config(config: &ErofsRootfsNewConfig) -> Result<(), BuilderError> {
+fn validate_erofs_config(config: &ErofsRootfsConfig) -> Result<(), BuilderError> {
     if matches!(config.compression.as_deref(), Some("")) {
         return Err(BuilderError::InvalidRecipe(
             "invalid builder config: compression must be null or a non-empty string".to_string(),
@@ -258,12 +258,12 @@ mod tests {
 
     #[test]
     fn input_spec_is_single_tree_input() {
-        assert_eq!(TypedBuilder::tag(&ErofsRootfsNewBuilder), "ErofsRootfs");
+        assert_eq!(TypedBuilder::tag(&ErofsRootfsBuilder), "ErofsRootfs");
         assert_eq!(
-            EROFS_ROOTFS_NEW_SPEC.required_inputs,
+            EROFS_ROOTFS_SPEC.required_inputs,
             &[InputSlot::fs_tree_root("tree")]
         );
-        assert!(!EROFS_ROOTFS_NEW_SPEC.allow_extra_inputs);
+        assert!(!EROFS_ROOTFS_SPEC.allow_extra_inputs);
     }
 
     #[test]
@@ -271,9 +271,9 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
 
-        let error = ErofsRootfsNewBuilder
+        let error = ErofsRootfsBuilder
             .build_typed(
-                ErofsRootfsNewConfig {
+                ErofsRootfsConfig {
                     compression: None,
                     label: None,
                 },
@@ -297,9 +297,9 @@ mod tests {
             },
         );
 
-        let error = ErofsRootfsNewBuilder
+        let error = ErofsRootfsBuilder
             .build_typed(
-                ErofsRootfsNewConfig {
+                ErofsRootfsConfig {
                     compression: Some(String::new()),
                     label: None,
                 },
@@ -309,9 +309,9 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("compression"));
 
-        let error = ErofsRootfsNewBuilder
+        let error = ErofsRootfsBuilder
             .build_typed(
-                ErofsRootfsNewConfig {
+                ErofsRootfsConfig {
                     compression: None,
                     label: Some(String::new()),
                 },

@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TreeNewConfig {
+pub struct TreeConfig {
     tree: TreePayload,
 }
 
@@ -76,23 +76,23 @@ enum OutputKind {
     Directory,
 }
 
-pub struct TreeNewBuilder;
+pub struct TreeBuilder;
 
-static TREE_NEW_SPEC: InputSpec = InputSpec {
+static TREE_SPEC: InputSpec = InputSpec {
     required_inputs: &[],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
 
-impl TypedBuilder for TreeNewBuilder {
-    type Config = TreeNewConfig;
+impl TypedBuilder for TreeBuilder {
+    type Config = TreeConfig;
 
     fn tag(&self) -> &'static str {
         "Tree"
     }
 
     fn spec(&self) -> &'static InputSpec {
-        &TREE_NEW_SPEC
+        &TREE_SPEC
     }
 
     fn build_typed(
@@ -106,7 +106,7 @@ impl TypedBuilder for TreeNewBuilder {
 }
 
 fn build_tree(
-    config: TreeNewConfig,
+    config: TreeConfig,
     inputs: BuilderInputs,
     cx: &mut BuildContext,
 ) -> Result<StagedBuildResult, BuilderError> {
@@ -438,9 +438,9 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
 
-        let result = TreeNewBuilder
+        let result = TreeBuilder
             .build_typed(
-                TreeNewConfig {
+                TreeConfig {
                     tree: TreePayload {
                         entries: vec![TreeEntry::File {
                             path: "tool".to_string(),
@@ -471,9 +471,9 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
 
-        let result = TreeNewBuilder
+        let result = TreeBuilder
             .build_typed(
-                TreeNewConfig {
+                TreeConfig {
                     tree: TreePayload {
                         entries: vec![
                             TreeEntry::Dir {
@@ -523,7 +523,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = build_context(temp.path());
 
-        let error = TreeNewBuilder
+        let error = TreeBuilder
             .build_erased(
                 serde_json::json!({
                     "tree": {

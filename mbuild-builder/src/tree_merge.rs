@@ -3,27 +3,27 @@ use bobr_store::fs_tree::{FsTreeManifest, merge_manifests};
 use mbuild_core::{BuildLogLevel, BuilderError};
 use serde::Deserialize;
 
-pub struct TreeMergeNewBuilder;
+pub struct TreeMergeBuilder;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TreeMergeNewConfig {}
+pub struct TreeMergeConfig {}
 
-static TREE_MERGE_NEW_SPEC: InputSpec = InputSpec {
+static TREE_MERGE_SPEC: InputSpec = InputSpec {
     required_inputs: &[],
     optional_inputs: &[],
     allow_extra_inputs: true,
 };
 
-impl TypedBuilder for TreeMergeNewBuilder {
-    type Config = TreeMergeNewConfig;
+impl TypedBuilder for TreeMergeBuilder {
+    type Config = TreeMergeConfig;
 
     fn tag(&self) -> &'static str {
         "TreeMerge"
     }
 
     fn spec(&self) -> &'static InputSpec {
-        &TREE_MERGE_NEW_SPEC
+        &TREE_MERGE_SPEC
     }
 
     fn build_typed(
@@ -37,11 +37,11 @@ impl TypedBuilder for TreeMergeNewBuilder {
 }
 
 fn build_tree_merge(
-    _config: TreeMergeNewConfig,
+    _config: TreeMergeConfig,
     inputs: BuilderInputs,
     cx: &mut BuildContext,
 ) -> Result<StagedBuildResult, BuilderError> {
-    let inputs = inputs.extras(&TREE_MERGE_NEW_SPEC).collect::<Vec<_>>();
+    let inputs = inputs.extras(&TREE_MERGE_SPEC).collect::<Vec<_>>();
     if inputs.len() < 2 {
         return Err(BuilderError::ExecutionFailed(
             "TreeMerge builder requires at least two fs-tree manifest inputs".to_string(),
@@ -59,14 +59,14 @@ fn build_tree_merge(
         .map(|(name, input)| {
             FsTreeManifest::read_canonical(&input.path).map_err(|error| {
                 BuilderError::ExecutionFailed(format!(
-                    "TreeMerge input '{name}' is not a valid fs-tree v2 manifest: {error}"
+                    "TreeMerge input '{name}' is not a valid fs-tree manifest: {error}"
                 ))
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
     let merged = merge_manifests(&manifests)
         .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-    let output_path = cx.temp_dir.join("fs-tree-merge-manifest-v2.jsonl");
+    let output_path = cx.temp_dir.join("fs-tree-merge-manifest.jsonl");
     merged.write_canonical(&output_path).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
             "failed to write merged fs-tree manifest '{}': {error}",
@@ -137,10 +137,10 @@ mod tests {
 
     #[test]
     fn spec_accepts_extra_inputs_only() {
-        assert_eq!(TypedBuilder::tag(&TreeMergeNewBuilder), "TreeMerge");
-        assert!(TREE_MERGE_NEW_SPEC.required_inputs.is_empty());
-        assert!(TREE_MERGE_NEW_SPEC.optional_inputs.is_empty());
-        assert!(TREE_MERGE_NEW_SPEC.allow_extra_inputs);
+        assert_eq!(TypedBuilder::tag(&TreeMergeBuilder), "TreeMerge");
+        assert!(TREE_MERGE_SPEC.required_inputs.is_empty());
+        assert!(TREE_MERGE_SPEC.optional_inputs.is_empty());
+        assert!(TREE_MERGE_SPEC.allow_extra_inputs);
     }
 
     #[test]
@@ -148,8 +148,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
 
-        let error = TreeMergeNewBuilder
-            .build_typed(TreeMergeNewConfig {}, BuilderInputs::empty(), &mut cx)
+        let error = TreeMergeBuilder
+            .build_typed(TreeMergeConfig {}, BuilderInputs::empty(), &mut cx)
             .unwrap_err();
 
         assert!(error.to_string().contains("requires at least two"));
@@ -171,9 +171,9 @@ mod tests {
             FsTreeEntry::symlink("etc/tool", 1, 2, "../usr/tool"),
         ]);
 
-        let result = TreeMergeNewBuilder
+        let result = TreeMergeBuilder
             .build_typed(
-                TreeMergeNewConfig {},
+                TreeMergeConfig {},
                 inputs(vec![
                     ("left", write_manifest(temp.path(), "left.jsonl", &left)),
                     ("right", write_manifest(temp.path(), "right.jsonl", &right)),
@@ -184,9 +184,7 @@ mod tests {
 
         assert_eq!(
             result.staged_path,
-            temp.path()
-                .join("tmp")
-                .join("fs-tree-merge-manifest-v2.jsonl")
+            temp.path().join("tmp").join("fs-tree-merge-manifest.jsonl")
         );
         assert!(result.object_hash.is_none());
         let merged = FsTreeManifest::read_canonical(&result.staged_path).unwrap();
@@ -209,9 +207,9 @@ mod tests {
             FsTreeEntry::file("bin/tool", hash()),
         ]);
 
-        TreeMergeNewBuilder
+        TreeMergeBuilder
             .build_typed(
-                TreeMergeNewConfig {},
+                TreeMergeConfig {},
                 inputs(vec![
                     (
                         "first",
@@ -236,9 +234,9 @@ mod tests {
         let invalid_path = temp.path().join("invalid.jsonl");
         std::fs::write(&invalid_path, b"not a manifest\n").unwrap();
 
-        let error = TreeMergeNewBuilder
+        let error = TreeMergeBuilder
             .build_typed(
-                TreeMergeNewConfig {},
+                TreeMergeConfig {},
                 inputs(vec![
                     ("bad", BuilderInputPath { path: invalid_path }),
                     ("valid", write_manifest(temp.path(), "valid.jsonl", &valid)),
@@ -258,9 +256,9 @@ mod tests {
         let left = manifest(vec![root(), FsTreeEntry::file("a", hash())]);
         let right = manifest(vec![root(), FsTreeEntry::file("a", other_hash())]);
 
-        let error = TreeMergeNewBuilder
+        let error = TreeMergeBuilder
             .build_typed(
-                TreeMergeNewConfig {},
+                TreeMergeConfig {},
                 inputs(vec![
                     ("left", write_manifest(temp.path(), "left.jsonl", &left)),
                     ("right", write_manifest(temp.path(), "right.jsonl", &right)),
@@ -277,7 +275,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
 
-        let error = TreeMergeNewBuilder
+        let error = TreeMergeBuilder
             .build_erased(
                 serde_json::json!({"extra": true}),
                 BuilderInputs::empty(),

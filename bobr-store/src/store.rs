@@ -168,7 +168,7 @@ impl Store {
         }
     }
 
-    /// Returns store-scoped fs-tree v2 operations.
+    /// Returns store-scoped fs-tree operations.
     pub fn fs_tree(&self) -> FsTree {
         FsTree::new(self.root().to_path_buf())
     }

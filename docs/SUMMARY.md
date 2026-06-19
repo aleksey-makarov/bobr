@@ -8,4 +8,4 @@
 - [Split Outputs](SPLIT_OUTPUTS.md)
 - [Store](STORE.md)
 - [Filesystem Object Hashing](FSOBJ_HASH.md)
-- [fs-tree Manifest v2](FS_TREE_MANIFEST_V2.md)
+- [fs-tree Manifest](FS_TREE_MANIFEST.md)

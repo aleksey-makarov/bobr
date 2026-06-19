@@ -79,7 +79,7 @@ path. The index records only regular file and symlink node hashes, keyed by
 object-relative path. Directory entries are intentionally not part of that
 leaf set.
 
-Current fs-tree manifest v2 objects do not use this leaf index as their object
+Current fs-tree manifest objects do not use this leaf index as their object
 format. The manifest text is a normal store object payload. Regular file
 payloads referenced by the manifest live under `<store>/fs-files/` and use
 their own fs-file hashes.
@@ -158,6 +158,6 @@ fsobj-hash - --mode=tar
 The generic `fsobj-hash` algorithm treats directory entry names and symlink
 targets as raw Unix bytes. It can hash paths that are not valid UTF-8.
 
-`mbuild` fs-tree manifest v2 paths and symlink targets are UTF-8-only because
+`mbuild` fs-tree manifest paths and symlink targets are UTF-8-only because
 they are serialized as JSON strings. This is a property of the fs-tree manifest
 format, not of the generic fsobj hash algorithm.

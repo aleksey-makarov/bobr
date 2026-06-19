@@ -90,7 +90,7 @@ mod tests {
     }
 
     #[test]
-    fn success_report_reads_only_steps_for_v2_output() {
+    fn success_report_reads_only_steps() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("success.json");
         let report = SandboxRunnerSuccessReport {

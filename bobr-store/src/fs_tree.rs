@@ -1,7 +1,7 @@
-//! Canonical `fs-tree manifest v2` parser, writer, validation types, and
+//! Canonical `fs-tree manifest` parser, writer, validation types, and
 //! local root-runner filesystem operations.
 //!
-//! This crate owns the future manifest-addressed fs-tree manifest format. It
+//! This crate owns the manifest-addressed fs-tree manifest format. It
 //! does not implement builder integration or the legacy fs-tree object format.
 
 #![deny(missing_docs)]
@@ -23,40 +23,40 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-const SCHEMA: &str = "bobr-fs-tree-manifest-v2";
-const CANONICAL_SCHEMA_LINE: &[u8] = br#"{"schema":"bobr-fs-tree-manifest-v2"}
+const SCHEMA: &str = "bobr-fs-tree-manifest";
+const CANONICAL_SCHEMA_LINE: &[u8] = br#"{"schema":"bobr-fs-tree-manifest"}
 "#;
 const FS_FILE_HASH_TAG: &[u8] = b"bobr:fs-file:v1\0";
 
-/// Store-scoped access to fs-tree v2 operations.
+/// Store-scoped access to fs-tree operations.
 ///
 /// This value is intentionally opaque: callers can obtain it from
 /// [`crate::Store::fs_tree`] or through serde deserialization, but cannot
-/// construct it directly. It carries only enough store context for fs-tree v2
+/// construct it directly. It carries only enough store context for fs-tree
 /// operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsTree {
     root: PathBuf,
 }
 
-/// Canonical `fs-tree manifest v2`.
+/// Canonical `fs-tree manifest`.
 ///
 /// A manifest contains validated filesystem entries sorted by UTF-8 path bytes.
 /// The serialized form always starts with the
-/// `{"schema":"bobr-fs-tree-manifest-v2"}` header line.
+/// `{"schema":"bobr-fs-tree-manifest"}` header line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FsTreeManifest {
     entries: Vec<FsTreeEntry>,
 }
 
-/// One filesystem entry in an `fs-tree manifest v2`.
+/// One filesystem entry in an `fs-tree manifest`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsTreeEntry {
     /// Regular file entry.
     ///
     /// The entry stores only the path and an opaque future fs-file object hash.
     /// Regular file bytes, owner, group, and mode are intentionally not stored
-    /// in manifest v2.
+    /// in manifest.
     File {
         /// Relative UTF-8 path inside the fs-tree.
         path: String,
@@ -98,7 +98,7 @@ pub enum FsTreeEntryKind {
     Symlink,
 }
 
-/// Opaque future fs-file object hash used by manifest v2 regular file entries.
+/// Opaque future fs-file object hash used by manifest regular file entries.
 ///
 /// The type validates and formats exactly 64 lowercase hex digits. The hash
 /// algorithm is deliberately not defined in this crate yet.
@@ -106,7 +106,7 @@ pub enum FsTreeEntryKind {
 pub struct FsFileHash([u8; 32]);
 
 /// Install policy used when importing an existing filesystem tree into
-/// manifest v2.
+/// manifest.
 ///
 /// Rules are evaluated in order. Every rule whose glob pattern matches a path
 /// contributes its explicitly specified attributes; later matching rules
@@ -326,7 +326,7 @@ impl FsTreeManifest {
         Ok(Self { entries })
     }
 
-    /// Parses canonical manifest v2 bytes.
+    /// Parses canonical manifest bytes.
     ///
     /// This accepts only the exact canonical encoding produced by
     /// [`FsTreeManifest::to_canonical_bytes`]. Non-canonical JSON whitespace,
@@ -387,7 +387,7 @@ impl FsTreeManifest {
         Ok(manifest)
     }
 
-    /// Reads and parses a canonical manifest v2 file.
+    /// Reads and parses a canonical manifest file.
     pub fn read_canonical(path: &Path) -> Result<Self, StoreError> {
         let bytes = fs::read(path).map_err(|error| {
             StoreError::Io(format!(
@@ -1972,7 +1972,7 @@ mod tests {
     }
 
     fn schema_line() -> &'static str {
-        r#"{"schema":"bobr-fs-tree-manifest-v2"}"#
+        r#"{"schema":"bobr-fs-tree-manifest"}"#
     }
 
     fn patterns(patterns: &[&str]) -> Vec<String> {
@@ -1995,7 +1995,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(manifest.to_canonical_bytes().unwrap()).unwrap(),
             concat!(
-                r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
+                r#"{"schema":"bobr-fs-tree-manifest"}"#,
                 "\n",
                 r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
                 "\n",
@@ -2171,7 +2171,7 @@ mod tests {
     #[test]
     fn parser_accepts_canonical_sample_and_round_trips() {
         let bytes = concat!(
-            r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
+            r#"{"schema":"bobr-fs-tree-manifest"}"#,
             "\n",
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
@@ -2198,13 +2198,9 @@ mod tests {
 
     #[test]
     fn rejects_missing_final_newline_empty_file_and_empty_line() {
-        assert_parse_rejects(r#"{"schema":"bobr-fs-tree-manifest-v2"}"#);
+        assert_parse_rejects(r#"{"schema":"bobr-fs-tree-manifest"}"#);
         assert!(FsTreeManifest::parse_canonical_bytes(b"").is_err());
-        assert_parse_rejects(concat!(
-            r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
-            "\n",
-            "\n",
-        ));
+        assert_parse_rejects(concat!(r#"{"schema":"bobr-fs-tree-manifest"}"#, "\n", "\n",));
     }
 
     #[test]
@@ -2217,7 +2213,7 @@ mod tests {
             "\n",
         ));
         assert_parse_rejects(concat!(
-            r#"{ "schema":"bobr-fs-tree-manifest-v2"}"#,
+            r#"{ "schema":"bobr-fs-tree-manifest"}"#,
             "\n",
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
@@ -2235,7 +2231,7 @@ mod tests {
     #[test]
     fn rejects_file_metadata_and_symlink_hash() {
         assert_parse_rejects(concat!(
-            r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
+            r#"{"schema":"bobr-fs-tree-manifest"}"#,
             "\n",
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
@@ -2243,7 +2239,7 @@ mod tests {
             "\n",
         ));
         assert_parse_rejects(concat!(
-            r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
+            r#"{"schema":"bobr-fs-tree-manifest"}"#,
             "\n",
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
@@ -2260,7 +2256,7 @@ mod tests {
             FsTreeEntry::directory("a", 0, 0, 0o755),
         ]);
         assert_parse_rejects(concat!(
-            r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
+            r#"{"schema":"bobr-fs-tree-manifest"}"#,
             "\n",
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
@@ -2274,7 +2270,7 @@ mod tests {
     #[test]
     fn parser_rejects_entries_outside_canonical_order() {
         assert_parse_rejects(concat!(
-            r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
+            r#"{"schema":"bobr-fs-tree-manifest"}"#,
             "\n",
             r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
             "\n",
@@ -2329,7 +2325,7 @@ mod tests {
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
             concat!(
-                r#"{"schema":"bobr-fs-tree-manifest-v2"}"#,
+                r#"{"schema":"bobr-fs-tree-manifest"}"#,
                 "\n",
                 r#"{"p":"","t":"d","u":0,"g":0,"m":493}"#,
                 "\n",
