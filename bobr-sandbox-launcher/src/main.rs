@@ -1,10 +1,11 @@
 use bobr_sandbox_launcher::{launch, protocol_info};
+use std::ffi::OsString;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 
 fn main() {
-    let args = std::env::args().collect::<Vec<_>>();
-    if args.len() == 2 && args[1] == "--protocol-info" {
+    let args = std::env::args_os().collect::<Vec<_>>();
+    if args.len() == 2 && args[1].to_str() == Some("--protocol-info") {
         match serde_json::to_string(&protocol_info()) {
             Ok(json) => {
                 println!("{json}");
@@ -28,13 +29,19 @@ fn main() {
     }
 }
 
-fn parse_launch_args(args: &[String]) -> Result<(RawFd, PathBuf), String> {
-    if args.len() != 6 || args[1] != "launch" || args[2] != "--wait-fd" || args[4] != "--config" {
-        return Err("usage: bobr-sandbox-launcher launch --wait-fd FD --config PATH".to_string());
+fn parse_launch_args(args: &[OsString]) -> Result<(RawFd, PathBuf), String> {
+    let usage = || "usage: bobr-sandbox-launcher launch --wait-fd FD --config PATH".to_string();
+    if args.len() != 6
+        || args[1].to_str() != Some("launch")
+        || args[2].to_str() != Some("--wait-fd")
+        || args[4].to_str() != Some("--config")
+    {
+        return Err(usage());
     }
     let wait_fd = args[3]
-        .parse::<RawFd>()
-        .map_err(|error| format!("invalid --wait-fd '{}': {error}", args[3]))?;
+        .to_str()
+        .and_then(|value| value.parse::<RawFd>().ok())
+        .ok_or_else(|| format!("invalid --wait-fd '{}'", args[3].to_string_lossy()))?;
     Ok((wait_fd, PathBuf::from(&args[5])))
 }
 
@@ -42,16 +49,20 @@ fn parse_launch_args(args: &[String]) -> Result<(RawFd, PathBuf), String> {
 mod tests {
     use super::*;
 
+    fn os_args(parts: &[&str]) -> Vec<OsString> {
+        parts.iter().map(OsString::from).collect()
+    }
+
     #[test]
     fn parses_launch_args() {
-        let args = vec![
-            "bobr-sandbox-launcher".to_string(),
-            "launch".to_string(),
-            "--wait-fd".to_string(),
-            "7".to_string(),
-            "--config".to_string(),
-            "/tmp/config.json".to_string(),
-        ];
+        let args = os_args(&[
+            "bobr-sandbox-launcher",
+            "launch",
+            "--wait-fd",
+            "7",
+            "--config",
+            "/tmp/config.json",
+        ]);
 
         let (fd, path) = parse_launch_args(&args).unwrap();
 
@@ -61,11 +72,23 @@ mod tests {
 
     #[test]
     fn rejects_old_bare_runner_config_mode() {
-        let args = vec![
-            "bobr-sandbox-launcher".to_string(),
-            "/tmp/runner-config.json".to_string(),
-        ];
+        let args = os_args(&["bobr-sandbox-launcher", "/tmp/runner-config.json"]);
 
         assert!(parse_launch_args(&args).unwrap_err().contains("launch"));
+    }
+
+    #[test]
+    fn rejects_non_utf8_wait_fd_without_panicking() {
+        use std::os::unix::ffi::OsStringExt;
+        let args = vec![
+            OsString::from("bobr-sandbox-launcher"),
+            OsString::from("launch"),
+            OsString::from("--wait-fd"),
+            OsString::from_vec(vec![0xff, 0xfe]),
+            OsString::from("--config"),
+            OsString::from("/tmp/config.json"),
+        ];
+
+        assert!(parse_launch_args(&args).unwrap_err().contains("--wait-fd"));
     }
 }
