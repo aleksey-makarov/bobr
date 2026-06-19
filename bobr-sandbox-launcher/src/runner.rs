@@ -5,17 +5,20 @@ use crate::protocol::{
     RunnerConfig, RunnerRunAs, RunnerStepConfig, SANDBOX_PROTOCOL_VERSION, SandboxRunnerFailureReport,
     SandboxRunnerSuccessReport, SandboxStepReport,
 };
+use nix::dir::Dir;
+use nix::errno::Errno;
+use nix::fcntl::{AtFlags, OFlag};
+use nix::sys::stat::Mode;
 #[cfg(not(test))]
 use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-use nix::unistd::{Gid, Uid, chown, setgid, setgroups, setuid};
 #[cfg(not(test))]
 use nix::unistd::Pid;
+use nix::unistd::{Gid, Uid, fchownat, setgid, setgroups, setuid};
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::fs;
 use std::fs::File;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -410,29 +413,48 @@ fn credential_error(operation: &str, error: impl std::fmt::Display) -> io::Error
 }
 
 fn chown_tree(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
-        lchown(path, uid, gid)?;
-        return Ok(());
+    let owner = Some(Uid::from_raw(uid));
+    let group = Some(Gid::from_raw(gid));
+    // Chown the top entry itself without dereferencing it as a symlink.
+    fchownat(None, path, owner, group, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(io::Error::other)?;
+    // Recurse only into a real directory, descending by file descriptor with
+    // O_NOFOLLOW so a swapped symlink can never redirect a chown out of the
+    // tree (defense-in-depth against TOCTOU).
+    if fs::symlink_metadata(path)?.is_dir() {
+        let dir = open_dir_nofollow(None, path)?;
+        chown_dir_contents(dir, owner, group)?;
     }
+    Ok(())
+}
 
-    chown(path, Some(Uid::from_raw(uid)), Some(Gid::from_raw(gid))).map_err(io::Error::other)?;
-    if metadata.is_dir() {
-        for entry in fs::read_dir(path)? {
-            chown_tree(&entry?.path(), uid, gid)?;
+fn chown_dir_contents(mut dir: Dir, owner: Option<Uid>, group: Option<Gid>) -> io::Result<()> {
+    let dir_fd = dir.as_raw_fd();
+    for entry in dir.iter() {
+        let entry = entry.map_err(io::Error::other)?;
+        let name = entry.file_name();
+        let bytes = name.to_bytes();
+        if bytes == b"." || bytes == b".." {
+            continue;
+        }
+        fchownat(Some(dir_fd), name, owner, group, AtFlags::AT_SYMLINK_NOFOLLOW)
+            .map_err(io::Error::other)?;
+        // Descend only into real subdirectories: O_NOFOLLOW makes a symlink
+        // entry fail with ELOOP and a non-directory fail with ENOTDIR.
+        match Dir::openat(Some(dir_fd), name, dir_open_flags(), Mode::empty()) {
+            Ok(subdir) => chown_dir_contents(subdir, owner, group)?,
+            Err(Errno::ENOTDIR | Errno::ELOOP) => {}
+            Err(error) => return Err(io::Error::other(error)),
         }
     }
     Ok(())
 }
 
-fn lchown(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
-    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)?;
-    let result = unsafe { libc::lchown(c_path.as_ptr(), uid, gid) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+fn open_dir_nofollow(dirfd: Option<std::os::fd::RawFd>, path: &Path) -> io::Result<Dir> {
+    Dir::openat(dirfd, path, dir_open_flags(), Mode::empty()).map_err(io::Error::other)
+}
+
+fn dir_open_flags() -> OFlag {
+    OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC
 }
 
 #[cfg(test)]
@@ -574,6 +596,23 @@ mod tests {
         let exit_code = run_config_path(&path);
 
         assert_eq!(exit_code, 2);
+    }
+
+    #[test]
+    fn chown_tree_walks_without_following_symlinks() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("sub")).unwrap();
+        fs::write(root.join("sub/file"), b"x").unwrap();
+        std::os::unix::fs::symlink("/nonexistent", root.join("sub/link")).unwrap();
+
+        // Chowning to our own ids needs no privileges; this exercises the
+        // fd-based descent, including the symlink (ELOOP) and file (ENOTDIR)
+        // branches, without dereferencing the dangling symlink.
+        let uid = nix::unistd::getuid().as_raw();
+        let gid = nix::unistd::getgid().as_raw();
+        chown_tree(&root, uid, gid).unwrap();
     }
 
     #[derive(Clone)]
