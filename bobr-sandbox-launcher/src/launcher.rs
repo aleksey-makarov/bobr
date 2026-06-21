@@ -3,15 +3,25 @@
 
 use crate::protocol::{
     SANDBOX_PROTOCOL_VERSION, SandboxLauncherConfig, SandboxLauncherMount,
-    SandboxLauncherMountKind, SandboxRunnerFailureReport, path_cstring, read_handshake_byte,
+    SandboxLauncherMountKind, SandboxRunnerFailureReport, read_handshake_byte,
     relative_launcher_target, validate_launcher_config,
 };
 use crate::runner::{RunnerOutcome, run_config_path};
-use std::ffi::CString;
+use nix::errno::Errno;
+use nix::mount::MsFlags;
+use nix::sched::CloneFlags;
+use nix::sys::wait::WaitStatus;
+use nix::unistd::Pid;
 use std::fs::{self, File};
 use std::io;
 use std::os::fd::RawFd;
 use std::path::Path;
+
+/// Maps a `nix` errno into an `io::Error` that preserves the OS error code (and
+/// thus its `io::ErrorKind`), unlike `io::Error::other`.
+fn nix_to_io(error: Errno) -> io::Error {
+    io::Error::from_raw_os_error(error as i32)
+}
 
 const CAP_CHOWN: u32 = 0;
 const CAP_DAC_OVERRIDE: u32 = 1;
@@ -116,14 +126,14 @@ fn read_launcher_config(path: &Path) -> Result<SandboxLauncherConfig, String> {
 }
 
 fn run_supervisor(config: &SandboxLauncherConfig, failure_report: &File) -> io::Result<i32> {
-    unshare_namespace("mount namespace", libc::CLONE_NEWNS)?;
-    unshare_namespace("network namespace", libc::CLONE_NEWNET)?;
+    unshare_namespace("mount namespace", CloneFlags::CLONE_NEWNS)?;
+    unshare_namespace("network namespace", CloneFlags::CLONE_NEWNET)?;
     bring_loopback_up().map_err(|error| context_error("bring up loopback", error))?;
-    unshare_namespace("UTS namespace", libc::CLONE_NEWUTS)?;
-    unshare_namespace("IPC namespace", libc::CLONE_NEWIPC)?;
+    unshare_namespace("UTS namespace", CloneFlags::CLONE_NEWUTS)?;
+    unshare_namespace("IPC namespace", CloneFlags::CLONE_NEWIPC)?;
     set_hostname("mbuild").map_err(|error| context_error("set hostname", error))?;
     mount_private().map_err(|error| context_error("make mount tree private", error))?;
-    unshare_namespace("PID namespace", libc::CLONE_NEWPID)?;
+    unshare_namespace("PID namespace", CloneFlags::CLONE_NEWPID)?;
 
     // INVARIANT: the launcher must stay single-threaded up to this fork. The
     // child below allocates, does file I/O and serde — operations that are only
@@ -153,7 +163,7 @@ fn run_supervisor(config: &SandboxLauncherConfig, failure_report: &File) -> io::
         unsafe { libc::_exit(code) };
     }
 
-    wait_for_child(pid)
+    wait_for_child(Pid::from_raw(pid))
 }
 
 fn run_pid1(config: &SandboxLauncherConfig, failure_report: &File) -> io::Result<i32> {
@@ -225,11 +235,11 @@ fn bind_mount(mount: &SandboxLauncherMount, target: &Path) -> io::Result<()> {
         )
     })?;
     let bind_flags = if source_is_dir {
-        libc::MS_BIND | libc::MS_REC
+        MsFlags::MS_BIND | MsFlags::MS_REC
     } else {
-        libc::MS_BIND
+        MsFlags::MS_BIND
     };
-    mount_syscall(Some(source), target, None, bind_flags, None).map_err(|error| {
+    do_mount(Some(source), target, None, bind_flags, None).map_err(|error| {
         context_error(
             format!(
                 "bind mount '{}' -> '{}'",
@@ -240,11 +250,11 @@ fn bind_mount(mount: &SandboxLauncherMount, target: &Path) -> io::Result<()> {
         )
     })?;
     if mount.readonly {
-        mount_syscall(
+        do_mount(
             Some(source),
             target,
             None,
-            libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
+            MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
             None,
         )
         .map_err(|error| {
@@ -264,11 +274,11 @@ fn proc_mount(mount: &SandboxLauncherMount, target: &Path) -> io::Result<()> {
             error,
         )
     })?;
-    let mut flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+    let mut flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
     if mount.readonly {
-        flags |= libc::MS_RDONLY;
+        flags |= MsFlags::MS_RDONLY;
     }
-    mount_syscall(Some(Path::new("proc")), target, Some("proc"), flags, None)
+    do_mount(Some(Path::new("proc")), target, Some("proc"), flags, None)
         .map_err(|error| context_error(format!("mount proc '{}'", mount.target.display()), error))
 }
 
@@ -280,7 +290,7 @@ fn tmpfs_mount(mount: &SandboxLauncherMount, target: &Path) -> io::Result<()> {
         )
     })?;
     let (flags, data) = tmpfs_mount_options(&mount.options, mount.readonly);
-    mount_syscall(
+    do_mount(
         Some(Path::new("tmpfs")),
         target,
         Some("tmpfs"),
@@ -293,19 +303,19 @@ fn tmpfs_mount(mount: &SandboxLauncherMount, target: &Path) -> io::Result<()> {
 /// Splits tmpfs mount options into kernel flag bits and the leftover `data`
 /// string. Recognised security options become flags; everything else (e.g.
 /// `size=`, `mode=`) is passed through as comma-joined mount data.
-fn tmpfs_mount_options(options: &[String], readonly: bool) -> (libc::c_ulong, Option<String>) {
-    let mut flags: libc::c_ulong = 0;
+fn tmpfs_mount_options(options: &[String], readonly: bool) -> (MsFlags, Option<String>) {
+    let mut flags = MsFlags::empty();
     let mut data_options = Vec::new();
     for option in options {
         match option.as_str() {
-            "nosuid" => flags |= libc::MS_NOSUID,
-            "nodev" => flags |= libc::MS_NODEV,
-            "noexec" => flags |= libc::MS_NOEXEC,
+            "nosuid" => flags |= MsFlags::MS_NOSUID,
+            "nodev" => flags |= MsFlags::MS_NODEV,
+            "noexec" => flags |= MsFlags::MS_NOEXEC,
             other => data_options.push(other),
         }
     }
     if readonly {
-        flags |= libc::MS_RDONLY;
+        flags |= MsFlags::MS_RDONLY;
     }
     let data = if data_options.is_empty() {
         None
@@ -316,67 +326,31 @@ fn tmpfs_mount_options(options: &[String], readonly: bool) -> (libc::c_ulong, Op
 }
 
 fn mount_private() -> io::Result<()> {
-    mount_syscall(
+    do_mount(
         None,
         Path::new("/"),
         None,
-        libc::MS_REC | libc::MS_PRIVATE,
+        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
         None,
     )
 }
 
-fn mount_syscall(
+fn do_mount(
     source: Option<&Path>,
     target: &Path,
     fstype: Option<&str>,
-    flags: libc::c_ulong,
+    flags: MsFlags,
     data: Option<&str>,
 ) -> io::Result<()> {
-    let c_source = source.map(path_cstring).transpose()?;
-    let c_target = path_cstring(target)?;
-    let c_fstype = fstype.map(CString::new).transpose()?;
-    let c_data = data.map(CString::new).transpose()?;
-    let result = unsafe {
-        libc::mount(
-            c_source
-                .as_ref()
-                .map_or(std::ptr::null(), |value| value.as_ptr()),
-            c_target.as_ptr(),
-            c_fstype
-                .as_ref()
-                .map_or(std::ptr::null(), |value| value.as_ptr()),
-            flags,
-            c_data
-                .as_ref()
-                .map_or(std::ptr::null(), |value| value.as_ptr().cast()),
-        )
-    };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    nix::mount::mount(source, target, fstype, flags, data).map_err(nix_to_io)
 }
 
 fn chroot(root: &Path) -> io::Result<()> {
-    let c_root = path_cstring(root)?;
-    let result = unsafe { libc::chroot(c_root.as_ptr()) };
-    if result == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    nix::unistd::chroot(root).map_err(nix_to_io)
 }
 
-fn unshare_namespace(label: &str, flags: libc::c_int) -> io::Result<()> {
-    if unsafe { libc::unshare(flags) } == 0 {
-        Ok(())
-    } else {
-        Err(context_error(
-            format!("unshare {label}"),
-            io::Error::last_os_error(),
-        ))
-    }
+fn unshare_namespace(label: &str, flags: CloneFlags) -> io::Result<()> {
+    nix::sched::unshare(flags).map_err(|error| context_error(format!("unshare {label}"), nix_to_io(error)))
 }
 
 fn context_error(context: impl std::fmt::Display, error: io::Error) -> io::Error {
@@ -384,12 +358,7 @@ fn context_error(context: impl std::fmt::Display, error: io::Error) -> io::Error
 }
 
 fn set_hostname(name: &str) -> io::Result<()> {
-    let bytes = name.as_bytes();
-    if unsafe { libc::sethostname(bytes.as_ptr().cast(), bytes.len()) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
+    nix::unistd::sethostname(name).map_err(nix_to_io)
 }
 
 /// Brings the loopback interface up in the current network namespace.
@@ -488,30 +457,24 @@ fn capability_mask(capabilities: &[u32]) -> [u32; 2] {
     mask
 }
 
-fn wait_for_child(pid: libc::pid_t) -> io::Result<i32> {
-    let mut status = 0;
+fn wait_for_child(pid: Pid) -> io::Result<i32> {
     loop {
-        let result = unsafe { libc::waitpid(pid, &mut status, 0) };
-        if result == pid {
-            return Ok(exit_code_from_wait_status(status));
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
+        match nix::sys::wait::waitpid(pid, None) {
+            Ok(status) => return Ok(exit_code_from_wait_status(status)),
+            Err(Errno::EINTR) => continue,
+            Err(error) => return Err(nix_to_io(error)),
         }
     }
 }
 
-/// Maps a raw `waitpid` status into a process exit code: the child's own code
-/// when it exited, `128 + signal` when it was killed, and `1` for any other
+/// Maps a `waitpid` result into a process exit code: the child's own code when
+/// it exited, `128 + signal` when it was killed, and `1` for any other
 /// (unexpected) status.
-fn exit_code_from_wait_status(status: libc::c_int) -> i32 {
-    if libc::WIFEXITED(status) {
-        libc::WEXITSTATUS(status)
-    } else if libc::WIFSIGNALED(status) {
-        128 + libc::WTERMSIG(status)
-    } else {
-        1
+fn exit_code_from_wait_status(status: WaitStatus) -> i32 {
+    match status {
+        WaitStatus::Exited(_, code) => code,
+        WaitStatus::Signaled(_, signal, _) => 128 + signal as i32,
+        _ => 1,
     }
 }
 
@@ -573,7 +536,7 @@ mod tests {
 
         assert_eq!(
             flags,
-            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
             "recognised options become flags, unrecognised ones do not"
         );
         assert_eq!(data.as_deref(), Some("size=64m,mode=1777"));
@@ -583,15 +546,24 @@ mod tests {
     fn tmpfs_options_readonly_without_data() {
         let (flags, data) = tmpfs_mount_options(&[], true);
 
-        assert_eq!(flags, libc::MS_RDONLY);
+        assert_eq!(flags, MsFlags::MS_RDONLY);
         assert_eq!(data, None);
     }
 
     #[test]
     fn exit_code_maps_exit_and_signal() {
-        // 7 << 8 encodes "exited with status 7"; 9 encodes "killed by signal 9".
-        assert_eq!(exit_code_from_wait_status(7 << 8), 7);
-        assert_eq!(exit_code_from_wait_status(9), 128 + 9);
+        assert_eq!(
+            exit_code_from_wait_status(WaitStatus::Exited(Pid::from_raw(123), 7)),
+            7
+        );
+        assert_eq!(
+            exit_code_from_wait_status(WaitStatus::Signaled(
+                Pid::from_raw(123),
+                nix::sys::signal::Signal::SIGKILL,
+                false
+            )),
+            128 + libc::SIGKILL
+        );
     }
 
     #[test]
