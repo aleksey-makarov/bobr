@@ -86,9 +86,13 @@ pub struct RunnerConfig {
     pub prepare_paths: Vec<PathBuf>,
     /// Ordered command steps to run.
     pub steps: Vec<RunnerStepConfig>,
-    /// Host-visible path where the success report is written.
+    /// Container path where the success report is written. The runner opens it
+    /// after chroot; it is visible on the host because the runtime directory is
+    /// bind-mounted (see [`CONTAINER_RUNTIME_DIR`]).
     pub success_report: PathBuf,
-    /// Host-visible path where the failure report is written.
+    /// Container path where the failure report is written. Same handoff as
+    /// `success_report`: opened by the runner after chroot, visible on the host
+    /// via the bind-mounted runtime directory.
     pub failure_report: PathBuf,
 }
 
@@ -274,8 +278,9 @@ pub struct RunnerStepConfig {
     pub env: HashMap<String, String>,
     /// File creation mask applied immediately before executing the step.
     ///
-    /// This field is required since runner protocol v4. Values must be in
-    /// `0o000..=0o777`; invalid values make the runner reject the config.
+    /// This field is required by the current protocol
+    /// ([`SANDBOX_PROTOCOL_VERSION`]). Values must be in `0o000..=0o777`;
+    /// invalid values make the runner reject the config.
     pub umask: u32,
     /// Container path where step stdout is captured.
     pub stdout_path: PathBuf,

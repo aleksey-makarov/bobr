@@ -146,6 +146,12 @@ fn runner_error(report: SandboxRunnerFailureReport) -> Box<SandboxRunnerFailureR
 
 impl SandboxRunner {
     fn new(config: RunnerConfig) -> io::Result<Self> {
+        // Both reports are created up front on purpose: this truncates any stale
+        // report from a previous run and fails fast on permission problems. As a
+        // result the "opposite" report is left empty (e.g. an empty failure
+        // report on success). The authoritative signal is the process exit code,
+        // not the existence or non-emptiness of either file; the runtime treats
+        // an empty report as a fallback (see bobr-sandbox reports/lifecycle).
         let success_report = File::create(&config.success_report)?;
         let failure_report = File::create(&config.failure_report)?;
         let steps = config
