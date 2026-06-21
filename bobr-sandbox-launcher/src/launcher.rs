@@ -131,7 +131,7 @@ fn run_supervisor(config: &SandboxLauncherConfig, failure_report: &File) -> io::
     bring_loopback_up().map_err(|error| context_error("bring up loopback", error))?;
     unshare_namespace("UTS namespace", CloneFlags::CLONE_NEWUTS)?;
     unshare_namespace("IPC namespace", CloneFlags::CLONE_NEWIPC)?;
-    set_hostname("mbuild").map_err(|error| context_error("set hostname", error))?;
+    set_hostname("bobr").map_err(|error| context_error("set hostname", error))?;
     mount_private().map_err(|error| context_error("make mount tree private", error))?;
     unshare_namespace("PID namespace", CloneFlags::CLONE_NEWPID)?;
 
@@ -506,7 +506,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "mbuild-launcher-failure-{}-{suffix}.json",
+            "bobr-launcher-failure-{}-{suffix}.json",
             std::process::id()
         ));
         let file = File::create(&path).unwrap();
@@ -573,7 +573,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "mbuild-early-failure-{}-{suffix}.json",
+            "bobr-early-failure-{}-{suffix}.json",
             std::process::id()
         ));
         let file = File::create(&path).unwrap();

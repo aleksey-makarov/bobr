@@ -33,7 +33,7 @@ macro_rules! container_path {
     };
 }
 
-/// Container-private directory used for mbuild runtime state.
+/// Container-private directory used for bobr runtime state.
 pub const CONTAINER_MBUILD_DIR: &str = container_mbuild_dir!();
 /// Container path where the build working directory is mounted.
 pub const CONTAINER_BUILD_DIR: &str = container_path!("build");
