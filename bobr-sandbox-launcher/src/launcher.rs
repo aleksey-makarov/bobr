@@ -125,6 +125,10 @@ fn run_supervisor(config: &SandboxLauncherConfig, failure_report: &File) -> io::
     mount_private().map_err(|error| context_error("make mount tree private", error))?;
     unshare_namespace("PID namespace", libc::CLONE_NEWPID)?;
 
+    // INVARIANT: the launcher must stay single-threaded up to this fork. The
+    // child below allocates, does file I/O and serde — operations that are only
+    // safe in a forked child because no other thread exists. Spawning any thread
+    // before this point would turn that into silent undefined behavior.
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         return Err(io::Error::last_os_error());
@@ -176,57 +180,56 @@ fn run_pid1(config: &SandboxLauncherConfig, failure_report: &File) -> io::Result
 
 fn mount_layout(config: &SandboxLauncherConfig) -> io::Result<()> {
     for mount in &config.mounts {
-        prepare_mount_target(&config.root, mount).map_err(|error| {
-            context_error(
-                format!("prepare mount target '{}'", mount.target.display()),
-                error,
-            )
-        })?;
+        // Resolve the in-root target once per mount; the kind helpers reuse it.
+        let target = config.root.join(
+            relative_launcher_target(&mount.target).map_err(|error| {
+                context_error(
+                    format!("resolve mount target '{}'", mount.target.display()),
+                    error,
+                )
+            })?,
+        );
         match mount.kind {
-            SandboxLauncherMountKind::Bind => bind_mount(&config.root, mount)?,
-            SandboxLauncherMountKind::Proc => proc_mount(&config.root, mount)?,
-            SandboxLauncherMountKind::Tmpfs => tmpfs_mount(&config.root, mount)?,
+            SandboxLauncherMountKind::Bind => bind_mount(mount, &target)?,
+            SandboxLauncherMountKind::Proc => proc_mount(mount, &target)?,
+            SandboxLauncherMountKind::Tmpfs => tmpfs_mount(mount, &target)?,
         }
     }
     Ok(())
 }
 
-fn prepare_mount_target(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
-    let target = root.join(relative_launcher_target(&mount.target)?);
-    match mount.kind {
-        SandboxLauncherMountKind::Bind => {
-            let source = mount.source.as_ref().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "bind source missing")
-            })?;
-            let metadata = fs::metadata(source)?;
-            if metadata.is_dir() {
-                fs::create_dir_all(&target)
-            } else {
-                if let Some(parent) = target.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                File::create(&target).map(|_| ())
-            }
+fn prepare_bind_target(target: &Path, source_is_dir: bool) -> io::Result<()> {
+    if source_is_dir {
+        fs::create_dir_all(target)
+    } else {
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
         }
-        SandboxLauncherMountKind::Proc | SandboxLauncherMountKind::Tmpfs => {
-            fs::create_dir_all(&target)
-        }
+        File::create(target).map(|_| ())
     }
 }
 
-fn bind_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
+fn bind_mount(mount: &SandboxLauncherMount, target: &Path) -> io::Result<()> {
     let source = mount
         .source
         .as_ref()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "bind source missing"))?;
-    let target = root.join(relative_launcher_target(&mount.target)?);
-    let metadata = fs::metadata(source)?;
-    let bind_flags = if metadata.is_dir() {
+    // Stat the source once: it decides both the target shape and the bind flags.
+    let source_is_dir = fs::metadata(source)
+        .map_err(|error| context_error(format!("stat bind source '{}'", source.display()), error))?
+        .is_dir();
+    prepare_bind_target(target, source_is_dir).map_err(|error| {
+        context_error(
+            format!("prepare mount target '{}'", mount.target.display()),
+            error,
+        )
+    })?;
+    let bind_flags = if source_is_dir {
         libc::MS_BIND | libc::MS_REC
     } else {
         libc::MS_BIND
     };
-    mount_syscall(Some(source), &target, None, bind_flags, None).map_err(|error| {
+    mount_syscall(Some(source), target, None, bind_flags, None).map_err(|error| {
         context_error(
             format!(
                 "bind mount '{}' -> '{}'",
@@ -239,7 +242,7 @@ fn bind_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
     if mount.readonly {
         mount_syscall(
             Some(source),
-            &target,
+            target,
             None,
             libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
             None,
@@ -254,18 +257,28 @@ fn bind_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
     Ok(())
 }
 
-fn proc_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
-    let target = root.join(relative_launcher_target(&mount.target)?);
+fn proc_mount(mount: &SandboxLauncherMount, target: &Path) -> io::Result<()> {
+    fs::create_dir_all(target).map_err(|error| {
+        context_error(
+            format!("prepare mount target '{}'", mount.target.display()),
+            error,
+        )
+    })?;
     let mut flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
     if mount.readonly {
         flags |= libc::MS_RDONLY;
     }
-    mount_syscall(Some(Path::new("proc")), &target, Some("proc"), flags, None)
+    mount_syscall(Some(Path::new("proc")), target, Some("proc"), flags, None)
         .map_err(|error| context_error(format!("mount proc '{}'", mount.target.display()), error))
 }
 
-fn tmpfs_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
-    let target = root.join(relative_launcher_target(&mount.target)?);
+fn tmpfs_mount(mount: &SandboxLauncherMount, target: &Path) -> io::Result<()> {
+    fs::create_dir_all(target).map_err(|error| {
+        context_error(
+            format!("prepare mount target '{}'", mount.target.display()),
+            error,
+        )
+    })?;
     let mut flags = 0;
     let mut data_options = Vec::new();
     for option in &mount.options {
@@ -285,13 +298,7 @@ fn tmpfs_mount(root: &Path, mount: &SandboxLauncherMount) -> io::Result<()> {
     } else {
         Some(data.as_str())
     };
-    mount_syscall(
-        Some(Path::new("tmpfs")),
-        &target,
-        Some("tmpfs"),
-        flags,
-        data,
-    )
+    mount_syscall(Some(Path::new("tmpfs")), target, Some("tmpfs"), flags, data)
     .map_err(|error| context_error(format!("mount tmpfs '{}'", mount.target.display()), error))
 }
 
