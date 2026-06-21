@@ -77,7 +77,7 @@ impl SandboxRunnerFailureReport {
 /// Outcome of running the runner config.
 ///
 /// The distinction matters for who writes the failure report. Once
-/// [`SandboxRunner::new`] succeeds the runner owns its report files and writes
+/// `SandboxRunner::new` succeeds the runner owns its report files and writes
 /// them itself ([`RunnerOutcome::Reported`]). Any failure *before* that point
 /// ([`RunnerOutcome::EarlyFailure`]) leaves the report unwritten, so the
 /// launcher records it through its pre-opened failure-report fd (the same file
