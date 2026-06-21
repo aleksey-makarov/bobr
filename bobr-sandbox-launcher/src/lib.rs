@@ -23,4 +23,4 @@ pub use protocol::{
     protocol_info, read_handshake_byte, relative_launcher_target, validate_launcher_config,
     write_handshake_byte,
 };
-pub use runner::{run_config, run_config_path};
+pub use runner::{RunnerOutcome, run_config, run_config_path};

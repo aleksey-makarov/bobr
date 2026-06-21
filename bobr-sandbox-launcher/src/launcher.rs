@@ -6,7 +6,7 @@ use crate::protocol::{
     SandboxLauncherMountKind, SandboxRunnerFailureReport, path_cstring, read_handshake_byte,
     relative_launcher_target, validate_launcher_config,
 };
-use crate::runner::run_config_path;
+use crate::runner::{RunnerOutcome, run_config_path};
 use std::ffi::CString;
 use std::fs::{self, File};
 use std::io;
@@ -139,7 +139,7 @@ fn run_supervisor(config: &SandboxLauncherConfig, failure_report: &File) -> io::
         unsafe {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
         }
-        let code = match run_pid1(config) {
+        let code = match run_pid1(config, failure_report) {
             Ok(code) => code,
             Err(error) => {
                 write_launcher_failure(failure_report, "launcher-pid1", error);
@@ -152,7 +152,7 @@ fn run_supervisor(config: &SandboxLauncherConfig, failure_report: &File) -> io::
     wait_for_child(pid)
 }
 
-fn run_pid1(config: &SandboxLauncherConfig) -> io::Result<i32> {
+fn run_pid1(config: &SandboxLauncherConfig, failure_report: &File) -> io::Result<i32> {
     mount_layout(config).map_err(|error| context_error("mount sandbox layout", error))?;
     set_no_new_privs().map_err(|error| context_error("set no_new_privs", error))?;
     chroot(&config.root)
@@ -160,9 +160,18 @@ fn run_pid1(config: &SandboxLauncherConfig) -> io::Result<i32> {
     std::env::set_current_dir("/")
         .map_err(|error| context_error("chdir '/' after chroot", error))?;
     drop_capabilities().map_err(|error| context_error("drop capabilities", error))?;
-    // After this handoff, inner runner owns the report contents. Launcher code
-    // must not write the failure report on paths where run_config_path ran.
-    Ok(run_config_path(&config.runner_config))
+    match run_config_path(&config.runner_config) {
+        // The runner created its reports and owns their contents; the launcher
+        // must not touch the failure report on this path.
+        RunnerOutcome::Reported(code) => Ok(code),
+        // The runner failed before owning its reports, so it wrote nothing.
+        // Record the structured report through the launcher's pre-opened fd
+        // (the same on-disk file the runner would have written).
+        RunnerOutcome::EarlyFailure(report) => {
+            write_launcher_report(failure_report, &report);
+            Ok(2)
+        }
+    }
 }
 
 fn mount_layout(config: &SandboxLauncherConfig) -> io::Result<()> {
@@ -481,7 +490,11 @@ fn wait_for_child(pid: libc::pid_t) -> io::Result<i32> {
 
 fn write_launcher_failure(file: &File, label: &str, error: impl std::fmt::Display) {
     let report = SandboxRunnerFailureReport::runtime(label, error.to_string());
-    let _ = serde_json::to_writer(file, &report);
+    write_launcher_report(file, &report);
+}
+
+fn write_launcher_report(file: &File, report: &SandboxRunnerFailureReport) {
+    let _ = serde_json::to_writer(file, report);
 }
 
 #[cfg(test)]
@@ -516,5 +529,33 @@ mod tests {
 
         assert_eq!(report.label, "launcher-pid1");
         assert!(report.message.contains("drop capabilities"));
+    }
+
+    #[test]
+    fn launcher_writes_early_runner_failure_through_open_file() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "mbuild-early-failure-{}-{suffix}.json",
+            std::process::id()
+        ));
+        let file = File::create(&path).unwrap();
+
+        // A runner EarlyFailure report is forwarded verbatim through the
+        // launcher's pre-opened failure-report fd.
+        let report = SandboxRunnerFailureReport::runtime(
+            "runner-config",
+            "failed to parse runner config".to_string(),
+        );
+        write_launcher_report(&file, &report);
+        drop(file);
+        let written: SandboxRunnerFailureReport =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let _ = fs::remove_file(path);
+
+        assert_eq!(written.label, "runner-config");
+        assert!(written.message.contains("parse runner config"));
     }
 }

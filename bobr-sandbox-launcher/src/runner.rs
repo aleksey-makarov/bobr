@@ -77,43 +77,58 @@ impl SandboxRunnerFailureReport {
     }
 }
 
-pub fn run_config_path(path: &Path) -> i32 {
+/// Outcome of running the runner config.
+///
+/// The distinction matters for who writes the failure report. Once
+/// [`SandboxRunner::new`] succeeds the runner owns its report files and writes
+/// them itself ([`RunnerOutcome::Reported`]). Any failure *before* that point
+/// ([`RunnerOutcome::EarlyFailure`]) leaves the report unwritten, so the
+/// launcher records it through its pre-opened failure-report fd (the same file
+/// on disk, opened before chroot).
+pub enum RunnerOutcome {
+    /// The runner owns its reports and has written one. This is the final code.
+    Reported(i32),
+    /// The runner failed before owning its reports; the launcher must record it.
+    EarlyFailure(SandboxRunnerFailureReport),
+}
+
+pub fn run_config_path(path: &Path) -> RunnerOutcome {
     let config = match fs::read(path)
         .map_err(|error| format!("failed to read runner config '{}': {error}", path.display()))
         .and_then(|bytes| serde_json::from_slice::<RunnerConfig>(&bytes).map_err(|e| e.to_string()))
     {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("{error}");
-            return 2;
+            return RunnerOutcome::EarlyFailure(SandboxRunnerFailureReport::runtime(
+                "runner-config",
+                error,
+            ));
         }
     };
 
     run_config(config)
 }
 
-pub fn run_config(config: RunnerConfig) -> i32 {
+pub fn run_config(config: RunnerConfig) -> RunnerOutcome {
     if config.protocol_version != SANDBOX_PROTOCOL_VERSION {
-        let report = SandboxRunnerFailureReport::runtime(
+        return RunnerOutcome::EarlyFailure(SandboxRunnerFailureReport::runtime(
             "sandbox-protocol",
             format!(
                 "unsupported sandbox protocol {}; expected {}",
                 config.protocol_version, SANDBOX_PROTOCOL_VERSION
             ),
-        );
-        if let Ok(file) = File::create(&config.failure_report) {
-            let _ = serde_json::to_writer(file, &report);
-        }
-        return 1;
+        ));
     }
     let runner = match SandboxRunner::new(config) {
         Ok(runner) => runner,
         Err(error) => {
-            eprintln!("{error}");
-            return 2;
+            return RunnerOutcome::EarlyFailure(SandboxRunnerFailureReport::runtime(
+                "sandbox-runner-init",
+                error.to_string(),
+            ));
         }
     };
-    runner.exec()
+    RunnerOutcome::Reported(runner.exec())
 }
 
 struct SandboxRunner {
@@ -470,20 +485,31 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn run_config_rejects_protocol_mismatch_with_failure_report() {
+    fn run_config_rejects_protocol_mismatch_as_early_failure() {
         let temp = tempdir().unwrap();
         let config = test_config(temp.path()).with_protocol(SANDBOX_PROTOCOL_VERSION + 1);
 
-        let exit_code = run_config(config.clone());
+        let report = early_failure(run_config(config));
 
-        assert_eq!(exit_code, 1);
-        let report = read_failure_report(&config.failure_report);
         assert_eq!(report.label, "sandbox-protocol");
         assert!(
             report.message.contains("unsupported sandbox protocol"),
             "{}",
             report.message
         );
+    }
+
+    #[test]
+    fn run_config_reports_runner_init_failure_as_early_failure() {
+        let temp = tempdir().unwrap();
+        let mut config = test_config(temp.path()).with_protocol(SANDBOX_PROTOCOL_VERSION);
+        // A report path under a missing directory makes File::create in
+        // SandboxRunner::new fail before the runner owns any report.
+        config.success_report = temp.path().join("missing-dir").join("success.json");
+
+        let report = early_failure(run_config(config));
+
+        assert_eq!(report.label, "sandbox-runner-init");
     }
 
     #[test]
@@ -505,7 +531,7 @@ mod tests {
             stderr.clone(),
         );
 
-        let exit_code = run_config(config.clone());
+        let exit_code = reported_code(run_config(config.clone()));
 
         assert_eq!(exit_code, 0);
         assert_eq!(fs::read_to_string(output.join("file")).unwrap(), "payload");
@@ -532,7 +558,7 @@ mod tests {
             stderr.clone(),
         );
 
-        let exit_code = run_config(config.clone());
+        let exit_code = reported_code(run_config(config.clone()));
 
         assert_eq!(exit_code, 1);
         assert_eq!(fs::read_to_string(&stderr).unwrap(), "nope");
@@ -563,7 +589,7 @@ mod tests {
             stderr,
         );
 
-        let exit_code = run_config(config);
+        let exit_code = reported_code(run_config(config));
 
         assert_eq!(exit_code, 0);
         let mode = fs::metadata(output.join("file"))
@@ -588,20 +614,22 @@ mod tests {
             stderr,
         );
 
-        let exit_code = run_config(config);
+        // An invalid umask is rejected while building the step inside
+        // SandboxRunner::new, before the runner owns its reports.
+        let report = early_failure(run_config(config));
 
-        assert_eq!(exit_code, 2);
+        assert_eq!(report.label, "sandbox-runner-init");
     }
 
     #[test]
-    fn run_config_path_rejects_malformed_json() {
+    fn run_config_path_rejects_malformed_json_as_early_failure() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("runner-config.json");
         fs::write(&path, "not json").unwrap();
 
-        let exit_code = run_config_path(&path);
+        let report = early_failure(run_config_path(&path));
 
-        assert_eq!(exit_code, 2);
+        assert_eq!(report.label, "runner-config");
     }
 
     #[test]
@@ -699,5 +727,21 @@ mod tests {
 
     fn read_failure_report(path: &Path) -> SandboxRunnerFailureReport {
         serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+    }
+
+    fn reported_code(outcome: RunnerOutcome) -> i32 {
+        match outcome {
+            RunnerOutcome::Reported(code) => code,
+            RunnerOutcome::EarlyFailure(report) => {
+                panic!("expected Reported, got EarlyFailure: {}", report.to_error_message())
+            }
+        }
+    }
+
+    fn early_failure(outcome: RunnerOutcome) -> SandboxRunnerFailureReport {
+        match outcome {
+            RunnerOutcome::EarlyFailure(report) => report,
+            RunnerOutcome::Reported(code) => panic!("expected EarlyFailure, got Reported({code})"),
+        }
     }
 }
