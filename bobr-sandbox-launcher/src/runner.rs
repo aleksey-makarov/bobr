@@ -9,11 +9,10 @@ use nix::dir::Dir;
 use nix::errno::Errno;
 use nix::fcntl::{AtFlags, OFlag};
 use nix::sys::stat::Mode;
+use nix::sys::wait::WaitStatus;
 #[cfg(not(test))]
-use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
-#[cfg(not(test))]
-use nix::unistd::Pid;
-use nix::unistd::{Gid, Uid, fchownat, setgid, setgroups, setuid};
+use nix::sys::wait::{WaitPidFlag, waitpid};
+use nix::unistd::{Gid, Pid, Uid, fchownat, setgid, setgroups, setuid};
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
@@ -43,27 +42,25 @@ impl SandboxRunnerFailureReport {
     }
 
     fn failed_step(step: &SandboxRunnerStep, status: &ExitStatus, duration_ms: u128) -> Self {
-        let (message, exit_code, signal) = if let Some(code) = status.code() {
-            (
+        let (message, exit_code, signal) = match classify_exit_status(status) {
+            StepExit::Exited(code) => (
                 format!(
                     "sandbox step '{}' failed with exit status {code}",
                     step.name
                 ),
                 Some(code),
                 None,
-            )
-        } else if let Some(signal) = status.signal() {
-            (
+            ),
+            StepExit::Signaled(signal) => (
                 format!("sandbox step '{}' was killed by signal {signal}", step.name),
                 None,
                 Some(signal),
-            )
-        } else {
-            (
+            ),
+            StepExit::Unknown => (
                 format!("sandbox step '{}' ended with status {status:?}", step.name),
                 None,
                 None,
-            )
+            ),
         };
         Self {
             label: step.name.clone(),
@@ -348,6 +345,24 @@ fn elapsed_ms(start: Instant) -> u128 {
     start.elapsed().as_millis()
 }
 
+/// How a finished step process terminated, used to build its failure report.
+#[derive(Debug, PartialEq)]
+enum StepExit {
+    Exited(i32),
+    Signaled(i32),
+    Unknown,
+}
+
+fn classify_exit_status(status: &ExitStatus) -> StepExit {
+    if let Some(code) = status.code() {
+        StepExit::Exited(code)
+    } else if let Some(signal) = status.signal() {
+        StepExit::Signaled(signal)
+    } else {
+        StepExit::Unknown
+    }
+}
+
 fn prepare_error(
     operation: &str,
     path: &Path,
@@ -380,17 +395,30 @@ fn terminate_remaining_children() {
     }
 }
 
+/// Whether the reap loop should keep draining children or stop.
+enum ReapAction {
+    Continue,
+    Stop,
+}
+
+/// Pure decision for one `waitpid(-1, WNOHANG)` result: retry on `EINTR`,
+/// keep draining while children are reaped, and stop once none are ready
+/// (`StillAlive`), there are none left (`ECHILD`), or on any other error.
+fn reap_action(result: Result<WaitStatus, Errno>) -> ReapAction {
+    match result {
+        Ok(WaitStatus::StillAlive) => ReapAction::Stop,
+        Ok(_) => ReapAction::Continue,
+        Err(Errno::EINTR) => ReapAction::Continue,
+        Err(Errno::ECHILD) => ReapAction::Stop,
+        Err(_) => ReapAction::Stop,
+    }
+}
+
 #[cfg(not(test))]
 fn reap_finished_children() {
-    loop {
-        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => break,
-            Ok(_) => continue,
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(nix::errno::Errno::ECHILD) => break,
-            Err(_) => break,
-        }
-    }
+    while let ReapAction::Continue =
+        reap_action(waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)))
+    {}
 }
 
 fn validate_umask(umask: u32) -> io::Result<()> {
@@ -636,6 +664,39 @@ mod tests {
         let report = early_failure(run_config_path(&path));
 
         assert_eq!(report.label, "runner-config");
+    }
+
+    #[test]
+    fn classify_exit_status_distinguishes_exit_and_signal() {
+        use std::os::unix::process::ExitStatusExt;
+
+        // 7 << 8 encodes "exited with status 7"; 9 encodes "killed by signal 9".
+        assert_eq!(
+            classify_exit_status(&ExitStatus::from_raw(7 << 8)),
+            StepExit::Exited(7)
+        );
+        assert_eq!(
+            classify_exit_status(&ExitStatus::from_raw(9)),
+            StepExit::Signaled(9)
+        );
+    }
+
+    #[test]
+    fn reap_action_classifies_waitpid_results() {
+        assert!(matches!(
+            reap_action(Ok(WaitStatus::StillAlive)),
+            ReapAction::Stop
+        ));
+        assert!(matches!(
+            reap_action(Ok(WaitStatus::Exited(Pid::from_raw(123), 0))),
+            ReapAction::Continue
+        ));
+        assert!(matches!(
+            reap_action(Err(Errno::EINTR)),
+            ReapAction::Continue
+        ));
+        assert!(matches!(reap_action(Err(Errno::ECHILD)), ReapAction::Stop));
+        assert!(matches!(reap_action(Err(Errno::EINVAL)), ReapAction::Stop));
     }
 
     #[test]

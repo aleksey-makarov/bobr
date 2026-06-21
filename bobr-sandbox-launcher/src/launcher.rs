@@ -279,27 +279,40 @@ fn tmpfs_mount(mount: &SandboxLauncherMount, target: &Path) -> io::Result<()> {
             error,
         )
     })?;
-    let mut flags = 0;
+    let (flags, data) = tmpfs_mount_options(&mount.options, mount.readonly);
+    mount_syscall(
+        Some(Path::new("tmpfs")),
+        target,
+        Some("tmpfs"),
+        flags,
+        data.as_deref(),
+    )
+    .map_err(|error| context_error(format!("mount tmpfs '{}'", mount.target.display()), error))
+}
+
+/// Splits tmpfs mount options into kernel flag bits and the leftover `data`
+/// string. Recognised security options become flags; everything else (e.g.
+/// `size=`, `mode=`) is passed through as comma-joined mount data.
+fn tmpfs_mount_options(options: &[String], readonly: bool) -> (libc::c_ulong, Option<String>) {
+    let mut flags: libc::c_ulong = 0;
     let mut data_options = Vec::new();
-    for option in &mount.options {
+    for option in options {
         match option.as_str() {
             "nosuid" => flags |= libc::MS_NOSUID,
             "nodev" => flags |= libc::MS_NODEV,
             "noexec" => flags |= libc::MS_NOEXEC,
-            option => data_options.push(option),
+            other => data_options.push(other),
         }
     }
-    if mount.readonly {
+    if readonly {
         flags |= libc::MS_RDONLY;
     }
-    let data = data_options.join(",");
-    let data = if data.is_empty() {
+    let data = if data_options.is_empty() {
         None
     } else {
-        Some(data.as_str())
+        Some(data_options.join(","))
     };
-    mount_syscall(Some(Path::new("tmpfs")), target, Some("tmpfs"), flags, data)
-    .map_err(|error| context_error(format!("mount tmpfs '{}'", mount.target.display()), error))
+    (flags, data)
 }
 
 fn mount_private() -> io::Result<()> {
@@ -480,18 +493,25 @@ fn wait_for_child(pid: libc::pid_t) -> io::Result<i32> {
     loop {
         let result = unsafe { libc::waitpid(pid, &mut status, 0) };
         if result == pid {
-            if libc::WIFEXITED(status) {
-                return Ok(libc::WEXITSTATUS(status));
-            }
-            if libc::WIFSIGNALED(status) {
-                return Ok(128 + libc::WTERMSIG(status));
-            }
-            return Ok(1);
+            return Ok(exit_code_from_wait_status(status));
         }
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
             return Err(error);
         }
+    }
+}
+
+/// Maps a raw `waitpid` status into a process exit code: the child's own code
+/// when it exited, `128 + signal` when it was killed, and `1` for any other
+/// (unexpected) status.
+fn exit_code_from_wait_status(status: libc::c_int) -> i32 {
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        1
     }
 }
 
@@ -536,6 +556,42 @@ mod tests {
 
         assert_eq!(report.label, "launcher-pid1");
         assert!(report.message.contains("drop capabilities"));
+    }
+
+    #[test]
+    fn tmpfs_options_split_flags_and_data() {
+        let (flags, data) = tmpfs_mount_options(
+            &[
+                "nosuid".to_string(),
+                "nodev".to_string(),
+                "noexec".to_string(),
+                "size=64m".to_string(),
+                "mode=1777".to_string(),
+            ],
+            false,
+        );
+
+        assert_eq!(
+            flags,
+            libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+            "recognised options become flags, unrecognised ones do not"
+        );
+        assert_eq!(data.as_deref(), Some("size=64m,mode=1777"));
+    }
+
+    #[test]
+    fn tmpfs_options_readonly_without_data() {
+        let (flags, data) = tmpfs_mount_options(&[], true);
+
+        assert_eq!(flags, libc::MS_RDONLY);
+        assert_eq!(data, None);
+    }
+
+    #[test]
+    fn exit_code_maps_exit_and_signal() {
+        // 7 << 8 encodes "exited with status 7"; 9 encodes "killed by signal 9".
+        assert_eq!(exit_code_from_wait_status(7 << 8), 7);
+        assert_eq!(exit_code_from_wait_status(9), 128 + 9);
     }
 
     #[test]
