@@ -8,7 +8,6 @@ use std::process::ExitCode;
 use mbuild::RecipeEnvelope;
 use mbuild::recipe_runtime;
 use mbuild_core::CancellationToken;
-use tracing_subscriber::EnvFilter;
 
 type MResult<T> = Result<T, MbuildError>;
 
@@ -47,8 +46,6 @@ fn main() -> ExitCode {
     if let Some(exit_code) = run_runtime_worker_if_requested() {
         return exit_code;
     }
-
-    init_tracing();
 
     let cancellation = CancellationToken::new();
     signal::install_handlers(cancellation.clone());
@@ -95,14 +92,6 @@ fn runtime_worker_exit_code(result: bobr_runtime::runtime::RuntimeResult<()>) ->
             ExitCode::FAILURE
         }
     }
-}
-
-fn init_tracing() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("error"));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .without_time()
-        .try_init();
 }
 
 fn build(cancellation: CancellationToken) -> MResult<()> {

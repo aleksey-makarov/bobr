@@ -21,7 +21,6 @@ use std::os::unix::fs::symlink;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use tar::{Archive, EntryType};
-use tracing::warn;
 
 const OUTPUT_MANIFEST_FILE_NAME: &str = "fs-tree-manifest.jsonl";
 const EXTRACT_ROOT_DIR_NAME: &str = "oci-extract-root";
@@ -103,6 +102,29 @@ impl OciExtractBuilder {
             )
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
 
+        if !output.warnings.is_empty() {
+            let raw_log_path = cx.write_raw_log(
+                "oci-extract-warnings",
+                &format!("{}\n", output.warnings.join("\n")),
+            );
+            cx.log_event_with_details(
+                BuildLogLevel::Warn,
+                "extract",
+                format!(
+                    "skipped {} unsupported OCI layer entr{}",
+                    output.warnings.len(),
+                    if output.warnings.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    }
+                ),
+                None,
+                raw_log_path,
+                serde_json::Map::new(),
+            );
+        }
+
         cx.log_event(
             BuildLogLevel::Info,
             "extract",
@@ -131,6 +153,10 @@ pub(crate) struct OciExtractInput {
 #[serde(deny_unknown_fields)]
 pub(crate) struct OciExtractOutput {
     entries: usize,
+    /// Human-readable warnings for entries the extraction skipped (unsupported
+    /// layer entries, special files, xattrs). Returned as a bulk payload so the
+    /// builder, which owns the logger, can write a raw log and emit one event.
+    warnings: Vec<String>,
 }
 
 impl RuntimeFunction for OciExtractFunction {
@@ -181,7 +207,9 @@ fn extract_oci_image_to_fs_tree(
 fn extract_oci_image_to_fs_tree_inner(
     input: &OciExtractInput,
 ) -> Result<OciExtractOutput, OciExtractError> {
-    let records = extract_oci_image_layers(&input.oci_layout_dir, &input.extract_root)?;
+    let mut warnings = Vec::new();
+    let records =
+        extract_oci_image_layers(&input.oci_layout_dir, &input.extract_root, &mut warnings)?;
     read_oci_config_bytes(&input.oci_layout_dir)?;
     apply_extracted_metadata(&input.extract_root, &records)?;
     let manifest = input.fs_tree.scan(&input.extract_root).map_err(|error| {
@@ -194,7 +222,7 @@ fn extract_oci_image_to_fs_tree_inner(
     manifest
         .write_canonical(&input.output_manifest)
         .map_err(|error| OciExtractError::Object(error.to_string()))?;
-    Ok(OciExtractOutput { entries })
+    Ok(OciExtractOutput { entries, warnings })
 }
 
 fn remove_extraction_root(path: &Path) -> Result<(), OciExtractError> {
@@ -288,13 +316,14 @@ enum TarRecordKind {
 fn extract_oci_image_layers(
     oci_layout_dir: &Path,
     target_root: &Path,
+    warnings: &mut Vec<String>,
 ) -> Result<Vec<TarEntryRecord>, OciExtractError> {
     let manifest = oci::read_oci_manifest(oci_layout_dir)
         .map_err(|error| OciExtractError::InvalidInput(error.to_string()))?;
     let mut records = BTreeMap::<String, TarEntryRecord>::new();
 
     for layer in &manifest.layers {
-        extract_layer(oci_layout_dir, target_root, layer, &mut records)?;
+        extract_layer(oci_layout_dir, target_root, layer, &mut records, warnings)?;
     }
 
     Ok(records.into_values().collect())
@@ -305,6 +334,7 @@ fn extract_layer(
     target_root: &Path,
     layer: &OciDescriptor,
     records: &mut BTreeMap<String, TarEntryRecord>,
+    warnings: &mut Vec<String>,
 ) -> Result<(), OciExtractError> {
     let blob_path = oci::blob_path(oci_layout_dir, &layer.digest);
     let blob = File::open(&blob_path).map_err(|error| {
@@ -317,9 +347,9 @@ fn extract_layer(
     match layer.media_type.as_str() {
         oci::MEDIA_TYPE_OCI_LAYER | MEDIA_TYPE_DOCKER_LAYER_GZIP => {
             let decoder = GzDecoder::new(blob);
-            extract_tar_stream(decoder, target_root, records)
+            extract_tar_stream(decoder, target_root, records, warnings)
         }
-        MEDIA_TYPE_OCI_LAYER_TAR => extract_tar_stream(blob, target_root, records),
+        MEDIA_TYPE_OCI_LAYER_TAR => extract_tar_stream(blob, target_root, records, warnings),
         media_type => Err(OciExtractError::InvalidLayer(format!(
             "unsupported OCI layer media type '{media_type}' for {}",
             layer.digest
@@ -331,6 +361,7 @@ fn extract_tar_stream(
     reader: impl Read,
     target_root: &Path,
     records: &mut BTreeMap<String, TarEntryRecord>,
+    warnings: &mut Vec<String>,
 ) -> Result<(), OciExtractError> {
     let mut archive = Archive::new(reader);
     archive.set_preserve_permissions(false);
@@ -352,7 +383,7 @@ fn extract_tar_stream(
             continue;
         }
 
-        warn_unsupported_xattrs(&mut entry)?;
+        warn_unsupported_xattrs(&mut entry, warnings)?;
         let entry_type = entry.header().entry_type();
         if entry_type.is_file() || entry_type.is_contiguous() {
             extract_file_entry(target_root, records, &path, &mut entry)?;
@@ -363,16 +394,21 @@ fn extract_tar_stream(
         } else if entry_type.is_hard_link() {
             extract_hardlink_entry(target_root, records, &path, &entry)?;
         } else if is_special_entry_type(entry_type) {
-            warn!("skipping unsupported OCI layer special file '{}'", path);
+            warnings.push(format!(
+                "skipping unsupported OCI layer special file '{path}'"
+            ));
         } else {
-            warn!("skipping unsupported OCI layer entry '{}'", path);
+            warnings.push(format!("skipping unsupported OCI layer entry '{path}'"));
         }
     }
 
     Ok(())
 }
 
-fn warn_unsupported_xattrs(entry: &mut tar::Entry<'_, impl Read>) -> Result<(), OciExtractError> {
+fn warn_unsupported_xattrs(
+    entry: &mut tar::Entry<'_, impl Read>,
+    warnings: &mut Vec<String>,
+) -> Result<(), OciExtractError> {
     let path = String::from_utf8_lossy(entry.path_bytes().as_ref()).to_string();
     let Some(extensions) = entry.pax_extensions().map_err(|error| {
         OciExtractError::InvalidLayer(format!(
@@ -396,10 +432,9 @@ fn warn_unsupported_xattrs(entry: &mut tar::Entry<'_, impl Read>) -> Result<(), 
             || key.starts_with("LIBARCHIVE.xattr.")
             || key == "security.capability"
         {
-            warn!(
-                "skipping unsupported OCI layer xattr '{}' on '{}'",
-                key, path
-            );
+            warnings.push(format!(
+                "skipping unsupported OCI layer xattr '{key}' on '{path}'"
+            ));
         }
     }
     Ok(())
@@ -978,7 +1013,7 @@ mod tests {
         let root = temp.path().join("root");
         fs::create_dir(&root).unwrap();
 
-        let records = extract_oci_image_layers(&oci, &root).unwrap();
+        let records = extract_oci_image_layers(&oci, &root, &mut Vec::new()).unwrap();
 
         assert_eq!(fs::read(root.join("bin/tool")).unwrap(), b"hello\n");
         assert_eq!(
@@ -1009,7 +1044,7 @@ mod tests {
         let root = temp.path().join("root");
         fs::create_dir(&root).unwrap();
 
-        extract_oci_image_layers(&oci, &root).unwrap();
+        extract_oci_image_layers(&oci, &root, &mut Vec::new()).unwrap();
 
         assert_eq!(fs::read(root.join("file")).unwrap(), b"plain");
     }
@@ -1022,7 +1057,7 @@ mod tests {
         let root = temp.path().join("root");
         fs::create_dir(&root).unwrap();
 
-        let error = extract_oci_image_layers(&oci, &root).unwrap_err();
+        let error = extract_oci_image_layers(&oci, &root, &mut Vec::new()).unwrap_err();
 
         assert!(error.to_string().contains("unsafe component"));
     }
@@ -1042,7 +1077,7 @@ mod tests {
         let root = temp.path().join("root");
         fs::create_dir(&root).unwrap();
 
-        let records = extract_oci_image_layers(&oci, &root).unwrap();
+        let records = extract_oci_image_layers(&oci, &root, &mut Vec::new()).unwrap();
 
         assert!(!root.join("etc/old").exists());
         assert!(!records.iter().any(|record| record.path == "etc/old"));
@@ -1069,7 +1104,7 @@ mod tests {
         let root = temp.path().join("root");
         fs::create_dir(&root).unwrap();
 
-        let records = extract_oci_image_layers(&oci, &root).unwrap();
+        let records = extract_oci_image_layers(&oci, &root, &mut Vec::new()).unwrap();
 
         assert!(!root.join("etc/a").exists());
         assert!(!root.join("etc/b").exists());
@@ -1099,7 +1134,7 @@ mod tests {
         let root = temp.path().join("root");
         fs::create_dir(&root).unwrap();
 
-        let records = extract_oci_image_layers(&oci, &root).unwrap();
+        let records = extract_oci_image_layers(&oci, &root, &mut Vec::new()).unwrap();
 
         assert!(!root.join("a").exists());
         assert!(!root.join("dir").exists());
@@ -1124,7 +1159,7 @@ mod tests {
         let root = temp.path().join("root");
         fs::create_dir(&root).unwrap();
 
-        let records = extract_oci_image_layers(&oci, &root).unwrap();
+        let records = extract_oci_image_layers(&oci, &root, &mut Vec::new()).unwrap();
 
         assert!(records.iter().any(|record| record.path == "bin/tool2"));
         let left = fs::metadata(root.join("bin/tool")).unwrap();
@@ -1143,7 +1178,7 @@ mod tests {
         let root = temp.path().join("root");
         fs::create_dir(&root).unwrap();
 
-        let error = extract_oci_image_layers(&oci, &root).unwrap_err();
+        let error = extract_oci_image_layers(&oci, &root, &mut Vec::new()).unwrap_err();
 
         assert!(error.to_string().contains("different from target"));
     }
