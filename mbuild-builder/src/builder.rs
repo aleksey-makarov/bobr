@@ -2,7 +2,8 @@ use bobr_runtime::runtime_provider::RuntimeProvider;
 use bobr_store::fs_tree::FsTree;
 use fsobj_hash::ObjectHash;
 use mbuild_core::{
-    BuildLogEvent, BuildLogLevel, BuildLogger, BuilderError, CancellationToken, NoopBuildLogger,
+    BuildLogEvent, BuildLogLevel, BuildLogger, BuildStatus, BuilderError, CancellationToken,
+    NoopBuildLogger,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
@@ -308,19 +309,22 @@ impl BuildContext {
         self.cancellation.check_cancelled()
     }
 
+    /// Logs a builder operation. Builder events always ride inside the
+    /// `running` lifecycle status; `op` names the builder-specific operation
+    /// (`mkfs`, `merge`, `extract`, …).
     pub fn log_event(
         &self,
         level: BuildLogLevel,
-        phase: impl Into<String>,
+        op: impl Into<String>,
         message: impl Into<String>,
     ) {
-        self.log_event_with_details(level, phase, message, None, None, Map::new());
+        self.log_event_with_details(level, op, message, None, None, Map::new());
     }
 
     pub fn log_event_with_details(
         &self,
         level: BuildLogLevel,
-        phase: impl Into<String>,
+        op: impl Into<String>,
         message: impl Into<String>,
         object_hash: Option<ObjectHash>,
         raw_log_path: Option<PathBuf>,
@@ -328,7 +332,8 @@ impl BuildContext {
     ) {
         self.logger.log_event(BuildLogEvent {
             level,
-            phase: phase.into(),
+            status: BuildStatus::Running,
+            op: Some(op.into()),
             message: message.into(),
             object_hash,
             raw_log_path,

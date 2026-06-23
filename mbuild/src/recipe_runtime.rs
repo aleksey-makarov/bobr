@@ -3,12 +3,13 @@ use crate::planned::{
     PlannedExecutionContext, PlannedSubject, RealizedInput, SubjectExecution, execute_subject,
 };
 use crate::recipe::{RecipeEnvelope, collect_graph};
-use crate::runtime::{RuntimeError, check_cancelled, log_runtime_event, map_store_error};
+use crate::runtime::{RuntimeError, check_cancelled, map_store_error};
 use crate::runtime_policy::runtime_provider_for_current_process;
 use bobr_store::{RealizedObject, Store};
 use mbuild_builder::BuilderPlannedSubject;
 use mbuild_core::{
-    BuildKey, BuildLogEvent, BuildLogLevel, BuildRunLogger, CancellationToken, RuntimeProvider,
+    BuildKey, BuildLogEvent, BuildLogLevel, BuildRunLogger, BuildStatus, CancellationToken,
+    RuntimeProvider,
 };
 use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
@@ -251,29 +252,10 @@ fn execute_graph(
                 continue;
             }
         };
-        let subject = match subjects.get(&key) {
-            Some(subject) => subject,
-            None => {
-                first_error.get_or_insert(RuntimeError::Store(format!(
-                    "missing planned subject for key '{}'",
-                    key
-                )));
-                continue;
-            }
-        };
-        let publication_name = subject.name();
-        log_runtime_event(
-            executed.logger.as_ref(),
-            BuildLogLevel::Info,
-            "publish",
-            format!(
-                "published '{}' -> {}",
-                publication_name, executed.realized.object_hash
-            ),
-        );
         executed.logger.log_event(BuildLogEvent {
             level: BuildLogLevel::Info,
-            phase: "done".to_string(),
+            status: BuildStatus::Done,
+            op: None,
             message: "subject completed".to_string(),
             object_hash: Some(executed.realized.object_hash),
             raw_log_path: None,

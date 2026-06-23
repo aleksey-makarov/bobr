@@ -1,18 +1,22 @@
 use crate::ObjectHash;
 use serde::Serialize;
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use time::OffsetDateTime;
-use time::UtcOffset;
 use time::macros::format_description;
+
+/// Schema tag stamped on every on-disk event record.
+pub const BUILD_EVENT_SCHEMA: &str = "bobr-build-event-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildLogLevel {
+    Debug,
     Info,
     Warn,
     Error,
@@ -20,18 +24,68 @@ pub enum BuildLogLevel {
 
 impl fmt::Display for BuildLogLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl BuildLogLevel {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Info => f.write_str("info"),
-            Self::Warn => f.write_str("warn"),
-            Self::Error => f.write_str("error"),
+            Self::Debug => "debug",
+            Self::Info => "info",
+            Self::Warn => "warn",
+            Self::Error => "error",
         }
     }
 }
 
+/// Closed lifecycle status shared by every subject and run-level event.
+///
+/// The lifecycle is `start → cache-miss → running → done | failed | cancelled`,
+/// plus `cleanup`. Builder-specific operations ride inside `running` and are
+/// named by the free-form [`BuildLogEvent::op`] field, not by this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildStatus {
+    Start,
+    CacheMiss,
+    Running,
+    Done,
+    Failed,
+    Cancelled,
+    Cleanup,
+}
+
+impl fmt::Display for BuildStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl BuildStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::CacheMiss => "cache-miss",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Cleanup => "cleanup",
+        }
+    }
+}
+
+/// Event payload produced by a source (builder, scheduler, runtime function).
+///
+/// The source supplies only the payload: `level`, `status`, `op`, `message`,
+/// `object_hash`, `raw_log_path`, and `details`. Subject identity and the
+/// envelope (`seq`/`subject_seq`/`ts`/`run_id`) are added by the logger when the
+/// event is emitted, so a source can neither forge nor omit them.
 #[derive(Debug, Clone)]
 pub struct BuildLogEvent {
     pub level: BuildLogLevel,
-    pub phase: String,
+    pub status: BuildStatus,
+    pub op: Option<String>,
     pub message: String,
     pub object_hash: Option<ObjectHash>,
     pub raw_log_path: Option<PathBuf>,
@@ -55,13 +109,35 @@ impl BuildLogger for NoopBuildLogger {
     }
 }
 
+/// A consumer of fully assembled event records.
+///
+/// Every event is built once at the fan-out point and handed to each sink. The
+/// file sink persists records to `events.jsonl`; the progress sink renders them
+/// to stderr. New sinks (metrics, live progress) plug in without touching the
+/// event producers.
+pub trait EventSink: fmt::Debug + Send + Sync {
+    /// Consumes one fully assembled, envelope-stamped record.
+    fn write_event(&self, record: &EventLogRecord);
+
+    /// Notifies the sink that a subject has been bound, before any of its
+    /// events arrive. Sinks that keep per-subject state (file writers) set it
+    /// up here; the default is a no-op.
+    fn register_subject(&self, _subject: &BuildLogSubject) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The event bus: stamps the envelope once and fans every event out to sinks.
+///
+/// `BuildRunLogger` no longer writes files or stderr itself; it owns the sink
+/// list and the run-global monotonic `seq` counter. `FileSink`/`ProgressSink`
+/// do the actual work.
 #[derive(Debug)]
 pub struct BuildRunLogger {
     run_log_dir: PathBuf,
-    event_log_path: PathBuf,
-    emit_progress: bool,
     run_id: String,
-    writer: Mutex<BufWriter<File>>,
+    seq: AtomicU64,
+    sinks: Vec<Arc<dyn EventSink>>,
 }
 
 impl BuildRunLogger {
@@ -73,20 +149,14 @@ impl BuildRunLogger {
             )
         })?;
 
-        let event_log_path = run_log_dir.join("events.jsonl");
-        let file = create_event_log_file(&event_log_path).map_err(|error| {
-            format!(
-                "failed to create run event log '{}': {error}",
-                event_log_path.display()
-            )
-        })?;
+        let file_sink = Arc::new(FileSink::new(run_log_dir)?);
+        let progress_sink = Arc::new(ProgressSink::new(run_log_dir.to_path_buf(), emit_progress));
 
         Ok(Self {
             run_log_dir: run_log_dir.to_path_buf(),
-            event_log_path,
-            emit_progress,
             run_id: run_id.to_string(),
-            writer: Mutex::new(BufWriter::new(file)),
+            seq: AtomicU64::new(0),
+            sinks: vec![file_sink, progress_sink],
         })
     }
 
@@ -102,68 +172,35 @@ impl BuildRunLogger {
         self: &Arc<Self>,
         subject: BuildLogSubject,
     ) -> Result<Arc<dyn BuildLogger>, String> {
-        fs::create_dir_all(&subject.log_dir).map_err(|error| {
-            format!(
-                "failed to create subject log directory '{}': {error}",
-                subject.log_dir.display()
-            )
-        })?;
-        fs::create_dir_all(&subject.raw_log_dir).map_err(|error| {
-            format!(
-                "failed to create raw log directory '{}': {error}",
-                subject.raw_log_dir.display()
-            )
-        })?;
-        let event_log_path = subject.log_dir.join("events.jsonl");
-        let event_file = create_event_log_file(&event_log_path).map_err(|error| {
-            format!(
-                "failed to create subject event log '{}': {error}",
-                event_log_path.display()
-            )
-        })?;
+        for sink in &self.sinks {
+            sink.register_subject(&subject)?;
+        }
         Ok(Arc::new(BoundBuildLogger {
             inner: self.clone(),
             subject,
-            event_log_path,
-            writer: Mutex::new(BufWriter::new(event_file)),
+            subject_seq: AtomicU64::new(0),
             raw_log_counters: Mutex::new(BTreeMap::new()),
         }))
     }
 
-    fn write_event(
+    /// Stamps the envelope once and fans the assembled record out to all sinks.
+    fn emit(
         &self,
-        builder: &str,
-        name: &str,
-        build_key: &str,
+        subject: Option<&BuildLogSubject>,
+        subject_seq: Option<u64>,
         event: &BuildLogEvent,
-    ) -> Result<(), String> {
-        let mut writer = self.writer.lock().map_err(|error| error.to_string())?;
-        let line =
-            serde_json::to_string(&EventLogRecord::from_event(builder, name, build_key, event))
-                .map_err(|error| format!("failed to serialize build event: {error}"))?;
-        writer
-            .write_all(line.as_bytes())
-            .and_then(|_| writer.write_all(b"\n"))
-            .and_then(|_| writer.flush())
-            .map_err(|error| {
-                format!(
-                    "failed to append event log '{}': {error}",
-                    self.event_log_path.display()
-                )
-            })
-    }
-
-    fn log_bound_event(&self, subject: &BuildLogSubject, event: &BuildLogEvent) {
-        if self.emit_progress {
-            eprintln!(
-                "{}",
-                format_progress_line(&subject.tag, &subject.name, &subject.build_key, event)
-            );
-        }
-
-        if let Err(error) = self.write_event(&subject.tag, &subject.name, &subject.build_key, event)
-        {
-            eprintln!("warning: {error}");
+    ) {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let record = EventLogRecord::assemble(
+            &self.run_id,
+            seq,
+            subject_seq,
+            subject,
+            event,
+            &self.run_log_dir,
+        );
+        for sink in &self.sinks {
+            sink.write_event(&record);
         }
     }
 }
@@ -201,17 +238,15 @@ impl BuildLogSubject {
 struct BoundBuildLogger {
     inner: Arc<BuildRunLogger>,
     subject: BuildLogSubject,
-    event_log_path: PathBuf,
-    writer: Mutex<BufWriter<File>>,
+    subject_seq: AtomicU64,
     raw_log_counters: Mutex<BTreeMap<String, usize>>,
 }
 
 impl BuildLogger for BoundBuildLogger {
     fn log_event(&self, event: BuildLogEvent) {
-        self.inner.log_bound_event(&self.subject, &event);
-        if let Err(error) = self.write_event(&event) {
-            eprintln!("warning: {error}");
-        }
+        let subject_seq = self.subject_seq.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .emit(Some(&self.subject), Some(subject_seq), &event);
     }
 
     fn allocate_raw_log_path(&self, label: &str) -> Result<PathBuf, String> {
@@ -231,109 +266,261 @@ impl BuildLogger for BoundBuildLogger {
     }
 }
 
-impl BoundBuildLogger {
-    fn write_event(&self, event: &BuildLogEvent) -> Result<(), String> {
-        let mut writer = self.writer.lock().map_err(|error| error.to_string())?;
-        let line = serde_json::to_string(&EventLogRecord::from_event(
-            &self.subject.tag,
-            &self.subject.name,
-            &self.subject.build_key,
-            event,
-        ))
-        .map_err(|error| format!("failed to serialize build event: {error}"))?;
+/// File sink: persists records to the run-level and per-subject `events.jsonl`.
+///
+/// Owns the run-level writer plus a writer per bound subject (keyed by the full
+/// build key). A subject event is written to both the run log and that
+/// subject's log; the serialized line is identical in both, so tooling can
+/// match records byte-for-byte.
+#[derive(Debug)]
+struct FileSink {
+    run_event_log_path: PathBuf,
+    run_writer: Mutex<BufWriter<File>>,
+    subject_writers: Mutex<HashMap<String, SubjectWriter>>,
+}
+
+#[derive(Debug)]
+struct SubjectWriter {
+    event_log_path: PathBuf,
+    writer: BufWriter<File>,
+}
+
+impl FileSink {
+    fn new(run_log_dir: &Path) -> Result<Self, String> {
+        let run_event_log_path = run_log_dir.join("events.jsonl");
+        let file = create_event_log_file(&run_event_log_path).map_err(|error| {
+            format!(
+                "failed to create run event log '{}': {error}",
+                run_event_log_path.display()
+            )
+        })?;
+        Ok(Self {
+            run_event_log_path,
+            run_writer: Mutex::new(BufWriter::new(file)),
+            subject_writers: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn append(writer: &mut BufWriter<File>, line: &str, path: &Path) -> Result<(), String> {
         writer
             .write_all(line.as_bytes())
             .and_then(|_| writer.write_all(b"\n"))
             .and_then(|_| writer.flush())
-            .map_err(|error| {
-                format!(
-                    "failed to append subject event log '{}': {error}",
-                    self.event_log_path.display()
-                )
-            })
+            .map_err(|error| format!("failed to append event log '{}': {error}", path.display()))
+    }
+}
+
+impl EventSink for FileSink {
+    fn write_event(&self, record: &EventLogRecord) {
+        let line = match serde_json::to_string(record) {
+            Ok(line) => line,
+            Err(error) => {
+                eprintln!("warning: failed to serialize build event: {error}");
+                return;
+            }
+        };
+
+        match self.run_writer.lock() {
+            Ok(mut writer) => {
+                if let Err(error) = Self::append(&mut writer, &line, &self.run_event_log_path) {
+                    eprintln!("warning: {error}");
+                }
+            }
+            Err(error) => eprintln!("warning: {error}"),
+        }
+
+        let Some(subject) = &record.subject else {
+            return;
+        };
+        match self.subject_writers.lock() {
+            Ok(mut writers) => {
+                if let Some(subject_writer) = writers.get_mut(&subject.build_key_full)
+                    && let Err(error) = Self::append(
+                        &mut subject_writer.writer,
+                        &line,
+                        &subject_writer.event_log_path,
+                    )
+                {
+                    eprintln!("warning: {error}");
+                }
+            }
+            Err(error) => eprintln!("warning: {error}"),
+        }
+    }
+
+    fn register_subject(&self, subject: &BuildLogSubject) -> Result<(), String> {
+        fs::create_dir_all(&subject.log_dir).map_err(|error| {
+            format!(
+                "failed to create subject log directory '{}': {error}",
+                subject.log_dir.display()
+            )
+        })?;
+        fs::create_dir_all(&subject.raw_log_dir).map_err(|error| {
+            format!(
+                "failed to create raw log directory '{}': {error}",
+                subject.raw_log_dir.display()
+            )
+        })?;
+        let event_log_path = subject.log_dir.join("events.jsonl");
+        let file = create_event_log_file(&event_log_path).map_err(|error| {
+            format!(
+                "failed to create subject event log '{}': {error}",
+                event_log_path.display()
+            )
+        })?;
+        let mut writers = self
+            .subject_writers
+            .lock()
+            .map_err(|error| error.to_string())?;
+        writers.insert(
+            subject.build_key.clone(),
+            SubjectWriter {
+                event_log_path,
+                writer: BufWriter::new(file),
+            },
+        );
+        Ok(())
+    }
+}
+
+/// Progress sink: renders events to stderr as the build's live UI.
+///
+/// The only writer of stderr progress. `emit_progress` is the current on/off
+/// switch (replaced by a verbosity threshold in a later step). Raw-log paths
+/// are stored run-relative in the record, so this sink rejoins `run_log_dir` to
+/// show an absolute path on screen.
+#[derive(Debug)]
+struct ProgressSink {
+    run_log_dir: PathBuf,
+    emit_progress: bool,
+}
+
+impl ProgressSink {
+    fn new(run_log_dir: PathBuf, emit_progress: bool) -> Self {
+        Self {
+            run_log_dir,
+            emit_progress,
+        }
+    }
+}
+
+impl EventSink for ProgressSink {
+    fn write_event(&self, record: &EventLogRecord) {
+        if self.emit_progress {
+            eprintln!("{}", format_progress_line(record, &self.run_log_dir));
+        }
     }
 }
 
 #[derive(Debug, Serialize)]
-struct EventLogRecord {
+pub struct EventLogRecord {
+    schema: &'static str,
+    run_id: String,
+    seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject_seq: Option<u64>,
     ts: String,
     level: String,
-    phase: String,
-    builder: String,
-    name: String,
-    build_key: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    op: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject: Option<SubjectRecord>,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    object_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    raw_log_path: Option<String>,
+    raw_log: Option<String>,
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     details: Map<String, Value>,
 }
 
+#[derive(Debug, Serialize)]
+struct SubjectRecord {
+    tag: String,
+    name: String,
+    build_key: String,
+    build_key_full: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_hash_full: Option<String>,
+}
+
 impl EventLogRecord {
-    fn from_event(builder: &str, name: &str, build_key: &str, event: &BuildLogEvent) -> Self {
-        let mut details = event.details.clone();
-        details.insert(
-            "full_build_key".to_string(),
-            Value::String(build_key.to_string()),
-        );
-        if let Some(object_hash) = event.object_hash {
-            details.insert(
-                "full_object_hash".to_string(),
-                Value::String(object_hash.to_string()),
-            );
-        }
+    fn assemble(
+        run_id: &str,
+        seq: u64,
+        subject_seq: Option<u64>,
+        subject: Option<&BuildLogSubject>,
+        event: &BuildLogEvent,
+        run_log_dir: &Path,
+    ) -> Self {
+        let subject = subject.map(|subject| SubjectRecord {
+            tag: subject.tag.clone(),
+            name: subject.name.clone(),
+            build_key: short_build_key(&subject.build_key),
+            build_key_full: subject.build_key.clone(),
+            object_hash: event.object_hash.map(short_object_hash),
+            object_hash_full: event.object_hash.map(|hash| hash.to_string()),
+        });
+
+        let raw_log = event
+            .raw_log_path
+            .as_ref()
+            .map(|path| relativize_raw_log(path, run_log_dir));
 
         Self {
-            ts: current_human_timestamp(),
-            level: event.level.to_string(),
-            phase: event.phase.clone(),
-            builder: builder.to_string(),
-            name: name.to_string(),
-            build_key: short_build_key(build_key),
+            schema: BUILD_EVENT_SCHEMA,
+            run_id: run_id.to_string(),
+            seq,
+            subject_seq,
+            ts: current_timestamp_rfc3339(),
+            level: event.level.as_str().to_string(),
+            status: event.status.as_str().to_string(),
+            op: event.op.clone(),
+            subject,
             message: event.message.clone(),
-            object_hash: event.object_hash.map(short_object_hash),
-            raw_log_path: event
-                .raw_log_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            details,
+            raw_log,
+            details: event.details.clone(),
         }
     }
 }
 
-fn format_progress_line(
-    builder: &str,
-    name: &str,
-    build_key: &str,
-    event: &BuildLogEvent,
-) -> String {
-    let mut line = format!(
-        "[{}] {} {} {}",
-        event.phase,
-        builder,
-        name,
-        short_build_key(build_key)
-    );
+fn format_progress_line(record: &EventLogRecord, run_log_dir: &Path) -> String {
+    let label = record.op.as_deref().unwrap_or(record.status.as_str());
+    let mut line = format!("[{label}]");
 
-    if let Some(object_hash) = event.object_hash {
+    if let Some(subject) = &record.subject {
         line.push(' ');
-        line.push_str(&short_object_hash(object_hash));
+        line.push_str(&subject.tag);
+        line.push(' ');
+        line.push_str(&subject.name);
+        line.push(' ');
+        line.push_str(&subject.build_key);
+        if let Some(object_hash) = &subject.object_hash {
+            line.push(' ');
+            line.push_str(object_hash);
+        }
     }
 
-    if !event.message.is_empty() {
+    if !record.message.is_empty() {
         line.push_str(": ");
-        line.push_str(&event.message);
+        line.push_str(&record.message);
     }
 
-    if let Some(path) = &event.raw_log_path {
+    if let Some(raw_log) = &record.raw_log {
         line.push_str(" (log: ");
-        line.push_str(&path.display().to_string());
+        line.push_str(&run_log_dir.join(raw_log).display().to_string());
         line.push(')');
     }
 
     line
+}
+
+fn relativize_raw_log(path: &Path, run_log_dir: &Path) -> String {
+    path.strip_prefix(run_log_dir)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 fn short_build_key(build_key: &str) -> String {
@@ -359,18 +546,12 @@ fn sanitize_component(value: &str) -> String {
     }
 }
 
-fn current_timestamp_utc() -> OffsetDateTime {
-    OffsetDateTime::now_utc()
-}
-
-fn current_human_timestamp() -> String {
-    let now = current_timestamp_utc();
-    let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    let local = now.to_offset(offset);
-    let format = format_description!("[year repr:last_two][month][day][hour][minute][second]");
-    local
-        .format(&format)
-        .unwrap_or_else(|_| "000000000000".to_string())
+fn current_timestamp_rfc3339() -> String {
+    let now = OffsetDateTime::now_utc();
+    let format =
+        format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z");
+    now.format(&format)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00.000Z".to_string())
 }
 
 fn unique_path(
@@ -406,8 +587,12 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    fn run_event_log(run_log_dir: &Path) -> String {
+        fs::read_to_string(run_log_dir.join("events.jsonl")).unwrap()
+    }
+
     #[test]
-    fn bound_logger_writes_builder_identity_to_event_log() {
+    fn bound_logger_writes_subject_identity_and_envelope() {
         let temp = tempdir().unwrap();
         let run_log_dir = temp.path().join("logs").join("260603123456");
         let logger = Arc::new(
@@ -426,33 +611,159 @@ mod tests {
 
         node_logger.log_event(BuildLogEvent {
             level: BuildLogLevel::Info,
-            phase: "start".to_string(),
+            status: BuildStatus::Start,
+            op: None,
             message: "starting builder node".to_string(),
             object_hash: None,
             raw_log_path: None,
             details: Map::new(),
         });
 
-        let contents = fs::read_to_string(&logger.event_log_path).unwrap();
+        let contents = run_event_log(&run_log_dir);
         let line = contents.lines().last().unwrap();
         let event: Value = serde_json::from_str(line).unwrap();
-        assert_eq!(event["builder"], Value::String("Sandbox".to_string()));
-        assert_eq!(event["name"], Value::String("bash".to_string()));
         assert_eq!(
-            event["build_key"],
+            event["schema"],
+            Value::String(BUILD_EVENT_SCHEMA.to_string())
+        );
+        assert_eq!(
+            event["run_id"],
+            Value::String("2026-06-03T12:34:56.000000000Z".to_string())
+        );
+        assert_eq!(event["seq"], Value::from(0));
+        assert_eq!(event["subject_seq"], Value::from(0));
+        assert_eq!(event["status"], Value::String("start".to_string()));
+        assert!(event.get("op").is_none());
+        assert_eq!(
+            event["subject"]["tag"],
+            Value::String("Sandbox".to_string())
+        );
+        assert_eq!(event["subject"]["name"], Value::String("bash".to_string()));
+        assert_eq!(
+            event["subject"]["build_key"],
             Value::String(short_build_key(build_key))
         );
         assert_eq!(
-            event["details"]["full_build_key"],
+            event["subject"]["build_key_full"],
             Value::String(build_key.to_string())
         );
 
         let subject_contents = fs::read_to_string(subject_dir.join("events.jsonl")).unwrap();
         let subject_line = subject_contents.lines().last().unwrap();
-        let subject_event: Value = serde_json::from_str(subject_line).unwrap();
+        // The run-level and subject-level lines are byte-identical.
+        assert_eq!(subject_line, line);
+    }
+
+    #[test]
+    fn op_events_carry_running_status_and_op_field() {
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        let logger = Arc::new(
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
+        );
+        let build_key = "4444444444444444444444444444444444444444444444444444444444444444";
+        let subject_dir = run_log_dir.join("00000000-Erofs-image");
+        let subject = BuildLogSubject::new(
+            "Erofs",
+            "image",
+            build_key,
+            subject_dir.clone(),
+            subject_dir.join("raw"),
+        );
+        let node_logger = logger.bind_subject(subject).unwrap();
+
+        node_logger.log_event(BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status: BuildStatus::Running,
+            op: Some("mkfs".to_string()),
+            message: "creating EROFS image".to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details: Map::new(),
+        });
+
+        let contents = run_event_log(&run_log_dir);
+        let event: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
+        assert_eq!(event["status"], Value::String("running".to_string()));
+        assert_eq!(event["op"], Value::String("mkfs".to_string()));
+    }
+
+    #[test]
+    fn subject_seq_is_monotonic_per_subject() {
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        let logger = Arc::new(
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
+        );
+        let build_key = "5555555555555555555555555555555555555555555555555555555555555555";
+        let subject_dir = run_log_dir.join("00000000-Tree-pkg");
+        let subject = BuildLogSubject::new(
+            "Tree",
+            "pkg",
+            build_key,
+            subject_dir.clone(),
+            subject_dir.join("raw"),
+        );
+        let node_logger = logger.bind_subject(subject).unwrap();
+
+        for index in 0..3 {
+            node_logger.log_event(BuildLogEvent {
+                level: BuildLogLevel::Info,
+                status: BuildStatus::Running,
+                op: Some("stage".to_string()),
+                message: format!("step {index}"),
+                object_hash: None,
+                raw_log_path: None,
+                details: Map::new(),
+            });
+        }
+
+        let contents = run_event_log(&run_log_dir);
+        let seqs: Vec<u64> = contents
+            .lines()
+            .map(|line| {
+                serde_json::from_str::<Value>(line).unwrap()["subject_seq"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(seqs, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn raw_log_path_is_run_relative() {
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        let logger = Arc::new(
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
+        );
+        let build_key = "6666666666666666666666666666666666666666666666666666666666666666";
+        let subject_dir = run_log_dir.join("00000000-Sandbox-bash");
+        let raw_dir = subject_dir.join("raw");
+        let subject = BuildLogSubject::new(
+            "Sandbox",
+            "bash",
+            build_key,
+            subject_dir.clone(),
+            raw_dir.clone(),
+        );
+        let node_logger = logger.bind_subject(subject).unwrap();
+
+        node_logger.log_event(BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status: BuildStatus::Running,
+            op: Some("sandbox-result".to_string()),
+            message: "sandbox wrote manifest".to_string(),
+            object_hash: None,
+            raw_log_path: Some(raw_dir.join("sandbox-result.log")),
+            details: Map::new(),
+        });
+
+        let contents = run_event_log(&run_log_dir);
+        let event: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
         assert_eq!(
-            subject_event["builder"],
-            Value::String("Sandbox".to_string())
+            event["raw_log"],
+            Value::String("00000000-Sandbox-bash/raw/sandbox-result.log".to_string())
         );
     }
 

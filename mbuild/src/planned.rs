@@ -10,8 +10,8 @@ use bobr_store::{
 };
 use mbuild_builder::{BuilderPlanError, BuilderPlannedSubject};
 use mbuild_core::{
-    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, CancellationToken, NoopBuildLogger,
-    SubjectRunContext, Workspace,
+    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, BuildStatus, CancellationToken,
+    NoopBuildLogger, SubjectRunContext, Workspace,
 };
 use mbuild_source::{SourceExecutionError, SourcePlannedSubject};
 use std::collections::HashMap;
@@ -125,13 +125,13 @@ fn execute_builder_subject(
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
-        "start",
+        BuildStatus::Start,
         "starting subject",
     );
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
-        "cache-miss",
+        BuildStatus::CacheMiss,
         "executing builder",
     );
     check_cancelled(&cx.cancellation)?;
@@ -139,7 +139,7 @@ fn execute_builder_subject(
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
-        "run",
+        BuildStatus::Running,
         "running builder implementation",
     );
     let ctx = SubjectRunContext::new(
@@ -154,7 +154,7 @@ fn execute_builder_subject(
             log_runtime_event(
                 logger.as_ref(),
                 BuildLogLevel::Error,
-                "fail",
+                BuildStatus::Failed,
                 error.to_string(),
             );
             map_builder_error(error)
@@ -172,7 +172,7 @@ fn execute_builder_subject(
         log_runtime_event(
             logger.as_ref(),
             BuildLogLevel::Error,
-            "fail",
+            BuildStatus::Failed,
             error.to_string(),
         );
         map_store_error(error)
@@ -234,13 +234,13 @@ fn execute_source_subject(
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
-        "start",
+        BuildStatus::Start,
         "starting subject",
     );
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
-        "cache-miss",
+        BuildStatus::CacheMiss,
         "materializing source",
     );
 
@@ -255,7 +255,7 @@ fn execute_source_subject(
         log_runtime_event(
             logger.as_ref(),
             BuildLogLevel::Error,
-            "fail",
+            BuildStatus::Failed,
             error.to_string(),
         );
         map_source_execution_error(error)
@@ -266,7 +266,7 @@ fn execute_source_subject(
     log_runtime_event(
         logger.as_ref(),
         BuildLogLevel::Info,
-        "run",
+        BuildStatus::Running,
         "materializing source origin",
     );
 
@@ -291,7 +291,12 @@ fn execute_source_subject(
                 subject.declared_object_hash(),
                 actual_hash
             );
-            log_runtime_event(logger.as_ref(), BuildLogLevel::Error, "fail", &message);
+            log_runtime_event(
+                logger.as_ref(),
+                BuildLogLevel::Error,
+                BuildStatus::Failed,
+                &message,
+            );
             Err(RuntimeError::Build(message))
         }
     }

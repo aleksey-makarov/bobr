@@ -1,6 +1,7 @@
 use bobr_store::{StoreError, StoreTempDir};
 use mbuild_core::{
-    BuildLogEvent, BuildLogLevel, BuildLogger, BuilderError, CancellationToken, NoopBuildLogger,
+    BuildLogEvent, BuildLogLevel, BuildLogger, BuildStatus, BuilderError, CancellationToken,
+    NoopBuildLogger,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -68,12 +69,13 @@ pub(crate) fn map_store_error(error: StoreError) -> RuntimeError {
 pub(crate) fn log_runtime_event(
     logger: &dyn BuildLogger,
     level: BuildLogLevel,
-    phase: &str,
+    status: BuildStatus,
     message: impl Into<String>,
 ) {
     logger.log_event(BuildLogEvent {
         level,
-        phase: phase.to_string(),
+        status,
+        op: None,
         message: message.into(),
         object_hash: None,
         raw_log_path: None,
@@ -96,7 +98,7 @@ fn cleanup_temp_dir(temp_dir: &StoreTempDir, logger: &dyn BuildLogger) {
         log_runtime_event(
             logger,
             BuildLogLevel::Warn,
-            "cleanup-warning",
+            BuildStatus::Cleanup,
             format!(
                 "failed to remove temp dir '{}': {error}",
                 temp_dir.path().display()
@@ -283,15 +285,15 @@ mod tests {
     ) -> Value {
         let events = event_log_records(log_dir)
             .into_iter()
-            .filter(|event| event["phase"] == "cleanup-warning")
+            .filter(|event| event["status"] == "cleanup")
             .collect::<Vec<_>>();
         assert_eq!(events.len(), 1);
 
         let event = events.into_iter().next().unwrap();
         assert_eq!(event["level"], "warn");
-        assert_eq!(event["builder"], builder);
-        assert_eq!(event["name"], name);
-        assert_eq!(event["details"]["full_build_key"], build_key.to_string());
+        assert_eq!(event["subject"]["tag"], builder);
+        assert_eq!(event["subject"]["name"], name);
+        assert_eq!(event["subject"]["build_key_full"], build_key.to_string());
 
         let message = event["message"].as_str().unwrap();
         assert!(message.contains(message_fragment));
@@ -596,7 +598,7 @@ mod tests {
         assert!(
             event_log_records(&metadata_log_dir(&metadata))
                 .iter()
-                .all(|event| event["phase"] != "cleanup-warning")
+                .all(|event| event["status"] != "cleanup")
         );
     }
 
