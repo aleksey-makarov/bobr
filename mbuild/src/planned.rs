@@ -46,10 +46,19 @@ pub(crate) struct PlannedExecutionContext<'a> {
     pub(crate) realized_inputs: &'a HashMap<BuildKey, RealizedInput>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubjectOutcome {
+    /// Resolved from cache without a workspace or per-subject logger.
+    CacheHit,
+    /// Built (or materialized) in this run through a bound subject logger.
+    Built,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SubjectExecution {
     pub(crate) realized: RealizedObject,
     pub(crate) logger: Arc<dyn BuildLogger>,
+    pub(crate) outcome: SubjectOutcome,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +96,7 @@ fn execute_builder_subject(
         return Ok(SubjectExecution {
             realized: realized_object_from_record(Some(build_key), &published.object_record),
             logger: Arc::new(NoopBuildLogger),
+            outcome: SubjectOutcome::CacheHit,
         });
     }
     let reuse_key = subject
@@ -99,6 +109,7 @@ fn execute_builder_subject(
         return Ok(SubjectExecution {
             realized: realized_object_from_record(Some(build_key), &published.object_record),
             logger: Arc::new(NoopBuildLogger),
+            outcome: SubjectOutcome::CacheHit,
         });
     }
     let builder_inputs =
@@ -180,6 +191,7 @@ fn execute_builder_subject(
     Ok(SubjectExecution {
         realized: realized_object_from_record(Some(build_key), &published.object_record),
         logger,
+        outcome: SubjectOutcome::Built,
     })
 }
 
@@ -198,6 +210,7 @@ fn execute_source_subject(
         return Ok(SubjectExecution {
             realized: realized_object_from_record(Some(build_key), &published.object_record),
             logger: Arc::new(NoopBuildLogger),
+            outcome: SubjectOutcome::CacheHit,
         });
     }
     if let Some(stored) = record_existing_source_object(
@@ -210,6 +223,7 @@ fn execute_source_subject(
         return Ok(SubjectExecution {
             realized: realized_object_from_record(Some(build_key), &stored.object_record),
             logger: Arc::new(NoopBuildLogger),
+            outcome: SubjectOutcome::CacheHit,
         });
     }
 
@@ -283,6 +297,7 @@ fn execute_source_subject(
         SourceImportOutcome::Matched(stored) => Ok(SubjectExecution {
             realized: realized_object_from_record(Some(build_key), &stored.object_record),
             logger,
+            outcome: SubjectOutcome::Built,
         }),
         SourceImportOutcome::Mismatched { actual_hash } => {
             let message = format!(

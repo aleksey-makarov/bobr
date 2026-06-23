@@ -41,18 +41,24 @@ impl BuildLogLevel {
 
 /// Closed lifecycle status shared by every subject and run-level event.
 ///
-/// The lifecycle is `start → cache-miss → running → done | failed | cancelled`,
-/// plus `cleanup`. Builder-specific operations ride inside `running` and are
-/// named by the free-form [`BuildLogEvent::op`] field, not by this enum.
+/// Subject lifecycle is `start → (cache-hit | cache-miss → running → done) |
+/// failed | cancelled`, plus `cleanup`. Builder-specific operations ride inside
+/// `running` and are named by the free-form [`BuildLogEvent::op`] field, not by
+/// this enum. `run-started`/`run-finished` describe the whole run, not a single
+/// subject; `cache-hit` is a per-subject outcome surfaced on the run-level
+/// channel (no workspace exists for a hit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildStatus {
     Start,
+    CacheHit,
     CacheMiss,
     Running,
     Done,
     Failed,
     Cancelled,
     Cleanup,
+    RunStarted,
+    RunFinished,
 }
 
 impl fmt::Display for BuildStatus {
@@ -65,12 +71,15 @@ impl BuildStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Start => "start",
+            Self::CacheHit => "cache-hit",
             Self::CacheMiss => "cache-miss",
             Self::Running => "running",
             Self::Done => "done",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
             Self::Cleanup => "cleanup",
+            Self::RunStarted => "run-started",
+            Self::RunFinished => "run-finished",
         }
     }
 }
@@ -183,10 +192,23 @@ impl BuildRunLogger {
         }))
     }
 
+    /// Logs a run-level event that belongs to no single subject (build start,
+    /// build finish, scheduler errors). The record has no `subject` block.
+    pub fn log_run_event(&self, event: BuildLogEvent) {
+        self.emit(None, None, &event);
+    }
+
+    /// Logs an event carrying a subject's identity but bound to no per-subject
+    /// log. Used for cache hits, which have identity but no workspace: the
+    /// record lands in the run-level log only (no subject writer is registered).
+    pub fn log_subject_event(&self, identity: &SubjectIdentity, event: BuildLogEvent) {
+        self.emit(Some(identity), None, &event);
+    }
+
     /// Stamps the envelope once and fans the assembled record out to all sinks.
     fn emit(
         &self,
-        subject: Option<&BuildLogSubject>,
+        subject: Option<&SubjectIdentity>,
         subject_seq: Option<u64>,
         event: &BuildLogEvent,
     ) {
@@ -205,12 +227,34 @@ impl BuildRunLogger {
     }
 }
 
-/// Log identity and paths for one concrete builder or source run.
+/// Identity of one concrete builder or source subject, independent of its log
+/// directories. Carried in every subject event, and also used for cache-hit
+/// events, which have an identity but no workspace.
 #[derive(Debug, Clone)]
-pub struct BuildLogSubject {
+pub struct SubjectIdentity {
     tag: String,
     name: String,
     build_key: String,
+}
+
+impl SubjectIdentity {
+    pub fn new(
+        tag: impl Into<String>,
+        name: impl Into<String>,
+        build_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            tag: tag.into(),
+            name: name.into(),
+            build_key: build_key.into(),
+        }
+    }
+}
+
+/// Subject identity plus the log directories allocated for a concrete run.
+#[derive(Debug, Clone)]
+pub struct BuildLogSubject {
+    identity: SubjectIdentity,
     log_dir: PathBuf,
     raw_log_dir: PathBuf,
 }
@@ -225,12 +269,15 @@ impl BuildLogSubject {
         raw_log_dir: PathBuf,
     ) -> Self {
         Self {
-            tag: tag.into(),
-            name: name.into(),
-            build_key: build_key.into(),
+            identity: SubjectIdentity::new(tag, name, build_key),
             log_dir,
             raw_log_dir,
         }
+    }
+
+    /// Returns the subject's identity (tag, name, build key).
+    pub fn identity(&self) -> &SubjectIdentity {
+        &self.identity
     }
 }
 
@@ -246,7 +293,7 @@ impl BuildLogger for BoundBuildLogger {
     fn log_event(&self, event: BuildLogEvent) {
         let subject_seq = self.subject_seq.fetch_add(1, Ordering::Relaxed);
         self.inner
-            .emit(Some(&self.subject), Some(subject_seq), &event);
+            .emit(Some(self.subject.identity()), Some(subject_seq), &event);
     }
 
     fn allocate_raw_log_path(&self, label: &str) -> Result<PathBuf, String> {
@@ -373,7 +420,7 @@ impl EventSink for FileSink {
             .lock()
             .map_err(|error| error.to_string())?;
         writers.insert(
-            subject.build_key.clone(),
+            subject.identity.build_key.clone(),
             SubjectWriter {
                 event_log_path,
                 writer: BufWriter::new(file),
@@ -450,7 +497,7 @@ impl EventLogRecord {
         run_id: &str,
         seq: u64,
         subject_seq: Option<u64>,
-        subject: Option<&BuildLogSubject>,
+        subject: Option<&SubjectIdentity>,
         event: &BuildLogEvent,
         run_log_dir: &Path,
     ) -> Self {
@@ -728,6 +775,75 @@ mod tests {
             })
             .collect();
         assert_eq!(seqs, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn run_level_event_has_no_subject() {
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        let logger = Arc::new(
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
+        );
+
+        logger.log_run_event(BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status: BuildStatus::RunStarted,
+            op: None,
+            message: "build started".to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details: Map::new(),
+        });
+
+        let contents = run_event_log(&run_log_dir);
+        let event: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
+        assert_eq!(event["status"], Value::String("run-started".to_string()));
+        assert!(event.get("subject").is_none());
+        assert!(event.get("subject_seq").is_none());
+    }
+
+    #[test]
+    fn cache_hit_event_carries_identity_but_writes_no_subject_file() {
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        let logger = Arc::new(
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
+        );
+        let build_key = "7777777777777777777777777777777777777777777777777777777777777777";
+        let object_hash: ObjectHash =
+            "8888888888888888888888888888888888888888888888888888888888888888"
+                .parse()
+                .unwrap();
+        let identity = SubjectIdentity::new("Tree", "cached", build_key);
+
+        // No bind_subject: a cache hit has no workspace, so no subject writer.
+        logger.log_subject_event(
+            &identity,
+            BuildLogEvent {
+                level: BuildLogLevel::Info,
+                status: BuildStatus::CacheHit,
+                op: None,
+                message: "served from cache".to_string(),
+                object_hash: Some(object_hash),
+                raw_log_path: None,
+                details: Map::new(),
+            },
+        );
+
+        let contents = run_event_log(&run_log_dir);
+        let event: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
+        assert_eq!(event["status"], Value::String("cache-hit".to_string()));
+        assert_eq!(event["subject"]["tag"], Value::String("Tree".to_string()));
+        assert_eq!(
+            event["subject"]["build_key_full"],
+            Value::String(build_key.to_string())
+        );
+        assert_eq!(
+            event["subject"]["object_hash_full"],
+            Value::String(object_hash.to_string())
+        );
+        // The hit lands only in the run-level log; there is no subject directory.
+        assert!(!run_log_dir.join("00000000-Tree-cached").exists());
     }
 
     #[test]

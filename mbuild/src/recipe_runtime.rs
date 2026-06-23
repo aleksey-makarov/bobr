@@ -1,6 +1,7 @@
 use crate::builder_registry::create_builder_registry;
 use crate::planned::{
-    PlannedExecutionContext, PlannedSubject, RealizedInput, SubjectExecution, execute_subject,
+    PlannedExecutionContext, PlannedSubject, RealizedInput, SubjectExecution, SubjectOutcome,
+    execute_subject,
 };
 use crate::recipe::{RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, map_store_error};
@@ -9,7 +10,7 @@ use bobr_store::{RealizedObject, Store};
 use mbuild_builder::BuilderPlannedSubject;
 use mbuild_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildRunLogger, BuildStatus, CancellationToken,
-    RuntimeProvider,
+    ObjectHash, RuntimeBackend, RuntimeProvider, SubjectIdentity,
 };
 use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
@@ -152,6 +153,9 @@ fn execute_graph(
         }
     }
 
+    let mut counters = RunCounters::default();
+    log_run_started(logger.as_ref(), subjects, root_key, jobs, &runtime_provider);
+
     let (tx, rx) = mpsc::channel::<(BuildKey, Result<SubjectExecution, RuntimeError>)>();
     let mut in_flight = 0usize;
 
@@ -226,41 +230,65 @@ fn execute_graph(
         }
 
         if in_flight == 0 {
-            if let Some(error) = first_error.take() {
-                return Err(error);
+            // No ready work and nothing running: if no failure was recorded,
+            // this is a stall. Funnel both cases through the single terminal
+            // exit below so the run-finished event is always emitted.
+            if first_error.is_none() {
+                first_error = Some(RuntimeError::Build(
+                    "planner/executor stalled: no ready jobs and root object is still unresolved"
+                        .to_string(),
+                ));
             }
-            return Err(RuntimeError::Build(
-                "planner/executor stalled: no ready jobs and root object is still unresolved"
-                    .to_string(),
-            ));
+            break;
         }
 
-        // Unreachable while this function holds its own `tx`: the channel can
-        // only disconnect once every sender is dropped, and disconnect would
-        // mean no worker can report a result anyway. The `?` is a defensive
-        // return for that impossible case (not an abandon: nothing to drain).
-        let (key, result) = rx
-            .recv()
-            .map_err(|_| RuntimeError::Build("worker channel closed unexpectedly".to_string()))?;
+        // Channel disconnect is unreachable while this function holds its own
+        // `tx`, but treat it as a recorded error and break so the terminal exit
+        // still emits the run-finished event.
+        let (key, result) = match rx.recv() {
+            Ok(received) => received,
+            Err(_) => {
+                if first_error.is_none() {
+                    first_error = Some(RuntimeError::Build(
+                        "worker channel closed unexpectedly".to_string(),
+                    ));
+                }
+                break;
+            }
+        };
         in_flight -= 1;
         let executed = match result {
             Ok(executed) => executed,
             Err(error) => {
+                counters.failed += 1;
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
                 continue;
             }
         };
-        executed.logger.log_event(BuildLogEvent {
-            level: BuildLogLevel::Info,
-            status: BuildStatus::Done,
-            op: None,
-            message: "subject completed".to_string(),
-            object_hash: Some(executed.realized.object_hash),
-            raw_log_path: None,
-            details: serde_json::Map::new(),
-        });
+        let object_hash = executed.realized.object_hash;
+        match executed.outcome {
+            SubjectOutcome::CacheHit => {
+                // Cache hits have no per-subject logger; surface them on the
+                // run-level channel so a fully cached run still leaves an audit
+                // trail.
+                counters.cache_hit += 1;
+                log_cache_hit(logger.as_ref(), subjects, key, object_hash);
+            }
+            SubjectOutcome::Built => {
+                counters.built += 1;
+                executed.logger.log_event(BuildLogEvent {
+                    level: BuildLogLevel::Info,
+                    status: BuildStatus::Done,
+                    op: None,
+                    message: "subject completed".to_string(),
+                    object_hash: Some(object_hash),
+                    raw_log_path: None,
+                    details: serde_json::Map::new(),
+                });
+            }
+        }
         completed.insert(key, executed.realized);
         if first_error.is_none()
             && let Some(parents) = reverse.get(&key)
@@ -281,15 +309,140 @@ fn execute_graph(
         }
     }
 
-    if let Some(error) = first_error {
-        return Err(error);
+    let result = if let Some(error) = first_error {
+        Err(error)
+    } else {
+        completed.get(&root_key).cloned().ok_or_else(|| {
+            RuntimeError::Store(format!(
+                "root object for key '{}' is missing after executor completion",
+                root_key
+            ))
+        })
+    };
+    log_run_finished(logger.as_ref(), &result, &counters);
+    result
+}
+
+#[derive(Default)]
+struct RunCounters {
+    built: usize,
+    cache_hit: usize,
+    failed: usize,
+}
+
+fn backend_label(provider: &RuntimeProvider) -> &'static str {
+    match provider.backend() {
+        RuntimeBackend::Host => "host",
+        RuntimeBackend::Namespace => "namespace",
     }
-    completed.get(&root_key).cloned().ok_or_else(|| {
-        RuntimeError::Store(format!(
-            "root object for key '{}' is missing after executor completion",
-            root_key
-        ))
-    })
+}
+
+fn json_object(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    }
+}
+
+fn log_run_started(
+    logger: &BuildRunLogger,
+    subjects: &SubjectGraph,
+    root_key: BuildKey,
+    jobs: usize,
+    provider: &RuntimeProvider,
+) {
+    let root_details = subjects.get(&root_key).map(|subject| {
+        let tag = subject
+            .as_builder()
+            .map_or("Source", |builder| builder.tag());
+        serde_json::json!({
+            "tag": tag,
+            "name": subject.name(),
+            "build_key": root_key.to_string(),
+        })
+    });
+    logger.log_run_event(BuildLogEvent {
+        level: BuildLogLevel::Info,
+        status: BuildStatus::RunStarted,
+        op: None,
+        message: "build started".to_string(),
+        object_hash: None,
+        raw_log_path: None,
+        details: json_object(serde_json::json!({
+            "jobs": jobs,
+            "subjects": subjects.len(),
+            "backend": backend_label(provider),
+            "root": root_details,
+        })),
+    });
+}
+
+fn log_cache_hit(
+    logger: &BuildRunLogger,
+    subjects: &SubjectGraph,
+    key: BuildKey,
+    object_hash: ObjectHash,
+) {
+    let Some(subject) = subjects.get(&key) else {
+        return;
+    };
+    let tag = subject
+        .as_builder()
+        .map_or("Source", |builder| builder.tag());
+    let identity = SubjectIdentity::new(tag, subject.name(), key.to_string());
+    logger.log_subject_event(
+        &identity,
+        BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status: BuildStatus::CacheHit,
+            op: None,
+            message: "served from cache".to_string(),
+            object_hash: Some(object_hash),
+            raw_log_path: None,
+            details: serde_json::Map::new(),
+        },
+    );
+}
+
+fn log_run_finished(
+    logger: &BuildRunLogger,
+    result: &Result<RealizedObject, RuntimeError>,
+    counters: &RunCounters,
+) {
+    let (level, object_hash, outcome, message) = match result {
+        Ok(realized) => (
+            BuildLogLevel::Info,
+            Some(realized.object_hash),
+            "ok",
+            "build finished".to_string(),
+        ),
+        Err(error) if error.class() == "cancelled" => (
+            BuildLogLevel::Error,
+            None,
+            "cancelled",
+            error.message().to_string(),
+        ),
+        Err(error) => (
+            BuildLogLevel::Error,
+            None,
+            "failed",
+            error.message().to_string(),
+        ),
+    };
+    logger.log_run_event(BuildLogEvent {
+        level,
+        status: BuildStatus::RunFinished,
+        op: None,
+        message,
+        object_hash,
+        raw_log_path: None,
+        details: json_object(serde_json::json!({
+            "result": outcome,
+            "built": counters.built,
+            "cache_hit": counters.cache_hit,
+            "failed": counters.failed,
+        })),
+    });
 }
 
 fn build_run_logger_for_store(

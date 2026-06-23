@@ -595,6 +595,73 @@ fn second_cached_run_creates_no_new_workspaces() {
     );
 }
 
+/// Parses the run-level `events.jsonl` of the most recent run.
+fn latest_run_events(workspace_root: &Path) -> Vec<Value> {
+    let logs = store_root(workspace_root).join("logs");
+    let mut runs = fs::read_dir(&logs)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    runs.sort();
+    let last = runs.last().expect("at least one run directory");
+    fs::read_to_string(last.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn cached_run_records_run_level_audit_trail() {
+    let workspace = tempdir().unwrap();
+    let recipe = recipe_node(
+        "all-targets",
+        "Group",
+        json!({}),
+        json!({
+            "only": tree_file_recipe("only-target", "f.txt", "hi\n", false),
+        }),
+    );
+    let recipe_path = workspace.path().join("cached-audit.json");
+    write_recipe(&recipe_path, &recipe);
+
+    // First run is a miss; the second is fully cached.
+    run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+
+    let events = latest_run_events(workspace.path());
+    let statuses = events
+        .iter()
+        .map(|event| event["status"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(statuses.contains(&"run-started"), "{statuses:?}");
+    assert!(statuses.contains(&"run-finished"), "{statuses:?}");
+    assert!(
+        statuses
+            .iter()
+            .filter(|status| **status == "cache-hit")
+            .count()
+            >= 1,
+        "a fully cached run must leave cache-hit events in the run log: {statuses:?}"
+    );
+
+    let cache_hit = events
+        .iter()
+        .find(|event| event["status"] == "cache-hit")
+        .unwrap();
+    assert!(cache_hit["subject"]["build_key_full"].is_string());
+    assert!(cache_hit["subject"]["object_hash_full"].is_string());
+
+    let finished = events
+        .iter()
+        .find(|event| event["status"] == "run-finished")
+        .unwrap();
+    assert_eq!(finished["details"]["result"], "ok");
+    assert!(finished["details"]["cache_hit"].as_u64().unwrap() >= 1);
+}
+
 #[test]
 fn identical_fetch_sources_are_deduped_by_object_hash() {
     let workspace = tempdir().unwrap();
