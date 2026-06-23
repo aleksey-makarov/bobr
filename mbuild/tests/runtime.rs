@@ -453,7 +453,7 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
 }
 
 #[test]
-fn second_run_reuses_root_and_republishes_dependency_refs() {
+fn second_run_reuses_root_without_republishing_refs() {
     let workspace = tempdir().unwrap();
     let source_tar = {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -499,10 +499,11 @@ fn second_run_reuses_root_and_republishes_dependency_refs() {
     let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
 
     assert_eq!(first.build_key, second.build_key);
-    // Every node now runs through the executor on each run, so reused
-    // dependencies recreate their object refs alongside the root.
-    assert_object_ref_exists(workspace.path(), "final-group");
-    assert_object_ref_exists(workspace.path(), "source");
+    // The reused root is resolved by build handle and its subtree is pruned, so
+    // neither the root nor its dependencies are revisited or republished: the
+    // refs removed above stay removed.
+    assert!(!object_ref_path(workspace.path(), "final-group").is_symlink());
+    assert!(!object_ref_path(workspace.path(), "source").is_symlink());
 }
 
 #[test]
@@ -660,6 +661,41 @@ fn cached_run_records_run_level_audit_trail() {
         .unwrap();
     assert_eq!(finished["details"]["result"], "ok");
     assert!(finished["details"]["cache_hit"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn cached_root_prunes_dependency_subtree() {
+    let workspace = tempdir().unwrap();
+    let recipe = recipe_node(
+        "all-targets",
+        "Group",
+        json!({}),
+        json!({
+            "only": tree_file_recipe("only-target", "f.txt", "hi\n", false),
+        }),
+    );
+    let recipe_path = workspace.path().join("prune.json");
+    write_recipe(&recipe_path, &recipe);
+
+    // First run builds the whole graph; the second resolves the root by build
+    // handle and must prune its (now cached) dependency subtree.
+    run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+
+    let events = latest_run_events(workspace.path());
+    let cache_hits = events
+        .iter()
+        .filter(|event| event["status"] == "cache-hit")
+        .collect::<Vec<_>>();
+    // Only the root is resolved; the cached child subject is never visited.
+    assert_eq!(cache_hits.len(), 1, "{events:#?}");
+    assert_eq!(cache_hits[0]["subject"]["name"], "all-targets");
+    assert!(
+        events
+            .iter()
+            .all(|event| event["subject"]["name"] != "only-target"),
+        "a pruned dependency leaked into the run log: {events:#?}"
+    );
 }
 
 #[test]

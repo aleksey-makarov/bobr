@@ -1,12 +1,12 @@
 use crate::builder_registry::create_builder_registry;
 use crate::planned::{
     PlannedExecutionContext, PlannedSubject, RealizedInput, SubjectExecution, SubjectOutcome,
-    execute_subject,
+    execute_subject, realized_object_from_record,
 };
 use crate::recipe::{RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, map_store_error};
 use crate::runtime_policy::runtime_provider_for_current_process;
-use bobr_store::{RealizedObject, Store};
+use bobr_store::{RealizedObject, Store, load_build_handle};
 use mbuild_builder::BuilderPlannedSubject;
 use mbuild_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildRunLogger, BuildStatus, CancellationToken,
@@ -133,18 +133,62 @@ fn execute_graph(
     jobs: usize,
     cancellation: CancellationToken,
 ) -> Result<RealizedObject, RuntimeError> {
+    let mut counters = RunCounters::default();
+    log_run_started(logger.as_ref(), subjects, root_key, jobs, &runtime_provider);
+
+    // Plan top-down: classify nodes lazily, pruning cached subtrees. A node
+    // whose output is reachable by build key alone (build-handle hit) is marked
+    // Reused, and its dependencies are never visited.
+    let mut states = PlanningStates::new();
+    if let Err(error) = resolve_planning_state(store, subjects, &mut states, root_key) {
+        let result = Err(error);
+        log_run_finished(logger.as_ref(), &result, &counters);
+        return result;
+    }
+
+    // Seed reused objects and surface them on the run-level channel. Only the
+    // resolved boundary is recorded; interior nodes of a cached subtree were
+    // never visited, so they are neither resolved nor logged.
     let mut completed = HashMap::<BuildKey, RealizedObject>::new();
+    for (key, state) in &states {
+        if let PlanningState::Reused { realized } = state {
+            completed.insert(*key, realized.clone());
+            counters.cache_hit += 1;
+            log_cache_hit(logger.as_ref(), subjects, *key, realized.object_hash);
+        }
+    }
+
+    // A reused root means there are no misses to build.
+    if let Some(realized) = completed.get(&root_key).cloned() {
+        let result = Ok(realized);
+        log_run_finished(logger.as_ref(), &result, &counters);
+        return result;
+    }
+
+    // Build the dependency in-degree over the miss frontier only; reused inputs
+    // are already in `completed`, so they are not waited on.
     let mut remaining = HashMap::<BuildKey, usize>::new();
     let mut reverse = HashMap::<BuildKey, Vec<BuildKey>>::new();
     let mut ready = VecDeque::<BuildKey>::new();
     let mut first_error: Option<RuntimeError> = None;
 
-    for (key, subject) in subjects {
+    for (key, state) in &states {
+        if !matches!(state, PlanningState::NeedsBuild) {
+            continue;
+        }
+        let Some(subject) = subjects.get(key) else {
+            first_error = Some(RuntimeError::Store(format!(
+                "missing planned subject for key '{key}'"
+            )));
+            break;
+        };
         let mut wait_for = 0usize;
         if let Some(builder) = subject.as_builder() {
             for dep in builder.inputs().values() {
-                wait_for += 1;
-                reverse.entry(*dep).or_default().push(*key);
+                if matches!(states.get(dep), Some(PlanningState::NeedsBuild)) {
+                    wait_for += 1;
+                    reverse.entry(*dep).or_default().push(*key);
+                }
             }
         }
         remaining.insert(*key, wait_for);
@@ -152,9 +196,6 @@ fn execute_graph(
             ready.push_back(*key);
         }
     }
-
-    let mut counters = RunCounters::default();
-    log_run_started(logger.as_ref(), subjects, root_key, jobs, &runtime_provider);
 
     let (tx, rx) = mpsc::channel::<(BuildKey, Result<SubjectExecution, RuntimeError>)>();
     let mut in_flight = 0usize;
@@ -321,6 +362,61 @@ fn execute_graph(
     };
     log_run_finished(logger.as_ref(), &result, &counters);
     result
+}
+
+/// Outcome of planning one subject: either reusable as-is or to be built.
+enum PlanningState {
+    /// Reachable from the store by build key alone (build-handle hit). Its
+    /// dependency subtree is never visited.
+    Reused { realized: RealizedObject },
+    /// Must be built (or resolved at runtime by execute_subject).
+    NeedsBuild,
+}
+
+type PlanningStates = HashMap<BuildKey, PlanningState>;
+
+/// Classifies subjects lazily, top-down, pruning cached subtrees.
+///
+/// A direct build-handle lookup needs no inputs, so a hit marks the node Reused
+/// and returns without descending — the dependencies of a cached object never
+/// have to be resolved. On a miss, only the node's immediate inputs are
+/// visited. Canonical (reuse-key) and source existing-object resolution are not
+/// done here; they stay in execute_subject, which runs after a node's inputs
+/// are built and their object hashes are known.
+fn resolve_planning_state(
+    store: &Store,
+    subjects: &SubjectGraph,
+    states: &mut PlanningStates,
+    key: BuildKey,
+) -> Result<(), RuntimeError> {
+    if states.contains_key(&key) {
+        return Ok(());
+    }
+    let subject = subjects
+        .get(&key)
+        .ok_or_else(|| RuntimeError::Store(format!("missing planned subject for key '{key}'")))?
+        .clone();
+
+    // Pure lookup (no object-ref update): reused subtrees are left untouched.
+    if let Some(published) = load_build_handle(store, key).map_err(map_store_error)? {
+        states.insert(
+            key,
+            PlanningState::Reused {
+                realized: realized_object_from_record(Some(key), &published.object_record),
+            },
+        );
+        return Ok(());
+    }
+
+    let input_keys: Vec<BuildKey> = subject
+        .as_builder()
+        .map(|builder| builder.inputs().values().copied().collect())
+        .unwrap_or_default();
+    for dep in input_keys {
+        resolve_planning_state(store, subjects, states, dep)?;
+    }
+    states.insert(key, PlanningState::NeedsBuild);
+    Ok(())
 }
 
 #[derive(Default)]
@@ -663,7 +759,7 @@ mod tests {
     fn execute_graph_drains_in_flight_workers_when_publish_fails() {
         use crate::planned::PlannedSubject;
         use mbuild_builder::{
-            BuildContext, BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult,
+            BuildContext, BuilderInputs, BuilderRegistry, InputSlot, InputSpec, StagedBuildResult,
             TypedBuilder,
         };
         use serde::Deserialize;
@@ -738,6 +834,36 @@ mod tests {
             }
         }
 
+        // Root depends on both leaves so that lazy planning schedules them:
+        // the planner only visits the root's dependency closure, so the slow
+        // node must be reachable from the root to be in flight when fast fails.
+        #[derive(Debug)]
+        struct RootBuilder;
+        static ROOT_BUILDER: RootBuilder = RootBuilder;
+        static DRAIN_ROOT_SPEC: InputSpec = InputSpec {
+            required_inputs: &[InputSlot::object("fast"), InputSlot::object("slow")],
+            optional_inputs: &[],
+            allow_extra_inputs: false,
+        };
+        impl TypedBuilder for RootBuilder {
+            type Config = EmptyConfig;
+            fn tag(&self) -> &'static str {
+                "DrainRoot"
+            }
+            fn spec(&self) -> &'static InputSpec {
+                &DRAIN_ROOT_SPEC
+            }
+            fn build_typed(
+                &self,
+                _config: Self::Config,
+                _inputs: BuilderInputs,
+                cx: &mut BuildContext,
+            ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+                // Never reached: the fast input fails to publish first.
+                Ok(stage_payload(cx, b"root\n"))
+            }
+        }
+
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let logger = create_test_logger(&store);
@@ -746,10 +872,11 @@ mod tests {
         let mut registry = BuilderRegistry::new();
         registry.register(&FAST_BUILDER).unwrap();
         registry.register(&SLOW_BUILDER).unwrap();
+        registry.register(&ROOT_BUILDER).unwrap();
 
         // Fast node publishes to a pre-existing non-symlink ref path, so its
-        // publish fails after the build succeeds. Slow node is a sibling that
-        // is still in flight.
+        // publish fails after the build succeeds. Slow node is a sibling input
+        // that is still in flight; both are inputs of the root.
         let fast = registry
             .parse_subject(
                 "DrainFast",
@@ -772,19 +899,35 @@ mod tests {
             .unwrap();
         let fast_key = fast.build_key();
         let slow_key = slow.build_key();
+        let root = registry
+            .parse_subject(
+                "DrainRoot",
+                json!({"name": "root", "config": {}})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                BTreeMap::from([
+                    ("fast".to_string(), fast_key),
+                    ("slow".to_string(), slow_key),
+                ]),
+            )
+            .unwrap();
+        let root_key = root.build_key();
 
         let mut subjects: SubjectGraph = HashMap::new();
         subjects.insert(fast_key, Arc::new(PlannedSubject::Builder(fast)));
         subjects.insert(slow_key, Arc::new(PlannedSubject::Builder(slow)));
+        subjects.insert(root_key, Arc::new(PlannedSubject::Builder(root)));
 
-        // Root is the failing node, so the loop never completes through the root
-        // and must drain the in-flight slow worker before returning the error.
+        // The root waits on both leaves, so it never completes once fast's
+        // publish fails; the scheduler must drain the in-flight slow worker
+        // before returning the error.
         let error = execute_graph(
             &store,
             logger,
             RuntimeProvider::host(),
             &subjects,
-            fast_key,
+            root_key,
             2,
             CancellationToken::new(),
         )
