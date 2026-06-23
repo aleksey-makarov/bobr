@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(event["level"], "warn");
         assert_eq!(event["subject"]["tag"], builder);
         assert_eq!(event["subject"]["name"], name);
-        assert_eq!(event["subject"]["build_key_full"], build_key.to_string());
+        assert_eq!(event["subject"]["build_key"], build_key.to_string());
 
         let message = event["message"].as_str().unwrap();
         assert!(message.contains(message_fragment));

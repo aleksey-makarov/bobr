@@ -88,7 +88,7 @@ impl BuildStatus {
 ///
 /// The source supplies only the payload: `level`, `status`, `op`, `message`,
 /// `object_hash`, `raw_log_path`, and `details`. Subject identity and the
-/// envelope (`seq`/`subject_seq`/`ts`/`run_id`) are added by the logger when the
+/// envelope (`seq`/`subject_seq`/`ts`) are added by the logger when the
 /// event is emitted, so a source can neither forge nor omit them.
 #[derive(Debug, Clone)]
 pub struct BuildLogEvent {
@@ -213,14 +213,7 @@ impl BuildRunLogger {
         event: &BuildLogEvent,
     ) {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        let record = EventLogRecord::assemble(
-            &self.run_id,
-            seq,
-            subject_seq,
-            subject,
-            event,
-            &self.run_log_dir,
-        );
+        let record = EventLogRecord::assemble(seq, subject_seq, subject, event, &self.run_log_dir);
         for sink in &self.sinks {
             sink.write_event(&record);
         }
@@ -381,7 +374,7 @@ impl EventSink for FileSink {
         };
         match self.subject_writers.lock() {
             Ok(mut writers) => {
-                if let Some(subject_writer) = writers.get_mut(&subject.build_key_full)
+                if let Some(subject_writer) = writers.get_mut(&subject.build_key)
                     && let Err(error) = Self::append(
                         &mut subject_writer.writer,
                         &line,
@@ -462,7 +455,6 @@ impl EventSink for ProgressSink {
 #[derive(Debug, Serialize)]
 pub struct EventLogRecord {
     schema: &'static str,
-    run_id: String,
     seq: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     subject_seq: Option<u64>,
@@ -484,17 +476,15 @@ pub struct EventLogRecord {
 struct SubjectRecord {
     tag: String,
     name: String,
+    // Full, canonical values. The 12-char short forms are derivable by
+    // truncation and are computed only for the progress line, not stored.
     build_key: String,
-    build_key_full: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     object_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    object_hash_full: Option<String>,
 }
 
 impl EventLogRecord {
     fn assemble(
-        run_id: &str,
         seq: u64,
         subject_seq: Option<u64>,
         subject: Option<&SubjectIdentity>,
@@ -504,10 +494,8 @@ impl EventLogRecord {
         let subject = subject.map(|subject| SubjectRecord {
             tag: subject.tag.clone(),
             name: subject.name.clone(),
-            build_key: short_build_key(&subject.build_key),
-            build_key_full: subject.build_key.clone(),
-            object_hash: event.object_hash.map(short_object_hash),
-            object_hash_full: event.object_hash.map(|hash| hash.to_string()),
+            build_key: subject.build_key.clone(),
+            object_hash: event.object_hash.map(|hash| hash.to_string()),
         });
 
         let raw_log = event
@@ -517,7 +505,6 @@ impl EventLogRecord {
 
         Self {
             schema: BUILD_EVENT_SCHEMA,
-            run_id: run_id.to_string(),
             seq,
             subject_seq,
             ts: current_timestamp_rfc3339(),
@@ -542,10 +529,10 @@ fn format_progress_line(record: &EventLogRecord, run_log_dir: &Path) -> String {
         line.push(' ');
         line.push_str(&subject.name);
         line.push(' ');
-        line.push_str(&subject.build_key);
+        line.push_str(&short_id(&subject.build_key));
         if let Some(object_hash) = &subject.object_hash {
             line.push(' ');
-            line.push_str(object_hash);
+            line.push_str(&short_id(object_hash));
         }
     }
 
@@ -570,12 +557,9 @@ fn relativize_raw_log(path: &Path, run_log_dir: &Path) -> String {
         .to_string()
 }
 
-fn short_build_key(build_key: &str) -> String {
-    build_key.chars().take(12).collect()
-}
-
-fn short_object_hash(object_hash: ObjectHash) -> String {
-    object_hash.to_string().chars().take(12).collect()
+/// 12-char prefix of a build key or object hash, for the progress line only.
+fn short_id(value: &str) -> String {
+    value.chars().take(12).collect()
 }
 
 fn sanitize_component(value: &str) -> String {
@@ -673,10 +657,8 @@ mod tests {
             event["schema"],
             Value::String(BUILD_EVENT_SCHEMA.to_string())
         );
-        assert_eq!(
-            event["run_id"],
-            Value::String("2026-06-03T12:34:56.000000000Z".to_string())
-        );
+        // run_id is the run directory name, not duplicated into every line.
+        assert!(event.get("run_id").is_none());
         assert_eq!(event["seq"], Value::from(0));
         assert_eq!(event["subject_seq"], Value::from(0));
         assert_eq!(event["status"], Value::String("start".to_string()));
@@ -686,12 +668,9 @@ mod tests {
             Value::String("Sandbox".to_string())
         );
         assert_eq!(event["subject"]["name"], Value::String("bash".to_string()));
+        // build_key holds the full, canonical value (no separate short field).
         assert_eq!(
             event["subject"]["build_key"],
-            Value::String(short_build_key(build_key))
-        );
-        assert_eq!(
-            event["subject"]["build_key_full"],
             Value::String(build_key.to_string())
         );
 
@@ -835,11 +814,11 @@ mod tests {
         assert_eq!(event["status"], Value::String("cache-hit".to_string()));
         assert_eq!(event["subject"]["tag"], Value::String("Tree".to_string()));
         assert_eq!(
-            event["subject"]["build_key_full"],
+            event["subject"]["build_key"],
             Value::String(build_key.to_string())
         );
         assert_eq!(
-            event["subject"]["object_hash_full"],
+            event["subject"]["object_hash"],
             Value::String(object_hash.to_string())
         );
         // The hit lands only in the run-level log; there is no subject directory.

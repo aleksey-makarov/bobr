@@ -651,8 +651,8 @@ fn cached_run_records_run_level_audit_trail() {
         .iter()
         .find(|event| event["status"] == "cache-hit")
         .unwrap();
-    assert!(cache_hit["subject"]["build_key_full"].is_string());
-    assert!(cache_hit["subject"]["object_hash_full"].is_string());
+    assert!(cache_hit["subject"]["build_key"].is_string());
+    assert!(cache_hit["subject"]["object_hash"].is_string());
 
     let finished = events
         .iter()
