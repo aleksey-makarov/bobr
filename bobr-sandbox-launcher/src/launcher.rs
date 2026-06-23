@@ -191,14 +191,14 @@ fn run_pid1(config: &SandboxLauncherConfig, failure_report: &File) -> io::Result
 fn mount_layout(config: &SandboxLauncherConfig) -> io::Result<()> {
     for mount in &config.mounts {
         // Resolve the in-root target once per mount; the kind helpers reuse it.
-        let target = config.root.join(
-            relative_launcher_target(&mount.target).map_err(|error| {
+        let target = config
+            .root
+            .join(relative_launcher_target(&mount.target).map_err(|error| {
                 context_error(
                     format!("resolve mount target '{}'", mount.target.display()),
                     error,
                 )
-            })?,
-        );
+            })?);
         match mount.kind {
             SandboxLauncherMountKind::Bind => bind_mount(mount, &target)?,
             SandboxLauncherMountKind::Proc => proc_mount(mount, &target)?,
@@ -350,7 +350,8 @@ fn chroot(root: &Path) -> io::Result<()> {
 }
 
 fn unshare_namespace(label: &str, flags: CloneFlags) -> io::Result<()> {
-    nix::sched::unshare(flags).map_err(|error| context_error(format!("unshare {label}"), nix_to_io(error)))
+    nix::sched::unshare(flags)
+        .map_err(|error| context_error(format!("unshare {label}"), nix_to_io(error)))
 }
 
 fn context_error(context: impl std::fmt::Display, error: io::Error) -> io::Error {

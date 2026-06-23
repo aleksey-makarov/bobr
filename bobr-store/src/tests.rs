@@ -1420,7 +1420,7 @@ fn store_create_pins_symlink_root_to_initial_target() {
 
     create_workspace(&store, "Tree", Some("node".to_string()), "build-key").unwrap();
 
-    let workspace_dir = format!("00000000-Tree-node");
+    let workspace_dir = "00000000-Tree-node".to_string();
     assert!(
         store_a
             .join(LOGS_DIR)

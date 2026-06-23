@@ -800,7 +800,10 @@ mod tests {
         match outcome {
             RunnerOutcome::Reported(code) => code,
             RunnerOutcome::EarlyFailure(report) => {
-                panic!("expected Reported, got EarlyFailure: {}", report.to_error_message())
+                panic!(
+                    "expected Reported, got EarlyFailure: {}",
+                    report.to_error_message()
+                )
             }
         }
     }
