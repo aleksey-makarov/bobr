@@ -10,7 +10,7 @@ use std::sync::Arc;
 pub enum RuntimeError {
     InvalidRequest(String),
     UnknownBuilder(String),
-    RecipeLoad(String),
+    RequestLoad(String),
     Cancelled(String),
     Build(String),
     Store(String),
@@ -21,7 +21,7 @@ impl RuntimeError {
         match self {
             Self::InvalidRequest(_) => "invalid-request",
             Self::UnknownBuilder(_) => "unknown-builder",
-            Self::RecipeLoad(_) => "recipe-load",
+            Self::RequestLoad(_) => "request-load",
             Self::Cancelled(_) => "cancelled",
             Self::Build(_) => "build",
             Self::Store(_) => "store",
@@ -32,7 +32,7 @@ impl RuntimeError {
         match self {
             Self::InvalidRequest(message)
             | Self::UnknownBuilder(message)
-            | Self::RecipeLoad(message)
+            | Self::RequestLoad(message)
             | Self::Cancelled(message)
             | Self::Build(message)
             | Self::Store(message) => message,

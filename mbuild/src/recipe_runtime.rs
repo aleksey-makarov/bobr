@@ -3,7 +3,7 @@ use crate::planned::{
     PlannedExecutionContext, PlannedSubject, RealizedInput, SubjectExecution, SubjectOutcome,
     execute_subject, realized_object_from_record,
 };
-use crate::recipe::{RecipeEnvelope, collect_graph};
+use crate::recipe::{RequestEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, map_store_error};
 use bobr_runtime::runtime_provider::runtime_provider_for_current_process;
 use bobr_store::{RealizedObject, Store, load_build_handle};
@@ -27,27 +27,27 @@ pub fn run_recipe_json_in_workspace(
     recipe_path: &Path,
 ) -> Result<RealizedObject, RuntimeError> {
     if !recipe_path.exists() {
-        return Err(RuntimeError::RecipeLoad(format!(
+        return Err(RuntimeError::RequestLoad(format!(
             "recipe file '{}' does not exist",
             recipe_path.display()
         )));
     }
 
     let recipe_bytes = fs::read(recipe_path).map_err(|error| {
-        RuntimeError::RecipeLoad(format!(
+        RuntimeError::RequestLoad(format!(
             "failed to read recipe file '{}': {error}",
             recipe_path.display()
         ))
     })?;
-    let envelope = RecipeEnvelope::parse_json(&recipe_bytes)?;
+    let envelope = RequestEnvelope::parse_json(&recipe_bytes)?;
     run_recipe_envelope(envelope, CancellationToken::new())
 }
 
 pub fn run_recipe_envelope(
-    envelope: RecipeEnvelope,
+    envelope: RequestEnvelope,
     cancellation: CancellationToken,
 ) -> Result<RealizedObject, RuntimeError> {
-    let RecipeEnvelope { options, request } = envelope;
+    let RequestEnvelope { options, request } = envelope;
     let jobs = options.jobs.unwrap_or_else(default_jobs);
     if jobs == 0 {
         return Err(RuntimeError::InvalidRequest(

@@ -355,7 +355,7 @@ fn builder_resolved_inputs(
 fn map_builder_plan_error(error: BuilderPlanError) -> RuntimeError {
     match error {
         BuilderPlanError::UnknownBuilder { .. } => RuntimeError::UnknownBuilder(error.to_string()),
-        BuilderPlanError::Recipe(_) => RuntimeError::RecipeLoad(error.to_string()),
+        BuilderPlanError::Recipe(_) => RuntimeError::RequestLoad(error.to_string()),
         BuilderPlanError::InvalidRequest(_) | BuilderPlanError::Identity(_) => {
             RuntimeError::InvalidRequest(error.to_string())
         }

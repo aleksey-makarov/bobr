@@ -11,24 +11,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
-pub struct RecipeEnvelope {
-    pub options: RecipeOptions,
+pub struct RequestEnvelope {
+    pub options: RequestOptions,
     pub request: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct RecipeOptions {
+pub struct RequestOptions {
     pub store: Option<PathBuf>,
     pub quiet: Option<bool>,
     pub jobs: Option<usize>,
 }
 
-impl RecipeEnvelope {
+impl RequestEnvelope {
     pub fn parse_json(bytes: &[u8]) -> Result<Self, RuntimeError> {
         let value: Value = serde_json::from_slice(bytes).map_err(|error| {
-            RuntimeError::RecipeLoad(format!("failed to decode recipe JSON value: {error}"))
+            RuntimeError::RequestLoad(format!("failed to decode recipe JSON value: {error}"))
         })?;
-        parse_envelope_value(value, "$")
+        parse_request_envelope(value, "$")
     }
 }
 
@@ -74,21 +74,21 @@ fn collect_graph_inner(
     let mut object = node_value
         .as_object()
         .cloned()
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{node_path}: expected recipe object")))?;
+        .ok_or_else(|| RuntimeError::RequestLoad(format!("{node_path}: expected recipe object")))?;
     let tag = take_string(&mut object, &node_path, "tag")?;
 
     let (key, subject) = if tag == "Source" {
         let subject = parse_source_subject(object)
-            .map_err(|error| RuntimeError::RecipeLoad(format!("{node_path}: {error}")))?;
+            .map_err(|error| RuntimeError::RequestLoad(format!("{node_path}: {error}")))?;
         let key = subject.build_key();
         (key, Arc::new(PlannedSubject::Source(subject)))
     } else {
         let inputs_value = object.remove("inputs").ok_or_else(|| {
-            RuntimeError::RecipeLoad(format!("{node_path}: missing required field 'inputs'"))
+            RuntimeError::RequestLoad(format!("{node_path}: missing required field 'inputs'"))
         })?;
 
         let inputs_object = inputs_value.as_object().cloned().ok_or_else(|| {
-            RuntimeError::RecipeLoad(format!("{node_path}.inputs: expected object"))
+            RuntimeError::RequestLoad(format!("{node_path}.inputs: expected object"))
         })?;
         let mut inputs = BTreeMap::new();
         for (input_name, slot_value) in inputs_object {
@@ -125,48 +125,48 @@ fn map_builder_plan_error(error: BuilderPlanError, node_path: &str) -> RuntimeEr
     let message = format!("{node_path}: {error}");
     match error {
         BuilderPlanError::UnknownBuilder { .. } => RuntimeError::UnknownBuilder(message),
-        BuilderPlanError::Recipe(_) => RuntimeError::RecipeLoad(message),
+        BuilderPlanError::Recipe(_) => RuntimeError::RequestLoad(message),
         BuilderPlanError::InvalidRequest(_) | BuilderPlanError::Identity(_) => {
             RuntimeError::InvalidRequest(message)
         }
     }
 }
 
-fn parse_envelope_value(value: Value, path: &str) -> Result<RecipeEnvelope, RuntimeError> {
+fn parse_request_envelope(value: Value, path: &str) -> Result<RequestEnvelope, RuntimeError> {
     let mut object = value.as_object().cloned().ok_or_else(|| {
-        RuntimeError::RecipeLoad(format!("{path}: expected top-level recipe object"))
+        RuntimeError::RequestLoad(format!("{path}: expected top-level recipe object"))
     })?;
 
     let options = match object.remove("options") {
-        Some(value) => parse_options_value(value, &format!("{path}.options"))?,
-        None => RecipeOptions::default(),
+        Some(value) => parse_request_options(value, &format!("{path}.options"))?,
+        None => RequestOptions::default(),
     };
-    let request = parse_request_value(
+    let request = parse_request_nodes(
         object.remove("nodes").ok_or_else(|| {
-            RuntimeError::RecipeLoad(format!("{path}: missing required field 'nodes'"))
+            RuntimeError::RequestLoad(format!("{path}: missing required field 'nodes'"))
         })?,
         &format!("{path}.nodes"),
     )?;
     if !object.is_empty() {
-        return Err(RuntimeError::RecipeLoad(format!(
+        return Err(RuntimeError::RequestLoad(format!(
             "{path}: unexpected fields: {}",
             object.keys().cloned().collect::<Vec<_>>().join(", ")
         )));
     }
 
-    Ok(RecipeEnvelope { options, request })
+    Ok(RequestEnvelope { options, request })
 }
 
-fn parse_options_value(value: Value, path: &str) -> Result<RecipeOptions, RuntimeError> {
+fn parse_request_options(value: Value, path: &str) -> Result<RequestOptions, RuntimeError> {
     let mut object = value
         .as_object()
         .cloned()
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: expected object")))?;
+        .ok_or_else(|| RuntimeError::RequestLoad(format!("{path}: expected object")))?;
 
     let store = match object.remove("store") {
         Some(Value::String(value)) => Some(PathBuf::from(value)),
         Some(_) => {
-            return Err(RuntimeError::RecipeLoad(format!(
+            return Err(RuntimeError::RequestLoad(format!(
                 "{path}.store: expected string"
             )));
         }
@@ -175,7 +175,7 @@ fn parse_options_value(value: Value, path: &str) -> Result<RecipeOptions, Runtim
     let quiet = match object.remove("quiet") {
         Some(Value::Bool(value)) => Some(value),
         Some(_) => {
-            return Err(RuntimeError::RecipeLoad(format!(
+            return Err(RuntimeError::RequestLoad(format!(
                 "{path}.quiet: expected boolean"
             )));
         }
@@ -184,40 +184,40 @@ fn parse_options_value(value: Value, path: &str) -> Result<RecipeOptions, Runtim
     let jobs = match object.remove("jobs") {
         Some(Value::Number(value)) => {
             let jobs = value.as_u64().ok_or_else(|| {
-                RuntimeError::RecipeLoad(format!("{path}.jobs: expected non-negative integer"))
+                RuntimeError::RequestLoad(format!("{path}.jobs: expected non-negative integer"))
             })?;
             let jobs = usize::try_from(jobs).map_err(|_| {
-                RuntimeError::RecipeLoad(format!(
+                RuntimeError::RequestLoad(format!(
                     "{path}.jobs: value is too large for this platform"
                 ))
             })?;
             Some(jobs)
         }
         Some(_) => {
-            return Err(RuntimeError::RecipeLoad(format!(
+            return Err(RuntimeError::RequestLoad(format!(
                 "{path}.jobs: expected integer"
             )));
         }
         None => None,
     };
     if !object.is_empty() {
-        return Err(RuntimeError::RecipeLoad(format!(
+        return Err(RuntimeError::RequestLoad(format!(
             "{path}: unexpected fields: {}",
             object.keys().cloned().collect::<Vec<_>>().join(", ")
         )));
     }
-    Ok(RecipeOptions { store, quiet, jobs })
+    Ok(RequestOptions { store, quiet, jobs })
 }
 
-fn parse_request_value(value: Value, path: &str) -> Result<BTreeMap<String, Value>, RuntimeError> {
+fn parse_request_nodes(value: Value, path: &str) -> Result<BTreeMap<String, Value>, RuntimeError> {
     let object = value.as_object().cloned().ok_or_else(|| {
-        RuntimeError::RecipeLoad(format!(
+        RuntimeError::RequestLoad(format!(
             "{path}: expected top-level object of node definitions"
         ))
     })?;
 
     if !object.contains_key("root") {
-        return Err(RuntimeError::RecipeLoad(
+        return Err(RuntimeError::RequestLoad(
             "missing required top-level node 'root'".to_string(),
         ));
     }
@@ -225,16 +225,16 @@ fn parse_request_value(value: Value, path: &str) -> Result<BTreeMap<String, Valu
     let mut nodes = BTreeMap::new();
     for (node_id, node_value) in object {
         let node_path = format!("{path}.{node_id}");
-        nodes.insert(node_id, parse_recipe_value(node_value, &node_path)?);
+        nodes.insert(node_id, parse_request_node(node_value, &node_path)?);
     }
 
     Ok(nodes)
 }
 
-fn parse_recipe_value(value: Value, path: &str) -> Result<Value, RuntimeError> {
+fn parse_request_node(value: Value, path: &str) -> Result<Value, RuntimeError> {
     value
         .as_object()
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}: expected recipe object")))?;
+        .ok_or_else(|| RuntimeError::RequestLoad(format!("{path}: expected recipe object")))?;
     Ok(value)
 }
 
@@ -245,13 +245,13 @@ fn node_path(node_id: &str) -> String {
 fn parse_input_value(value: Value, path: &str) -> Result<String, RuntimeError> {
     match value {
         Value::String(child_id) => Ok(child_id),
-        Value::Null => Err(RuntimeError::RecipeLoad(format!(
+        Value::Null => Err(RuntimeError::RequestLoad(format!(
             "{path}: expected node id string, got null"
         ))),
-        Value::Array(_) => Err(RuntimeError::RecipeLoad(format!(
+        Value::Array(_) => Err(RuntimeError::RequestLoad(format!(
             "{path}: expected node id string, got array"
         ))),
-        _ => Err(RuntimeError::RecipeLoad(format!(
+        _ => Err(RuntimeError::RequestLoad(format!(
             "{path}: expected node id string"
         ))),
     }
@@ -263,12 +263,12 @@ fn take_string(
     field: &str,
 ) -> Result<String, RuntimeError> {
     let value = object.remove(field).ok_or_else(|| {
-        RuntimeError::RecipeLoad(format!("{path}: missing required field '{field}'"))
+        RuntimeError::RequestLoad(format!("{path}: missing required field '{field}'"))
     })?;
     value
         .as_str()
         .map(ToOwned::to_owned)
-        .ok_or_else(|| RuntimeError::RecipeLoad(format!("{path}.{field}: expected string")))
+        .ok_or_else(|| RuntimeError::RequestLoad(format!("{path}.{field}: expected string")))
 }
 
 #[cfg(test)]
@@ -280,7 +280,7 @@ mod tests {
     fn collect_one(
         request: &Value,
     ) -> Result<(BuildKey, HashMap<BuildKey, Arc<PlannedSubject>>), RuntimeError> {
-        let request = parse_request_value(request.clone(), "$")?;
+        let request = parse_request_nodes(request.clone(), "$")?;
         let registry = create_builder_registry()?;
         let mut subjects = HashMap::new();
         let root_key = collect_graph(&request, &registry, &mut subjects)?;
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn recipe_requires_top_level_root_node() {
-        let error = parse_request_value(json!({"kind":"Legacy"}), "$").unwrap_err();
+        let error = parse_request_nodes(json!({"kind":"Legacy"}), "$").unwrap_err();
         assert!(
             error
                 .to_string()
@@ -675,7 +675,7 @@ mod tests {
             "inputs": {}
         });
 
-        let error = RecipeEnvelope::parse_json(serde_json::to_vec(&old_shape).unwrap().as_slice())
+        let error = RequestEnvelope::parse_json(serde_json::to_vec(&old_shape).unwrap().as_slice())
             .unwrap_err();
         assert!(
             error.to_string().contains("missing required field 'nodes'"),

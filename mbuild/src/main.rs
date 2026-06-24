@@ -5,7 +5,7 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use mbuild::RecipeEnvelope;
+use mbuild::RequestEnvelope;
 use mbuild::recipe_runtime;
 use mbuild_core::CancellationToken;
 
@@ -97,7 +97,7 @@ fn runtime_worker_exit_code(result: bobr_runtime::runtime::RuntimeResult<()>) ->
 fn build(cancellation: CancellationToken) -> MResult<()> {
     let recipe_file = recipe_file_from_args()?;
     let recipe_bytes = read_recipe_bytes(recipe_file.as_ref())?;
-    let envelope = RecipeEnvelope::parse_json(&recipe_bytes).map_err(map_runtime_error)?;
+    let envelope = RequestEnvelope::parse_json(&recipe_bytes).map_err(map_runtime_error)?;
 
     let build =
         recipe_runtime::run_recipe_envelope(envelope, cancellation).map_err(map_runtime_error)?;
@@ -143,7 +143,7 @@ fn map_runtime_error(error: mbuild::RuntimeError) -> MbuildError {
     match error {
         mbuild::RuntimeError::InvalidRequest(_)
         | mbuild::RuntimeError::UnknownBuilder(_)
-        | mbuild::RuntimeError::RecipeLoad(_) => MbuildError::InvalidInput(error.to_string()),
+        | mbuild::RuntimeError::RequestLoad(_) => MbuildError::InvalidInput(error.to_string()),
         mbuild::RuntimeError::Cancelled(_) => MbuildError::Cancelled(error.to_string()),
         mbuild::RuntimeError::Build(_) | mbuild::RuntimeError::Store(_) => {
             MbuildError::BuildFailed(error.to_string())

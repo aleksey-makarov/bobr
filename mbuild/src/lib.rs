@@ -5,5 +5,5 @@ pub mod recipe_runtime;
 mod resolved_inputs;
 mod runtime;
 
-pub use recipe::{RecipeEnvelope, RecipeOptions};
+pub use recipe::{RequestEnvelope, RequestOptions};
 pub use runtime::RuntimeError;
