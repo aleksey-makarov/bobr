@@ -1,7 +1,7 @@
 mod support;
 
 use bobr_store::{Store, load_build_handle};
-use mbuild::recipe_runtime::run_request_in_workspace;
+use mbuild::run_request_in_workspace;
 use std::fs;
 use support::{
     build_ref_count, object_record_count, remove_build_ref, store_root, tree_file_recipe,

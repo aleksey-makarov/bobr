@@ -1,5 +1,5 @@
+use crate::execution::ExecutionError;
 use crate::planned::PlannedSubject;
-use crate::runtime::RuntimeError;
 use bobr_core::BuildKey;
 #[cfg(test)]
 use bobr_core::compute_build_key;
@@ -13,7 +13,7 @@ pub(crate) fn collect_graph(
     request: &BTreeMap<String, Value>,
     registry: &BuilderRegistry,
     subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
-) -> Result<BuildKey, RuntimeError> {
+) -> Result<BuildKey, ExecutionError> {
     let mut visited_in_path = BTreeSet::new();
     let mut node_keys = HashMap::new();
     collect_graph_inner(
@@ -33,38 +33,38 @@ fn collect_graph_inner(
     subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
     visited_in_path: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, BuildKey>,
-) -> Result<BuildKey, RuntimeError> {
+) -> Result<BuildKey, ExecutionError> {
     if let Some(existing) = node_keys.get(node_id) {
         return Ok(*existing);
     }
 
     if !visited_in_path.insert(node_id.to_string()) {
-        return Err(RuntimeError::InvalidRequest(format!(
+        return Err(ExecutionError::InvalidRequest(format!(
             "request graph contains a cycle through node id '{node_id}'"
         )));
     }
 
     let node_value = request.get(node_id).ok_or_else(|| {
-        RuntimeError::InvalidRequest(format!("request references unknown node id '{node_id}'"))
+        ExecutionError::InvalidRequest(format!("request references unknown node id '{node_id}'"))
     })?;
     let node_path = node_path(node_id);
     let mut object = node_value.as_object().cloned().ok_or_else(|| {
-        RuntimeError::RequestLoad(format!("{node_path}: expected request object"))
+        ExecutionError::RequestLoad(format!("{node_path}: expected request object"))
     })?;
     let tag = take_string(&mut object, &node_path, "tag")?;
 
     let (key, subject) = if tag == "Source" {
         let subject = parse_source_subject(object)
-            .map_err(|error| RuntimeError::RequestLoad(format!("{node_path}: {error}")))?;
+            .map_err(|error| ExecutionError::RequestLoad(format!("{node_path}: {error}")))?;
         let key = subject.build_key();
         (key, Arc::new(PlannedSubject::Source(subject)))
     } else {
         let inputs_value = object.remove("inputs").ok_or_else(|| {
-            RuntimeError::RequestLoad(format!("{node_path}: missing required field 'inputs'"))
+            ExecutionError::RequestLoad(format!("{node_path}: missing required field 'inputs'"))
         })?;
 
         let inputs_object = inputs_value.as_object().cloned().ok_or_else(|| {
-            RuntimeError::RequestLoad(format!("{node_path}.inputs: expected object"))
+            ExecutionError::RequestLoad(format!("{node_path}.inputs: expected object"))
         })?;
         let mut inputs = BTreeMap::new();
         for (input_name, slot_value) in inputs_object {
@@ -97,13 +97,13 @@ fn collect_graph_inner(
     Ok(key)
 }
 
-fn map_builder_plan_error(error: BuilderPlanError, node_path: &str) -> RuntimeError {
+fn map_builder_plan_error(error: BuilderPlanError, node_path: &str) -> ExecutionError {
     let message = format!("{node_path}: {error}");
     match error {
-        BuilderPlanError::UnknownBuilder { .. } => RuntimeError::UnknownBuilder(message),
-        BuilderPlanError::Recipe(_) => RuntimeError::RequestLoad(message),
+        BuilderPlanError::UnknownBuilder { .. } => ExecutionError::UnknownBuilder(message),
+        BuilderPlanError::Recipe(_) => ExecutionError::RequestLoad(message),
         BuilderPlanError::InvalidRequest(_) | BuilderPlanError::Identity(_) => {
-            RuntimeError::InvalidRequest(message)
+            ExecutionError::InvalidRequest(message)
         }
     }
 }
@@ -112,16 +112,16 @@ fn node_path(node_id: &str) -> String {
     format!("$.nodes.{node_id}")
 }
 
-fn parse_input_value(value: Value, path: &str) -> Result<String, RuntimeError> {
+fn parse_input_value(value: Value, path: &str) -> Result<String, ExecutionError> {
     match value {
         Value::String(child_id) => Ok(child_id),
-        Value::Null => Err(RuntimeError::RequestLoad(format!(
+        Value::Null => Err(ExecutionError::RequestLoad(format!(
             "{path}: expected node id string, got null"
         ))),
-        Value::Array(_) => Err(RuntimeError::RequestLoad(format!(
+        Value::Array(_) => Err(ExecutionError::RequestLoad(format!(
             "{path}: expected node id string, got array"
         ))),
-        _ => Err(RuntimeError::RequestLoad(format!(
+        _ => Err(ExecutionError::RequestLoad(format!(
             "{path}: expected node id string"
         ))),
     }
@@ -131,14 +131,14 @@ fn take_string(
     object: &mut Map<String, Value>,
     path: &str,
     field: &str,
-) -> Result<String, RuntimeError> {
+) -> Result<String, ExecutionError> {
     let value = object.remove(field).ok_or_else(|| {
-        RuntimeError::RequestLoad(format!("{path}: missing required field '{field}'"))
+        ExecutionError::RequestLoad(format!("{path}: missing required field '{field}'"))
     })?;
     value
         .as_str()
         .map(ToOwned::to_owned)
-        .ok_or_else(|| RuntimeError::RequestLoad(format!("{path}.{field}: expected string")))
+        .ok_or_else(|| ExecutionError::RequestLoad(format!("{path}.{field}: expected string")))
 }
 
 #[cfg(test)]
@@ -150,7 +150,7 @@ mod tests {
 
     fn collect_one(
         request: &Value,
-    ) -> Result<(BuildKey, HashMap<BuildKey, Arc<PlannedSubject>>), RuntimeError> {
+    ) -> Result<(BuildKey, HashMap<BuildKey, Arc<PlannedSubject>>), ExecutionError> {
         let request = parse_request_nodes(request.clone(), "$")?;
         let registry = create_builder_registry()?;
         let mut subjects = HashMap::new();
@@ -158,7 +158,7 @@ mod tests {
         Ok((root_key, subjects))
     }
 
-    fn collect_error(request: &Value) -> RuntimeError {
+    fn collect_error(request: &Value) -> ExecutionError {
         match collect_one(request) {
             Ok(_) => panic!("expected collect_graph to fail"),
             Err(error) => error,

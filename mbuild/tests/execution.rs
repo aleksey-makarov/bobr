@@ -4,7 +4,7 @@ use bobr_core::{BuildKey, ObjectHash};
 #[cfg(feature = "integration-tests")]
 use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
 use bobr_store::{Store, load_build_handle, load_object_record};
-use mbuild::recipe_runtime::run_request_in_workspace;
+use mbuild::run_request_in_workspace;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -152,7 +152,7 @@ fn source_recipe_node(name: &str, object_hash: &str, origin_path: &str, unpack: 
 }
 
 #[cfg(feature = "integration-tests")]
-fn ownership_runtime_lock() -> &'static Mutex<()> {
+fn ownership_execution_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -740,7 +740,7 @@ fn identical_fetch_sources_are_deduped_by_object_hash() {
 }
 
 #[test]
-fn tree_file_recipe_builds_successfully_via_runtime() {
+fn tree_file_recipe_builds_successfully_via_execution() {
     let workspace = tempdir().unwrap();
     let request_path = workspace.path().join("tree-file.json");
     write_request(
@@ -763,8 +763,8 @@ fn tree_file_recipe_builds_successfully_via_runtime() {
 
 #[test]
 #[cfg(feature = "integration-tests")]
-fn tree_directory_recipe_builds_successfully_via_runtime() {
-    let _guard = ownership_runtime_lock()
+fn tree_directory_recipe_builds_successfully_via_execution() {
+    let _guard = ownership_execution_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let workspace = tempdir().unwrap();
@@ -809,8 +809,8 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
 
 #[test]
 #[cfg(feature = "integration-tests")]
-fn tree_symlink_recipe_builds_successfully_via_runtime() {
-    let _guard = ownership_runtime_lock()
+fn tree_symlink_recipe_builds_successfully_via_execution() {
+    let _guard = ownership_execution_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let workspace = tempdir().unwrap();

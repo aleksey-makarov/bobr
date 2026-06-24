@@ -1,4 +1,4 @@
-use crate::runtime::{RuntimeError, map_store_error};
+use crate::execution::{ExecutionError, map_store_error};
 use bobr_core::{ObjectHash, RuntimeProvider};
 use bobr_store::Store;
 use mbuild_builder::{
@@ -26,12 +26,12 @@ impl ResolvedInputs {
     }
 
     #[cfg(test)]
-    pub(crate) fn new(slots: BTreeMap<String, ResolvedDependency>) -> Self {
+    fn new(slots: BTreeMap<String, ResolvedDependency>) -> Self {
         Self { slots }
     }
 
     #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }
 
@@ -39,7 +39,7 @@ impl ResolvedInputs {
         self.slots.insert(name.into(), value);
     }
 
-    pub(crate) fn required(&self, name: &str) -> Result<&ResolvedDependency, BuilderError> {
+    fn required(&self, name: &str) -> Result<&ResolvedDependency, BuilderError> {
         match self.slots.get(name) {
             Some(object) => Ok(object),
             None => Err(BuilderError::ExecutionFailed(format!(
@@ -48,19 +48,15 @@ impl ResolvedInputs {
         }
     }
 
-    pub(crate) fn optional(&self, name: &str) -> Option<&ResolvedDependency> {
+    fn optional(&self, name: &str) -> Option<&ResolvedDependency> {
         self.slots.get(name)
     }
 
-    pub(crate) fn get(&self, name: &str) -> Option<&ResolvedDependency> {
+    fn get(&self, name: &str) -> Option<&ResolvedDependency> {
         self.slots.get(name)
     }
 
-    pub(crate) fn extra<'a>(
-        &'a self,
-        spec: &InputSpec,
-        name: &str,
-    ) -> Option<&'a ResolvedDependency> {
+    fn extra<'a>(&'a self, spec: &InputSpec, name: &str) -> Option<&'a ResolvedDependency> {
         if spec.is_reserved_input(name) {
             None
         } else {
@@ -68,7 +64,7 @@ impl ResolvedInputs {
         }
     }
 
-    pub(crate) fn extras<'a>(
+    fn extras<'a>(
         &'a self,
         spec: &'a InputSpec,
     ) -> impl Iterator<Item = (&'a str, &'a ResolvedDependency)> + 'a {
@@ -99,7 +95,7 @@ impl ResolvedInputs {
         spec: &InputSpec,
         store: &Store,
         runtime: &RuntimeProvider,
-    ) -> Result<BuilderInputs, RuntimeError> {
+    ) -> Result<BuilderInputs, ExecutionError> {
         let mut slots = BTreeMap::new();
         for (name, value) in self.slots {
             let path = match spec.input_kind(&name).unwrap_or(InputKind::Object) {
@@ -122,7 +118,7 @@ fn prepare_fs_tree_root_input(
     runtime: &RuntimeProvider,
     object_hash: ObjectHash,
     materialization_name: Option<&str>,
-) -> Result<PathBuf, RuntimeError> {
+) -> Result<PathBuf, ExecutionError> {
     let fs_tree = store.fs_tree();
     if let Some(root) = fs_tree
         .lookup_materialized_root(object_hash)
@@ -136,7 +132,7 @@ fn prepare_fs_tree_root_input(
         return Ok(root);
     }
     materialize_fs_tree_root(runtime, fs_tree, object_hash, materialization_name).map_err(|error| {
-        RuntimeError::Build(format!(
+        ExecutionError::Build(format!(
             "failed to materialize fs-tree input '{}': {error}",
             object_hash
         ))

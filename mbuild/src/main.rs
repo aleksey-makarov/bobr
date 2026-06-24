@@ -6,8 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use bobr_core::CancellationToken;
-use mbuild::RequestEnvelope;
-use mbuild::recipe_runtime;
+use mbuild::{RequestEnvelope, render_object_as_json, run_request_envelope};
 
 type MResult<T> = Result<T, MbuildError>;
 
@@ -97,11 +96,10 @@ fn runtime_worker_exit_code(result: bobr_runtime::runtime::RuntimeResult<()>) ->
 fn build(cancellation: CancellationToken) -> MResult<()> {
     let request_file = request_file_from_args()?;
     let request_bytes = read_request_bytes(request_file.as_ref())?;
-    let envelope = RequestEnvelope::parse_json(&request_bytes).map_err(map_runtime_error)?;
+    let envelope = RequestEnvelope::parse_json(&request_bytes).map_err(map_execution_error)?;
 
-    let build =
-        recipe_runtime::run_request_envelope(envelope, cancellation).map_err(map_runtime_error)?;
-    let rendered = recipe_runtime::render_object_as_json(&build).map_err(map_runtime_error)?;
+    let build = run_request_envelope(envelope, cancellation).map_err(map_execution_error)?;
+    let rendered = render_object_as_json(&build).map_err(map_execution_error)?;
     print!("{rendered}");
     Ok(())
 }
@@ -141,13 +139,13 @@ fn read_request_bytes(request_file: Option<&PathBuf>) -> MResult<Vec<u8>> {
     }
 }
 
-fn map_runtime_error(error: mbuild::RuntimeError) -> MbuildError {
+fn map_execution_error(error: mbuild::ExecutionError) -> MbuildError {
     match error {
-        mbuild::RuntimeError::InvalidRequest(_)
-        | mbuild::RuntimeError::UnknownBuilder(_)
-        | mbuild::RuntimeError::RequestLoad(_) => MbuildError::InvalidInput(error.to_string()),
-        mbuild::RuntimeError::Cancelled(_) => MbuildError::Cancelled(error.to_string()),
-        mbuild::RuntimeError::Build(_) | mbuild::RuntimeError::Store(_) => {
+        mbuild::ExecutionError::InvalidRequest(_)
+        | mbuild::ExecutionError::UnknownBuilder(_)
+        | mbuild::ExecutionError::RequestLoad(_) => MbuildError::InvalidInput(error.to_string()),
+        mbuild::ExecutionError::Cancelled(_) => MbuildError::Cancelled(error.to_string()),
+        mbuild::ExecutionError::Build(_) | mbuild::ExecutionError::Store(_) => {
             MbuildError::BuildFailed(error.to_string())
         }
     }
@@ -170,7 +168,7 @@ mod signal {
         }
     }
 
-    pub fn install_handlers(cancellation: CancellationToken) {
+    pub(crate) fn install_handlers(cancellation: CancellationToken) {
         unsafe {
             libc::signal(
                 libc::SIGINT,
@@ -197,5 +195,5 @@ mod signal {
 mod signal {
     use bobr_core::CancellationToken;
 
-    pub fn install_handlers(_cancellation: CancellationToken) {}
+    pub(crate) fn install_handlers(_cancellation: CancellationToken) {}
 }

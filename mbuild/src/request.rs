@@ -1,33 +1,33 @@
-use crate::runtime::RuntimeError;
+use crate::execution::ExecutionError;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct RequestEnvelope {
-    pub options: RequestOptions,
-    pub request: BTreeMap<String, Value>,
+    pub(crate) options: RequestOptions,
+    pub(crate) request: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct RequestOptions {
-    pub store: Option<PathBuf>,
-    pub quiet: Option<bool>,
-    pub jobs: Option<usize>,
+pub(crate) struct RequestOptions {
+    pub(crate) store: Option<PathBuf>,
+    pub(crate) quiet: Option<bool>,
+    pub(crate) jobs: Option<usize>,
 }
 
 impl RequestEnvelope {
-    pub fn parse_json(bytes: &[u8]) -> Result<Self, RuntimeError> {
+    pub fn parse_json(bytes: &[u8]) -> Result<Self, ExecutionError> {
         let value: Value = serde_json::from_slice(bytes).map_err(|error| {
-            RuntimeError::RequestLoad(format!("failed to decode request JSON value: {error}"))
+            ExecutionError::RequestLoad(format!("failed to decode request JSON value: {error}"))
         })?;
         parse_request_envelope(value, "$")
     }
 }
 
-fn parse_request_envelope(value: Value, path: &str) -> Result<RequestEnvelope, RuntimeError> {
+fn parse_request_envelope(value: Value, path: &str) -> Result<RequestEnvelope, ExecutionError> {
     let mut object = value.as_object().cloned().ok_or_else(|| {
-        RuntimeError::RequestLoad(format!("{path}: expected top-level request object"))
+        ExecutionError::RequestLoad(format!("{path}: expected top-level request object"))
     })?;
 
     let options = match object.remove("options") {
@@ -36,12 +36,12 @@ fn parse_request_envelope(value: Value, path: &str) -> Result<RequestEnvelope, R
     };
     let request = parse_request_nodes(
         object.remove("nodes").ok_or_else(|| {
-            RuntimeError::RequestLoad(format!("{path}: missing required field 'nodes'"))
+            ExecutionError::RequestLoad(format!("{path}: missing required field 'nodes'"))
         })?,
         &format!("{path}.nodes"),
     )?;
     if !object.is_empty() {
-        return Err(RuntimeError::RequestLoad(format!(
+        return Err(ExecutionError::RequestLoad(format!(
             "{path}: unexpected fields: {}",
             object.keys().cloned().collect::<Vec<_>>().join(", ")
         )));
@@ -50,16 +50,16 @@ fn parse_request_envelope(value: Value, path: &str) -> Result<RequestEnvelope, R
     Ok(RequestEnvelope { options, request })
 }
 
-fn parse_request_options(value: Value, path: &str) -> Result<RequestOptions, RuntimeError> {
+fn parse_request_options(value: Value, path: &str) -> Result<RequestOptions, ExecutionError> {
     let mut object = value
         .as_object()
         .cloned()
-        .ok_or_else(|| RuntimeError::RequestLoad(format!("{path}: expected object")))?;
+        .ok_or_else(|| ExecutionError::RequestLoad(format!("{path}: expected object")))?;
 
     let store = match object.remove("store") {
         Some(Value::String(value)) => Some(PathBuf::from(value)),
         Some(_) => {
-            return Err(RuntimeError::RequestLoad(format!(
+            return Err(ExecutionError::RequestLoad(format!(
                 "{path}.store: expected string"
             )));
         }
@@ -68,7 +68,7 @@ fn parse_request_options(value: Value, path: &str) -> Result<RequestOptions, Run
     let quiet = match object.remove("quiet") {
         Some(Value::Bool(value)) => Some(value),
         Some(_) => {
-            return Err(RuntimeError::RequestLoad(format!(
+            return Err(ExecutionError::RequestLoad(format!(
                 "{path}.quiet: expected boolean"
             )));
         }
@@ -77,24 +77,24 @@ fn parse_request_options(value: Value, path: &str) -> Result<RequestOptions, Run
     let jobs = match object.remove("jobs") {
         Some(Value::Number(value)) => {
             let jobs = value.as_u64().ok_or_else(|| {
-                RuntimeError::RequestLoad(format!("{path}.jobs: expected non-negative integer"))
+                ExecutionError::RequestLoad(format!("{path}.jobs: expected non-negative integer"))
             })?;
             let jobs = usize::try_from(jobs).map_err(|_| {
-                RuntimeError::RequestLoad(format!(
+                ExecutionError::RequestLoad(format!(
                     "{path}.jobs: value is too large for this platform"
                 ))
             })?;
             Some(jobs)
         }
         Some(_) => {
-            return Err(RuntimeError::RequestLoad(format!(
+            return Err(ExecutionError::RequestLoad(format!(
                 "{path}.jobs: expected integer"
             )));
         }
         None => None,
     };
     if !object.is_empty() {
-        return Err(RuntimeError::RequestLoad(format!(
+        return Err(ExecutionError::RequestLoad(format!(
             "{path}: unexpected fields: {}",
             object.keys().cloned().collect::<Vec<_>>().join(", ")
         )));
@@ -105,15 +105,15 @@ fn parse_request_options(value: Value, path: &str) -> Result<RequestOptions, Run
 pub(crate) fn parse_request_nodes(
     value: Value,
     path: &str,
-) -> Result<BTreeMap<String, Value>, RuntimeError> {
+) -> Result<BTreeMap<String, Value>, ExecutionError> {
     let object = value.as_object().cloned().ok_or_else(|| {
-        RuntimeError::RequestLoad(format!(
+        ExecutionError::RequestLoad(format!(
             "{path}: expected top-level object of node definitions"
         ))
     })?;
 
     if !object.contains_key("root") {
-        return Err(RuntimeError::RequestLoad(
+        return Err(ExecutionError::RequestLoad(
             "missing required top-level node 'root'".to_string(),
         ));
     }
@@ -127,10 +127,10 @@ pub(crate) fn parse_request_nodes(
     Ok(nodes)
 }
 
-fn parse_request_node(value: Value, path: &str) -> Result<Value, RuntimeError> {
+fn parse_request_node(value: Value, path: &str) -> Result<Value, ExecutionError> {
     value
         .as_object()
-        .ok_or_else(|| RuntimeError::RequestLoad(format!("{path}: expected request object")))?;
+        .ok_or_else(|| ExecutionError::RequestLoad(format!("{path}: expected request object")))?;
     Ok(value)
 }
 

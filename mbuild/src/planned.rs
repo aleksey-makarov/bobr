@@ -1,8 +1,8 @@
-use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
-use crate::runtime::{
-    RuntimeError, TempDirGuard, check_cancelled, log_runtime_event, map_builder_error,
+use crate::execution::{
+    ExecutionError, TempDirGuard, check_cancelled, log_execution_event, map_builder_error,
     map_store_error, prepare_temp,
 };
+use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use bobr_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, BuildStatus, CancellationToken,
     NoopBuildLogger, SubjectRunContext, Workspace,
@@ -70,7 +70,7 @@ pub(crate) struct RealizedInput {
 pub(crate) fn execute_subject(
     subject: &PlannedSubject,
     cx: PlannedExecutionContext<'_>,
-) -> Result<SubjectExecution, RuntimeError> {
+) -> Result<SubjectExecution, ExecutionError> {
     match subject {
         PlannedSubject::Source(subject) => execute_source_subject(subject, cx),
         PlannedSubject::Builder(subject) => execute_builder_subject(subject, cx),
@@ -80,7 +80,7 @@ pub(crate) fn execute_subject(
 fn execute_builder_subject(
     subject: &BuilderPlannedSubject,
     cx: PlannedExecutionContext<'_>,
-) -> Result<SubjectExecution, RuntimeError> {
+) -> Result<SubjectExecution, ExecutionError> {
     let build_key = subject.build_key();
     let inputs = builder_resolved_inputs(subject, cx.store, cx.realized_inputs)?;
     check_cancelled(&cx.cancellation)?;
@@ -131,15 +131,15 @@ fn execute_builder_subject(
     let logger = cx
         .run_logger
         .bind_subject(subject.log_subject(&workspace))
-        .map_err(RuntimeError::Store)?;
+        .map_err(ExecutionError::Store)?;
     temp_guard.set_logger(logger.clone());
-    log_runtime_event(
+    log_execution_event(
         logger.as_ref(),
         BuildLogLevel::Info,
         BuildStatus::Start,
         "starting subject",
     );
-    log_runtime_event(
+    log_execution_event(
         logger.as_ref(),
         BuildLogLevel::Info,
         BuildStatus::CacheMiss,
@@ -147,7 +147,7 @@ fn execute_builder_subject(
     );
     check_cancelled(&cx.cancellation)?;
     prepare_temp(&temp_dir_handle)?;
-    log_runtime_event(
+    log_execution_event(
         logger.as_ref(),
         BuildLogLevel::Info,
         BuildStatus::Running,
@@ -162,7 +162,7 @@ fn execute_builder_subject(
     let staged = subject
         .execute(&ctx, builder_inputs, Some(cx.store.fs_tree()))
         .map_err(|error| {
-            log_runtime_event(
+            log_execution_event(
                 logger.as_ref(),
                 BuildLogLevel::Error,
                 BuildStatus::Failed,
@@ -180,7 +180,7 @@ fn execute_builder_subject(
         Some(subject.name()),
     )
     .map_err(|error| {
-        log_runtime_event(
+        log_execution_event(
             logger.as_ref(),
             BuildLogLevel::Error,
             BuildStatus::Failed,
@@ -198,7 +198,7 @@ fn execute_builder_subject(
 fn execute_source_subject(
     subject: &SourcePlannedSubject,
     cx: PlannedExecutionContext<'_>,
-) -> Result<SubjectExecution, RuntimeError> {
+) -> Result<SubjectExecution, ExecutionError> {
     let build_key = subject.build_key();
     check_cancelled(&cx.cancellation)?;
 
@@ -239,15 +239,15 @@ fn execute_source_subject(
     let logger = cx
         .run_logger
         .bind_subject(subject.log_subject(&workspace))
-        .map_err(RuntimeError::Store)?;
+        .map_err(ExecutionError::Store)?;
     temp_guard.set_logger(logger.clone());
-    log_runtime_event(
+    log_execution_event(
         logger.as_ref(),
         BuildLogLevel::Info,
         BuildStatus::Start,
         "starting subject",
     );
-    log_runtime_event(
+    log_execution_event(
         logger.as_ref(),
         BuildLogLevel::Info,
         BuildStatus::CacheMiss,
@@ -262,7 +262,7 @@ fn execute_source_subject(
         cx.runtime_provider.clone(),
     );
     let staged_path = subject.execute(&ctx).map_err(|error| {
-        log_runtime_event(
+        log_execution_event(
             logger.as_ref(),
             BuildLogLevel::Error,
             BuildStatus::Failed,
@@ -273,7 +273,7 @@ fn execute_source_subject(
     // `origin.materialize` has no cancellation hook, so honor a cancel that
     // arrived while staging before publishing the imported object.
     check_cancelled(&cx.cancellation)?;
-    log_runtime_event(
+    log_execution_event(
         logger.as_ref(),
         BuildLogLevel::Info,
         BuildStatus::Running,
@@ -302,13 +302,13 @@ fn execute_source_subject(
                 subject.declared_object_hash(),
                 actual_hash
             );
-            log_runtime_event(
+            log_execution_event(
                 logger.as_ref(),
                 BuildLogLevel::Error,
                 BuildStatus::Failed,
                 &message,
             );
-            Err(RuntimeError::Build(message))
+            Err(ExecutionError::Build(message))
         }
     }
 }
@@ -317,21 +317,21 @@ fn builder_resolved_inputs(
     subject: &BuilderPlannedSubject,
     store: &Store,
     realized_inputs: &HashMap<BuildKey, RealizedInput>,
-) -> Result<ResolvedInputs, RuntimeError> {
+) -> Result<ResolvedInputs, ExecutionError> {
     let mut inputs = ResolvedInputs::empty();
     for input_name in subject
         .input_spec()
         .ordered_present_input_names(subject.inputs())
     {
         let key = *subject.inputs().get(input_name).ok_or_else(|| {
-            RuntimeError::Store(format!(
+            ExecutionError::Store(format!(
                 "planned builder input '{}' is missing for '{}'",
                 input_name,
                 subject.name()
             ))
         })?;
         let input = realized_inputs.get(&key).cloned().ok_or_else(|| {
-            RuntimeError::Build(format!(
+            ExecutionError::Build(format!(
                 "dependency object '{}' is not available in completed set",
                 key
             ))
@@ -348,20 +348,22 @@ fn builder_resolved_inputs(
     Ok(inputs)
 }
 
-fn map_builder_plan_error(error: BuilderPlanError) -> RuntimeError {
+fn map_builder_plan_error(error: BuilderPlanError) -> ExecutionError {
     match error {
-        BuilderPlanError::UnknownBuilder { .. } => RuntimeError::UnknownBuilder(error.to_string()),
-        BuilderPlanError::Recipe(_) => RuntimeError::RequestLoad(error.to_string()),
+        BuilderPlanError::UnknownBuilder { .. } => {
+            ExecutionError::UnknownBuilder(error.to_string())
+        }
+        BuilderPlanError::Recipe(_) => ExecutionError::RequestLoad(error.to_string()),
         BuilderPlanError::InvalidRequest(_) | BuilderPlanError::Identity(_) => {
-            RuntimeError::InvalidRequest(error.to_string())
+            ExecutionError::InvalidRequest(error.to_string())
         }
     }
 }
 
-fn map_source_execution_error(error: SourceExecutionError) -> RuntimeError {
+fn map_source_execution_error(error: SourceExecutionError) -> ExecutionError {
     match error {
-        SourceExecutionError::Cancelled(message) => RuntimeError::Cancelled(message),
-        SourceExecutionError::Build(message) => RuntimeError::Build(message),
+        SourceExecutionError::Cancelled(message) => ExecutionError::Cancelled(message),
+        SourceExecutionError::Build(message) => ExecutionError::Build(message),
     }
 }
 
@@ -376,7 +378,7 @@ pub(crate) fn realized_object_from_record(
     }
 }
 
-pub(crate) fn core_workspace(workspace: bobr_store::StoreWorkspace) -> Workspace {
+fn core_workspace(workspace: bobr_store::StoreWorkspace) -> Workspace {
     Workspace::new(
         workspace.log_dir().to_path_buf(),
         workspace.raw_log_dir().to_path_buf(),
