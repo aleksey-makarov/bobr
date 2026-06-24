@@ -22,8 +22,12 @@
    Content-addressed store, build identity, canonical object records, build
    handles, and publication refs.
 
-6. [Filesystem Object Hashing](./FSOBJ_HASH.md)
+6. [Build logging](./LOGGING.md)
+   Logging channels, store-log layout, the structured event record, the closed
+   `status` vocabulary, and the format guarantees.
+
+7. [Filesystem Object Hashing](./FSOBJ_HASH.md)
    Structural hashing rules shared by filesystem paths and tar archives.
 
-7. [fs-tree Manifest](./FS_TREE_MANIFEST.md)
+8. [fs-tree Manifest](./FS_TREE_MANIFEST.md)
    Canonical manifest format for manifest-addressed fs-tree artifacts.

@@ -213,16 +213,8 @@ tag, recipe name, subject key, and workspace paths are stored in that subject's
 `meta.json`. Subject keys are build keys; for source subjects that build key is
 the declared object hash.
 
-The run-level event log records lifecycle events such as:
-
-- `start`
-- `cache-hit`
-- `object-hit`
-- `cache-miss`
-- `run`
-- `publish`
-- `done`
-- `fail`
-
-Subject events are also written to the subject's own `events.jsonl`. Raw logs
-created by builders are written under the subject's `raw/` directory.
+The run-level event log is the full audit log of the run, and subject events
+are also written to each subject's own `events.jsonl`. Raw logs created by
+builders are written under the subject's `raw/` directory. The event record
+format, the closed `status` vocabulary, and the format guarantees are specified
+in [Build logging](LOGGING.md).
