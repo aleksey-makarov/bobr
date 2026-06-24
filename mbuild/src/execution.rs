@@ -164,10 +164,7 @@ impl Drop for TempDirGuard {
     }
 }
 
-pub fn run_request_in_workspace(
-    _workspace_root: &Path,
-    request_path: &Path,
-) -> Result<RealizedObject, ExecutionError> {
+pub fn execute_request(request_path: &Path) -> Result<RealizedObject, ExecutionError> {
     if !request_path.exists() {
         return Err(ExecutionError::RequestLoad(format!(
             "request file '{}' does not exist",
@@ -182,10 +179,10 @@ pub fn run_request_in_workspace(
         ))
     })?;
     let envelope = RequestEnvelope::parse_json(&request_bytes)?;
-    run_request_envelope(envelope, CancellationToken::new())
+    execute_request_envelope(envelope, CancellationToken::new())
 }
 
-pub fn run_request_envelope(
+pub fn execute_request_envelope(
     envelope: RequestEnvelope,
     cancellation: CancellationToken,
 ) -> Result<RealizedObject, ExecutionError> {

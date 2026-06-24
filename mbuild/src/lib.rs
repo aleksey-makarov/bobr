@@ -6,6 +6,6 @@ mod request;
 mod resolved_inputs;
 
 pub use execution::{
-    ExecutionError, render_object_as_json, run_request_envelope, run_request_in_workspace,
+    ExecutionError, execute_request, execute_request_envelope, render_object_as_json,
 };
 pub use request::RequestEnvelope;

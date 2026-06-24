@@ -4,7 +4,7 @@ use bobr_core::{BuildKey, ObjectHash};
 #[cfg(feature = "integration-tests")]
 use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
 use bobr_store::{Store, load_build_handle, load_object_record};
-use mbuild::run_request_in_workspace;
+use mbuild::execute_request;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -116,7 +116,7 @@ fn group_root_builds_independent_inputs() {
     let request_path = workspace.path().join("group.json");
     write_request(&request_path, &recipe);
 
-    let realized = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let realized = execute_request(&request_path).unwrap();
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let root_hash = object_ref_hash(workspace.path(), "all-targets");
     let root_record = load_object_record(&layout, root_hash)
@@ -385,7 +385,7 @@ fn request_executes_source_and_group_graph() {
     let request_path = workspace.path().join("recipe.json");
     write_request(&request_path, &recipe);
 
-    let build = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let build = execute_request(&request_path).unwrap();
     handle.join().unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
@@ -438,7 +438,7 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
     let request_path = workspace.path().join("dedup.json");
     write_request(&request_path, &recipe);
 
-    let build = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let build = execute_request(&request_path).unwrap();
     handle.join().unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
@@ -480,7 +480,7 @@ fn second_run_reuses_root_without_republishing_refs() {
     let request_path = workspace.path().join("root-reuse.json");
     write_request(&request_path, &recipe);
 
-    let first = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let first = execute_request(&request_path).unwrap();
     handle.join().unwrap();
 
     assert!(
@@ -496,7 +496,7 @@ fn second_run_reuses_root_without_republishing_refs() {
         remove_object_ref(workspace.path(), name);
     }
 
-    let second = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let second = execute_request(&request_path).unwrap();
 
     assert_eq!(first.build_key, second.build_key);
     // The reused root is resolved by build handle and its subtree is pruned, so
@@ -534,10 +534,10 @@ fn second_run_reuses_root_without_source_materialization() {
     let request_path = workspace.path().join("root-reuse-no-local.json");
     write_request(&request_path, &recipe);
 
-    let first = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let first = execute_request(&request_path).unwrap();
     handle.join().unwrap();
 
-    let second = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let second = execute_request(&request_path).unwrap();
 
     assert_eq!(first.build_key, second.build_key);
 }
@@ -579,14 +579,14 @@ fn second_cached_run_creates_no_new_workspaces() {
     let request_path = workspace.path().join("cached.json");
     write_request(&request_path, &recipe);
 
-    let first = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let first = execute_request(&request_path).unwrap();
     let after_first = workspace_dir_count(workspace.path());
     assert!(
         after_first >= 2,
         "expected per-node workspaces on the first (miss) run, got {after_first}"
     );
 
-    let second = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let second = execute_request(&request_path).unwrap();
     let after_second = workspace_dir_count(workspace.path());
 
     assert_eq!(first.object_hash, second.object_hash);
@@ -629,8 +629,8 @@ fn cached_run_records_run_level_audit_trail() {
     write_request(&request_path, &recipe);
 
     // First run is a miss; the second is fully cached.
-    run_request_in_workspace(workspace.path(), &request_path).unwrap();
-    run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    execute_request(&request_path).unwrap();
+    execute_request(&request_path).unwrap();
 
     let events = latest_run_events(workspace.path());
     let statuses = events
@@ -679,8 +679,8 @@ fn cached_root_prunes_dependency_subtree() {
 
     // First run builds the whole graph; the second resolves the root by build
     // handle and must prune its (now cached) dependency subtree.
-    run_request_in_workspace(workspace.path(), &request_path).unwrap();
-    run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    execute_request(&request_path).unwrap();
+    execute_request(&request_path).unwrap();
 
     let events = latest_run_events(workspace.path());
     let cache_hits = events
@@ -729,7 +729,7 @@ fn identical_fetch_sources_are_deduped_by_object_hash() {
     let request_path = workspace.path().join("parallel.json");
     write_request_with_options(&request_path, &recipe, &json!({ "jobs": 4 }));
 
-    let build = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let build = execute_request(&request_path).unwrap();
     handle.join().unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
@@ -748,7 +748,7 @@ fn tree_file_recipe_builds_successfully_via_execution() {
         &tree_file_recipe("hello-tree", "hello.txt", "hello tree\n", false),
     );
 
-    let build = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let build = execute_request(&request_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
@@ -856,7 +856,7 @@ fn source_path_file_materializes_known_object_with_source_build_handle() {
         ),
     );
 
-    let realized = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let realized = execute_request(&request_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let build_key = source_build_key(object_hash);
@@ -902,7 +902,7 @@ fn source_path_tar_materializes_unpacked_tree_with_source_build_handle() {
         ),
     );
 
-    let realized = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let realized = execute_request(&request_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let ref_hash = object_ref_hash(workspace.path(), "source-tar");
@@ -952,7 +952,7 @@ fn source_http_mismatch_imports_actual_object_without_canonical_record() {
     let request_path = workspace.path().join("source-http-mismatch.json");
     write_request(&request_path, &source_recipe(&url, wrong_hash));
 
-    let error = run_request_in_workspace(workspace.path(), &request_path).unwrap_err();
+    let error = execute_request(&request_path).unwrap_err();
     handle.join().unwrap();
 
     let message = error.to_string();
@@ -978,7 +978,7 @@ fn source_oci_registry_mismatch_imports_actual_object_without_canonical_record()
         &base_image_recipe(&image_ref, &pinned_digest, wrong_hash),
     );
 
-    let error = run_request_in_workspace(workspace.path(), &request_path).unwrap_err();
+    let error = execute_request(&request_path).unwrap_err();
     let message = error.to_string();
     assert!(message.contains(&actual_hash), "{message}");
 
@@ -1020,7 +1020,7 @@ fn source_http_mismatch_second_run_reuses_stored_object_without_second_download(
             "1111111111111111111111111111111111111111111111111111111111111111",
         ),
     );
-    let first_error = run_request_in_workspace(workspace.path(), &request_path).unwrap_err();
+    let first_error = execute_request(&request_path).unwrap_err();
     handle.join().unwrap();
     assert!(
         first_error.to_string().contains(&actual_hash),
@@ -1028,7 +1028,7 @@ fn source_http_mismatch_second_run_reuses_stored_object_without_second_download(
     );
 
     write_request(&request_path, &source_recipe(&url, &actual_hash));
-    let realized = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let realized = execute_request(&request_path).unwrap();
     assert_eq!(realized.object_hash.to_string(), actual_hash);
 }
 
@@ -1048,7 +1048,7 @@ fn source_oci_registry_mismatch_second_run_reuses_stored_object_without_second_f
         ),
     );
 
-    let first_error = run_request_in_workspace(workspace.path(), &request_path).unwrap_err();
+    let first_error = execute_request(&request_path).unwrap_err();
     assert!(
         first_error.to_string().contains(&actual_hash),
         "{first_error}"
@@ -1059,7 +1059,7 @@ fn source_oci_registry_mismatch_second_run_reuses_stored_object_without_second_f
         &request_path,
         &base_image_recipe(&image_ref, &pinned_digest, &actual_hash),
     );
-    let realized = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let realized = execute_request(&request_path).unwrap();
     assert_eq!(realized.object_hash.to_string(), actual_hash);
 }
 
@@ -1081,7 +1081,7 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
         ),
     );
 
-    let error = run_request_in_workspace(workspace.path(), &request_path).unwrap_err();
+    let error = execute_request(&request_path).unwrap_err();
     assert!(
         error.to_string().contains(&actual_hash.to_string()),
         "{error}"
@@ -1103,7 +1103,7 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
             "object_hash": actual_hash.to_string(),
         }),
     );
-    let realized = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let realized = execute_request(&request_path).unwrap();
     assert_eq!(realized.object_hash, actual_hash);
 }
 
@@ -1123,7 +1123,7 @@ fn source_without_origin_reuses_existing_canonical_object() {
             false,
         ),
     );
-    let first = run_request_in_workspace(workspace.path(), &materialized_request_path).unwrap();
+    let first = execute_request(&materialized_request_path).unwrap();
 
     let cutoff_request_path = workspace.path().join("source-cutoff.json");
     write_request(
@@ -1135,7 +1135,7 @@ fn source_without_origin_reuses_existing_canonical_object() {
         }),
     );
 
-    let second = run_request_in_workspace(workspace.path(), &cutoff_request_path).unwrap();
+    let second = execute_request(&cutoff_request_path).unwrap();
     assert_eq!(first.object_hash, second.object_hash);
     assert_eq!(second.build_key, Some(source_build_key(object_hash)));
 }
@@ -1149,7 +1149,7 @@ fn source_without_origin_reuses_existing_oci_layout_object() {
         &materialized_request_path,
         &base_image_recipe(&image_ref, &pinned_digest, &object_hash),
     );
-    let first = run_request_in_workspace(workspace.path(), &materialized_request_path).unwrap();
+    let first = execute_request(&materialized_request_path).unwrap();
 
     let cutoff_request_path = workspace.path().join("source-oci-registry-cutoff.json");
     write_request(
@@ -1161,7 +1161,7 @@ fn source_without_origin_reuses_existing_oci_layout_object() {
         }),
     );
 
-    let second = run_request_in_workspace(workspace.path(), &cutoff_request_path).unwrap();
+    let second = execute_request(&cutoff_request_path).unwrap();
     assert_eq!(first.object_hash, second.object_hash);
     assert_eq!(
         second.build_key,
@@ -1185,7 +1185,7 @@ fn source_without_origin_republishes_existing_object() {
             false,
         ),
     );
-    let first = run_request_in_workspace(workspace.path(), &materialized_request_path).unwrap();
+    let first = execute_request(&materialized_request_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     remove_build_ref(
@@ -1204,7 +1204,7 @@ fn source_without_origin_republishes_existing_object() {
         }),
     );
 
-    let second = run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    let second = execute_request(&request_path).unwrap();
     let restored = load_object_record(&layout, second.object_hash)
         .unwrap()
         .expect("expected restored object record");
@@ -1224,7 +1224,7 @@ fn source_without_origin_requires_existing_object_or_record() {
         }),
     );
 
-    let error = run_request_in_workspace(workspace.path(), &request_path).unwrap_err();
+    let error = execute_request(&request_path).unwrap_err();
     assert!(
         error.to_string().contains("has no origin and object"),
         "{error}"
