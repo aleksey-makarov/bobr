@@ -1,15 +1,32 @@
 use crate::execution::ExecutionError;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer, de::Error as _};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-const REQUEST_SCHEMA: &str = "bobr-request-v1";
+/// Schema marker for the request format. It deserializes only from the exact
+/// schema string, so the format version is enforced declaratively at parse
+/// time and never needs to live as data on `Request`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RequestSchemaV1;
+
+impl<'de> Deserialize<'de> for RequestSchemaV1 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "bobr-request-v1" => Ok(RequestSchemaV1),
+            other => Err(D::Error::custom(format!(
+                "unsupported request schema '{other}'"
+            ))),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    pub(crate) schema: String,
+    // Validated at deserialization via RequestSchemaV1; never read afterwards.
+    #[allow(dead_code)]
+    pub(crate) schema: RequestSchemaV1,
     pub(crate) store: PathBuf,
     pub(crate) quiet: Option<bool>,
     pub(crate) jobs: Option<usize>,
@@ -21,12 +38,6 @@ impl Request {
         let request: Request = serde_json::from_slice(bytes).map_err(|error| {
             ExecutionError::RequestLoad(format!("failed to decode request JSON value: {error}"))
         })?;
-        if request.schema != REQUEST_SCHEMA {
-            return Err(ExecutionError::RequestLoad(format!(
-                "unsupported request schema '{}'",
-                request.schema
-            )));
-        }
         validate_nodes(&request.nodes, "$.nodes")?;
         Ok(request)
     }
