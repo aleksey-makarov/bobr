@@ -5,7 +5,7 @@ use crate::planned::{
 };
 use crate::recipe::{RecipeEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, map_store_error};
-use crate::runtime_policy::runtime_provider_for_current_process;
+use bobr_runtime::runtime_provider::runtime_provider_for_current_process;
 use bobr_store::{RealizedObject, Store, load_build_handle};
 use mbuild_builder::BuilderPlannedSubject;
 use mbuild_core::{
