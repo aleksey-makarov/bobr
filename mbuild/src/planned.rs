@@ -119,7 +119,7 @@ fn execute_builder_subject(
     let store_workspace = create_workspace(
         cx.store,
         subject.tag(),
-        Some(subject.name().to_string()),
+        subject.name(),
         build_key.to_string(),
     )
     .map_err(map_store_error)?;
@@ -228,13 +228,9 @@ fn execute_source_subject(
     }
 
     // Miss: create the workspace and materialize the source.
-    let store_workspace = create_workspace(
-        cx.store,
-        "Source",
-        Some(subject.name().to_string()),
-        build_key.to_string(),
-    )
-    .map_err(map_store_error)?;
+    let store_workspace =
+        create_workspace(cx.store, "Source", subject.name(), build_key.to_string())
+            .map_err(map_store_error)?;
     let temp_dir_handle = store_workspace.temp_dir_handle().clone();
     let workspace = core_workspace(store_workspace);
     // Owns the temp dir from here on: every return path (bind error below, and

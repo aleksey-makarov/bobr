@@ -26,7 +26,7 @@ pub struct RequestOptions {
 impl RequestEnvelope {
     pub fn parse_json(bytes: &[u8]) -> Result<Self, RuntimeError> {
         let value: Value = serde_json::from_slice(bytes).map_err(|error| {
-            RuntimeError::RequestLoad(format!("failed to decode recipe JSON value: {error}"))
+            RuntimeError::RequestLoad(format!("failed to decode request JSON value: {error}"))
         })?;
         parse_request_envelope(value, "$")
     }
@@ -71,10 +71,9 @@ fn collect_graph_inner(
         RuntimeError::InvalidRequest(format!("request references unknown node id '{node_id}'"))
     })?;
     let node_path = node_path(node_id);
-    let mut object = node_value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| RuntimeError::RequestLoad(format!("{node_path}: expected recipe object")))?;
+    let mut object = node_value.as_object().cloned().ok_or_else(|| {
+        RuntimeError::RequestLoad(format!("{node_path}: expected request object"))
+    })?;
     let tag = take_string(&mut object, &node_path, "tag")?;
 
     let (key, subject) = if tag == "Source" {
@@ -134,7 +133,7 @@ fn map_builder_plan_error(error: BuilderPlanError, node_path: &str) -> RuntimeEr
 
 fn parse_request_envelope(value: Value, path: &str) -> Result<RequestEnvelope, RuntimeError> {
     let mut object = value.as_object().cloned().ok_or_else(|| {
-        RuntimeError::RequestLoad(format!("{path}: expected top-level recipe object"))
+        RuntimeError::RequestLoad(format!("{path}: expected top-level request object"))
     })?;
 
     let options = match object.remove("options") {
@@ -234,7 +233,7 @@ fn parse_request_nodes(value: Value, path: &str) -> Result<BTreeMap<String, Valu
 fn parse_request_node(value: Value, path: &str) -> Result<Value, RuntimeError> {
     value
         .as_object()
-        .ok_or_else(|| RuntimeError::RequestLoad(format!("{path}: expected recipe object")))?;
+        .ok_or_else(|| RuntimeError::RequestLoad(format!("{path}: expected request object")))?;
     Ok(value)
 }
 
@@ -317,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn recipe_requires_top_level_root_node() {
+    fn request_requires_top_level_root_node() {
         let error = parse_request_nodes(json!({"kind":"Legacy"}), "$").unwrap_err();
         assert!(
             error

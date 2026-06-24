@@ -4,18 +4,20 @@ use bobr_store::RealizedObject;
 use serde_json::json;
 use std::fs;
 use std::process::{Command, Stdio};
-use support::{recipe_node, store_root, tree_file_recipe, write_recipe, write_recipe_with_options};
+use support::{
+    recipe_node, store_root, tree_file_recipe, write_request, write_request_with_options,
+};
 use tempfile::tempdir;
 
 #[test]
-fn cli_reads_recipe_from_stdin_when_path_is_omitted() {
+fn cli_reads_request_from_stdin_when_path_is_omitted() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("stdin.json");
-    write_recipe(
-        &recipe_path,
+    let request_path = workspace.path().join("stdin.json");
+    write_request(
+        &request_path,
         &tree_file_recipe("stdin-recipe", "stdin.txt", "hello stdin", false),
     );
-    let recipe_bytes = fs::read(&recipe_path).unwrap();
+    let request_bytes = fs::read(&request_path).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
         .current_dir(workspace.path())
@@ -25,7 +27,7 @@ fn cli_reads_recipe_from_stdin_when_path_is_omitted() {
         .spawn()
         .and_then(|mut child| {
             use std::io::Write as _;
-            child.stdin.as_mut().unwrap().write_all(&recipe_bytes)?;
+            child.stdin.as_mut().unwrap().write_all(&request_bytes)?;
             child.wait_with_output()
         })
         .unwrap();
@@ -39,16 +41,16 @@ fn cli_reads_recipe_from_stdin_when_path_is_omitted() {
 }
 
 #[test]
-fn cli_accepts_explicit_recipe_path() {
+fn cli_accepts_explicit_request_path() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("custom.json");
-    write_recipe(
-        &recipe_path,
+    let request_path = workspace.path().join("custom.json");
+    write_request(
+        &request_path,
         &tree_file_recipe("custom-recipe", "custom.txt", "hello custom", false),
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&recipe_path)
+        .arg(&request_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -61,17 +63,17 @@ fn cli_accepts_explicit_recipe_path() {
 }
 
 #[test]
-fn cli_rejects_more_than_one_recipe_argument() {
+fn cli_rejects_more_than_one_request_argument() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("one.json");
+    let request_path = workspace.path().join("one.json");
     let extra_path = workspace.path().join("two.json");
-    write_recipe(
-        &recipe_path,
+    write_request(
+        &request_path,
         &tree_file_recipe("one-recipe", "one.txt", "hello", false),
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&recipe_path)
+        .arg(&request_path)
         .arg(&extra_path)
         .current_dir(workspace.path())
         .output()
@@ -81,15 +83,15 @@ fn cli_rejects_more_than_one_recipe_argument() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
     assert!(stderr.contains("unexpected argument"), "{stderr}");
-    assert!(stderr.contains("usage: mbuild [recipe.json]"), "{stderr}");
+    assert!(stderr.contains("usage: mbuild [request.json]"), "{stderr}");
 }
 
 #[test]
 fn cli_reports_missing_store_option() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("missing-store-option.json");
+    let request_path = workspace.path().join("missing-store-option.json");
     fs::write(
-        &recipe_path,
+        &request_path,
         serde_json::to_vec_pretty(&json!({
             "nodes": {
                 "root": tree_file_recipe("missing-store-option", "missing.txt", "hello", false)
@@ -100,7 +102,7 @@ fn cli_reports_missing_store_option() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&recipe_path)
+        .arg(&request_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -109,17 +111,17 @@ fn cli_reports_missing_store_option() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
     assert!(
-        stderr.contains("recipe options.store must be set"),
+        stderr.contains("request options.store must be set"),
         "{stderr}"
     );
 }
 
 #[test]
-fn recipe_options_quiet_suppresses_live_progress() {
+fn request_options_quiet_suppresses_live_progress() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("quiet.json");
-    write_recipe_with_options(
-        &recipe_path,
+    let request_path = workspace.path().join("quiet.json");
+    write_request_with_options(
+        &request_path,
         &tree_file_recipe("quiet-recipe", "quiet.txt", "hello quiet", false),
         &json!({
             "quiet": true,
@@ -127,7 +129,7 @@ fn recipe_options_quiet_suppresses_live_progress() {
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&recipe_path)
+        .arg(&request_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -139,11 +141,11 @@ fn recipe_options_quiet_suppresses_live_progress() {
 }
 
 #[test]
-fn recipe_options_jobs_zero_is_rejected() {
+fn request_options_jobs_zero_is_rejected() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("zero-jobs.json");
-    write_recipe_with_options(
-        &recipe_path,
+    let request_path = workspace.path().join("zero-jobs.json");
+    write_request_with_options(
+        &request_path,
         &tree_file_recipe("zero-jobs-recipe", "zero.txt", "hello zero", false),
         &json!({
             "jobs": 0,
@@ -151,7 +153,7 @@ fn recipe_options_jobs_zero_is_rejected() {
     );
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&recipe_path)
+        .arg(&request_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -160,19 +162,19 @@ fn recipe_options_jobs_zero_is_rejected() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
     assert!(
-        stderr.contains("recipe options.jobs must be greater than zero"),
+        stderr.contains("request options.jobs must be greater than zero"),
         "{stderr}"
     );
 }
 
 #[test]
-fn cli_reports_invalid_json_recipe() {
+fn cli_reports_invalid_request() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("broken.json");
-    fs::write(&recipe_path, b"{ not valid json").unwrap();
+    let request_path = workspace.path().join("broken.json");
+    fs::write(&request_path, b"{ not valid json").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&recipe_path)
+        .arg(&request_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -181,7 +183,7 @@ fn cli_reports_invalid_json_recipe() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
     assert!(
-        stderr.contains("failed to decode recipe JSON value"),
+        stderr.contains("failed to decode request JSON value"),
         "{stderr}"
     );
 }
@@ -189,11 +191,11 @@ fn cli_reports_invalid_json_recipe() {
 #[test]
 fn cli_reports_invalid_generic_input_shape() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("broken-shape.json");
+    let request_path = workspace.path().join("broken-shape.json");
     let store = store_root(workspace.path());
     fs::create_dir_all(&store).unwrap();
     fs::write(
-        &recipe_path,
+        &request_path,
         serde_json::to_vec_pretty(&json!({
             "options": { "store": store.to_string_lossy() },
             "nodes": {
@@ -212,7 +214,7 @@ fn cli_reports_invalid_generic_input_shape() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&recipe_path)
+        .arg(&request_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -226,9 +228,9 @@ fn cli_reports_invalid_generic_input_shape() {
 #[test]
 fn cli_reports_relative_store_path() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("relative-store.json");
+    let request_path = workspace.path().join("relative-store.json");
     fs::write(
-        &recipe_path,
+        &request_path,
         serde_json::to_vec_pretty(&json!({
             "options": { "store": "relative/store" },
             "nodes": {
@@ -254,7 +256,7 @@ fn cli_reports_relative_store_path() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&recipe_path)
+        .arg(&request_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -268,11 +270,11 @@ fn cli_reports_relative_store_path() {
 #[test]
 fn cli_reports_unexpected_local_path() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("unexpected-local.json");
+    let request_path = workspace.path().join("unexpected-local.json");
     let store = store_root(workspace.path());
     fs::create_dir_all(&store).unwrap();
     fs::write(
-        &recipe_path,
+        &request_path,
         serde_json::to_vec_pretty(&json!({
             "options": {
                 "store": store.to_string_lossy(),
@@ -295,7 +297,7 @@ fn cli_reports_unexpected_local_path() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&recipe_path)
+        .arg(&request_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -311,11 +313,11 @@ fn cli_reports_unexpected_local_path() {
 #[test]
 fn cli_reports_relative_source_path() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("relative-source-path.json");
+    let request_path = workspace.path().join("relative-source-path.json");
     let store = store_root(workspace.path());
     fs::create_dir_all(&store).unwrap();
     fs::write(
-        &recipe_path,
+        &request_path,
         serde_json::to_vec_pretty(&json!({
             "options": { "store": store.to_string_lossy() },
             "nodes": {
@@ -335,7 +337,7 @@ fn cli_reports_relative_source_path() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&recipe_path)
+        .arg(&request_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -352,10 +354,10 @@ fn cli_reports_relative_source_path() {
 #[test]
 fn cli_reports_missing_store_directory() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("missing-store.json");
+    let request_path = workspace.path().join("missing-store.json");
     let missing_store = workspace.path().join("missing-store");
     fs::write(
-        &recipe_path,
+        &request_path,
         serde_json::to_vec_pretty(&json!({
             "options": { "store": missing_store.to_string_lossy() },
             "nodes": {
@@ -381,7 +383,7 @@ fn cli_reports_missing_store_directory() {
     .unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&recipe_path)
+        .arg(&request_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -395,7 +397,7 @@ fn cli_reports_missing_store_directory() {
 #[test]
 fn cli_reports_unknown_input_slot() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("unknown-slot.json");
+    let request_path = workspace.path().join("unknown-slot.json");
     let recipe = recipe_node(
         "tree",
         "Tree",
@@ -413,10 +415,10 @@ fn cli_reports_unknown_input_slot() {
             "unexpected": tree_file_recipe("dep", "dep.txt", "hello", false)
         }),
     );
-    write_recipe(&recipe_path, &recipe);
+    write_request(&request_path, &recipe);
 
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(&recipe_path)
+        .arg(&request_path)
         .current_dir(workspace.path())
         .output()
         .unwrap();

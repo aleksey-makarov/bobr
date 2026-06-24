@@ -189,8 +189,7 @@ mod tests {
         name: &str,
         build_key: BuildKey,
     ) -> (StoreWorkspace, Arc<dyn BuildLogger>) {
-        let workspace =
-            create_workspace(store, tag, Some(name.to_string()), build_key.to_string()).unwrap();
+        let workspace = create_workspace(store, tag, name, build_key.to_string()).unwrap();
         let subject = BuildLogSubject::new(
             tag,
             name,
@@ -252,7 +251,7 @@ mod tests {
                 }
                 let metadata: Value =
                     serde_json::from_slice(&fs::read(meta_path).unwrap()).unwrap();
-                if metadata["tag"] == tag && metadata["recipe_name"] == name {
+                if metadata["tag"] == tag && metadata["name"] == name {
                     return metadata;
                 }
             }

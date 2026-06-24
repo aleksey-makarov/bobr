@@ -253,13 +253,14 @@ impl Store {
 pub fn create_workspace(
     store: &Store,
     tag: impl Into<String>,
-    recipe_name: Option<String>,
+    name: impl Into<String>,
     build_key: impl Into<String>,
 ) -> Result<StoreWorkspace, StoreError> {
     let tag = tag.into();
+    let name = name.into();
     let build_key = build_key.into();
     let serial = store.inner.next_serial.fetch_add(1, Ordering::SeqCst);
-    let directory_name = workspace_directory_name(serial, &tag, recipe_name.as_deref());
+    let directory_name = workspace_directory_name(serial, &tag, &name);
     let log_dir = store.run_log_dir().join(&directory_name);
     let temp_dir = store.run_tmp_dir().join(&directory_name);
     fs::create_dir(&log_dir).map_err(|error| {
@@ -285,7 +286,7 @@ pub fn create_workspace(
     let record = WorkspaceLogRecord {
         serial,
         tag: &tag,
-        recipe_name: recipe_name.as_deref(),
+        name: &name,
         build_key: &build_key,
         log_dir: &log_dir,
         raw_log_dir: &raw_log_dir,
@@ -420,16 +421,14 @@ pub(crate) fn allocate_store_run_id(root: &Path) -> Result<String, StoreError> {
     )))
 }
 
-fn workspace_directory_name(serial: u64, tag: &str, recipe_name: Option<&str>) -> String {
-    let mut name = format!("{serial:08}-{}", safe_log_component_or(tag, "Builder"));
-    if let Some(recipe_name) = recipe_name {
-        let recipe_name = safe_log_component(recipe_name);
-        if !recipe_name.is_empty() {
-            name.push('-');
-            name.push_str(&recipe_name);
-        }
+fn workspace_directory_name(serial: u64, tag: &str, name: &str) -> String {
+    let mut directory = format!("{serial:08}-{}", safe_log_component_or(tag, "Builder"));
+    let name = safe_log_component(name);
+    if !name.is_empty() {
+        directory.push('-');
+        directory.push_str(&name);
     }
-    name
+    directory
 }
 
 fn safe_log_component_or(value: &str, fallback: &str) -> String {
@@ -454,7 +453,7 @@ fn safe_log_component(value: &str) -> String {
 struct WorkspaceLogRecord<'a> {
     serial: u64,
     tag: &'a str,
-    recipe_name: Option<&'a str>,
+    name: &'a str,
     build_key: &'a str,
     log_dir: &'a Path,
     raw_log_dir: &'a Path,
@@ -468,16 +467,11 @@ fn write_workspace_metadata(
     let mut metadata = Map::new();
     metadata.insert(
         "schema".to_string(),
-        Value::String("bobr-workspace-v1".to_string()),
+        Value::String("bobr-workspace-v2".to_string()),
     );
     metadata.insert("serial".to_string(), Value::Number(record.serial.into()));
     metadata.insert("tag".to_string(), Value::String(record.tag.to_string()));
-    if let Some(recipe_name) = record.recipe_name {
-        metadata.insert(
-            "recipe_name".to_string(),
-            Value::String(recipe_name.to_string()),
-        );
-    }
+    metadata.insert("name".to_string(), Value::String(record.name.to_string()));
     metadata.insert(
         "build_key".to_string(),
         Value::String(record.build_key.to_string()),
@@ -533,7 +527,7 @@ fn append_workspace_index(
     let record = json!({
         "serial": record.serial,
         "tag": record.tag,
-        "recipe_name": record.recipe_name,
+        "name": record.name,
         "build_key": record.build_key,
         "log_dir": record.log_dir.display().to_string(),
     });

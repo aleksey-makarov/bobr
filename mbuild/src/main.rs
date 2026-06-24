@@ -95,44 +95,46 @@ fn runtime_worker_exit_code(result: bobr_runtime::runtime::RuntimeResult<()>) ->
 }
 
 fn build(cancellation: CancellationToken) -> MResult<()> {
-    let recipe_file = recipe_file_from_args()?;
-    let recipe_bytes = read_recipe_bytes(recipe_file.as_ref())?;
-    let envelope = RequestEnvelope::parse_json(&recipe_bytes).map_err(map_runtime_error)?;
+    let request_file = request_file_from_args()?;
+    let request_bytes = read_request_bytes(request_file.as_ref())?;
+    let envelope = RequestEnvelope::parse_json(&request_bytes).map_err(map_runtime_error)?;
 
     let build =
-        recipe_runtime::run_recipe_envelope(envelope, cancellation).map_err(map_runtime_error)?;
+        recipe_runtime::run_request_envelope(envelope, cancellation).map_err(map_runtime_error)?;
     let rendered = recipe_runtime::render_object_as_json(&build).map_err(map_runtime_error)?;
     print!("{rendered}");
     Ok(())
 }
 
-fn recipe_file_from_args() -> MResult<Option<PathBuf>> {
+fn request_file_from_args() -> MResult<Option<PathBuf>> {
     let mut args = env::args_os();
     let _program = args.next();
-    let Some(recipe_file) = args.next() else {
+    let Some(request_file) = args.next() else {
         return Ok(None);
     };
     if let Some(extra) = args.next() {
         return Err(MbuildError::InvalidInput(format!(
-            "unexpected argument '{}'; usage: mbuild [recipe.json]",
+            "unexpected argument '{}'; usage: mbuild [request.json]",
             extra.to_string_lossy()
         )));
     }
-    Ok(Some(PathBuf::from(recipe_file)))
+    Ok(Some(PathBuf::from(request_file)))
 }
 
-fn read_recipe_bytes(recipe_file: Option<&PathBuf>) -> MResult<Vec<u8>> {
-    match recipe_file {
+fn read_request_bytes(request_file: Option<&PathBuf>) -> MResult<Vec<u8>> {
+    match request_file {
         Some(path) => fs::read(path).map_err(|error| {
             MbuildError::InvalidInput(format!(
-                "failed to read recipe file '{}': {error}",
+                "failed to read request file '{}': {error}",
                 path.display()
             ))
         }),
         None => {
             let mut bytes = Vec::new();
             io::stdin().read_to_end(&mut bytes).map_err(|error| {
-                MbuildError::InvalidInput(format!("failed to read recipe JSON from stdin: {error}"))
+                MbuildError::InvalidInput(format!(
+                    "failed to read request JSON from stdin: {error}"
+                ))
             })?;
             Ok(bytes)
         }

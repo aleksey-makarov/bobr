@@ -1218,9 +1218,8 @@ fn store_clone_shares_run_directories_and_serial_counter() {
     let layout = Store::create(temp.path()).unwrap();
     let clone = layout.clone();
 
-    let first = create_workspace(&layout, "Tree", Some("left".to_string()), "build-left").unwrap();
-    let second =
-        create_workspace(&clone, "Tree", Some("right".to_string()), "build-right").unwrap();
+    let first = create_workspace(&layout, "Tree", "left", "build-left").unwrap();
+    let second = create_workspace(&clone, "Tree", "right", "build-right").unwrap();
 
     assert!(first.log_dir().starts_with(layout.run_log_dir()));
     assert!(second.log_dir().starts_with(layout.run_log_dir()));
@@ -1251,7 +1250,7 @@ fn workspace_allocation_writes_metadata_index_and_sanitized_paths() {
     let workspace = create_workspace(
         &layout,
         "Source Builder",
-        Some("name / demo".to_string()),
+        "name / demo",
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     )
     .unwrap();
@@ -1272,10 +1271,10 @@ fn workspace_allocation_writes_metadata_index_and_sanitized_paths() {
     );
     let metadata: Value =
         serde_json::from_slice(&fs::read(workspace.log_dir().join("meta.json")).unwrap()).unwrap();
-    assert_eq!(metadata["schema"], "bobr-workspace-v1");
+    assert_eq!(metadata["schema"], "bobr-workspace-v2");
     assert_eq!(metadata["serial"], 0);
     assert_eq!(metadata["tag"], "Source Builder");
-    assert_eq!(metadata["recipe_name"], "name / demo");
+    assert_eq!(metadata["name"], "name / demo");
     assert_eq!(
         metadata["build_key"],
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -1291,15 +1290,14 @@ fn workspace_allocation_writes_metadata_index_and_sanitized_paths() {
     let record: Value = serde_json::from_str(records[0]).unwrap();
     assert_eq!(record["serial"], 0);
     assert_eq!(record["tag"], "Source Builder");
-    assert_eq!(record["recipe_name"], "name / demo");
+    assert_eq!(record["name"], "name / demo");
 }
 
 #[test]
 fn store_temp_dir_handle_prepares_and_removes_temp() {
     let temp = tempdir().unwrap();
     let layout = Store::create(temp.path()).unwrap();
-    let workspace =
-        create_workspace(&layout, "Tree", Some("demo".to_string()), "build-demo").unwrap();
+    let workspace = create_workspace(&layout, "Tree", "demo", "build-demo").unwrap();
     let temp_dir = workspace.temp_dir().to_path_buf();
     fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
@@ -1326,7 +1324,7 @@ fn parallel_workspace_allocation_does_not_reuse_serials() {
             create_workspace(
                 &layout,
                 "Tree",
-                Some(format!("node-{index}")),
+                format!("node-{index}"),
                 format!("build-{index}"),
             )
             .unwrap()
@@ -1418,7 +1416,7 @@ fn store_create_pins_symlink_root_to_initial_target() {
     fs::remove_file(&link).unwrap();
     symlink(&store_b, &link).unwrap();
 
-    create_workspace(&store, "Tree", Some("node".to_string()), "build-key").unwrap();
+    create_workspace(&store, "Tree", "node", "build-key").unwrap();
 
     let workspace_dir = "00000000-Tree-node".to_string();
     assert!(

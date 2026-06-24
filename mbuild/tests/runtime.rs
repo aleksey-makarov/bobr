@@ -3,7 +3,7 @@ mod support;
 #[cfg(feature = "integration-tests")]
 use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
 use bobr_store::{Store, load_build_handle, load_object_record};
-use mbuild::recipe_runtime::run_recipe_json_in_workspace;
+use mbuild::recipe_runtime::run_request_in_workspace;
 use mbuild_core::{BuildKey, ObjectHash};
 use serde_json::{Value, json};
 use std::fs;
@@ -20,7 +20,7 @@ use std::time::Instant;
 use support::{
     base_image_recipe, build_ref_count, group_recipe, recipe_node, remove_build_ref,
     remove_object_record, source_recipe, spawn_test_oci_registry, store_root, tree_file_recipe,
-    write_recipe, write_recipe_with_options,
+    write_request, write_request_with_options,
 };
 #[cfg(feature = "integration-tests")]
 use support::{tree_directory_recipe, tree_symlink_recipe};
@@ -52,9 +52,9 @@ fn assert_object_ref_exists(workspace_root: &Path, name: &str) {
 }
 
 #[cfg(feature = "integration-tests")]
-fn run_recipe_json_via_cli(recipe_path: &Path) -> bobr_store::RealizedObject {
+fn run_request_via_cli(request_path: &Path) -> bobr_store::RealizedObject {
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
-        .arg(recipe_path)
+        .arg(request_path)
         .output()
         .unwrap();
     assert!(
@@ -113,10 +113,10 @@ fn group_root_builds_independent_inputs() {
             "second": tree_file_recipe("second-target", "second.txt", "second\n", false),
         }),
     );
-    let recipe_path = workspace.path().join("group.json");
-    write_recipe(&recipe_path, &recipe);
+    let request_path = workspace.path().join("group.json");
+    write_request(&request_path, &recipe);
 
-    let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let realized = run_request_in_workspace(workspace.path(), &request_path).unwrap();
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let root_hash = object_ref_hash(workspace.path(), "all-targets");
     let root_record = load_object_record(&layout, root_hash)
@@ -296,7 +296,7 @@ fn source_tree_hash(source_tar: &[u8]) -> String {
     fsobj_hash::hash_path(&staged).unwrap().to_string()
 }
 
-fn make_full_recipe(
+fn make_full_request(
     url: &str,
     source_hash: &str,
     image: &str,
@@ -354,7 +354,7 @@ fn group_with_two_sources_recipe(url_a: &str, url_b: &str, source_hash: &str) ->
 }
 
 #[test]
-fn json_recipe_executes_source_and_group_graph() {
+fn request_executes_source_and_group_graph() {
     let workspace = tempdir().unwrap();
     let (oci_server, image_ref, pinned_digest, image_object_hash) = spawn_test_oci_registry();
     let source_tar = {
@@ -375,17 +375,17 @@ fn json_recipe_executes_source_and_group_graph() {
         Err(error) => panic!("failed to start test HTTP server: {error}"),
     };
     let source_hash = source_tree_hash(&source_tar);
-    let recipe = make_full_recipe(
+    let recipe = make_full_request(
         &url,
         &source_hash,
         &image_ref,
         &pinned_digest,
         &image_object_hash,
     );
-    let recipe_path = workspace.path().join("recipe.json");
-    write_recipe(&recipe_path, &recipe);
+    let request_path = workspace.path().join("recipe.json");
+    write_request(&request_path, &recipe);
 
-    let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let build = run_request_in_workspace(workspace.path(), &request_path).unwrap();
     handle.join().unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
@@ -435,10 +435,10 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
             "in001": named_source_recipe("source-b", &url, &source_hash)
         }),
     );
-    let recipe_path = workspace.path().join("dedup.json");
-    write_recipe(&recipe_path, &recipe);
+    let request_path = workspace.path().join("dedup.json");
+    write_request(&request_path, &recipe);
 
-    let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let build = run_request_in_workspace(workspace.path(), &request_path).unwrap();
     handle.join().unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
@@ -477,10 +477,10 @@ fn second_run_reuses_root_without_republishing_refs() {
         "final-group",
         vec![named_source_recipe("source", &url, &source_hash)],
     );
-    let recipe_path = workspace.path().join("root-reuse.json");
-    write_recipe(&recipe_path, &recipe);
+    let request_path = workspace.path().join("root-reuse.json");
+    write_request(&request_path, &recipe);
 
-    let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let first = run_request_in_workspace(workspace.path(), &request_path).unwrap();
     handle.join().unwrap();
 
     assert!(
@@ -496,7 +496,7 @@ fn second_run_reuses_root_without_republishing_refs() {
         remove_object_ref(workspace.path(), name);
     }
 
-    let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let second = run_request_in_workspace(workspace.path(), &request_path).unwrap();
 
     assert_eq!(first.build_key, second.build_key);
     // The reused root is resolved by build handle and its subtree is pruned, so
@@ -531,13 +531,13 @@ fn second_run_reuses_root_without_source_materialization() {
         "final-group",
         vec![named_source_recipe("source", &url, &source_hash)],
     );
-    let recipe_path = workspace.path().join("root-reuse-no-local.json");
-    write_recipe(&recipe_path, &recipe);
+    let request_path = workspace.path().join("root-reuse-no-local.json");
+    write_request(&request_path, &recipe);
 
-    let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let first = run_request_in_workspace(workspace.path(), &request_path).unwrap();
     handle.join().unwrap();
 
-    let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let second = run_request_in_workspace(workspace.path(), &request_path).unwrap();
 
     assert_eq!(first.build_key, second.build_key);
 }
@@ -576,17 +576,17 @@ fn second_cached_run_creates_no_new_workspaces() {
             "only": tree_file_recipe("only-target", "f.txt", "hi\n", false),
         }),
     );
-    let recipe_path = workspace.path().join("cached.json");
-    write_recipe(&recipe_path, &recipe);
+    let request_path = workspace.path().join("cached.json");
+    write_request(&request_path, &recipe);
 
-    let first = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let first = run_request_in_workspace(workspace.path(), &request_path).unwrap();
     let after_first = workspace_dir_count(workspace.path());
     assert!(
         after_first >= 2,
         "expected per-node workspaces on the first (miss) run, got {after_first}"
     );
 
-    let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let second = run_request_in_workspace(workspace.path(), &request_path).unwrap();
     let after_second = workspace_dir_count(workspace.path());
 
     assert_eq!(first.object_hash, second.object_hash);
@@ -625,12 +625,12 @@ fn cached_run_records_run_level_audit_trail() {
             "only": tree_file_recipe("only-target", "f.txt", "hi\n", false),
         }),
     );
-    let recipe_path = workspace.path().join("cached-audit.json");
-    write_recipe(&recipe_path, &recipe);
+    let request_path = workspace.path().join("cached-audit.json");
+    write_request(&request_path, &recipe);
 
     // First run is a miss; the second is fully cached.
-    run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-    run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    run_request_in_workspace(workspace.path(), &request_path).unwrap();
 
     let events = latest_run_events(workspace.path());
     let statuses = events
@@ -674,13 +674,13 @@ fn cached_root_prunes_dependency_subtree() {
             "only": tree_file_recipe("only-target", "f.txt", "hi\n", false),
         }),
     );
-    let recipe_path = workspace.path().join("prune.json");
-    write_recipe(&recipe_path, &recipe);
+    let request_path = workspace.path().join("prune.json");
+    write_request(&request_path, &recipe);
 
     // First run builds the whole graph; the second resolves the root by build
     // handle and must prune its (now cached) dependency subtree.
-    run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
-    run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    run_request_in_workspace(workspace.path(), &request_path).unwrap();
+    run_request_in_workspace(workspace.path(), &request_path).unwrap();
 
     let events = latest_run_events(workspace.path());
     let cache_hits = events
@@ -726,10 +726,10 @@ fn identical_fetch_sources_are_deduped_by_object_hash() {
         &format!("{base_url}?a=2"),
         &source_hash,
     );
-    let recipe_path = workspace.path().join("parallel.json");
-    write_recipe_with_options(&recipe_path, &recipe, &json!({ "jobs": 4 }));
+    let request_path = workspace.path().join("parallel.json");
+    write_request_with_options(&request_path, &recipe, &json!({ "jobs": 4 }));
 
-    let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let build = run_request_in_workspace(workspace.path(), &request_path).unwrap();
     handle.join().unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
@@ -742,13 +742,13 @@ fn identical_fetch_sources_are_deduped_by_object_hash() {
 #[test]
 fn tree_file_recipe_builds_successfully_via_runtime() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("tree-file.json");
-    write_recipe(
-        &recipe_path,
+    let request_path = workspace.path().join("tree-file.json");
+    write_request(
+        &request_path,
         &tree_file_recipe("hello-tree", "hello.txt", "hello tree\n", false),
     );
 
-    let build = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let build = run_request_in_workspace(workspace.path(), &request_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
@@ -768,10 +768,10 @@ fn tree_directory_recipe_builds_successfully_via_runtime() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("tree-dir.json");
-    write_recipe(&recipe_path, &tree_directory_recipe("runtime-tree"));
+    let request_path = workspace.path().join("tree-dir.json");
+    write_request(&request_path, &tree_directory_recipe("runtime-tree"));
 
-    let build = run_recipe_json_via_cli(&recipe_path);
+    let build = run_request_via_cli(&request_path);
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
@@ -814,10 +814,10 @@ fn tree_symlink_recipe_builds_successfully_via_runtime() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("recipe.json");
-    write_recipe(&recipe_path, &tree_symlink_recipe("runtime-tree-symlink"));
+    let request_path = workspace.path().join("recipe.json");
+    write_request(&request_path, &tree_symlink_recipe("runtime-tree-symlink"));
 
-    let build = run_recipe_json_via_cli(&recipe_path);
+    let build = run_request_via_cli(&request_path);
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let published = load_build_handle(&layout, build.build_key.expect("builder root"))
@@ -845,9 +845,9 @@ fn source_path_file_materializes_known_object_with_source_build_handle() {
     let source_path = workspace.path().join("payload.txt");
     fs::write(&source_path, b"hello source\n").unwrap();
     let object_hash = fsobj_hash::hash_path(&source_path).unwrap();
-    let recipe_path = workspace.path().join("source-file.json");
-    write_recipe(
-        &recipe_path,
+    let request_path = workspace.path().join("source-file.json");
+    write_request(
+        &request_path,
         &source_recipe_node(
             "source-file",
             &object_hash.to_string(),
@@ -856,7 +856,7 @@ fn source_path_file_materializes_known_object_with_source_build_handle() {
         ),
     );
 
-    let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let realized = run_request_in_workspace(workspace.path(), &request_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let build_key = source_build_key(object_hash);
@@ -891,9 +891,9 @@ fn source_path_tar_materializes_unpacked_tree_with_source_build_handle() {
         tar.finish().unwrap();
     }
     let object_hash = fsobj_hash::hash_tar_file(&tar_path).unwrap();
-    let recipe_path = workspace.path().join("source-tar.json");
-    write_recipe(
-        &recipe_path,
+    let request_path = workspace.path().join("source-tar.json");
+    write_request(
+        &request_path,
         &source_recipe_node(
             "source-tar",
             &object_hash.to_string(),
@@ -902,7 +902,7 @@ fn source_path_tar_materializes_unpacked_tree_with_source_build_handle() {
         ),
     );
 
-    let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let realized = run_request_in_workspace(workspace.path(), &request_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let ref_hash = object_ref_hash(workspace.path(), "source-tar");
@@ -949,10 +949,10 @@ fn source_http_mismatch_imports_actual_object_without_canonical_record() {
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
         Err(error) => panic!("failed to start test HTTP server: {error}"),
     };
-    let recipe_path = workspace.path().join("source-http-mismatch.json");
-    write_recipe(&recipe_path, &source_recipe(&url, wrong_hash));
+    let request_path = workspace.path().join("source-http-mismatch.json");
+    write_request(&request_path, &source_recipe(&url, wrong_hash));
 
-    let error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
+    let error = run_request_in_workspace(workspace.path(), &request_path).unwrap_err();
     handle.join().unwrap();
 
     let message = error.to_string();
@@ -972,13 +972,13 @@ fn source_oci_registry_mismatch_imports_actual_object_without_canonical_record()
     let workspace = tempdir().unwrap();
     let (_oci_server, image_ref, pinned_digest, actual_hash) = spawn_test_oci_registry();
     let wrong_hash = "1111111111111111111111111111111111111111111111111111111111111111";
-    let recipe_path = workspace.path().join("source-oci-registry-mismatch.json");
-    write_recipe(
-        &recipe_path,
+    let request_path = workspace.path().join("source-oci-registry-mismatch.json");
+    write_request(
+        &request_path,
         &base_image_recipe(&image_ref, &pinned_digest, wrong_hash),
     );
 
-    let error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
+    let error = run_request_in_workspace(workspace.path(), &request_path).unwrap_err();
     let message = error.to_string();
     assert!(message.contains(&actual_hash), "{message}");
 
@@ -1012,23 +1012,23 @@ fn source_http_mismatch_second_run_reuses_stored_object_without_second_download(
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
         Err(error) => panic!("failed to start test HTTP server: {error}"),
     };
-    let recipe_path = workspace.path().join("source-http-mismatch-retry.json");
-    write_recipe(
-        &recipe_path,
+    let request_path = workspace.path().join("source-http-mismatch-retry.json");
+    write_request(
+        &request_path,
         &source_recipe(
             &url,
             "1111111111111111111111111111111111111111111111111111111111111111",
         ),
     );
-    let first_error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
+    let first_error = run_request_in_workspace(workspace.path(), &request_path).unwrap_err();
     handle.join().unwrap();
     assert!(
         first_error.to_string().contains(&actual_hash),
         "{first_error}"
     );
 
-    write_recipe(&recipe_path, &source_recipe(&url, &actual_hash));
-    let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    write_request(&request_path, &source_recipe(&url, &actual_hash));
+    let realized = run_request_in_workspace(workspace.path(), &request_path).unwrap();
     assert_eq!(realized.object_hash.to_string(), actual_hash);
 }
 
@@ -1036,11 +1036,11 @@ fn source_http_mismatch_second_run_reuses_stored_object_without_second_download(
 fn source_oci_registry_mismatch_second_run_reuses_stored_object_without_second_fetch() {
     let workspace = tempdir().unwrap();
     let (oci_server, image_ref, pinned_digest, actual_hash) = spawn_test_oci_registry();
-    let recipe_path = workspace
+    let request_path = workspace
         .path()
         .join("source-oci-registry-mismatch-retry.json");
-    write_recipe(
-        &recipe_path,
+    write_request(
+        &request_path,
         &base_image_recipe(
             &image_ref,
             &pinned_digest,
@@ -1048,18 +1048,18 @@ fn source_oci_registry_mismatch_second_run_reuses_stored_object_without_second_f
         ),
     );
 
-    let first_error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
+    let first_error = run_request_in_workspace(workspace.path(), &request_path).unwrap_err();
     assert!(
         first_error.to_string().contains(&actual_hash),
         "{first_error}"
     );
     drop(oci_server);
 
-    write_recipe(
-        &recipe_path,
+    write_request(
+        &request_path,
         &base_image_recipe(&image_ref, &pinned_digest, &actual_hash),
     );
-    let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let realized = run_request_in_workspace(workspace.path(), &request_path).unwrap();
     assert_eq!(realized.object_hash.to_string(), actual_hash);
 }
 
@@ -1070,9 +1070,9 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
     fs::write(&source_path, b"hello mismatch source\n").unwrap();
     let actual_hash = fsobj_hash::hash_path(&source_path).unwrap();
     let wrong_hash = "1111111111111111111111111111111111111111111111111111111111111111";
-    let recipe_path = workspace.path().join("source-path-mismatch.json");
-    write_recipe(
-        &recipe_path,
+    let request_path = workspace.path().join("source-path-mismatch.json");
+    write_request(
+        &request_path,
         &source_recipe_node(
             "source-file",
             wrong_hash,
@@ -1081,7 +1081,7 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
         ),
     );
 
-    let error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
+    let error = run_request_in_workspace(workspace.path(), &request_path).unwrap_err();
     assert!(
         error.to_string().contains(&actual_hash.to_string()),
         "{error}"
@@ -1095,15 +1095,15 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
             .is_none()
     );
 
-    write_recipe(
-        &recipe_path,
+    write_request(
+        &request_path,
         &json!({
             "name": "source-file",
             "tag": "Source",
             "object_hash": actual_hash.to_string(),
         }),
     );
-    let realized = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let realized = run_request_in_workspace(workspace.path(), &request_path).unwrap();
     assert_eq!(realized.object_hash, actual_hash);
 }
 
@@ -1113,9 +1113,9 @@ fn source_without_origin_reuses_existing_canonical_object() {
     let source_path = workspace.path().join("payload.txt");
     fs::write(&source_path, b"hello source\n").unwrap();
     let object_hash = fsobj_hash::hash_path(&source_path).unwrap();
-    let materialized_recipe_path = workspace.path().join("source-materialized.json");
-    write_recipe(
-        &materialized_recipe_path,
+    let materialized_request_path = workspace.path().join("source-materialized.json");
+    write_request(
+        &materialized_request_path,
         &source_recipe_node(
             "source-file",
             &object_hash.to_string(),
@@ -1123,11 +1123,11 @@ fn source_without_origin_reuses_existing_canonical_object() {
             false,
         ),
     );
-    let first = run_recipe_json_in_workspace(workspace.path(), &materialized_recipe_path).unwrap();
+    let first = run_request_in_workspace(workspace.path(), &materialized_request_path).unwrap();
 
-    let cutoff_recipe_path = workspace.path().join("source-cutoff.json");
-    write_recipe(
-        &cutoff_recipe_path,
+    let cutoff_request_path = workspace.path().join("source-cutoff.json");
+    write_request(
+        &cutoff_request_path,
         &json!({
             "name": "source-file",
             "tag": "Source",
@@ -1135,7 +1135,7 @@ fn source_without_origin_reuses_existing_canonical_object() {
         }),
     );
 
-    let second = run_recipe_json_in_workspace(workspace.path(), &cutoff_recipe_path).unwrap();
+    let second = run_request_in_workspace(workspace.path(), &cutoff_request_path).unwrap();
     assert_eq!(first.object_hash, second.object_hash);
     assert_eq!(second.build_key, Some(source_build_key(object_hash)));
 }
@@ -1144,16 +1144,16 @@ fn source_without_origin_reuses_existing_canonical_object() {
 fn source_without_origin_reuses_existing_oci_layout_object() {
     let workspace = tempdir().unwrap();
     let (_oci_server, image_ref, pinned_digest, object_hash) = spawn_test_oci_registry();
-    let materialized_recipe_path = workspace.path().join("source-oci-registry.json");
-    write_recipe(
-        &materialized_recipe_path,
+    let materialized_request_path = workspace.path().join("source-oci-registry.json");
+    write_request(
+        &materialized_request_path,
         &base_image_recipe(&image_ref, &pinned_digest, &object_hash),
     );
-    let first = run_recipe_json_in_workspace(workspace.path(), &materialized_recipe_path).unwrap();
+    let first = run_request_in_workspace(workspace.path(), &materialized_request_path).unwrap();
 
-    let cutoff_recipe_path = workspace.path().join("source-oci-registry-cutoff.json");
-    write_recipe(
-        &cutoff_recipe_path,
+    let cutoff_request_path = workspace.path().join("source-oci-registry-cutoff.json");
+    write_request(
+        &cutoff_request_path,
         &json!({
             "name": "base-image",
             "tag": "Source",
@@ -1161,7 +1161,7 @@ fn source_without_origin_reuses_existing_oci_layout_object() {
         }),
     );
 
-    let second = run_recipe_json_in_workspace(workspace.path(), &cutoff_recipe_path).unwrap();
+    let second = run_request_in_workspace(workspace.path(), &cutoff_request_path).unwrap();
     assert_eq!(first.object_hash, second.object_hash);
     assert_eq!(
         second.build_key,
@@ -1175,9 +1175,9 @@ fn source_without_origin_republishes_existing_object() {
     let source_path = workspace.path().join("payload.txt");
     fs::write(&source_path, b"hello source\n").unwrap();
     let object_hash = fsobj_hash::hash_path(&source_path).unwrap();
-    let materialized_recipe_path = workspace.path().join("source-materialized.json");
-    write_recipe(
-        &materialized_recipe_path,
+    let materialized_request_path = workspace.path().join("source-materialized.json");
+    write_request(
+        &materialized_request_path,
         &source_recipe_node(
             "source-file",
             &object_hash.to_string(),
@@ -1185,7 +1185,7 @@ fn source_without_origin_republishes_existing_object() {
             false,
         ),
     );
-    let first = run_recipe_json_in_workspace(workspace.path(), &materialized_recipe_path).unwrap();
+    let first = run_request_in_workspace(workspace.path(), &materialized_request_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     remove_build_ref(
@@ -1194,9 +1194,9 @@ fn source_without_origin_republishes_existing_object() {
     );
     remove_object_record(workspace.path(), first.object_hash);
 
-    let recipe_path = workspace.path().join("source-cutoff-missing-record.json");
-    write_recipe(
-        &recipe_path,
+    let request_path = workspace.path().join("source-cutoff-missing-record.json");
+    write_request(
+        &request_path,
         &json!({
             "name": "source-cutoff",
             "tag": "Source",
@@ -1204,7 +1204,7 @@ fn source_without_origin_republishes_existing_object() {
         }),
     );
 
-    let second = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap();
+    let second = run_request_in_workspace(workspace.path(), &request_path).unwrap();
     let restored = load_object_record(&layout, second.object_hash)
         .unwrap()
         .expect("expected restored object record");
@@ -1214,9 +1214,9 @@ fn source_without_origin_republishes_existing_object() {
 #[test]
 fn source_without_origin_requires_existing_object_or_record() {
     let workspace = tempdir().unwrap();
-    let recipe_path = workspace.path().join("source-cutoff-missing-record.json");
-    write_recipe(
-        &recipe_path,
+    let request_path = workspace.path().join("source-cutoff-missing-record.json");
+    write_request(
+        &request_path,
         &json!({
             "name": "source-cutoff",
             "tag": "Source",
@@ -1224,7 +1224,7 @@ fn source_without_origin_requires_existing_object_or_record() {
         }),
     );
 
-    let error = run_recipe_json_in_workspace(workspace.path(), &recipe_path).unwrap_err();
+    let error = run_request_in_workspace(workspace.path(), &request_path).unwrap_err();
     assert!(
         error.to_string().contains("has no origin and object"),
         "{error}"

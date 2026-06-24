@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 ///
 /// A workspace belongs to a single per-run builder object. It contains the
 /// subject log directory, the raw-log subdirectory, and a per-run temporary
-/// directory. Allocation is handled outside `mbuild-core`; this type is the
+/// directory. Allocation is handled outside `bobr-core`; this type is the
 /// builder-facing value object passed to per-run builders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {

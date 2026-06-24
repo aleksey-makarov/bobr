@@ -7,15 +7,15 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn write_recipe(recipe_path: &Path, recipe: &Value) {
-    write_recipe_with_options(recipe_path, recipe, &json!({}));
+pub fn write_request(request_path: &Path, recipe: &Value) {
+    write_request_with_options(request_path, recipe, &json!({}));
 }
 
-pub fn write_recipe_with_options(recipe_path: &Path, recipe: &Value, options: &Value) {
-    if let Some(parent) = recipe_path.parent() {
+pub fn write_request_with_options(request_path: &Path, recipe: &Value, options: &Value) {
+    if let Some(parent) = request_path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
-    let root = recipe_path
+    let root = request_path
         .parent()
         .expect("recipe path for tests must have a parent");
     let store = store_root(root);
@@ -30,7 +30,7 @@ pub fn write_recipe_with_options(recipe_path: &Path, recipe: &Value, options: &V
         "options": Value::Object(options),
         "nodes": request,
     });
-    fs::write(recipe_path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
+    fs::write(request_path, serde_json::to_vec_pretty(&envelope).unwrap()).unwrap();
 }
 
 fn normalize_request(recipe: &Value) -> Value {

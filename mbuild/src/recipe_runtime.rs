@@ -22,28 +22,28 @@ use std::thread;
 
 type SubjectGraph = HashMap<BuildKey, Arc<PlannedSubject>>;
 
-pub fn run_recipe_json_in_workspace(
+pub fn run_request_in_workspace(
     _workspace_root: &Path,
-    recipe_path: &Path,
+    request_path: &Path,
 ) -> Result<RealizedObject, RuntimeError> {
-    if !recipe_path.exists() {
+    if !request_path.exists() {
         return Err(RuntimeError::RequestLoad(format!(
-            "recipe file '{}' does not exist",
-            recipe_path.display()
+            "request file '{}' does not exist",
+            request_path.display()
         )));
     }
 
-    let recipe_bytes = fs::read(recipe_path).map_err(|error| {
+    let request_bytes = fs::read(request_path).map_err(|error| {
         RuntimeError::RequestLoad(format!(
-            "failed to read recipe file '{}': {error}",
-            recipe_path.display()
+            "failed to read request file '{}': {error}",
+            request_path.display()
         ))
     })?;
-    let envelope = RequestEnvelope::parse_json(&recipe_bytes)?;
-    run_recipe_envelope(envelope, CancellationToken::new())
+    let envelope = RequestEnvelope::parse_json(&request_bytes)?;
+    run_request_envelope(envelope, CancellationToken::new())
 }
 
-pub fn run_recipe_envelope(
+pub fn run_request_envelope(
     envelope: RequestEnvelope,
     cancellation: CancellationToken,
 ) -> Result<RealizedObject, RuntimeError> {
@@ -51,14 +51,14 @@ pub fn run_recipe_envelope(
     let jobs = options.jobs.unwrap_or_else(default_jobs);
     if jobs == 0 {
         return Err(RuntimeError::InvalidRequest(
-            "recipe options.jobs must be greater than zero".to_string(),
+            "request options.jobs must be greater than zero".to_string(),
         ));
     }
     let quiet = options.quiet.unwrap_or(false);
     check_cancelled(&cancellation)?;
 
     let store_path = options.store.as_ref().ok_or_else(|| {
-        RuntimeError::InvalidRequest("recipe options.store must be set".to_string())
+        RuntimeError::InvalidRequest("request options.store must be set".to_string())
     })?;
     let builder_registry = create_builder_registry()?;
     let mut subjects = HashMap::new();
@@ -585,7 +585,7 @@ mod tests {
                 }
                 let metadata: serde_json::Value =
                     serde_json::from_slice(&fs::read(meta_path).unwrap()).unwrap();
-                if metadata["tag"] == tag && metadata["recipe_name"] == name {
+                if metadata["tag"] == tag && metadata["name"] == name {
                     return metadata;
                 }
             }
