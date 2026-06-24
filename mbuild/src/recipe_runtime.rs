@@ -54,7 +54,7 @@ pub fn run_recipe_envelope(
             "recipe options.jobs must be greater than zero".to_string(),
         ));
     }
-    let emit_progress = !options.quiet.unwrap_or(false);
+    let quiet = options.quiet.unwrap_or(false);
     check_cancelled(&cancellation)?;
 
     let store_path = options.store.as_ref().ok_or_else(|| {
@@ -66,7 +66,7 @@ pub fn run_recipe_envelope(
 
     let store = Store::create(store_path).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> =
-        Arc::new(build_run_logger_for_store(&store, emit_progress).map_err(RuntimeError::Store)?);
+        Arc::new(build_run_logger_for_store(&store, quiet).map_err(RuntimeError::Store)?);
     let runtime_provider = runtime_provider_for_current_process();
 
     execute_graph(
@@ -541,12 +541,9 @@ fn log_run_finished(
     });
 }
 
-fn build_run_logger_for_store(
-    store: &Store,
-    emit_progress: bool,
-) -> Result<BuildRunLogger, String> {
+fn build_run_logger_for_store(store: &Store, quiet: bool) -> Result<BuildRunLogger, String> {
     let locations = store.run_log_locations();
-    BuildRunLogger::new(locations.run_log_dir(), locations.run_id(), emit_progress)
+    BuildRunLogger::new(locations.run_log_dir(), locations.run_id(), quiet)
 }
 
 #[cfg(test)]
@@ -568,7 +565,7 @@ mod tests {
     }
 
     fn create_test_logger(store: &Store) -> Arc<BuildRunLogger> {
-        Arc::new(build_run_logger_for_store(store, false).unwrap())
+        Arc::new(build_run_logger_for_store(store, true).unwrap())
     }
 
     fn workspace_metadata(root: &Path, tag: &str, name: &str) -> serde_json::Value {

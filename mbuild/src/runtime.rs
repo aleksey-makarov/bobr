@@ -179,7 +179,7 @@ mod tests {
 
     fn create_test_logger(store: &Store) -> Arc<BuildRunLogger> {
         let locations = store.run_log_locations();
-        Arc::new(BuildRunLogger::new(locations.run_log_dir(), locations.run_id(), false).unwrap())
+        Arc::new(BuildRunLogger::new(locations.run_log_dir(), locations.run_id(), true).unwrap())
     }
 
     fn create_test_run(

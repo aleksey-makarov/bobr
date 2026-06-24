@@ -14,9 +14,10 @@ use time::macros::format_description;
 /// Schema tag stamped on every on-disk event record.
 pub const BUILD_EVENT_SCHEMA: &str = "bobr-build-event-v1";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Severity of an event. Ordered `Info < Warn < Error`; the stderr threshold
+/// (see [`ProgressSink`]) compares against it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuildLogLevel {
-    Debug,
     Info,
     Warn,
     Error,
@@ -31,11 +32,16 @@ impl fmt::Display for BuildLogLevel {
 impl BuildLogLevel {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Debug => "debug",
             Self::Info => "info",
             Self::Warn => "warn",
             Self::Error => "error",
         }
+    }
+}
+
+impl Serialize for BuildLogLevel {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -150,7 +156,7 @@ pub struct BuildRunLogger {
 }
 
 impl BuildRunLogger {
-    pub fn new(run_log_dir: &Path, run_id: &str, emit_progress: bool) -> Result<Self, String> {
+    pub fn new(run_log_dir: &Path, run_id: &str, quiet: bool) -> Result<Self, String> {
         fs::create_dir_all(run_log_dir).map_err(|error| {
             format!(
                 "failed to create run log directory '{}': {error}",
@@ -159,7 +165,7 @@ impl BuildRunLogger {
         })?;
 
         let file_sink = Arc::new(FileSink::new(run_log_dir)?);
-        let progress_sink = Arc::new(ProgressSink::new(run_log_dir.to_path_buf(), emit_progress));
+        let progress_sink = Arc::new(ProgressSink::new(run_log_dir.to_path_buf(), quiet));
 
         Ok(Self {
             run_log_dir: run_log_dir.to_path_buf(),
@@ -425,28 +431,41 @@ impl EventSink for FileSink {
 
 /// Progress sink: renders events to stderr as the build's live UI.
 ///
-/// The only writer of stderr progress. `emit_progress` is the current on/off
-/// switch (replaced by a verbosity threshold in a later step). Raw-log paths
-/// are stored run-relative in the record, so this sink rejoins `run_log_dir` to
-/// show an absolute path on screen.
+/// The only writer of stderr progress. Events below `min_level` are dropped
+/// from stderr: `quiet` raises the threshold to `Warn`, so only warnings and
+/// errors show and progress is silenced; otherwise the threshold is `Info` and
+/// everything shows. `Warn`/`Error` are never suppressed by construction, and
+/// file logs are unaffected (they record every level). Raw-log paths are stored
+/// run-relative in the record, so this sink rejoins `run_log_dir` to show an
+/// absolute path on screen.
 #[derive(Debug)]
 struct ProgressSink {
     run_log_dir: PathBuf,
-    emit_progress: bool,
+    min_level: BuildLogLevel,
 }
 
 impl ProgressSink {
-    fn new(run_log_dir: PathBuf, emit_progress: bool) -> Self {
+    fn new(run_log_dir: PathBuf, quiet: bool) -> Self {
         Self {
             run_log_dir,
-            emit_progress,
+            min_level: stderr_min_level(quiet),
         }
+    }
+}
+
+/// Lowest level shown on stderr. `quiet` raises the bar to `Warn` (progress
+/// silenced, warnings/errors still shown); otherwise everything from `Info` up.
+fn stderr_min_level(quiet: bool) -> BuildLogLevel {
+    if quiet {
+        BuildLogLevel::Warn
+    } else {
+        BuildLogLevel::Info
     }
 }
 
 impl EventSink for ProgressSink {
     fn write_event(&self, record: &EventLogRecord) {
-        if self.emit_progress {
+        if record.level >= self.min_level {
             eprintln!("{}", format_progress_line(record, &self.run_log_dir));
         }
     }
@@ -459,7 +478,7 @@ pub struct EventLogRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     subject_seq: Option<u64>,
     ts: String,
-    level: String,
+    level: BuildLogLevel,
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     op: Option<String>,
@@ -508,7 +527,7 @@ impl EventLogRecord {
             seq,
             subject_seq,
             ts: current_timestamp_rfc3339(),
-            level: event.level.as_str().to_string(),
+            level: event.level,
             status: event.status.as_str().to_string(),
             op: event.op.clone(),
             subject,
@@ -623,11 +642,26 @@ mod tests {
     }
 
     #[test]
+    fn quiet_stderr_threshold_drops_progress_but_keeps_warnings() {
+        // quiet: only Warn/Error reach stderr; Info (progress) is dropped.
+        let quiet = stderr_min_level(true);
+        assert!(BuildLogLevel::Info < quiet);
+        assert!(BuildLogLevel::Warn >= quiet);
+        assert!(BuildLogLevel::Error >= quiet);
+
+        // normal: everything from Info up reaches stderr.
+        let normal = stderr_min_level(false);
+        assert!(BuildLogLevel::Info >= normal);
+        assert!(BuildLogLevel::Warn >= normal);
+        assert!(BuildLogLevel::Error >= normal);
+    }
+
+    #[test]
     fn bound_logger_writes_subject_identity_and_envelope() {
         let temp = tempdir().unwrap();
         let run_log_dir = temp.path().join("logs").join("260603123456");
         let logger = Arc::new(
-            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
         );
         let build_key = "1111111111111111111111111111111111111111111111111111111111111111";
         let subject_dir = run_log_dir.join("00000000-Sandbox-bash");
@@ -685,7 +719,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let run_log_dir = temp.path().join("logs").join("260603123456");
         let logger = Arc::new(
-            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
         );
         let build_key = "4444444444444444444444444444444444444444444444444444444444444444";
         let subject_dir = run_log_dir.join("00000000-Erofs-image");
@@ -719,7 +753,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let run_log_dir = temp.path().join("logs").join("260603123456");
         let logger = Arc::new(
-            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
         );
         let build_key = "5555555555555555555555555555555555555555555555555555555555555555";
         let subject_dir = run_log_dir.join("00000000-Tree-pkg");
@@ -761,7 +795,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let run_log_dir = temp.path().join("logs").join("260603123456");
         let logger = Arc::new(
-            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
         );
 
         logger.log_run_event(BuildLogEvent {
@@ -786,7 +820,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let run_log_dir = temp.path().join("logs").join("260603123456");
         let logger = Arc::new(
-            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
         );
         let build_key = "7777777777777777777777777777777777777777777777777777777777777777";
         let object_hash: ObjectHash =
@@ -830,7 +864,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let run_log_dir = temp.path().join("logs").join("260603123456");
         let logger = Arc::new(
-            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
         );
         let build_key = "6666666666666666666666666666666666666666666666666666666666666666";
         let subject_dir = run_log_dir.join("00000000-Sandbox-bash");
@@ -867,7 +901,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let run_log_dir = temp.path().join("logs").join("260603123456");
         let logger = Arc::new(
-            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", false).unwrap(),
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
         );
         let build_key = "2222222222222222222222222222222222222222222222222222222222222222";
         let subject_dir = run_log_dir.join("00000000-Sandbox-bash_debug_test");
