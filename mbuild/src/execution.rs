@@ -4,7 +4,7 @@ use crate::planned::{
     PlannedExecutionContext, PlannedSubject, RealizedInput, SubjectExecution, SubjectOutcome,
     execute_subject, realized_object_from_record,
 };
-use crate::request::RequestEnvelope;
+use crate::request::Request;
 use bobr_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuildStatus,
     CancellationToken, NoopBuildLogger, ObjectHash, RuntimeBackend, RuntimeProvider,
@@ -178,32 +178,35 @@ pub fn execute_request(request_path: &Path) -> Result<RealizedObject, ExecutionE
             request_path.display()
         ))
     })?;
-    let envelope = RequestEnvelope::parse_json(&request_bytes)?;
-    execute_request_envelope(envelope, CancellationToken::new())
+    let request = Request::parse_json(&request_bytes)?;
+    execute(request, CancellationToken::new())
 }
 
-pub fn execute_request_envelope(
-    envelope: RequestEnvelope,
+pub fn execute(
+    request: Request,
     cancellation: CancellationToken,
 ) -> Result<RealizedObject, ExecutionError> {
-    let RequestEnvelope { options, request } = envelope;
-    let jobs = options.jobs.unwrap_or_else(default_jobs);
+    let Request {
+        store,
+        quiet,
+        jobs,
+        nodes,
+        ..
+    } = request;
+    let jobs = jobs.unwrap_or_else(default_jobs);
     if jobs == 0 {
         return Err(ExecutionError::InvalidRequest(
-            "request options.jobs must be greater than zero".to_string(),
+            "request 'jobs' must be greater than zero".to_string(),
         ));
     }
-    let quiet = options.quiet.unwrap_or(false);
+    let quiet = quiet.unwrap_or(false);
     check_cancelled(&cancellation)?;
 
-    let store_path = options.store.as_ref().ok_or_else(|| {
-        ExecutionError::InvalidRequest("request options.store must be set".to_string())
-    })?;
     let builder_registry = create_builder_registry()?;
     let mut subjects = HashMap::new();
-    let root_key = collect_graph(&request, &builder_registry, &mut subjects)?;
+    let root_key = collect_graph(&nodes, &builder_registry, &mut subjects)?;
 
-    let store = Store::create(store_path).map_err(map_store_error)?;
+    let store = Store::create(&store).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> =
         Arc::new(build_run_logger_for_store(&store, quiet).map_err(ExecutionError::Store)?);
     let runtime_provider = runtime_provider_for_current_process();

@@ -4,24 +4,28 @@
 
 `mbuild` consumes one JSON DAG request and executes it entirely in Rust.
 
-The input is a JSON envelope with:
+The input is a flat JSON envelope with:
 
-- `options`
+- `schema`: format version, currently `"bobr-request-v1"`
+- `store`: store root for the request
+- `quiet` (optional)
+- `jobs` (optional)
 - `nodes`
 
 `nodes` is a top-level object of recipe nodes keyed by technical ids. The
 reserved id `root` identifies the build target for the current invocation.
-`options.store` points at the store root for the request. Each node describes
+`store` points at the store root for the request. Each node describes
 either one builder node or one source node. Dependencies are encoded as id
 references rather than inline child recipe objects.
 
-`options` currently supports:
+The envelope fields are:
 
+- `schema: string` (must be `"bobr-request-v1"`)
 - `store: string`
 - `quiet: bool`
 - `jobs: integer`
 
-Command-line arguments do not override `options`; the JSON envelope is the
+Command-line arguments do not override the envelope; the JSON envelope is the
 single source of build configuration.
 
 Rust is responsible for:
@@ -181,9 +185,9 @@ Builder semantics depend only on:
 
 - if `recipe.json` is omitted, the JSON envelope is read from `stdin`
 - `stdout`: JSON serialization of the realized root `RealizedObject`
-- `stderr`: live progress log unless `options.quiet` is true
-- `options.jobs`: limit parallel execution, default = available CPU parallelism
-- `options.store`: set the store root for the request
+- `stderr`: live progress log unless `quiet` is true
+- `jobs`: limit parallel execution, default = available CPU parallelism
+- `store`: set the store root for the request
 - final store path: absolute path to an existing store root directory. The
   value is the store root itself; `mbuild` does not add an implicit `.mbuild/`
   directory.

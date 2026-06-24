@@ -93,6 +93,7 @@ fn cli_reports_missing_store_option() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
+            "schema": "bobr-request-v1",
             "nodes": {
                 "root": tree_file_recipe("missing-store-option", "missing.txt", "hello", false)
             }
@@ -110,14 +111,11 @@ fn cli_reports_missing_store_option() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
-    assert!(
-        stderr.contains("request options.store must be set"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("missing field `store`"), "{stderr}");
 }
 
 #[test]
-fn request_options_quiet_suppresses_live_progress() {
+fn request_quiet_suppresses_live_progress() {
     let workspace = tempdir().unwrap();
     let request_path = workspace.path().join("quiet.json");
     write_request_with_options(
@@ -141,7 +139,7 @@ fn request_options_quiet_suppresses_live_progress() {
 }
 
 #[test]
-fn request_options_jobs_zero_is_rejected() {
+fn request_jobs_zero_is_rejected() {
     let workspace = tempdir().unwrap();
     let request_path = workspace.path().join("zero-jobs.json");
     write_request_with_options(
@@ -162,7 +160,7 @@ fn request_options_jobs_zero_is_rejected() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
     assert!(
-        stderr.contains("request options.jobs must be greater than zero"),
+        stderr.contains("request 'jobs' must be greater than zero"),
         "{stderr}"
     );
 }
@@ -197,7 +195,8 @@ fn cli_reports_invalid_generic_input_shape() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "options": { "store": store.to_string_lossy() },
+            "schema": "bobr-request-v1",
+            "store": store.to_string_lossy(),
             "nodes": {
                 "root": {
                     "name": "sandbox",
@@ -232,7 +231,8 @@ fn cli_reports_relative_store_path() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "options": { "store": "relative/store" },
+            "schema": "bobr-request-v1",
+            "store": "relative/store",
             "nodes": {
                 "root": {
                     "name": "tree",
@@ -276,10 +276,9 @@ fn cli_reports_unexpected_local_path() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "options": {
-                "store": store.to_string_lossy(),
-                "local": "relative/local"
-            },
+            "schema": "bobr-request-v1",
+            "store": store.to_string_lossy(),
+            "local": "relative/local",
             "nodes": {
                 "root": {
                     "name": "source",
@@ -304,10 +303,7 @@ fn cli_reports_unexpected_local_path() {
 
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("$.options: unexpected fields: local"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("unknown field `local`"), "{stderr}");
 }
 
 #[test]
@@ -319,7 +315,8 @@ fn cli_reports_relative_source_path() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "options": { "store": store.to_string_lossy() },
+            "schema": "bobr-request-v1",
+            "store": store.to_string_lossy(),
             "nodes": {
                 "root": {
                     "name": "source",
@@ -359,7 +356,8 @@ fn cli_reports_missing_store_directory() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "options": { "store": missing_store.to_string_lossy() },
+            "schema": "bobr-request-v1",
+            "store": missing_store.to_string_lossy(),
             "nodes": {
                 "root": {
                     "name": "tree",

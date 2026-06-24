@@ -10,14 +10,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 pub(crate) fn collect_graph(
-    request: &BTreeMap<String, Value>,
+    nodes: &BTreeMap<String, Value>,
     registry: &BuilderRegistry,
     subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
 ) -> Result<BuildKey, ExecutionError> {
     let mut visited_in_path = BTreeSet::new();
     let mut node_keys = HashMap::new();
     collect_graph_inner(
-        request,
+        nodes,
         "root",
         registry,
         subjects,
@@ -27,7 +27,7 @@ pub(crate) fn collect_graph(
 }
 
 fn collect_graph_inner(
-    request: &BTreeMap<String, Value>,
+    nodes: &BTreeMap<String, Value>,
     node_id: &str,
     registry: &BuilderRegistry,
     subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
@@ -44,7 +44,7 @@ fn collect_graph_inner(
         )));
     }
 
-    let node_value = request.get(node_id).ok_or_else(|| {
+    let node_value = nodes.get(node_id).ok_or_else(|| {
         ExecutionError::InvalidRequest(format!("request references unknown node id '{node_id}'"))
     })?;
     let node_path = node_path(node_id);
@@ -71,7 +71,7 @@ fn collect_graph_inner(
             let input_path = format!("{node_path}.inputs.{input_name}");
             let child_id = parse_input_value(slot_value, &input_path)?;
             let child = collect_graph_inner(
-                request,
+                nodes,
                 &child_id,
                 registry,
                 subjects,
@@ -149,17 +149,17 @@ mod tests {
     use serde_json::json;
 
     fn collect_one(
-        request: &Value,
+        nodes: &Value,
     ) -> Result<(BuildKey, HashMap<BuildKey, Arc<PlannedSubject>>), ExecutionError> {
-        let request = parse_request_nodes(request.clone(), "$")?;
+        let nodes = parse_request_nodes(nodes.clone(), "$")?;
         let registry = create_builder_registry()?;
         let mut subjects = HashMap::new();
-        let root_key = collect_graph(&request, &registry, &mut subjects)?;
+        let root_key = collect_graph(&nodes, &registry, &mut subjects)?;
         Ok((root_key, subjects))
     }
 
-    fn collect_error(request: &Value) -> ExecutionError {
-        match collect_one(request) {
+    fn collect_error(nodes: &Value) -> ExecutionError {
+        match collect_one(nodes) {
             Ok(_) => panic!("expected collect_graph to fail"),
             Err(error) => error,
         }
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn unknown_builder_tag_is_rejected() {
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "broken",
                 "tag": "NoSuchBuilder",
@@ -197,7 +197,7 @@ mod tests {
                 "inputs": {}
             }
         });
-        let error = collect_error(&request);
+        let error = collect_error(&nodes);
         assert!(
             error
                 .to_string()
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn unreachable_node_recipe_fields_are_not_interpreted() {
-        let request = json!({
+        let nodes = json!({
             "root": tree_recipe("root", "hello.txt", "hello", false),
             "unused": {
                 "tag": [],
@@ -217,14 +217,14 @@ mod tests {
             }
         });
 
-        let (root_key, subjects) = collect_one(&request).unwrap();
+        let (root_key, subjects) = collect_one(&nodes).unwrap();
         assert!(subjects.contains_key(&root_key));
         assert_eq!(subjects.len(), 1);
     }
 
     #[test]
     fn source_without_config_or_inputs_is_accepted() {
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "local-source",
                 "tag": "Source",
@@ -236,7 +236,7 @@ mod tests {
                 }
             }
         });
-        let (root_key, subjects) = collect_one(&request).unwrap();
+        let (root_key, subjects) = collect_one(&nodes).unwrap();
         let subject = subjects.get(&root_key).unwrap();
         assert_eq!(subject.name(), "local-source");
         assert!(matches!(subject.as_ref(), PlannedSubject::Source(_)));
@@ -244,7 +244,7 @@ mod tests {
 
     #[test]
     fn source_with_origin_is_accepted() {
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "local-source",
                 "tag": "Source",
@@ -256,7 +256,7 @@ mod tests {
                 }
             }
         });
-        let (root_key, subjects) = collect_one(&request).unwrap();
+        let (root_key, subjects) = collect_one(&nodes).unwrap();
         let subject = subjects.get(&root_key).unwrap();
         assert_eq!(subject.name(), "local-source");
         assert!(matches!(subject.as_ref(), PlannedSubject::Source(_)));
@@ -264,14 +264,14 @@ mod tests {
 
     #[test]
     fn source_without_origin_is_accepted() {
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "local-source",
                 "tag": "Source",
                 "object_hash": "1111111111111111111111111111111111111111111111111111111111111111"
             }
         });
-        let (root_key, subjects) = collect_one(&request).unwrap();
+        let (root_key, subjects) = collect_one(&nodes).unwrap();
         let subject = subjects.get(&root_key).unwrap();
         assert_eq!(subject.name(), "local-source");
         assert!(matches!(subject.as_ref(), PlannedSubject::Source(_)));
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn source_oci_registry_origin_is_accepted() {
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "base-image",
                 "tag": "Source",
@@ -291,7 +291,7 @@ mod tests {
                 }
             }
         });
-        let (root_key, subjects) = collect_one(&request).unwrap();
+        let (root_key, subjects) = collect_one(&nodes).unwrap();
         let subject = subjects.get(&root_key).unwrap();
         assert_eq!(subject.name(), "base-image");
         assert!(matches!(subject.as_ref(), PlannedSubject::Source(_)));
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn source_path_origin_requires_absolute_paths() {
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "local-source",
                 "tag": "Source",
@@ -311,7 +311,7 @@ mod tests {
                 }
             }
         });
-        let error = collect_error(&request);
+        let error = collect_error(&nodes);
         assert!(
             error.to_string().contains("expected absolute path"),
             "{error}"
@@ -320,14 +320,14 @@ mod tests {
 
     #[test]
     fn source_object_hash_allows_trailing_whitespace() {
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "local-source",
                 "tag": "Source",
                 "object_hash": "1111111111111111111111111111111111111111111111111111111111111111\n"
             }
         });
-        let (root_key, subjects) = collect_one(&request).unwrap();
+        let (root_key, subjects) = collect_one(&nodes).unwrap();
         let subject = subjects.get(&root_key).unwrap();
         let object_hash = "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn extra_input_slot_is_rejected() {
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "tree",
                 "tag": "Tree",
@@ -350,7 +350,7 @@ mod tests {
             },
             "dep": tree_recipe("dep", "dep.txt", "dep", false)
         });
-        let error = collect_error(&request);
+        let error = collect_error(&nodes);
         assert!(
             error
                 .to_string()
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn missing_required_input_slot_is_rejected() {
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "sandbox",
                 "tag": "Sandbox",
@@ -370,7 +370,7 @@ mod tests {
             },
             "script": tree_recipe("script", "script.sh", "#!/bin/sh\n", true)
         });
-        let error = collect_error(&request);
+        let error = collect_error(&nodes);
         assert!(
             error
                 .to_string()
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn non_string_input_is_rejected() {
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "sandbox",
                 "tag": "Sandbox",
@@ -391,7 +391,7 @@ mod tests {
                 }
             }
         });
-        let error = collect_error(&request);
+        let error = collect_error(&nodes);
         assert!(
             error
                 .to_string()
@@ -424,7 +424,7 @@ mod tests {
                 "unpack": true
             }
         });
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "sandbox",
                 "tag": "Sandbox",
@@ -440,7 +440,7 @@ mod tests {
             "source": source.clone()
         });
 
-        let (root_key, _) = collect_one(&request).unwrap();
+        let (root_key, _) = collect_one(&nodes).unwrap();
         let rootfs_key = compute_build_key("Tree", &rootfs["config"], &[]).unwrap();
         let script_key = compute_build_key("Tree", &script["config"], &[]).unwrap();
         let source_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -449,7 +449,7 @@ mod tests {
         let source_key = BuildKey::from_object_hash(source_hash);
         let expected = compute_build_key(
             "Sandbox",
-            &request["root"]["config"],
+            &nodes["root"]["config"],
             &[rootfs_key, script_key, source_key],
         )
         .unwrap();
@@ -459,7 +459,7 @@ mod tests {
 
     #[test]
     fn collect_graph_keeps_first_representative_recipe_for_deduped_nodes() {
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "final-group",
                 "tag": "Group",
@@ -473,7 +473,7 @@ mod tests {
             "binary-b": tree_recipe("binary-b", "same.txt", "same", false)
         });
 
-        let (_root_key, subjects) = collect_one(&request).unwrap();
+        let (_root_key, subjects) = collect_one(&nodes).unwrap();
         let deduped_key =
             compute_build_key("Tree", &tree_config("same.txt", "same", false), &[]).unwrap();
         let subject = subjects.get(&deduped_key).unwrap();
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn cycles_are_rejected() {
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "a",
                 "tag": "Sandbox",
@@ -498,13 +498,13 @@ mod tests {
             "script": tree_recipe("script", "script.sh", "#!/bin/sh\n", true)
         });
 
-        let error = collect_error(&request);
+        let error = collect_error(&nodes);
         assert!(error.to_string().contains("contains a cycle"), "{error}");
     }
 
     #[test]
     fn dangling_references_are_rejected() {
-        let request = json!({
+        let nodes = json!({
             "root": {
                 "name": "sandbox",
                 "tag": "Sandbox",
@@ -517,7 +517,7 @@ mod tests {
             "script": tree_recipe("script", "script.sh", "#!/bin/sh\n", true)
         });
 
-        let error = collect_error(&request);
+        let error = collect_error(&nodes);
         assert!(
             error
                 .to_string()

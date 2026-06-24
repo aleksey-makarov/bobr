@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use bobr_core::CancellationToken;
-use mbuild::{RequestEnvelope, execute_request_envelope, render_object_as_json};
+use mbuild::{Request, execute, render_object_as_json};
 
 type MResult<T> = Result<T, MbuildError>;
 
@@ -96,9 +96,9 @@ fn runtime_worker_exit_code(result: bobr_runtime::runtime::RuntimeResult<()>) ->
 fn build(cancellation: CancellationToken) -> MResult<()> {
     let request_file = request_file_from_args()?;
     let request_bytes = read_request_bytes(request_file.as_ref())?;
-    let envelope = RequestEnvelope::parse_json(&request_bytes).map_err(map_execution_error)?;
+    let request = Request::parse_json(&request_bytes).map_err(map_execution_error)?;
 
-    let build = execute_request_envelope(envelope, cancellation).map_err(map_execution_error)?;
+    let build = execute(request, cancellation).map_err(map_execution_error)?;
     let rendered = render_object_as_json(&build).map_err(map_execution_error)?;
     print!("{rendered}");
     Ok(())

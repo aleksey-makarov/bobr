@@ -124,7 +124,7 @@ subject events. Beyond the fanned-out subject events it carries:
 
 Levels are `info`, `warn`, `error` (ordered `info < warn < error`).
 
-`options.quiet` (a boolean recipe option) is a **stderr level threshold**, not
+`quiet` (a boolean request setting) is a **stderr level threshold**, not
 an on/off switch:
 
 - `quiet = true`: only `warn`/`error` reach stderr; progress (`info`) is

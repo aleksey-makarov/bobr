@@ -1,107 +1,56 @@
 use crate::execution::ExecutionError;
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
-pub struct RequestEnvelope {
-    pub(crate) options: RequestOptions,
-    pub(crate) request: BTreeMap<String, Value>,
-}
+const REQUEST_SCHEMA: &str = "bobr-request-v1";
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct RequestOptions {
-    pub(crate) store: Option<PathBuf>,
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Request {
+    pub(crate) schema: String,
+    pub(crate) store: PathBuf,
     pub(crate) quiet: Option<bool>,
     pub(crate) jobs: Option<usize>,
+    pub(crate) nodes: BTreeMap<String, Value>,
 }
 
-impl RequestEnvelope {
+impl Request {
     pub fn parse_json(bytes: &[u8]) -> Result<Self, ExecutionError> {
-        let value: Value = serde_json::from_slice(bytes).map_err(|error| {
+        let request: Request = serde_json::from_slice(bytes).map_err(|error| {
             ExecutionError::RequestLoad(format!("failed to decode request JSON value: {error}"))
         })?;
-        parse_request_envelope(value, "$")
+        if request.schema != REQUEST_SCHEMA {
+            return Err(ExecutionError::RequestLoad(format!(
+                "unsupported request schema '{}'",
+                request.schema
+            )));
+        }
+        validate_nodes(&request.nodes, "$.nodes")?;
+        Ok(request)
     }
 }
 
-fn parse_request_envelope(value: Value, path: &str) -> Result<RequestEnvelope, ExecutionError> {
-    let mut object = value.as_object().cloned().ok_or_else(|| {
-        ExecutionError::RequestLoad(format!("{path}: expected top-level request object"))
-    })?;
-
-    let options = match object.remove("options") {
-        Some(value) => parse_request_options(value, &format!("{path}.options"))?,
-        None => RequestOptions::default(),
-    };
-    let request = parse_request_nodes(
-        object.remove("nodes").ok_or_else(|| {
-            ExecutionError::RequestLoad(format!("{path}: missing required field 'nodes'"))
-        })?,
-        &format!("{path}.nodes"),
-    )?;
-    if !object.is_empty() {
-        return Err(ExecutionError::RequestLoad(format!(
-            "{path}: unexpected fields: {}",
-            object.keys().cloned().collect::<Vec<_>>().join(", ")
-        )));
+/// Validates a parsed node map: a `root` node must exist and every node must be
+/// an object. Per-node fields are interpreted later, during graph collection.
+fn validate_nodes(nodes: &BTreeMap<String, Value>, path: &str) -> Result<(), ExecutionError> {
+    if !nodes.contains_key("root") {
+        return Err(ExecutionError::RequestLoad(
+            "missing required top-level node 'root'".to_string(),
+        ));
     }
-
-    Ok(RequestEnvelope { options, request })
+    for (node_id, node_value) in nodes {
+        if !node_value.is_object() {
+            return Err(ExecutionError::RequestLoad(format!(
+                "{path}.{node_id}: expected request object"
+            )));
+        }
+    }
+    Ok(())
 }
 
-fn parse_request_options(value: Value, path: &str) -> Result<RequestOptions, ExecutionError> {
-    let mut object = value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| ExecutionError::RequestLoad(format!("{path}: expected object")))?;
-
-    let store = match object.remove("store") {
-        Some(Value::String(value)) => Some(PathBuf::from(value)),
-        Some(_) => {
-            return Err(ExecutionError::RequestLoad(format!(
-                "{path}.store: expected string"
-            )));
-        }
-        None => None,
-    };
-    let quiet = match object.remove("quiet") {
-        Some(Value::Bool(value)) => Some(value),
-        Some(_) => {
-            return Err(ExecutionError::RequestLoad(format!(
-                "{path}.quiet: expected boolean"
-            )));
-        }
-        None => None,
-    };
-    let jobs = match object.remove("jobs") {
-        Some(Value::Number(value)) => {
-            let jobs = value.as_u64().ok_or_else(|| {
-                ExecutionError::RequestLoad(format!("{path}.jobs: expected non-negative integer"))
-            })?;
-            let jobs = usize::try_from(jobs).map_err(|_| {
-                ExecutionError::RequestLoad(format!(
-                    "{path}.jobs: value is too large for this platform"
-                ))
-            })?;
-            Some(jobs)
-        }
-        Some(_) => {
-            return Err(ExecutionError::RequestLoad(format!(
-                "{path}.jobs: expected integer"
-            )));
-        }
-        None => None,
-    };
-    if !object.is_empty() {
-        return Err(ExecutionError::RequestLoad(format!(
-            "{path}: unexpected fields: {}",
-            object.keys().cloned().collect::<Vec<_>>().join(", ")
-        )));
-    }
-    Ok(RequestOptions { store, quiet, jobs })
-}
-
+#[cfg(test)]
 pub(crate) fn parse_request_nodes(
     value: Value,
     path: &str,
@@ -111,27 +60,9 @@ pub(crate) fn parse_request_nodes(
             "{path}: expected top-level object of node definitions"
         ))
     })?;
-
-    if !object.contains_key("root") {
-        return Err(ExecutionError::RequestLoad(
-            "missing required top-level node 'root'".to_string(),
-        ));
-    }
-
-    let mut nodes = BTreeMap::new();
-    for (node_id, node_value) in object {
-        let node_path = format!("{path}.{node_id}");
-        nodes.insert(node_id, parse_request_node(node_value, &node_path)?);
-    }
-
+    let nodes: BTreeMap<String, Value> = object.into_iter().collect();
+    validate_nodes(&nodes, path)?;
     Ok(nodes)
-}
-
-fn parse_request_node(value: Value, path: &str) -> Result<Value, ExecutionError> {
-    value
-        .as_object()
-        .ok_or_else(|| ExecutionError::RequestLoad(format!("{path}: expected request object")))?;
-    Ok(value)
 }
 
 #[cfg(test)]
@@ -168,10 +99,12 @@ mod tests {
             "inputs": {}
         });
 
-        let error = RequestEnvelope::parse_json(serde_json::to_vec(&old_shape).unwrap().as_slice())
-            .unwrap_err();
+        let error =
+            Request::parse_json(serde_json::to_vec(&old_shape).unwrap().as_slice()).unwrap_err();
         assert!(
-            error.to_string().contains("missing required field 'nodes'"),
+            error
+                .to_string()
+                .contains("failed to decode request JSON value"),
             "{error}"
         );
     }
