@@ -1,9 +1,10 @@
 mod builder_registry;
+mod collect_graph;
 mod planned;
-mod recipe;
 pub mod recipe_runtime;
+mod request;
 mod resolved_inputs;
 mod runtime;
 
-pub use recipe::{RequestEnvelope, RequestOptions};
+pub use request::{RequestEnvelope, RequestOptions};
 pub use runtime::RuntimeError;

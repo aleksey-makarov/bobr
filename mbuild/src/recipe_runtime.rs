@@ -1,9 +1,10 @@
 use crate::builder_registry::create_builder_registry;
+use crate::collect_graph::collect_graph;
 use crate::planned::{
     PlannedExecutionContext, PlannedSubject, RealizedInput, SubjectExecution, SubjectOutcome,
     execute_subject, realized_object_from_record,
 };
-use crate::recipe::{RequestEnvelope, collect_graph};
+use crate::request::RequestEnvelope;
 use crate::runtime::{RuntimeError, check_cancelled, map_store_error};
 use bobr_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildRunLogger, BuildStatus, CancellationToken,
