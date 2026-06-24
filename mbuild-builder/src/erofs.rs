@@ -11,6 +11,13 @@ use std::process::Command;
 
 const OUTPUT_FILE_NAME: &str = "erofs-rootfs.erofs";
 
+/// Fixed build timestamp for reproducible images (1980-01-01 UTC). mkfs.erofs
+/// treats `-T 0` as unset and falls back to the ambient `SOURCE_DATE_EPOCH`, so
+/// the superblock build time leaked the host environment; pin both the `-T`
+/// argument and `SOURCE_DATE_EPOCH` to this non-zero value. Matches the sandbox
+/// `SOURCE_DATE_EPOCH` so the whole build agrees on one epoch.
+const REPRODUCIBLE_SOURCE_DATE_EPOCH: &str = "315532800";
+
 pub struct ErofsRootfsBuilder;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -175,9 +182,12 @@ fn mkfs_erofs_command(
 ) -> Command {
     let mut command = Command::new(mkfs_erofs);
     command
+        // Pin the build time explicitly and override any ambient
+        // SOURCE_DATE_EPOCH so the superblock time is host-independent.
+        .env("SOURCE_DATE_EPOCH", REPRODUCIBLE_SOURCE_DATE_EPOCH)
         .arg("--sort=path")
         .arg("-T")
-        .arg("0")
+        .arg(REPRODUCIBLE_SOURCE_DATE_EPOCH)
         .arg("-U")
         .arg("clear");
     if let Some(label) = label {
@@ -251,7 +261,7 @@ impl std::fmt::Display for ErofsRootfsError {
 mod tests {
     use super::*;
     use crate::BuilderInputPath;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use tempfile::tempdir;
 
@@ -358,7 +368,7 @@ mod tests {
             vec![
                 OsString::from("--sort=path"),
                 OsString::from("-T"),
-                OsString::from("0"),
+                OsString::from("315532800"),
                 OsString::from("-U"),
                 OsString::from("clear"),
                 OsString::from("-L"),
@@ -369,6 +379,12 @@ mod tests {
                 source.as_os_str().to_os_string(),
             ]
         );
+        // SOURCE_DATE_EPOCH is pinned so the superblock build time does not
+        // depend on the ambient environment.
+        let source_date_epoch = command
+            .get_envs()
+            .find_map(|(key, value)| (key == OsStr::new("SOURCE_DATE_EPOCH")).then_some(value));
+        assert_eq!(source_date_epoch, Some(Some(OsStr::new("315532800"))));
     }
 
     #[test]
