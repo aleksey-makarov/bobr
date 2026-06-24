@@ -1,7 +1,5 @@
-use crate::{Build, ObjectRecord, PublishedBuild, Store, StoreError};
-use mbuild_core::{
-    BuildKey, ObjectHash, ReuseKey, validate_publication_name as validate_core_publication_name,
-};
+use crate::{Build, ObjectRecord, PublishedBuild, Store, StoreError, validate_ref_name};
+use mbuild_core::{BuildKey, ObjectHash, ReuseKey};
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
@@ -254,7 +252,7 @@ pub(crate) fn update_object_ref(
     object_ref_name: &str,
     object_hash: ObjectHash,
 ) -> Result<(), StoreError> {
-    validate_object_ref_name(object_ref_name)?;
+    validate_ref_name(object_ref_name)?;
 
     let current_object_ref_path = store.object_refs_dir().join(object_ref_name);
     let new_target = object_ref_target(object_hash);
@@ -298,11 +296,6 @@ pub(crate) fn update_object_ref(
     }
 
     replace_symlink(&new_target, &current_object_ref_path)
-}
-
-pub(crate) fn validate_object_ref_name(name: &str) -> Result<(), StoreError> {
-    validate_core_publication_name(name)
-        .map_err(|error| StoreError::InvalidInput(error.to_string()))
 }
 
 fn generation_suffix_from_symlink_metadata(metadata: &fs::Metadata) -> Result<String, StoreError> {

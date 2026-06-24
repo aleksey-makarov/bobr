@@ -16,7 +16,7 @@ pub fn materialize_build(
     object_ref_name: Option<&str>,
 ) -> Result<PublishedBuild, StoreError> {
     if let Some(name) = object_ref_name {
-        crate::refs::validate_object_ref_name(name)?;
+        crate::validate_ref_name(name)?;
     }
     let object_hash = crate::object::import_object(store, staged_path)?;
     let object_record = ObjectRecord {

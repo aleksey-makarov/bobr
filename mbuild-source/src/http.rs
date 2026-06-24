@@ -1,6 +1,6 @@
+use crate::origin::{OriginContext, OriginHandler, OriginSpec, ParsedOrigin};
 use bzip2::read::BzDecoder;
 use flate2::read::GzDecoder;
-use mbuild_core::{OriginContext, OriginHandler, OriginSpec, ParsedOrigin};
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use serde_json::{Map, Value};

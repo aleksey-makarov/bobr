@@ -3,7 +3,7 @@ use crate::{
     GroupBuilder, InitramfsBuilder, OciExtractBuilder, TreeBuilder, TreeMergeBuilder,
     TreeSubsetBuilder,
 };
-use mbuild_core::{BuildKey, validate_publication_name};
+use mbuild_core::BuildKey;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
@@ -62,8 +62,6 @@ impl BuilderRegistry {
         inputs: BTreeMap<String, BuildKey>,
     ) -> Result<BuilderPlannedSubject, BuilderPlanError> {
         let name = take_string(&mut object, "name")?;
-        validate_publication_name(&name)
-            .map_err(|error| BuilderPlanError::recipe(format!("name: {error}")))?;
         let config = object
             .remove("config")
             .ok_or_else(|| BuilderPlanError::recipe("missing required field 'config'"))?;
@@ -327,20 +325,10 @@ mod tests {
     }
 
     #[test]
-    fn parse_subject_rejects_invalid_name_and_unexpected_fields() {
+    fn parse_subject_rejects_unexpected_fields() {
         let mut registry = BuilderRegistry::new();
         registry.register(&DUPLICATE).unwrap();
 
-        let invalid_name = registry
-            .parse_subject(
-                "Duplicate",
-                serde_json::json!({"name": "bad/name", "config": {}})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-                BTreeMap::new(),
-            )
-            .unwrap_err();
         let unexpected = registry
             .parse_subject(
                 "Duplicate",
@@ -352,7 +340,6 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(invalid_name.to_string().contains("name:"));
         assert_eq!(unexpected.to_string(), "unexpected fields: extra");
     }
 

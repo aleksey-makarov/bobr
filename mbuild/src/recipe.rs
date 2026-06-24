@@ -418,25 +418,6 @@ mod tests {
     }
 
     #[test]
-    fn source_publication_name_is_rejected_during_graph_collection() {
-        let request = json!({
-            "root": {
-                "name": "bad/name",
-                "tag": "Source",
-                "object_hash": "1111111111111111111111111111111111111111111111111111111111111111"
-            }
-        });
-
-        let error = collect_error(&request);
-        assert!(
-            error
-                .to_string()
-                .contains("$.nodes.root: name: invalid publication name"),
-            "{error}"
-        );
-    }
-
-    #[test]
     fn source_oci_registry_origin_is_accepted() {
         let request = json!({
             "root": {
@@ -514,26 +495,6 @@ mod tests {
             error
                 .to_string()
                 .contains("does not accept extra input 'unexpected'"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn builder_publication_name_is_rejected_during_graph_collection() {
-        let request = json!({
-            "root": {
-                "name": "bad/name",
-                "tag": "Tree",
-                "config": tree_config("hello.txt", "hello", false),
-                "inputs": {}
-            }
-        });
-
-        let error = collect_error(&request);
-        assert!(
-            error
-                .to_string()
-                .contains("$.nodes.root: name: invalid publication name"),
             "{error}"
         );
     }

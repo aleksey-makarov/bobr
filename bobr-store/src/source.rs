@@ -29,7 +29,7 @@ pub fn record_existing_source_object(
     object_ref_name: Option<&str>,
 ) -> Result<Option<StoredObjectRecord>, StoreError> {
     if let Some(name) = object_ref_name {
-        crate::refs::validate_object_ref_name(name)?;
+        crate::validate_ref_name(name)?;
     }
     if !store.object_path(declared_hash).exists() {
         return Ok(None);
@@ -56,7 +56,7 @@ pub fn import_source_object(
     object_ref_name: Option<&str>,
 ) -> Result<SourceImportOutcome, StoreError> {
     if let Some(name) = object_ref_name {
-        crate::refs::validate_object_ref_name(name)?;
+        crate::validate_ref_name(name)?;
     }
     let actual_hash = import_object(store, staged_path)?;
     if actual_hash != declared_hash {

@@ -840,7 +840,7 @@ fn replace_symlink_temp_names_do_not_conflict_on_repeated_replace() {
 }
 
 #[test]
-fn invalid_publication_name_is_rejected() {
+fn invalid_ref_name_is_rejected() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 

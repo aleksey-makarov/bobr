@@ -26,6 +26,7 @@ mod json;
 mod object;
 mod publish;
 mod record;
+mod ref_name;
 mod refs;
 mod source;
 mod store;
@@ -37,6 +38,7 @@ pub use record::{
     Build, ObjectRecord, PublishedBuild, RealizedObject, StoredObjectRecord, load_object_record,
     load_stored_object_record,
 };
+pub(crate) use ref_name::validate_ref_name;
 pub use refs::{
     load_build_handle, load_public_build, resolve_build_handle, resolve_reuse_for_build,
 };

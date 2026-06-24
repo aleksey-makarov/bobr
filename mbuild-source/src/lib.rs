@@ -1,11 +1,11 @@
 mod http;
 pub mod oci_registry;
+pub mod origin;
 mod origins;
 
-use mbuild_core::{
-    BuildKey, BuildLogSubject, ObjectHash, OriginContext, ParsedOrigin, SubjectRunContext,
-    Workspace, validate_publication_name,
-};
+pub use origin::*;
+
+use mbuild_core::{BuildKey, BuildLogSubject, ObjectHash, SubjectRunContext, Workspace};
 use serde_json::{Map, Value};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -188,8 +188,6 @@ pub fn parse_source_subject(
     mut object: Map<String, Value>,
 ) -> Result<SourcePlannedSubject, SourceRecipeError> {
     let name = take_string(&mut object, "name")?;
-    validate_publication_name(&name)
-        .map_err(|error| SourceRecipeError::new(format!("name: {error}")))?;
     let declared_object_hash = take_string(&mut object, "object_hash")?
         .trim()
         .parse::<ObjectHash>()
@@ -227,7 +225,8 @@ fn take_string(object: &mut Map<String, Value>, field: &str) -> Result<String, S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::{CancellationToken, NoopBuildLogger, OriginSpec, RuntimeProvider};
+    use crate::origin::OriginSpec;
+    use mbuild_core::{CancellationToken, NoopBuildLogger, RuntimeProvider};
     use serde_json::json;
     use std::sync::{
         Arc,
@@ -264,18 +263,6 @@ mod tests {
             "1111111111111111111111111111111111111111111111111111111111111111"
         );
         assert!(subject.clone_origin().is_none());
-    }
-
-    #[test]
-    fn source_publication_name_is_validated() {
-        let mut object = source_object(None);
-        object.insert("name".to_string(), Value::String("bad/name".to_string()));
-
-        let error = parse_source_subject(object).unwrap_err();
-        assert!(
-            error.to_string().contains("name: invalid publication name"),
-            "{error}"
-        );
     }
 
     #[test]

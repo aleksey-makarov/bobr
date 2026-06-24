@@ -8,8 +8,9 @@
 
 use crate::StoreError;
 use crate::store::{FS_FILES_DIR, FS_TREE_REFS_DIR, FS_TREES_DIR, OBJECTS_DIR};
+use crate::validate_ref_name;
 use globset::{Glob, GlobMatcher};
-use mbuild_core::{ObjectHash, validate_publication_name as validate_core_publication_name};
+use mbuild_core::ObjectHash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -277,7 +278,7 @@ impl FsTree {
         manifest_hash: ObjectHash,
     ) -> Result<PathBuf, StoreError> {
         if let Some(name) = name {
-            validate_fs_tree_ref_name(name)?;
+            validate_ref_name(name)?;
         }
         let root = if let Some(root) = self.lookup_materialized_root(manifest_hash)? {
             root
@@ -312,7 +313,7 @@ impl FsTree {
         name: &str,
         manifest_hash: ObjectHash,
     ) -> Result<(), StoreError> {
-        validate_fs_tree_ref_name(name)?;
+        validate_ref_name(name)?;
         let ref_path = self.fs_tree_refs_dir().join(name);
         let new_target = fs_tree_ref_target(manifest_hash);
 
@@ -909,11 +910,6 @@ fn fs_tree_ref_target(manifest_hash: ObjectHash) -> PathBuf {
     PathBuf::from("..")
         .join(FS_TREES_DIR)
         .join(manifest_hash.to_hex())
-}
-
-fn validate_fs_tree_ref_name(name: &str) -> Result<(), StoreError> {
-    validate_core_publication_name(name)
-        .map_err(|error| StoreError::InvalidInput(error.to_string()))
 }
 
 fn fs_tree_ref_generation_suffix(metadata: &fs::Metadata) -> Result<String, StoreError> {

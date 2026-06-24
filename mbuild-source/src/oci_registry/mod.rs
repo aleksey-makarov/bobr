@@ -1,6 +1,6 @@
 mod registry;
 
-use mbuild_core::{OriginContext, OriginHandler, OriginSpec, ParsedOrigin};
+use crate::origin::{OriginContext, OriginHandler, OriginSpec, ParsedOrigin};
 use serde_json::{Map, Value};
 use std::fmt;
 use std::fs;

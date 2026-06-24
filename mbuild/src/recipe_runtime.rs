@@ -550,8 +550,8 @@ fn build_run_logger_for_store(store: &Store, quiet: bool) -> Result<BuildRunLogg
 mod tests {
     use super::*;
     use crate::planned::PlannedSubject;
-    use mbuild_core::{CancellationToken, OriginContext, OriginSpec, ParsedOrigin};
-    use mbuild_source::SourcePlannedSubject;
+    use mbuild_core::CancellationToken;
+    use mbuild_source::{OriginContext, OriginSpec, ParsedOrigin, SourcePlannedSubject};
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -928,7 +928,7 @@ mod tests {
             2,
             CancellationToken::new(),
         )
-        .expect_err("expected publish failure for invalid publication name");
+        .expect_err("expected store failure for invalid object ref path");
 
         assert_eq!(error.class(), "store");
         assert!(

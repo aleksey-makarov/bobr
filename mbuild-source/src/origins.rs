@@ -1,6 +1,6 @@
 mod path;
 
-use mbuild_core::{OriginHandler, ParsedOrigin};
+use crate::origin::{OriginHandler, ParsedOrigin};
 use serde_json::Value;
 
 use self::path::PathOriginHandler;

@@ -14,8 +14,8 @@ use time::macros::format_description;
 /// Schema tag stamped on every on-disk event record.
 pub const BUILD_EVENT_SCHEMA: &str = "bobr-build-event-v1";
 
-/// Severity of an event. Ordered `Info < Warn < Error`; the stderr threshold
-/// (see [`ProgressSink`]) compares against it.
+/// Severity of an event. Ordered `Info < Warn < Error`; the stderr progress
+/// sink compares each event's level against its threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuildLogLevel {
     Info,
