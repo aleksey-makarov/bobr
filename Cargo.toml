@@ -2,7 +2,7 @@
 members = [
   "mbuild",
   "mbuild-builder",
-  "mbuild-core",
+  "bobr-core",
   "mbuild-source",
   "bobr-sandbox-launcher",
   "bobr-store",

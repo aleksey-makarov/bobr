@@ -9,8 +9,8 @@
 use crate::StoreError;
 use crate::store::{FS_FILES_DIR, FS_TREE_REFS_DIR, FS_TREES_DIR, OBJECTS_DIR};
 use crate::validate_ref_name;
+use bobr_core::ObjectHash;
 use globset::{Glob, GlobMatcher};
-use mbuild_core::ObjectHash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};

@@ -2,12 +2,12 @@ use crate::{
     BuildContext, Builder, BuilderError, BuilderInputs, InputSpec, StagedBuildResult,
     validate_input_name,
 };
-use bobr_store::fs_tree::FsTree;
-use fsobj_hash::ObjectHash;
-use mbuild_core::{
+use bobr_core::{
     BuildKey, BuildLogSubject, IdentityError, ReuseKey, SubjectRunContext, Workspace,
     compute_build_key, compute_reuse_key,
 };
+use bobr_store::fs_tree::FsTree;
+use fsobj_hash::ObjectHash;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -212,8 +212,8 @@ impl BuilderPlannedSubject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bobr_core::{CancellationToken, NoopBuildLogger};
     use bobr_runtime::runtime_provider::{RuntimeBackend, RuntimeProvider};
-    use mbuild_core::{CancellationToken, NoopBuildLogger};
     use serde::Deserialize;
     use std::sync::Arc;
     use tempfile::tempdir;

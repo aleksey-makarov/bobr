@@ -7,7 +7,7 @@ edition = "2024"
 fsobj-hash = { path = "../fsobj-hash" }
 globset = "0.4"
 libc = "0.2"
-mbuild-core = { path = "../mbuild-core" }
+bobr-core = { path = "../bobr-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"

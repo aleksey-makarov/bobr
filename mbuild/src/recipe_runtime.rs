@@ -5,13 +5,13 @@ use crate::planned::{
 };
 use crate::recipe::{RequestEnvelope, collect_graph};
 use crate::runtime::{RuntimeError, check_cancelled, map_store_error};
-use bobr_runtime::runtime_provider::runtime_provider_for_current_process;
-use bobr_store::{RealizedObject, Store, load_build_handle};
-use mbuild_builder::BuilderPlannedSubject;
-use mbuild_core::{
+use bobr_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildRunLogger, BuildStatus, CancellationToken,
     ObjectHash, RuntimeBackend, RuntimeProvider, SubjectIdentity,
 };
+use bobr_runtime::runtime_provider::runtime_provider_for_current_process;
+use bobr_store::{RealizedObject, Store, load_build_handle};
+use mbuild_builder::BuilderPlannedSubject;
 use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -550,7 +550,7 @@ fn build_run_logger_for_store(store: &Store, quiet: bool) -> Result<BuildRunLogg
 mod tests {
     use super::*;
     use crate::planned::PlannedSubject;
-    use mbuild_core::CancellationToken;
+    use bobr_core::CancellationToken;
     use mbuild_source::{OriginContext, OriginSpec, ParsedOrigin, SourcePlannedSubject};
     use std::collections::HashMap;
     use std::fs;

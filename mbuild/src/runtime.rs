@@ -1,8 +1,8 @@
-use bobr_store::{StoreError, StoreTempDir};
-use mbuild_builder::BuilderError;
-use mbuild_core::{
+use bobr_core::{
     BuildLogEvent, BuildLogLevel, BuildLogger, BuildStatus, CancellationToken, NoopBuildLogger,
 };
+use bobr_store::{StoreError, StoreTempDir};
+use mbuild_builder::BuilderError;
 use std::fmt;
 use std::sync::Arc;
 
@@ -152,15 +152,15 @@ mod tests {
     use crate::planned::{
         PlannedExecutionContext, PlannedSubject, SubjectExecution, execute_subject,
     };
+    use bobr_core::{
+        BuildKey, BuildLogSubject, BuildLogger, BuildRunLogger, CancellationToken, RuntimeProvider,
+        compute_build_key, compute_reuse_key,
+    };
     use bobr_store::{
         Store, StoreWorkspace, create_workspace, materialize_build, resolve_reuse_for_build,
     };
     use mbuild_builder::{
         BuildContext, BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult, TypedBuilder,
-    };
-    use mbuild_core::{
-        BuildKey, BuildLogSubject, BuildLogger, BuildRunLogger, CancellationToken, RuntimeProvider,
-        compute_build_key, compute_reuse_key,
     };
     use serde::Deserialize;
     use serde_json::{Map, Value, json};

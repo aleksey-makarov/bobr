@@ -1,5 +1,5 @@
 use crate::{ObjectRecord, PublishedBuild, Store, StoreError};
-use mbuild_core::{BuildKey, ObjectHash, ReuseKey};
+use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use std::path::Path;
 
 /// Imports a staged object and records a newly materialized build object.

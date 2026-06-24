@@ -5,7 +5,7 @@ mod origins;
 
 pub use origin::*;
 
-use mbuild_core::{BuildKey, BuildLogSubject, ObjectHash, SubjectRunContext, Workspace};
+use bobr_core::{BuildKey, BuildLogSubject, ObjectHash, SubjectRunContext, Workspace};
 use serde_json::{Map, Value};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -226,7 +226,7 @@ fn take_string(object: &mut Map<String, Value>, field: &str) -> Result<String, S
 mod tests {
     use super::*;
     use crate::origin::OriginSpec;
-    use mbuild_core::{CancellationToken, NoopBuildLogger, RuntimeProvider};
+    use bobr_core::{CancellationToken, NoopBuildLogger, RuntimeProvider};
     use serde_json::json;
     use std::sync::{
         Arc,

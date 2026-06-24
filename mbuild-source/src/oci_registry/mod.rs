@@ -131,7 +131,7 @@ fn is_valid_sha256_digest(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::oci;
+    use bobr_core::oci;
     use mockito::Server;
     use sha2::{Digest, Sha256};
     use tempfile::tempdir;

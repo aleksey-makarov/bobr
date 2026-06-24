@@ -1,5 +1,5 @@
 use crate::{Build, ObjectRecord, PublishedBuild, Store, StoreError, validate_ref_name};
-use mbuild_core::{BuildKey, ObjectHash, ReuseKey};
+use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};

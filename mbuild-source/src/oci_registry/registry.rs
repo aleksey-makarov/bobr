@@ -1,4 +1,4 @@
-use mbuild_core::oci::{self, MEDIA_TYPE_OCI_MANIFEST, OciDescriptor, OciManifest};
+use bobr_core::oci::{self, MEDIA_TYPE_OCI_MANIFEST, OciDescriptor, OciManifest};
 use std::fmt;
 use std::io::Read;
 use std::path::Path;

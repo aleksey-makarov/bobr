@@ -5,9 +5,9 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use bobr_core::CancellationToken;
 use mbuild::RequestEnvelope;
 use mbuild::recipe_runtime;
-use mbuild_core::CancellationToken;
 
 type MResult<T> = Result<T, MbuildError>;
 
@@ -155,7 +155,7 @@ fn map_runtime_error(error: mbuild::RuntimeError) -> MbuildError {
 
 #[cfg(unix)]
 mod signal {
-    use mbuild_core::CancellationToken;
+    use bobr_core::CancellationToken;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
@@ -195,7 +195,7 @@ mod signal {
 
 #[cfg(not(unix))]
 mod signal {
-    use mbuild_core::CancellationToken;
+    use bobr_core::CancellationToken;
 
     pub fn install_handlers(_cancellation: CancellationToken) {}
 }

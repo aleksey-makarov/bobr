@@ -1,10 +1,10 @@
 mod support;
 
+use bobr_core::{BuildKey, ObjectHash};
 #[cfg(feature = "integration-tests")]
 use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
 use bobr_store::{Store, load_build_handle, load_object_record};
 use mbuild::recipe_runtime::run_request_in_workspace;
-use mbuild_core::{BuildKey, ObjectHash};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Cursor, Read, Write};

@@ -12,7 +12,7 @@ bobr-sandbox = { path = "../bobr-sandbox" }
 bobr-store = { path = "../bobr-store" }
 fsobj-hash = { path = "../fsobj-hash" }
 libc = "0.2"
-mbuild-core = { path = "../mbuild-core" }
+bobr-core = { path = "../bobr-core" }
 mbuild-builder = { path = "../mbuild-builder" }
 mbuild-source = { path = "../mbuild-source" }
 serde = { version = "1.0", features = ["derive"] }

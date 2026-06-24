@@ -3,16 +3,16 @@ use crate::runtime::{
     RuntimeError, TempDirGuard, check_cancelled, log_runtime_event, map_builder_error,
     map_store_error, prepare_temp,
 };
+use bobr_core::{
+    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, BuildStatus, CancellationToken,
+    NoopBuildLogger, SubjectRunContext, Workspace,
+};
 use bobr_store::{
     ObjectRecord, RealizedObject, SourceImportOutcome, Store, create_workspace,
     import_source_object, materialize_build, record_existing_source_object, resolve_build_handle,
     resolve_reuse_for_build,
 };
 use mbuild_builder::{BuilderPlanError, BuilderPlannedSubject};
-use mbuild_core::{
-    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, BuildStatus, CancellationToken,
-    NoopBuildLogger, SubjectRunContext, Workspace,
-};
 use mbuild_source::{SourceExecutionError, SourcePlannedSubject};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,7 +41,7 @@ impl PlannedSubject {
 pub(crate) struct PlannedExecutionContext<'a> {
     pub(crate) store: &'a Store,
     pub(crate) run_logger: Arc<BuildRunLogger>,
-    pub(crate) runtime_provider: mbuild_core::RuntimeProvider,
+    pub(crate) runtime_provider: bobr_core::RuntimeProvider,
     pub(crate) cancellation: CancellationToken,
     pub(crate) realized_inputs: &'a HashMap<BuildKey, RealizedInput>,
 }
@@ -387,7 +387,7 @@ pub(crate) fn core_workspace(workspace: bobr_store::StoreWorkspace) -> Workspace
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mbuild_core::ObjectHash;
+    use bobr_core::ObjectHash;
     use std::str::FromStr;
 
     #[test]

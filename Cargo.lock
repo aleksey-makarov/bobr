@@ -70,6 +70,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bobr-core"
+version = "0.1.0"
+dependencies = [
+ "bobr-runtime",
+ "fsobj-hash",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "time",
+]
+
+[[package]]
 name = "bobr-runtime"
 version = "0.1.0"
 dependencies = [
@@ -82,12 +96,12 @@ dependencies = [
 name = "bobr-sandbox"
 version = "0.1.0"
 dependencies = [
+ "bobr-core",
  "bobr-runtime",
  "bobr-sandbox-launcher",
  "bobr-store",
  "libc",
  "mbuild-builder",
- "mbuild-core",
  "serde",
  "serde_json",
  "tempfile",
@@ -108,10 +122,10 @@ dependencies = [
 name = "bobr-store"
 version = "0.1.0"
 dependencies = [
+ "bobr-core",
  "fsobj-hash",
  "globset",
  "libc",
- "mbuild-core",
  "serde",
  "serde_json",
  "sha2",
@@ -809,6 +823,7 @@ dependencies = [
 name = "mbuild"
 version = "0.1.0"
 dependencies = [
+ "bobr-core",
  "bobr-runtime",
  "bobr-sandbox",
  "bobr-store",
@@ -816,7 +831,6 @@ dependencies = [
  "fsobj-hash",
  "libc",
  "mbuild-builder",
- "mbuild-core",
  "mbuild-source",
  "mockito",
  "serde",
@@ -831,13 +845,13 @@ dependencies = [
 name = "mbuild-builder"
 version = "0.1.0"
 dependencies = [
+ "bobr-core",
  "bobr-runtime",
  "bobr-store",
  "flate2",
  "fsobj-hash",
  "globset",
  "libc",
- "mbuild-core",
  "serde",
  "serde_json",
  "sha2",
@@ -846,27 +860,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "mbuild-core"
-version = "0.1.0"
-dependencies = [
- "bobr-runtime",
- "fsobj-hash",
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "time",
-]
-
-[[package]]
 name = "mbuild-source"
 version = "0.1.0"
 dependencies = [
+ "bobr-core",
  "bzip2",
  "flate2",
  "fsobj-hash",
- "mbuild-core",
  "mockito",
  "reqwest",
  "serde_json",

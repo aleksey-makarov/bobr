@@ -3,7 +3,7 @@ use crate::record::{
     StoredObjectRecord, record_existing_source_object as record_existing_source_object_record,
 };
 use crate::{Store, StoreError};
-use mbuild_core::{BuildKey, ObjectHash};
+use bobr_core::{BuildKey, ObjectHash};
 use std::path::Path;
 
 /// Outcome of importing a materialized source origin into the store.

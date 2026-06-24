@@ -3,7 +3,7 @@ use crate::{
     GroupBuilder, InitramfsBuilder, OciExtractBuilder, TreeBuilder, TreeMergeBuilder,
     TreeSubsetBuilder,
 };
-use mbuild_core::BuildKey;
+use bobr_core::BuildKey;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
@@ -445,7 +445,7 @@ mod tests {
                 BTreeMap::new(),
             )
             .unwrap();
-        let expected = mbuild_core::compute_build_key("Tree", &config, &[]).unwrap();
+        let expected = bobr_core::compute_build_key("Tree", &config, &[]).unwrap();
 
         assert_eq!(subject.name(), "tree");
         assert_eq!(subject.tag(), "Tree");

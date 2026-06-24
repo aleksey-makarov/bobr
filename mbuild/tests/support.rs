@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use mbuild_core::ObjectHash;
+use bobr_core::ObjectHash;
 use mbuild_source::oci_registry::fetch_image_authenticated;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

@@ -12,7 +12,7 @@
 //!
 //! Most fallible store operations return [`StoreError`]. Pure string parsing
 //! for value types keeps narrow parse errors such as
-//! [`mbuild_core::ParseHexHashError`] and [`fs_tree::ParseFsFileHashError`].
+//! [`bobr_core::ParseHexHashError`] and [`fs_tree::ParseFsFileHashError`].
 
 #![deny(missing_docs)]
 
