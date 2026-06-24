@@ -1,6 +1,7 @@
+use crate::BuilderError;
 use crate::{BuildContext, BuilderInputs, InputSlot, InputSpec, StagedBuildResult, TypedBuilder};
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
-use mbuild_core::{BuildLogLevel, BuilderError};
+use mbuild_core::BuildLogLevel;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs;

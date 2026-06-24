@@ -803,7 +803,7 @@ mod tests {
                 _config: Self::Config,
                 _inputs: BuilderInputs,
                 cx: &mut BuildContext,
-            ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+            ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
                 Ok(stage_payload(cx, b"fast\n"))
             }
         }
@@ -824,7 +824,7 @@ mod tests {
                 _config: Self::Config,
                 _inputs: BuilderInputs,
                 cx: &mut BuildContext,
-            ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+            ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
                 std::thread::sleep(Duration::from_millis(300));
                 SLOW_FINISHED.store(true, Ordering::SeqCst);
                 Ok(stage_payload(cx, b"slow\n"))
@@ -855,7 +855,7 @@ mod tests {
                 _config: Self::Config,
                 _inputs: BuilderInputs,
                 cx: &mut BuildContext,
-            ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+            ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
                 // Never reached: the fast input fails to publish first.
                 Ok(stage_payload(cx, b"root\n"))
             }

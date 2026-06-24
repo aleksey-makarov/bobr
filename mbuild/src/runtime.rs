@@ -1,7 +1,7 @@
 use bobr_store::{StoreError, StoreTempDir};
+use mbuild_builder::BuilderError;
 use mbuild_core::{
-    BuildLogEvent, BuildLogLevel, BuildLogger, BuildStatus, BuilderError, CancellationToken,
-    NoopBuildLogger,
+    BuildLogEvent, BuildLogLevel, BuildLogger, BuildStatus, CancellationToken, NoopBuildLogger,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -341,7 +341,7 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+        ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
@@ -381,7 +381,7 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+        ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
@@ -416,12 +416,12 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+        ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
             fs::write(cx.temp_dir.join("scratch"), b"temp\n").unwrap();
-            Err(mbuild_core::BuilderError::ExecutionFailed(
+            Err(mbuild_builder::BuilderError::ExecutionFailed(
                 "intentional failure".to_string(),
             ))
         }
@@ -447,7 +447,7 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, mbuild_core::BuilderError> {
+        ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);

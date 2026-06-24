@@ -1,9 +1,10 @@
+use crate::BuilderError;
 use crate::{BuildContext, BuilderInputs, InputSlot, InputSpec, StagedBuildResult, TypedBuilder};
 use bobr_store::{
     StoreError,
     fs_tree::{FsTreeManifest, subset_manifest},
 };
-use mbuild_core::{BuildLogLevel, BuilderError};
+use mbuild_core::BuildLogLevel;
 use serde::Deserialize;
 
 pub struct TreeSubsetBuilder;

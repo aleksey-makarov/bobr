@@ -119,8 +119,8 @@ pub fn register_in_tree_builders(registry: &mut BuilderRegistry) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BuilderError;
     use crate::{BuildContext, BuilderInputs, InputSlot, InputSpec, StagedBuildResult};
-    use mbuild_core::BuilderError;
     use serde_json::Value;
     use std::str::FromStr;
 

@@ -1,5 +1,6 @@
 pub mod builder;
 mod erofs;
+mod error;
 mod fs_tree_import;
 mod fs_tree_materialize;
 pub mod group;
@@ -13,6 +14,7 @@ mod tree_subset;
 
 pub use builder::*;
 pub use erofs::{ErofsRootfsBuilder, ErofsRootfsConfig};
+pub use error::BuilderError;
 pub use fs_tree_import::{FsTreeImportBuilder, FsTreeImportConfig};
 pub use fs_tree_materialize::materialize_fs_tree_root;
 pub use group::{GroupBuilder, GroupConfig};

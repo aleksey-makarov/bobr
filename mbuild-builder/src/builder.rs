@@ -1,9 +1,9 @@
+use crate::BuilderError;
 use bobr_runtime::runtime_provider::RuntimeProvider;
 use bobr_store::fs_tree::FsTree;
 use fsobj_hash::ObjectHash;
 use mbuild_core::{
-    BuildLogEvent, BuildLogLevel, BuildLogger, BuildStatus, BuilderError, CancellationToken,
-    NoopBuildLogger,
+    BuildLogEvent, BuildLogLevel, BuildLogger, BuildStatus, CancellationToken, NoopBuildLogger,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
@@ -306,7 +306,13 @@ impl BuildContext {
     }
 
     pub fn check_cancelled(&self) -> Result<(), BuilderError> {
-        self.cancellation.check_cancelled()
+        if self.cancellation.is_cancelled() {
+            Err(BuilderError::Cancelled(
+                "build cancelled by signal".to_string(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// Logs a builder operation. Builder events always ride inside the

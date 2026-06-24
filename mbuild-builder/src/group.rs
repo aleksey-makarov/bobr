@@ -1,5 +1,6 @@
+use crate::BuilderError;
 use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
-use mbuild_core::{BuildLogLevel, BuilderError};
+use mbuild_core::BuildLogLevel;
 use serde::Deserialize;
 use std::fs;
 #[cfg(unix)]

@@ -1,4 +1,3 @@
-use crate::BuilderError;
 use std::fmt;
 use std::sync::{
     Arc,
@@ -37,15 +36,5 @@ impl CancellationToken {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
-    }
-
-    pub fn check_cancelled(&self) -> Result<(), BuilderError> {
-        if self.is_cancelled() {
-            Err(BuilderError::Cancelled(
-                "build cancelled by signal".to_string(),
-            ))
-        } else {
-            Ok(())
-        }
     }
 }
