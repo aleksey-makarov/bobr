@@ -22,7 +22,6 @@ compile_error!("bobr requires Linux");
 mod error;
 pub mod fs_tree;
 mod fsutil;
-mod json;
 mod object;
 mod publish;
 mod record;
@@ -46,12 +45,7 @@ pub use source::{SourceImportOutcome, import_source_object, record_existing_sour
 pub use store::{Store, StoreRunLogLocations, StoreTempDir, StoreWorkspace, create_workspace};
 
 #[cfg(test)]
-pub(crate) use json::canonical_json_bytes;
-#[cfg(test)]
-pub(crate) use record::{
-    OBJECT_RECORD_SCHEMA, OBJECT_RECORD_SCHEMA_FOR_TEST, build_json_value,
-    parse_object_record_value,
-};
+pub(crate) use record::{OBJECT_RECORD_SCHEMA, parse_object_record_value};
 #[cfg(test)]
 pub(crate) use refs::{load_reuse_object_record, replace_symlink};
 #[cfg(test)]

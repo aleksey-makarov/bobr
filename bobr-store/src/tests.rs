@@ -36,27 +36,6 @@ struct TestBuild {
 }
 
 #[test]
-fn canonical_json_hash_is_stable_across_key_order() {
-    let object_hash =
-        parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
-    let left = json!({
-        "z": 1,
-        "a": true,
-        "object_record": build_json_value(Some(sample_run_id()), object_hash, &[]),
-    });
-    let right = json!({
-        "object_record": build_json_value(Some(sample_run_id()), object_hash, &[]),
-        "a": true,
-        "z": 1,
-    });
-
-    assert_eq!(
-        canonical_json_bytes(&left).unwrap(),
-        canonical_json_bytes(&right).unwrap()
-    );
-}
-
-#[test]
 fn reuse_key_is_stable_for_identical_inputs() {
     let payload = json!({ "kind": "sandbox-script" });
     let inputs = vec![
@@ -219,7 +198,7 @@ fn materialize_build_writes_build_record_and_object_ref() {
         serde_json::from_slice(&fs::read(&object_record_path).unwrap()).unwrap();
     assert_eq!(
         build_json["schema"],
-        Value::String(OBJECT_RECORD_SCHEMA_FOR_TEST.to_string())
+        Value::String(OBJECT_RECORD_SCHEMA.to_string())
     );
     assert_eq!(
         build_json["run_id"],
@@ -1585,10 +1564,6 @@ fn parse_object_hash(value: &str) -> ObjectHash {
 
 fn parse_build_key(value: &str) -> BuildKey {
     BuildKey::from_str(value).unwrap()
-}
-
-fn sample_run_id() -> &'static str {
-    "260324123456"
 }
 
 fn build_key_for(builder_tag: &str, payload: Value, input_builds: &[BuildKey]) -> BuildKey {

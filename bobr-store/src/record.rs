@@ -1,14 +1,35 @@
 use crate::fsutil as private_fs;
 use crate::{Store, StoreError};
 use bobr_core::{BuildKey, ObjectHash};
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
+use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 
 pub(crate) const OBJECT_RECORD_SCHEMA: &str = "bobr-object-record-v3";
-#[cfg(test)]
-pub(crate) const OBJECT_RECORD_SCHEMA_FOR_TEST: &str = OBJECT_RECORD_SCHEMA;
+
+/// Schema marker for the object record format. It (de)serializes only as the
+/// current schema string, so the version is enforced declaratively and never
+/// needs to live as data on `ObjectRecord`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ObjectRecordSchemaV3;
+
+impl Serialize for ObjectRecordSchemaV3 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(OBJECT_RECORD_SCHEMA)
+    }
+}
+
+impl<'de> Deserialize<'de> for ObjectRecordSchemaV3 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            OBJECT_RECORD_SCHEMA => Ok(ObjectRecordSchemaV3),
+            other => Err(D::Error::custom(format!(
+                "unsupported object record schema '{other}'"
+            ))),
+        }
+    }
+}
 
 /// Public build handle resolved from a build key.
 ///
@@ -28,14 +49,17 @@ pub struct Build {
 
 /// Store record for a realized object.
 ///
-/// Object records are stored as canonical JSON under the store's object record
-/// directory and are keyed by [`ObjectRecord::object_hash`], not by the build
-/// key that first produced them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Object records are stored as JSON under the store's object record directory
+/// and are keyed by [`ObjectRecord::object_hash`], not by the build key that
+/// first produced them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectRecord {
+    /// Schema marker; enforces the record format version at (de)serialization.
+    pub(crate) schema: ObjectRecordSchemaV3,
     /// Hash of the output object this record describes.
     pub object_hash: ObjectHash,
     /// Optional store run id that recorded this object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
     /// Realized input object hashes used for reuse accounting.
     pub inputs: Vec<ObjectHash>,
@@ -86,8 +110,8 @@ pub struct StoredObjectRecord {
 /// Loads an object record by object hash.
 ///
 /// Returns `Ok(None)` when the record file does not exist. Existing files are
-/// parsed as the current canonical object record schema and are validated against
-/// the requested `object_hash`.
+/// parsed as the current object record schema and are validated against the
+/// requested `object_hash`.
 pub fn load_object_record(
     store: &Store,
     object_hash: ObjectHash,
@@ -115,7 +139,7 @@ pub fn load_object_record(
 /// Loads an object record and verifies that its object exists in the store.
 ///
 /// Returns `Ok(None)` when the record file does not exist. Existing records are
-/// parsed as canonical object record JSON and must point to an existing object.
+/// parsed as object record JSON and must point to an existing object.
 pub fn load_stored_object_record(
     store: &Store,
     object_hash: ObjectHash,
@@ -147,6 +171,7 @@ pub(crate) fn record_existing_source_object(
     }
 
     let object_record = ObjectRecord {
+        schema: ObjectRecordSchemaV3,
         object_hash,
         run_id: Some(store.run_id().to_string()),
         inputs: Vec::new(),
@@ -187,17 +212,10 @@ pub(crate) fn store_object_record(store: &Store, record: &ObjectRecord) -> Resul
     if object_record_path.exists() {
         return Ok(());
     }
-    let object_record_value = object_record_json_value(record);
-    let canonical = crate::json::canonical_json_bytes(&object_record_value)?;
-    private_fs::write_atomic(
-        &object_record_path,
-        std::str::from_utf8(&canonical).map_err(|error| {
-            StoreError::InvalidData(format!(
-                "failed to encode canonical object record JSON as UTF-8: {error}"
-            ))
-        })?,
-    )
-    .map_err(crate::error::map_fsutil_error)
+    let json = serde_json::to_string(record).map_err(|error| {
+        StoreError::InvalidData(format!("failed to encode object record JSON: {error}"))
+    })?;
+    private_fs::write_atomic(&object_record_path, &json).map_err(crate::error::map_fsutil_error)
 }
 
 pub(crate) fn build_from_object_record(build_key: BuildKey, object_record: &ObjectRecord) -> Build {
@@ -208,120 +226,17 @@ pub(crate) fn build_from_object_record(build_key: BuildKey, object_record: &Obje
     }
 }
 
-fn object_record_json_value_from_parts(
-    run_id: Option<&str>,
-    object_hash: ObjectHash,
-    inputs: &[ObjectHash],
-) -> Value {
-    let input_values = inputs
-        .iter()
-        .map(|input_hash| Value::String(input_hash.to_string()))
-        .collect::<Vec<_>>();
-
-    let mut root = Map::new();
-    root.insert(
-        "schema".to_string(),
-        Value::String(OBJECT_RECORD_SCHEMA.to_string()),
-    );
-    if let Some(run_id) = run_id {
-        root.insert("run_id".to_string(), Value::String(run_id.to_string()));
-    }
-    root.insert(
-        "object_hash".to_string(),
-        Value::String(object_hash.to_string()),
-    );
-    root.insert("inputs".to_string(), Value::Array(input_values));
-    Value::Object(root)
-}
-
-fn object_record_json_value(record: &ObjectRecord) -> Value {
-    object_record_json_value_from_parts(
-        record.run_id.as_deref(),
-        record.object_hash,
-        &record.inputs,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn build_json_value(
-    run_id: Option<&str>,
-    object_hash: ObjectHash,
-    inputs: &[ObjectHash],
-) -> Value {
-    object_record_json_value_from_parts(run_id, object_hash, inputs)
-}
-
 pub(crate) fn parse_object_record_value(
     expected_object_hash: ObjectHash,
     value: &Value,
 ) -> Result<ObjectRecord, StoreError> {
-    let object = value.as_object().ok_or_else(|| {
-        StoreError::InvalidData("object record root must be a JSON object".to_string())
-    })?;
-
-    let schema = object
-        .get("schema")
-        .and_then(Value::as_str)
-        .ok_or_else(|| StoreError::InvalidData("object record is missing 'schema'".to_string()))?;
-    if schema != OBJECT_RECORD_SCHEMA {
-        return Err(StoreError::InvalidData(format!(
-            "unsupported object record schema '{schema}'"
-        )));
-    }
-
-    let run_id = object
-        .get("run_id")
-        .map(|value| {
-            value.as_str().ok_or_else(|| {
-                StoreError::InvalidData("object record run_id must be a string".to_string())
-            })
-        })
-        .transpose()?
-        .map(str::to_string);
-
-    let object_hash = object
-        .get("object_hash")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            StoreError::InvalidData("object record is missing 'object_hash'".to_string())
-        })
-        .and_then(parse_object_hash_for_record)?;
-
-    if object_hash != expected_object_hash {
+    let record: ObjectRecord = serde_json::from_value(value.clone())
+        .map_err(|error| StoreError::InvalidData(error.to_string()))?;
+    if record.object_hash != expected_object_hash {
         return Err(StoreError::InvalidData(format!(
             "object record key mismatch: path key '{}' does not match record object hash '{}'",
-            expected_object_hash, object_hash
+            expected_object_hash, record.object_hash
         )));
     }
-
-    let inputs = object
-        .get("inputs")
-        .and_then(Value::as_array)
-        .ok_or_else(|| StoreError::InvalidData("object record is missing 'inputs'".to_string()))?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .ok_or_else(|| {
-                    StoreError::InvalidData(
-                        "object record inputs must contain object hash strings".to_string(),
-                    )
-                })
-                .and_then(parse_object_hash_for_record)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(ObjectRecord {
-        object_hash,
-        run_id,
-        inputs,
-    })
-}
-
-fn parse_object_hash_for_record(value: &str) -> Result<ObjectHash, StoreError> {
-    value.parse::<ObjectHash>().map_err(|error| {
-        StoreError::InvalidData(format!(
-            "invalid object hash '{value}' in object record: {error}"
-        ))
-    })
+    Ok(record)
 }

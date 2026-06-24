@@ -1,3 +1,4 @@
+use crate::record::ObjectRecordSchemaV3;
 use crate::{ObjectRecord, PublishedBuild, Store, StoreError};
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use std::path::Path;
@@ -20,6 +21,7 @@ pub fn materialize_build(
     }
     let object_hash = crate::object::import_object(store, staged_path)?;
     let object_record = ObjectRecord {
+        schema: ObjectRecordSchemaV3,
         object_hash,
         run_id: Some(store.run_id().to_string()),
         inputs,
