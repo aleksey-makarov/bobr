@@ -15,7 +15,7 @@ use std::path::Path;
 ///
 /// `staged_path` is consumed on success. It may also be removed when the store
 /// already contains the object.
-pub fn import_object(store: &Store, staged_path: &Path) -> Result<ObjectHash, StoreError> {
+pub(crate) fn import_object(store: &Store, staged_path: &Path) -> Result<ObjectHash, StoreError> {
     let object_hash = hash_path(staged_path).map_err(|error| {
         StoreError::Hashing(format!(
             "failed to hash staged object '{}': {error}",

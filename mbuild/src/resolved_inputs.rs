@@ -142,7 +142,7 @@ fn prepare_fs_tree_root_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bobr_store::{Store, import_object};
+    use bobr_store::{Store, import_build};
     use mbuild_builder::InputSlot;
     use std::fs;
     use std::str::FromStr;
@@ -266,7 +266,15 @@ mod tests {
         let manifest = store.fs_tree().scan(&source).unwrap();
         let staged_manifest = temp.path().join("manifest.jsonl");
         manifest.write_canonical(&staged_manifest).unwrap();
-        let object_hash = import_object(&store, &staged_manifest).unwrap();
+        let object_hash = import_build(
+            &store,
+            "0".repeat(64).parse().unwrap(),
+            "0".repeat(64).parse().unwrap(),
+            Vec::new(),
+            &staged_manifest,
+            "staged-object",
+        )
+        .unwrap();
         let inputs = ResolvedInputs::new(BTreeMap::from([(
             "tree".to_string(),
             ResolvedDependency {
@@ -315,7 +323,15 @@ mod tests {
         let manifest = store.fs_tree().scan(&source).unwrap();
         let staged_manifest = temp.path().join("manifest.jsonl");
         manifest.write_canonical(&staged_manifest).unwrap();
-        let object_hash = import_object(&store, &staged_manifest).unwrap();
+        let object_hash = import_build(
+            &store,
+            "0".repeat(64).parse().unwrap(),
+            "0".repeat(64).parse().unwrap(),
+            Vec::new(),
+            &staged_manifest,
+            "staged-object",
+        )
+        .unwrap();
         let root = store
             .fs_tree()
             .ensure_materialized_root(None, object_hash)

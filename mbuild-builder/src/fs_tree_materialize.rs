@@ -65,7 +65,7 @@ impl RuntimeFunction for FsTreeMaterializeFunction {
 mod tests {
     use super::*;
     use bobr_runtime::runtime::RuntimeFunction;
-    use bobr_store::{Store, import_object};
+    use bobr_store::{Store, import_build};
     use std::fs;
     use tempfile::tempdir;
 
@@ -82,7 +82,15 @@ mod tests {
         let manifest = store.fs_tree().scan(&source).unwrap();
         let staged_manifest = temp.path().join("manifest.jsonl");
         manifest.write_canonical(&staged_manifest).unwrap();
-        let manifest_hash = import_object(&store, &staged_manifest).unwrap();
+        let manifest_hash = import_build(
+            &store,
+            "0".repeat(64).parse().unwrap(),
+            "0".repeat(64).parse().unwrap(),
+            Vec::new(),
+            &staged_manifest,
+            "staged-object",
+        )
+        .unwrap();
 
         let output = FsTreeMaterializeFunction
             .call(FsTreeMaterializeInput {

@@ -119,7 +119,7 @@ mod tests {
     use super::*;
     use crate::{Builder, BuilderInputPath};
     use bobr_store::fs_tree::{FsTreeEntry, FsTreeInstallAttrs, FsTreeInstallRule, FsTreeManifest};
-    use bobr_store::{Store, import_object};
+    use bobr_store::{Store, import_build};
     use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -200,7 +200,15 @@ mod tests {
             entry,
             FsTreeEntry::File { path, .. } if path == "bin/tool"
         )));
-        let manifest_hash = import_object(&store, &result.staged_path).unwrap();
+        let manifest_hash = import_build(
+            &store,
+            "0".repeat(64).parse().unwrap(),
+            "0".repeat(64).parse().unwrap(),
+            Vec::new(),
+            &result.staged_path,
+            "staged-object",
+        )
+        .unwrap();
         let root = store
             .fs_tree()
             .ensure_materialized_root(None, manifest_hash)

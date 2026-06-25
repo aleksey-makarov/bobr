@@ -982,7 +982,7 @@ mod tests {
     use super::*;
     use crate::{Builder, BuilderInputPath, TypedBuilder};
     use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
-    use bobr_store::{Store, import_object};
+    use bobr_store::{Store, import_build};
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use sha2::{Digest, Sha256};
@@ -1251,7 +1251,15 @@ mod tests {
             entry,
             FsTreeEntry::File { path, .. } if path == "bin/tool"
         )));
-        let manifest_hash = import_object(&store, &result.staged_path).unwrap();
+        let manifest_hash = import_build(
+            &store,
+            "0".repeat(64).parse().unwrap(),
+            "0".repeat(64).parse().unwrap(),
+            Vec::new(),
+            &result.staged_path,
+            "staged-object",
+        )
+        .unwrap();
         let root = store
             .fs_tree()
             .ensure_materialized_root(None, manifest_hash)
