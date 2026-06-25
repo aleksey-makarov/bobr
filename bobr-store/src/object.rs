@@ -23,13 +23,13 @@ pub fn import_object(store: &Store, staged_path: &Path) -> Result<ObjectHash, St
     })?;
     let destination = store.object_path(object_hash);
     if destination.exists() {
-        remove_path_force(staged_path)?;
+        private_fs::remove_path_force(staged_path).map_err(crate::error::map_fsutil_error)?;
         return Ok(object_hash);
     }
 
     if let Err(error) = fs::rename(staged_path, &destination) {
         if destination.exists() {
-            remove_path_force(staged_path)?;
+            private_fs::remove_path_force(staged_path).map_err(crate::error::map_fsutil_error)?;
             return Ok(object_hash);
         }
         return Err(StoreError::Io(format!(
@@ -40,26 +40,4 @@ pub fn import_object(store: &Store, staged_path: &Path) -> Result<ObjectHash, St
     }
 
     Ok(object_hash)
-}
-
-pub(crate) fn remove_path_force(path: &Path) -> Result<(), StoreError> {
-    if !path.exists() && !path.is_symlink() {
-        return Ok(());
-    }
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        StoreError::Io(format!(
-            "failed to inspect path '{}': {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_dir() {
-        private_fs::remove_dir_force(path).map_err(crate::error::map_fsutil_error)
-    } else {
-        fs::remove_file(path).map_err(|error| {
-            StoreError::Io(format!(
-                "failed to remove file '{}': {error}",
-                path.display()
-            ))
-        })
-    }
 }

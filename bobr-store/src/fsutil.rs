@@ -39,6 +39,28 @@ pub(crate) fn recreate_empty_dir_force(path: &Path) -> Result<(), FsUtilError> {
     })
 }
 
+pub(crate) fn remove_path_force(path: &Path) -> Result<(), FsUtilError> {
+    if !path.exists() && !path.is_symlink() {
+        return Ok(());
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        FsUtilError::Io(format!(
+            "failed to inspect path '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_dir() {
+        remove_dir_force(path)
+    } else {
+        fs::remove_file(path).map_err(|error| {
+            FsUtilError::Io(format!(
+                "failed to remove file '{}': {error}",
+                path.display()
+            ))
+        })
+    }
+}
+
 pub(crate) fn remove_dir_force(path: &Path) -> Result<(), FsUtilError> {
     if !path.exists() {
         return Ok(());
