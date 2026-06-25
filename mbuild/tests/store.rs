@@ -1,6 +1,6 @@
 mod support;
 
-use bobr_store::{Store, load_build_handle};
+use bobr_store::{Store, load_build_handle, load_object_record};
 use mbuild::execute_request;
 use std::fs;
 use support::{
@@ -22,16 +22,13 @@ fn second_run_reuses_existing_root_build_handle() {
     let second = execute_request(&request_path).unwrap();
     let builds_after_second = build_ref_count(workspace.path());
 
-    assert_eq!(first.build_key, second.build_key);
-    assert_eq!(first.object_hash, second.object_hash);
-    assert!(
-        load_build_handle(
-            &Store::create(&store_root(workspace.path())).unwrap(),
-            first.build_key.expect("builder root"),
-        )
+    assert_eq!(first, second);
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
+    let build_key = load_object_record(&layout, first)
         .unwrap()
-        .is_some()
-    );
+        .expect("object record")
+        .build_key;
+    assert!(load_build_handle(&layout, build_key).unwrap().is_some());
     assert_eq!(builds_after_first, 1);
     assert_eq!(builds_after_second, 1);
 }
@@ -44,7 +41,11 @@ fn second_run_reuses_canonical_object_when_build_handle_is_missing() {
     write_request(&request_path, &recipe);
 
     let first = execute_request(&request_path).unwrap();
-    let build_key = first.build_key.expect("builder root");
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
+    let build_key = load_object_record(&layout, first)
+        .unwrap()
+        .expect("object record")
+        .build_key;
     let object_records_after_first = object_record_count(workspace.path());
     let objects_after_first = fs::read_dir(store_root(workspace.path()).join("objects"))
         .unwrap()
@@ -59,19 +60,11 @@ fn second_run_reuses_canonical_object_when_build_handle_is_missing() {
         .count();
     let builds_after_second = build_ref_count(workspace.path());
 
-    assert_eq!(first.build_key, second.build_key);
-    assert_eq!(first.object_hash, second.object_hash);
+    assert_eq!(first, second);
     assert_eq!(object_records_after_first, 1);
     assert_eq!(object_records_after_second, 1);
     assert_eq!(objects_after_first, 1);
     assert_eq!(objects_after_second, 1);
     assert_eq!(builds_after_second, 1);
-    assert!(
-        load_build_handle(
-            &Store::create(&store_root(workspace.path())).unwrap(),
-            build_key
-        )
-        .unwrap()
-        .is_some()
-    );
+    assert!(load_build_handle(&layout, build_key).unwrap().is_some());
 }

@@ -2,7 +2,7 @@ use crate::builder_registry::create_builder_registry;
 use crate::collect_graph::collect_graph;
 use crate::planned::{
     PlannedExecutionContext, PlannedSubject, RealizedInput, SubjectExecution, SubjectOutcome,
-    execute_subject, realized_object_from_record,
+    execute_subject,
 };
 use crate::request::Request;
 use bobr_core::{
@@ -13,7 +13,6 @@ use bobr_core::{
 use bobr_runtime::runtime_provider::runtime_provider_for_current_process;
 use bobr_store::{RealizedObject, Store, StoreError, StoreTempDir, load_build_handle};
 use mbuild_builder::{BuilderError, BuilderPlannedSubject};
-use serde_json::to_string_pretty;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs;
@@ -164,7 +163,7 @@ impl Drop for TempDirGuard {
     }
 }
 
-pub fn execute_request(request_path: &Path) -> Result<RealizedObject, ExecutionError> {
+pub fn execute_request(request_path: &Path) -> Result<ObjectHash, ExecutionError> {
     if !request_path.exists() {
         return Err(ExecutionError::RequestLoad(format!(
             "request file '{}' does not exist",
@@ -185,7 +184,7 @@ pub fn execute_request(request_path: &Path) -> Result<RealizedObject, ExecutionE
 pub fn execute(
     request: Request,
     cancellation: CancellationToken,
-) -> Result<RealizedObject, ExecutionError> {
+) -> Result<ObjectHash, ExecutionError> {
     let Request {
         store,
         quiet,
@@ -220,14 +219,6 @@ pub fn execute(
         jobs,
         cancellation,
     )
-}
-
-pub fn render_object_as_json(object: &RealizedObject) -> Result<String, ExecutionError> {
-    let mut rendered = to_string_pretty(object).map_err(|error| {
-        ExecutionError::InvalidRequest(format!("failed to render realized object as JSON: {error}"))
-    })?;
-    rendered.push('\n');
-    Ok(rendered)
 }
 
 fn default_jobs() -> usize {
@@ -274,7 +265,7 @@ fn execute_graph(
     root_key: BuildKey,
     jobs: usize,
     cancellation: CancellationToken,
-) -> Result<RealizedObject, ExecutionError> {
+) -> Result<ObjectHash, ExecutionError> {
     let mut counters = RunCounters::default();
     log_run_started(logger.as_ref(), subjects, root_key, jobs, &runtime_provider);
 
@@ -293,16 +284,23 @@ fn execute_graph(
     // never visited, so they are neither resolved nor logged.
     let mut completed = HashMap::<BuildKey, RealizedObject>::new();
     for (key, state) in &states {
-        if let PlanningState::Reused { realized } = state {
-            completed.insert(*key, realized.clone());
+        if let PlanningState::Reused(object_hash) = state {
+            completed.insert(
+                *key,
+                RealizedObject {
+                    build_key: Some(*key),
+                    object_hash: *object_hash,
+                    run_id: None,
+                },
+            );
             counters.cache_hit += 1;
-            log_cache_hit(logger.as_ref(), subjects, *key, realized.object_hash);
+            log_cache_hit(logger.as_ref(), subjects, *key, *object_hash);
         }
     }
 
     // A reused root means there are no misses to build.
-    if let Some(realized) = completed.get(&root_key).cloned() {
-        let result = Ok(realized);
+    if let Some(realized) = completed.get(&root_key) {
+        let result = Ok(realized.object_hash);
         log_run_finished(logger.as_ref(), &result, &counters);
         return result;
     }
@@ -495,12 +493,15 @@ fn execute_graph(
     let result = if let Some(error) = first_error {
         Err(error)
     } else {
-        completed.get(&root_key).cloned().ok_or_else(|| {
-            ExecutionError::Store(format!(
-                "root object for key '{}' is missing after executor completion",
-                root_key
-            ))
-        })
+        completed
+            .get(&root_key)
+            .map(|realized| realized.object_hash)
+            .ok_or_else(|| {
+                ExecutionError::Store(format!(
+                    "root object for key '{}' is missing after executor completion",
+                    root_key
+                ))
+            })
     };
     log_run_finished(logger.as_ref(), &result, &counters);
     result
@@ -510,7 +511,7 @@ fn execute_graph(
 enum PlanningState {
     /// Reachable from the store by build key alone (build-handle hit). Its
     /// dependency subtree is never visited.
-    Reused { realized: RealizedObject },
+    Reused(ObjectHash),
     /// Must be built (or resolved at runtime by execute_subject).
     NeedsBuild,
 }
@@ -543,9 +544,7 @@ fn resolve_planning_state(
     if let Some(published) = load_build_handle(store, key).map_err(map_store_error)? {
         states.insert(
             key,
-            PlanningState::Reused {
-                realized: realized_object_from_record(Some(key), &published.object_record),
-            },
+            PlanningState::Reused(published.object_record.object_hash),
         );
         return Ok(());
     }
@@ -644,13 +643,13 @@ fn log_cache_hit(
 
 fn log_run_finished(
     logger: &BuildRunLogger,
-    result: &Result<RealizedObject, ExecutionError>,
+    result: &Result<ObjectHash, ExecutionError>,
     counters: &RunCounters,
 ) {
     let (level, object_hash, outcome, message) = match result {
-        Ok(realized) => (
+        Ok(object_hash) => (
             BuildLogLevel::Info,
-            Some(realized.object_hash),
+            Some(*object_hash),
             "ok",
             "build finished".to_string(),
         ),

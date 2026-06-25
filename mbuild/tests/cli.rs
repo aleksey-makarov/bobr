@@ -1,6 +1,6 @@
 mod support;
 
-use bobr_store::RealizedObject;
+use bobr_core::ObjectHash;
 use serde_json::json;
 use std::fs;
 use std::process::{Command, Stdio};
@@ -35,7 +35,7 @@ fn cli_reads_request_from_stdin_when_path_is_omitted() {
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let _build: RealizedObject = serde_json::from_str(&stdout).unwrap();
+    let _object_hash: ObjectHash = stdout.trim().parse().unwrap();
     assert!(stderr.contains("[start] Tree stdin-recipe"), "{stderr}");
     assert!(stderr.contains("[done] Tree stdin-recipe"), "{stderr}");
 }
@@ -58,7 +58,7 @@ fn cli_accepts_explicit_request_path() {
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let _build: RealizedObject = serde_json::from_str(&stdout).unwrap();
+    let _object_hash: ObjectHash = stdout.trim().parse().unwrap();
     assert!(stderr.contains("[start] Tree custom-recipe"), "{stderr}");
 }
 
@@ -135,7 +135,7 @@ fn request_quiet_suppresses_live_progress() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
     let stdout = String::from_utf8(output.stdout).unwrap();
-    let _build: RealizedObject = serde_json::from_str(&stdout).unwrap();
+    let _object_hash: ObjectHash = stdout.trim().parse().unwrap();
 }
 
 #[test]

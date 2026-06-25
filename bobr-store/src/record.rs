@@ -6,24 +6,24 @@ use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 
-pub(crate) const OBJECT_RECORD_SCHEMA: &str = "bobr-object-record-v3";
+pub(crate) const OBJECT_RECORD_SCHEMA: &str = "bobr-object-record-v4";
 
 /// Schema marker for the object record format. It (de)serializes only as the
 /// current schema string, so the version is enforced declaratively and never
 /// needs to live as data on `ObjectRecord`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ObjectRecordSchemaV3;
+pub(crate) struct ObjectRecordSchemaV4;
 
-impl Serialize for ObjectRecordSchemaV3 {
+impl Serialize for ObjectRecordSchemaV4 {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(OBJECT_RECORD_SCHEMA)
     }
 }
 
-impl<'de> Deserialize<'de> for ObjectRecordSchemaV3 {
+impl<'de> Deserialize<'de> for ObjectRecordSchemaV4 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match String::deserialize(deserializer)?.as_str() {
-            OBJECT_RECORD_SCHEMA => Ok(ObjectRecordSchemaV3),
+            OBJECT_RECORD_SCHEMA => Ok(ObjectRecordSchemaV4),
             other => Err(D::Error::custom(format!(
                 "unsupported object record schema '{other}'"
             ))),
@@ -55,7 +55,9 @@ pub struct Build {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectRecord {
     /// Schema marker; enforces the record format version at (de)serialization.
-    pub(crate) schema: ObjectRecordSchemaV3,
+    pub(crate) schema: ObjectRecordSchemaV4,
+    /// Build key that first materialized this object.
+    pub build_key: BuildKey,
     /// Hash of the output object this record describes.
     pub object_hash: ObjectHash,
     /// Optional store run id that recorded this object.
@@ -171,7 +173,8 @@ pub(crate) fn record_existing_source_object(
     }
 
     let object_record = ObjectRecord {
-        schema: ObjectRecordSchemaV3,
+        schema: ObjectRecordSchemaV4,
+        build_key: BuildKey::from_object_hash(object_hash),
         object_hash,
         run_id: Some(store.run_id().to_string()),
         inputs: Vec::new(),

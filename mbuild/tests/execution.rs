@@ -51,8 +51,15 @@ fn assert_object_ref_exists(workspace_root: &Path, name: &str) {
     );
 }
 
+fn record_build_key(layout: &Store, object_hash: ObjectHash) -> BuildKey {
+    load_object_record(layout, object_hash)
+        .unwrap()
+        .expect("object record")
+        .build_key
+}
+
 #[cfg(feature = "integration-tests")]
-fn run_request_via_cli(request_path: &Path) -> bobr_store::RealizedObject {
+fn run_request_via_cli(request_path: &Path) -> ObjectHash {
     let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
         .arg(request_path)
         .output()
@@ -64,7 +71,11 @@ fn run_request_via_cli(request_path: &Path) -> bobr_store::RealizedObject {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).unwrap()
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
 }
 
 #[test]
@@ -122,7 +133,7 @@ fn group_root_builds_independent_inputs() {
     let root_record = load_object_record(&layout, root_hash)
         .unwrap()
         .expect("expected root object record");
-    assert_eq!(root_record.object_hash, realized.object_hash);
+    assert_eq!(root_record.object_hash, realized);
     assert_eq!(fs::read(layout.object_path(root_hash)).unwrap(), b"");
 
     for name in ["all-targets", "first-target", "second-target"] {
@@ -389,7 +400,7 @@ fn request_executes_source_and_group_graph() {
     handle.join().unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let published = load_build_handle(&layout, build.build_key.expect("builder root"))
+    let published = load_build_handle(&layout, record_build_key(&layout, build))
         .unwrap()
         .expect("expected final Build to exist in store");
 
@@ -443,7 +454,7 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(
-        load_build_handle(&layout, build.build_key.expect("builder root"))
+        load_build_handle(&layout, record_build_key(&layout, build))
             .unwrap()
             .is_some()
     );
@@ -483,13 +494,11 @@ fn second_run_reuses_root_without_republishing_refs() {
     let first = execute_request(&request_path).unwrap();
     handle.join().unwrap();
 
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(
-        load_build_handle(
-            &Store::create(&store_root(workspace.path())).unwrap(),
-            first.build_key.expect("builder root"),
-        )
-        .unwrap()
-        .is_some()
+        load_build_handle(&layout, record_build_key(&layout, first))
+            .unwrap()
+            .is_some()
     );
 
     for name in ["source", "final-group"] {
@@ -498,7 +507,7 @@ fn second_run_reuses_root_without_republishing_refs() {
 
     let second = execute_request(&request_path).unwrap();
 
-    assert_eq!(first.build_key, second.build_key);
+    assert_eq!(first, second);
     // The reused root is resolved by build handle and its subtree is pruned, so
     // neither the root nor its dependencies are revisited or republished: the
     // refs removed above stay removed.
@@ -539,7 +548,7 @@ fn second_run_reuses_root_without_source_materialization() {
 
     let second = execute_request(&request_path).unwrap();
 
-    assert_eq!(first.build_key, second.build_key);
+    assert_eq!(first, second);
 }
 
 /// Counts per-node workspace dirs (those with a `meta.json`) across all runs.
@@ -589,7 +598,7 @@ fn second_cached_run_creates_no_new_workspaces() {
     let second = execute_request(&request_path).unwrap();
     let after_second = workspace_dir_count(workspace.path());
 
-    assert_eq!(first.object_hash, second.object_hash);
+    assert_eq!(first, second);
     assert_eq!(
         after_second, after_first,
         "a fully cached run must not create new per-node workspaces"
@@ -733,7 +742,7 @@ fn identical_fetch_sources_are_deduped_by_object_hash() {
     handle.join().unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let published = load_build_handle(&layout, build.build_key.expect("builder root"))
+    let published = load_build_handle(&layout, record_build_key(&layout, build))
         .unwrap()
         .expect("expected Group Build to exist in store");
     assert!(published.object_path.is_file());
@@ -751,7 +760,7 @@ fn tree_file_recipe_builds_successfully_via_execution() {
     let build = execute_request(&request_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let published = load_build_handle(&layout, build.build_key.expect("builder root"))
+    let published = load_build_handle(&layout, record_build_key(&layout, build))
         .unwrap()
         .expect("expected Tree Build to exist in store");
     assert!(published.object_path.is_file());
@@ -771,19 +780,17 @@ fn tree_directory_recipe_builds_successfully_via_execution() {
     let request_path = workspace.path().join("tree-dir.json");
     write_request(&request_path, &tree_directory_recipe("runtime-tree"));
 
-    let build = run_request_via_cli(&request_path);
+    let object_hash = run_request_via_cli(&request_path);
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let published = load_build_handle(&layout, build.build_key.expect("builder root"))
-        .unwrap()
-        .expect("expected Tree Build to exist in store");
+    let object_path = layout.object_path(object_hash);
 
-    assert!(published.object_path.is_file());
+    assert!(object_path.is_file());
     assert_eq!(
         object_ref_hash(workspace.path(), "runtime-tree"),
-        published.build.object_hash
+        object_hash
     );
-    let manifest = FsTreeManifest::read_canonical(&published.object_path).unwrap();
+    let manifest = FsTreeManifest::read_canonical(&object_path).unwrap();
     assert!(
         manifest
             .entries()
@@ -817,15 +824,13 @@ fn tree_symlink_recipe_builds_successfully_via_execution() {
     let request_path = workspace.path().join("recipe.json");
     write_request(&request_path, &tree_symlink_recipe("runtime-tree-symlink"));
 
-    let build = run_request_via_cli(&request_path);
+    let object_hash = run_request_via_cli(&request_path);
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let published = load_build_handle(&layout, build.build_key.expect("builder root"))
-        .unwrap()
-        .expect("expected Tree Build to exist in store");
+    let object_path = layout.object_path(object_hash);
 
-    assert!(published.object_path.is_file());
-    let manifest = FsTreeManifest::read_canonical(&published.object_path).unwrap();
+    assert!(object_path.is_file());
+    let manifest = FsTreeManifest::read_canonical(&object_path).unwrap();
     assert!(
         manifest
             .entries()
@@ -860,14 +865,14 @@ fn source_path_file_materializes_known_object_with_source_build_handle() {
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let build_key = source_build_key(object_hash);
-    assert_eq!(realized.build_key, Some(build_key));
-    assert_eq!(realized.object_hash, object_hash);
+    assert_eq!(record_build_key(&layout, realized), build_key);
+    assert_eq!(realized, object_hash);
     assert!(object_path_exists(&layout, object_hash));
     let published = load_build_handle(&layout, build_key)
         .unwrap()
         .expect("expected source build handle");
     assert_eq!(published.object_record.object_hash, object_hash);
-    let result = load_object_record(&layout, realized.object_hash)
+    let result = load_object_record(&layout, realized)
         .unwrap()
         .expect("expected source object record");
     assert_eq!(result.object_hash, object_hash);
@@ -908,8 +913,8 @@ fn source_path_tar_materializes_unpacked_tree_with_source_build_handle() {
     let ref_hash = object_ref_hash(workspace.path(), "source-tar");
     let object_path = layout.object_path(ref_hash);
     let build_key = source_build_key(object_hash);
-    assert_eq!(realized.build_key, Some(build_key));
-    assert_eq!(realized.object_hash, object_hash);
+    assert_eq!(record_build_key(&layout, realized), build_key);
+    assert_eq!(realized, object_hash);
     assert_eq!(ref_hash, object_hash);
     let published = load_build_handle(&layout, build_key)
         .unwrap()
@@ -920,11 +925,7 @@ fn source_path_tar_materializes_unpacked_tree_with_source_build_handle() {
         fs::read_to_string(object_path.join("pkg/README.txt")).unwrap(),
         "hello tar source\n"
     );
-    assert!(
-        load_object_record(&layout, realized.object_hash)
-            .unwrap()
-            .is_some()
-    );
+    assert!(load_object_record(&layout, realized).unwrap().is_some());
 }
 
 #[test]
@@ -1029,7 +1030,7 @@ fn source_http_mismatch_second_run_reuses_stored_object_without_second_download(
 
     write_request(&request_path, &source_recipe(&url, &actual_hash));
     let realized = execute_request(&request_path).unwrap();
-    assert_eq!(realized.object_hash.to_string(), actual_hash);
+    assert_eq!(realized.to_string(), actual_hash);
 }
 
 #[test]
@@ -1060,7 +1061,7 @@ fn source_oci_registry_mismatch_second_run_reuses_stored_object_without_second_f
         &base_image_recipe(&image_ref, &pinned_digest, &actual_hash),
     );
     let realized = execute_request(&request_path).unwrap();
-    assert_eq!(realized.object_hash.to_string(), actual_hash);
+    assert_eq!(realized.to_string(), actual_hash);
 }
 
 #[test]
@@ -1104,7 +1105,7 @@ fn source_path_mismatch_imports_actual_object_for_follow_up_reuse() {
         }),
     );
     let realized = execute_request(&request_path).unwrap();
-    assert_eq!(realized.object_hash, actual_hash);
+    assert_eq!(realized, actual_hash);
 }
 
 #[test]
@@ -1136,8 +1137,12 @@ fn source_without_origin_reuses_existing_canonical_object() {
     );
 
     let second = execute_request(&cutoff_request_path).unwrap();
-    assert_eq!(first.object_hash, second.object_hash);
-    assert_eq!(second.build_key, Some(source_build_key(object_hash)));
+    assert_eq!(first, second);
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
+    assert_eq!(
+        record_build_key(&layout, second),
+        source_build_key(object_hash)
+    );
 }
 
 #[test]
@@ -1162,10 +1167,11 @@ fn source_without_origin_reuses_existing_oci_layout_object() {
     );
 
     let second = execute_request(&cutoff_request_path).unwrap();
-    assert_eq!(first.object_hash, second.object_hash);
+    assert_eq!(first, second);
+    let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert_eq!(
-        second.build_key,
-        Some(source_build_key(object_hash.parse().unwrap()))
+        record_build_key(&layout, second),
+        source_build_key(object_hash.parse().unwrap())
     );
 }
 
@@ -1188,11 +1194,8 @@ fn source_without_origin_republishes_existing_object() {
     let first = execute_request(&materialized_request_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    remove_build_ref(
-        workspace.path(),
-        first.build_key.expect("expected source build key"),
-    );
-    remove_object_record(workspace.path(), first.object_hash);
+    remove_build_ref(workspace.path(), record_build_key(&layout, first));
+    remove_object_record(workspace.path(), first);
 
     let request_path = workspace.path().join("source-cutoff-missing-record.json");
     write_request(
@@ -1205,7 +1208,7 @@ fn source_without_origin_republishes_existing_object() {
     );
 
     let second = execute_request(&request_path).unwrap();
-    let restored = load_object_record(&layout, second.object_hash)
+    let restored = load_object_record(&layout, second)
         .unwrap()
         .expect("expected restored object record");
     assert_eq!(restored.object_hash, object_hash);

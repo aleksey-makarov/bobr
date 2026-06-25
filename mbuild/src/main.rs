@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use bobr_core::CancellationToken;
-use mbuild::{Request, execute, render_object_as_json};
+use mbuild::{Request, execute};
 
 type MResult<T> = Result<T, MbuildError>;
 
@@ -98,9 +98,8 @@ fn build(cancellation: CancellationToken) -> MResult<()> {
     let request_bytes = read_request_bytes(request_file.as_ref())?;
     let request = Request::parse_json(&request_bytes).map_err(map_execution_error)?;
 
-    let build = execute(request, cancellation).map_err(map_execution_error)?;
-    let rendered = render_object_as_json(&build).map_err(map_execution_error)?;
-    print!("{rendered}");
+    let object_hash = execute(request, cancellation).map_err(map_execution_error)?;
+    println!("{object_hash}");
     Ok(())
 }
 

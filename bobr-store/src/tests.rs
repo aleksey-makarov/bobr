@@ -83,6 +83,7 @@ fn parse_object_record_rejects_mismatched_path_key() {
         .unwrap();
     let value = json!({
         "schema": OBJECT_RECORD_SCHEMA,
+        "build_key": BuildKey::from_object_hash(object_hash),
         "object_hash": object_hash.to_string(),
         "inputs": [],
     });
