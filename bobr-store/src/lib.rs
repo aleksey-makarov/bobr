@@ -34,7 +34,7 @@ pub use error::StoreError;
 pub use object::import_object;
 pub use publish::materialize_build;
 pub use record::{
-    Build, ObjectRecord, PublishedBuild, RealizedObject, StoredObjectRecord, load_object_record,
+    Build, ObjectRecord, PublishedBuild, StoredObjectRecord, load_object_record,
     load_stored_object_record,
 };
 pub(crate) use ref_name::validate_ref_name;

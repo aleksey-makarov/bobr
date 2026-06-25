@@ -11,7 +11,7 @@ use bobr_core::{
     SubjectIdentity,
 };
 use bobr_runtime::runtime_provider::runtime_provider_for_current_process;
-use bobr_store::{RealizedObject, Store, StoreError, StoreTempDir, load_build_handle};
+use bobr_store::{Store, StoreError, StoreTempDir, load_build_handle};
 use mbuild_builder::{BuilderError, BuilderPlannedSubject};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -228,13 +228,13 @@ fn default_jobs() -> usize {
 }
 
 fn completed_inputs_for_builder(
-    completed: &HashMap<BuildKey, RealizedObject>,
+    completed: &HashMap<BuildKey, ObjectHash>,
     subjects: &SubjectGraph,
     builder: &BuilderPlannedSubject,
 ) -> Result<HashMap<BuildKey, RealizedInput>, ExecutionError> {
     let mut realized_inputs = HashMap::new();
     for dep in builder.inputs().values() {
-        let realized = completed.get(dep).cloned().ok_or_else(|| {
+        let object_hash = completed.get(dep).copied().ok_or_else(|| {
             ExecutionError::Build(format!(
                 "dependency object '{}' is not available in completed set",
                 dep
@@ -249,7 +249,7 @@ fn completed_inputs_for_builder(
         realized_inputs.insert(
             *dep,
             RealizedInput {
-                realized,
+                object_hash,
                 materialization_name: subject.name().to_string(),
             },
         );
@@ -282,25 +282,18 @@ fn execute_graph(
     // Seed reused objects and surface them on the run-level channel. Only the
     // resolved boundary is recorded; interior nodes of a cached subtree were
     // never visited, so they are neither resolved nor logged.
-    let mut completed = HashMap::<BuildKey, RealizedObject>::new();
+    let mut completed = HashMap::<BuildKey, ObjectHash>::new();
     for (key, state) in &states {
         if let PlanningState::Reused(object_hash) = state {
-            completed.insert(
-                *key,
-                RealizedObject {
-                    build_key: Some(*key),
-                    object_hash: *object_hash,
-                    run_id: None,
-                },
-            );
+            completed.insert(*key, *object_hash);
             counters.cache_hit += 1;
             log_cache_hit(logger.as_ref(), subjects, *key, *object_hash);
         }
     }
 
     // A reused root means there are no misses to build.
-    if let Some(realized) = completed.get(&root_key) {
-        let result = Ok(realized.object_hash);
+    if let Some(object_hash) = completed.get(&root_key) {
+        let result = Ok(*object_hash);
         log_run_finished(logger.as_ref(), &result, &counters);
         return result;
     }
@@ -448,7 +441,7 @@ fn execute_graph(
                 continue;
             }
         };
-        let object_hash = executed.realized.object_hash;
+        let object_hash = executed.object_hash;
         match executed.outcome {
             SubjectOutcome::CacheHit => {
                 // Cache hits have no per-subject logger; surface them on the
@@ -470,7 +463,7 @@ fn execute_graph(
                 });
             }
         }
-        completed.insert(key, executed.realized);
+        completed.insert(key, executed.object_hash);
         if first_error.is_none()
             && let Some(parents) = reverse.get(&key)
         {
@@ -493,15 +486,12 @@ fn execute_graph(
     let result = if let Some(error) = first_error {
         Err(error)
     } else {
-        completed
-            .get(&root_key)
-            .map(|realized| realized.object_hash)
-            .ok_or_else(|| {
-                ExecutionError::Store(format!(
-                    "root object for key '{}' is missing after executor completion",
-                    root_key
-                ))
-            })
+        completed.get(&root_key).copied().ok_or_else(|| {
+            ExecutionError::Store(format!(
+                "root object for key '{}' is missing after executor completion",
+                root_key
+            ))
+        })
     };
     log_run_finished(logger.as_ref(), &result, &counters);
     result
@@ -1069,7 +1059,7 @@ mod tests {
         let metadata = workspace_metadata(temp.path(), "ExecutionTest", "runtime-test");
         let temp_dir = metadata_temp_dir(&metadata);
         assert!(!temp_dir.exists());
-        let object_path = store.object_path(executed.realized.object_hash);
+        let object_path = store.object_path(executed.object_hash);
         assert!(object_path.is_dir());
         assert!(object_path.join("payload").is_file());
     }
@@ -1128,7 +1118,7 @@ mod tests {
         let metadata = workspace_metadata(temp.path(), "Sandbox", "sandbox-runtime-test");
         let temp_dir = metadata_temp_dir(&metadata);
         assert!(!temp_dir.exists());
-        let object_path = store.object_path(executed.realized.object_hash);
+        let object_path = store.object_path(executed.object_hash);
         assert!(object_path.join("payload").is_file());
         assert!(
             event_log_records(&metadata_log_dir(&metadata))

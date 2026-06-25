@@ -5,12 +5,11 @@ use crate::execution::{
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use bobr_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, BuildStatus, CancellationToken,
-    NoopBuildLogger, SubjectRunContext, Workspace,
+    NoopBuildLogger, ObjectHash, SubjectRunContext, Workspace,
 };
 use bobr_store::{
-    ObjectRecord, RealizedObject, SourceImportOutcome, Store, create_workspace,
-    import_source_object, materialize_build, record_existing_source_object, resolve_build_handle,
-    resolve_reuse_for_build,
+    SourceImportOutcome, Store, create_workspace, import_source_object, materialize_build,
+    record_existing_source_object, resolve_build_handle, resolve_reuse_for_build,
 };
 use mbuild_builder::{BuilderPlanError, BuilderPlannedSubject};
 use mbuild_source::{SourceExecutionError, SourcePlannedSubject};
@@ -56,14 +55,14 @@ pub(crate) enum SubjectOutcome {
 
 #[derive(Debug, Clone)]
 pub(crate) struct SubjectExecution {
-    pub(crate) realized: RealizedObject,
+    pub(crate) object_hash: ObjectHash,
     pub(crate) logger: Arc<dyn BuildLogger>,
     pub(crate) outcome: SubjectOutcome,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RealizedInput {
-    pub(crate) realized: RealizedObject,
+    pub(crate) object_hash: ObjectHash,
     pub(crate) materialization_name: String,
 }
 
@@ -94,7 +93,7 @@ fn execute_builder_subject(
         resolve_build_handle(cx.store, build_key, Some(subject.name())).map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
-            realized: realized_object_from_record(Some(build_key), &published.object_record),
+            object_hash: published.object_record.object_hash,
             logger: Arc::new(NoopBuildLogger),
             outcome: SubjectOutcome::CacheHit,
         });
@@ -107,7 +106,7 @@ fn execute_builder_subject(
             .map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
-            realized: realized_object_from_record(Some(build_key), &published.object_record),
+            object_hash: published.object_record.object_hash,
             logger: Arc::new(NoopBuildLogger),
             outcome: SubjectOutcome::CacheHit,
         });
@@ -189,7 +188,7 @@ fn execute_builder_subject(
         map_store_error(error)
     })?;
     Ok(SubjectExecution {
-        realized: realized_object_from_record(Some(build_key), &published.object_record),
+        object_hash: published.object_record.object_hash,
         logger,
         outcome: SubjectOutcome::Built,
     })
@@ -208,7 +207,7 @@ fn execute_source_subject(
         resolve_build_handle(cx.store, build_key, Some(subject.name())).map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
-            realized: realized_object_from_record(Some(build_key), &published.object_record),
+            object_hash: published.object_record.object_hash,
             logger: Arc::new(NoopBuildLogger),
             outcome: SubjectOutcome::CacheHit,
         });
@@ -221,7 +220,7 @@ fn execute_source_subject(
     .map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
-            realized: realized_object_from_record(Some(build_key), &stored.object_record),
+            object_hash: stored.object_record.object_hash,
             logger: Arc::new(NoopBuildLogger),
             outcome: SubjectOutcome::CacheHit,
         });
@@ -291,7 +290,7 @@ fn execute_source_subject(
 
     match import_outcome {
         SourceImportOutcome::Matched(stored) => Ok(SubjectExecution {
-            realized: realized_object_from_record(Some(build_key), &stored.object_record),
+            object_hash: stored.object_record.object_hash,
             logger,
             outcome: SubjectOutcome::Built,
         }),
@@ -339,8 +338,8 @@ fn builder_resolved_inputs(
         inputs.insert(
             input_name,
             ResolvedDependency {
-                object_hash: input.realized.object_hash,
-                object_path: store.object_path(input.realized.object_hash),
+                object_hash: input.object_hash,
+                object_path: store.object_path(input.object_hash),
                 materialization_name: Some(input.materialization_name),
             },
         );
@@ -364,17 +363,6 @@ fn map_source_execution_error(error: SourceExecutionError) -> ExecutionError {
     match error {
         SourceExecutionError::Cancelled(message) => ExecutionError::Cancelled(message),
         SourceExecutionError::Build(message) => ExecutionError::Build(message),
-    }
-}
-
-pub(crate) fn realized_object_from_record(
-    build_key: Option<BuildKey>,
-    object_record: &ObjectRecord,
-) -> RealizedObject {
-    RealizedObject {
-        build_key,
-        object_hash: object_record.object_hash,
-        run_id: object_record.run_id.clone(),
     }
 }
 

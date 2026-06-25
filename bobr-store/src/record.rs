@@ -67,22 +67,6 @@ pub struct ObjectRecord {
     pub inputs: Vec<ObjectHash>,
 }
 
-/// Object information returned to runtime code after resolving or publishing.
-///
-/// This is the serializable representation used when the runtime needs both
-/// the object identity and, optionally, the build key that led to the object.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RealizedObject {
-    /// Build key that resolved to the object, when known.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub build_key: Option<BuildKey>,
-    /// Hash of the output object.
-    pub object_hash: ObjectHash,
-    /// Optional store run id that recorded this object.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-}
-
 /// Fully resolved build publication inside the local store.
 ///
 /// This combines the public build handle, the underlying object record, and the
