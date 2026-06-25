@@ -46,19 +46,17 @@ pub fn import_object(store: &Store, staged_path: &Path) -> Result<ObjectHash, St
 /// Imports a staged object and records it as a newly materialized build.
 ///
 /// The operation imports `staged_path`, stores the object record, writes the
-/// reuse ref, writes the build handle ref, and optionally updates
-/// `object-refs/<name>` for the materialized object.
+/// reuse ref, writes the build handle ref, and updates `object-refs/<name>`
+/// for the materialized object.
 pub fn import_build(
     store: &Store,
     build_key: BuildKey,
     reuse_key: ReuseKey,
     inputs: Vec<ObjectHash>,
     staged_path: &Path,
-    object_ref_name: Option<&str>,
+    object_ref_name: &str,
 ) -> Result<ObjectHash, StoreError> {
-    if let Some(name) = object_ref_name {
-        crate::validate_ref_name(name)?;
-    }
+    crate::validate_ref_name(object_ref_name)?;
     let object_hash = import_object(store, staged_path)?;
     let object_record = ObjectRecord {
         schema: ObjectRecordSchemaV4,
@@ -70,8 +68,6 @@ pub fn import_build(
     crate::record::store_object_record(store, &object_record)?;
     crate::refs::store_reuse_ref(store, reuse_key, object_hash)?;
     crate::refs::store_build_handle_ref(store, build_key, object_hash)?;
-    if let Some(name) = object_ref_name {
-        crate::refs::update_object_ref(store, name, object_hash)?;
-    }
+    crate::refs::update_object_ref(store, object_ref_name, object_hash)?;
     Ok(object_hash)
 }

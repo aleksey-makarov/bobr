@@ -325,7 +325,7 @@ fn record_existing_source_object_returns_none_when_object_absent() {
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
 
-    let recorded = record_existing_source_object(&layout, object_hash, Some("source")).unwrap();
+    let recorded = record_existing_source_object(&layout, object_hash, "source").unwrap();
 
     assert!(recorded.is_none());
     assert!(!layout.object_record_path(object_hash).exists());
@@ -345,7 +345,7 @@ fn record_existing_source_object_reuses_canonical_record() {
     let object_hash = import_object(&layout, &stage).unwrap();
     crate::record::record_existing_source_object(&layout, object_hash).unwrap();
 
-    let hit = record_existing_source_object(&layout, object_hash, Some("source"))
+    let hit = record_existing_source_object(&layout, object_hash, "source")
         .unwrap()
         .expect("expected source hit");
     assert_eq!(hit, object_hash);
@@ -373,7 +373,7 @@ fn record_existing_source_object_records_existing_object_as_source_object() {
     let object_record_path = layout.object_record_path(object_hash);
     assert!(!object_record_path.exists());
 
-    let hit = record_existing_source_object(&layout, object_hash, Some("source"))
+    let hit = record_existing_source_object(&layout, object_hash, "source")
         .unwrap()
         .expect("expected source hit");
     assert_eq!(hit, object_hash);
@@ -401,7 +401,7 @@ fn import_source_object_on_match_imports_object_and_writes_canonical_record() {
     fs::write(&stage, b"hello").unwrap();
     let object_hash = hash_path(&stage).unwrap();
 
-    let outcome = import_source_object(&layout, object_hash, &stage, Some("source")).unwrap();
+    let outcome = import_source_object(&layout, object_hash, &stage, "source").unwrap();
 
     let SourceImportOutcome::Matched(matched_hash) = outcome else {
         panic!("expected source import match");
@@ -435,7 +435,7 @@ fn import_source_object_on_mismatch_imports_actual_object_without_declared_recor
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
     assert_ne!(actual_hash, declared_hash);
 
-    let outcome = import_source_object(&layout, declared_hash, &stage, Some("source")).unwrap();
+    let outcome = import_source_object(&layout, declared_hash, &stage, "source").unwrap();
 
     let SourceImportOutcome::Mismatched {
         actual_hash: imported_hash,
@@ -476,7 +476,7 @@ fn object_ref_update_rejects_non_canonical_current_target() {
         reuse_key_for("CasTest", json!({ "kind": "next" }), &[]),
         vec![],
         &next_stage,
-        Some("script"),
+        "script",
     )
     .unwrap_err();
 
@@ -834,7 +834,7 @@ fn invalid_ref_name_is_rejected() {
             reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
             vec![],
             &stage,
-            Some(invalid_name),
+            invalid_name,
         )
         .unwrap_err();
 
@@ -1510,7 +1510,7 @@ fn materialize_text_object(
         reuse_key_for("CasTest", payload, &[]),
         vec![],
         &stage,
-        Some(object_ref_name),
+        object_ref_name,
     )
     .unwrap();
     TestBuild {
@@ -1533,7 +1533,7 @@ fn materialize_named_test_build(
         reuse_key,
         inputs,
         staged_path,
-        Some(object_ref_name),
+        object_ref_name,
     )
     .unwrap();
     TestBuild {

@@ -162,22 +162,19 @@ pub fn load_build_handle(
     Ok(Some(object_hash))
 }
 
-/// Resolves the build reached by a build key and optionally updates its object ref.
+/// Resolves the build reached by a build key and updates its object ref.
 ///
-/// This is the normal runtime-facing build-handle resolver. When `object_ref_name`
-/// is provided, a successful hit also updates `object-refs/<name>` to point at
-/// the resolved object.
+/// This is the normal runtime-facing build-handle resolver. A successful hit
+/// also updates `object-refs/<name>` to point at the resolved object.
 pub fn resolve_build_handle(
     store: &Store,
     build_key: BuildKey,
-    object_ref_name: Option<&str>,
+    object_ref_name: &str,
 ) -> Result<Option<ObjectHash>, StoreError> {
     let Some(object_hash) = load_build_handle(store, build_key)? else {
         return Ok(None);
     };
-    if let Some(name) = object_ref_name {
-        update_object_ref(store, name, object_hash)?;
-    }
+    update_object_ref(store, object_ref_name, object_hash)?;
     Ok(Some(object_hash))
 }
 
@@ -220,7 +217,7 @@ pub fn resolve_reuse_for_build(
     store: &Store,
     build_key: BuildKey,
     reuse_key: ReuseKey,
-    object_ref_name: Option<&str>,
+    object_ref_name: &str,
 ) -> Result<Option<ObjectHash>, StoreError> {
     let Some(object_record) = load_reuse_object_record(store, reuse_key)? else {
         return Ok(None);
@@ -232,9 +229,7 @@ pub fn resolve_reuse_for_build(
         )));
     }
     store_build_handle_ref(store, build_key, object_hash)?;
-    if let Some(name) = object_ref_name {
-        update_object_ref(store, name, object_hash)?;
-    }
+    update_object_ref(store, object_ref_name, object_hash)?;
     Ok(Some(object_hash))
 }
 

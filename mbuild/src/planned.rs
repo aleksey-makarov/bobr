@@ -90,7 +90,7 @@ fn execute_builder_subject(
     // Resolve the caches before building a workspace: a hit needs no
     // workspace, logger, or temp dir, and is left silent (NoopBuildLogger).
     if let Some(object_hash) =
-        resolve_build_handle(cx.store, build_key, Some(subject.name())).map_err(map_store_error)?
+        resolve_build_handle(cx.store, build_key, subject.name()).map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
             object_hash,
@@ -102,7 +102,7 @@ fn execute_builder_subject(
         .compute_reuse_key(&input_hashes)
         .map_err(map_builder_plan_error)?;
     if let Some(object_hash) =
-        resolve_reuse_for_build(cx.store, build_key, reuse_key, Some(subject.name()))
+        resolve_reuse_for_build(cx.store, build_key, reuse_key, subject.name())
             .map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
@@ -176,7 +176,7 @@ fn execute_builder_subject(
         reuse_key,
         input_hashes,
         &staged.staged_path,
-        Some(subject.name()),
+        subject.name(),
     )
     .map_err(|error| {
         log_execution_event(
@@ -204,7 +204,7 @@ fn execute_source_subject(
     // Resolve the caches before building a workspace: a hit needs no
     // workspace, logger, or temp dir, and is left silent (NoopBuildLogger).
     if let Some(object_hash) =
-        resolve_build_handle(cx.store, build_key, Some(subject.name())).map_err(map_store_error)?
+        resolve_build_handle(cx.store, build_key, subject.name()).map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
             object_hash,
@@ -212,12 +212,9 @@ fn execute_source_subject(
             outcome: SubjectOutcome::CacheHit,
         });
     }
-    if let Some(object_hash) = record_existing_source_object(
-        cx.store,
-        subject.declared_object_hash(),
-        Some(subject.name()),
-    )
-    .map_err(map_store_error)?
+    if let Some(object_hash) =
+        record_existing_source_object(cx.store, subject.declared_object_hash(), subject.name())
+            .map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
             object_hash,
@@ -283,7 +280,7 @@ fn execute_source_subject(
         cx.store,
         subject.declared_object_hash(),
         &staged_path,
-        Some(subject.name()),
+        subject.name(),
     )
     .map_err(map_store_error)?;
     check_cancelled(&cx.cancellation)?;

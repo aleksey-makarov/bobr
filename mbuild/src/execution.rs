@@ -1005,14 +1005,14 @@ mod tests {
             reuse_key,
             matching_inputs.clone(),
             &stage,
-            Some("script"),
+            "script",
         )
         .unwrap();
 
         let matching_reuse_key =
             compute_reuse_key("ExecutionLookupTest", &payload, &matching_inputs).unwrap();
         let object_hash =
-            resolve_reuse_for_build(&store, lookup_build_key, matching_reuse_key, Some("script"))
+            resolve_reuse_for_build(&store, lookup_build_key, matching_reuse_key, "script")
                 .unwrap()
                 .expect("expected canonical object hit");
         let repaired = load_build_handle(&store, lookup_build_key)
@@ -1028,14 +1028,9 @@ mod tests {
         let mismatching_reuse_key =
             compute_reuse_key("ExecutionLookupTest", &payload, &mismatching_inputs).unwrap();
         assert!(
-            resolve_reuse_for_build(
-                &store,
-                lookup_build_key,
-                mismatching_reuse_key,
-                Some("script")
-            )
-            .unwrap()
-            .is_none()
+            resolve_reuse_for_build(&store, lookup_build_key, mismatching_reuse_key, "script")
+                .unwrap()
+                .is_none()
         );
     }
 
