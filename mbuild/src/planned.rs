@@ -212,7 +212,7 @@ fn execute_source_subject(
             outcome: SubjectOutcome::CacheHit,
         });
     }
-    if let Some(stored) = record_existing_source_object(
+    if let Some(object_hash) = record_existing_source_object(
         cx.store,
         subject.declared_object_hash(),
         Some(subject.name()),
@@ -220,7 +220,7 @@ fn execute_source_subject(
     .map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
-            object_hash: stored.object_record.object_hash,
+            object_hash,
             logger: Arc::new(NoopBuildLogger),
             outcome: SubjectOutcome::CacheHit,
         });
@@ -289,8 +289,8 @@ fn execute_source_subject(
     check_cancelled(&cx.cancellation)?;
 
     match import_outcome {
-        SourceImportOutcome::Matched(stored) => Ok(SubjectExecution {
-            object_hash: stored.object_record.object_hash,
+        SourceImportOutcome::Matched(object_hash) => Ok(SubjectExecution {
+            object_hash,
             logger,
             outcome: SubjectOutcome::Built,
         }),
@@ -339,7 +339,15 @@ fn builder_resolved_inputs(
             input_name,
             ResolvedDependency {
                 object_hash: input.object_hash,
-                object_path: store.object_path(input.object_hash),
+                object_path: store
+                    .object_path(input.object_hash)
+                    .map_err(map_store_error)?
+                    .ok_or_else(|| {
+                        ExecutionError::Build(format!(
+                            "input object '{}' is missing from store",
+                            input.object_hash
+                        ))
+                    })?,
                 materialization_name: Some(input.materialization_name),
             },
         );

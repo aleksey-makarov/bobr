@@ -22,7 +22,7 @@ pub fn import_object(store: &Store, staged_path: &Path) -> Result<ObjectHash, St
             staged_path.display()
         ))
     })?;
-    let destination = store.object_path(object_hash);
+    let destination = store.object_path_unchecked(object_hash);
     if destination.exists() {
         private_fs::remove_path_force(staged_path).map_err(crate::error::map_fsutil_error)?;
         return Ok(object_hash);

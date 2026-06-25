@@ -31,7 +31,7 @@ mod store;
 
 pub use error::StoreError;
 pub use object::{import_build, import_object};
-pub use record::{ObjectRecord, StoredObjectRecord, load_object_record, load_stored_object_record};
+pub use record::{ObjectRecord, load_object_record};
 pub(crate) use ref_name::validate_ref_name;
 pub use refs::{load_build_handle, resolve_build_handle, resolve_reuse_for_build};
 pub use source::{SourceImportOutcome, import_source_object, record_existing_source_object};

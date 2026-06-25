@@ -271,7 +271,7 @@ mod tests {
             "tree".to_string(),
             ResolvedDependency {
                 object_hash,
-                object_path: store.object_path(object_hash),
+                object_path: store.object_path(object_hash).unwrap().unwrap(),
                 materialization_name: Some("source-tree".to_string()),
             },
         )]));
@@ -324,7 +324,7 @@ mod tests {
             "tree".to_string(),
             ResolvedDependency {
                 object_hash,
-                object_path: store.object_path(object_hash),
+                object_path: store.object_path(object_hash).unwrap().unwrap(),
                 materialization_name: Some("cached-tree".to_string()),
             },
         )]));

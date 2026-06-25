@@ -1057,7 +1057,7 @@ mod tests {
         let metadata = workspace_metadata(temp.path(), "ExecutionTest", "runtime-test");
         let temp_dir = metadata_temp_dir(&metadata);
         assert!(!temp_dir.exists());
-        let object_path = store.object_path(executed.object_hash);
+        let object_path = store.object_path(executed.object_hash).unwrap().unwrap();
         assert!(object_path.is_dir());
         assert!(object_path.join("payload").is_file());
     }
@@ -1116,7 +1116,7 @@ mod tests {
         let metadata = workspace_metadata(temp.path(), "Sandbox", "sandbox-runtime-test");
         let temp_dir = metadata_temp_dir(&metadata);
         assert!(!temp_dir.exists());
-        let object_path = store.object_path(executed.object_hash);
+        let object_path = store.object_path(executed.object_hash).unwrap().unwrap();
         assert!(object_path.join("payload").is_file());
         assert!(
             event_log_records(&metadata_log_dir(&metadata))

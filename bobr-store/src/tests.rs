@@ -135,7 +135,7 @@ fn import_build_reuses_existing_object_record_via_new_build_handle_ref() {
     assert_eq!(first.object_hash, second.object_hash);
     assert_ne!(first.build_key, second.build_key);
     assert_eq!(first.object_hash, second.object_hash);
-    assert!(layout.object_path(first.object_hash).exists());
+    assert!(layout.object_path_unchecked(first.object_hash).exists());
     assert_eq!(
         fs::read_link(layout.build_ref_path(first.build_key)).unwrap(),
         PathBuf::from("..")
@@ -343,16 +343,14 @@ fn record_existing_source_object_reuses_canonical_record() {
     let stage = temp.path().join("source.txt");
     fs::write(&stage, b"hello").unwrap();
     let object_hash = import_object(&layout, &stage).unwrap();
-    let stored = crate::record::record_existing_source_object(&layout, object_hash).unwrap();
+    crate::record::record_existing_source_object(&layout, object_hash).unwrap();
 
     let hit = record_existing_source_object(&layout, object_hash, Some("source"))
         .unwrap()
         .expect("expected source hit");
-    assert_eq!(
-        hit.object_record.object_hash,
-        stored.object_record.object_hash
-    );
-    assert_eq!(hit.object_record.run_id.as_deref(), Some(layout.run_id()));
+    assert_eq!(hit, object_hash);
+    let record = load_object_record(&layout, object_hash).unwrap().unwrap();
+    assert_eq!(record.run_id.as_deref(), Some(layout.run_id()));
     let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
         .unwrap()
         .expect("expected source build handle");
@@ -378,9 +376,10 @@ fn record_existing_source_object_records_existing_object_as_source_object() {
     let hit = record_existing_source_object(&layout, object_hash, Some("source"))
         .unwrap()
         .expect("expected source hit");
-    assert_eq!(hit.object_record.object_hash, object_hash);
-    assert_eq!(hit.object_record.inputs, Vec::new());
-    assert_eq!(hit.object_record.run_id.as_deref(), Some(layout.run_id()));
+    assert_eq!(hit, object_hash);
+    let record = load_object_record(&layout, object_hash).unwrap().unwrap();
+    assert_eq!(record.inputs, Vec::new());
+    assert_eq!(record.run_id.as_deref(), Some(layout.run_id()));
     assert!(object_record_path.exists());
     let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
         .unwrap()
@@ -404,15 +403,13 @@ fn import_source_object_on_match_imports_object_and_writes_canonical_record() {
 
     let outcome = import_source_object(&layout, object_hash, &stage, Some("source")).unwrap();
 
-    let SourceImportOutcome::Matched(stored) = outcome else {
+    let SourceImportOutcome::Matched(matched_hash) = outcome else {
         panic!("expected source import match");
     };
-    assert_eq!(stored.object_record.object_hash, object_hash);
-    assert_eq!(
-        stored.object_record.run_id.as_deref(),
-        Some(layout.run_id())
-    );
-    assert!(layout.object_path(object_hash).exists());
+    assert_eq!(matched_hash, object_hash);
+    let record = load_object_record(&layout, object_hash).unwrap().unwrap();
+    assert_eq!(record.run_id.as_deref(), Some(layout.run_id()));
+    assert!(layout.object_path_unchecked(object_hash).exists());
     assert!(layout.object_record_path(object_hash).exists());
     let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
         .unwrap()
@@ -447,7 +444,7 @@ fn import_source_object_on_mismatch_imports_actual_object_without_declared_recor
         panic!("expected source import mismatch");
     };
     assert_eq!(imported_hash, actual_hash);
-    assert!(layout.object_path(actual_hash).exists());
+    assert!(layout.object_path_unchecked(actual_hash).exists());
     assert!(!layout.object_record_path(declared_hash).exists());
     assert!(!layout.object_record_path(actual_hash).exists());
     assert!(
@@ -863,7 +860,7 @@ fn import_build_accepts_directory_objects() {
         vec![],
     );
 
-    let object_path = layout.object_path(published.object_hash);
+    let object_path = layout.object_path_unchecked(published.object_hash);
     assert!(object_path.is_dir());
     assert!(object_path.join("bin").join("tool").exists());
     assert!(layout.build_ref_path(published.build_key).exists());
@@ -894,7 +891,7 @@ fn import_build_points_fs_tree_object_ref_at_object_root() {
             .join(OBJECTS_DIR)
             .join(published.object_hash.to_hex())
     );
-    let object_path = layout.object_path(published.object_hash);
+    let object_path = layout.object_path_unchecked(published.object_hash);
     assert!(object_path.join("manifest.jsonl").is_file());
     assert!(object_path.join("root").is_dir());
 }

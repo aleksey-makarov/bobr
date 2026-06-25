@@ -144,14 +144,21 @@ pub fn load_build_handle(
         ))
     })?;
     let object_hash = parse_object_record_ref_target("build", &build_ref_path, &target)?;
-    // Validate that the referenced object record and its object exist.
-    crate::record::load_stored_object_record(store, object_hash)?.ok_or_else(|| {
-        StoreError::InvalidData(format!(
+    // The ref must resolve to a stored object record whose object exists.
+    if crate::record::load_object_record(store, object_hash)?.is_none() {
+        return Err(StoreError::InvalidData(format!(
             "build ref '{}' points to missing object record for object '{}'",
             build_ref_path.display(),
             object_hash
-        ))
-    })?;
+        )));
+    }
+    if store.object_path(object_hash)?.is_none() {
+        return Err(StoreError::InvalidData(format!(
+            "build ref '{}' points to missing object '{}'",
+            build_ref_path.display(),
+            object_hash
+        )));
+    }
     Ok(Some(object_hash))
 }
 
@@ -218,8 +225,12 @@ pub fn resolve_reuse_for_build(
     let Some(object_record) = load_reuse_object_record(store, reuse_key)? else {
         return Ok(None);
     };
-    let stored = crate::record::stored_object_record_from_record(store, object_record)?;
-    let object_hash = stored.object_record.object_hash;
+    let object_hash = object_record.object_hash;
+    if store.object_path(object_hash)?.is_none() {
+        return Err(StoreError::InvalidData(format!(
+            "reuse ref points to missing object '{object_hash}'"
+        )));
+    }
     store_build_handle_ref(store, build_key, object_hash)?;
     if let Some(name) = object_ref_name {
         update_object_ref(store, name, object_hash)?;

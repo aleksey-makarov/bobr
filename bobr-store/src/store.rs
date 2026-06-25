@@ -217,11 +217,25 @@ impl Store {
         self.root().join(OBJECT_REFS_DIR)
     }
 
-    /// Returns the canonical path of an imported legacy object.
+    /// Returns the path of an existing imported object, or `None` when it is
+    /// absent from the store.
     ///
-    /// The path is `<store>/objects/<64-lowercase-object-hash>`. The function
-    /// does not check whether the object currently exists.
-    pub fn object_path(&self, object_hash: ObjectHash) -> PathBuf {
+    /// The path is `<store>/objects/<64-lowercase-object-hash>`.
+    pub fn object_path(&self, object_hash: ObjectHash) -> Result<Option<PathBuf>, StoreError> {
+        let path = self.object_path_unchecked(object_hash);
+        match path.try_exists() {
+            Ok(true) => Ok(Some(path)),
+            Ok(false) => Ok(None),
+            Err(error) => Err(StoreError::Io(format!(
+                "failed to check object '{object_hash}' at '{}': {error}",
+                path.display()
+            ))),
+        }
+    }
+
+    /// Returns the canonical path of an imported object without checking that it
+    /// exists. The path is `<store>/objects/<64-lowercase-object-hash>`.
+    pub(crate) fn object_path_unchecked(&self, object_hash: ObjectHash) -> PathBuf {
         self.objects_dir().join(object_hash.to_hex())
     }
 

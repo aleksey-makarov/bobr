@@ -4,7 +4,6 @@ use bobr_core::{BuildKey, ObjectHash};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
 
 pub(crate) const OBJECT_RECORD_SCHEMA: &str = "bobr-object-record-v4";
 
@@ -51,18 +50,6 @@ pub struct ObjectRecord {
     pub inputs: Vec<ObjectHash>,
 }
 
-/// Object record resolved to an existing object in the local store.
-///
-/// A `StoredObjectRecord` is stronger than a raw [`ObjectRecord`]: loading it checks
-/// that the record exists and that its object path exists in the store.
-#[derive(Debug, Clone)]
-pub struct StoredObjectRecord {
-    /// Object record loaded from the store.
-    pub object_record: ObjectRecord,
-    /// Local path of the recorded object in the store.
-    pub object_path: PathBuf,
-}
-
 /// Loads an object record by object hash.
 ///
 /// Returns `Ok(None)` when the record file does not exist. Existing files are
@@ -92,37 +79,17 @@ pub fn load_object_record(
     Ok(Some(parse_object_record_value(object_hash, &value)?))
 }
 
-/// Loads an object record and verifies that its object exists in the store.
-///
-/// Returns `Ok(None)` when the record file does not exist. Existing records are
-/// parsed as object record JSON and must point to an existing object.
-pub fn load_stored_object_record(
-    store: &Store,
-    object_hash: ObjectHash,
-) -> Result<Option<StoredObjectRecord>, StoreError> {
-    let Some(object_record) = load_object_record(store, object_hash)? else {
-        return Ok(None);
-    };
-    Ok(Some(stored_object_record_from_record(
-        store,
-        object_record,
-    )?))
-}
-
 /// Records a source object already present in the store.
 ///
-/// The object path for `object_hash` must exist. The object record is written
-/// idempotently and then reloaded as a checked [`StoredObjectRecord`].
+/// The object for `object_hash` must exist; its object record is written
+/// idempotently.
 pub(crate) fn record_existing_source_object(
     store: &Store,
     object_hash: ObjectHash,
-) -> Result<StoredObjectRecord, StoreError> {
-    let object_path = store.object_path(object_hash);
-    if !object_path.exists() {
+) -> Result<(), StoreError> {
+    if store.object_path(object_hash)?.is_none() {
         return Err(StoreError::Io(format!(
-            "source object '{}' is missing from store at '{}'",
-            object_hash,
-            object_path.display()
+            "source object '{object_hash}' is missing from store"
         )));
     }
 
@@ -133,31 +100,7 @@ pub(crate) fn record_existing_source_object(
         run_id: Some(store.run_id().to_string()),
         inputs: Vec::new(),
     };
-    store_object_record(store, &object_record)?;
-    load_stored_object_record(store, object_record.object_hash)?.ok_or_else(|| {
-        StoreError::InvalidData(format!(
-            "source object record for object '{}' was not stored",
-            object_record.object_hash
-        ))
-    })
-}
-
-pub(crate) fn stored_object_record_from_record(
-    store: &Store,
-    object_record: ObjectRecord,
-) -> Result<StoredObjectRecord, StoreError> {
-    let object_path = store.object_path(object_record.object_hash);
-    if !object_path.exists() {
-        return Err(StoreError::Io(format!(
-            "object record for object '{}' points to missing object '{}'",
-            object_record.object_hash,
-            object_path.display()
-        )));
-    }
-    Ok(StoredObjectRecord {
-        object_record,
-        object_path,
-    })
+    store_object_record(store, &object_record)
 }
 
 /// Stores an object record if it is not already present.

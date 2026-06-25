@@ -134,7 +134,10 @@ fn group_root_builds_independent_inputs() {
         .unwrap()
         .expect("expected root object record");
     assert_eq!(root_record.object_hash, realized);
-    assert_eq!(fs::read(layout.object_path(root_hash)).unwrap(), b"");
+    assert_eq!(
+        fs::read(layout.object_path(root_hash).unwrap().unwrap()).unwrap(),
+        b""
+    );
 
     for name in ["all-targets", "first-target", "second-target"] {
         assert_object_ref_exists(workspace.path(), name);
@@ -404,7 +407,7 @@ fn request_executes_source_and_group_graph() {
         .unwrap()
         .expect("expected final Build to exist in store");
 
-    assert!(layout.object_path(object_hash).is_file());
+    assert!(layout.object_path(object_hash).unwrap().unwrap().is_file());
 
     for name in ["source", "base-image", "final-group"] {
         assert_object_ref_exists(workspace.path(), name);
@@ -745,7 +748,7 @@ fn identical_fetch_sources_are_deduped_by_object_hash() {
     let object_hash = load_build_handle(&layout, record_build_key(&layout, build))
         .unwrap()
         .expect("expected Group Build to exist in store");
-    assert!(layout.object_path(object_hash).is_file());
+    assert!(layout.object_path(object_hash).unwrap().unwrap().is_file());
 }
 
 #[test]
@@ -763,7 +766,7 @@ fn tree_file_recipe_builds_successfully_via_execution() {
     let object_hash = load_build_handle(&layout, record_build_key(&layout, build))
         .unwrap()
         .expect("expected Tree Build to exist in store");
-    let object_path = layout.object_path(object_hash);
+    let object_path = layout.object_path(object_hash).unwrap().unwrap();
     assert!(object_path.is_file());
     assert_eq!(fs::read_to_string(&object_path).unwrap(), "hello tree\n");
 }
@@ -781,7 +784,7 @@ fn tree_directory_recipe_builds_successfully_via_execution() {
     let object_hash = run_request_via_cli(&request_path);
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let object_path = layout.object_path(object_hash);
+    let object_path = layout.object_path(object_hash).unwrap().unwrap();
 
     assert!(object_path.is_file());
     assert_eq!(
@@ -825,7 +828,7 @@ fn tree_symlink_recipe_builds_successfully_via_execution() {
     let object_hash = run_request_via_cli(&request_path);
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let object_path = layout.object_path(object_hash);
+    let object_path = layout.object_path(object_hash).unwrap().unwrap();
 
     assert!(object_path.is_file());
     let manifest = FsTreeManifest::read_canonical(&object_path).unwrap();
@@ -909,7 +912,7 @@ fn source_path_tar_materializes_unpacked_tree_with_source_build_handle() {
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let ref_hash = object_ref_hash(workspace.path(), "source-tar");
-    let object_path = layout.object_path(ref_hash);
+    let object_path = layout.object_path(ref_hash).unwrap().unwrap();
     let build_key = source_build_key(object_hash);
     assert_eq!(record_build_key(&layout, realized), build_key);
     assert_eq!(realized, object_hash);
@@ -1233,5 +1236,5 @@ fn source_without_origin_requires_existing_object_or_record() {
 }
 
 fn object_path_exists(layout: &Store, object_hash: fsobj_hash::ObjectHash) -> bool {
-    layout.object_path(object_hash).exists()
+    layout.object_path(object_hash).unwrap().is_some()
 }

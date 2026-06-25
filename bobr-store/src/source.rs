@@ -1,7 +1,5 @@
 use crate::object::import_object;
-use crate::record::{
-    StoredObjectRecord, record_existing_source_object as record_existing_source_object_record,
-};
+use crate::record::record_existing_source_object as record_existing_source_object_record;
 use crate::{Store, StoreError};
 use bobr_core::{BuildKey, ObjectHash};
 use std::path::Path;
@@ -10,7 +8,7 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 pub enum SourceImportOutcome {
     /// The materialized object matched the declared hash and was recorded.
-    Matched(StoredObjectRecord),
+    Matched(ObjectHash),
     /// The materialized object was imported, but it did not match the declared hash.
     Mismatched {
         /// Hash of the object that was actually imported.
@@ -27,20 +25,20 @@ pub fn record_existing_source_object(
     store: &Store,
     declared_hash: ObjectHash,
     object_ref_name: Option<&str>,
-) -> Result<Option<StoredObjectRecord>, StoreError> {
+) -> Result<Option<ObjectHash>, StoreError> {
     if let Some(name) = object_ref_name {
         crate::validate_ref_name(name)?;
     }
-    if !store.object_path(declared_hash).exists() {
+    if store.object_path(declared_hash)?.is_none() {
         return Ok(None);
     }
 
-    let stored = record_existing_source_object_record(store, declared_hash)?;
+    record_existing_source_object_record(store, declared_hash)?;
     record_source_build_handle(store, declared_hash)?;
     if let Some(name) = object_ref_name {
         crate::refs::update_object_ref(store, name, declared_hash)?;
     }
-    Ok(Some(stored))
+    Ok(Some(declared_hash))
 }
 
 /// Imports a materialized source origin and records it if it matches the declaration.
@@ -63,12 +61,12 @@ pub fn import_source_object(
         return Ok(SourceImportOutcome::Mismatched { actual_hash });
     }
 
-    let stored = record_existing_source_object_record(store, declared_hash)?;
+    record_existing_source_object_record(store, declared_hash)?;
     record_source_build_handle(store, declared_hash)?;
     if let Some(name) = object_ref_name {
         crate::refs::update_object_ref(store, name, declared_hash)?;
     }
-    Ok(SourceImportOutcome::Matched(stored))
+    Ok(SourceImportOutcome::Matched(declared_hash))
 }
 
 fn record_source_build_handle(store: &Store, declared_hash: ObjectHash) -> Result<(), StoreError> {
