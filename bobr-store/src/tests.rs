@@ -96,7 +96,7 @@ fn parse_object_record_rejects_mismatched_path_key() {
 }
 
 #[test]
-fn materialize_build_reuses_existing_object_record_via_new_build_handle_ref() {
+fn import_build_reuses_existing_object_record_via_new_build_handle_ref() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -158,7 +158,7 @@ fn materialize_build_reuses_existing_object_record_via_new_build_handle_ref() {
 }
 
 #[test]
-fn materialize_build_writes_build_record_and_object_ref() {
+fn import_build_writes_build_record_and_object_ref() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -353,10 +353,10 @@ fn record_existing_source_object_reuses_canonical_record() {
         stored.object_record.object_hash
     );
     assert_eq!(hit.object_record.run_id.as_deref(), Some(layout.run_id()));
-    let published = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
+    let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
         .unwrap()
         .expect("expected source build handle");
-    assert_eq!(published.object_record.object_hash, object_hash);
+    assert_eq!(resolved, object_hash);
     assert_eq!(
         fs::read_link(layout.object_refs_dir().join("source")).unwrap(),
         PathBuf::from("..")
@@ -382,10 +382,10 @@ fn record_existing_source_object_records_existing_object_as_source_object() {
     assert_eq!(hit.object_record.inputs, Vec::new());
     assert_eq!(hit.object_record.run_id.as_deref(), Some(layout.run_id()));
     assert!(object_record_path.exists());
-    let published = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
+    let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
         .unwrap()
         .expect("expected source build handle");
-    assert_eq!(published.object_record.object_hash, object_hash);
+    assert_eq!(resolved, object_hash);
     assert_eq!(
         fs::read_link(layout.object_refs_dir().join("source")).unwrap(),
         PathBuf::from("..")
@@ -414,10 +414,10 @@ fn import_source_object_on_match_imports_object_and_writes_canonical_record() {
     );
     assert!(layout.object_path(object_hash).exists());
     assert!(layout.object_record_path(object_hash).exists());
-    let published = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
+    let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
         .unwrap()
         .expect("expected source build handle");
-    assert_eq!(published.object_record.object_hash, object_hash);
+    assert_eq!(resolved, object_hash);
     assert_eq!(
         fs::read_link(layout.object_refs_dir().join("source")).unwrap(),
         PathBuf::from("..")
@@ -473,7 +473,7 @@ fn object_ref_update_rejects_non_canonical_current_target() {
 
     let next_stage = temp.path().join("script-next.txt");
     fs::write(&next_stage, b"next").unwrap();
-    let error = materialize_build(
+    let error = import_build(
         &layout,
         build_key_for("CasTest", json!({ "kind": "next" }), &[]),
         reuse_key_for("CasTest", json!({ "kind": "next" }), &[]),
@@ -597,7 +597,7 @@ fn build_key_changes_when_builder_tag_changes() {
 }
 
 #[test]
-fn materialize_build_rotates_existing_object_refs_into_generations() {
+fn import_build_rotates_existing_object_refs_into_generations() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -658,7 +658,7 @@ fn materialize_build_rotates_existing_object_refs_into_generations() {
 }
 
 #[test]
-fn materialize_build_same_object_ref_target_does_not_create_generation_refs() {
+fn import_build_same_object_ref_target_does_not_create_generation_refs() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -700,7 +700,7 @@ fn materialize_build_same_object_ref_target_does_not_create_generation_refs() {
 }
 
 #[test]
-fn materialize_build_generation_suffix_collisions_get_numeric_suffixes() {
+fn import_build_generation_suffix_collisions_get_numeric_suffixes() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -831,7 +831,7 @@ fn invalid_ref_name_is_rejected() {
         ));
         fs::write(&stage, b"hello").unwrap();
 
-        let error = materialize_build(
+        let error = import_build(
             &layout,
             build_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
             reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]),
@@ -846,7 +846,7 @@ fn invalid_ref_name_is_rejected() {
 }
 
 #[test]
-fn materialize_build_accepts_directory_objects() {
+fn import_build_accepts_directory_objects() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -870,7 +870,7 @@ fn materialize_build_accepts_directory_objects() {
 }
 
 #[test]
-fn materialize_build_points_fs_tree_object_ref_at_object_root() {
+fn import_build_points_fs_tree_object_ref_at_object_root() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -1506,9 +1506,10 @@ fn materialize_text_object(
         "name": object_ref_name,
         "text": text,
     });
-    let published = materialize_build(
+    let build_key = build_key_for("CasTest", payload.clone(), &[]);
+    let object_hash = import_build(
         layout,
-        build_key_for("CasTest", payload.clone(), &[]),
+        build_key,
         reuse_key_for("CasTest", payload, &[]),
         vec![],
         &stage,
@@ -1516,8 +1517,8 @@ fn materialize_text_object(
     )
     .unwrap();
     TestBuild {
-        object_hash: published.object_record.object_hash,
-        build_key: published.build.build_key,
+        object_hash,
+        build_key,
     }
 }
 
@@ -1529,7 +1530,7 @@ fn materialize_named_test_build(
     staged_path: &Path,
     inputs: Vec<ObjectHash>,
 ) -> TestBuild {
-    let published = materialize_build(
+    let object_hash = import_build(
         layout,
         build_key,
         reuse_key,
@@ -1539,8 +1540,8 @@ fn materialize_named_test_build(
     )
     .unwrap();
     TestBuild {
-        object_hash: published.object_record.object_hash,
-        build_key: published.build.build_key,
+        object_hash,
+        build_key,
     }
 }
 

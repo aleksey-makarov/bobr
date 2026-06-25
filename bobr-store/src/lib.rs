@@ -23,7 +23,6 @@ mod error;
 pub mod fs_tree;
 mod fsutil;
 mod object;
-mod publish;
 mod record;
 mod ref_name;
 mod refs;
@@ -31,16 +30,10 @@ mod source;
 mod store;
 
 pub use error::StoreError;
-pub use object::import_object;
-pub use publish::materialize_build;
-pub use record::{
-    Build, ObjectRecord, PublishedBuild, StoredObjectRecord, load_object_record,
-    load_stored_object_record,
-};
+pub use object::{import_build, import_object};
+pub use record::{ObjectRecord, StoredObjectRecord, load_object_record, load_stored_object_record};
 pub(crate) use ref_name::validate_ref_name;
-pub use refs::{
-    load_build_handle, load_public_build, resolve_build_handle, resolve_reuse_for_build,
-};
+pub use refs::{load_build_handle, resolve_build_handle, resolve_reuse_for_build};
 pub use source::{SourceImportOutcome, import_source_object, record_existing_source_object};
 pub use store::{Store, StoreRunLogLocations, StoreTempDir, StoreWorkspace, create_workspace};
 

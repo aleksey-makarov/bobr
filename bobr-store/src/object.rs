@@ -1,6 +1,7 @@
 use crate::fsutil as private_fs;
-use crate::{Store, StoreError};
-use bobr_core::ObjectHash;
+use crate::record::ObjectRecordSchemaV4;
+use crate::{ObjectRecord, Store, StoreError};
+use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use fsobj_hash::hash_path;
 use std::fs;
 use std::path::Path;
@@ -39,5 +40,38 @@ pub fn import_object(store: &Store, staged_path: &Path) -> Result<ObjectHash, St
         )));
     }
 
+    Ok(object_hash)
+}
+
+/// Imports a staged object and records it as a newly materialized build.
+///
+/// The operation imports `staged_path`, stores the object record, writes the
+/// reuse ref, writes the build handle ref, and optionally updates
+/// `object-refs/<name>` for the materialized object.
+pub fn import_build(
+    store: &Store,
+    build_key: BuildKey,
+    reuse_key: ReuseKey,
+    inputs: Vec<ObjectHash>,
+    staged_path: &Path,
+    object_ref_name: Option<&str>,
+) -> Result<ObjectHash, StoreError> {
+    if let Some(name) = object_ref_name {
+        crate::validate_ref_name(name)?;
+    }
+    let object_hash = import_object(store, staged_path)?;
+    let object_record = ObjectRecord {
+        schema: ObjectRecordSchemaV4,
+        build_key,
+        object_hash,
+        run_id: Some(store.run_id().to_string()),
+        inputs,
+    };
+    crate::record::store_object_record(store, &object_record)?;
+    crate::refs::store_reuse_ref(store, reuse_key, object_hash)?;
+    crate::refs::store_build_handle_ref(store, build_key, object_hash)?;
+    if let Some(name) = object_ref_name {
+        crate::refs::update_object_ref(store, name, object_hash)?;
+    }
     Ok(object_hash)
 }

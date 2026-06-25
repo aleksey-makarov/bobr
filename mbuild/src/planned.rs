@@ -8,7 +8,7 @@ use bobr_core::{
     NoopBuildLogger, ObjectHash, SubjectRunContext, Workspace,
 };
 use bobr_store::{
-    SourceImportOutcome, Store, create_workspace, import_source_object, materialize_build,
+    SourceImportOutcome, Store, create_workspace, import_build, import_source_object,
     record_existing_source_object, resolve_build_handle, resolve_reuse_for_build,
 };
 use mbuild_builder::{BuilderPlanError, BuilderPlannedSubject};
@@ -89,11 +89,11 @@ fn execute_builder_subject(
 
     // Resolve the caches before building a workspace: a hit needs no
     // workspace, logger, or temp dir, and is left silent (NoopBuildLogger).
-    if let Some(published) =
+    if let Some(object_hash) =
         resolve_build_handle(cx.store, build_key, Some(subject.name())).map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
-            object_hash: published.object_record.object_hash,
+            object_hash,
             logger: Arc::new(NoopBuildLogger),
             outcome: SubjectOutcome::CacheHit,
         });
@@ -101,12 +101,12 @@ fn execute_builder_subject(
     let reuse_key = subject
         .compute_reuse_key(&input_hashes)
         .map_err(map_builder_plan_error)?;
-    if let Some(published) =
+    if let Some(object_hash) =
         resolve_reuse_for_build(cx.store, build_key, reuse_key, Some(subject.name()))
             .map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
-            object_hash: published.object_record.object_hash,
+            object_hash,
             logger: Arc::new(NoopBuildLogger),
             outcome: SubjectOutcome::CacheHit,
         });
@@ -170,7 +170,7 @@ fn execute_builder_subject(
             map_builder_error(error)
         })?;
     check_cancelled(&cx.cancellation)?;
-    let published = materialize_build(
+    let object_hash = import_build(
         cx.store,
         build_key,
         reuse_key,
@@ -188,7 +188,7 @@ fn execute_builder_subject(
         map_store_error(error)
     })?;
     Ok(SubjectExecution {
-        object_hash: published.object_record.object_hash,
+        object_hash,
         logger,
         outcome: SubjectOutcome::Built,
     })
@@ -203,11 +203,11 @@ fn execute_source_subject(
 
     // Resolve the caches before building a workspace: a hit needs no
     // workspace, logger, or temp dir, and is left silent (NoopBuildLogger).
-    if let Some(published) =
+    if let Some(object_hash) =
         resolve_build_handle(cx.store, build_key, Some(subject.name())).map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
-            object_hash: published.object_record.object_hash,
+            object_hash,
             logger: Arc::new(NoopBuildLogger),
             outcome: SubjectOutcome::CacheHit,
         });

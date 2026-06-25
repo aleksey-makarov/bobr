@@ -531,11 +531,8 @@ fn resolve_planning_state(
         .clone();
 
     // Pure lookup (no object-ref update): reused subtrees are left untouched.
-    if let Some(published) = load_build_handle(store, key).map_err(map_store_error)? {
-        states.insert(
-            key,
-            PlanningState::Reused(published.object_record.object_hash),
-        );
+    if let Some(object_hash) = load_build_handle(store, key).map_err(map_store_error)? {
+        states.insert(key, PlanningState::Reused(object_hash));
         return Ok(());
     }
 
@@ -681,9 +678,7 @@ fn build_run_logger_for_store(store: &Store, quiet: bool) -> Result<BuildRunLogg
 mod tests {
     use super::*;
     use bobr_core::{BuildLogSubject, compute_build_key, compute_reuse_key};
-    use bobr_store::{
-        StoreWorkspace, create_workspace, materialize_build, resolve_reuse_for_build,
-    };
+    use bobr_store::{StoreWorkspace, create_workspace, import_build, resolve_reuse_for_build};
     use mbuild_builder::{
         BuildContext, BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult, TypedBuilder,
     };
@@ -1004,7 +999,7 @@ mod tests {
                 .unwrap();
         let stage = temp.path().join("script.sh");
         fs::write(&stage, b"echo hi\n").unwrap();
-        materialize_build(
+        import_build(
             &store,
             build_key_for_object,
             reuse_key,
@@ -1016,11 +1011,14 @@ mod tests {
 
         let matching_reuse_key =
             compute_reuse_key("ExecutionLookupTest", &payload, &matching_inputs).unwrap();
-        let hit =
+        let object_hash =
             resolve_reuse_for_build(&store, lookup_build_key, matching_reuse_key, Some("script"))
                 .unwrap()
                 .expect("expected canonical object hit");
-        assert_eq!(hit.build.build_key, lookup_build_key);
+        let repaired = load_build_handle(&store, lookup_build_key)
+            .unwrap()
+            .expect("build handle repaired for lookup key");
+        assert_eq!(repaired, object_hash);
 
         let mismatching_inputs = vec![
             "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"

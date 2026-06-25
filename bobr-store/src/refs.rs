@@ -1,4 +1,4 @@
-use crate::{Build, ObjectRecord, PublishedBuild, Store, StoreError, validate_ref_name};
+use crate::{ObjectRecord, Store, StoreError, validate_ref_name};
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use std::fs;
 use std::os::unix::fs as unix_fs;
@@ -131,7 +131,7 @@ pub(crate) fn store_reuse_ref(
 pub fn load_build_handle(
     store: &Store,
     build_key: BuildKey,
-) -> Result<Option<PublishedBuild>, StoreError> {
+) -> Result<Option<ObjectHash>, StoreError> {
     let build_ref_path = store.build_ref_path(build_key);
     if !build_ref_path.exists() && !build_ref_path.is_symlink() {
         return Ok(None);
@@ -144,19 +144,15 @@ pub fn load_build_handle(
         ))
     })?;
     let object_hash = parse_object_record_ref_target("build", &build_ref_path, &target)?;
-    let stored =
-        crate::record::load_stored_object_record(store, object_hash)?.ok_or_else(|| {
-            StoreError::InvalidData(format!(
-                "build ref '{}' points to missing object record for object '{}'",
-                build_ref_path.display(),
-                object_hash
-            ))
-        })?;
-    Ok(Some(PublishedBuild {
-        build: crate::record::build_from_object_record(build_key, &stored.object_record),
-        object_record: stored.object_record,
-        object_path: stored.object_path,
-    }))
+    // Validate that the referenced object record and its object exist.
+    crate::record::load_stored_object_record(store, object_hash)?.ok_or_else(|| {
+        StoreError::InvalidData(format!(
+            "build ref '{}' points to missing object record for object '{}'",
+            build_ref_path.display(),
+            object_hash
+        ))
+    })?;
+    Ok(Some(object_hash))
 }
 
 /// Resolves the build reached by a build key and optionally updates its object ref.
@@ -168,14 +164,14 @@ pub fn resolve_build_handle(
     store: &Store,
     build_key: BuildKey,
     object_ref_name: Option<&str>,
-) -> Result<Option<PublishedBuild>, StoreError> {
-    let Some(published) = load_build_handle(store, build_key)? else {
+) -> Result<Option<ObjectHash>, StoreError> {
+    let Some(object_hash) = load_build_handle(store, build_key)? else {
         return Ok(None);
     };
     if let Some(name) = object_ref_name {
-        update_object_ref(store, name, published.object_record.object_hash)?;
+        update_object_ref(store, name, object_hash)?;
     }
-    Ok(Some(published))
+    Ok(Some(object_hash))
 }
 
 /// Loads the reusable object record reached by a reuse key.
@@ -218,28 +214,17 @@ pub fn resolve_reuse_for_build(
     build_key: BuildKey,
     reuse_key: ReuseKey,
     object_ref_name: Option<&str>,
-) -> Result<Option<PublishedBuild>, StoreError> {
+) -> Result<Option<ObjectHash>, StoreError> {
     let Some(object_record) = load_reuse_object_record(store, reuse_key)? else {
         return Ok(None);
     };
     let stored = crate::record::stored_object_record_from_record(store, object_record)?;
-    store_build_handle_ref(store, build_key, stored.object_record.object_hash)?;
+    let object_hash = stored.object_record.object_hash;
+    store_build_handle_ref(store, build_key, object_hash)?;
     if let Some(name) = object_ref_name {
-        update_object_ref(store, name, stored.object_record.object_hash)?;
+        update_object_ref(store, name, object_hash)?;
     }
-    Ok(Some(PublishedBuild {
-        build: crate::record::build_from_object_record(build_key, &stored.object_record),
-        object_record: stored.object_record,
-        object_path: stored.object_path,
-    }))
-}
-
-/// Loads the public build handle for `build_key`.
-///
-/// This is a narrower view of [`load_build_handle`] that returns only the
-/// serializable [`Build`] value.
-pub fn load_public_build(store: &Store, build_key: BuildKey) -> Result<Option<Build>, StoreError> {
-    Ok(load_build_handle(store, build_key)?.map(|published| published.build))
+    Ok(Some(object_hash))
 }
 
 /// Updates the current object ref for `object_ref_name`.

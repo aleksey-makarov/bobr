@@ -400,11 +400,11 @@ fn request_executes_source_and_group_graph() {
     handle.join().unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let published = load_build_handle(&layout, record_build_key(&layout, build))
+    let object_hash = load_build_handle(&layout, record_build_key(&layout, build))
         .unwrap()
         .expect("expected final Build to exist in store");
 
-    assert!(published.object_path.is_file());
+    assert!(layout.object_path(object_hash).is_file());
 
     for name in ["source", "base-image", "final-group"] {
         assert_object_ref_exists(workspace.path(), name);
@@ -742,10 +742,10 @@ fn identical_fetch_sources_are_deduped_by_object_hash() {
     handle.join().unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let published = load_build_handle(&layout, record_build_key(&layout, build))
+    let object_hash = load_build_handle(&layout, record_build_key(&layout, build))
         .unwrap()
         .expect("expected Group Build to exist in store");
-    assert!(published.object_path.is_file());
+    assert!(layout.object_path(object_hash).is_file());
 }
 
 #[test]
@@ -760,14 +760,12 @@ fn tree_file_recipe_builds_successfully_via_execution() {
     let build = execute_request(&request_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let published = load_build_handle(&layout, record_build_key(&layout, build))
+    let object_hash = load_build_handle(&layout, record_build_key(&layout, build))
         .unwrap()
         .expect("expected Tree Build to exist in store");
-    assert!(published.object_path.is_file());
-    assert_eq!(
-        fs::read_to_string(&published.object_path).unwrap(),
-        "hello tree\n"
-    );
+    let object_path = layout.object_path(object_hash);
+    assert!(object_path.is_file());
+    assert_eq!(fs::read_to_string(&object_path).unwrap(), "hello tree\n");
 }
 
 #[test]
@@ -868,10 +866,10 @@ fn source_path_file_materializes_known_object_with_source_build_handle() {
     assert_eq!(record_build_key(&layout, realized), build_key);
     assert_eq!(realized, object_hash);
     assert!(object_path_exists(&layout, object_hash));
-    let published = load_build_handle(&layout, build_key)
+    let resolved = load_build_handle(&layout, build_key)
         .unwrap()
         .expect("expected source build handle");
-    assert_eq!(published.object_record.object_hash, object_hash);
+    assert_eq!(resolved, object_hash);
     let result = load_object_record(&layout, realized)
         .unwrap()
         .expect("expected source object record");
@@ -916,10 +914,10 @@ fn source_path_tar_materializes_unpacked_tree_with_source_build_handle() {
     assert_eq!(record_build_key(&layout, realized), build_key);
     assert_eq!(realized, object_hash);
     assert_eq!(ref_hash, object_hash);
-    let published = load_build_handle(&layout, build_key)
+    let resolved = load_build_handle(&layout, build_key)
         .unwrap()
         .expect("expected source build handle");
-    assert_eq!(published.object_record.object_hash, object_hash);
+    assert_eq!(resolved, object_hash);
     assert!(object_path.is_dir());
     assert_eq!(
         fs::read_to_string(object_path.join("pkg/README.txt")).unwrap(),

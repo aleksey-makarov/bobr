@@ -31,22 +31,6 @@ impl<'de> Deserialize<'de> for ObjectRecordSchemaV4 {
     }
 }
 
-/// Public build handle resolved from a build key.
-///
-/// A build handle connects a [`BuildKey`] to the object hash of the realized
-/// output. It is the deserializable public view returned when a stored build
-/// reference is resolved.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Build {
-    /// Build invocation key that was requested.
-    pub build_key: BuildKey,
-    /// Hash of the output object recorded by the object record.
-    pub object_hash: ObjectHash,
-    /// Optional store run id copied from the object record.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-}
-
 /// Store record for a realized object.
 ///
 /// Object records are stored as JSON under the store's object record directory
@@ -65,20 +49,6 @@ pub struct ObjectRecord {
     pub run_id: Option<String>,
     /// Realized input object hashes used for reuse accounting.
     pub inputs: Vec<ObjectHash>,
-}
-
-/// Fully resolved build publication inside the local store.
-///
-/// This combines the public build handle, the underlying object record, and the
-/// local filesystem path of the imported output object.
-#[derive(Debug, Clone)]
-pub struct PublishedBuild {
-    /// Build handle resolved from the build reference.
-    pub build: Build,
-    /// Object record reached by the build handle.
-    pub object_record: ObjectRecord,
-    /// Local path of the imported output object in the store.
-    pub object_path: PathBuf,
 }
 
 /// Object record resolved to an existing object in the local store.
@@ -203,14 +173,6 @@ pub(crate) fn store_object_record(store: &Store, record: &ObjectRecord) -> Resul
         StoreError::InvalidData(format!("failed to encode object record JSON: {error}"))
     })?;
     private_fs::write_atomic(&object_record_path, &json).map_err(crate::error::map_fsutil_error)
-}
-
-pub(crate) fn build_from_object_record(build_key: BuildKey, object_record: &ObjectRecord) -> Build {
-    Build {
-        build_key,
-        object_hash: object_record.object_hash,
-        run_id: object_record.run_id.clone(),
-    }
 }
 
 pub(crate) fn parse_object_record_value(
