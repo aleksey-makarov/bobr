@@ -4,8 +4,6 @@
 //! This crate owns the manifest-addressed fs-tree manifest format. It
 //! does not implement builder integration or the legacy fs-tree object format.
 
-#![deny(missing_docs)]
-
 use crate::StoreError;
 use crate::store::{FS_FILES_DIR, FS_TREE_REFS_DIR, FS_TREES_DIR, OBJECTS_DIR};
 use crate::validate_ref_name;
