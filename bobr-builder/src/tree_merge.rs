@@ -23,6 +23,10 @@ impl TypedBuilder for TreeMergeBuilder {
         "TreeMerge"
     }
 
+    fn impl_version(&self) -> &'static str {
+        "1"
+    }
+
     fn spec(&self) -> &'static InputSpec {
         &TREE_MERGE_SPEC
     }

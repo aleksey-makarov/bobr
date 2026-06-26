@@ -46,6 +46,10 @@ impl TypedBuilder for OciExtractBuilder {
         "OciExtract"
     }
 
+    fn impl_version(&self) -> &'static str {
+        "1"
+    }
+
     fn spec(&self) -> &'static InputSpec {
         &OCI_EXTRACT_SPEC
     }

@@ -27,6 +27,10 @@ impl TypedBuilder for FsTreeImportBuilder {
         "FsTreeImport"
     }
 
+    fn impl_version(&self) -> &'static str {
+        "1"
+    }
+
     fn spec(&self) -> &'static InputSpec {
         &FS_TREE_IMPORT_SPEC
     }

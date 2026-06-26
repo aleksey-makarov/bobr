@@ -426,6 +426,14 @@ pub trait Builder: Send + Sync {
 
     fn spec(&self) -> &'static InputSpec;
 
+    /// Implementation-version token of the builder; see
+    /// [`TypedBuilder::impl_version`].
+    fn impl_version(&self) -> &'static str;
+
+    /// Whether the builder's output depends on the execution architecture; see
+    /// [`TypedBuilder::is_arch_dependent`].
+    fn is_arch_dependent(&self) -> bool;
+
     fn build_erased(
         &self,
         config: Value,
@@ -440,6 +448,24 @@ pub trait TypedBuilder: Send + Sync {
     fn tag(&self) -> &'static str;
 
     fn spec(&self) -> &'static InputSpec;
+
+    /// Opaque version token of the builder's implementation, folded into the
+    /// build and reuse keys. Bump it whenever the builder's output for the same
+    /// config and inputs changes, so stale cached objects are not reused. Only
+    /// equality matters (it is hashed, not ordered).
+    fn impl_version(&self) -> &'static str;
+
+    /// Whether the builder's output depends on the architecture it executes on.
+    ///
+    /// Default `false`: most builders are pure functions of their config and
+    /// content-addressed inputs (any architecture difference already flows in
+    /// through the input hashes). Return `true` only for builders that execute
+    /// arbitrary code whose output depends on the host architecture — that
+    /// architecture is otherwise an uncaptured implicit input. When `true`, the
+    /// current build architecture is folded into the keys.
+    fn is_arch_dependent(&self) -> bool {
+        false
+    }
 
     fn build_typed(
         &self,
@@ -459,6 +485,14 @@ where
 
     fn spec(&self) -> &'static InputSpec {
         <T as TypedBuilder>::spec(self)
+    }
+
+    fn impl_version(&self) -> &'static str {
+        <T as TypedBuilder>::impl_version(self)
+    }
+
+    fn is_arch_dependent(&self) -> bool {
+        <T as TypedBuilder>::is_arch_dependent(self)
     }
 
     fn build_erased(
@@ -602,6 +636,10 @@ mod tests {
 
         fn tag(&self) -> &'static str {
             "Dummy"
+        }
+
+        fn impl_version(&self) -> &'static str {
+            "test"
         }
 
         fn spec(&self) -> &'static InputSpec {

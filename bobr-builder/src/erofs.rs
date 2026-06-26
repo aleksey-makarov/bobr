@@ -43,6 +43,10 @@ impl TypedBuilder for ErofsRootfsBuilder {
         "ErofsRootfs"
     }
 
+    fn impl_version(&self) -> &'static str {
+        "1"
+    }
+
     fn spec(&self) -> &'static InputSpec {
         &EROFS_ROOTFS_SPEC
     }

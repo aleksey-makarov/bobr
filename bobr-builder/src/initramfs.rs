@@ -36,6 +36,10 @@ impl TypedBuilder for InitramfsBuilder {
         "Initramfs"
     }
 
+    fn impl_version(&self) -> &'static str {
+        "1"
+    }
+
     fn spec(&self) -> &'static InputSpec {
         &INITRAMFS_SPEC
     }

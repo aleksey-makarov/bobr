@@ -1568,7 +1568,7 @@ fn build_key_for(builder_tag: &str, payload: Value, input_builds: &[BuildKey]) -
         .enumerate()
         .map(|(i, key)| (format!("in{i:03}"), *key))
         .collect::<BTreeMap<_, _>>();
-    compute_build_key(builder_tag, &payload, &inputs).unwrap()
+    compute_build_key(builder_tag, "test", &payload, &inputs).unwrap()
 }
 
 fn reuse_key_for(builder_tag: &str, payload: Value, inputs: &[ObjectHash]) -> ReuseKey {
@@ -1577,5 +1577,5 @@ fn reuse_key_for(builder_tag: &str, payload: Value, inputs: &[ObjectHash]) -> Re
         .enumerate()
         .map(|(i, hash)| (format!("in{i:03}"), *hash))
         .collect::<BTreeMap<_, _>>();
-    compute_reuse_key(builder_tag, &payload, &inputs).unwrap()
+    compute_reuse_key(builder_tag, "test", &payload, &inputs).unwrap()
 }

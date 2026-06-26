@@ -28,6 +28,10 @@ impl TypedBuilder for TreeSubsetBuilder {
         "TreeSubset"
     }
 
+    fn impl_version(&self) -> &'static str {
+        "1"
+    }
+
     fn spec(&self) -> &'static InputSpec {
         &TREE_SUBSET_SPEC
     }

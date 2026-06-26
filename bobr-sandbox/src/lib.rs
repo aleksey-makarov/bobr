@@ -93,6 +93,14 @@ impl TypedBuilder for SandboxBuilder {
         "Sandbox"
     }
 
+    fn impl_version(&self) -> &'static str {
+        "1"
+    }
+
+    fn is_arch_dependent(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> &'static InputSpec {
         &SANDBOX_SPEC
     }

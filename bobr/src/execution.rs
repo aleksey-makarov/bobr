@@ -838,6 +838,10 @@ mod tests {
             "ExecutionTest"
         }
 
+        fn impl_version(&self) -> &'static str {
+            "test"
+        }
+
         fn spec(&self) -> &'static InputSpec {
             &EXECUTION_TEST_SPEC
         }
@@ -879,6 +883,10 @@ mod tests {
             "Sandbox"
         }
 
+        fn impl_version(&self) -> &'static str {
+            "test"
+        }
+
         fn spec(&self) -> &'static InputSpec {
             &SANDBOX_EXECUTION_TEST_SPEC
         }
@@ -914,6 +922,10 @@ mod tests {
             "ExecutionTest"
         }
 
+        fn impl_version(&self) -> &'static str {
+            "test"
+        }
+
         fn spec(&self) -> &'static InputSpec {
             &EXECUTION_TEST_SPEC
         }
@@ -944,6 +956,10 @@ mod tests {
 
         fn tag(&self) -> &'static str {
             "ExecutionTest"
+        }
+
+        fn impl_version(&self) -> &'static str {
+            "test"
         }
 
         fn spec(&self) -> &'static InputSpec {
@@ -980,7 +996,7 @@ mod tests {
         )]);
         let payload = json!({ "source": "echo hi\n", "executable": true });
         let reuse_key =
-            compute_reuse_key("ExecutionLookupTest", &payload, &matching_inputs).unwrap();
+            compute_reuse_key("ExecutionLookupTest", "test", &payload, &matching_inputs).unwrap();
         let build_key_for_object =
             BuildKey::from_str("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
                 .unwrap();
@@ -1000,7 +1016,7 @@ mod tests {
         .unwrap();
 
         let matching_reuse_key =
-            compute_reuse_key("ExecutionLookupTest", &payload, &matching_inputs).unwrap();
+            compute_reuse_key("ExecutionLookupTest", "test", &payload, &matching_inputs).unwrap();
         let object_hash =
             resolve_reuse_for_build(&store, lookup_build_key, matching_reuse_key, "script")
                 .unwrap()
@@ -1017,7 +1033,8 @@ mod tests {
                 .unwrap(),
         )]);
         let mismatching_reuse_key =
-            compute_reuse_key("ExecutionLookupTest", &payload, &mismatching_inputs).unwrap();
+            compute_reuse_key("ExecutionLookupTest", "test", &payload, &mismatching_inputs)
+                .unwrap();
         assert!(
             resolve_reuse_for_build(&store, lookup_build_key, mismatching_reuse_key, "script")
                 .unwrap()
@@ -1056,7 +1073,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let config = json!({});
-        let build_key = compute_build_key("ExecutionTest", &config, &BTreeMap::new()).unwrap();
+        let build_key =
+            compute_build_key("ExecutionTest", "test", &config, &BTreeMap::new()).unwrap();
         let run_logger = create_test_logger(&store);
         let (workspace, _logger) = create_test_run(
             &store,
@@ -1117,7 +1135,7 @@ mod tests {
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
         let config = json!({});
-        let build_key = compute_build_key("Sandbox", &config, &BTreeMap::new()).unwrap();
+        let build_key = compute_build_key("Sandbox", "test", &config, &BTreeMap::new()).unwrap();
         let (workspace, _logger) = create_test_run(
             &store,
             &run_logger,
@@ -1164,7 +1182,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
-        let build_key = compute_build_key("ExecutionTest", &json!({}), &BTreeMap::new()).unwrap();
+        let build_key =
+            compute_build_key("ExecutionTest", "test", &json!({}), &BTreeMap::new()).unwrap();
         let (workspace, logger) = create_test_run(
             &store,
             &run_logger,
@@ -1196,7 +1215,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
-        let build_key = compute_build_key("ExecutionTest", &json!({}), &BTreeMap::new()).unwrap();
+        let build_key =
+            compute_build_key("ExecutionTest", "test", &json!({}), &BTreeMap::new()).unwrap();
         let (workspace, _logger) = create_test_run(
             &store,
             &run_logger,
@@ -1453,6 +1473,10 @@ mod tests {
             fn tag(&self) -> &'static str {
                 "DrainFast"
             }
+
+            fn impl_version(&self) -> &'static str {
+                "test"
+            }
             fn spec(&self) -> &'static InputSpec {
                 &DRAIN_SPEC
             }
@@ -1473,6 +1497,10 @@ mod tests {
             type Config = EmptyConfig;
             fn tag(&self) -> &'static str {
                 "DrainSlow"
+            }
+
+            fn impl_version(&self) -> &'static str {
+                "test"
             }
             fn spec(&self) -> &'static InputSpec {
                 &DRAIN_SPEC
@@ -1504,6 +1532,10 @@ mod tests {
             type Config = EmptyConfig;
             fn tag(&self) -> &'static str {
                 "DrainRoot"
+            }
+
+            fn impl_version(&self) -> &'static str {
+                "test"
             }
             fn spec(&self) -> &'static InputSpec {
                 &DRAIN_ROOT_SPEC

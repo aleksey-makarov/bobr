@@ -92,6 +92,10 @@ impl TypedBuilder for TreeBuilder {
         "Tree"
     }
 
+    fn impl_version(&self) -> &'static str {
+        "1"
+    }
+
     fn spec(&self) -> &'static InputSpec {
         &TREE_SPEC
     }

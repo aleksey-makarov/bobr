@@ -73,6 +73,11 @@ mod tests {
                 .spec()
                 .validate_for_builder(builder.tag())
                 .unwrap_or_else(|error| panic!("invalid spec for '{}': {error}", builder.tag()));
+            assert!(
+                !builder.impl_version().is_empty(),
+                "builder '{}' has an empty impl_version",
+                builder.tag()
+            );
         }
     }
 
@@ -192,7 +197,8 @@ mod tests {
             BTreeMap::new(),
         )
         .unwrap();
-        let expected = bobr_core::compute_build_key("Tree", &config, &BTreeMap::new()).unwrap();
+        let expected =
+            bobr_core::compute_build_key("Tree", "1", &config, &BTreeMap::new()).unwrap();
 
         assert_eq!(subject.name(), "tree");
         assert_eq!(subject.tag(), "Tree");

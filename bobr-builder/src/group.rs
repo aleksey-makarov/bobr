@@ -25,6 +25,10 @@ impl TypedBuilder for GroupBuilder {
         "Group"
     }
 
+    fn impl_version(&self) -> &'static str {
+        "1"
+    }
+
     fn spec(&self) -> &'static InputSpec {
         &GROUP_SPEC
     }

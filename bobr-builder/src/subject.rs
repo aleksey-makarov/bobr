@@ -69,6 +69,7 @@ pub struct BuilderPlannedSubject {
     config: Value,
     inputs: BTreeMap<String, BuildKey>,
     build_key: BuildKey,
+    impl_version_token: String,
 }
 
 impl fmt::Debug for BuilderPlannedSubject {
@@ -116,8 +117,13 @@ impl BuilderPlannedSubject {
             }
         }
 
-        let build_key =
-            compute_build_key(tag, &config, &inputs).map_err(BuilderPlanError::identity)?;
+        let impl_version_token = if builder.is_arch_dependent() {
+            format!("{}@{}", builder.impl_version(), std::env::consts::ARCH)
+        } else {
+            builder.impl_version().to_string()
+        };
+        let build_key = compute_build_key(tag, &impl_version_token, &config, &inputs)
+            .map_err(BuilderPlanError::identity)?;
 
         Ok(Self {
             builder,
@@ -125,6 +131,7 @@ impl BuilderPlannedSubject {
             config,
             inputs,
             build_key,
+            impl_version_token,
         })
     }
 
@@ -158,8 +165,13 @@ impl BuilderPlannedSubject {
         &self,
         input_hashes: &BTreeMap<String, ObjectHash>,
     ) -> Result<ReuseKey, BuilderPlanError> {
-        compute_reuse_key(self.tag(), &self.config, input_hashes)
-            .map_err(BuilderPlanError::identity)
+        compute_reuse_key(
+            self.tag(),
+            &self.impl_version_token,
+            &self.config,
+            input_hashes,
+        )
+        .map_err(BuilderPlanError::identity)
     }
 
     /// Executes the underlying builder implementation.
@@ -232,6 +244,10 @@ mod tests {
 
         fn tag(&self) -> &'static str {
             "Staging"
+        }
+
+        fn impl_version(&self) -> &'static str {
+            "test"
         }
 
         fn spec(&self) -> &'static InputSpec {

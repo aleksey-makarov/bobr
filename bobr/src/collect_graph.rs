@@ -451,14 +451,17 @@ mod tests {
         });
 
         let (root_key, _) = collect_one(&nodes).unwrap();
-        let rootfs_key = compute_build_key("Tree", &rootfs["config"], &BTreeMap::new()).unwrap();
-        let script_key = compute_build_key("Tree", &script["config"], &BTreeMap::new()).unwrap();
+        let rootfs_key =
+            compute_build_key("Tree", "1", &rootfs["config"], &BTreeMap::new()).unwrap();
+        let script_key =
+            compute_build_key("Tree", "1", &script["config"], &BTreeMap::new()).unwrap();
         let source_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             .parse()
             .unwrap();
         let source_key = BuildKey::from_object_hash(source_hash);
         let expected = compute_build_key(
             "Sandbox",
+            &format!("1@{}", std::env::consts::ARCH),
             &nodes["root"]["config"],
             &BTreeMap::from([
                 ("rootfs".to_string(), rootfs_key),
@@ -490,6 +493,7 @@ mod tests {
         let (_root_key, subjects) = collect_one(&nodes).unwrap();
         let deduped_key = compute_build_key(
             "Tree",
+            "1",
             &tree_config("same.txt", "same", false),
             &BTreeMap::new(),
         )
