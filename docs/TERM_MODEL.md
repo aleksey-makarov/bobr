@@ -97,7 +97,8 @@ In v1, `Source` supports:
 - `origin.tag = "OciRegistry"`
 - `origin.image` as the registry image locator
 - `origin.digest` as the pinned manifest or index digest
-- manifest lists and OCI indexes resolve to the `linux/amd64` manifest only
+- `origin.platform` as the selected OCI platform for manifest lists and OCI
+  indexes
 
 If `origin` is omitted, the payload object must already exist in the store.
 If the canonical object record is missing, Rust reconstructs it from the

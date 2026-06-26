@@ -145,7 +145,8 @@ In v1, `Source` supports three origins:
 - `origin.tag = "OciRegistry"`
 - `origin.image` is the registry image locator kept in the recipe
 - `origin.digest` is the pinned manifest or index digest requested from the registry
-- pinned manifest lists / OCI indexes are resolved to the `linux/amd64` manifest
+- `origin.platform` selects the OCI platform when the pinned digest names a
+  manifest list or OCI index
 
 `Source` may also omit `origin`. In that shape, the payload object must
 already exist in the store under `objects/<object_hash>`. If the canonical

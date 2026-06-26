@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use bobr_core::ObjectHash;
-use mbuild_source::oci_registry::fetch_image_authenticated;
+use mbuild_source::oci_registry::{OciPlatform, fetch_image_authenticated};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -418,7 +418,13 @@ fn registry_layout_object_hash(image_ref: &str, pinned_digest: &str) -> String {
     let temp = tempfile::tempdir().unwrap();
     let oci_dir = temp.path().join("image");
     fs::create_dir(&oci_dir).unwrap();
-    fetch_image_authenticated(image_ref, pinned_digest, &oci_dir).unwrap();
+    fetch_image_authenticated(
+        image_ref,
+        pinned_digest,
+        &OciPlatform::new("linux".to_string(), "amd64".to_string()).unwrap(),
+        &oci_dir,
+    )
+    .unwrap();
     fsobj_hash::hash_path(&oci_dir).unwrap().to_string()
 }
 
@@ -431,6 +437,10 @@ pub fn base_image_recipe(image: &str, digest: &str, object_hash: &str) -> Value 
             "tag": "OciRegistry",
             "image": image,
             "digest": digest,
+            "platform": {
+                "os": "linux",
+                "architecture": "amd64"
+            }
         }
     })
 }

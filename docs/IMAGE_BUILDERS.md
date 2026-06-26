@@ -33,7 +33,11 @@ Imported registry images use a `Source` node like this:
   "origin": {
     "tag": "OciRegistry",
     "image": "docker.io/library/buildpack-deps:bookworm",
-    "digest": "sha256:<pinned manifest-or-index digest>"
+    "digest": "sha256:<pinned manifest-or-index digest>",
+    "platform": {
+      "os": "linux",
+      "architecture": "amd64"
+    }
   }
 }
 ```
@@ -43,14 +47,13 @@ Current behavior:
 - parses the image reference and talks directly to the OCI/Docker registry API
 - handles Bearer auth challenges
 - fetches the pinned manifest by digest
-- if the pinned object is a manifest list, selects the `linux/amd64` manifest
+- if the pinned object is a manifest list, selects the requested
+  `origin.platform` manifest
 - downloads the manifest, config blob, and all layer blobs
 - verifies the digest of every downloaded blob
 - writes the result to the staged object path as an OCI image layout directory
 - writes `index.json` without image-ref annotations, so the canonical object is
   independent of the registry mirror named by `origin.image`
-
-`Source/OciRegistry` currently targets `linux/amd64` only.
 
 ## `OciExtract`
 
@@ -198,7 +201,6 @@ The common native toolchain is `linux_headers`, `glibc`, `binutils`, `gcc`,
 
 ## Current Limitations
 
-- `Source/OciRegistry` currently selects only `linux/amd64`
 - `mbuild` does not currently provide a builder for producing derived OCI
   image layouts from fs-tree inputs
 - Rust-side `Sandbox` requests require a prepared fs-tree manifest rootfs

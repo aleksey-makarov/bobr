@@ -306,7 +306,11 @@ mod tests {
         let subject = parse_source_subject(source_object(Some(json!({
             "tag": "OciRegistry",
             "image": "docker.io/library/alpine:3.20",
-            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "platform": {
+                "os": "linux",
+                "architecture": "amd64"
+            }
         }))))
         .unwrap();
 

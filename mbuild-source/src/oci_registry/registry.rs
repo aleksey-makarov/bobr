@@ -1,3 +1,4 @@
+use super::OciPlatform;
 use bobr_core::oci::{self, MEDIA_TYPE_OCI_MANIFEST, OciDescriptor, OciManifest};
 use std::fmt;
 use std::io::Read;
@@ -112,15 +113,23 @@ pub fn resolve_current_digest(image: &str) -> Result<String, RegistryError> {
 pub fn fetch_image_authenticated(
     image: &str,
     pinned_digest: &str,
+    platform: &OciPlatform,
     target_dir: &Path,
 ) -> Result<String, RegistryError> {
     let mut progress = |_message: &str| {};
-    fetch_image_authenticated_with_progress(image, pinned_digest, target_dir, &mut progress)
+    fetch_image_authenticated_with_progress(
+        image,
+        pinned_digest,
+        platform,
+        target_dir,
+        &mut progress,
+    )
 }
 
 pub fn fetch_image_authenticated_with_progress(
     image: &str,
     pinned_digest: &str,
+    platform: &OciPlatform,
     target_dir: &Path,
     progress: &mut dyn FnMut(&str),
 ) -> Result<String, RegistryError> {
@@ -148,11 +157,15 @@ pub fn fetch_image_authenticated_with_progress(
     }
 
     let manifest_bytes = if is_manifest_list(&pinned_media_type) {
-        let platform_digest = select_platform_manifest(&pinned_bytes, "linux", "amd64")?;
+        let platform_digest =
+            select_platform_manifest(&pinned_bytes, platform.os(), platform.architecture())?;
         let platform_url =
             format!("{scheme}://{registry_host}/v2/{repository}/manifests/{platform_digest}");
-        let platform_message =
-            format!("selected linux/amd64 manifest {platform_digest}; fetching platform manifest");
+        let platform_message = format!(
+            "selected {}/{} manifest {platform_digest}; fetching platform manifest",
+            platform.os(),
+            platform.architecture()
+        );
         progress(&platform_message);
         let (platform_bytes, _) = get_with_bearer_auth(&platform_url, ACCEPT_MANIFESTS, progress)?;
         verify_digest(&platform_bytes, &platform_digest)?;
@@ -386,6 +399,10 @@ mod tests {
         )
     }
 
+    fn platform(os: &str, architecture: &str) -> OciPlatform {
+        OciPlatform::new(os.to_string(), architecture.to_string()).unwrap()
+    }
+
     fn sample_manifest(
         config_digest: &str,
         layer_digest: &str,
@@ -484,7 +501,8 @@ mod tests {
 
         let image = format!("{}/{repo}@{pinned_digest}", server.host_with_port());
         let stored_manifest_digest =
-            fetch_image_authenticated(&image, &pinned_digest, &target).unwrap();
+            fetch_image_authenticated(&image, &pinned_digest, &platform("linux", "amd64"), &target)
+                .unwrap();
 
         assert!(target.join("oci-layout").exists());
         assert!(target.join("index.json").exists());
@@ -538,8 +556,20 @@ mod tests {
 
         let image_a = format!("{}/mirror-a/testimage:latest", server.host_with_port());
         let image_b = format!("{}/mirror-b/testimage:bookworm", server.host_with_port());
-        fetch_image_authenticated(&image_a, &pinned_digest, &target_a).unwrap();
-        fetch_image_authenticated(&image_b, &pinned_digest, &target_b).unwrap();
+        fetch_image_authenticated(
+            &image_a,
+            &pinned_digest,
+            &platform("linux", "amd64"),
+            &target_a,
+        )
+        .unwrap();
+        fetch_image_authenticated(
+            &image_b,
+            &pinned_digest,
+            &platform("linux", "amd64"),
+            &target_b,
+        )
+        .unwrap();
 
         assert_no_ref_name_annotation(&target_a);
         assert_no_ref_name_annotation(&target_b);
@@ -627,12 +657,97 @@ mod tests {
 
         let image = format!("{}/{repo}:latest", server.host_with_port());
         let stored_manifest_digest =
-            fetch_image_authenticated(&image, &pinned_digest, &target).unwrap();
+            fetch_image_authenticated(&image, &pinned_digest, &platform("linux", "amd64"), &target)
+                .unwrap();
         assert_eq!(stored_manifest_digest, manifest_digest);
     }
 
     #[test]
-    fn fetch_image_fails_when_linux_amd64_is_missing() {
+    fn fetch_image_selects_requested_platform_from_index() {
+        let mut server = Server::new();
+        let (config_digest, layer_digest) = sample_digests();
+        let arm64_manifest =
+            sample_manifest(&config_digest, &layer_digest, sample_layer_bytes().len());
+        let arm64_manifest_bytes = serde_json::to_vec(&arm64_manifest).unwrap();
+        let arm64_manifest_hex = format!("{:x}", Sha256::digest(&arm64_manifest_bytes));
+        let arm64_manifest_digest = format!("sha256:{arm64_manifest_hex}");
+
+        let amd64_manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "config": {
+                "mediaType": oci::MEDIA_TYPE_OCI_CONFIG,
+                "digest": config_digest,
+                "size": sample_config_bytes().len()
+            },
+            "layers": []
+        });
+        let amd64_manifest_bytes = serde_json::to_vec(&amd64_manifest).unwrap();
+        let amd64_manifest_hex = format!("{:x}", Sha256::digest(&amd64_manifest_bytes));
+        let amd64_manifest_digest = format!("sha256:{amd64_manifest_hex}");
+
+        let index = serde_json::json!({
+            "schemaVersion": 2,
+            "manifests": [
+                {
+                    "mediaType": oci::MEDIA_TYPE_OCI_MANIFEST,
+                    "digest": arm64_manifest_digest,
+                    "size": arm64_manifest_bytes.len(),
+                    "platform": { "os": "linux", "architecture": "arm64" }
+                },
+                {
+                    "mediaType": oci::MEDIA_TYPE_OCI_MANIFEST,
+                    "digest": amd64_manifest_digest,
+                    "size": amd64_manifest_bytes.len(),
+                    "platform": { "os": "linux", "architecture": "amd64" }
+                }
+            ]
+        });
+        let index_bytes = serde_json::to_vec(&index).unwrap();
+        let index_hex = format!("{:x}", Sha256::digest(&index_bytes));
+        let pinned_digest = format!("sha256:{index_hex}");
+
+        let repo = "testuser/testimage";
+        let path_index = format!("/v2/{repo}/manifests/{pinned_digest}");
+        let path_manifest = format!("/v2/{repo}/manifests/{arm64_manifest_digest}");
+        let path_config = format!("/v2/{repo}/blobs/{config_digest}");
+        let path_layer = format!("/v2/{repo}/blobs/{layer_digest}");
+        let _m1 = server.mock("GET", "/v2/").with_status(200).create();
+        let _m2 = server
+            .mock("GET", path_index.as_str())
+            .with_status(200)
+            .with_header("Content-Type", MEDIA_TYPE_OCI_INDEX)
+            .with_body(index_bytes)
+            .create();
+        let _m3 = server
+            .mock("GET", path_manifest.as_str())
+            .with_status(200)
+            .with_header("Content-Type", oci::MEDIA_TYPE_OCI_MANIFEST)
+            .with_body(arm64_manifest_bytes)
+            .create();
+        let _m4 = server
+            .mock("GET", path_config.as_str())
+            .with_status(200)
+            .with_body(sample_config_bytes())
+            .create();
+        let _m5 = server
+            .mock("GET", path_layer.as_str())
+            .with_status(200)
+            .with_body(sample_layer_bytes())
+            .create();
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("oci");
+        std::fs::create_dir(&target).unwrap();
+
+        let image = format!("{}/{repo}:latest", server.host_with_port());
+        let stored_manifest_digest =
+            fetch_image_authenticated(&image, &pinned_digest, &platform("linux", "arm64"), &target)
+                .unwrap();
+        assert_eq!(stored_manifest_digest, arm64_manifest_digest);
+    }
+
+    #[test]
+    fn fetch_image_fails_when_requested_platform_is_missing() {
         let mut server = Server::new();
         let index = serde_json::json!({
             "schemaVersion": 2,
@@ -661,7 +776,9 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
 
         let image = format!("{}/{repo}:latest", server.host_with_port());
-        let error = fetch_image_authenticated(&image, &pinned_digest, &target).unwrap_err();
+        let error =
+            fetch_image_authenticated(&image, &pinned_digest, &platform("linux", "amd64"), &target)
+                .unwrap_err();
         assert!(
             error.to_string().contains("no linux/amd64 manifest found"),
             "{error}"
@@ -736,7 +853,8 @@ mod tests {
         std::fs::create_dir(&target).unwrap();
 
         let image = format!("{}/{repo}:latest", registry.host_with_port());
-        fetch_image_authenticated(&image, &pinned_digest, &target).unwrap();
+        fetch_image_authenticated(&image, &pinned_digest, &platform("linux", "amd64"), &target)
+            .unwrap();
         assert!(target.join("index.json").exists());
         assert_no_ref_name_annotation(&target);
     }
