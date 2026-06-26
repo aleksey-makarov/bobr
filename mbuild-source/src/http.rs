@@ -17,6 +17,8 @@ use zip::read::ZipArchive;
 
 const REDIRECT_LIMIT: usize = 10;
 const USER_AGENT: &str = "mbuild-source-http/0.1";
+const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const HTTP_OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 static HTTP_ORIGIN_SPEC: OriginSpec = OriginSpec { tag: "Http" };
 
@@ -46,6 +48,21 @@ impl fmt::Display for HttpOriginError {
 }
 
 type HResult<T> = Result<T, HttpOriginError>;
+
+#[derive(Debug, Clone, Copy)]
+struct HttpTimeouts {
+    connect: std::time::Duration,
+    operation: std::time::Duration,
+}
+
+impl HttpTimeouts {
+    fn production() -> Self {
+        Self {
+            connect: HTTP_CONNECT_TIMEOUT,
+            operation: HTTP_OPERATION_TIMEOUT,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ArchiveFormat {
@@ -135,13 +152,15 @@ impl ParsedOrigin for HttpOrigin {
 }
 
 fn materialize_http_origin(temp_root: &Path, origin: &HttpOrigin) -> HResult<PathBuf> {
-    let client = Client::builder()
-        .redirect(Policy::limited(REDIRECT_LIMIT))
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|error| {
-            HttpOriginError::NetworkFailed(format!("failed to create HTTP client: {error}"))
-        })?;
+    materialize_http_origin_with_timeouts(temp_root, origin, HttpTimeouts::production())
+}
+
+fn materialize_http_origin_with_timeouts(
+    temp_root: &Path,
+    origin: &HttpOrigin,
+    timeouts: HttpTimeouts,
+) -> HResult<PathBuf> {
+    let client = http_client(timeouts)?;
     let downloaded_blob = download_first_success(temp_root, &client, &origin.urls)?;
     if !origin.unpack {
         return Ok(downloaded_blob);
@@ -157,6 +176,19 @@ fn materialize_http_origin(temp_root: &Path, origin: &HttpOrigin) -> HResult<Pat
     extract_archive(&downloaded_blob, format, &staged_dir)?;
     let _ = normalize_extracted_root(&staged_dir)?;
     Ok(staged_dir)
+}
+
+fn http_client(timeouts: HttpTimeouts) -> HResult<Client> {
+    let client = Client::builder()
+        .redirect(Policy::limited(REDIRECT_LIMIT))
+        .user_agent(USER_AGENT)
+        .connect_timeout(timeouts.connect)
+        .timeout(timeouts.operation)
+        .build()
+        .map_err(|error| {
+            HttpOriginError::NetworkFailed(format!("failed to create HTTP client: {error}"))
+        })?;
+    Ok(client)
 }
 
 fn take_string(object: &mut Map<String, Value>, path: &str, field: &str) -> Result<String, String> {
@@ -261,9 +293,10 @@ fn download_first_success(temp_root: &Path, client: &Client, urls: &[String]) ->
 }
 
 fn download_to_file(client: &Client, url: &str, destination: &Path) -> HResult<()> {
-    let mut response = client.get(url).send().map_err(|error| {
-        HttpOriginError::NetworkFailed(format!("failed to download '{url}': {error}"))
-    })?;
+    let mut response = client
+        .get(url)
+        .send()
+        .map_err(|error| download_request_error(url, error))?;
     if !response.status().is_success() {
         return Err(HttpOriginError::NetworkFailed(format!(
             "failed to download '{url}': HTTP {}",
@@ -280,7 +313,9 @@ fn download_to_file(client: &Client, url: &str, destination: &Path) -> HResult<(
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let read_bytes = response.read(&mut buffer).map_err(|error| {
-            HttpOriginError::NetworkFailed(format!("failed to read HTTP response body: {error}"))
+            HttpOriginError::NetworkFailed(format!(
+                "failed to read HTTP response body from '{url}': {error}"
+            ))
         })?;
         if read_bytes == 0 {
             break;
@@ -293,6 +328,15 @@ fn download_to_file(client: &Client, url: &str, destination: &Path) -> HResult<(
         })?;
     }
     Ok(())
+}
+
+fn download_request_error(url: &str, error: reqwest::Error) -> HttpOriginError {
+    if error.is_timeout() {
+        return HttpOriginError::NetworkFailed(format!(
+            "download timed out while requesting '{url}': {error}"
+        ));
+    }
+    HttpOriginError::NetworkFailed(format!("failed to download '{url}': {error}"))
 }
 
 fn select_archive_format(
@@ -734,6 +778,26 @@ mod tests {
         Ok((url, handle))
     }
 
+    fn spawn_stalled_body_server(
+        stall: Duration,
+    ) -> Result<(String, thread::JoinHandle<()>), std::io::Error> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{}/payload", addr);
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            drain_request(&mut stream);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            stream.flush().unwrap();
+            thread::sleep(stall);
+            let _ = stream.write_all(b"x");
+            let _ = stream.flush();
+        });
+        Ok((url, handle))
+    }
+
     fn spawn_fallback_server(
         ok_body: Vec<u8>,
         content_type: &'static str,
@@ -857,6 +921,34 @@ mod tests {
             .unwrap();
         handle.join().unwrap();
         assert_eq!(fs::read(staged).unwrap(), payload);
+    }
+
+    #[test]
+    fn stalled_http_body_times_out() {
+        let temp = tempdir().unwrap();
+        let (url, handle) = spawn_stalled_body_server(Duration::from_millis(500)).unwrap();
+        let origin = HttpOrigin {
+            urls: vec![url.clone()],
+            unpack: false,
+            archive_format: None,
+        };
+        let error = materialize_http_origin_with_timeouts(
+            temp.path(),
+            &origin,
+            HttpTimeouts {
+                connect: Duration::from_millis(100),
+                operation: Duration::from_millis(100),
+            },
+        )
+        .unwrap_err();
+        handle.join().unwrap();
+        let message = error.to_string();
+        assert!(message.contains("all download URLs failed"), "{message}");
+        assert!(message.contains(&url), "{message}");
+        assert!(
+            message.contains("failed to read HTTP response body") || message.contains("timed out"),
+            "{message}"
+        );
     }
 
     #[test]
