@@ -21,20 +21,20 @@ pub const LAUNCHER_BINARY_NAME: &str = "bobr-sandbox-launcher";
 /// Version 6 removes the legacy output scan from the launcher.
 pub const SANDBOX_PROTOCOL_VERSION: u32 = 6;
 
-macro_rules! container_mbuild_dir {
+macro_rules! container_bobr_dir {
     () => {
-        "/__mbuild"
+        "/__bobr"
     };
 }
 
 macro_rules! container_path {
     ($relative:literal) => {
-        concat!(container_mbuild_dir!(), "/", $relative)
+        concat!(container_bobr_dir!(), "/", $relative)
     };
 }
 
 /// Container-private directory used for bobr runtime state.
-pub const CONTAINER_MBUILD_DIR: &str = container_mbuild_dir!();
+pub const CONTAINER_BOBR_DIR: &str = container_bobr_dir!();
 /// Container path where the build working directory is mounted.
 pub const CONTAINER_BUILD_DIR: &str = container_path!("build");
 /// Container path where generated step configuration is mounted.
@@ -404,7 +404,7 @@ mod tests {
         }
         assert_eq!(
             relative_launcher_target(Path::new(CONTAINER_OUT_DIR)).unwrap(),
-            PathBuf::from("__mbuild/out")
+            PathBuf::from("__bobr/out")
         );
     }
 

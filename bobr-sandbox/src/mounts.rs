@@ -1,8 +1,8 @@
 use crate::{SandboxInput, SandboxRuntimeStep, StepUser};
 use bobr_runtime::runtime::RuntimeError;
 use bobr_sandbox_launcher::{
-    CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_FAILURE_REPORT, CONTAINER_INPUTS_DIR,
-    CONTAINER_LAUNCHER_DIR, CONTAINER_LOG_DIR, CONTAINER_MBUILD_DIR, CONTAINER_OUT_DIR,
+    CONTAINER_BOBR_DIR, CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_FAILURE_REPORT,
+    CONTAINER_INPUTS_DIR, CONTAINER_LAUNCHER_DIR, CONTAINER_LOG_DIR, CONTAINER_OUT_DIR,
     CONTAINER_RUNNER_CONFIG, CONTAINER_RUNTIME_DIR, CONTAINER_SUCCESS_REPORT, LAUNCHER_BINARY_NAME,
     RunnerConfig, RunnerRunAs, RunnerStepConfig, SANDBOX_PROTOCOL_VERSION, SandboxLauncherConfig,
     SandboxLauncherMount, SandboxLauncherMountKind, relative_launcher_target,
@@ -157,7 +157,7 @@ fn validate_steps(steps: &[SandboxRuntimeStep]) -> Result<(), RuntimeError> {
 }
 
 fn validate_rootfs_top_level(rootfs: &Path) -> Result<(), RuntimeError> {
-    reject_reserved_rootfs_entry(rootfs, "__mbuild")?;
+    reject_reserved_rootfs_entry(rootfs, "__bobr")?;
     for entry in rootfs_top_level_entries(rootfs)? {
         let name = entry.file_name();
         let name = name.to_str().ok_or_else(|| {
@@ -361,7 +361,7 @@ fn rootfs_top_level_entries(rootfs: &Path) -> Result<Vec<fs::DirEntry>, RuntimeE
 }
 
 fn should_mount_rootfs_entry(name: &str) -> bool {
-    !matches!(name, "__mbuild" | "dev" | "proc" | "run" | "tmp")
+    !matches!(name, "__bobr" | "dev" | "proc" | "run" | "tmp")
 }
 
 fn populate_root_skeleton(
@@ -396,7 +396,7 @@ fn populate_root_skeleton(
         }
     }
     for path in [
-        relative_container_path(CONTAINER_MBUILD_DIR)?,
+        relative_container_path(CONTAINER_BOBR_DIR)?,
         relative_container_path(CONTAINER_BUILD_DIR)?,
         relative_container_path(CONTAINER_CONFIG_DIR)?,
         relative_container_path(CONTAINER_INPUTS_DIR)?,
@@ -498,7 +498,7 @@ fn effective_step_env(step: &SandboxRuntimeStep) -> HashMap<String, String> {
         ),
         ("HOME".to_string(), CONTAINER_BUILD_DIR.to_string()),
         ("TMPDIR".to_string(), "/tmp".to_string()),
-        ("USER".to_string(), "mbuild".to_string()),
+        ("USER".to_string(), "bobr".to_string()),
         ("LC_ALL".to_string(), "C".to_string()),
         ("LANG".to_string(), "C".to_string()),
         ("TZ".to_string(), "UTC".to_string()),
@@ -509,15 +509,19 @@ fn effective_step_env(step: &SandboxRuntimeStep) -> HashMap<String, String> {
         ("SOURCE_DATE_EPOCH".to_string(), "315532800".to_string()),
         ("PYTHONHASHSEED".to_string(), "0".to_string()),
         (
-            "MBUILD_CONFIG_DIR".to_string(),
+            "BOBR_CONFIG_DIR".to_string(),
             CONTAINER_CONFIG_DIR.to_string(),
         ),
         (
-            "MBUILD_BUILD_DIR".to_string(),
+            "BOBR_BUILD_DIR".to_string(),
             CONTAINER_BUILD_DIR.to_string(),
         ),
-        ("MBUILD_OUT_DIR".to_string(), CONTAINER_OUT_DIR.to_string()),
-        ("MBUILD_STEP_NAME".to_string(), step.name.clone()),
+        ("BOBR_OUT_DIR".to_string(), CONTAINER_OUT_DIR.to_string()),
+        (
+            "BOBR_INPUTS_DIR".to_string(),
+            CONTAINER_INPUTS_DIR.to_string(),
+        ),
+        ("BOBR_STEP_NAME".to_string(), step.name.clone()),
     ]);
     env.extend(step.env_overrides.clone());
     env
@@ -694,7 +698,7 @@ mod tests {
 
         let env = effective_step_env(&step);
 
-        assert_eq!(env["MBUILD_STEP_NAME"], "build");
+        assert_eq!(env["BOBR_STEP_NAME"], "build");
         assert_eq!(env["LC_ALL"], "C");
         assert_eq!(env["LANG"], "C");
         assert_eq!(env["TZ"], "UTC");
