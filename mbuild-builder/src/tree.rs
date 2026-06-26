@@ -276,9 +276,9 @@ fn validate_rel_path(path: &str) -> Result<String, BuilderError> {
 }
 
 fn materialize_file_output(path: &Path, entries: &[NormalizedEntry]) -> Result<(), BuilderError> {
-    let NormalizedEntry::File {
+    let Some(NormalizedEntry::File {
         text, executable, ..
-    } = entries.first().expect("validated non-empty tree entries")
+    }) = entries.first()
     else {
         return Err(BuilderError::ExecutionFailed(
             "internal error: file output requires one file entry".to_string(),

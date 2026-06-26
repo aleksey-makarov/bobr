@@ -302,7 +302,7 @@ struct TarEntryRecord {
     kind: TarRecordKind,
     uid: u32,
     gid: u32,
-    mode: Option<u32>,
+    mode: u32,
     symlink_target: Option<String>,
 }
 
@@ -564,7 +564,7 @@ fn extract_hardlink_entry(
     }
 
     let mut link_record = record_from_entry(path, TarRecordKind::File, entry, None)?;
-    if link_record.mode == Some(0) {
+    if link_record.mode == 0 {
         link_record.mode = target_record.mode;
     }
     if link_record.uid != target_record.uid
@@ -611,15 +611,9 @@ fn record_from_entry(
         "gid",
         path,
     )?;
-    let mode = if kind == TarRecordKind::Symlink {
-        None
-    } else {
-        Some(
-            entry.header().mode().map_err(|error| {
-                OciExtractError::InvalidLayer(format!("failed to read mode for '{path}': {error}"))
-            })? & 0o7777,
-        )
-    };
+    let mode = entry.header().mode().map_err(|error| {
+        OciExtractError::InvalidLayer(format!("failed to read mode for '{path}': {error}"))
+    })? & 0o7777;
     Ok(TarEntryRecord {
         path: path.to_string(),
         kind,
@@ -801,7 +795,7 @@ fn ensure_parent_directories(
                         kind: TarRecordKind::Directory,
                         uid: 0,
                         gid: 0,
-                        mode: Some(0o755),
+                        mode: 0o755,
                         symlink_target: None,
                     },
                 );
@@ -821,18 +815,13 @@ fn apply_extracted_metadata(
         match record.kind {
             TarRecordKind::File => {
                 chown_if_needed(&path, record.uid, record.gid)?;
-                chmod(&path, record.mode.expect("file record has mode"))?;
+                chmod(&path, record.mode)?;
             }
             TarRecordKind::Symlink => {
                 lchown_if_needed(&path, record.uid, record.gid)?;
             }
             TarRecordKind::Directory => {
-                directories.push((
-                    record.path.clone(),
-                    record.uid,
-                    record.gid,
-                    record.mode.expect("directory record has mode"),
-                ));
+                directories.push((record.path.clone(), record.uid, record.gid, record.mode));
             }
         }
     }
@@ -1025,7 +1014,7 @@ mod tests {
                 && record.kind == TarRecordKind::File
                 && record.uid == 1
                 && record.gid == 2
-                && record.mode == Some(0o755)
+                && record.mode == 0o755
         }));
         assert!(records.iter().any(|record| {
             record.path == "tool-link"
@@ -1286,7 +1275,7 @@ mod tests {
                 kind: TarRecordKind::Directory,
                 uid: owner.uid(),
                 gid: owner.gid(),
-                mode: Some(0o000),
+                mode: 0o000,
                 symlink_target: None,
             },
             TarEntryRecord {
@@ -1294,7 +1283,7 @@ mod tests {
                 kind: TarRecordKind::File,
                 uid: owner.uid(),
                 gid: owner.gid(),
-                mode: Some(0o600),
+                mode: 0o600,
                 symlink_target: None,
             },
         ];
