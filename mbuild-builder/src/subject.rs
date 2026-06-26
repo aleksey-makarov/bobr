@@ -29,7 +29,7 @@ pub enum BuilderPlanError {
 }
 
 impl BuilderPlanError {
-    pub(crate) fn recipe(message: impl Into<String>) -> Self {
+    pub fn recipe(message: impl Into<String>) -> Self {
         Self::Recipe(message.into())
     }
 
@@ -84,7 +84,7 @@ impl fmt::Debug for BuilderPlannedSubject {
 }
 
 impl BuilderPlannedSubject {
-    pub(crate) fn new(
+    pub fn new(
         builder: &'static dyn Builder,
         name: String,
         config: Value,

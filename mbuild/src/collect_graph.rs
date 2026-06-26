@@ -3,7 +3,7 @@ use crate::planned::PlannedSubject;
 use bobr_core::BuildKey;
 #[cfg(test)]
 use bobr_core::compute_build_key;
-use mbuild_builder::{BuilderPlanError, BuilderRegistry};
+use mbuild_builder::BuilderPlanError;
 use mbuild_source::parse_source_subject;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 pub(crate) fn collect_graph(
     nodes: &BTreeMap<String, Value>,
-    registry: &BuilderRegistry,
     subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
 ) -> Result<BuildKey, ExecutionError> {
     let mut visited_in_path = BTreeSet::new();
@@ -19,7 +18,6 @@ pub(crate) fn collect_graph(
     collect_graph_inner(
         nodes,
         "root",
-        registry,
         subjects,
         &mut visited_in_path,
         &mut node_keys,
@@ -29,7 +27,6 @@ pub(crate) fn collect_graph(
 fn collect_graph_inner(
     nodes: &BTreeMap<String, Value>,
     node_id: &str,
-    registry: &BuilderRegistry,
     subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
     visited_in_path: &mut BTreeSet<String>,
     node_keys: &mut HashMap<String, BuildKey>,
@@ -70,19 +67,12 @@ fn collect_graph_inner(
         for (input_name, slot_value) in inputs_object {
             let input_path = format!("{node_path}.inputs.{input_name}");
             let child_id = parse_input_value(slot_value, &input_path)?;
-            let child = collect_graph_inner(
-                nodes,
-                &child_id,
-                registry,
-                subjects,
-                visited_in_path,
-                node_keys,
-            )?;
+            let child =
+                collect_graph_inner(nodes, &child_id, subjects, visited_in_path, node_keys)?;
             inputs.insert(input_name, child);
         }
 
-        let builder_subject = registry
-            .parse_subject(&tag, object, inputs)
+        let builder_subject = crate::builder_registry::parse_subject(&tag, object, inputs)
             .map_err(|error| map_builder_plan_error(error, &node_path))?;
         (
             builder_subject.build_key(),
@@ -144,7 +134,6 @@ fn take_string(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder_registry::create_builder_registry;
     use crate::request::parse_request_nodes;
     use serde_json::json;
 
@@ -152,9 +141,8 @@ mod tests {
         nodes: &Value,
     ) -> Result<(BuildKey, HashMap<BuildKey, Arc<PlannedSubject>>), ExecutionError> {
         let nodes = parse_request_nodes(nodes.clone(), "$")?;
-        let registry = create_builder_registry()?;
         let mut subjects = HashMap::new();
-        let root_key = collect_graph(&nodes, &registry, &mut subjects)?;
+        let root_key = collect_graph(&nodes, &mut subjects)?;
         Ok((root_key, subjects))
     }
 

@@ -16,8 +16,8 @@ use bobr_sandbox_launcher::{
 };
 use bobr_store::fs_tree::FsTree;
 use mbuild_builder::{
-    BuildContext, BuilderError, BuilderInputPath, BuilderInputs, BuilderRegistry, InputSlot,
-    InputSpec, StagedBuildResult, TypedBuilder,
+    BuildContext, Builder, BuilderError, BuilderInputPath, BuilderInputs, InputSlot, InputSpec,
+    StagedBuildResult, TypedBuilder,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -38,13 +38,10 @@ const OUTPUT_MANIFEST_NAME: &str = "sandbox-fs-tree.jsonl";
 /// Builder implementation registered for recipe nodes tagged `Sandbox`.
 pub struct SandboxBuilder;
 
-/// Static `Sandbox` builder class used by explicit registries.
-pub static SANDBOX_BUILDER: SandboxBuilder = SandboxBuilder;
+static SANDBOX_BUILDER: SandboxBuilder = SandboxBuilder;
 
-/// Registers the `Sandbox` builder into an explicit builder registry.
-pub fn register_builders(registry: &mut BuilderRegistry) -> Result<(), String> {
-    registry.register(&SANDBOX_BUILDER)
-}
+/// Builder classes provided by this crate.
+pub static BUILDERS: &[&'static dyn Builder] = &[&SANDBOX_BUILDER];
 
 /// Return runtime functions supported by `bobr-sandbox`.
 pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {

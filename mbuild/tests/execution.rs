@@ -80,10 +80,11 @@ fn run_request_via_cli(request_path: &Path) -> ObjectHash {
 
 #[test]
 fn registered_builders_include_current_tags_only() {
-    let mut registry = mbuild_builder::BuilderRegistry::new();
-    mbuild_builder::register_in_tree_builders(&mut registry).unwrap();
-    bobr_sandbox::register_builders(&mut registry).unwrap();
-    let tags = registry.supported_tags();
+    let tags: Vec<&str> = mbuild_builder::BUILDERS
+        .iter()
+        .chain(bobr_sandbox::BUILDERS)
+        .map(|builder| builder.tag())
+        .collect();
     for tag in [
         "Group",
         "FsTreeImport",

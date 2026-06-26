@@ -20,7 +20,7 @@ pub use fs_tree_materialize::materialize_fs_tree_root;
 pub use group::{GroupBuilder, GroupConfig};
 pub use initramfs::{InitramfsBuilder, InitramfsConfig};
 pub use oci_extract::{OciExtractBuilder, OciExtractConfig};
-pub use registry::{BuilderRegistry, register_in_tree_builders};
+pub use registry::BUILDERS;
 pub use subject::{BuilderPlanError, BuilderPlannedSubject};
 pub use tree::{TreeBuilder, TreeConfig};
 pub use tree_merge::{TreeMergeBuilder, TreeMergeConfig};

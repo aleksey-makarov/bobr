@@ -1,4 +1,3 @@
-use crate::builder_registry::create_builder_registry;
 use crate::collect_graph::collect_graph;
 use crate::planned::{
     PlannedExecutionContext, PlannedSubject, RealizedInput, SubjectExecution, SubjectOutcome,
@@ -201,9 +200,8 @@ pub fn execute(
     let quiet = quiet.unwrap_or(false);
     check_cancelled(&cancellation)?;
 
-    let builder_registry = create_builder_registry()?;
     let mut subjects = HashMap::new();
-    let root_key = collect_graph(&nodes, &builder_registry, &mut subjects)?;
+    let root_key = collect_graph(&nodes, &mut subjects)?;
 
     let store = Store::create(&store).map_err(map_store_error)?;
     let logger: Arc<BuildRunLogger> =
@@ -680,7 +678,8 @@ mod tests {
     use bobr_core::{BuildLogSubject, compute_build_key, compute_reuse_key};
     use bobr_store::{StoreWorkspace, create_workspace, import_build, resolve_reuse_for_build};
     use mbuild_builder::{
-        BuildContext, BuilderInputs, BuilderRegistry, InputSpec, StagedBuildResult, TypedBuilder,
+        BuildContext, BuilderInputs, BuilderPlannedSubject, InputSpec, StagedBuildResult,
+        TypedBuilder,
     };
     use mbuild_source::{OriginContext, OriginSpec, ParsedOrigin, SourcePlannedSubject};
     use serde::Deserialize;
@@ -727,18 +726,8 @@ mod tests {
         config: Value,
         cancellation: CancellationToken,
     ) -> Result<SubjectExecution, ExecutionError> {
-        let mut registry = BuilderRegistry::new();
-        registry.register(builder).unwrap();
-        let subject = registry
-            .parse_subject(
-                builder.tag(),
-                json!({"name": name, "config": config})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-                BTreeMap::new(),
-            )
-            .unwrap();
+        let subject =
+            BuilderPlannedSubject::new(builder, name.to_string(), config, BTreeMap::new()).unwrap();
         let realized_inputs = HashMap::new();
         execute_subject(
             &PlannedSubject::Builder(subject),
@@ -1533,49 +1522,35 @@ mod tests {
         let logger = create_test_logger(&store);
         fs::create_dir(temp.path().join(".mbuild").join("object-refs").join("bad")).unwrap();
 
-        let mut registry = BuilderRegistry::new();
-        registry.register(&FAST_BUILDER).unwrap();
-        registry.register(&SLOW_BUILDER).unwrap();
-        registry.register(&ROOT_BUILDER).unwrap();
-
         // Fast node publishes to a pre-existing non-symlink ref path, so its
         // publish fails after the build succeeds. Slow node is a sibling input
         // that is still in flight; both are inputs of the root.
-        let fast = registry
-            .parse_subject(
-                "DrainFast",
-                json!({"name": "bad", "config": {}})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-                BTreeMap::new(),
-            )
-            .unwrap();
-        let slow = registry
-            .parse_subject(
-                "DrainSlow",
-                json!({"name": "good", "config": {}})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-                BTreeMap::new(),
-            )
-            .unwrap();
+        let fast = BuilderPlannedSubject::new(
+            &FAST_BUILDER,
+            "bad".to_string(),
+            json!({}),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let slow = BuilderPlannedSubject::new(
+            &SLOW_BUILDER,
+            "good".to_string(),
+            json!({}),
+            BTreeMap::new(),
+        )
+        .unwrap();
         let fast_key = fast.build_key();
         let slow_key = slow.build_key();
-        let root = registry
-            .parse_subject(
-                "DrainRoot",
-                json!({"name": "root", "config": {}})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-                BTreeMap::from([
-                    ("fast".to_string(), fast_key),
-                    ("slow".to_string(), slow_key),
-                ]),
-            )
-            .unwrap();
+        let root = BuilderPlannedSubject::new(
+            &ROOT_BUILDER,
+            "root".to_string(),
+            json!({}),
+            BTreeMap::from([
+                ("fast".to_string(), fast_key),
+                ("slow".to_string(), slow_key),
+            ]),
+        )
+        .unwrap();
         let root_key = root.build_key();
 
         let mut subjects: SubjectGraph = HashMap::new();
