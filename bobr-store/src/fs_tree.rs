@@ -1453,6 +1453,13 @@ fn create_fs_file_shard_dir(object_path: &Path) -> Result<(), StoreError> {
     };
     create_dir_all(shard_dir, "fs-files shard directory")
 }
+// Creates each manifest entry under `output_root` with a plain `join` (no
+// `O_NOFOLLOW`). This is safe against symlink escape only because the manifest
+// is validated: `validate_entries` requires every entry's parent to be a
+// `Directory`, so no entry can live under a symlink, and every parent component
+// here is a real directory created earlier in sorted order. Symlink targets are
+// written verbatim (absolute or `..` targets are legitimate in a rootfs) and are
+// never followed, since nothing is ever created underneath a symlink.
 fn materialize_into_existing_root(
     manifest: &FsTreeManifest,
     fs_files_root: &Path,
@@ -2113,6 +2120,59 @@ mod tests {
 
     fn paths(manifest: &FsTreeManifest) -> Vec<&str> {
         manifest.entries().iter().map(FsTreeEntry::path).collect()
+    }
+
+    #[test]
+    fn manifest_rejects_entry_under_symlink() {
+        // A symlink cannot have children: `validate_entries` requires every
+        // entry's parent to be a directory. This is the invariant that keeps
+        // materialization from ever writing through a symlink, so an entry
+        // placed under a symlink must be rejected at manifest construction.
+        let error = FsTreeManifest::from_entries(vec![
+            root(),
+            FsTreeEntry::symlink("a", 0, 0, "/etc"),
+            FsTreeEntry::file("a/x", hash()),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("is not a directory"), "{error}");
+    }
+
+    #[test]
+    fn materialize_creates_outside_target_symlinks_without_escaping() {
+        // Symlinks whose targets point outside the root (absolute or `..`) are
+        // legitimate in a rootfs; they are stored verbatim and created without
+        // being followed. Materialization must not write anything outside the
+        // output root.
+        let temp = tempfile::tempdir().unwrap();
+        let fs_files = temp.path().join("fs-files");
+        fs::create_dir(&fs_files).unwrap();
+        let output_root = temp.path().join("root");
+        fs::create_dir(&output_root).unwrap();
+        let victim = temp.path().join("victim");
+        fs::create_dir(&victim).unwrap();
+
+        // Use the current owner so materialization's chown/lchown are no-ops
+        // when the test does not run as root.
+        let owner = fs::symlink_metadata(&output_root).unwrap();
+        let (uid, gid) = (owner.uid(), owner.gid());
+        let manifest = manifest(vec![
+            FsTreeEntry::directory("", uid, gid, 0o755),
+            FsTreeEntry::symlink("abs", uid, gid, "/etc"),
+            FsTreeEntry::symlink("rel", uid, gid, "../../escape"),
+        ]);
+
+        materialize_fs_tree_with_root(&manifest, &fs_files, &output_root).unwrap();
+
+        assert_eq!(
+            fs::read_link(output_root.join("abs")).unwrap(),
+            PathBuf::from("/etc")
+        );
+        assert_eq!(
+            fs::read_link(output_root.join("rel")).unwrap(),
+            PathBuf::from("../../escape")
+        );
+        // Nothing was created outside the output root by following a symlink.
+        assert_eq!(fs::read_dir(&victim).unwrap().count(), 0);
     }
 
     #[test]
