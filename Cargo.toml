@@ -1,9 +1,9 @@
 [workspace]
 members = [
   "mbuild",
-  "mbuild-builder",
+  "bobr-builder",
   "bobr-core",
-  "mbuild-source",
+  "bobr-source",
   "bobr-sandbox-launcher",
   "bobr-store",
   "fsobj-hash",

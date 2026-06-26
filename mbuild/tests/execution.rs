@@ -80,7 +80,7 @@ fn run_request_via_cli(request_path: &Path) -> ObjectHash {
 
 #[test]
 fn registered_builders_include_current_tags_only() {
-    let tags: Vec<&str> = mbuild_builder::BUILDERS
+    let tags: Vec<&str> = bobr_builder::BUILDERS
         .iter()
         .chain(bobr_sandbox::BUILDERS)
         .map(|builder| builder.tag())

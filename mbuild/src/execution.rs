@@ -4,6 +4,7 @@ use crate::planned::{
     execute_subject,
 };
 use crate::request::Request;
+use bobr_builder::{BuilderError, BuilderPlannedSubject};
 use bobr_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuildStatus,
     CancellationToken, NoopBuildLogger, ObjectHash, RuntimeBackend, RuntimeProvider,
@@ -11,7 +12,6 @@ use bobr_core::{
 };
 use bobr_runtime::runtime_provider::runtime_provider_for_current_process;
 use bobr_store::{Store, StoreError, StoreTempDir, load_build_handle};
-use mbuild_builder::{BuilderError, BuilderPlannedSubject};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs;
@@ -675,13 +675,13 @@ fn build_run_logger_for_store(store: &Store, quiet: bool) -> Result<BuildRunLogg
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bobr_core::{BuildLogSubject, compute_build_key, compute_reuse_key};
-    use bobr_store::{StoreWorkspace, create_workspace, import_build, resolve_reuse_for_build};
-    use mbuild_builder::{
+    use bobr_builder::{
         BuildContext, BuilderInputs, BuilderPlannedSubject, InputSpec, StagedBuildResult,
         TypedBuilder,
     };
-    use mbuild_source::{OriginContext, OriginSpec, ParsedOrigin, SourcePlannedSubject};
+    use bobr_core::{BuildLogSubject, compute_build_key, compute_reuse_key};
+    use bobr_source::{OriginContext, OriginSpec, ParsedOrigin, SourcePlannedSubject};
+    use bobr_store::{StoreWorkspace, create_workspace, import_build, resolve_reuse_for_build};
     use serde::Deserialize;
     use serde_json::{Map, Value, json};
     use std::collections::BTreeMap;
@@ -721,7 +721,7 @@ mod tests {
     fn run_builder_subject(
         store: &Store,
         run_logger: Arc<BuildRunLogger>,
-        builder: &'static dyn mbuild_builder::Builder,
+        builder: &'static dyn bobr_builder::Builder,
         name: &str,
         config: Value,
         cancellation: CancellationToken,
@@ -847,7 +847,7 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
+        ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
@@ -888,7 +888,7 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
+        ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
@@ -923,12 +923,12 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
+        ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
             fs::write(cx.temp_dir.join("scratch"), b"temp\n").unwrap();
-            Err(mbuild_builder::BuilderError::ExecutionFailed(
+            Err(bobr_builder::BuilderError::ExecutionFailed(
                 "intentional failure".to_string(),
             ))
         }
@@ -955,7 +955,7 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
+        ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
@@ -1419,7 +1419,7 @@ mod tests {
 
     #[test]
     fn execute_graph_drains_in_flight_workers_when_publish_fails() {
-        use mbuild_builder::InputSlot;
+        use bobr_builder::InputSlot;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
 
@@ -1461,7 +1461,7 @@ mod tests {
                 _config: Self::Config,
                 _inputs: BuilderInputs,
                 cx: &mut BuildContext,
-            ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
+            ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
                 Ok(stage_payload(cx, b"fast\n"))
             }
         }
@@ -1482,7 +1482,7 @@ mod tests {
                 _config: Self::Config,
                 _inputs: BuilderInputs,
                 cx: &mut BuildContext,
-            ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
+            ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
                 std::thread::sleep(Duration::from_millis(300));
                 SLOW_FINISHED.store(true, Ordering::SeqCst);
                 Ok(stage_payload(cx, b"slow\n"))
@@ -1513,7 +1513,7 @@ mod tests {
                 _config: Self::Config,
                 _inputs: BuilderInputs,
                 cx: &mut BuildContext,
-            ) -> Result<StagedBuildResult, mbuild_builder::BuilderError> {
+            ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
                 // Never reached: the fast input fails to publish first.
                 Ok(stage_payload(cx, b"root\n"))
             }

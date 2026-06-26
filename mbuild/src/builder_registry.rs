@@ -1,5 +1,5 @@
+use bobr_builder::{Builder, BuilderPlanError, BuilderPlannedSubject};
 use bobr_core::BuildKey;
-use mbuild_builder::{Builder, BuilderPlanError, BuilderPlannedSubject};
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 ///
 /// This is the single place that knows all builder sources.
 fn registered_builders() -> impl Iterator<Item = &'static dyn Builder> {
-    mbuild_builder::BUILDERS
+    bobr_builder::BUILDERS
         .iter()
         .copied()
         .chain(bobr_sandbox::BUILDERS.iter().copied())

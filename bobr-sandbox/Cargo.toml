@@ -7,7 +7,7 @@ edition = "2024"
 bobr-runtime = { path = "../bobr-runtime" }
 bobr-store = { path = "../bobr-store" }
 libc = "0.2"
-mbuild-builder = { path = "../mbuild-builder" }
+bobr-builder = { path = "../bobr-builder" }
 bobr-core = { path = "../bobr-core" }
 bobr-sandbox-launcher = { path = "../bobr-sandbox-launcher" }
 serde = { version = "1.0", features = ["derive"] }

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use bobr_core::ObjectHash;
-use mbuild_source::oci_registry::{OciPlatform, fetch_image_authenticated};
+use bobr_source::oci_registry::{OciPlatform, fetch_image_authenticated};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;

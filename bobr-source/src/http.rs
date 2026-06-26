@@ -16,7 +16,7 @@ use xz2::read::XzDecoder;
 use zip::read::ZipArchive;
 
 const REDIRECT_LIMIT: usize = 10;
-const USER_AGENT: &str = "mbuild-source-http/0.1";
+const USER_AGENT: &str = "bobr-source-http/0.1";
 const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const HTTP_OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 

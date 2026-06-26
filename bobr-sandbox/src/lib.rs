@@ -8,6 +8,10 @@ mod mounts;
 mod reports;
 mod tools;
 
+use bobr_builder::{
+    BuildContext, Builder, BuilderError, BuilderInputPath, BuilderInputs, InputSlot, InputSpec,
+    StagedBuildResult, TypedBuilder,
+};
 use bobr_core::BuildLogLevel;
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use bobr_sandbox_launcher::{
@@ -15,10 +19,6 @@ use bobr_sandbox_launcher::{
     SandboxStepReport,
 };
 use bobr_store::fs_tree::FsTree;
-use mbuild_builder::{
-    BuildContext, Builder, BuilderError, BuilderInputPath, BuilderInputs, InputSlot, InputSpec,
-    StagedBuildResult, TypedBuilder,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -959,8 +959,8 @@ impl RuntimeFunction for SandboxFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bobr_builder::{Builder, BuilderInputPath};
     use bobr_store::Store;
-    use mbuild_builder::{Builder, BuilderInputPath};
     use serde_json::json;
     use std::collections::BTreeMap;
     use tempfile::tempdir;

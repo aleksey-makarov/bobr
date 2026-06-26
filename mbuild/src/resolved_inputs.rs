@@ -1,9 +1,9 @@
 use crate::execution::{ExecutionError, map_store_error};
-use bobr_core::{ObjectHash, RuntimeProvider};
-use bobr_store::Store;
-use mbuild_builder::{
+use bobr_builder::{
     BuilderError, BuilderInputPath, BuilderInputs, InputKind, InputSpec, materialize_fs_tree_root,
 };
+use bobr_core::{ObjectHash, RuntimeProvider};
+use bobr_store::Store;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -132,8 +132,8 @@ fn prepare_fs_tree_root_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bobr_builder::InputSlot;
     use bobr_store::{Store, import_build};
-    use mbuild_builder::InputSlot;
     use std::fs;
     use std::str::FromStr;
     use tempfile::tempdir;
