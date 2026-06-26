@@ -5,7 +5,7 @@ use crate::StoreError;
 /// Ref names are used as filenames under store ref directories, so they must be
 /// non-empty, must not be `.` or `..`, and may contain only ASCII letters,
 /// digits, `.`, `_`, or `-`.
-pub(crate) fn validate_ref_name(name: &str) -> Result<(), StoreError> {
+pub fn validate_ref_name(name: &str) -> Result<(), StoreError> {
     if name.is_empty() {
         return Err(StoreError::InvalidInput(
             "ref name must not be empty".to_string(),

@@ -3,6 +3,7 @@ use crate::planned::PlannedSubject;
 use bobr_core::BuildKey;
 #[cfg(test)]
 use bobr_core::compute_build_key;
+use bobr_store::validate_ref_name;
 use mbuild_builder::BuilderPlanError;
 use mbuild_source::parse_source_subject;
 use serde_json::{Map, Value};
@@ -79,6 +80,11 @@ fn collect_graph_inner(
             Arc::new(PlannedSubject::Builder(builder_subject)),
         )
     };
+
+    // Validate the recipe node name early (it later becomes a store ref name),
+    // so a bad name fails during planning rather than after the node is built.
+    validate_ref_name(subject.name())
+        .map_err(|error| ExecutionError::RequestLoad(format!("{node_path}: {error}")))?;
 
     visited_in_path.remove(node_id);
 
@@ -190,6 +196,18 @@ mod tests {
             error
                 .to_string()
                 .contains("unknown builder tag 'NoSuchBuilder'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn invalid_recipe_node_name_is_rejected_during_planning() {
+        let nodes = json!({
+            "root": tree_recipe("bad/name", "hello.txt", "hello", false),
+        });
+        let error = collect_error(&nodes);
+        assert!(
+            error.to_string().contains("invalid ref name 'bad/name'"),
             "{error}"
         );
     }
