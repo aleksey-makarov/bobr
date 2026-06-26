@@ -1,7 +1,7 @@
 mod support;
 
+use bobr::execute_request;
 use bobr_store::{Store, load_build_handle, load_object_record};
-use mbuild::execute_request;
 use std::fs;
 use support::{
     build_ref_count, object_record_count, remove_build_ref, store_root, tree_file_recipe,

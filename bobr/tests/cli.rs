@@ -19,7 +19,7 @@ fn cli_reads_request_from_stdin_when_path_is_omitted() {
     );
     let request_bytes = fs::read(&request_path).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .current_dir(workspace.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -49,7 +49,7 @@ fn cli_accepts_explicit_request_path() {
         &tree_file_recipe("custom-recipe", "custom.txt", "hello custom", false),
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .arg(&request_path)
         .current_dir(workspace.path())
         .output()
@@ -72,7 +72,7 @@ fn cli_rejects_more_than_one_request_argument() {
         &tree_file_recipe("one-recipe", "one.txt", "hello", false),
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .arg(&request_path)
         .arg(&extra_path)
         .current_dir(workspace.path())
@@ -83,7 +83,7 @@ fn cli_rejects_more_than_one_request_argument() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
     assert!(stderr.contains("unexpected argument"), "{stderr}");
-    assert!(stderr.contains("usage: mbuild [request.json]"), "{stderr}");
+    assert!(stderr.contains("usage: bobr [request.json]"), "{stderr}");
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn cli_reports_missing_store_option() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .arg(&request_path)
         .current_dir(workspace.path())
         .output()
@@ -126,7 +126,7 @@ fn request_quiet_suppresses_live_progress() {
         }),
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .arg(&request_path)
         .current_dir(workspace.path())
         .output()
@@ -150,7 +150,7 @@ fn request_jobs_zero_is_rejected() {
         }),
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .arg(&request_path)
         .current_dir(workspace.path())
         .output()
@@ -171,7 +171,7 @@ fn cli_reports_invalid_request() {
     let request_path = workspace.path().join("broken.json");
     fs::write(&request_path, b"{ not valid json").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .arg(&request_path)
         .current_dir(workspace.path())
         .output()
@@ -212,7 +212,7 @@ fn cli_reports_invalid_generic_input_shape() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .arg(&request_path)
         .current_dir(workspace.path())
         .output()
@@ -255,7 +255,7 @@ fn cli_reports_relative_store_path() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .arg(&request_path)
         .current_dir(workspace.path())
         .output()
@@ -295,7 +295,7 @@ fn cli_reports_unexpected_local_path() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .arg(&request_path)
         .current_dir(workspace.path())
         .output()
@@ -333,7 +333,7 @@ fn cli_reports_relative_source_path() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .arg(&request_path)
         .current_dir(workspace.path())
         .output()
@@ -380,7 +380,7 @@ fn cli_reports_missing_store_directory() {
     )
     .unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .arg(&request_path)
         .current_dir(workspace.path())
         .output()
@@ -415,7 +415,7 @@ fn cli_reports_unknown_input_slot() {
     );
     write_request(&request_path, &recipe);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .arg(&request_path)
         .current_dir(workspace.path())
         .output()

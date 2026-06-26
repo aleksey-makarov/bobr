@@ -254,7 +254,7 @@ mod tests {
         let musl_debug = target.join("x86_64-unknown-linux-musl").join("debug");
         fs::create_dir_all(&debug).unwrap();
         fs::create_dir_all(&musl_debug).unwrap();
-        let current_exe = debug.join("mbuild");
+        let current_exe = debug.join("bobr");
         let dynamic_sibling = debug.join(LAUNCHER_BINARY_NAME);
         let static_runner = musl_debug.join(LAUNCHER_BINARY_NAME);
         fs::write(&current_exe, "").unwrap();
@@ -271,7 +271,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let bin = temp.path().join("bin");
         fs::create_dir(&bin).unwrap();
-        let current_exe = bin.join("mbuild");
+        let current_exe = bin.join("bobr");
         let sibling = bin.join(LAUNCHER_BINARY_NAME);
         fs::write(&current_exe, "").unwrap();
         fs::write(&sibling, "").unwrap();

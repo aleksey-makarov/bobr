@@ -1,6 +1,6 @@
 [workspace]
 members = [
-  "mbuild",
+  "bobr",
   "bobr-builder",
   "bobr-core",
   "bobr-source",

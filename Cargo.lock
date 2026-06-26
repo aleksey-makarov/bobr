@@ -70,6 +70,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "bobr"
+version = "0.1.0"
+dependencies = [
+ "bobr-builder",
+ "bobr-core",
+ "bobr-runtime",
+ "bobr-sandbox",
+ "bobr-source",
+ "bobr-store",
+ "flate2",
+ "fsobj-hash",
+ "libc",
+ "mockito",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "time",
+]
+
+[[package]]
 name = "bobr-builder"
 version = "0.1.0"
 dependencies = [
@@ -854,28 +876,6 @@ dependencies = [
  "cc",
  "libc",
  "pkg-config",
-]
-
-[[package]]
-name = "mbuild"
-version = "0.1.0"
-dependencies = [
- "bobr-builder",
- "bobr-core",
- "bobr-runtime",
- "bobr-sandbox",
- "bobr-source",
- "bobr-store",
- "flate2",
- "fsobj-hash",
- "libc",
- "mockito",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
- "time",
 ]
 
 [[package]]

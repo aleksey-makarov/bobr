@@ -5,19 +5,19 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use bobr::{Request, execute};
 use bobr_core::CancellationToken;
-use mbuild::{Request, execute};
 
-type MResult<T> = Result<T, MbuildError>;
+type MResult<T> = Result<T, BobrError>;
 
 #[derive(Debug)]
-enum MbuildError {
+enum BobrError {
     InvalidInput(String),
     Cancelled(String),
     BuildFailed(String),
 }
 
-impl MbuildError {
+impl BobrError {
     fn class(&self) -> &'static str {
         match self {
             Self::InvalidInput(_) => "invalid-input",
@@ -35,7 +35,7 @@ impl MbuildError {
     }
 }
 
-impl fmt::Display for MbuildError {
+impl fmt::Display for BobrError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.message())
     }
@@ -54,7 +54,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error[{}]: {}", error.class(), error);
-            if matches!(error, MbuildError::Cancelled(_)) {
+            if matches!(error, BobrError::Cancelled(_)) {
                 ExitCode::from(130)
             } else {
                 ExitCode::from(1)
@@ -110,8 +110,8 @@ fn request_file_from_args() -> MResult<Option<PathBuf>> {
         return Ok(None);
     };
     if let Some(extra) = args.next() {
-        return Err(MbuildError::InvalidInput(format!(
-            "unexpected argument '{}'; usage: mbuild [request.json]",
+        return Err(BobrError::InvalidInput(format!(
+            "unexpected argument '{}'; usage: bobr [request.json]",
             extra.to_string_lossy()
         )));
     }
@@ -121,7 +121,7 @@ fn request_file_from_args() -> MResult<Option<PathBuf>> {
 fn read_request_bytes(request_file: Option<&PathBuf>) -> MResult<Vec<u8>> {
     match request_file {
         Some(path) => fs::read(path).map_err(|error| {
-            MbuildError::InvalidInput(format!(
+            BobrError::InvalidInput(format!(
                 "failed to read request file '{}': {error}",
                 path.display()
             ))
@@ -129,23 +129,21 @@ fn read_request_bytes(request_file: Option<&PathBuf>) -> MResult<Vec<u8>> {
         None => {
             let mut bytes = Vec::new();
             io::stdin().read_to_end(&mut bytes).map_err(|error| {
-                MbuildError::InvalidInput(format!(
-                    "failed to read request JSON from stdin: {error}"
-                ))
+                BobrError::InvalidInput(format!("failed to read request JSON from stdin: {error}"))
             })?;
             Ok(bytes)
         }
     }
 }
 
-fn map_execution_error(error: mbuild::ExecutionError) -> MbuildError {
+fn map_execution_error(error: bobr::ExecutionError) -> BobrError {
     match error {
-        mbuild::ExecutionError::InvalidRequest(_)
-        | mbuild::ExecutionError::UnknownBuilder(_)
-        | mbuild::ExecutionError::RequestLoad(_) => MbuildError::InvalidInput(error.to_string()),
-        mbuild::ExecutionError::Cancelled(_) => MbuildError::Cancelled(error.to_string()),
-        mbuild::ExecutionError::Build(_) | mbuild::ExecutionError::Store(_) => {
-            MbuildError::BuildFailed(error.to_string())
+        bobr::ExecutionError::InvalidRequest(_)
+        | bobr::ExecutionError::UnknownBuilder(_)
+        | bobr::ExecutionError::RequestLoad(_) => BobrError::InvalidInput(error.to_string()),
+        bobr::ExecutionError::Cancelled(_) => BobrError::Cancelled(error.to_string()),
+        bobr::ExecutionError::Build(_) | bobr::ExecutionError::Store(_) => {
+            BobrError::BuildFailed(error.to_string())
         }
     }
 }

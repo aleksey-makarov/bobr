@@ -1,10 +1,10 @@
 mod support;
 
+use bobr::execute_request;
 use bobr_core::{BuildKey, ObjectHash};
 #[cfg(feature = "integration-tests")]
 use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
 use bobr_store::{Store, load_build_handle, load_object_record};
-use mbuild::execute_request;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -60,13 +60,13 @@ fn record_build_key(layout: &Store, object_hash: ObjectHash) -> BuildKey {
 
 #[cfg(feature = "integration-tests")]
 fn run_request_via_cli(request_path: &Path) -> ObjectHash {
-    let output = Command::new(env!("CARGO_BIN_EXE_mbuild"))
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
         .arg(request_path)
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "mbuild failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
+        "bobr failed with status {:?}\nstdout:\n{}\nstderr:\n{}",
         output.status.code(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
