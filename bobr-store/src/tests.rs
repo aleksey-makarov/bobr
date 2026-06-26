@@ -3,7 +3,7 @@ use crate::fs_tree::{FsTree, FsTreeEntry, FsTreeInstall, FsTreeInstallAttrs, FsT
 use bobr_core::{BuildKey, ObjectHash, ReuseKey, compute_build_key, compute_reuse_key};
 use fsobj_hash::hash_path;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -44,8 +44,8 @@ fn reuse_key_is_stable_for_identical_inputs() {
     ];
 
     assert_eq!(
-        compute_reuse_key("CasTest", &payload, &inputs).unwrap(),
-        compute_reuse_key("CasTest", &payload, &inputs).unwrap()
+        reuse_key_for("CasTest", payload.clone(), &inputs),
+        reuse_key_for("CasTest", payload, &inputs)
     );
 }
 
@@ -100,8 +100,7 @@ fn import_build_reuses_existing_object_record_via_new_build_handle_ref() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
-    let reuse_key =
-        compute_reuse_key("CasTest", &json!({ "kind": "sandbox-script" }), &[]).unwrap();
+    let reuse_key = reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]);
     let first_stage = temp.path().join("first.txt");
     fs::write(&first_stage, b"hello").unwrap();
     let first = materialize_named_test_build(
@@ -174,12 +173,11 @@ fn import_build_writes_build_record_and_object_ref() {
                 "1111111111111111111111111111111111111111111111111111111111111111",
             )],
         ),
-        compute_reuse_key(
+        reuse_key_for(
             "CasTest",
-            &json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
+            json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
             &[],
-        )
-        .unwrap(),
+        ),
         &stage,
         vec![],
     );
@@ -262,12 +260,11 @@ fn object_record_round_trips_inputs() {
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111"),
         parse_object_hash("2222222222222222222222222222222222222222222222222222222222222222"),
     ];
-    let reuse_key = compute_reuse_key(
+    let reuse_key = reuse_key_for(
         "CasTest",
-        &json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
+        json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
         &inputs,
-    )
-    .unwrap();
+    );
 
     let stage = temp.path().join("script.sh");
     fs::write(&stage, b"echo hi\n").unwrap();
@@ -1566,9 +1563,19 @@ fn parse_build_key(value: &str) -> BuildKey {
 }
 
 fn build_key_for(builder_tag: &str, payload: Value, input_builds: &[BuildKey]) -> BuildKey {
-    compute_build_key(builder_tag, &payload, input_builds).unwrap()
+    let inputs = input_builds
+        .iter()
+        .enumerate()
+        .map(|(i, key)| (format!("in{i:03}"), *key))
+        .collect::<BTreeMap<_, _>>();
+    compute_build_key(builder_tag, &payload, &inputs).unwrap()
 }
 
 fn reuse_key_for(builder_tag: &str, payload: Value, inputs: &[ObjectHash]) -> ReuseKey {
-    compute_reuse_key(builder_tag, &payload, inputs).unwrap()
+    let inputs = inputs
+        .iter()
+        .enumerate()
+        .map(|(i, hash)| (format!("in{i:03}"), *hash))
+        .collect::<BTreeMap<_, _>>();
+    compute_reuse_key(builder_tag, &payload, &inputs).unwrap()
 }

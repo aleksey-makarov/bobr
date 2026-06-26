@@ -8,10 +8,11 @@ use fsobj_hash::define_hex_hash_type;
 pub use fsobj_hash::{ObjectHash, ParseHexHashError};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fmt;
 
-const INVOCATION_SCHEMA: &str = "bobr-build-invocation-v2";
-const REUSE_INVOCATION_SCHEMA: &str = "bobr-build-reuse-invocation-v2";
+const INVOCATION_SCHEMA: &str = "bobr-build-invocation-v3";
+const REUSE_INVOCATION_SCHEMA: &str = "bobr-build-reuse-invocation-v3";
 
 define_hex_hash_type! {
     /// Stable key for a planned build graph node.
@@ -77,19 +78,25 @@ impl std::error::Error for IdentityError {}
 
 /// Computes the stable key for a normalized build invocation.
 ///
-/// The key covers the builder tag, the normalized JSON payload, and the ordered
-/// list of direct dependency build keys. The payload is serialized with the
-/// core canonical JSON encoder before hashing, so callers must pass the already
-/// normalized semantic payload rather than arbitrary user input.
+/// The key covers the builder tag, the normalized JSON payload, and the direct
+/// dependency build keys **keyed by input slot name**. The payload is serialized
+/// with the core canonical JSON encoder before hashing, so callers must pass the
+/// already normalized semantic payload rather than arbitrary user input.
+///
+/// Inputs are identified by name: both the slot name and its build key enter the
+/// fingerprint, so two builds that wire the same objects into differently named
+/// slots get distinct keys. The `BTreeMap` makes the encoding order-independent
+/// and deterministic.
 pub fn compute_build_key(
     builder_tag: &str,
     normalized_payload: &Value,
-    input_keys: &[BuildKey],
+    inputs: &BTreeMap<String, BuildKey>,
 ) -> Result<BuildKey, IdentityError> {
-    let input_values = input_keys
+    let input_values = inputs
         .iter()
-        .map(|build_key| {
+        .map(|(name, build_key)| {
             let mut input = Map::new();
+            input.insert("name".to_string(), Value::String(name.clone()));
             input.insert(
                 "build_key".to_string(),
                 Value::String(build_key.to_string()),
@@ -116,17 +123,29 @@ pub fn compute_build_key(
 
 /// Computes the stable reuse key for a normalized object invocation.
 ///
-/// The key covers the builder tag, the normalized JSON payload, and the ordered
-/// list of realized input object hashes. Runtime code uses this key to find
-/// a reusable object even when the current build key has not been seen before.
+/// The key covers the builder tag, the normalized JSON payload, and the realized
+/// input object hashes **keyed by input slot name**. Runtime code uses this key
+/// to find a reusable object even when the current build key has not been seen
+/// before.
+///
+/// As with [`compute_build_key`], inputs are identified by name: both the slot
+/// name and its object hash enter the fingerprint.
 pub fn compute_reuse_key(
     builder_tag: &str,
     normalized_payload: &Value,
-    inputs: &[ObjectHash],
+    inputs: &BTreeMap<String, ObjectHash>,
 ) -> Result<ReuseKey, IdentityError> {
     let input_values = inputs
         .iter()
-        .map(|object_hash| Value::String(object_hash.to_string()))
+        .map(|(name, object_hash)| {
+            let mut input = Map::new();
+            input.insert("name".to_string(), Value::String(name.clone()));
+            input.insert(
+                "object_hash".to_string(),
+                Value::String(object_hash.to_string()),
+            );
+            Value::Object(input)
+        })
         .collect::<Vec<_>>();
 
     let mut root = Map::new();
@@ -182,5 +201,54 @@ fn write_canonical_json(value: &Value, out: &mut Vec<u8>) -> Result<(), Identity
             out.push(b'}');
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::str::FromStr;
+
+    const HEX_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const HEX_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn build_key_distinguishes_inputs_by_slot_name() {
+        let key = BuildKey::from_str(HEX_A).unwrap();
+        let under_a =
+            compute_build_key("T", &json!({}), &BTreeMap::from([("a".to_string(), key)])).unwrap();
+        let under_b =
+            compute_build_key("T", &json!({}), &BTreeMap::from([("b".to_string(), key)])).unwrap();
+        assert_ne!(under_a, under_b);
+    }
+
+    #[test]
+    fn build_key_distinguishes_swapped_inputs() {
+        let k1 = BuildKey::from_str(HEX_A).unwrap();
+        let k2 = BuildKey::from_str(HEX_B).unwrap();
+        let forward = compute_build_key(
+            "T",
+            &json!({}),
+            &BTreeMap::from([("a".to_string(), k1), ("b".to_string(), k2)]),
+        )
+        .unwrap();
+        let swapped = compute_build_key(
+            "T",
+            &json!({}),
+            &BTreeMap::from([("a".to_string(), k2), ("b".to_string(), k1)]),
+        )
+        .unwrap();
+        assert_ne!(forward, swapped);
+    }
+
+    #[test]
+    fn reuse_key_distinguishes_inputs_by_slot_name() {
+        let hash = ObjectHash::from_str(HEX_A).unwrap();
+        let under_a =
+            compute_reuse_key("T", &json!({}), &BTreeMap::from([("a".to_string(), hash)])).unwrap();
+        let under_b =
+            compute_reuse_key("T", &json!({}), &BTreeMap::from([("b".to_string(), hash)])).unwrap();
+        assert_ne!(under_a, under_b);
     }
 }

@@ -451,8 +451,8 @@ mod tests {
         });
 
         let (root_key, _) = collect_one(&nodes).unwrap();
-        let rootfs_key = compute_build_key("Tree", &rootfs["config"], &[]).unwrap();
-        let script_key = compute_build_key("Tree", &script["config"], &[]).unwrap();
+        let rootfs_key = compute_build_key("Tree", &rootfs["config"], &BTreeMap::new()).unwrap();
+        let script_key = compute_build_key("Tree", &script["config"], &BTreeMap::new()).unwrap();
         let source_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             .parse()
             .unwrap();
@@ -460,7 +460,11 @@ mod tests {
         let expected = compute_build_key(
             "Sandbox",
             &nodes["root"]["config"],
-            &[rootfs_key, script_key, source_key],
+            &BTreeMap::from([
+                ("rootfs".to_string(), rootfs_key),
+                ("script".to_string(), script_key),
+                ("source".to_string(), source_key),
+            ]),
         )
         .unwrap();
 
@@ -484,8 +488,12 @@ mod tests {
         });
 
         let (_root_key, subjects) = collect_one(&nodes).unwrap();
-        let deduped_key =
-            compute_build_key("Tree", &tree_config("same.txt", "same", false), &[]).unwrap();
+        let deduped_key = compute_build_key(
+            "Tree",
+            &tree_config("same.txt", "same", false),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let subject = subjects.get(&deduped_key).unwrap();
         assert_eq!(subject.name(), "binary-a");
         assert!(

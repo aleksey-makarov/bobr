@@ -52,10 +52,6 @@ impl ResolvedInputs {
         self.slots.get(name)
     }
 
-    fn get(&self, name: &str) -> Option<&ResolvedDependency> {
-        self.slots.get(name)
-    }
-
     fn extra<'a>(&'a self, spec: &InputSpec, name: &str) -> Option<&'a ResolvedDependency> {
         if spec.is_reserved_input(name) {
             None
@@ -77,17 +73,11 @@ impl ResolvedInputs {
         })
     }
 
-    pub(crate) fn ordered_reuse_input_hashes(
-        &self,
-        spec: &InputSpec,
-    ) -> Result<Vec<ObjectHash>, BuilderError> {
-        let mut ordered = Vec::new();
-        for name in spec.ordered_present_input_names(&self.slots) {
-            if let Some(object) = self.get(name) {
-                ordered.push(object.object_hash);
-            }
-        }
-        Ok(ordered)
+    pub(crate) fn reuse_input_hashes(&self) -> BTreeMap<String, ObjectHash> {
+        self.slots
+            .iter()
+            .map(|(name, object)| (name.clone(), object.object_hash))
+            .collect()
     }
 
     pub(crate) fn prepare_builder_inputs(
@@ -363,63 +353,42 @@ mod tests {
         );
     }
 
-    static ORDERED_SPEC: InputSpec = InputSpec {
-        required_inputs: &[InputSlot::object("first")],
-        optional_inputs: &[InputSlot::object("optional")],
-        allow_extra_inputs: true,
-    };
-
     #[test]
-    fn ordered_reuse_input_hashes_follow_input_spec_order() {
-        let mut first = sample_object();
-        first.object_hash = ObjectHash::from_str(
+    fn reuse_input_hashes_map_inputs_by_name() {
+        let mut rootfs = sample_object();
+        rootfs.object_hash = ObjectHash::from_str(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
         .unwrap();
-        let mut optional = sample_object();
-        optional.object_hash = ObjectHash::from_str(
+        let mut tools = sample_object();
+        tools.object_hash = ObjectHash::from_str(
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        )
-        .unwrap();
-        let mut extra_a = sample_object();
-        extra_a.object_hash = ObjectHash::from_str(
-            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        )
-        .unwrap();
-        let mut extra_b = sample_object();
-        extra_b.object_hash = ObjectHash::from_str(
-            "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
         )
         .unwrap();
 
         let inputs = ResolvedInputs::new(BTreeMap::from([
-            ("first".to_string(), first),
-            ("optional".to_string(), optional),
-            ("extra_b".to_string(), extra_b),
-            ("extra_a".to_string(), extra_a),
+            ("rootfs".to_string(), rootfs),
+            ("tools".to_string(), tools),
         ]));
 
-        let ordered = inputs.ordered_reuse_input_hashes(&ORDERED_SPEC).unwrap();
         assert_eq!(
-            ordered,
-            vec![
-                ObjectHash::from_str(
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                )
-                .unwrap(),
-                ObjectHash::from_str(
-                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                )
-                .unwrap(),
-                ObjectHash::from_str(
-                    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-                )
-                .unwrap(),
-                ObjectHash::from_str(
-                    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-                )
-                .unwrap(),
-            ]
+            inputs.reuse_input_hashes(),
+            BTreeMap::from([
+                (
+                    "rootfs".to_string(),
+                    ObjectHash::from_str(
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    )
+                    .unwrap()
+                ),
+                (
+                    "tools".to_string(),
+                    ObjectHash::from_str(
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    )
+                    .unwrap()
+                ),
+            ])
         );
     }
 }

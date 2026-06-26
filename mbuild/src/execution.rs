@@ -972,11 +972,12 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
 
-        let matching_inputs = vec![
+        let matching_inputs: BTreeMap<String, ObjectHash> = BTreeMap::from([(
+            "in".to_string(),
             "1111111111111111111111111111111111111111111111111111111111111111"
                 .parse()
                 .unwrap(),
-        ];
+        )]);
         let payload = json!({ "source": "echo hi\n", "executable": true });
         let reuse_key =
             compute_reuse_key("ExecutionLookupTest", &payload, &matching_inputs).unwrap();
@@ -992,7 +993,7 @@ mod tests {
             &store,
             build_key_for_object,
             reuse_key,
-            matching_inputs.clone(),
+            matching_inputs.values().copied().collect(),
             &stage,
             "script",
         )
@@ -1009,11 +1010,12 @@ mod tests {
             .expect("build handle repaired for lookup key");
         assert_eq!(repaired, object_hash);
 
-        let mismatching_inputs = vec![
+        let mismatching_inputs: BTreeMap<String, ObjectHash> = BTreeMap::from([(
+            "in".to_string(),
             "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                 .parse()
                 .unwrap(),
-        ];
+        )]);
         let mismatching_reuse_key =
             compute_reuse_key("ExecutionLookupTest", &payload, &mismatching_inputs).unwrap();
         assert!(
@@ -1054,7 +1056,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let config = json!({});
-        let build_key = compute_build_key("ExecutionTest", &config, &[]).unwrap();
+        let build_key = compute_build_key("ExecutionTest", &config, &BTreeMap::new()).unwrap();
         let run_logger = create_test_logger(&store);
         let (workspace, _logger) = create_test_run(
             &store,
@@ -1115,7 +1117,7 @@ mod tests {
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
         let config = json!({});
-        let build_key = compute_build_key("Sandbox", &config, &[]).unwrap();
+        let build_key = compute_build_key("Sandbox", &config, &BTreeMap::new()).unwrap();
         let (workspace, _logger) = create_test_run(
             &store,
             &run_logger,
@@ -1162,7 +1164,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
-        let build_key = compute_build_key("ExecutionTest", &json!({}), &[]).unwrap();
+        let build_key = compute_build_key("ExecutionTest", &json!({}), &BTreeMap::new()).unwrap();
         let (workspace, logger) = create_test_run(
             &store,
             &run_logger,
@@ -1194,7 +1196,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
-        let build_key = compute_build_key("ExecutionTest", &json!({}), &[]).unwrap();
+        let build_key = compute_build_key("ExecutionTest", &json!({}), &BTreeMap::new()).unwrap();
         let (workspace, _logger) = create_test_run(
             &store,
             &run_logger,

@@ -83,9 +83,7 @@ fn execute_builder_subject(
     let build_key = subject.build_key();
     let inputs = builder_resolved_inputs(subject, cx.store, cx.realized_inputs)?;
     check_cancelled(&cx.cancellation)?;
-    let input_hashes = inputs
-        .ordered_reuse_input_hashes(subject.input_spec())
-        .map_err(map_builder_error)?;
+    let input_hashes = inputs.reuse_input_hashes();
 
     // Resolve the caches before building a workspace: a hit needs no
     // workspace, logger, or temp dir, and is left silent (NoopBuildLogger).
@@ -174,7 +172,7 @@ fn execute_builder_subject(
         cx.store,
         build_key,
         reuse_key,
-        input_hashes,
+        input_hashes.values().copied().collect(),
         &staged.staged_path,
         subject.name(),
     )

@@ -116,13 +116,8 @@ impl BuilderPlannedSubject {
             }
         }
 
-        let ordered_direct_deps = spec
-            .ordered_present_input_names(&inputs)
-            .into_iter()
-            .filter_map(|input_name| inputs.get(input_name).copied())
-            .collect::<Vec<_>>();
-        let build_key = compute_build_key(tag, &config, &ordered_direct_deps)
-            .map_err(BuilderPlanError::identity)?;
+        let build_key =
+            compute_build_key(tag, &config, &inputs).map_err(BuilderPlanError::identity)?;
 
         Ok(Self {
             builder,
@@ -161,7 +156,7 @@ impl BuilderPlannedSubject {
     /// Computes the reuse key for this builder and realized input hashes.
     pub fn compute_reuse_key(
         &self,
-        input_hashes: &[ObjectHash],
+        input_hashes: &BTreeMap<String, ObjectHash>,
     ) -> Result<ReuseKey, BuilderPlanError> {
         compute_reuse_key(self.tag(), &self.config, input_hashes)
             .map_err(BuilderPlanError::identity)
