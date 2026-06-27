@@ -151,9 +151,21 @@ impl SourcePlannedSubject {
             return Err(SourceExecutionError::cancelled());
         }
         let temp_root = ctx.temp_dir();
-        let staged_path = origin
-            .materialize(&OriginContext { temp_root })
-            .map_err(SourceExecutionError::build)?;
+        let origin_cx = OriginContext {
+            temp_root,
+            logger: ctx.logger().as_ref(),
+            cancellation: ctx.cancellation(),
+        };
+        let staged_path = match origin.materialize(&origin_cx) {
+            Ok(path) => path,
+            // A mid-fetch abort surfaces as an opaque error; if the run was
+            // cancelled, report it as cancellation rather than a build failure.
+            Err(error) if ctx.cancellation().is_cancelled() => {
+                let _ = error;
+                return Err(SourceExecutionError::cancelled());
+            }
+            Err(error) => return Err(SourceExecutionError::build(error)),
+        };
         validate_origin_staged_path(&staged_path, temp_root)
             .map_err(SourceExecutionError::build)?;
         Ok(staged_path)

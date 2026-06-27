@@ -14,10 +14,17 @@ use time::macros::format_description;
 /// Schema tag stamped on every on-disk event record.
 pub const BUILD_EVENT_SCHEMA: &str = "bobr-build-event-v1";
 
-/// Severity of an event. Ordered `Info < Warn < Error`; the stderr progress
-/// sink compares each event's level against its threshold.
+/// Severity of an event. Ordered `Progress < Info < Warn < Error`; the stderr
+/// progress sink compares each event's level against its threshold.
+///
+/// `Progress` is a transient, screen-only level: it is rendered to stderr (in
+/// non-quiet mode) but **never persisted** — `FileSink` drops it, so the
+/// on-disk level vocabulary stays `info`/`warn`/`error`. Use it for
+/// high-frequency progress ticks (e.g. download byte counts); use `Info` for
+/// durable milestones worth keeping in the event log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuildLogLevel {
+    Progress,
     Info,
     Warn,
     Error,
@@ -32,6 +39,7 @@ impl fmt::Display for BuildLogLevel {
 impl BuildLogLevel {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Progress => "progress",
             Self::Info => "info",
             Self::Warn => "warn",
             Self::Error => "error",
@@ -244,7 +252,14 @@ impl BuildRunLogger {
         subject_seq: Option<u64>,
         event: &BuildLogEvent,
     ) {
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        // Progress events are transient and never persisted, so they must not
+        // consume the durable run sequence — otherwise the on-disk `seq` would
+        // show gaps that look like lost events. Peek instead of advancing.
+        let seq = if event.level == BuildLogLevel::Progress {
+            self.seq.load(Ordering::Relaxed)
+        } else {
+            self.seq.fetch_add(1, Ordering::Relaxed)
+        };
         let record = EventLogRecord::assemble(seq, subject_seq, subject, event, &self.run_log_dir);
         for sink in &self.sinks {
             sink.write_event(&record);
@@ -316,7 +331,13 @@ struct BoundBuildLogger {
 
 impl BuildLogger for BoundBuildLogger {
     fn log_event(&self, event: BuildLogEvent) {
-        let subject_seq = self.subject_seq.fetch_add(1, Ordering::Relaxed);
+        // Transient progress does not consume the durable per-subject sequence
+        // (see `BuildRunLogger::emit`): peek instead of advancing.
+        let subject_seq = if event.level == BuildLogLevel::Progress {
+            self.subject_seq.load(Ordering::Relaxed)
+        } else {
+            self.subject_seq.fetch_add(1, Ordering::Relaxed)
+        };
         self.inner
             .emit(Some(self.subject.identity()), Some(subject_seq), &event);
     }
@@ -408,6 +429,12 @@ impl FileSink {
 
 impl EventSink for FileSink {
     fn write_event(&self, record: &EventLogRecord) {
+        // Progress is transient and screen-only: never persisted. Dropping it
+        // before serialization keeps the on-disk level vocabulary to
+        // info/warn/error and avoids the write cost entirely.
+        if record.level == BuildLogLevel::Progress {
+            return;
+        }
         let line = match serde_json::to_string(record) {
             Ok(line) => line,
             Err(error) => {
@@ -549,9 +576,12 @@ impl ProgressSink {
 /// silenced, warnings/errors still shown); otherwise everything from `Info` up.
 fn stderr_min_level(quiet: bool) -> BuildLogLevel {
     if quiet {
+        // Quiet shows only warnings/errors: progress and routine info are
+        // dropped from stderr.
         BuildLogLevel::Warn
     } else {
-        BuildLogLevel::Info
+        // Normal shows everything, including transient progress ticks.
+        BuildLogLevel::Progress
     }
 }
 
@@ -741,11 +771,60 @@ mod tests {
         assert!(BuildLogLevel::Warn >= quiet);
         assert!(BuildLogLevel::Error >= quiet);
 
-        // normal: everything from Info up reaches stderr.
+        // quiet also drops transient progress.
+        assert!(BuildLogLevel::Progress < quiet);
+
+        // normal: everything from Progress up reaches stderr, including ticks.
         let normal = stderr_min_level(false);
+        assert!(BuildLogLevel::Progress >= normal);
         assert!(BuildLogLevel::Info >= normal);
         assert!(BuildLogLevel::Warn >= normal);
         assert!(BuildLogLevel::Error >= normal);
+    }
+
+    #[test]
+    fn progress_events_are_screen_only_and_keep_seq_contiguous() {
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        let logger = Arc::new(
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
+        );
+
+        let info = |status| BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status,
+            op: None,
+            message: "m".to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details: Map::new(),
+        };
+
+        logger.log_run_event(info(BuildStatus::RunStarted)); // durable seq 0
+        logger.log_run_event(BuildLogEvent {
+            level: BuildLogLevel::Progress,
+            status: BuildStatus::Running,
+            op: Some("download".to_string()),
+            message: "12 MB".to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details: Map::new(),
+        }); // transient: not persisted, no durable seq consumed
+        logger.log_run_event(info(BuildStatus::RunFinished)); // durable seq 1
+
+        logger.flush();
+        let lines: Vec<Value> = run_event_log(&run_log_dir)
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        // Progress is absent from the file; durable seq stays contiguous (0, 1).
+        let seqs: Vec<u64> = lines.iter().map(|e| e["seq"].as_u64().unwrap()).collect();
+        assert_eq!(seqs, vec![0, 1]);
+        assert!(
+            lines
+                .iter()
+                .all(|e| e["level"] != Value::String("progress".to_string()))
+        );
     }
 
     #[test]

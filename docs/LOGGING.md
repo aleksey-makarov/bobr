@@ -122,17 +122,26 @@ subject events. Beyond the fanned-out subject events it carries:
 
 ## Levels and verbosity
 
-Levels are `info`, `warn`, `error` (ordered `info < warn < error`).
+Levels are `progress`, `info`, `warn`, `error` (ordered
+`progress < info < warn < error`).
+
+`progress` is a **transient, screen-only** level for high-frequency ticks
+(e.g. download byte counts). It is rendered to stderr in non-quiet mode but
+**never persisted** — `FileSink` drops it, so the on-disk vocabulary is only
+`info`/`warn`/`error`, and progress ticks do not consume the durable `seq`
+(no gaps in the file). Use `info` for durable milestones worth keeping (e.g.
+"fetching X" / "fetched N bytes"); use `progress` for the noisy in-between.
 
 `quiet` (a boolean request setting) is a **stderr level threshold**, not
 an on/off switch:
 
-- `quiet = true`: only `warn`/`error` reach stderr; progress (`info`) is
-  silenced.
-- otherwise: everything from `info` up reaches stderr.
+- `quiet = true`: only `warn`/`error` reach stderr; `progress` and `info`
+  are silenced.
+- otherwise: everything from `progress` up reaches stderr.
 
 `warn`/`error` are never suppressed on stderr. The threshold affects only
-stderr; **file logs always record every level** regardless of `quiet`.
+stderr; **file logs always record every persisted level** (`info`/`warn`/
+`error`) regardless of `quiet` — `progress` is screen-only by design.
 
 ## Guarantees
 

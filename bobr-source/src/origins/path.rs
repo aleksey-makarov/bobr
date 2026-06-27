@@ -49,9 +49,12 @@ impl ParsedOrigin for PathOrigin {
     }
 
     fn materialize(&self, cx: &OriginContext<'_>) -> Result<PathBuf, String> {
+        // Local and fast: one milestone, no per-chunk ticks or cancellation.
         if self.unpack {
+            cx.milestone(format!("unpacking {}", self.path.display()));
             materialize_path_source_tar(cx.temp_root, &self.path)
         } else {
+            cx.milestone(format!("copying {}", self.path.display()));
             materialize_path_source_direct(cx.temp_root, &self.path)
         }
     }

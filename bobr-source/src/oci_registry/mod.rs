@@ -135,11 +135,15 @@ fn materialize_oci_registry_origin(
         OciRegistryOriginError::FsFailed(format!("failed to create staging dir: {e}"))
     })?;
 
-    fetch_image_authenticated(
+    cx.milestone(format!("pulling OCI image {}", origin.image));
+    // The registry's progress callback fires at manifest/blob boundaries
+    // (already coarse), so surface each message as a progress tick.
+    fetch_image_authenticated_with_progress(
         &origin.image,
         &origin.digest,
         &origin.platform,
         &staged_path,
+        &mut |message: &str| cx.progress(message),
     )
     .map_err(|e| {
         let hint = resolve_current_digest(&origin.image)
@@ -197,6 +201,7 @@ fn is_valid_sha256_digest(value: &str) -> bool {
 mod tests {
     use super::*;
     use bobr_core::oci;
+    use bobr_core::{CancellationToken, NoopBuildLogger};
     use mockito::Server;
     use sha2::{Digest, Sha256};
     use tempfile::tempdir;
@@ -401,9 +406,13 @@ mod tests {
             platform: OciPlatform::new("linux".to_string(), "amd64".to_string()).unwrap(),
         };
         let temp = tempdir().unwrap();
+        let logger = NoopBuildLogger;
+        let cancellation = CancellationToken::new();
         let staged = materialize_oci_registry_origin(
             &OriginContext {
                 temp_root: temp.path(),
+                logger: &logger,
+                cancellation: &cancellation,
             },
             &origin,
         )

@@ -11,6 +11,7 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 use tar::Archive;
 use xz2::read::XzDecoder;
 use zip::read::ZipArchive;
@@ -143,7 +144,7 @@ impl ParsedOrigin for HttpOrigin {
     }
 
     fn materialize(&self, cx: &OriginContext<'_>) -> Result<PathBuf, String> {
-        materialize_http_origin(cx.temp_root, self).map_err(|error| error.to_string())
+        materialize_http_origin(cx, self).map_err(|error| error.to_string())
     }
 
     fn clone_box(&self) -> Box<dyn ParsedOrigin> {
@@ -151,17 +152,17 @@ impl ParsedOrigin for HttpOrigin {
     }
 }
 
-fn materialize_http_origin(temp_root: &Path, origin: &HttpOrigin) -> HResult<PathBuf> {
-    materialize_http_origin_with_timeouts(temp_root, origin, HttpTimeouts::production())
+fn materialize_http_origin(cx: &OriginContext<'_>, origin: &HttpOrigin) -> HResult<PathBuf> {
+    materialize_http_origin_with_timeouts(cx, origin, HttpTimeouts::production())
 }
 
 fn materialize_http_origin_with_timeouts(
-    temp_root: &Path,
+    cx: &OriginContext<'_>,
     origin: &HttpOrigin,
     timeouts: HttpTimeouts,
 ) -> HResult<PathBuf> {
     let client = http_client(timeouts)?;
-    let downloaded_blob = download_first_success(temp_root, &client, &origin.urls)?;
+    let downloaded_blob = download_first_success(cx, &client, &origin.urls)?;
     if !origin.unpack {
         return Ok(downloaded_blob);
     }
@@ -171,7 +172,7 @@ fn materialize_http_origin_with_timeouts(
         &downloaded_blob,
         &origin.urls,
     )?;
-    let staged_dir = temp_root.join("staged");
+    let staged_dir = cx.temp_root.join("staged");
     recreate_empty_dir_force(&staged_dir)?;
     extract_archive(&downloaded_blob, format, &staged_dir)?;
     let _ = normalize_extracted_root(&staged_dir)?;
@@ -265,8 +266,12 @@ fn take_optional_archive_format(
     }
 }
 
-fn download_first_success(temp_root: &Path, client: &Client, urls: &[String]) -> HResult<PathBuf> {
-    let download_path = temp_root.join("download.blob");
+fn download_first_success(
+    cx: &OriginContext<'_>,
+    client: &Client,
+    urls: &[String],
+) -> HResult<PathBuf> {
+    let download_path = cx.temp_root.join("download.blob");
     if download_path.exists() {
         fs::remove_file(&download_path).map_err(|error| {
             HttpOriginError::FsFailed(format!(
@@ -278,7 +283,7 @@ fn download_first_success(temp_root: &Path, client: &Client, urls: &[String]) ->
 
     let mut failures = Vec::new();
     for url in urls {
-        if let Err(error) = download_to_file(client, url, &download_path) {
+        if let Err(error) = download_to_file(cx, client, url, &download_path) {
             failures.push(format!("{url}: {error}"));
             let _ = fs::remove_file(&download_path);
             continue;
@@ -292,7 +297,13 @@ fn download_first_success(temp_root: &Path, client: &Client, urls: &[String]) ->
     )))
 }
 
-fn download_to_file(client: &Client, url: &str, destination: &Path) -> HResult<()> {
+fn download_to_file(
+    cx: &OriginContext<'_>,
+    client: &Client,
+    url: &str,
+    destination: &Path,
+) -> HResult<()> {
+    cx.milestone(format!("fetching {url}"));
     let mut response = client
         .get(url)
         .send()
@@ -311,7 +322,16 @@ fn download_to_file(client: &Client, url: &str, destination: &Path) -> HResult<(
         ))
     })?;
     let mut buffer = [0_u8; 64 * 1024];
+    let mut downloaded: u64 = 0;
+    let mut last_tick = Instant::now();
     loop {
+        // Poll cancellation each chunk so a long download stops promptly. The
+        // opaque error is reclassified to "cancelled" by the source executor.
+        if cx.is_cancelled() {
+            return Err(HttpOriginError::NetworkFailed(format!(
+                "download of '{url}' cancelled"
+            )));
+        }
         let read_bytes = response.read(&mut buffer).map_err(|error| {
             HttpOriginError::NetworkFailed(format!(
                 "failed to read HTTP response body from '{url}': {error}"
@@ -326,7 +346,14 @@ fn download_to_file(client: &Client, url: &str, destination: &Path) -> HResult<(
                 destination.display()
             ))
         })?;
+        downloaded += read_bytes as u64;
+        // Throttle transient progress ticks to ~once per second.
+        if last_tick.elapsed() >= Duration::from_secs(1) {
+            cx.progress(format!("downloaded {downloaded} bytes from {url}"));
+            last_tick = Instant::now();
+        }
     }
+    cx.milestone(format!("fetched {downloaded} bytes from {url}"));
     Ok(())
 }
 
@@ -725,15 +752,133 @@ fn make_tree_writable(path: &Path) -> HResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bobr_core::{
+        BuildLogEvent, BuildLogLevel, BuildLogger, CancellationToken, NoopBuildLogger,
+    };
     use flate2::Compression;
     use std::io::{Cursor, Read};
     use std::net::{TcpListener, TcpStream};
+    use std::sync::Mutex;
     use std::thread;
-    use std::time::Duration;
     use tempfile::tempdir;
+
+    /// Records every emitted event so tests can assert on milestones/progress.
+    #[derive(Debug, Default)]
+    struct CapturingLogger {
+        events: Mutex<Vec<BuildLogEvent>>,
+    }
+
+    impl BuildLogger for CapturingLogger {
+        fn log_event(&self, event: BuildLogEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+
+        fn allocate_raw_log_path(&self, _label: &str) -> Result<PathBuf, String> {
+            Err("raw logs unused in test".to_string())
+        }
+    }
+
+    /// Owns a no-op logger and a fresh cancellation token, and lends them as an
+    /// `OriginContext` for tests that just need a staging dir.
+    struct TestOrigin {
+        logger: NoopBuildLogger,
+        cancellation: CancellationToken,
+    }
+
+    impl TestOrigin {
+        fn new() -> Self {
+            Self {
+                logger: NoopBuildLogger,
+                cancellation: CancellationToken::new(),
+            }
+        }
+
+        fn cx<'a>(&'a self, temp_root: &'a std::path::Path) -> OriginContext<'a> {
+            OriginContext {
+                temp_root,
+                logger: &self.logger,
+                cancellation: &self.cancellation,
+            }
+        }
+    }
 
     fn parse_origin(value: Value) -> Result<Box<dyn ParsedOrigin>, String> {
         HttpOriginHandler.parse(value.as_object().unwrap().clone(), "$.origin")
+    }
+
+    #[test]
+    fn http_download_emits_milestones() {
+        let temp = tempdir().unwrap();
+        let payload = b"hi there\n".to_vec();
+        let (url, handle) = match spawn_http_server(payload, "application/octet-stream") {
+            Ok(server) => server,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to start test HTTP server: {error}"),
+        };
+        let origin = parse_origin(serde_json::json!({
+            "tag": "Http",
+            "url": url,
+            "unpack": false
+        }))
+        .unwrap();
+
+        let logger = CapturingLogger::default();
+        let cancellation = CancellationToken::new();
+        origin
+            .materialize(&OriginContext {
+                temp_root: temp.path(),
+                logger: &logger,
+                cancellation: &cancellation,
+            })
+            .unwrap();
+        handle.join().unwrap();
+
+        let events = logger.events.lock().unwrap();
+        // Milestones are durable (Info); start and end are both emitted.
+        assert!(
+            events
+                .iter()
+                .any(|e| e.level == BuildLogLevel::Info && e.message.starts_with("fetching")),
+            "missing 'fetching' milestone"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| e.level == BuildLogLevel::Info && e.message.starts_with("fetched")),
+            "missing 'fetched' milestone"
+        );
+    }
+
+    #[test]
+    fn http_download_aborts_when_cancelled() {
+        let temp = tempdir().unwrap();
+        let (url, handle) = match spawn_http_server(b"hello\n".to_vec(), "application/octet-stream")
+        {
+            Ok(server) => server,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to start test HTTP server: {error}"),
+        };
+        let origin = parse_origin(serde_json::json!({
+            "tag": "Http",
+            "url": url,
+            "unpack": false
+        }))
+        .unwrap();
+
+        let logger = NoopBuildLogger;
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let error = origin
+            .materialize(&OriginContext {
+                temp_root: temp.path(),
+                logger: &logger,
+                cancellation: &cancellation,
+            })
+            .unwrap_err();
+        // Detach the server thread: the body is already buffered, and the client
+        // aborts before reading it.
+        drop(handle);
+        assert!(error.contains("cancelled"), "{error}");
     }
 
     fn spawn_http_server(
@@ -914,11 +1059,8 @@ mod tests {
             "unpack": false
         }))
         .unwrap();
-        let staged = origin
-            .materialize(&OriginContext {
-                temp_root: temp.path(),
-            })
-            .unwrap();
+        let test_origin = TestOrigin::new();
+        let staged = origin.materialize(&test_origin.cx(temp.path())).unwrap();
         handle.join().unwrap();
         assert_eq!(fs::read(staged).unwrap(), payload);
     }
@@ -932,8 +1074,9 @@ mod tests {
             unpack: false,
             archive_format: None,
         };
+        let test_origin = TestOrigin::new();
         let error = materialize_http_origin_with_timeouts(
-            temp.path(),
+            &test_origin.cx(temp.path()),
             &origin,
             HttpTimeouts {
                 connect: Duration::from_millis(100),
@@ -966,11 +1109,8 @@ mod tests {
             "unpack": false
         }))
         .unwrap();
-        let staged = origin
-            .materialize(&OriginContext {
-                temp_root: temp.path(),
-            })
-            .unwrap();
+        let test_origin = TestOrigin::new();
+        let staged = origin.materialize(&test_origin.cx(temp.path())).unwrap();
         handle.join().unwrap();
         assert!(staged.is_file());
         assert_eq!(fs::read(staged).unwrap(), payload);
@@ -990,11 +1130,8 @@ mod tests {
             "url": url
         }))
         .unwrap();
-        let staged = origin
-            .materialize(&OriginContext {
-                temp_root: temp.path(),
-            })
-            .unwrap();
+        let test_origin = TestOrigin::new();
+        let staged = origin.materialize(&test_origin.cx(temp.path())).unwrap();
         handle.join().unwrap();
         assert!(staged.is_file());
         assert_eq!(fs::read(staged).unwrap(), payload);
@@ -1015,11 +1152,8 @@ mod tests {
             "unpack": true
         }))
         .unwrap();
-        let staged = origin
-            .materialize(&OriginContext {
-                temp_root: temp.path(),
-            })
-            .unwrap();
+        let test_origin = TestOrigin::new();
+        let staged = origin.materialize(&test_origin.cx(temp.path())).unwrap();
         handle.join().unwrap();
         assert!(staged.is_dir());
         assert_eq!(
