@@ -137,7 +137,16 @@ stderr; **file logs always record every level** regardless of `quiet`.
 ## Guarantees
 
 - **Best-effort.** A failed log write prints a warning to stderr but never fails
-  the build.
+  the build. Such failures are counted and reported as `logging_errors` in the
+  `run-finished` event's `details` (a write failure of `run-finished` itself is
+  not reflected in its own count).
+- **Durability.** File logs are buffered: routine `info` events are not flushed
+  per event (fewer syscalls). `warn`/`error` events and the terminal
+  `run-finished` event are flushed immediately so anything diagnostically
+  relevant survives a process crash; `run-finished` additionally fsyncs the run
+  log so a completed run is durable across power loss. Remaining buffered events
+  are flushed when the logger is dropped (normal exit or panic-unwind); a
+  `SIGKILL` can lose the unflushed tail.
 - **Ordering.** `seq` is authoritative for run order; `ts` is informational.
   Per-subject order is `subject_seq`.
 - **Timestamps** are honest UTC (RFC3339, milliseconds, trailing `Z`), never

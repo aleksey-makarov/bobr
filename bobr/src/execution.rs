@@ -663,6 +663,7 @@ fn log_run_finished(
             "built": counters.built,
             "cache_hit": counters.cache_hit,
             "failed": counters.failed,
+            "logging_errors": logger.logging_errors(),
         })),
     });
 }

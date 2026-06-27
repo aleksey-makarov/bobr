@@ -140,6 +140,17 @@ pub trait EventSink: fmt::Debug + Send + Sync {
     fn register_subject(&self, _subject: &BuildLogSubject) -> Result<(), String> {
         Ok(())
     }
+
+    /// Flushes any buffered output to the OS. Default no-op for sinks that do
+    /// not buffer.
+    fn flush(&self) {}
+
+    /// Number of write/flush/sync failures this sink has swallowed. Logging is
+    /// best-effort and never fails the build, so failures are counted here
+    /// instead of propagated. Default 0.
+    fn error_count(&self) -> u64 {
+        0
+    }
 }
 
 /// The event bus: stamps the envelope once and fans every event out to sinks.
@@ -181,6 +192,21 @@ impl BuildRunLogger {
 
     pub fn run_log_dir(&self) -> &Path {
         &self.run_log_dir
+    }
+
+    /// Flushes every sink's buffered output to the OS. Routine events are
+    /// buffered (see `FileSink`); this forces them out without waiting for a
+    /// `Warn`/`Error`, the run-finished event, or sink drop.
+    pub fn flush(&self) {
+        for sink in &self.sinks {
+            sink.flush();
+        }
+    }
+
+    /// Total number of best-effort logging failures swallowed across sinks.
+    /// Surfaced in the run-finished summary; logging never fails the build.
+    pub fn logging_errors(&self) -> u64 {
+        self.sinks.iter().map(|sink| sink.error_count()).sum()
     }
 
     pub fn bind_subject(
@@ -323,6 +349,7 @@ struct FileSink {
     run_event_log_path: PathBuf,
     run_writer: Mutex<BufWriter<File>>,
     subject_writers: Mutex<HashMap<String, SubjectWriter>>,
+    errors: AtomicU64,
 }
 
 #[derive(Debug)]
@@ -344,15 +371,38 @@ impl FileSink {
             run_event_log_path,
             run_writer: Mutex::new(BufWriter::new(file)),
             subject_writers: Mutex::new(HashMap::new()),
+            errors: AtomicU64::new(0),
         })
     }
 
+    /// Appends one line to the buffer **without** flushing. Routine events stay
+    /// buffered; flushing is decided per record in `write_event`.
     fn append(writer: &mut BufWriter<File>, line: &str, path: &Path) -> Result<(), String> {
         writer
             .write_all(line.as_bytes())
             .and_then(|_| writer.write_all(b"\n"))
-            .and_then(|_| writer.flush())
             .map_err(|error| format!("failed to append event log '{}': {error}", path.display()))
+    }
+
+    /// Flushes the buffer to the OS; when `sync`, also fsyncs the file to disk.
+    fn flush_writer(writer: &mut BufWriter<File>, sync: bool, path: &Path) -> Result<(), String> {
+        writer
+            .flush()
+            .and_then(|_| {
+                if sync {
+                    writer.get_ref().sync_data()
+                } else {
+                    Ok(())
+                }
+            })
+            .map_err(|error| format!("failed to flush event log '{}': {error}", path.display()))
+    }
+
+    /// Records a best-effort logging failure: counts it and warns, never fails
+    /// the build.
+    fn note_error(&self, message: String) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+        eprintln!("warning: {message}");
     }
 }
 
@@ -361,18 +411,29 @@ impl EventSink for FileSink {
         let line = match serde_json::to_string(record) {
             Ok(line) => line,
             Err(error) => {
-                eprintln!("warning: failed to serialize build event: {error}");
+                self.note_error(format!("failed to serialize build event: {error}"));
                 return;
             }
         };
 
+        // Routine `Info` events stay buffered. Flush `Warn`/`Error` (and the
+        // terminal run event) so anything diagnostically relevant survives a
+        // process crash; fsync only the run log on `run-finished`.
+        let run_finished = record.status.as_str() == BuildStatus::RunFinished.as_str();
+        let flush_now = record.level >= BuildLogLevel::Warn || run_finished;
+
         match self.run_writer.lock() {
             Ok(mut writer) => {
                 if let Err(error) = Self::append(&mut writer, &line, &self.run_event_log_path) {
-                    eprintln!("warning: {error}");
+                    self.note_error(error);
+                } else if flush_now
+                    && let Err(error) =
+                        Self::flush_writer(&mut writer, run_finished, &self.run_event_log_path)
+                {
+                    self.note_error(error);
                 }
             }
-            Err(error) => eprintln!("warning: {error}"),
+            Err(error) => self.note_error(error.to_string()),
         }
 
         let Some(subject) = &record.subject else {
@@ -380,18 +441,49 @@ impl EventSink for FileSink {
         };
         match self.subject_writers.lock() {
             Ok(mut writers) => {
-                if let Some(subject_writer) = writers.get_mut(&subject.build_key)
-                    && let Err(error) = Self::append(
+                if let Some(subject_writer) = writers.get_mut(&subject.build_key) {
+                    if let Err(error) = Self::append(
                         &mut subject_writer.writer,
                         &line,
                         &subject_writer.event_log_path,
-                    )
-                {
-                    eprintln!("warning: {error}");
+                    ) {
+                        self.note_error(error);
+                    } else if flush_now
+                        && let Err(error) = Self::flush_writer(
+                            &mut subject_writer.writer,
+                            false,
+                            &subject_writer.event_log_path,
+                        )
+                    {
+                        self.note_error(error);
+                    }
                 }
             }
-            Err(error) => eprintln!("warning: {error}"),
+            Err(error) => self.note_error(error.to_string()),
         }
+    }
+
+    fn flush(&self) {
+        if let Ok(mut writer) = self.run_writer.lock()
+            && let Err(error) = Self::flush_writer(&mut writer, false, &self.run_event_log_path)
+        {
+            self.note_error(error);
+        }
+        if let Ok(mut writers) = self.subject_writers.lock() {
+            for subject_writer in writers.values_mut() {
+                if let Err(error) = Self::flush_writer(
+                    &mut subject_writer.writer,
+                    false,
+                    &subject_writer.event_log_path,
+                ) {
+                    self.note_error(error);
+                }
+            }
+        }
+    }
+
+    fn error_count(&self) -> u64 {
+        self.errors.load(Ordering::Relaxed)
     }
 
     fn register_subject(&self, subject: &BuildLogSubject) -> Result<(), String> {
@@ -684,6 +776,7 @@ mod tests {
             details: Map::new(),
         });
 
+        logger.flush();
         let contents = run_event_log(&run_log_dir);
         let line = contents.lines().last().unwrap();
         let event: Value = serde_json::from_str(line).unwrap();
@@ -742,6 +835,7 @@ mod tests {
             details: Map::new(),
         });
 
+        logger.flush();
         let contents = run_event_log(&run_log_dir);
         let event: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
         assert_eq!(event["status"], Value::String("running".to_string()));
@@ -778,6 +872,7 @@ mod tests {
             });
         }
 
+        logger.flush();
         let contents = run_event_log(&run_log_dir);
         let seqs: Vec<u64> = contents
             .lines()
@@ -808,11 +903,93 @@ mod tests {
             details: Map::new(),
         });
 
+        logger.flush();
         let contents = run_event_log(&run_log_dir);
         let event: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
         assert_eq!(event["status"], Value::String("run-started".to_string()));
         assert!(event.get("subject").is_none());
         assert!(event.get("subject_seq").is_none());
+    }
+
+    #[test]
+    fn info_events_are_buffered_until_flush() {
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        let logger = Arc::new(
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
+        );
+
+        logger.log_run_event(BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status: BuildStatus::RunStarted,
+            op: None,
+            message: "build started".to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details: Map::new(),
+        });
+
+        // Routine Info stays buffered: nothing on disk until an explicit flush.
+        assert!(run_event_log(&run_log_dir).is_empty());
+        logger.flush();
+        assert!(!run_event_log(&run_log_dir).is_empty());
+    }
+
+    #[test]
+    fn warn_events_are_flushed_without_explicit_flush() {
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        let logger = Arc::new(
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
+        );
+
+        // status is orthogonal here; the point is that Warn triggers a flush.
+        logger.log_run_event(BuildLogEvent {
+            level: BuildLogLevel::Warn,
+            status: BuildStatus::RunStarted,
+            op: None,
+            message: "heads up".to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details: Map::new(),
+        });
+
+        let event: Value =
+            serde_json::from_str(run_event_log(&run_log_dir).lines().last().unwrap()).unwrap();
+        assert_eq!(event["level"], Value::String("warn".to_string()));
+    }
+
+    #[test]
+    fn run_finished_flushes_run_log_without_explicit_flush() {
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        let logger = Arc::new(
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
+        );
+
+        logger.log_run_event(BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status: BuildStatus::RunFinished,
+            op: None,
+            message: "build finished".to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details: Map::new(),
+        });
+
+        // The terminal run event is flushed (and fsynced) without an explicit flush.
+        let event: Value =
+            serde_json::from_str(run_event_log(&run_log_dir).lines().last().unwrap()).unwrap();
+        assert_eq!(event["status"], Value::String("run-finished".to_string()));
+    }
+
+    #[test]
+    fn logging_errors_starts_at_zero() {
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        let logger =
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap();
+        assert_eq!(logger.logging_errors(), 0);
     }
 
     #[test]
@@ -843,6 +1020,7 @@ mod tests {
             },
         );
 
+        logger.flush();
         let contents = run_event_log(&run_log_dir);
         let event: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
         assert_eq!(event["status"], Value::String("cache-hit".to_string()));
@@ -888,6 +1066,7 @@ mod tests {
             details: Map::new(),
         });
 
+        logger.flush();
         let contents = run_event_log(&run_log_dir);
         let event: Value = serde_json::from_str(contents.lines().last().unwrap()).unwrap();
         assert_eq!(
