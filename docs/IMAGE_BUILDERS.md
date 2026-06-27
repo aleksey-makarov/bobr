@@ -2,7 +2,7 @@
 
 ## Summary
 
-`mbuild` keeps imported OCI images in the content-addressed store. The active
+`bobr` keeps imported OCI images in the content-addressed store. The active
 OCI and rootfs-backed execution path consists of:
 
 - `Source` with `origin.tag = "OciRegistry"`: import one pinned external
@@ -78,7 +78,7 @@ The result can be consumed by `TreeMerge`, `ErofsRootfs`, `Initramfs`, or
 
 - required `rootfs`: one fs-tree manifest object materialized as the
   readonly root filesystem before builder execution
-- extra named inputs mounted read-only under `/__mbuild/inputs/<name>`
+- extra named inputs mounted read-only under `/__bobr/inputs/<name>`
 
 The `rootfs` input must be a valid fs-tree manifest object. Runtime
 materializes it under `<store>/fs-trees/<manifest-object-hash>/` and passes the
@@ -97,7 +97,7 @@ digits, or `_`. The names `build`, `out`, and `config` are reserved.
 `Sandbox.config` is a JSON object with these fields:
 
 - `steps`: required non-empty array of step objects
-- `script_config`: optional config tree materialized at `/__mbuild/config`
+- `script_config`: optional config tree materialized at `/__bobr/config`
 
 Unknown fields are rejected. In particular, `Sandbox.config` does not accept
 `install` metadata; filesystem ownership and modes are represented by the
@@ -201,7 +201,7 @@ The common native toolchain is `linux_headers`, `glibc`, `binutils`, `gcc`,
 
 ## Current Limitations
 
-- `mbuild` does not currently provide a builder for producing derived OCI
+- `bobr` does not currently provide a builder for producing derived OCI
   image layouts from fs-tree inputs
 - Rust-side `Sandbox` requests require a prepared fs-tree manifest rootfs
   object; the runtime materializes it before sandbox execution

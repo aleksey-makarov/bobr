@@ -1,8 +1,8 @@
-# mbuild
+# bobr
 
 <img src="docs/bobr.svg" alt="bobr" width="200">
 
-`mbuild` executes one JSON DAG request.
+`bobr` executes one JSON DAG request.
 
 The input document is a JSON envelope with:
 
@@ -12,7 +12,7 @@ The input document is a JSON envelope with:
 `nodes` is a table of recipe nodes keyed by technical ids. The root build
 target is the entry with the reserved id `root`. Dependencies are encoded as
 id references in input slots. `options.store` points at the store root that
-`mbuild` should use for this request. `mbuild` parses that DAG request,
+`bobr` should use for this request. `bobr` parses that DAG request,
 validates each node, performs top-down store lookups, and materializes only the
 missing nodes. Missing leaves and other ready nodes may execute in parallel.
 
@@ -150,19 +150,19 @@ In v1, `Source` supports three origins:
 
 `Source` may also omit `origin`. In that shape, the payload object must
 already exist in the store under `objects/<object_hash>`. If the canonical
-`<store>/object-records/<object_hash>.json` record is missing, `mbuild` reconstructs
+`<store>/object-records/<object_hash>.json` record is missing, `bobr` reconstructs
 it from the declared object hash. A successful source lookup also creates or
 repairs `builds/<object_hash>`.
 
 If a source origin materializes a different object than the declared
-`object_hash`, `mbuild` still imports the actual object into
+`object_hash`, `bobr` still imports the actual object into
 `objects/<actual_hash>`, but it does not write the canonical object record or
 source build handle for the declared hash. The failing message includes the
 actual hash so the recipe can be updated and rerun without downloading again.
 
 CLI contract:
 
-- `mbuild [recipe.json]`
+- `bobr [recipe.json]`
 - if `recipe.json` is omitted, the JSON envelope is read from `stdin`
 - on success, `stdout` receives the realized root `RealizedObject` as JSON
 - live progress goes to `stderr` unless `options.quiet` is true
@@ -174,7 +174,7 @@ CLI contract:
 
 The final store path must be an absolute path to an existing directory. That
 directory is the store root itself. A request may still choose a path named
-`.mbuild`, but `mbuild` no longer adds an extra `.mbuild/` layer implicitly.
+`.bobr`, but `bobr` no longer adds an extra `.bobr/` layer implicitly.
 
 The store layout is content-addressed:
 
@@ -219,7 +219,7 @@ The dependency order comes from the builder input contract:
 - reserved inputs in spec order
 - extra inputs in lexical name order
 
-It does not depend on JSON field order or node id order. This lets `mbuild`
+It does not depend on JSON field order or node id order. This lets `bobr`
 keep the general runtime independent from concrete builders.
 
 Concrete builder behavior is documented separately:

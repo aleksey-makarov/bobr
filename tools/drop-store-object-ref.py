@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drop an mbuild store object by publication name.
+"""Drop a bobr store object by publication name.
 
 The argument is a name from object-refs/.  The tool removes every store index
 entry that points to the same object identity, not just the requested public
@@ -39,7 +39,7 @@ class DropPlan:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Drop an mbuild store object by a name from object-refs/. "
+            "Drop a bobr store object by a name from object-refs/. "
             "Dry-run by default; pass --yes to delete."
         )
     )
@@ -54,7 +54,7 @@ def main() -> int:
         "--store",
         type=Path,
         default=default_store(),
-        help="store root (default: $MBUILD_STORE, ./bobr-store, or ../bobr-store)",
+        help="store root (default: $BOBR_STORE, ./bobr-store, or ../bobr-store)",
     )
     parser.add_argument(
         "--yes",
@@ -82,7 +82,7 @@ class StoreDropError(Exception):
 
 
 def default_store() -> Path:
-    if value := os.environ.get("MBUILD_STORE"):
+    if value := os.environ.get("BOBR_STORE"):
         return Path(value)
     cwd_store = Path.cwd() / "bobr-store"
     if cwd_store.is_dir():

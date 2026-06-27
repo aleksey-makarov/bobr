@@ -206,7 +206,7 @@ pub fn tree_directory_recipe(name: &str) -> Value {
                             {
                                 "type": "file",
                                 "path": "etc/hostname",
-                                "text": "mbuild\n",
+                                "text": "bobr\n",
                                 "executable": false,
                             },
                             {
@@ -283,7 +283,7 @@ pub fn legacy_tree_directory_recipe(name: &str) -> Value {
                     {
                         "type": "file",
                         "path": "etc/hostname",
-                        "text": "mbuild\n",
+                        "text": "bobr\n",
                         "executable": false,
                     },
                     {

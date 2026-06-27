@@ -2,7 +2,7 @@
 
 ## Summary
 
-`mbuild` consumes one JSON DAG request and executes it entirely in Rust.
+`bobr` consumes one JSON DAG request and executes it entirely in Rust.
 
 The input is a flat JSON envelope with:
 
@@ -38,7 +38,7 @@ Rust is responsible for:
 - running ready nodes in parallel
 - publishing current refs
 
-There is no embedded Nickel runtime in `mbuild`.
+There is no embedded Nickel runtime in `bobr`.
 
 ## Recipe Model
 
@@ -182,7 +182,7 @@ Builder semantics depend only on:
 
 ## CLI Contract
 
-`mbuild [recipe.json]`
+`bobr [recipe.json]`
 
 - if `recipe.json` is omitted, the JSON envelope is read from `stdin`
 - `stdout`: JSON serialization of the realized root `RealizedObject`
@@ -190,5 +190,5 @@ Builder semantics depend only on:
 - `jobs`: limit parallel execution, default = available CPU parallelism
 - `store`: set the store root for the request
 - final store path: absolute path to an existing store root directory. The
-  value is the store root itself; `mbuild` does not add an implicit `.mbuild/`
+  value is the store root itself; `bobr` does not add an implicit `.bobr/`
   directory.

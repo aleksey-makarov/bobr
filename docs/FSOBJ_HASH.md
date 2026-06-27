@@ -158,6 +158,6 @@ fsobj-hash - --mode=tar
 The generic `fsobj-hash` algorithm treats directory entry names and symlink
 targets as raw Unix bytes. It can hash paths that are not valid UTF-8.
 
-`mbuild` fs-tree manifest paths and symlink targets are UTF-8-only because
+`bobr` fs-tree manifest paths and symlink targets are UTF-8-only because
 they are serialized as JSON strings. This is a property of the fs-tree manifest
 format, not of the generic fsobj hash algorithm.

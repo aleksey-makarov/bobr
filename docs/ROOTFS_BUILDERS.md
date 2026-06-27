@@ -2,7 +2,7 @@
 
 ## Summary
 
-`mbuild` currently implements filesystem-related builders around fs-tree
+`bobr` currently implements filesystem-related builders around fs-tree
 manifest:
 
 - `Tree`: realize generated text files, symlinks, and directories as one plain
@@ -42,7 +42,7 @@ builder.
       {
         "type": "file",
         "path": "etc/hostname",
-        "text": "mbuild\n",
+        "text": "bobr\n",
         "executable": false
       }
     ]

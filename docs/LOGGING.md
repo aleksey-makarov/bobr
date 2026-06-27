@@ -1,6 +1,6 @@
 # Build logging
 
-`mbuild` records the progress of a build as structured events. This document
+`bobr` records the progress of a build as structured events. This document
 fixes the contract: the channels, the on-disk layout, the event record, the
 closed `status` vocabulary, and the format guarantees tooling may rely on.
 

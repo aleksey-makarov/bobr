@@ -690,7 +690,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn create_test_store(root: &Path) -> Store {
-        let store_root = root.join(".mbuild");
+        let store_root = root.join(".bobr");
         fs::create_dir_all(&store_root).unwrap();
         Store::create(&store_root).unwrap()
     }
@@ -742,7 +742,7 @@ mod tests {
     }
 
     fn workspace_metadata(root: &Path, tag: &str, name: &str) -> Value {
-        let logs_root = root.join(".mbuild").join("logs");
+        let logs_root = root.join(".bobr").join("logs");
         let mut run_dirs = fs::read_dir(&logs_root)
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -807,7 +807,7 @@ mod tests {
     }
 
     fn workspace_count(root: &Path) -> usize {
-        let logs_root = root.join(".mbuild").join("logs");
+        let logs_root = root.join(".bobr").join("logs");
         fs::read_dir(&logs_root)
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -1554,7 +1554,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let logger = create_test_logger(&store);
-        fs::create_dir(temp.path().join(".mbuild").join("object-refs").join("bad")).unwrap();
+        fs::create_dir(temp.path().join(".bobr").join("object-refs").join("bad")).unwrap();
 
         // Fast node publishes to a pre-existing non-symlink ref path, so its
         // publish fails after the build succeeds. Slow node is a sibling input

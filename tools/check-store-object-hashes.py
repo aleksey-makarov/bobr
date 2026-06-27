@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify object payload hashes in an mbuild store.
+"""Verify object payload hashes in a bobr store.
 
 The tool walks direct children of <store>/objects, recomputes each payload hash
 with fsobj-hash, and compares the computed hash with the object entry name.
@@ -57,7 +57,7 @@ def main() -> int:
         "--store",
         type=Path,
         default=default_store(),
-        help="store root (default: $MBUILD_STORE, ./bobr-store, or ../bobr-store)",
+        help="store root (default: $BOBR_STORE, ./bobr-store, or ../bobr-store)",
     )
     parser.add_argument(
         "--fsobj-hash",
@@ -96,7 +96,7 @@ class CheckError(Exception):
 
 
 def default_store() -> Path:
-    if value := os.environ.get("MBUILD_STORE"):
+    if value := os.environ.get("BOBR_STORE"):
         return Path(value)
     cwd_store = Path.cwd() / "bobr-store"
     if cwd_store.is_dir():
