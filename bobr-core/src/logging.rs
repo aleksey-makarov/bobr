@@ -1,13 +1,15 @@
 use crate::ObjectHash;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use time::OffsetDateTime;
 use time::macros::format_description;
 
@@ -548,47 +550,227 @@ impl EventSink for FileSink {
     }
 }
 
-/// Progress sink: renders events to stderr as the build's live UI.
+/// Progress sink: the build's live UI on stderr (the only stderr writer).
 ///
-/// The only writer of stderr progress. Events below `min_level` are dropped
-/// from stderr: `quiet` raises the threshold to `Warn`, so only warnings and
-/// errors show and progress is silenced; otherwise the threshold is `Info` and
-/// everything shows. `Warn`/`Error` are never suppressed by construction, and
-/// file logs are unaffected (they record every level). Raw-log paths are stored
-/// run-relative in the record, so this sink rejoins `run_log_dir` to show an
-/// absolute path on screen.
-#[derive(Debug)]
-struct ProgressSink {
-    run_log_dir: PathBuf,
-    min_level: BuildLogLevel,
+/// In an interactive terminal (and not `quiet`) it renders a live block via
+/// indicatif — one line per active subject, updated in place, with a summary
+/// line at the bottom; `Warn`/`Error` print above the block. Otherwise (non-TTY
+/// or `quiet`) it falls back to plain per-line output. Transient `Progress`
+/// ticks are shown only in the live block — in plain mode they would be scroll
+/// noise, so the plain threshold starts at `Info`. File logs are unaffected
+/// (and never carry `Progress`).
+enum ProgressSink {
+    /// Live indicatif block (interactive terminal, non-quiet).
+    Live(Mutex<LiveProgress>),
+    /// Plain per-line stderr at or above `min_level`.
+    Plain {
+        run_log_dir: PathBuf,
+        min_level: BuildLogLevel,
+    },
 }
 
-impl ProgressSink {
-    fn new(run_log_dir: PathBuf, quiet: bool) -> Self {
-        Self {
-            run_log_dir,
-            min_level: stderr_min_level(quiet),
+impl fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Live(_) => f.write_str("ProgressSink::Live"),
+            Self::Plain { min_level, .. } => {
+                write!(f, "ProgressSink::Plain {{ min_level: {min_level} }}")
+            }
         }
     }
 }
 
-/// Lowest level shown on stderr. `quiet` raises the bar to `Warn` (progress
-/// silenced, warnings/errors still shown); otherwise everything from `Info` up.
+impl ProgressSink {
+    fn new(run_log_dir: PathBuf, quiet: bool) -> Self {
+        if !quiet && std::io::stderr().is_terminal() {
+            Self::Live(Mutex::new(LiveProgress::new(
+                run_log_dir,
+                MultiProgress::new(),
+            )))
+        } else {
+            Self::Plain {
+                run_log_dir,
+                min_level: stderr_min_level(quiet),
+            }
+        }
+    }
+
+    /// Live sink with a hidden draw target, for tests: exercises the adapter
+    /// without touching a terminal.
+    #[cfg(test)]
+    fn live_hidden(run_log_dir: PathBuf) -> Self {
+        let multi = MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden());
+        Self::Live(Mutex::new(LiveProgress::new(run_log_dir, multi)))
+    }
+}
+
+impl Drop for ProgressSink {
+    fn drop(&mut self) {
+        // Clear any remaining live block so a panic/early exit doesn't leave a
+        // half-drawn block on the terminal.
+        if let Self::Live(state) = self
+            && let Ok(live) = state.get_mut()
+        {
+            live.clear();
+        }
+    }
+}
+
+/// Lowest level shown on the **plain** stderr path. `quiet` raises the bar to
+/// `Warn`; otherwise `Info`. `Progress` is below both, so plain output never
+/// shows transient ticks (those belong to the live block).
 fn stderr_min_level(quiet: bool) -> BuildLogLevel {
     if quiet {
-        // Quiet shows only warnings/errors: progress and routine info are
-        // dropped from stderr.
         BuildLogLevel::Warn
     } else {
-        // Normal shows everything, including transient progress ticks.
-        BuildLogLevel::Progress
+        BuildLogLevel::Info
+    }
+}
+
+/// Live indicatif state: one bar per active subject plus a bottom summary bar.
+struct LiveProgress {
+    run_log_dir: PathBuf,
+    multi: MultiProgress,
+    summary: ProgressBar,
+    bars: HashMap<String, ProgressBar>,
+    total: usize,
+    done: usize,
+    failed: usize,
+}
+
+impl LiveProgress {
+    fn new(run_log_dir: PathBuf, multi: MultiProgress) -> Self {
+        let summary = multi.add(ProgressBar::new_spinner());
+        summary.set_style(ProgressStyle::with_template("{msg}").expect("valid template"));
+        Self {
+            run_log_dir,
+            multi,
+            summary,
+            bars: HashMap::new(),
+            total: 0,
+            done: 0,
+            failed: 0,
+        }
+    }
+
+    fn detail_u64(record: &EventLogRecord, key: &str) -> u64 {
+        record.details.get(key).and_then(Value::as_u64).unwrap_or(0)
+    }
+
+    fn update_summary(&self) {
+        self.summary.set_message(format!(
+            "{}/{} done · {} running · {} failed",
+            self.done,
+            self.total,
+            self.bars.len(),
+            self.failed
+        ));
+    }
+
+    fn clear(&mut self) {
+        for (_, bar) in self.bars.drain() {
+            bar.finish_and_clear();
+        }
+        self.summary.finish_and_clear();
+    }
+
+    fn handle(&mut self, record: &EventLogRecord) {
+        let status = record.status.as_str();
+
+        if status == BuildStatus::RunStarted.as_str() {
+            self.total = Self::detail_u64(record, "subjects") as usize;
+            self.update_summary();
+            return;
+        }
+        if status == BuildStatus::RunFinished.as_str() {
+            self.clear();
+            let _ = self.multi.println(format!(
+                "done: {} built · {} cache-hit · {} failed",
+                Self::detail_u64(record, "built"),
+                Self::detail_u64(record, "cache_hit"),
+                Self::detail_u64(record, "failed"),
+            ));
+            return;
+        }
+        if status == BuildStatus::CacheHit.as_str() {
+            self.done += 1;
+            self.update_summary();
+            return;
+        }
+
+        let Some(subject) = &record.subject else {
+            // Run-level non-terminal event with no subject: surface warnings and
+            // errors above the block; ignore routine info in the live UI.
+            if record.level >= BuildLogLevel::Warn {
+                let _ = self
+                    .multi
+                    .println(format_progress_line(record, &self.run_log_dir));
+            }
+            return;
+        };
+
+        if status == BuildStatus::Done.as_str() {
+            if let Some(bar) = self.bars.remove(&subject.build_key) {
+                bar.finish_and_clear();
+            }
+            self.done += 1;
+            self.update_summary();
+            return;
+        }
+        if status == BuildStatus::Failed.as_str() {
+            if let Some(bar) = self.bars.remove(&subject.build_key) {
+                bar.finish_and_clear();
+            }
+            self.failed += 1;
+            // Leave a visible record of the failure above the block.
+            let _ = self
+                .multi
+                .println(format_progress_line(record, &self.run_log_dir));
+            self.update_summary();
+            return;
+        }
+        if record.level >= BuildLogLevel::Warn {
+            // A non-terminal warning/error from a running subject: print above,
+            // but keep its bar.
+            let _ = self
+                .multi
+                .println(format_progress_line(record, &self.run_log_dir));
+            return;
+        }
+
+        // start / running / progress: create or update this subject's bar.
+        let message = format_progress_line(record, &self.run_log_dir);
+        if let Some(bar) = self.bars.get(&subject.build_key) {
+            bar.set_message(message);
+        } else {
+            let bar = self
+                .multi
+                .insert_before(&self.summary, ProgressBar::new_spinner());
+            bar.set_style(ProgressStyle::with_template("{spinner} {msg}").expect("valid template"));
+            bar.enable_steady_tick(Duration::from_millis(120));
+            bar.set_message(message);
+            self.bars.insert(subject.build_key.clone(), bar);
+            self.update_summary();
+        }
     }
 }
 
 impl EventSink for ProgressSink {
     fn write_event(&self, record: &EventLogRecord) {
-        if record.level >= self.min_level {
-            eprintln!("{}", format_progress_line(record, &self.run_log_dir));
+        match self {
+            Self::Live(state) => {
+                if let Ok(mut live) = state.lock() {
+                    live.handle(record);
+                }
+            }
+            Self::Plain {
+                run_log_dir,
+                min_level,
+            } => {
+                if record.level >= *min_level {
+                    eprintln!("{}", format_progress_line(record, run_log_dir));
+                }
+            }
         }
     }
 }
@@ -774,12 +956,137 @@ mod tests {
         // quiet also drops transient progress.
         assert!(BuildLogLevel::Progress < quiet);
 
-        // normal: everything from Progress up reaches stderr, including ticks.
+        // normal (plain path): Info and up reach stderr. Transient Progress is
+        // NOT shown on the plain path — it belongs to the live block only.
         let normal = stderr_min_level(false);
-        assert!(BuildLogLevel::Progress >= normal);
+        assert!(BuildLogLevel::Progress < normal);
         assert!(BuildLogLevel::Info >= normal);
         assert!(BuildLogLevel::Warn >= normal);
         assert!(BuildLogLevel::Error >= normal);
+    }
+
+    fn live_subject_record(
+        level: BuildLogLevel,
+        status: BuildStatus,
+        build_key: &str,
+    ) -> EventLogRecord {
+        let identity = SubjectIdentity::new("Tree", "pkg", build_key);
+        EventLogRecord::assemble(
+            0,
+            Some(0),
+            Some(&identity),
+            &BuildLogEvent {
+                level,
+                status,
+                op: None,
+                message: "step".to_string(),
+                object_hash: None,
+                raw_log_path: None,
+                details: Map::new(),
+            },
+            Path::new("/run"),
+        )
+    }
+
+    fn live_run_record(status: BuildStatus, details: Value) -> EventLogRecord {
+        EventLogRecord::assemble(
+            0,
+            None,
+            None,
+            &BuildLogEvent {
+                level: BuildLogLevel::Info,
+                status,
+                op: None,
+                message: "run".to_string(),
+                object_hash: None,
+                raw_log_path: None,
+                details: details.as_object().cloned().unwrap_or_default(),
+            },
+            Path::new("/run"),
+        )
+    }
+
+    #[test]
+    fn live_progress_tracks_subjects_and_counters() {
+        let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
+        let bk = |c: char| std::iter::repeat_n(c, 64).collect::<String>();
+
+        sink.write_event(&live_run_record(
+            BuildStatus::RunStarted,
+            serde_json::json!({ "subjects": 3, "jobs": 2 }),
+        ));
+        sink.write_event(&live_subject_record(
+            BuildLogLevel::Info,
+            BuildStatus::Running,
+            &bk('a'),
+        ));
+        // A progress tick updates A's line in place (no new bar).
+        sink.write_event(&live_subject_record(
+            BuildLogLevel::Progress,
+            BuildStatus::Running,
+            &bk('a'),
+        ));
+        sink.write_event(&live_subject_record(
+            BuildLogLevel::Info,
+            BuildStatus::Running,
+            &bk('b'),
+        ));
+        {
+            let ProgressSink::Live(state) = &sink else {
+                panic!("expected live sink");
+            };
+            let live = state.lock().unwrap();
+            assert_eq!(live.total, 3);
+            assert_eq!(live.bars.len(), 2, "two subjects active");
+            assert_eq!(live.done, 0);
+        }
+
+        sink.write_event(&live_subject_record(
+            BuildLogLevel::Info,
+            BuildStatus::Done,
+            &bk('a'),
+        ));
+        // cache-hit counts as done but occupies no bar.
+        sink.write_event(&live_subject_record(
+            BuildLogLevel::Info,
+            BuildStatus::CacheHit,
+            &bk('c'),
+        ));
+        sink.write_event(&live_subject_record(
+            BuildLogLevel::Error,
+            BuildStatus::Failed,
+            &bk('b'),
+        ));
+
+        let ProgressSink::Live(state) = &sink else {
+            panic!("expected live sink");
+        };
+        let live = state.lock().unwrap();
+        assert_eq!(live.bars.len(), 0, "all subjects finished");
+        assert_eq!(live.done, 2, "one built + one cache-hit");
+        assert_eq!(live.failed, 1);
+    }
+
+    #[test]
+    fn sink_uses_plain_path_off_tty() {
+        // Skip under a real terminal (rare for `cargo test`, but be robust).
+        if std::io::stderr().is_terminal() {
+            return;
+        }
+        assert!(matches!(
+            ProgressSink::new(PathBuf::from("/run"), false),
+            ProgressSink::Plain {
+                min_level: BuildLogLevel::Info,
+                ..
+            }
+        ));
+        assert!(matches!(
+            ProgressSink::new(PathBuf::from("/run"), true),
+            ProgressSink::Plain {
+                min_level: BuildLogLevel::Warn,
+                ..
+            }
+        ));
     }
 
     #[test]

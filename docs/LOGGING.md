@@ -13,8 +13,12 @@ There are three non-overlapping output channels:
   build-significant goes here, at every level.
 - **stderr** is the live UI only: build progress plus warnings and errors, as a
   projection of the store logs onto the screen. The progress renderer is the
-  only writer of stderr. How much it shows is a threshold (see
-  [Verbosity](#verbosity)).
+  only writer of stderr. In an interactive terminal (and not `quiet`) it draws a
+  **live block** (one updating line per active subject, a bottom summary line,
+  with warnings/errors printed above) via `indicatif`; otherwise (non-TTY, e.g.
+  CI or a pipe, or `quiet`) it falls back to **plain per-line** output.
+  Transient `progress` ticks appear only in the live block — the plain path
+  omits them. How much it shows is a threshold (see [Verbosity](#verbosity)).
 - **stdout** carries the machine-readable result (the realized object JSON).
   Moving the result into a store file is a related, separate concern and is not
   part of the logging contract.
