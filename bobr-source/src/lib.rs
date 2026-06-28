@@ -1,8 +1,26 @@
+//! Source materialization: fetch and stage source objects from their origins.
+//!
+//! A *source* is a leaf build input — it has no inputs of its own, so its
+//! content is fixed up front rather than computed by a build. That is exactly
+//! what lets a source be *pinned* by an object hash: with nothing to depend on,
+//! the content is known in advance, and the hash both names it and verifies it
+//! after fetching. An *origin* only describes where to obtain those bytes.
+//!
+//! An [`OriginHandler`] parses a recipe's `origin` object into a
+//! [`ParsedOrigin`], which materializes the content into a staging directory the
+//! runtime owns and cleans up; the result is then checked against the declared
+//! hash.
+//!
+//! The origin traits live in [`origin`] and are re-exported at the crate root.
+
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 
 mod http;
+/// OCI registry client: pulls and stages an image's layers by pinned digest.
 pub mod oci_registry;
+/// Origin abstractions: [`OriginSpec`], [`OriginContext`], [`OriginHandler`],
+/// and [`ParsedOrigin`].
 pub mod origin;
 mod origins;
 

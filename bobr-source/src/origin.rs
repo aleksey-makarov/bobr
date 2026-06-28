@@ -3,8 +3,13 @@ use serde_json::{Map, Value};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+/// Static descriptor for one origin kind, naming the recipe `tag` it handles
+/// (e.g. `"Http"`, `"Oci"`, `"Path"`). Both [`OriginHandler`] and
+/// [`ParsedOrigin`] report the spec they belong to via `spec()`.
 #[derive(Debug, Clone, Copy)]
 pub struct OriginSpec {
+    /// The origin's recipe tag, matched against the `tag` field of a source's
+    /// `origin` object.
     pub tag: &'static str,
 }
 
@@ -13,8 +18,13 @@ pub struct OriginSpec {
 /// progress and stop promptly when the run is cancelled.
 #[derive(Clone, Copy)]
 pub struct OriginContext<'a> {
+    /// Staging directory the origin must materialize into; the runtime only
+    /// cleans up this path (see [`ParsedOrigin::materialize`]).
     pub temp_root: &'a Path,
+    /// Subject logger for milestones ([`OriginContext::milestone`]) and progress
+    /// ticks ([`OriginContext::progress`]).
     pub logger: &'a dyn BuildLogger,
+    /// Run cancellation token; long fetches poll [`OriginContext::is_cancelled`].
     pub cancellation: &'a CancellationToken,
 }
 
@@ -49,7 +59,14 @@ impl OriginContext<'_> {
     }
 }
 
+/// A parsed, ready-to-run source origin.
+///
+/// Produced by an [`OriginHandler`] from a recipe's `origin` object; it knows
+/// how to fetch and stage its content via
+/// [`materialize`](ParsedOrigin::materialize). Boxed trait objects are cloneable
+/// (see the `Clone` impl below) so a planned source can be duplicated cheaply.
 pub trait ParsedOrigin: fmt::Debug + Send + Sync {
+    /// The [`OriginSpec`] (kind/tag) this origin belongs to.
     fn spec(&self) -> &'static OriginSpec;
 
     /// Materializes the origin and returns the staged path.
@@ -60,6 +77,8 @@ pub trait ParsedOrigin: fmt::Debug + Send + Sync {
     /// `cx.temp_root` and return a path within it.
     fn materialize(&self, cx: &OriginContext<'_>) -> Result<PathBuf, String>;
 
+    /// Clones into a fresh boxed trait object. Backs the `Clone` impl for
+    /// `Box<dyn ParsedOrigin>`.
     fn clone_box(&self) -> Box<dyn ParsedOrigin>;
 }
 
@@ -69,9 +88,19 @@ impl Clone for Box<dyn ParsedOrigin> {
     }
 }
 
+/// Parses a recipe `origin` object of one kind into a [`ParsedOrigin`].
+///
+/// There is one handler per origin kind (HTTP, OCI registry, path, …); the
+/// source layer dispatches to the handler whose [`OriginSpec::tag`] matches the
+/// `tag` field of the recipe's `origin` object.
 pub trait OriginHandler: Send + Sync {
+    /// The [`OriginSpec`] (kind/tag) this handler parses.
     fn spec(&self) -> &'static OriginSpec;
 
+    /// Parses `object` (a source's `origin` map) into a [`ParsedOrigin`].
+    ///
+    /// `field_path` is the JSON-path prefix of `object`, used to build readable
+    /// error messages. Returns a human-readable error string on invalid input.
     fn parse(
         &self,
         object: Map<String, Value>,

@@ -35,6 +35,9 @@ impl fmt::Display for OciRegistryOriginError {
     }
 }
 
+/// [`OriginHandler`](crate::origin::OriginHandler) for `Oci` origins: parses an
+/// image reference plus pinned digest and platform into a registry-backed
+/// [`ParsedOrigin`](crate::origin::ParsedOrigin).
 #[derive(Debug)]
 pub struct OciRegistryOriginHandler;
 

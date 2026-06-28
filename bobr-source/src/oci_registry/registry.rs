@@ -19,11 +19,17 @@ const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+/// Error from talking to an OCI registry: HTTP/auth, manifest or blob parsing,
+/// digest verification, or local I/O while staging the image.
 #[derive(Debug)]
 pub enum RegistryError {
+    /// HTTP transport failure or a non-success status from the registry.
     Http(String),
+    /// Malformed manifest/index JSON or an unexpected media type.
     Parse(String),
+    /// Content digest mismatch or an otherwise invalid digest.
     Digest(String),
+    /// Local filesystem error while staging the image.
     Io(String),
 }
 
@@ -56,6 +62,11 @@ impl From<ureq::Error> for RegistryError {
     }
 }
 
+/// Splits an image reference into `(registry_host, repository, reference)`.
+///
+/// Applies Docker Hub defaults: a bare name resolves to `registry-1.docker.io`
+/// with a `library/` prefix, and a missing tag/digest defaults to `latest`. The
+/// returned `reference` is either a tag or a `sha256:...` digest.
 pub fn parse_image_ref(image: &str) -> Result<(String, String, String), RegistryError> {
     let (name_part, reference) = if let Some(pos) = image.rfind('@') {
         (&image[..pos], image[pos + 1..].to_string())
@@ -97,6 +108,9 @@ pub fn parse_image_ref(image: &str) -> Result<(String, String, String), Registry
     Ok((registry_host, repository, reference))
 }
 
+/// Resolves an image reference to the digest its tag currently points at, by
+/// fetching the manifest and hashing it. Used to suggest a `digest = "..."` pin
+/// when a pinned fetch fails.
 pub fn resolve_current_digest(image: &str) -> Result<String, RegistryError> {
     let (registry_host, repository, reference) = parse_image_ref(image)?;
     let scheme = if registry_host.starts_with("localhost") || registry_host.starts_with("127.") {
@@ -110,6 +124,10 @@ pub fn resolve_current_digest(image: &str) -> Result<String, RegistryError> {
     Ok(format!("sha256:{}", oci::sha256_hex(&bytes)))
 }
 
+/// Fetches the manifest and layers for `platform`, verifies the content matches
+/// `pinned_digest`, and stages them under `target_dir` as an OCI layout,
+/// returning the verified digest. Convenience wrapper over
+/// [`fetch_image_authenticated_with_progress`] that discards progress.
 pub fn fetch_image_authenticated(
     image: &str,
     pinned_digest: &str,
@@ -126,6 +144,8 @@ pub fn fetch_image_authenticated(
     )
 }
 
+/// Like [`fetch_image_authenticated`], but reports coarse progress: `progress`
+/// is called with a short message at each manifest/blob step.
 pub fn fetch_image_authenticated_with_progress(
     image: &str,
     pinned_digest: &str,
