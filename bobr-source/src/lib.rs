@@ -11,7 +11,8 @@
 //! runtime owns and cleans up; the result is then checked against the declared
 //! hash.
 //!
-//! The origin traits live in [`origin`] and are re-exported at the crate root.
+//! The core abstractions — [`OriginSpec`], [`OriginContext`], [`OriginHandler`],
+//! and [`ParsedOrigin`] — are exposed at the crate root.
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
@@ -25,12 +26,12 @@ mod http;
 pub mod oci_registry;
 #[cfg(not(feature = "test-support"))]
 mod oci_registry;
-/// Origin abstractions: [`OriginSpec`], [`OriginContext`], [`OriginHandler`],
-/// and [`ParsedOrigin`].
-pub mod origin;
+mod origin;
 mod origins;
 
-pub use origin::*;
+// The origin abstractions are the crate's public API; re-export them at the root
+// rather than exposing the module path.
+pub use origin::{OriginContext, OriginHandler, OriginSpec, ParsedOrigin};
 
 use bobr_core::{BuildKey, BuildLogSubject, ObjectHash, SubjectRunContext, Workspace};
 use serde_json::{Map, Value};
