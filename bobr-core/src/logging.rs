@@ -560,8 +560,9 @@ impl EventSink for FileSink {
 /// noise, so the plain threshold starts at `Info`. File logs are unaffected
 /// (and never carry `Progress`).
 enum ProgressSink {
-    /// Live indicatif block (interactive terminal, non-quiet).
-    Live(Mutex<LiveProgress>),
+    /// Live indicatif block (interactive terminal, non-quiet). Boxed: the live
+    /// state is far larger than the plain variant.
+    Live(Box<Mutex<LiveProgress>>),
     /// Plain per-line stderr at or above `min_level`.
     Plain {
         run_log_dir: PathBuf,
@@ -583,10 +584,10 @@ impl fmt::Debug for ProgressSink {
 impl ProgressSink {
     fn new(run_log_dir: PathBuf, quiet: bool) -> Self {
         if !quiet && std::io::stderr().is_terminal() {
-            Self::Live(Mutex::new(LiveProgress::new(
+            Self::Live(Box::new(Mutex::new(LiveProgress::new(
                 run_log_dir,
                 MultiProgress::new(),
-            )))
+            ))))
         } else {
             Self::Plain {
                 run_log_dir,
@@ -600,7 +601,7 @@ impl ProgressSink {
     #[cfg(test)]
     fn live_hidden(run_log_dir: PathBuf) -> Self {
         let multi = MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden());
-        Self::Live(Mutex::new(LiveProgress::new(run_log_dir, multi)))
+        Self::Live(Box::new(Mutex::new(LiveProgress::new(run_log_dir, multi))))
     }
 }
 
@@ -627,12 +628,25 @@ fn stderr_min_level(quiet: bool) -> BuildLogLevel {
     }
 }
 
-/// Live indicatif state: one bar per active subject plus a bottom summary bar.
+/// One terminal line in the live block: a bar plus whether it currently holds a
+/// running subject. A finished subject leaves its slot in place (marked idle)
+/// for the next subject to reuse, so the block grows to the peak concurrency and
+/// never shrinks mid-run.
+struct Slot {
+    bar: ProgressBar,
+    occupied: bool,
+}
+
+/// Live indicatif state: a fixed set of subject slots (idle ones kept in place)
+/// plus a bottom summary bar.
 struct LiveProgress {
     run_log_dir: PathBuf,
     multi: MultiProgress,
     summary: ProgressBar,
-    bars: HashMap<String, ProgressBar>,
+    active_style: ProgressStyle,
+    idle_style: ProgressStyle,
+    slots: Vec<Slot>,
+    index_of: HashMap<String, usize>,
     total: usize,
     done: usize,
     failed: usize,
@@ -646,7 +660,10 @@ impl LiveProgress {
             run_log_dir,
             multi,
             summary,
-            bars: HashMap::new(),
+            active_style: ProgressStyle::with_template("{spinner} {msg}").expect("valid template"),
+            idle_style: ProgressStyle::with_template("  {msg}").expect("valid template"),
+            slots: Vec::new(),
+            index_of: HashMap::new(),
             total: 0,
             done: 0,
             failed: 0,
@@ -657,20 +674,75 @@ impl LiveProgress {
         record.details.get(key).and_then(Value::as_u64).unwrap_or(0)
     }
 
+    fn running(&self) -> usize {
+        self.index_of.len()
+    }
+
     fn update_summary(&self) {
         self.summary.set_message(format!(
             "{}/{} done · {} running · {} failed",
             self.done,
             self.total,
-            self.bars.len(),
+            self.running(),
             self.failed
         ));
     }
 
-    fn clear(&mut self) {
-        for (_, bar) in self.bars.drain() {
-            bar.finish_and_clear();
+    /// Routes a subject to its existing slot, an idle slot, or a new bottom slot
+    /// and sets the line text. Idle slots are reused in place, so the block does
+    /// not grow past the peak number of concurrent subjects.
+    fn start_or_update(&mut self, build_key: &str, message: String) {
+        if let Some(&index) = self.index_of.get(build_key) {
+            self.slots[index].bar.set_message(message);
+            return;
         }
+        let index = match self.slots.iter().position(|slot| !slot.occupied) {
+            Some(index) => index,
+            None => {
+                let bar = self
+                    .multi
+                    .insert_before(&self.summary, ProgressBar::new_spinner());
+                self.slots.push(Slot {
+                    bar,
+                    occupied: false,
+                });
+                self.slots.len() - 1
+            }
+        };
+        let style = self.active_style.clone();
+        let slot = &mut self.slots[index];
+        slot.occupied = true;
+        slot.bar.set_style(style);
+        slot.bar.enable_steady_tick(Duration::from_millis(120));
+        slot.bar.set_message(message);
+        self.index_of.insert(build_key.to_string(), index);
+        self.update_summary();
+    }
+
+    /// Marks a finished subject's slot idle: the line stays in place (the block
+    /// does not shrink) and becomes available for the next subject.
+    fn finish_subject(&mut self, build_key: &str, failed: bool) {
+        if let Some(index) = self.index_of.remove(build_key) {
+            let style = self.idle_style.clone();
+            let slot = &mut self.slots[index];
+            slot.occupied = false;
+            slot.bar.disable_steady_tick();
+            slot.bar.set_style(style);
+            slot.bar.set_message("idle");
+        }
+        if failed {
+            self.failed += 1;
+        } else {
+            self.done += 1;
+        }
+        self.update_summary();
+    }
+
+    fn clear(&mut self) {
+        for slot in self.slots.drain(..) {
+            slot.bar.finish_and_clear();
+        }
+        self.index_of.clear();
         self.summary.finish_and_clear();
     }
 
@@ -710,48 +782,30 @@ impl LiveProgress {
         };
 
         if status == BuildStatus::Done.as_str() {
-            if let Some(bar) = self.bars.remove(&subject.build_key) {
-                bar.finish_and_clear();
-            }
-            self.done += 1;
-            self.update_summary();
+            self.finish_subject(&subject.build_key, false);
             return;
         }
         if status == BuildStatus::Failed.as_str() {
-            if let Some(bar) = self.bars.remove(&subject.build_key) {
-                bar.finish_and_clear();
-            }
-            self.failed += 1;
             // Leave a visible record of the failure above the block.
             let _ = self
                 .multi
                 .println(format_progress_line(record, &self.run_log_dir));
-            self.update_summary();
+            self.finish_subject(&subject.build_key, true);
             return;
         }
         if record.level >= BuildLogLevel::Warn {
             // A non-terminal warning/error from a running subject: print above,
-            // but keep its bar.
+            // but keep its slot.
             let _ = self
                 .multi
                 .println(format_progress_line(record, &self.run_log_dir));
             return;
         }
 
-        // start / running / progress: create or update this subject's bar.
+        // start / running / progress: route to the subject's (possibly reused)
+        // slot and update its line in place.
         let message = format_progress_line(record, &self.run_log_dir);
-        if let Some(bar) = self.bars.get(&subject.build_key) {
-            bar.set_message(message);
-        } else {
-            let bar = self
-                .multi
-                .insert_before(&self.summary, ProgressBar::new_spinner());
-            bar.set_style(ProgressStyle::with_template("{spinner} {msg}").expect("valid template"));
-            bar.enable_steady_tick(Duration::from_millis(120));
-            bar.set_message(message);
-            self.bars.insert(subject.build_key.clone(), bar);
-            self.update_summary();
-        }
+        self.start_or_update(&subject.build_key, message);
     }
 }
 
@@ -843,21 +897,22 @@ impl EventLogRecord {
 }
 
 fn format_progress_line(record: &EventLogRecord, run_log_dir: &Path) -> String {
-    let label = record.op.as_deref().unwrap_or(record.status.as_str());
-    let mut line = format!("[{label}]");
-
-    if let Some(subject) = &record.subject {
-        line.push(' ');
-        line.push_str(&subject.tag);
-        line.push(' ');
-        line.push_str(&subject.name);
-        line.push(' ');
-        line.push_str(&short_id(&subject.build_key));
+    let mut line = if let Some(subject) = &record.subject {
+        // Subject lines lead with the builder/source tag and recipe name; the
+        // build key lives in the logs, not on screen. The realized object hash
+        // is kept when present (it is the result identity, shown on completion).
+        let mut line = format!("{} {}", subject.tag, subject.name);
         if let Some(object_hash) = &subject.object_hash {
             line.push(' ');
             line.push_str(&short_id(object_hash));
         }
-    }
+        line
+    } else {
+        // Run-level lines have no subject, so the status/op label is the only
+        // structure.
+        let label = record.op.as_deref().unwrap_or(record.status.as_str());
+        format!("[{label}]")
+    };
 
     if !record.message.is_empty() {
         line.push_str(": ");
@@ -1007,63 +1062,57 @@ mod tests {
     }
 
     #[test]
-    fn live_progress_tracks_subjects_and_counters() {
+    fn live_progress_keeps_idle_slots_and_reuses_them() {
         let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
         let bk = |c: char| std::iter::repeat_n(c, 64).collect::<String>();
+        let running = |level, status, key: &str| {
+            sink.write_event(&live_subject_record(level, status, key));
+        };
 
         sink.write_event(&live_run_record(
             BuildStatus::RunStarted,
-            serde_json::json!({ "subjects": 3, "jobs": 2 }),
+            serde_json::json!({ "subjects": 4, "jobs": 2 }),
         ));
-        sink.write_event(&live_subject_record(
-            BuildLogLevel::Info,
-            BuildStatus::Running,
-            &bk('a'),
-        ));
-        // A progress tick updates A's line in place (no new bar).
-        sink.write_event(&live_subject_record(
-            BuildLogLevel::Progress,
-            BuildStatus::Running,
-            &bk('a'),
-        ));
-        sink.write_event(&live_subject_record(
-            BuildLogLevel::Info,
-            BuildStatus::Running,
-            &bk('b'),
-        ));
+        running(BuildLogLevel::Info, BuildStatus::Running, &bk('a'));
+        // A progress tick updates A's line in place (no new slot).
+        running(BuildLogLevel::Progress, BuildStatus::Running, &bk('a'));
+        running(BuildLogLevel::Info, BuildStatus::Running, &bk('b'));
+
+        // A finishes: its slot stays (idle); the block does not shrink.
+        running(BuildLogLevel::Info, BuildStatus::Done, &bk('a'));
         {
             let ProgressSink::Live(state) = &sink else {
                 panic!("expected live sink");
             };
             let live = state.lock().unwrap();
-            assert_eq!(live.total, 3);
-            assert_eq!(live.bars.len(), 2, "two subjects active");
-            assert_eq!(live.done, 0);
+            assert_eq!(live.slots.len(), 2, "block does not shrink");
+            assert_eq!(live.running(), 1);
+            assert_eq!(live.done, 1);
         }
 
-        sink.write_event(&live_subject_record(
-            BuildLogLevel::Info,
-            BuildStatus::Done,
-            &bk('a'),
-        ));
-        // cache-hit counts as done but occupies no bar.
-        sink.write_event(&live_subject_record(
-            BuildLogLevel::Info,
-            BuildStatus::CacheHit,
-            &bk('c'),
-        ));
-        sink.write_event(&live_subject_record(
-            BuildLogLevel::Error,
-            BuildStatus::Failed,
-            &bk('b'),
-        ));
+        // A new subject reuses A's idle slot instead of growing the block.
+        running(BuildLogLevel::Info, BuildStatus::Running, &bk('d'));
+        {
+            let ProgressSink::Live(state) = &sink else {
+                panic!("expected live sink");
+            };
+            let live = state.lock().unwrap();
+            assert_eq!(live.slots.len(), 2, "idle slot reused, not grown");
+            assert_eq!(live.running(), 2);
+        }
+
+        // cache-hit counts as done but occupies no slot; B and D finish.
+        running(BuildLogLevel::Info, BuildStatus::CacheHit, &bk('e'));
+        running(BuildLogLevel::Info, BuildStatus::Done, &bk('b'));
+        running(BuildLogLevel::Error, BuildStatus::Failed, &bk('d'));
 
         let ProgressSink::Live(state) = &sink else {
             panic!("expected live sink");
         };
         let live = state.lock().unwrap();
-        assert_eq!(live.bars.len(), 0, "all subjects finished");
-        assert_eq!(live.done, 2, "one built + one cache-hit");
+        assert_eq!(live.slots.len(), 2, "two lines remain, now both idle");
+        assert_eq!(live.running(), 0);
+        assert_eq!(live.done, 3, "A + B done, plus one cache-hit");
         assert_eq!(live.failed, 1);
     }
 

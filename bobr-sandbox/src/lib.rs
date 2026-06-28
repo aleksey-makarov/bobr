@@ -139,7 +139,7 @@ fn build_sandbox(
         BuildLogLevel::Info,
         "sandbox",
         format!(
-            "running Sandbox with {} step(s) and {} extra input(s)",
+            "running with {} step(s) and {} extra input(s)",
             runtime_input.steps.len(),
             runtime_input.extra_inputs.len()
         ),
