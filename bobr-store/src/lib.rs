@@ -14,8 +14,6 @@
 //! for value types keeps narrow parse errors such as
 //! [`bobr_core::ParseHexHashError`] and [`fs_tree::ParseFsFileHashError`].
 
-#![deny(missing_docs)]
-
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 

@@ -10,6 +10,9 @@
 //! can execute the same typed function through a concrete provider or through a
 //! specific runtime implementation.
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("bobr requires Linux");
+
 /// Shared typed runtime traits and error type.
 pub mod runtime;
 

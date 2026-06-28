@@ -1,3 +1,6 @@
+#[cfg(not(target_os = "linux"))]
+compile_error!("bobr requires Linux");
+
 mod http;
 pub mod oci_registry;
 pub mod origin;

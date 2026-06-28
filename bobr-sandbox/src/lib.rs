@@ -3,6 +3,9 @@
 //! It provides the `Sandbox` builder that executes `bobr-sandbox-launcher`
 //! through a `bobr-runtime` function and publishes fs-tree manifests.
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("bobr requires Linux");
+
 mod lifecycle;
 mod mounts;
 mod reports;

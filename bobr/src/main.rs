@@ -1,3 +1,6 @@
+#[cfg(not(target_os = "linux"))]
+compile_error!("bobr requires Linux");
+
 use std::env;
 use std::fmt;
 use std::fs;

@@ -1,3 +1,6 @@
+#[cfg(not(target_os = "linux"))]
+compile_error!("bobr requires Linux");
+
 mod builder_registry;
 mod collect_graph;
 mod execution;

@@ -15,3 +15,6 @@ time = { version = "0.3", features = ["formatting", "local-offset", "macros", "p
 
 [dev-dependencies]
 tempfile = "3.14"
+
+[lints]
+workspace = true

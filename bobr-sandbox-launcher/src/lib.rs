@@ -8,6 +8,9 @@
 //! - `runner`: the in-namespace runner that executes steps as pid 1.
 //! - `launcher`: the privileged setup (namespaces, mounts, caps, chroot).
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("bobr requires Linux");
+
 mod launcher;
 mod protocol;
 mod runner;

@@ -1,3 +1,6 @@
+#[cfg(not(target_os = "linux"))]
+compile_error!("bobr requires Linux");
+
 use bobr_sandbox_launcher::{launch, protocol_info};
 use std::ffi::OsString;
 use std::os::fd::RawFd;

@@ -1,3 +1,6 @@
+#[cfg(not(target_os = "linux"))]
+compile_error!("bobr requires Linux");
+
 use fsobj_hash::{hash_path, hash_tar_file, hash_tar_reader};
 use std::env;
 use std::ffi::OsString;

@@ -1,3 +1,6 @@
+#[cfg(not(target_os = "linux"))]
+compile_error!("bobr requires Linux");
+
 pub use bobr_runtime::runtime_provider::{RuntimeBackend, RuntimeProvider};
 
 pub mod cancellation;
