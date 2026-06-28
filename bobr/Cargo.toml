@@ -20,6 +20,7 @@ serde_json = "1.0"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
 
 [dev-dependencies]
+bobr-source = { path = "../bobr-source", features = ["test-support"] }
 flate2 = "1.0"
 mockito = "1.6"
 sha2 = "0.10"

@@ -6,10 +6,10 @@ use std::fmt;
 use std::fs;
 use std::path::PathBuf;
 
-pub use registry::{
-    RegistryError, fetch_image_authenticated, fetch_image_authenticated_with_progress,
-    parse_image_ref, resolve_current_digest,
-};
+use registry::{fetch_image_authenticated_with_progress, resolve_current_digest};
+// Exposed (with the module) only under `test-support`, for `bobr`'s tests.
+#[cfg(feature = "test-support")]
+pub use registry::fetch_image_authenticated;
 
 const OCI_LAYOUT_SUBDIR: &str = "image";
 

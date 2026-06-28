@@ -3,6 +3,12 @@ name = "bobr-source"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Exposes the `oci_registry` client as public API. Enabled by `bobr` as a
+# dev-dependency so its integration tests can drive the registry directly; off
+# in normal builds, where `oci_registry` stays crate-private.
+test-support = []
+
 [dependencies]
 bzip2 = "0.5"
 flate2 = "1.0"

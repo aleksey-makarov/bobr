@@ -18,7 +18,13 @@ compile_error!("bobr requires Linux");
 
 mod http;
 /// OCI registry client: pulls and stages an image's layers by pinned digest.
+///
+/// Public only under the `test-support` feature (used by `bobr`'s integration
+/// tests); crate-private otherwise.
+#[cfg(feature = "test-support")]
 pub mod oci_registry;
+#[cfg(not(feature = "test-support"))]
+mod oci_registry;
 /// Origin abstractions: [`OriginSpec`], [`OriginContext`], [`OriginHandler`],
 /// and [`ParsedOrigin`].
 pub mod origin;

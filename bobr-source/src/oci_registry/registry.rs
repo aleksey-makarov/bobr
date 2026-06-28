@@ -128,6 +128,10 @@ pub fn resolve_current_digest(image: &str) -> Result<String, RegistryError> {
 /// `pinned_digest`, and stages them under `target_dir` as an OCI layout,
 /// returning the verified digest. Convenience wrapper over
 /// [`fetch_image_authenticated_with_progress`] that discards progress.
+///
+/// Available in unit tests and under the `test-support` feature (where the
+/// `oci_registry` module is public); not compiled into normal builds.
+#[cfg(any(test, feature = "test-support"))]
 pub fn fetch_image_authenticated(
     image: &str,
     pinned_digest: &str,
@@ -144,8 +148,10 @@ pub fn fetch_image_authenticated(
     )
 }
 
-/// Like [`fetch_image_authenticated`], but reports coarse progress: `progress`
-/// is called with a short message at each manifest/blob step.
+/// Fetches the manifest and layers for `platform`, verifies them against
+/// `pinned_digest`, and stages them under `target_dir` as an OCI layout,
+/// returning the verified digest. Reports coarse progress: `progress` is called
+/// with a short message at each manifest/blob step.
 pub fn fetch_image_authenticated_with_progress(
     image: &str,
     pinned_digest: &str,
