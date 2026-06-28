@@ -1,17 +1,17 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 
-pub mod builder;
+mod builder;
 mod erofs;
 mod error;
 mod fs_tree_import;
 mod fs_tree_materialize;
-pub mod group;
+mod group;
 mod initramfs;
 mod oci_extract;
 mod registry;
-pub mod subject;
-pub mod tree;
+mod subject;
+mod tree;
 mod tree_merge;
 mod tree_subset;
 
