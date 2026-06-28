@@ -129,6 +129,7 @@ fn build_sandbox(
         collect_extra_inputs(&SANDBOX_SPEC, "Sandbox", &inputs).map_err(map_error)?;
     validate_step_interpolations(&config.steps, &extra_inputs).map_err(map_error)?;
 
+    cx.log_event(BuildLogLevel::Info, "sandbox", "preparing inputs");
     let launcher_path = tools::resolve_and_preflight_sandbox_launcher()
         .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
     let (runtime_input, output_manifest) =

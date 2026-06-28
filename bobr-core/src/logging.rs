@@ -660,7 +660,8 @@ impl LiveProgress {
             run_log_dir,
             multi,
             summary,
-            active_style: ProgressStyle::with_template("{spinner} {msg}").expect("valid template"),
+            active_style: ProgressStyle::with_template("{spinner} {msg} ({elapsed})")
+                .expect("valid template"),
             idle_style: ProgressStyle::with_template("  {msg}").expect("valid template"),
             slots: Vec::new(),
             index_of: HashMap::new(),
@@ -713,6 +714,9 @@ impl LiveProgress {
         let slot = &mut self.slots[index];
         slot.occupied = true;
         slot.bar.set_style(style);
+        // Count `{elapsed}` from this subject's assignment, not from a previous
+        // occupant of a reused slot.
+        slot.bar.reset_elapsed();
         slot.bar.enable_steady_tick(Duration::from_millis(120));
         slot.bar.set_message(message);
         self.index_of.insert(build_key.to_string(), index);
@@ -728,7 +732,7 @@ impl LiveProgress {
             slot.occupied = false;
             slot.bar.disable_steady_tick();
             slot.bar.set_style(style);
-            slot.bar.set_message("idle");
+            slot.bar.set_message("—");
         }
         if failed {
             self.failed += 1;

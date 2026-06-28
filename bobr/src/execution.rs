@@ -19,6 +19,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Instant;
 
 type SubjectGraph = HashMap<BuildKey, Arc<PlannedSubject>>;
 
@@ -330,6 +331,8 @@ fn execute_graph(
 
     let (tx, rx) = mpsc::channel::<(BuildKey, Result<SubjectExecution, ExecutionError>)>();
     let mut in_flight = 0usize;
+    // Wall-clock start per dispatched subject, to report its duration on `done`.
+    let mut start_times: HashMap<BuildKey, Instant> = HashMap::new();
 
     // Workers run on detached threads tracked only by `in_flight`. Once a
     // worker is spawned, scheduler-side failures should be recorded in
@@ -374,6 +377,7 @@ fn execute_graph(
                 }
                 None => HashMap::new(),
             };
+            start_times.insert(key, Instant::now());
             thread::spawn(move || {
                 let result = panic::catch_unwind(AssertUnwindSafe(|| {
                     execute_subject(
@@ -429,6 +433,7 @@ fn execute_graph(
             }
         };
         in_flight -= 1;
+        let started_at = start_times.remove(&key);
         let executed = match result {
             Ok(executed) => executed,
             Err(error) => {
@@ -450,11 +455,20 @@ fn execute_graph(
             }
             SubjectOutcome::Built => {
                 counters.built += 1;
+                let message = match started_at {
+                    Some(started) => {
+                        format!(
+                            "subject completed in {:.1}s",
+                            started.elapsed().as_secs_f64()
+                        )
+                    }
+                    None => "subject completed".to_string(),
+                };
                 executed.logger.log_event(BuildLogEvent {
                     level: BuildLogLevel::Info,
                     status: BuildStatus::Done,
                     op: None,
-                    message: "subject completed".to_string(),
+                    message,
                     object_hash: Some(object_hash),
                     raw_log_path: None,
                     details: serde_json::Map::new(),
