@@ -6,12 +6,16 @@ use bobr_store::fs_tree::{FsTree, FsTreeInstall};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Configuration for [`FsTreeImportBuilder`].
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FsTreeImportConfig {
+    /// Where and how to place the imported object within the output fs-tree.
     pub install: FsTreeInstall,
 }
 
+/// Imports a content object (the `input`) into an fs-tree at a configured
+/// location.
 pub struct FsTreeImportBuilder;
 
 static FS_TREE_IMPORT_SPEC: InputSpec = InputSpec {

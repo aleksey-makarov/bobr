@@ -1,3 +1,11 @@
+//! In-tree builders for bobr.
+//!
+//! Defines the [`Builder`]/[`TypedBuilder`] traits, the [`BuildContext`] and
+//! input contract ([`InputSpec`]/[`BuilderInputs`]), and the concrete builders
+//! bobr ships — tree, group, tree-merge, tree-subset, fs-tree-import, OCI
+//! extract, and the EROFS/initramfs rootfs builders. [`BUILDERS`] is the
+//! registry of all of them.
+
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 

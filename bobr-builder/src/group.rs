@@ -6,10 +6,12 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+/// Configuration for [`GroupBuilder`] (no options).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupConfig {}
 
+/// Aggregates its named inputs into a single group object.
 pub struct GroupBuilder;
 
 static GROUP_SPEC: InputSpec = InputSpec {

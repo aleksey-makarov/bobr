@@ -17,7 +17,9 @@ use std::fmt;
 pub enum BuilderPlanError {
     /// The builder tag is not registered in the registry used for planning.
     UnknownBuilder {
+        /// The unknown builder tag from the recipe.
         tag: String,
+        /// Tags the planning registry does support.
         supported_tags: Vec<&'static str>,
     },
     /// The recipe object does not match the builder recipe shape.
@@ -29,6 +31,7 @@ pub enum BuilderPlanError {
 }
 
 impl BuilderPlanError {
+    /// Builds a [`Recipe`](BuilderPlanError::Recipe) error from a message.
     pub fn recipe(message: impl Into<String>) -> Self {
         Self::Recipe(message.into())
     }
@@ -85,6 +88,9 @@ impl fmt::Debug for BuilderPlannedSubject {
 }
 
 impl BuilderPlannedSubject {
+    /// Plans a builder subject from the `builder`, recipe `name`, raw `config`,
+    /// and resolved input keys: validates the inputs against the builder's spec
+    /// and computes the subject's build key.
     pub fn new(
         builder: &'static dyn Builder,
         name: String,

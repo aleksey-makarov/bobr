@@ -7,8 +7,11 @@ use bobr_store::{
 };
 use serde::Deserialize;
 
+/// Builds an fs-tree that is a subset of its input `tree`, keeping only the
+/// configured paths.
 pub struct TreeSubsetBuilder;
 
+/// Configuration for [`TreeSubsetBuilder`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TreeSubsetConfig {

@@ -3,9 +3,13 @@ use std::fmt;
 /// Error returned by a builder implementation.
 #[derive(Debug)]
 pub enum BuilderError {
+    /// The recipe object is malformed for this builder.
     InvalidRecipe(String),
+    /// The build was cancelled before completing.
     Cancelled(String),
+    /// The builder ran but failed.
     ExecutionFailed(String),
+    /// The requested builder operation is not implemented.
     NotImplemented(String),
 }
 

@@ -19,13 +19,18 @@ const OUTPUT_FILE_NAME: &str = "erofs-rootfs.erofs";
 /// `SOURCE_DATE_EPOCH` so the whole build agrees on one epoch.
 const REPRODUCIBLE_SOURCE_DATE_EPOCH: &str = "315532800";
 
+/// Builds an EROFS rootfs image from an fs-tree (the `tree` input).
 pub struct ErofsRootfsBuilder;
 
+/// Configuration for [`ErofsRootfsBuilder`].
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ErofsRootfsConfig {
+    /// Optional compression algorithm (e.g. `"lz4hc"`); uses the mkfs default
+    /// when `None`.
     #[serde(default)]
     pub compression: Option<String>,
+    /// Optional filesystem label.
     #[serde(default)]
     pub label: Option<String>,
 }

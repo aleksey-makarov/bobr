@@ -14,19 +14,26 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Whether a builder input slot takes a content object or an fs-tree root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputKind {
+    /// A content-addressed object.
     Object,
+    /// The root of a materialized fs-tree.
     FsTreeRoot,
 }
 
+/// A declared input slot of a builder: its `name` and expected [`InputKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputSlot {
+    /// Slot name, as used in the recipe's `inputs`.
     pub name: &'static str,
+    /// What kind of input the slot accepts.
     pub kind: InputKind,
 }
 
 impl InputSlot {
+    /// An object-input slot named `name`.
     pub const fn object(name: &'static str) -> Self {
         Self {
             name,
@@ -34,6 +41,7 @@ impl InputSlot {
         }
     }
 
+    /// An fs-tree-root-input slot named `name`.
     pub const fn fs_tree_root(name: &'static str) -> Self {
         Self {
             name,
@@ -42,18 +50,27 @@ impl InputSlot {
     }
 }
 
+/// A builder's input contract: which named slots it requires, which are
+/// optional, and whether extra (unlisted) inputs are accepted.
 #[derive(Debug)]
 pub struct InputSpec {
+    /// Slots that must be present.
     pub required_inputs: &'static [InputSlot],
+    /// Slots that may be present.
     pub optional_inputs: &'static [InputSlot],
+    /// Whether inputs beyond the declared slots are allowed.
     pub allow_extra_inputs: bool,
 }
 
 impl InputSpec {
+    /// Validates the spec itself: input names are well-formed, with no
+    /// duplicates or required/optional conflicts.
     pub fn validate(&self) -> Result<(), String> {
         self.validate_for_builder("input spec")
     }
 
+    /// Like [`validate`](InputSpec::validate), with `builder_tag` included in
+    /// error messages.
     pub fn validate_for_builder(&self, builder_tag: &str) -> Result<(), String> {
         let mut required = BTreeSet::new();
         for slot in self.required_inputs {
@@ -98,6 +115,7 @@ impl InputSpec {
         Ok(())
     }
 
+    /// Names of all declared (required + optional) slots.
     pub fn reserved_input_names(&self) -> impl Iterator<Item = &'static str> {
         self.required_inputs
             .iter()
@@ -105,6 +123,7 @@ impl InputSpec {
             .chain(self.optional_inputs.iter().map(|slot| slot.name))
     }
 
+    /// The [`InputKind`] of the named slot, if it is declared.
     pub fn input_kind(&self, name: &str) -> Option<InputKind> {
         self.required_inputs
             .iter()
@@ -112,18 +131,23 @@ impl InputSpec {
             .find_map(|slot| (slot.name == name).then_some(slot.kind))
     }
 
+    /// Whether `name` is a required slot.
     pub fn is_required_input(&self, name: &str) -> bool {
         self.required_inputs.iter().any(|slot| slot.name == name)
     }
 
+    /// Whether `name` is an optional slot.
     pub fn is_optional_input(&self, name: &str) -> bool {
         self.optional_inputs.iter().any(|slot| slot.name == name)
     }
 
+    /// Whether `name` is a declared (required or optional) slot.
     pub fn is_reserved_input(&self, name: &str) -> bool {
         self.is_required_input(name) || self.is_optional_input(name)
     }
 
+    /// Present input names in canonical order: required, then optional, then
+    /// any extras.
     pub fn ordered_present_input_names<'a, T>(
         &self,
         inputs: &'a BTreeMap<String, T>,
@@ -166,33 +190,42 @@ pub(crate) fn validate_input_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The materialized filesystem path of one resolved builder input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderInputPath {
+    /// Path to the input's materialized content.
     pub path: PathBuf,
 }
 
+/// The resolved inputs handed to a builder: a map from slot name to its
+/// materialized [`BuilderInputPath`].
 #[derive(Debug, Clone, Default)]
 pub struct BuilderInputs {
     slots: BTreeMap<String, BuilderInputPath>,
 }
 
 impl BuilderInputs {
+    /// An empty input set.
     pub fn empty() -> Self {
         Self::default()
     }
 
+    /// Builds an input set from `slots`.
     pub fn new(slots: BTreeMap<String, BuilderInputPath>) -> Self {
         Self { slots }
     }
 
+    /// Whether there are no inputs.
     pub fn is_empty(&self) -> bool {
         self.slots.is_empty()
     }
 
+    /// Inserts an input under `name`.
     pub fn insert(&mut self, name: impl Into<String>, value: BuilderInputPath) {
         self.slots.insert(name.into(), value);
     }
 
+    /// Returns the required input `name`, or an error if it is missing.
     pub fn required(&self, name: &str) -> Result<&BuilderInputPath, BuilderError> {
         match self.slots.get(name) {
             Some(object) => Ok(object),
@@ -202,14 +235,18 @@ impl BuilderInputs {
         }
     }
 
+    /// Returns the optional input `name`, if present.
     pub fn optional(&self, name: &str) -> Option<&BuilderInputPath> {
         self.slots.get(name)
     }
 
+    /// Returns the input `name`, if present.
     pub fn get(&self, name: &str) -> Option<&BuilderInputPath> {
         self.slots.get(name)
     }
 
+    /// Returns the input `name` only if it is an extra (not a declared slot of
+    /// `spec`).
     pub fn extra<'a>(&'a self, spec: &InputSpec, name: &str) -> Option<&'a BuilderInputPath> {
         if spec.is_reserved_input(name) {
             None
@@ -218,6 +255,7 @@ impl BuilderInputs {
         }
     }
 
+    /// Iterates the extra inputs (those not declared in `spec`).
     pub fn extras<'a>(
         &'a self,
         spec: &'a InputSpec,
@@ -259,6 +297,8 @@ impl fmt::Debug for BuildContext {
 }
 
 impl BuildContext {
+    /// A context with a no-op logger, the host runtime, and no fs-tree — for
+    /// tests and simple callers.
     pub fn with_noop_logger(temp_dir: PathBuf) -> Self {
         Self {
             temp_dir,
@@ -269,34 +309,42 @@ impl BuildContext {
         }
     }
 
+    /// Returns the context with `logger` attached.
     pub fn with_logger(mut self, logger: Arc<dyn BuildLogger>) -> Self {
         self.logger = logger;
         self
     }
 
+    /// Returns the context with `cancellation` attached.
     pub fn with_cancellation_token(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = cancellation;
         self
     }
 
+    /// Returns the context with `runtime` attached.
     pub fn with_runtime_provider(mut self, runtime: RuntimeProvider) -> Self {
         self.runtime = runtime;
         self
     }
 
+    /// Returns the context with a store `fs_tree` attached.
     pub fn with_fs_tree(mut self, fs_tree: FsTree) -> Self {
         self.fs_tree = Some(fs_tree);
         self
     }
 
+    /// The cancellation token for this build.
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation
     }
 
+    /// The runtime provider to execute runtime functions through.
     pub fn runtime(&self) -> &RuntimeProvider {
         &self.runtime
     }
 
+    /// The store fs-tree, or an error if the builder needs it but none was
+    /// provided.
     pub fn fs_tree(&self) -> Result<FsTree, BuilderError> {
         self.fs_tree.clone().ok_or_else(|| {
             BuilderError::ExecutionFailed(
@@ -305,6 +353,7 @@ impl BuildContext {
         })
     }
 
+    /// Returns an error if the build has been cancelled.
     pub fn check_cancelled(&self) -> Result<(), BuilderError> {
         if self.cancellation.is_cancelled() {
             Err(BuilderError::Cancelled(
@@ -327,6 +376,8 @@ impl BuildContext {
         self.log_event_with_details(level, op, message, None, None, Map::new());
     }
 
+    /// Like [`log_event`](BuildContext::log_event), but also attaches an object
+    /// hash, a raw-log path, and extra structured `details`.
     pub fn log_event_with_details(
         &self,
         level: BuildLogLevel,
@@ -347,12 +398,15 @@ impl BuildContext {
         });
     }
 
+    /// Allocates a path for a raw log file labelled `label`.
     pub fn allocate_raw_log_path(&self, label: &str) -> Result<PathBuf, BuilderError> {
         self.logger
             .allocate_raw_log_path(label)
             .map_err(BuilderError::ExecutionFailed)
     }
 
+    /// Writes `content` to a raw log file labelled `label`, returning its path,
+    /// or `None` on failure (failures are reported as warning events).
     pub fn write_raw_log(&self, label: &str, content: &str) -> Option<PathBuf> {
         let path = match self.allocate_raw_log_path(label) {
             Ok(path) => path,
@@ -416,14 +470,20 @@ fn write_raw_log_atomic(path: &Path, content: &str) -> Result<(), String> {
     })
 }
 
+/// A builder's result: the staged output path the runtime then imports.
 #[derive(Debug, Clone)]
 pub struct StagedBuildResult {
+    /// Path (under the build's temp dir) holding the staged output.
     pub staged_path: PathBuf,
 }
 
+/// Object-safe builder interface used by the registry and executor. Blanket-
+/// implemented for every [`TypedBuilder`]; builders implement [`TypedBuilder`].
 pub trait Builder: Send + Sync {
+    /// The builder's recipe tag.
     fn tag(&self) -> &'static str;
 
+    /// The builder's input contract.
     fn spec(&self) -> &'static InputSpec;
 
     /// Implementation-version token of the builder; see
@@ -434,6 +494,7 @@ pub trait Builder: Send + Sync {
     /// [`TypedBuilder::is_arch_dependent`].
     fn is_arch_dependent(&self) -> bool;
 
+    /// Builds from a raw JSON `config` (deserialized internally) and `inputs`.
     fn build_erased(
         &self,
         config: Value,
@@ -442,11 +503,16 @@ pub trait Builder: Send + Sync {
     ) -> Result<StagedBuildResult, BuilderError>;
 }
 
+/// The trait builders implement: a typed `Config` plus the build logic. A
+/// blanket impl exposes every `TypedBuilder` as a [`Builder`].
 pub trait TypedBuilder: Send + Sync {
+    /// The builder's strongly-typed configuration, deserialized from the recipe.
     type Config: DeserializeOwned;
 
+    /// The builder's recipe tag.
     fn tag(&self) -> &'static str;
 
+    /// The builder's input contract.
     fn spec(&self) -> &'static InputSpec;
 
     /// Opaque version token of the builder's implementation, folded into the
@@ -467,6 +533,8 @@ pub trait TypedBuilder: Send + Sync {
         false
     }
 
+    /// Builds from the typed `config` and resolved `inputs`, staging the output
+    /// under `cx.temp_dir` and returning its path.
     fn build_typed(
         &self,
         config: Self::Config,

@@ -8,6 +8,8 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Configuration for [`TreeBuilder`]: an inline `tree` of files, directories,
+/// and symlinks.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TreeConfig {
@@ -77,6 +79,7 @@ enum OutputKind {
     Directory,
 }
 
+/// Builds a content tree from an inline `tree` description (takes no inputs).
 pub struct TreeBuilder;
 
 static TREE_SPEC: InputSpec = InputSpec {

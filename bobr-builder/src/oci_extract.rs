@@ -27,10 +27,13 @@ const EXTRACT_ROOT_DIR_NAME: &str = "oci-extract-root";
 const MEDIA_TYPE_DOCKER_LAYER_GZIP: &str = "application/vnd.docker.image.rootfs.diff.tar.gzip";
 const MEDIA_TYPE_OCI_LAYER_TAR: &str = "application/vnd.oci.image.layer.v1.tar";
 
+/// Configuration for [`OciExtractBuilder`] (no options).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OciExtractConfig {}
 
+/// Extracts the layers of an OCI image (the `image` input) into a single
+/// fs-tree.
 pub struct OciExtractBuilder;
 
 static OCI_EXTRACT_SPEC: InputSpec = InputSpec {
