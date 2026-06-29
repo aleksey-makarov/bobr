@@ -2,6 +2,10 @@
 
 ## Summary
 
+For the conceptual model — recipes, objects, keys, and how a build runs — see
+[Concepts](./CONCEPTS.md). This document specifies the request envelope, the
+recipe node shapes, and the planning and execution steps in detail.
+
 `bobr` consumes one JSON DAG request and executes it entirely in Rust.
 
 The input is a flat JSON envelope with:

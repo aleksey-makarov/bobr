@@ -4,6 +4,7 @@
 
 # Design Documents
 
+- [Concepts](CONCEPTS.md)
 - [JSON Graph Build Model](TERM_MODEL.md)
 - [Request and store format](REQUEST_FORMAT.md)
 - [OCI Image Inputs](IMAGE_BUILDERS.md)

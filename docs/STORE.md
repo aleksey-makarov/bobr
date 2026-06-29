@@ -2,17 +2,20 @@
 
 ## Summary
 
-The store contains immutable payloads, canonical object records,
-mutable build and publication refs, and per-run operational logs.
+The store contains immutable payloads, canonical object records, mutable build
+and publication refs, and per-run operational logs. It is a content-addressed
+store (CAS): payload identity is derived from normalized content, not from the
+path or publication name used to reach it.
 
-The store is a content-addressed store (CAS). This means payload identity is
-derived from normalized content, not from the path or publication name used to
-reach it. Importing the same payload content produces the same `object_hash`;
-different payload content produces a different address. Human-facing names and
-build handles are mutable refs layered on top of immutable content-addressed
-objects and canonical object records.
+For the mental model behind objects, keys, and CAS, see
+[Concepts](./CONCEPTS.md). This document is the precise reference for the store's
+identity model, reuse rules, and on-disk layout.
 
 ## Identity Model
+
+[Concepts](./CONCEPTS.md#keys-build-identity) introduces the three identities
+(`object_hash`, `build_key`, `reuse_key`); this section is their normative
+definition.
 
 Every planned node has a `build_key`.
 
