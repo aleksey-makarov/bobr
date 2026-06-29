@@ -1,3 +1,6 @@
+//! Command-line tool that prints the content hash of a filesystem path or a tar
+//! archive, using the [`fsobj_hash`] library.
+
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 
