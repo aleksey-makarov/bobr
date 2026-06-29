@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use fsobj_hash::{Error, InvalidPathReason, TarEntryKind, hash_tar_reader};
 use std::io::Cursor;
 use tar::{Builder, EntryType, Header};

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use fsobj_hash::{hash_path, hash_tar_reader};
 use std::fs;
 use std::io::Cursor;

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 mod support;
 
 use bobr_store::{Store, load_build_handle, load_object_record};

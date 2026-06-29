@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use fsobj_hash::ObjectHash;
 use std::str::FromStr;
 

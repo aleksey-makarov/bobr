@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 #![allow(dead_code)]
 
 use bobr::{ExecutionError, Request, execute};

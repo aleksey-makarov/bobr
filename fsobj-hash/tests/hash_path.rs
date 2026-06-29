@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 use fsobj_hash::{
     DirectoryEntryHash, EntryKind, Error, hash_directory_node, hash_file_bytes,
     hash_fs_tree_object, hash_fs_tree_object_from_hashes, hash_path, hash_path_with_leaf_index,

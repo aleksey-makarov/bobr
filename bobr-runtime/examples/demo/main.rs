@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 mod checked_divide;
 mod namespace_identity;
 mod uppercase;

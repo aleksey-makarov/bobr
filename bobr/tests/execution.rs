@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 mod support;
 
 use bobr_core::{BuildKey, ObjectHash};
