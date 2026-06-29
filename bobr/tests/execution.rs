@@ -1,6 +1,5 @@
 mod support;
 
-use bobr::execute_request;
 use bobr_core::{BuildKey, ObjectHash};
 #[cfg(feature = "integration-tests")]
 use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
@@ -18,9 +17,9 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use support::{
-    base_image_recipe, build_ref_count, group_recipe, recipe_node, remove_build_ref,
-    remove_object_record, source_recipe, spawn_test_oci_registry, store_root, tree_file_recipe,
-    write_request, write_request_with_options,
+    base_image_recipe, build_ref_count, execute_request, group_recipe, recipe_node,
+    remove_build_ref, remove_object_record, source_recipe, spawn_test_oci_registry, store_root,
+    tree_file_recipe, write_request, write_request_with_options,
 };
 #[cfg(feature = "integration-tests")]
 use support::{tree_directory_recipe, tree_symlink_recipe};

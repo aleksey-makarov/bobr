@@ -3,10 +3,9 @@
 //!
 //! A request names a content-addressed store and a table of `nodes` keyed by id,
 //! with a reserved `root` node as the build target; dependencies are id
-//! references in input slots. [`execute_request`] reads and runs a request file;
-//! [`execute`] runs an already-parsed [`Request`]. Both return the root's
-//! realized [`ObjectHash`](bobr_core::ObjectHash), building only what is missing
-//! from the store and reusing the rest.
+//! references in input slots. [`execute`] runs a parsed [`Request`] and returns
+//! the root's realized [`ObjectHash`](bobr_core::ObjectHash), building only what
+//! is missing from the store and reusing the rest.
 //!
 //! This is the library entry point; the `bobr` binary is a thin wrapper that
 //! reads the request from a file or stdin.
@@ -21,5 +20,5 @@ mod planned;
 mod request;
 mod resolved_inputs;
 
-pub use execution::{ExecutionError, execute, execute_request};
+pub use execution::{ExecutionError, execute};
 pub use request::Request;

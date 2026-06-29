@@ -14,8 +14,10 @@ use bobr_runtime::runtime_provider::runtime_provider_for_current_process;
 use bobr_store::{Store, StoreError, StoreTempDir, load_build_handle};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+#[cfg(test)]
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
+#[cfg(test)]
 use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::thread;
@@ -170,26 +172,6 @@ impl Drop for TempDirGuard {
     fn drop(&mut self) {
         cleanup_temp_dir(&self.temp_dir, self.logger.as_ref());
     }
-}
-
-/// Reads and parses the request file at `request_path`, then runs it via
-/// [`execute`]. Returns the realized [`ObjectHash`] of the `root` node.
-pub fn execute_request(request_path: &Path) -> Result<ObjectHash, ExecutionError> {
-    if !request_path.exists() {
-        return Err(ExecutionError::RequestLoad(format!(
-            "request file '{}' does not exist",
-            request_path.display()
-        )));
-    }
-
-    let request_bytes = fs::read(request_path).map_err(|error| {
-        ExecutionError::RequestLoad(format!(
-            "failed to read request file '{}': {error}",
-            request_path.display()
-        ))
-    })?;
-    let request = Request::parse_json(&request_bytes)?;
-    execute(request, CancellationToken::new())
 }
 
 /// Executes a parsed [`Request`], building the DAG and returning the realized

@@ -1,11 +1,32 @@
 #![allow(dead_code)]
 
-use bobr_core::ObjectHash;
+use bobr::{ExecutionError, Request, execute};
+use bobr_core::{CancellationToken, ObjectHash};
 use bobr_source::oci_registry::{OciPlatform, fetch_image_authenticated};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Reads, parses, and executes a request file through the public API
+/// (`Request::parse_json` + `execute`) — what the `bobr` CLI does for a request
+/// path. Lives here, not in the crate's public API, since only tests need it.
+pub fn execute_request(request_path: &Path) -> Result<ObjectHash, ExecutionError> {
+    if !request_path.exists() {
+        return Err(ExecutionError::RequestLoad(format!(
+            "request file '{}' does not exist",
+            request_path.display()
+        )));
+    }
+    let request_bytes = fs::read(request_path).map_err(|error| {
+        ExecutionError::RequestLoad(format!(
+            "failed to read request file '{}': {error}",
+            request_path.display()
+        ))
+    })?;
+    let request = Request::parse_json(&request_bytes)?;
+    execute(request, CancellationToken::new())
+}
 
 pub fn write_request(request_path: &Path, recipe: &Value) {
     write_request_with_options(request_path, recipe, &json!({}));
