@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 /// Reads, parses, and executes a request file through the public API
 /// (`Request::parse_json` + `execute`) — what the `bobr` CLI does for a request
 /// path. Lives here, not in the crate's public API, since only tests need it.
-pub fn execute_request(request_path: &Path) -> Result<ObjectHash, ExecutionError> {
+pub(crate) fn execute_request(request_path: &Path) -> Result<ObjectHash, ExecutionError> {
     if !request_path.exists() {
         return Err(ExecutionError::RequestLoad(format!(
             "request file '{}' does not exist",
@@ -29,11 +29,11 @@ pub fn execute_request(request_path: &Path) -> Result<ObjectHash, ExecutionError
     execute(request, CancellationToken::new())
 }
 
-pub fn write_request(request_path: &Path, recipe: &Value) {
+pub(crate) fn write_request(request_path: &Path, recipe: &Value) {
     write_request_with_options(request_path, recipe, &json!({}));
 }
 
-pub fn write_request_with_options(request_path: &Path, recipe: &Value, options: &Value) {
+pub(crate) fn write_request_with_options(request_path: &Path, recipe: &Value, options: &Value) {
     if let Some(parent) = request_path.parent() {
         fs::create_dir_all(parent).unwrap();
     }
@@ -156,35 +156,35 @@ fn object_record_file_path(root: &Path, object_hash: ObjectHash) -> PathBuf {
         .join(format!("{}.json", object_hash.to_hex()))
 }
 
-pub fn build_ref_count(root: &Path) -> usize {
+pub(crate) fn build_ref_count(root: &Path) -> usize {
     fs::read_dir(store_root(root).join("builds"))
         .unwrap()
         .count()
 }
 
-pub fn object_record_count(root: &Path) -> usize {
+pub(crate) fn object_record_count(root: &Path) -> usize {
     fs::read_dir(store_root(root).join("object-records"))
         .unwrap()
         .count()
 }
 
-pub fn remove_build_ref(root: &Path, build_key: impl ToString) {
+pub(crate) fn remove_build_ref(root: &Path, build_key: impl ToString) {
     let build_ref = build_ref_path(root, build_key);
     fs::remove_file(&build_ref).unwrap();
     assert!(!build_ref.exists());
 }
 
-pub fn remove_object_record(root: &Path, object_hash: ObjectHash) {
+pub(crate) fn remove_object_record(root: &Path, object_hash: ObjectHash) {
     let object_record_path = object_record_file_path(root, object_hash);
     fs::remove_file(&object_record_path).unwrap();
     assert!(!object_record_path.exists());
 }
 
-pub fn store_root(root: &Path) -> PathBuf {
+pub(crate) fn store_root(root: &Path) -> PathBuf {
     root.join("store")
 }
 
-pub fn recipe_node(name: &str, tag: &str, config: Value, inputs: Value) -> Value {
+pub(crate) fn recipe_node(name: &str, tag: &str, config: Value, inputs: Value) -> Value {
     json!({
         "name": name,
         "tag": tag,
@@ -193,7 +193,7 @@ pub fn recipe_node(name: &str, tag: &str, config: Value, inputs: Value) -> Value
     })
 }
 
-pub fn tree_file_recipe(name: &str, path: &str, text: &str, executable: bool) -> Value {
+pub(crate) fn tree_file_recipe(name: &str, path: &str, text: &str, executable: bool) -> Value {
     recipe_node(
         name,
         "Tree",
@@ -211,7 +211,7 @@ pub fn tree_file_recipe(name: &str, path: &str, text: &str, executable: bool) ->
     )
 }
 
-pub fn tree_directory_recipe(name: &str) -> Value {
+pub(crate) fn tree_directory_recipe(name: &str) -> Value {
     let files_name = format!("{name}-files");
     recipe_node(
         name,
@@ -251,7 +251,7 @@ pub fn tree_directory_recipe(name: &str) -> Value {
     )
 }
 
-pub fn tree_symlink_recipe(name: &str) -> Value {
+pub(crate) fn tree_symlink_recipe(name: &str) -> Value {
     let files_name = format!("{name}-files");
     recipe_node(
         name,
@@ -294,7 +294,7 @@ fn root_install_config() -> Value {
 }
 
 #[allow(dead_code)]
-pub fn legacy_tree_directory_recipe(name: &str) -> Value {
+pub(crate) fn legacy_tree_directory_recipe(name: &str) -> Value {
     recipe_node(
         name,
         "Tree",
@@ -340,7 +340,7 @@ pub fn legacy_tree_directory_recipe(name: &str) -> Value {
 }
 
 #[allow(dead_code)]
-pub fn legacy_tree_symlink_recipe(name: &str) -> Value {
+pub(crate) fn legacy_tree_symlink_recipe(name: &str) -> Value {
     recipe_node(
         name,
         "Tree",
@@ -378,7 +378,7 @@ pub fn legacy_tree_symlink_recipe(name: &str) -> Value {
 /// "OciRegistry"`.
 ///
 /// The server must be kept alive until the build completes.
-pub fn spawn_test_oci_registry() -> (mockito::ServerGuard, String, String, String) {
+pub(crate) fn spawn_test_oci_registry() -> (mockito::ServerGuard, String, String, String) {
     let config_bytes = b"{}";
     let config_hex = format!("{:x}", Sha256::digest(config_bytes));
     let config_digest = format!("sha256:{config_hex}");
@@ -450,7 +450,7 @@ fn registry_layout_object_hash(image_ref: &str, pinned_digest: &str) -> String {
     fsobj_hash::hash_path(&oci_dir).unwrap().to_string()
 }
 
-pub fn base_image_recipe(image: &str, digest: &str, object_hash: &str) -> Value {
+pub(crate) fn base_image_recipe(image: &str, digest: &str, object_hash: &str) -> Value {
     json!({
         "name": "base-image",
         "tag": "Source",
@@ -467,7 +467,7 @@ pub fn base_image_recipe(image: &str, digest: &str, object_hash: &str) -> Value 
     })
 }
 
-pub fn source_recipe(url: &str, source_hash: &str) -> Value {
+pub(crate) fn source_recipe(url: &str, source_hash: &str) -> Value {
     json!({
         "name": "source",
         "tag": "Source",
@@ -480,7 +480,7 @@ pub fn source_recipe(url: &str, source_hash: &str) -> Value {
     })
 }
 
-pub fn group_recipe(name: &str, inputs: Vec<Value>) -> Value {
+pub(crate) fn group_recipe(name: &str, inputs: Vec<Value>) -> Value {
     let mut named_inputs = serde_json::Map::new();
     for (index, input) in inputs.into_iter().enumerate() {
         named_inputs.insert(format!("in{index:03}"), input);

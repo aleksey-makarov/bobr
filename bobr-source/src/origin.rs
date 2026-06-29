@@ -16,7 +16,7 @@ pub struct OriginSpec {
 /// What an origin handler is given to materialize a source: the staging
 /// directory plus a logger and a cancellation token, so long fetches can report
 /// progress and stop promptly when the run is cancelled.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct OriginContext<'a> {
     /// Staging directory the origin must materialize into; the runtime only
     /// cleans up this path (see [`ParsedOrigin::materialize`]).

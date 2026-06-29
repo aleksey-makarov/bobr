@@ -80,6 +80,7 @@ enum OutputKind {
 }
 
 /// Builds a content tree from an inline `tree` description (takes no inputs).
+#[derive(Debug)]
 pub struct TreeBuilder;
 
 static TREE_SPEC: InputSpec = InputSpec {

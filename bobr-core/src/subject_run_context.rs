@@ -18,6 +18,15 @@ pub struct SubjectRunContext {
     runtime: RuntimeProvider,
 }
 
+impl std::fmt::Debug for SubjectRunContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubjectRunContext")
+            .field("cancellation", &self.cancellation)
+            .field("runtime", &self.runtime)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SubjectRunContext {
     /// Creates a run context from already-allocated runtime state.
     pub fn new(

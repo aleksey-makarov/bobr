@@ -4,15 +4,15 @@ use std::fs;
 use std::io;
 
 #[derive(Debug, Clone, Copy)]
-pub struct NamespaceIdentity;
+pub(crate) struct NamespaceIdentity;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct NamespaceIdentityInput;
+pub(crate) struct NamespaceIdentityInput;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct NamespaceIdentityOutput {
+pub(crate) struct NamespaceIdentityOutput {
     pub pid: u32,
     pub uid: u32,
     pub gid: u32,

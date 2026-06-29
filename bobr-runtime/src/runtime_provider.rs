@@ -39,6 +39,14 @@ pub struct RuntimeProvider<C = JsonCodec> {
     inner: Arc<RuntimeProviderInner<C>>,
 }
 
+impl<C> std::fmt::Debug for RuntimeProvider<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeProvider")
+            .field("backend", &self.inner.backend)
+            .finish_non_exhaustive()
+    }
+}
+
 struct RuntimeProviderInner<C> {
     backend: RuntimeBackend,
     namespace_call_timeout: Option<Duration>,

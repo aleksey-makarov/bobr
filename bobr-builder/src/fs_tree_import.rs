@@ -16,6 +16,7 @@ pub struct FsTreeImportConfig {
 
 /// Imports a content object (the `input`) into an fs-tree at a configured
 /// location.
+#[derive(Debug)]
 pub struct FsTreeImportBuilder;
 
 static FS_TREE_IMPORT_SPEC: InputSpec = InputSpec {

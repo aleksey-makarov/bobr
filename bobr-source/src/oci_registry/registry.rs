@@ -67,7 +67,7 @@ impl From<ureq::Error> for RegistryError {
 /// Applies Docker Hub defaults: a bare name resolves to `registry-1.docker.io`
 /// with a `library/` prefix, and a missing tag/digest defaults to `latest`. The
 /// returned `reference` is either a tag or a `sha256:...` digest.
-pub fn parse_image_ref(image: &str) -> Result<(String, String, String), RegistryError> {
+pub(super) fn parse_image_ref(image: &str) -> Result<(String, String, String), RegistryError> {
     let (name_part, reference) = if let Some(pos) = image.rfind('@') {
         (&image[..pos], image[pos + 1..].to_string())
     } else if let Some(pos) = image.rfind(':') {
@@ -111,7 +111,7 @@ pub fn parse_image_ref(image: &str) -> Result<(String, String, String), Registry
 /// Resolves an image reference to the digest its tag currently points at, by
 /// fetching the manifest and hashing it. Used to suggest a `digest = "..."` pin
 /// when a pinned fetch fails.
-pub fn resolve_current_digest(image: &str) -> Result<String, RegistryError> {
+pub(super) fn resolve_current_digest(image: &str) -> Result<String, RegistryError> {
     let (registry_host, repository, reference) = parse_image_ref(image)?;
     let scheme = if registry_host.starts_with("localhost") || registry_host.starts_with("127.") {
         "http"
@@ -152,7 +152,7 @@ pub fn fetch_image_authenticated(
 /// `pinned_digest`, and stages them under `target_dir` as an OCI layout,
 /// returning the verified digest. Reports coarse progress: `progress` is called
 /// with a short message at each manifest/blob step.
-pub fn fetch_image_authenticated_with_progress(
+pub(super) fn fetch_image_authenticated_with_progress(
     image: &str,
     pinned_digest: &str,
     platform: &OciPlatform,
@@ -507,7 +507,7 @@ mod tests {
         let _m2 = server
             .mock("GET", path_manifests.as_str())
             .with_status(200)
-            .with_header("Content-Type", oci::MEDIA_TYPE_OCI_MANIFEST)
+            .with_header("Content-Type", MEDIA_TYPE_OCI_MANIFEST)
             .with_body(manifest_bytes)
             .create();
         let _m3 = server
@@ -554,7 +554,7 @@ mod tests {
                 server
                     .mock("GET", path_manifests.as_str())
                     .with_status(200)
-                    .with_header("Content-Type", oci::MEDIA_TYPE_OCI_MANIFEST)
+                    .with_header("Content-Type", MEDIA_TYPE_OCI_MANIFEST)
                     .with_body(manifest_bytes.clone())
                     .create(),
             );
@@ -631,13 +631,13 @@ mod tests {
             "schemaVersion": 2,
             "manifests": [
                 {
-                    "mediaType": oci::MEDIA_TYPE_OCI_MANIFEST,
+                    "mediaType": MEDIA_TYPE_OCI_MANIFEST,
                     "digest": other_manifest_digest,
                     "size": other_manifest_bytes.len(),
                     "platform": { "os": "linux", "architecture": "arm64" }
                 },
                 {
-                    "mediaType": oci::MEDIA_TYPE_OCI_MANIFEST,
+                    "mediaType": MEDIA_TYPE_OCI_MANIFEST,
                     "digest": manifest_digest,
                     "size": manifest_bytes.len(),
                     "platform": { "os": "linux", "architecture": "amd64" }
@@ -663,7 +663,7 @@ mod tests {
         let _m3 = server
             .mock("GET", path_manifest.as_str())
             .with_status(200)
-            .with_header("Content-Type", oci::MEDIA_TYPE_OCI_MANIFEST)
+            .with_header("Content-Type", MEDIA_TYPE_OCI_MANIFEST)
             .with_body(manifest_bytes)
             .create();
         let _m4 = server
@@ -715,13 +715,13 @@ mod tests {
             "schemaVersion": 2,
             "manifests": [
                 {
-                    "mediaType": oci::MEDIA_TYPE_OCI_MANIFEST,
+                    "mediaType": MEDIA_TYPE_OCI_MANIFEST,
                     "digest": arm64_manifest_digest,
                     "size": arm64_manifest_bytes.len(),
                     "platform": { "os": "linux", "architecture": "arm64" }
                 },
                 {
-                    "mediaType": oci::MEDIA_TYPE_OCI_MANIFEST,
+                    "mediaType": MEDIA_TYPE_OCI_MANIFEST,
                     "digest": amd64_manifest_digest,
                     "size": amd64_manifest_bytes.len(),
                     "platform": { "os": "linux", "architecture": "amd64" }
@@ -747,7 +747,7 @@ mod tests {
         let _m3 = server
             .mock("GET", path_manifest.as_str())
             .with_status(200)
-            .with_header("Content-Type", oci::MEDIA_TYPE_OCI_MANIFEST)
+            .with_header("Content-Type", MEDIA_TYPE_OCI_MANIFEST)
             .with_body(arm64_manifest_bytes)
             .create();
         let _m4 = server
@@ -778,7 +778,7 @@ mod tests {
         let index = serde_json::json!({
             "schemaVersion": 2,
             "manifests": [{
-                "mediaType": oci::MEDIA_TYPE_OCI_MANIFEST,
+                "mediaType": MEDIA_TYPE_OCI_MANIFEST,
                 "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "size": 1,
                 "platform": { "os": "linux", "architecture": "arm64" }
@@ -848,7 +848,7 @@ mod tests {
             .mock("GET", manifest_path.as_str())
             .match_header("authorization", "Bearer secret-token")
             .with_status(200)
-            .with_header("Content-Type", oci::MEDIA_TYPE_OCI_MANIFEST)
+            .with_header("Content-Type", MEDIA_TYPE_OCI_MANIFEST)
             .with_body(manifest_bytes)
             .create();
         let _config_unauth = registry

@@ -39,6 +39,7 @@ const STEP_LOG_DIR_NAME: &str = "step-logs";
 const OUTPUT_MANIFEST_NAME: &str = "sandbox-fs-tree.jsonl";
 
 /// Builder implementation registered for recipe nodes tagged `Sandbox`.
+#[derive(Debug)]
 pub struct SandboxBuilder;
 
 static SANDBOX_BUILDER: SandboxBuilder = SandboxBuilder;

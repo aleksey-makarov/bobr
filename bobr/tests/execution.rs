@@ -26,7 +26,7 @@ use support::{
 use support::{tree_directory_recipe, tree_symlink_recipe};
 use tempfile::tempdir;
 
-fn source_build_key(object_hash: fsobj_hash::ObjectHash) -> BuildKey {
+fn source_build_key(object_hash: ObjectHash) -> BuildKey {
     BuildKey::from_object_hash(object_hash)
 }
 
@@ -1236,6 +1236,6 @@ fn source_without_origin_requires_existing_object_or_record() {
     );
 }
 
-fn object_path_exists(layout: &Store, object_hash: fsobj_hash::ObjectHash) -> bool {
+fn object_path_exists(layout: &Store, object_hash: ObjectHash) -> bool {
     layout.object_path(object_hash).unwrap().is_some()
 }

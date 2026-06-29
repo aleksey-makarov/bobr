@@ -82,6 +82,7 @@ impl SandboxRunnerFailureReport {
 /// ([`RunnerOutcome::EarlyFailure`]) leaves the report unwritten, so the
 /// launcher records it through its pre-opened failure-report fd (the same file
 /// on disk, opened before chroot).
+#[derive(Debug)]
 pub enum RunnerOutcome {
     /// The runner owns its reports and has written one. This is the final code.
     Reported(i32),

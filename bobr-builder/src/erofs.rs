@@ -20,6 +20,7 @@ const OUTPUT_FILE_NAME: &str = "erofs-rootfs.erofs";
 const REPRODUCIBLE_SOURCE_DATE_EPOCH: &str = "315532800";
 
 /// Builds an EROFS rootfs image from an fs-tree (the `tree` input).
+#[derive(Debug)]
 pub struct ErofsRootfsBuilder;
 
 /// Configuration for [`ErofsRootfsBuilder`].

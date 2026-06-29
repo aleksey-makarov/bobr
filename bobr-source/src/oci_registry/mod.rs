@@ -1,3 +1,8 @@
+// This module is `pub` only under `test-support`; in the default build it is
+// private, which makes its (intentionally public) API items "unreachable". That
+// is by design, not a visibility mistake — silence the lint in that config.
+#![cfg_attr(not(feature = "test-support"), allow(unreachable_pub))]
+
 mod registry;
 
 use crate::origin::{OriginContext, OriginHandler, OriginSpec, ParsedOrigin};
@@ -221,7 +226,7 @@ mod tests {
     }
 
     fn assert_no_ref_name_annotation(staged: &std::path::Path) {
-        let index: serde_json::Value =
+        let index: Value =
             serde_json::from_slice(&fs::read(staged.join("index.json")).unwrap()).unwrap();
         let manifest = &index["manifests"][0];
         assert!(

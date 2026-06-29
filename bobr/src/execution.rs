@@ -218,7 +218,7 @@ pub fn execute(
 }
 
 fn default_jobs() -> usize {
-    std::thread::available_parallelism()
+    thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
 }
@@ -863,7 +863,7 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
+        ) -> Result<StagedBuildResult, BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
@@ -908,7 +908,7 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
+        ) -> Result<StagedBuildResult, BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
@@ -947,12 +947,12 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
+        ) -> Result<StagedBuildResult, BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
             fs::write(cx.temp_dir.join("scratch"), b"temp\n").unwrap();
-            Err(bobr_builder::BuilderError::ExecutionFailed(
+            Err(BuilderError::ExecutionFailed(
                 "intentional failure".to_string(),
             ))
         }
@@ -983,7 +983,7 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
+        ) -> Result<StagedBuildResult, BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
@@ -1303,7 +1303,7 @@ mod tests {
             &SPEC
         }
 
-        fn materialize(&self, cx: &OriginContext<'_>) -> Result<std::path::PathBuf, String> {
+        fn materialize(&self, cx: &OriginContext<'_>) -> Result<PathBuf, String> {
             let staged = cx.temp_root.join("staged");
             fs::create_dir_all(&staged).map_err(|error| error.to_string())?;
             fs::write(staged.join("payload"), b"cancel\n").map_err(|error| error.to_string())?;
@@ -1327,7 +1327,7 @@ mod tests {
             &SPEC
         }
 
-        fn materialize(&self, cx: &OriginContext<'_>) -> Result<std::path::PathBuf, String> {
+        fn materialize(&self, cx: &OriginContext<'_>) -> Result<PathBuf, String> {
             let staged = cx
                 .temp_root
                 .parent()
@@ -1497,7 +1497,7 @@ mod tests {
                 _config: Self::Config,
                 _inputs: BuilderInputs,
                 cx: &mut BuildContext,
-            ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
+            ) -> Result<StagedBuildResult, BuilderError> {
                 Ok(stage_payload(cx, b"fast\n"))
             }
         }
@@ -1522,8 +1522,8 @@ mod tests {
                 _config: Self::Config,
                 _inputs: BuilderInputs,
                 cx: &mut BuildContext,
-            ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
-                std::thread::sleep(Duration::from_millis(300));
+            ) -> Result<StagedBuildResult, BuilderError> {
+                thread::sleep(Duration::from_millis(300));
                 SLOW_FINISHED.store(true, Ordering::SeqCst);
                 Ok(stage_payload(cx, b"slow\n"))
             }
@@ -1557,7 +1557,7 @@ mod tests {
                 _config: Self::Config,
                 _inputs: BuilderInputs,
                 cx: &mut BuildContext,
-            ) -> Result<StagedBuildResult, bobr_builder::BuilderError> {
+            ) -> Result<StagedBuildResult, BuilderError> {
                 // Never reached: the fast input fails to publish first.
                 Ok(stage_payload(cx, b"root\n"))
             }

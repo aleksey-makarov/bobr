@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 /// Builds an fs-tree that is a subset of its input `tree`, keeping only the
 /// configured paths.
+#[derive(Debug)]
 pub struct TreeSubsetBuilder;
 
 /// Configuration for [`TreeSubsetBuilder`].

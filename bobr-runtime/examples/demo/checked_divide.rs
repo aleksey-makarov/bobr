@@ -2,18 +2,18 @@ use bobr_runtime::runtime::{RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy)]
-pub struct CheckedDivide;
+pub(crate) struct CheckedDivide;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DivideInput {
+pub(crate) struct DivideInput {
     pub dividend: i64,
     pub divisor: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct DivideOutput {
+pub(crate) struct DivideOutput {
     pub quotient: i64,
     pub remainder: i64,
     pub pid: u32,

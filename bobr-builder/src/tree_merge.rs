@@ -5,6 +5,7 @@ use bobr_store::fs_tree::{FsTreeManifest, merge_manifests};
 use serde::Deserialize;
 
 /// Builds a merged fs-tree by overlaying its input trees in order.
+#[derive(Debug)]
 pub struct TreeMergeBuilder;
 
 /// Configuration for [`TreeMergeBuilder`] (no options; the inputs are the trees

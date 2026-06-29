@@ -99,6 +99,14 @@ pub struct NsRuntime<C = JsonCodec> {
     _codec: PhantomData<fn() -> C>,
 }
 
+impl<C> std::fmt::Debug for NsRuntime<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NsRuntime")
+            .field("call_timeout", &self.call_timeout)
+            .finish_non_exhaustive()
+    }
+}
+
 impl NsRuntime<JsonCodec> {
     /// Start a namespace runtime using the default [`JsonCodec`].
     ///
@@ -313,6 +321,14 @@ pub struct NsFunction<C = JsonCodec> {
     name: &'static str,
     call: Box<ErasedNsCall>,
     _codec: PhantomData<fn() -> C>,
+}
+
+impl<C> std::fmt::Debug for NsFunction<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NsFunction")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
+    }
 }
 
 type ErasedNsCall = dyn Fn(&[u8]) -> RuntimeResult<Vec<u8>> + Send + Sync + 'static;

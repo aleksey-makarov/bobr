@@ -12,6 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 pub struct GroupConfig {}
 
 /// Aggregates its named inputs into a single group object.
+#[derive(Debug)]
 pub struct GroupBuilder;
 
 static GROUP_SPEC: InputSpec = InputSpec {
@@ -94,8 +95,8 @@ mod tests {
 
     fn build_context(root: &Path) -> BuildContext {
         let temp_dir = root.join("group").join("tmp");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        std::fs::create_dir_all(&temp_dir).unwrap();
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
         BuildContext::with_noop_logger(temp_dir)
     }
 
@@ -108,9 +109,9 @@ mod tests {
     #[test]
     fn spec_accepts_extra_inputs_only() {
         let builder = GroupBuilder;
-        let spec = crate::TypedBuilder::spec(&builder);
+        let spec = TypedBuilder::spec(&builder);
 
-        assert_eq!(crate::TypedBuilder::tag(&builder), "Group");
+        assert_eq!(TypedBuilder::tag(&builder), "Group");
         assert!(spec.required_inputs.is_empty());
         assert!(spec.optional_inputs.is_empty());
         assert!(spec.allow_extra_inputs);
@@ -143,11 +144,11 @@ mod tests {
             .build_typed(GroupConfig {}, inputs, &mut cx)
             .unwrap();
 
-        assert_eq!(std::fs::read(&result.staged_path).unwrap(), b"");
+        assert_eq!(fs::read(&result.staged_path).unwrap(), b"");
 
         #[cfg(unix)]
         {
-            let metadata = std::fs::metadata(&result.staged_path).unwrap();
+            let metadata = fs::metadata(&result.staged_path).unwrap();
             assert_eq!(metadata.permissions().mode() & 0o777, 0o644);
         }
     }

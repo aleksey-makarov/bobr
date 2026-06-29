@@ -18,15 +18,15 @@ fn create_test_store(root: &Path) -> Store {
 }
 
 fn fs_files_dir(store: &Store) -> PathBuf {
-    store.root().join(crate::store::FS_FILES_DIR)
+    store.root().join(store::FS_FILES_DIR)
 }
 
 fn fs_trees_dir(store: &Store) -> PathBuf {
-    store.root().join(crate::store::FS_TREES_DIR)
+    store.root().join(store::FS_TREES_DIR)
 }
 
 fn fs_tree_refs_dir(store: &Store) -> PathBuf {
-    store.root().join(crate::store::FS_TREE_REFS_DIR)
+    store.root().join(store::FS_TREE_REFS_DIR)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -309,7 +309,7 @@ fn record_existing_source_object_requires_existing_object() {
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
 
-    let error = crate::record::record_existing_source_object(&layout, object_hash).unwrap_err();
+    let error = record::record_existing_source_object(&layout, object_hash).unwrap_err();
 
     assert!(matches!(error, StoreError::Io(message) if message.contains("source object")));
     assert!(!layout.object_record_path(object_hash).exists());
@@ -340,7 +340,7 @@ fn record_existing_source_object_reuses_canonical_record() {
     let stage = temp.path().join("source.txt");
     fs::write(&stage, b"hello").unwrap();
     let object_hash = import_object(&layout, &stage).unwrap();
-    crate::record::record_existing_source_object(&layout, object_hash).unwrap();
+    record::record_existing_source_object(&layout, object_hash).unwrap();
 
     let hit = record_existing_source_object(&layout, object_hash, "source")
         .unwrap()
@@ -1112,12 +1112,12 @@ fn run_dir_allocation_disambiguates_by_logs_dir() {
         fs::create_dir_all(&logs_dir).unwrap();
         fs::create_dir_all(&tmp_dir).unwrap();
 
-        let first_run_id = crate::store::allocate_store_run_id(temp.path()).unwrap();
+        let first_run_id = store::allocate_store_run_id(temp.path()).unwrap();
         let first_suffix = format!("{first_run_id}.1");
         let second_suffix = format!("{first_run_id}.2");
         fs::create_dir(logs_dir.join(&first_suffix)).unwrap();
 
-        let run_id = crate::store::allocate_store_run_id(temp.path()).unwrap();
+        let run_id = store::allocate_store_run_id(temp.path()).unwrap();
         if run_id != second_suffix {
             assert!(
                 !run_id.starts_with(&format!("{first_run_id}.")),
@@ -1148,11 +1148,11 @@ fn run_dir_allocation_errors_when_matching_tmp_dir_exists() {
         fs::create_dir_all(&logs_dir).unwrap();
         fs::create_dir_all(&tmp_dir).unwrap();
 
-        let first_run_id = crate::store::allocate_store_run_id(temp.path()).unwrap();
+        let first_run_id = store::allocate_store_run_id(temp.path()).unwrap();
         let conflicting_run_id = format!("{first_run_id}.1");
         fs::create_dir(tmp_dir.join(&conflicting_run_id)).unwrap();
 
-        match crate::store::allocate_store_run_id(temp.path()) {
+        match store::allocate_store_run_id(temp.path()) {
             Ok(run_id) => {
                 assert!(
                     !run_id.starts_with(&format!("{first_run_id}.")),

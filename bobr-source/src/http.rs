@@ -18,8 +18,8 @@ use zip::read::ZipArchive;
 
 const REDIRECT_LIMIT: usize = 10;
 const USER_AGENT: &str = "bobr-source-http/0.1";
-const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const HTTP_OPERATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const HTTP_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 
 static HTTP_ORIGIN_SPEC: OriginSpec = OriginSpec { tag: "Http" };
 
@@ -52,8 +52,8 @@ type HResult<T> = Result<T, HttpOriginError>;
 
 #[derive(Debug, Clone, Copy)]
 struct HttpTimeouts {
-    connect: std::time::Duration,
-    operation: std::time::Duration,
+    connect: Duration,
+    operation: Duration,
 }
 
 impl HttpTimeouts {
@@ -89,7 +89,7 @@ impl UrlField {
 }
 
 #[derive(Debug)]
-pub struct HttpOriginHandler;
+pub(crate) struct HttpOriginHandler;
 
 #[derive(Debug, Clone)]
 struct HttpOrigin {
@@ -793,7 +793,7 @@ mod tests {
             }
         }
 
-        fn cx<'a>(&'a self, temp_root: &'a std::path::Path) -> OriginContext<'a> {
+        fn cx<'a>(&'a self, temp_root: &'a Path) -> OriginContext<'a> {
             OriginContext {
                 temp_root,
                 logger: &self.logger,

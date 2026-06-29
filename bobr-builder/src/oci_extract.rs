@@ -34,6 +34,7 @@ pub struct OciExtractConfig {}
 
 /// Extracts the layers of an OCI image (the `image` input) into a single
 /// fs-tree.
+#[derive(Debug)]
 pub struct OciExtractBuilder;
 
 static OCI_EXTRACT_SPEC: InputSpec = InputSpec {
@@ -1349,7 +1350,7 @@ mod tests {
             .into_iter()
             .map(|(media_type, bytes)| write_test_blob(&oci_dir, &bytes, media_type))
             .collect::<Vec<_>>();
-        let manifest = oci::OciManifest {
+        let manifest = OciManifest {
             schema_version: 2,
             config: config_desc,
             layers: layer_descs,

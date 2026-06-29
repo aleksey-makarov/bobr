@@ -414,7 +414,7 @@ impl BuildContext {
         };
 
         if let Some(parent) = path.parent()
-            && let Err(error) = std::fs::create_dir_all(parent)
+            && let Err(error) = fs::create_dir_all(parent)
         {
             self.log_event(
                 BuildLogLevel::Warn,

@@ -18,6 +18,7 @@ const S_IFLNK: u32 = 0o120000;
 const SYMLINK_MODE: u32 = 0o777;
 
 /// Builds an initramfs cpio archive from an fs-tree (the `tree` input).
+#[derive(Debug)]
 pub struct InitramfsBuilder;
 
 /// Configuration for [`InitramfsBuilder`] (no options).

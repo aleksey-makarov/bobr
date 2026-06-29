@@ -2,17 +2,17 @@ use bobr_runtime::runtime::{RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy)]
-pub struct Uppercase;
+pub(crate) struct Uppercase;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UppercaseInput {
+pub(crate) struct UppercaseInput {
     pub text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct UppercaseOutput {
+pub(crate) struct UppercaseOutput {
     pub text: String,
     pub pid: u32,
 }
