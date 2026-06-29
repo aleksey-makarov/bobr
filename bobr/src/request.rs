@@ -21,6 +21,9 @@ impl<'de> Deserialize<'de> for RequestSchemaV1 {
     }
 }
 
+/// A parsed, validated build request: the content-addressed store path plus the
+/// table of recipe nodes to build (see the crate docs for the request shape).
+/// Construct it with [`Request::parse_json`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -34,6 +37,9 @@ pub struct Request {
 }
 
 impl Request {
+    /// Parses and validates a request from its JSON encoding: enforces the
+    /// request schema and that a `root` node exists. Returns
+    /// [`ExecutionError::RequestLoad`] on malformed input.
     pub fn parse_json(bytes: &[u8]) -> Result<Self, ExecutionError> {
         let request: Request = serde_json::from_slice(bytes).map_err(|error| {
             ExecutionError::RequestLoad(format!("failed to decode request JSON value: {error}"))

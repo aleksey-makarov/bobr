@@ -1,3 +1,7 @@
+//! Command-line entry point for `bobr`: reads a build request (from a path
+//! argument or stdin), executes it, and prints the realized root object hash to
+//! stdout.
+
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 

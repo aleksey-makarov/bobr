@@ -23,13 +23,22 @@ use std::time::Instant;
 
 type SubjectGraph = HashMap<BuildKey, Arc<PlannedSubject>>;
 
+/// Why a build request failed. Each variant carries a human-readable message;
+/// the variant classifies the failure.
 #[derive(Debug)]
 pub enum ExecutionError {
+    /// Structurally valid but semantically invalid request (e.g. a job count of
+    /// zero).
     InvalidRequest(String),
+    /// A node references a builder tag that is not registered.
     UnknownBuilder(String),
+    /// The request could not be read, decoded, or failed schema/shape validation.
     RequestLoad(String),
+    /// The build was cancelled (e.g. by a signal) before completing.
     Cancelled(String),
+    /// A subject failed to build, or the dependency graph could not be executed.
     Build(String),
+    /// A content-addressed store operation failed.
     Store(String),
 }
 
@@ -163,6 +172,8 @@ impl Drop for TempDirGuard {
     }
 }
 
+/// Reads and parses the request file at `request_path`, then runs it via
+/// [`execute`]. Returns the realized [`ObjectHash`] of the `root` node.
 pub fn execute_request(request_path: &Path) -> Result<ObjectHash, ExecutionError> {
     if !request_path.exists() {
         return Err(ExecutionError::RequestLoad(format!(
@@ -181,6 +192,10 @@ pub fn execute_request(request_path: &Path) -> Result<ObjectHash, ExecutionError
     execute(request, CancellationToken::new())
 }
 
+/// Executes a parsed [`Request`], building the DAG and returning the realized
+/// [`ObjectHash`] of the `root` node. `cancellation` lets a caller abort an
+/// in-progress build; only objects missing from the store are built, the rest
+/// are reused.
 pub fn execute(
     request: Request,
     cancellation: CancellationToken,
