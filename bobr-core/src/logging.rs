@@ -26,9 +26,13 @@ pub const BUILD_EVENT_SCHEMA: &str = "bobr-build-event-v1";
 /// durable milestones worth keeping in the event log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuildLogLevel {
+    /// Transient progress tick: shown on screen, never persisted.
     Progress,
+    /// Routine informational milestone.
     Info,
+    /// Warning; surfaced even in quiet mode.
     Warn,
+    /// Error; surfaced even in quiet mode.
     Error,
 }
 
@@ -39,6 +43,7 @@ impl fmt::Display for BuildLogLevel {
 }
 
 impl BuildLogLevel {
+    /// The lowercase wire string for this level (`"progress"`, `"info"`, …).
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Progress => "progress",
@@ -65,15 +70,25 @@ impl Serialize for BuildLogLevel {
 /// channel (no workspace exists for a hit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildStatus {
+    /// A subject began execution.
     Start,
+    /// A subject was served from cache (run-level outcome; no workspace).
     CacheHit,
+    /// A cache miss: the subject must be built.
     CacheMiss,
+    /// The subject's builder is running.
     Running,
+    /// The subject completed successfully.
     Done,
+    /// The subject failed.
     Failed,
+    /// The subject was cancelled before completing.
     Cancelled,
+    /// Post-execution cleanup (e.g. removing the temp dir).
     Cleanup,
+    /// The whole run started.
     RunStarted,
+    /// The whole run finished.
     RunFinished,
 }
 
@@ -84,6 +99,8 @@ impl fmt::Display for BuildStatus {
 }
 
 impl BuildStatus {
+    /// The kebab-case wire string for this status (`"cache-hit"`,
+    /// `"run-started"`, …).
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Start => "start",
@@ -108,21 +125,37 @@ impl BuildStatus {
 /// event is emitted, so a source can neither forge nor omit them.
 #[derive(Debug, Clone)]
 pub struct BuildLogEvent {
+    /// Severity level.
     pub level: BuildLogLevel,
+    /// Lifecycle status.
     pub status: BuildStatus,
+    /// Optional named operation within `running` (free-form).
     pub op: Option<String>,
+    /// Human-readable message.
     pub message: String,
+    /// Realized object hash, when the event reports one.
     pub object_hash: Option<ObjectHash>,
+    /// Path to an associated raw log file, if any.
     pub raw_log_path: Option<PathBuf>,
+    /// Extra structured fields.
     pub details: Map<String, Value>,
 }
 
+/// Sink that a subject (or the run) logs events to. Implementors stamp the
+/// envelope (sequence numbers, timestamp) and fan events out to the configured
+/// sinks.
 pub trait BuildLogger: fmt::Debug + Send + Sync {
+    /// Emits one event; the caller supplies only the payload, the logger adds
+    /// subject identity and the envelope.
     fn log_event(&self, event: BuildLogEvent);
 
+    /// Allocates a fresh path for a raw log file labelled `label`, erroring if
+    /// this logger has no workspace to write into.
     fn allocate_raw_log_path(&self, label: &str) -> Result<PathBuf, String>;
 }
 
+/// A [`BuildLogger`] that discards everything. Used where no per-subject log
+/// exists (e.g. cache hits).
 #[derive(Debug, Default)]
 pub struct NoopBuildLogger;
 
@@ -177,6 +210,9 @@ pub struct BuildRunLogger {
 }
 
 impl BuildRunLogger {
+    /// Creates a run logger writing under `run_log_dir`, tagged with `run_id`.
+    /// `quiet` raises the stderr threshold (warnings/errors only). Sets up the
+    /// file and progress sinks.
     pub fn new(run_log_dir: &Path, run_id: &str, quiet: bool) -> Result<Self, String> {
         fs::create_dir_all(run_log_dir).map_err(|error| {
             format!(
@@ -196,10 +232,12 @@ impl BuildRunLogger {
         })
     }
 
+    /// The run's identifier.
     pub fn run_id(&self) -> &str {
         &self.run_id
     }
 
+    /// The directory this run's logs are written under.
     pub fn run_log_dir(&self) -> &Path {
         &self.run_log_dir
     }
@@ -219,6 +257,9 @@ impl BuildRunLogger {
         self.sinks.iter().map(|sink| sink.error_count()).sum()
     }
 
+    /// Binds a subject to this run: registers it with every sink and returns a
+    /// per-subject [`BuildLogger`] that stamps the subject's identity on its
+    /// events.
     pub fn bind_subject(
         self: &Arc<Self>,
         subject: BuildLogSubject,
@@ -280,6 +321,7 @@ pub struct SubjectIdentity {
 }
 
 impl SubjectIdentity {
+    /// Creates a subject identity from its `tag`, `name`, and `build_key`.
     pub fn new(
         tag: impl Into<String>,
         name: impl Into<String>,
@@ -833,6 +875,8 @@ impl EventSink for ProgressSink {
     }
 }
 
+/// A fully assembled, envelope-stamped event record: the serialized form
+/// written to `events.jsonl` and handed to each sink.
 #[derive(Debug, Serialize)]
 pub struct EventLogRecord {
     schema: &'static str,
