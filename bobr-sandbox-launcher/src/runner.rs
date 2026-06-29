@@ -89,6 +89,9 @@ pub enum RunnerOutcome {
     EarlyFailure(SandboxRunnerFailureReport),
 }
 
+/// Reads and decodes the runner config from `path`, then runs it via
+/// [`run_config`]. A read/parse failure is returned as an
+/// [`EarlyFailure`](RunnerOutcome::EarlyFailure) for the launcher to record.
 pub fn run_config_path(path: &Path) -> RunnerOutcome {
     let config = match fs::read(path)
         .map_err(|error| format!("failed to read runner config '{}': {error}", path.display()))
@@ -106,6 +109,9 @@ pub fn run_config_path(path: &Path) -> RunnerOutcome {
     run_config(config)
 }
 
+/// Runs the build steps described by `config` as pid 1 inside the sandbox,
+/// returning a [`RunnerOutcome`] (a reported exit code, or an early failure the
+/// launcher must record).
 pub fn run_config(config: RunnerConfig) -> RunnerOutcome {
     if config.protocol_version != SANDBOX_PROTOCOL_VERSION {
         return RunnerOutcome::EarlyFailure(SandboxRunnerFailureReport::runtime(

@@ -1,3 +1,7 @@
+//! Command-line entry point for `bobr-sandbox-launcher`: the privileged process
+//! that sets up the sandbox (namespaces, mounts, chroot) and runs the build
+//! steps. The protocol and implementation live in the library crate.
+
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 

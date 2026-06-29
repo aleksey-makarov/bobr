@@ -138,6 +138,8 @@ pub enum SandboxLauncherMountKind {
     Tmpfs,
 }
 
+/// Validates a launcher config: every mount target must be a unique, absolute
+/// path with no `.`/`..` components (the runner config path is checked too).
 pub fn validate_launcher_config(config: &SandboxLauncherConfig) -> io::Result<()> {
     let mut targets = HashSet::new();
     for mount in &config.mounts {
@@ -156,6 +158,8 @@ pub fn validate_launcher_config(config: &SandboxLauncherConfig) -> io::Result<()
     Ok(())
 }
 
+/// Converts an absolute mount `target` into the path relative to the sandbox
+/// root, rejecting non-absolute paths, `.`/`..` components, and `/` itself.
 pub fn relative_launcher_target(target: &Path) -> io::Result<PathBuf> {
     if !target.is_absolute() {
         return Err(io::Error::new(
@@ -211,6 +215,8 @@ pub fn relative_launcher_target(target: &Path) -> io::Result<PathBuf> {
     Ok(relative)
 }
 
+/// Converts a path to a [`CString`] for libc calls, failing if it contains a
+/// NUL byte.
 pub fn path_cstring(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes()).map_err(|_| {
         io::Error::new(
@@ -220,6 +226,8 @@ pub fn path_cstring(path: &Path) -> io::Result<CString> {
     })
 }
 
+/// Blocks reading the one-byte readiness handshake from `fd` (retrying on
+/// `EINTR`); errors if the pipe closes before a byte arrives.
 pub fn read_handshake_byte(fd: RawFd) -> io::Result<()> {
     let mut byte = [0_u8; 1];
     loop {
@@ -240,6 +248,7 @@ pub fn read_handshake_byte(fd: RawFd) -> io::Result<()> {
     }
 }
 
+/// Writes the one-byte readiness handshake to `fd` (retrying on `EINTR`).
 pub fn write_handshake_byte(fd: RawFd) -> io::Result<()> {
     let byte = [1_u8; 1];
     loop {
@@ -311,33 +320,53 @@ impl RunnerRunAs {
     }
 }
 
+/// Per-step execution report: how one sandbox step ran.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxStepReport {
+    /// Step name, from the recipe.
     pub name: String,
+    /// User the step ran as (`build-user` or `root`).
     pub run_as: String,
+    /// Process exit code.
     pub exit_code: i32,
+    /// Wall-clock duration, in milliseconds.
     pub duration_ms: u128,
+    /// Path to the captured stdout log.
     pub stdout_path: PathBuf,
+    /// Path to the captured stderr log.
     pub stderr_path: PathBuf,
 }
 
+/// Report written by the runner when every step succeeded.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SandboxRunnerSuccessReport {
+    /// Per-step reports, in execution order.
     pub steps: Vec<SandboxStepReport>,
 }
 
+/// Report describing why the sandbox run failed. The fields beyond
+/// `label`/`message` are populated when a specific step process failed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxRunnerFailureReport {
+    /// Short label for the failing phase or step.
     pub label: String,
+    /// Human-readable failure message.
     pub message: String,
+    /// Exit code, if a step process exited non-zero.
     pub exit_code: Option<i32>,
+    /// Terminating signal, if the step was killed by one.
     pub signal: Option<i32>,
+    /// Wall-clock duration of the failed step, in milliseconds.
     pub duration_ms: Option<u128>,
+    /// Path to the captured stdout log, if any.
     pub stdout_path: Option<PathBuf>,
+    /// Path to the captured stderr log, if any.
     pub stderr_path: Option<PathBuf>,
 }
 
 impl SandboxRunnerFailureReport {
+    /// Builds a failure report for an early/runtime error (no step process
+    /// involved): only `label` and `message` are set.
     pub fn runtime(label: &str, message: String) -> Self {
         Self {
             label: label.to_string(),
@@ -350,6 +379,8 @@ impl SandboxRunnerFailureReport {
         }
     }
 
+    /// Renders the report as a single-line error string, appending whichever
+    /// optional fields (exit code, signal, duration, log paths) are set.
     pub fn to_error_message(&self) -> String {
         let mut message = format!("{}: {}", self.label, self.message);
         if let Some(code) = self.exit_code {
