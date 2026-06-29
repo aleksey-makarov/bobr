@@ -225,4 +225,4 @@ Concrete builder behavior is documented separately:
 - OCI image inputs: [`docs/IMAGE_BUILDERS.md`](./IMAGE_BUILDERS.md)
 - filesystem-related builders: [`docs/ROOTFS_BUILDERS.md`](./ROOTFS_BUILDERS.md)
 
-For the architecture documents, start with [`docs/INDEX.md`](./INDEX.md).
+For the architecture documents, start with [`docs/OVERVIEW.md`](./OVERVIEW.md).
