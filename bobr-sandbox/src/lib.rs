@@ -887,9 +887,17 @@ fn write_script_config_node(
     }
 }
 
+/// [`RuntimeFunction`] that runs a sandbox: sets up the container (rootfs,
+/// mounts, namespaces) via `bobr-sandbox-launcher`, executes the configured
+/// steps, and captures the result. Dispatched through a runtime, so it runs
+/// in-process (host) or in a child user namespace.
 #[derive(Debug, Clone, Copy)]
 pub struct SandboxFunction;
 
+/// Typed input to [`SandboxFunction`]: the rootfs and output locations, the
+/// fs-tree to capture as output, the launcher binary, the extra named inputs,
+/// and the ordered steps to run. Serialized when the call is marshalled to a
+/// namespace worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxInput {
@@ -904,6 +912,8 @@ pub struct SandboxInput {
     steps: Vec<SandboxRuntimeStep>,
 }
 
+/// A named extra input exposed inside the sandbox: a `name` and the host `path`
+/// bind-mounted under it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxRuntimeInput {
@@ -924,6 +934,8 @@ pub(crate) struct SandboxRuntimeStep {
     stderr_path: PathBuf,
 }
 
+/// Typed output of [`SandboxFunction`]: the number of captured fs-tree entries
+/// and a per-step execution report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxOutput {
