@@ -7,6 +7,10 @@ and publication refs, and per-run operational logs. It is a content-addressed
 store (CAS): payload identity is derived from normalized content, not from the
 path or publication name used to reach it.
 
+The store root is the directory named by the request's `store` field — an
+absolute path to an existing directory, used as-is (`bobr` adds no implicit
+`.bobr/` layer).
+
 For the mental model behind objects, keys, and CAS, see
 [Concepts](./CONCEPTS.md). This document is the precise reference for the store's
 identity model, reuse rules, and on-disk layout.

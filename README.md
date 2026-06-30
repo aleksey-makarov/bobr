@@ -44,7 +44,7 @@ experimental.
 ## Documentation
 
 Documentation lives in [`docs/`](./docs/); start with
-[`docs/OVERVIEW.md`](./docs/OVERVIEW.md).
+[`docs/CONTENTS.md`](./docs/CONTENTS.md).
 
 ## Independence and Affiliation
 

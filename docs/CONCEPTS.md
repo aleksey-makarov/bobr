@@ -64,7 +64,7 @@ Recipes are normally written declaratively in
 [Nickel](https://nickel-lang.org/) and lowered to a single JSON request — a flat
 DAG of nodes — which the engine executes. `bobr` itself only ever sees that JSON
 request; it has no embedded recipe language. The exact request shape is the
-[Request and store format](./REQUEST_FORMAT.md).
+[Request](./REQUEST.md).
 
 
 ## Recipes and the request graph
@@ -141,7 +141,7 @@ leaf with no inputs; a *builder recipe* describes how to build its object from
 its inputs.
 
 **request** — The JSON document `bobr` takes as input; it describes the recipe DAG
-to build. See [Request and store format](./REQUEST_FORMAT.md).
+to build. See [Request](./REQUEST.md).
 
 **`ReuseKey`** — A builder recipe's content-based identity: like its `BuildKey`,
 but computed from the `ObjectHash`es of its inputs instead of their `BuildKey`s.
