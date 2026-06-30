@@ -3,12 +3,12 @@
 <img src="docs/bobr.svg" alt="bobr" width="200">
 
 > `bobr` is a build system. It executes a request — a DAG of recipe nodes — and
-> yields reproducible, content-addressed artifacts such as filesystem trees and
+> yields reproducible, content-addressed objects such as filesystem trees and
 > root-filesystem images.
 
 ## Key properties
 
-Every artifact — a fetched source or a build result — is named by the hash of
+Every object — a fetched source or a build result — is named by the hash of
 its content and kept in a content-addressed store. Identical results are
 deduplicated and reused across builds, so a request rebuilds only what is
 actually missing and serves everything else from the store. The same inputs
