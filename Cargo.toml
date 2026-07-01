@@ -13,6 +13,10 @@ members = [
 
 resolver = "3"
 
+[workspace.package]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/aleksey-makarov/bobr"
+
 [workspace.lints.rust]
 # Hygiene ratchets: the workspace is clean of all of these, so deny keeps it
 # that way (a new violation fails the build). Test/example crates opt out of

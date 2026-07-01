@@ -2,6 +2,8 @@
 name = "bobr-source"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+repository.workspace = true
 
 [features]
 # Exposes the `oci_registry` client as public API. Enabled by `bobr` as a

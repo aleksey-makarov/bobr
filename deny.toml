@@ -1,0 +1,33 @@
+# cargo-deny configuration for the bobr workspace.
+#
+# Gates the dependency tree's licenses against a permissive allow-list, so a
+# new dependency under an unexpected license fails the check.
+#
+# Run: cargo deny check licenses
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# The allow-list is a documentary superset of the permissive licenses present;
+# many crates are multi-licensed and get satisfied via MIT/Apache-2.0, so do not
+# warn about allow entries a given resolution does not exercise.
+unused-allowed-license = "allow"
+
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "0BSD",
+  "BSL-1.0",
+  "Unlicense",
+  "CDLA-Permissive-2.0",
+]
+
+# The only copyleft in the tree is `colored` (MPL-2.0), pulled in solely as a
+# dev/test dependency (via mockito). It is not part of any shipped artifact and
+# is outside the checked graph, so no MPL-2.0 allowance is needed here.
