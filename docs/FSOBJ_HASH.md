@@ -2,6 +2,15 @@
 
 This document defines the hashing rules for filesystem objects.
 
+> **Scope.** These rules define how `bobr` computes the
+> [`ObjectHash`](./CONCEPTS.md) of ordinary objects — regular files,
+> directories, and tar archives. The algorithm deliberately ignores ownership
+> (`uid`/`gid`) and every mode bit except the executable bit. Filesystem trees
+> are different: they make ownership and mode part of file identity, so their
+> files are content-addressed by a separate fs-file hash, described in
+> [Filesystem trees](./FS_TREE.md) and the
+> [fs-tree Manifest](./FS_TREE_MANIFEST.md).
+
 ## Summary
 
 Filesystem object hashing computes structural hashes for two input sources:
