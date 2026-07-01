@@ -2,14 +2,16 @@
 
 ## Summary
 
+This document is the normative definition of the `fs-tree manifest` format.
+
 `fs-tree manifest` is the canonical manifest format for manifest-addressed
 filesystem trees. It describes filesystem tree structure, directory metadata,
 symlink metadata, and references to regular file payloads stored in
 `<store>/fs-files/`.
 
-The manifest itself is an ordinary store object, usually published through
-builders such as `FsTreeImport`, `OciExtract`, `TreeMerge`, `TreeSubset`, and
-`Sandbox`. Materialized roots are cache entries under
+The manifest itself is an ordinary store object, produced by builders such as
+`FsTreeImport`, `OciExtract`, `TreeMerge`, `TreeSubset`, and `Sandbox`.
+Materialized roots are cache entries under
 `<store>/fs-trees/<manifest-object-hash>/`, not the payload stored in
 `<store>/objects/`.
 
@@ -57,10 +59,9 @@ Regular file entry:
 
 - `p`: relative UTF-8 path.
 - `t`: entry type, always `"f"`.
-- `h`: opaque future fs-file object hash, encoded as exactly 64 lowercase hex
-  digits.
+- `h`: opaque fs-file hash, encoded as exactly 64 lowercase hex digits.
 
-Regular file bytes, uid, gid, and mode are not stored in manifest. They are
+Regular file bytes, uid, gid, and mode are not stored in the manifest. They are
 part of the referenced fs-file object. The fs-file hash algorithm is not
 defined by this document.
 
@@ -103,6 +104,13 @@ whitespace are rejected.
 Strings are written without optional JSON escapes. Only `"` and `\` are
 escaped. Control characters are invalid in paths and symlink targets.
 
+Together these rules give a tree exactly one valid byte encoding: the parser
+accepts only that encoding and rejects any deviation in entry order, field set,
+field order, whitespace, or escaping. Because the manifest is an ordinary store
+object, its `ObjectHash` (see [Filesystem Object Hashing](./FSOBJ_HASH.md)) is
+taken over these canonical bytes and is therefore a deterministic function of
+the tree.
+
 ## Tree Shape Rules
 
 The manifest must contain at least the root directory entry:
@@ -141,8 +149,8 @@ the tree.
 
 ## Scope Boundaries
 
-Manifest intentionally does not preserve original inode topology. Future
-materialization may hardlink equal fs-file objects to the same inode. `st_ino`
+The manifest format intentionally does not preserve original inode topology.
+Materialization may hardlink equal fs-file objects to the same inode. `st_ino`
 and `st_nlink` are not semantic fs-tree identity.
 
 The first manifest implementation does not model xattrs, POSIX ACLs, or
