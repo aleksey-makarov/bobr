@@ -2,6 +2,7 @@
 
 [Contents](CONTENTS.md)
 
+- [Getting Started](GETTING_STARTED.md)
 - [Concepts](CONCEPTS.md)
 - [Filesystem trees](FS_TREE.md)
 - [Request](REQUEST.md)

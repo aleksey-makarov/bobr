@@ -43,8 +43,9 @@ experimental.
 
 ## Documentation
 
-Documentation lives in [`docs/`](./docs/); start with
-[`docs/CONTENTS.md`](./docs/CONTENTS.md).
+Documentation lives in [`docs/`](./docs/). New here? Start with
+[Getting Started](./docs/GETTING_STARTED.md); for the full table of
+contents see [`docs/CONTENTS.md`](./docs/CONTENTS.md).
 
 ## Independence and Affiliation
 
