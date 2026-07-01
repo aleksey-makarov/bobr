@@ -86,15 +86,6 @@ A recipe for any other builder has this shape:
 
 ## Builders
 
-Several builders produce or consume an **fs-tree**: a store object whose payload
-is a canonical manifest of files, directories, and symlinks with logical
-ownership and mode, plus regular-file contents stored separately and shared by
-content (see [fs-tree Manifest](./FS_TREE_MANIFEST.md) for the format). When a
-builder needs a real directory rather than the manifest, the runtime
-materializes it first. fs-trees model only regular files, directories, and
-symlinks — not device nodes, FIFOs, sockets, xattrs, ACLs, file capabilities, or
-hardlink identity.
-
 ### `Tree`
 
 Realizes an inline description of text files, symlinks, and directories as one
@@ -233,8 +224,7 @@ Extracts one OCI image layout into an fs-tree.
 
 **Behavior:**
 
-- extracts the image root filesystem into one fs-tree object, carrying file
-  content, symlink targets, and logical ownership and mode
+- extracts the image root filesystem into one fs-tree object
 - the result can be consumed as a `tree`/`rootfs` input by `TreeMerge`,
   `TreeSubset`, `ErofsRootfs`, `Initramfs`, or `Sandbox`
 
