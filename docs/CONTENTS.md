@@ -5,31 +5,26 @@
    recipes — and how a build runs. The mental model behind the reference docs.
 
 2. [Request](./REQUEST.md)
-   The JSON request, the builder and source node shapes, higher-level
-   recipe tags, and the CLI contract.
+   The request format: the envelope, the source and builder node shapes, the
+   built-in builders, and the source origins.
 
-3. [Store](./STORE.md)
+3. [Recipes in Nickel](./NICKEL.md)
+   How Nickel recipes lower to the JSON request (work in progress).
+
+4. [Store](./STORE.md)
    Content-addressed store, build identity, canonical object records, build
    handles, and publication refs.
 
-4. [OCI Image Inputs](./IMAGE_BUILDERS.md)
-   Current behavior of `Source/OciRegistry`, `OciExtract`, and `Sandbox` on
-   the OCI import and rootfs-backed execution paths.
-
-5. [Rootfs Builders](./ROOTFS_BUILDERS.md)
-   Current behavior of `Tree`, `TreeSubset`, `TreeMerge`, `ErofsRootfs`,
-   `Initramfs`, and the fs-tree filesystem authoring/composition path.
-
-6. [Split Outputs](./SPLIT_OUTPUTS.md)
+5. [Split Outputs](./SPLIT_OUTPUTS.md)
    Naming convention for split package outputs and how those outputs are used
    in build and runtime dependency edges.
 
-7. [Build logging](./LOGGING.md)
+6. [Build logging](./LOGGING.md)
    Logging channels, store-log layout, the structured event record, the closed
    `status` vocabulary, and the format guarantees.
 
-8. [Filesystem Object Hashing](./FSOBJ_HASH.md)
+7. [Filesystem Object Hashing](./FSOBJ_HASH.md)
    Structural hashing rules shared by filesystem paths and tar archives.
 
-9. [fs-tree Manifest](./FS_TREE_MANIFEST.md)
+8. [fs-tree Manifest](./FS_TREE_MANIFEST.md)
    Canonical manifest format for manifest-addressed fs-tree artifacts.

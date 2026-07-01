@@ -4,9 +4,8 @@
 
 - [Concepts](CONCEPTS.md)
 - [Request](REQUEST.md)
+- [Recipes in Nickel](NICKEL.md)
 - [Store](STORE.md)
-- [OCI Image Inputs](IMAGE_BUILDERS.md)
-- [Rootfs Builders](ROOTFS_BUILDERS.md)
 - [Split Outputs](SPLIT_OUTPUTS.md)
 - [Build logging](LOGGING.md)
 - [Filesystem Object Hashing](FSOBJ_HASH.md)
