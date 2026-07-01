@@ -101,6 +101,35 @@ A dependency-aware synthetic recipe carries `deps = { build = [...], runtime =
 So a recipe declares what a package needs, and the root filesystem to build it in
 is assembled automatically from the runtime closures of its build dependencies.
 
+## Split outputs
+
+The unsuffixed attribute (`pkgs.glibc`) is the full install tree. You can also
+add recipes for **split outputs** — suffixed attributes carrying a subset of
+that tree, so a dependent pulls in only what it needs. A split output is just a
+`TreeSubset` over an [fs-tree](./FS_TREE.md), so it is very cheap: it references
+the same shared fs-files as the full tree, with nothing copied. The built-in
+helper `recipe.split.libs` produces a `_libs` output from the shared libraries,
+loader, and SONAME symlinks — `pkgs.glibc_libs` from `pkgs.glibc`. Attributes
+are `snake_case`; the builder name keeps the version in `kebab-case`
+(`glibc-libs-2.42`).
+
+Depend on the narrowest output that has the files you need — `deps.runtime` on
+`_libs` for a library dependency (`pkgs.glibc_libs`, not `pkgs.glibc`), the full
+attribute only when the whole tree is required.
+
+Other suffixes are reserved for the same idea and added by hand as a
+`TreeSubset` when a package needs them; today only `_libs` has a helper (plus one
+hand-written `systemd_dev`):
+
+- `_dev` — headers, pkg-config/CMake metadata, and dev symlinks
+- `_tools` — executable utilities
+- `_static` — static libraries
+- `_doc`, `_locale`, `_data` — documentation, locale data, other
+  architecture-independent runtime data
+
+Avoid `_runtime` (already the `deps.runtime` role) and `_closure` (used by
+`RootfsClosure`); `_src` and `_gen1` keep their bootstrap meaning.
+
 ## Synthetic builders
 
 A synthetic builder expands to a `Sandbox` (see [Request](./REQUEST.md)) that
