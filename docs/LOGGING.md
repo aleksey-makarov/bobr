@@ -107,9 +107,9 @@ filtering by lifecycle is reliable while builders stay free to name their work.
 
 Builder operations ride inside `running` and name themselves with `op`. Current
 values: `stage`, `mkfs`, `merge`, `subset`, `extract`, `initramfs`, `sandbox`,
-`sandbox-result`, plus the meta operations `log-warning` and
-`oci-extract-warnings`. `op` is intentionally open; tooling must not assume a
-closed set.
+`sandbox-result`, and `fetch` (source download), plus the meta operations
+`log-warning` and `oci-extract-warnings`. `op` is intentionally open; tooling
+must not assume a closed set.
 
 ## Run-level events
 
@@ -130,18 +130,19 @@ Levels are `progress`, `info`, `warn`, `error` (ordered
 `progress < info < warn < error`).
 
 `progress` is a **transient, screen-only** level for high-frequency ticks
-(e.g. download byte counts). It is rendered to stderr in non-quiet mode but
-**never persisted** — `FileSink` drops it, so the on-disk vocabulary is only
+(e.g. download byte counts). It appears only in the interactive live block, and
+is **never persisted** — `FileSink` drops it, so the on-disk vocabulary is only
 `info`/`warn`/`error`, and progress ticks do not consume the durable `seq`
 (no gaps in the file). Use `info` for durable milestones worth keeping (e.g.
 "fetching X" / "fetched N bytes"); use `progress` for the noisy in-between.
 
-`quiet` (a boolean request setting) is a **stderr level threshold**, not
-an on/off switch:
+`quiet` (a boolean request setting) raises the **stderr threshold**, rather than
+being an on/off switch:
 
-- `quiet = true`: only `warn`/`error` reach stderr; `progress` and `info`
-  are silenced.
-- otherwise: everything from `progress` up reaches stderr.
+- `quiet = true`: only `warn`/`error` reach stderr; `info` and `progress` are
+  silenced.
+- otherwise: `info`, `warn`, and `error` reach stderr, plus — in the interactive
+  live block — transient `progress` ticks.
 
 `warn`/`error` are never suppressed on stderr. The threshold affects only
 stderr; **file logs always record every persisted level** (`info`/`warn`/
