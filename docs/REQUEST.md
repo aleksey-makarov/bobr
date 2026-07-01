@@ -273,15 +273,20 @@ Each step has:
 - `argv` — a non-empty array of non-empty strings
 - `env` — optional object whose values are strings
 
-Each step runs with a default environment — `PATH`, `HOME` (the build
-directory), `USER` (`bobr`), and `SOURCE_DATE_EPOCH` (a fixed epoch, for
-reproducibility) — which its `env` adds to or overrides.
+Each step runs with a fixed default environment, which its `env` extends or
+overrides: `PATH`, `HOME` (the build directory), `TMPDIR` (`/tmp`), `USER`
+(`bobr`), `LC_ALL` and `LANG` (`C`), `TZ` (`UTC`), `SOURCE_DATE_EPOCH` (a fixed
+epoch), and `PYTHONHASHSEED` (`0`) — locale, timezone, epoch, and hash seed are
+pinned for reproducibility. The build, output, config, and inputs directories
+are also exposed as `BOBR_BUILD_DIR`, `BOBR_OUT_DIR`, `BOBR_CONFIG_DIR`, and
+`BOBR_INPUTS_DIR`, and the step's name as `BOBR_STEP_NAME`.
 
 `cwd`, each `argv` item, and each `env` value support `@{…}` interpolation
 (`name`, `run_as`, `env` keys, and `script_config` do not):
 
 - `@{build}` — the writable build directory
-- `@{out}` — the writable output directory
+- `@{out}` — the writable output directory; its contents become the result
+  fs-tree
 - `@{config}` — the materialized `script_config` directory
 - `@{<input>}` — the read-only mount of an extra input
 

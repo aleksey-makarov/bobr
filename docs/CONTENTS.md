@@ -5,15 +5,16 @@
    recipes — and how a build runs. The mental model behind the reference docs.
 
 2. [Filesystem trees](./FS_TREE.md)
-   How bobr represents directory trees as content-addressed objects: manifests,
-   shared files, and materialization.
+   How bobr represents filesystem trees as content-addressed objects:
+   manifests, shared files, and materialization.
 
 3. [Request](./REQUEST.md)
-   The request format: the envelope, the source and builder node shapes, the
-   built-in builders, and the source origins.
+   The request format: the source and builder recipe shapes, the builders, and
+   the source origins.
 
 4. [Recipes in Nickel](./NICKEL.md)
-   How Nickel recipes lower to the JSON request (work in progress).
+   Authoring recipes in Nickel instead of raw JSON: the package set, overlays,
+   build/runtime dependencies, and synthetic builders that expand into a request.
 
 5. [Store](./STORE.md)
    Content-addressed store, build identity, canonical object records, build
