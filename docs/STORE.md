@@ -2,10 +2,11 @@
 
 ## Summary
 
-The store contains immutable payloads, canonical object records, mutable build
-and publication refs, and per-run operational logs. It is a content-addressed
-store (CAS): payload identity is derived from normalized content, not from the
-path or publication name used to reach it.
+The store contains immutable payloads, canonical object records, per-run
+operational logs, the `BuildKey` → `ObjectHash` and `ReuseKey` → `ObjectHash`
+reuse mappings, and mutable refs from a name to its object. It is a
+content-addressed store (CAS): payload identity is derived from normalized
+content, not from the path or name used to reach it.
 
 The store root is the directory named by the request's `store` field — an
 absolute path to an existing directory, used as-is (`bobr` adds no implicit
@@ -21,12 +22,12 @@ identity model, reuse rules, and on-disk layout.
 (`object_hash`, `build_key`, `reuse_key`); this section is their normative
 definition.
 
-Every planned node has a `build_key`.
+Every recipe has a `build_key`.
 
 For `Source`, `build_key` is the declared `object_hash` reinterpreted as a
-build key. Source nodes have no planned inputs.
+build key. Source recipes have no inputs.
 
-For a builder node, `build_key` is computed from:
+For a builder recipe, `build_key` is computed from:
 
 - builder tag
 - normalized config payload
@@ -39,9 +40,9 @@ Dependency order follows the builder input contract:
 
 It does not follow the order of fields in JSON.
 
-`build_key` identifies a planned graph node and backs the public build-handle
-ref. For builder nodes, a build-handle hit can be used before looking through
-the node's direct inputs.
+`build_key` identifies a recipe; the store maps it to the object the recipe
+produced (`builds/<build_key>`). For a builder recipe, a hit on that mapping can
+be used before looking through the recipe's direct inputs.
 
 After a builder's direct inputs are realized, the builder-only canonical reuse
 identity, `reuse_key`, is computed from:
@@ -61,7 +62,7 @@ Executing a builder or materializing a source produces one payload object. The
 payload is addressed by `object_hash`.
 
 The same `object_hash` also keys the canonical object record for that payload.
-Different builder nodes can share one object record when they intentionally
+Different builder recipes can share one object record when they intentionally
 stage the same payload.
 
 Recipe names do not participate in object identity, `build_key`, or
@@ -70,14 +71,14 @@ the `build_key` that resolved to the object when that key is known.
 
 ## Reuse Model
 
-For one planned builder node, builder reuse lookup uses this order:
+For a builder recipe, builder reuse lookup uses this order:
 
-1. build-handle hit on `build_key`
-2. canonical reuse hit on `reuse_key`
+1. a hit on `build_key` (`builds/`)
+2. a hit on `reuse_key` (`reuses/`)
 3. actual builder execution
 
-If a canonical builder object exists but the public build handle is missing,
-the missing build-handle ref is recreated and the object is reused.
+If a `reuse_key` hit finds an object but its `build_key` mapping is missing, the
+`build_key` mapping is recreated and the object is reused.
 
 For `Source`, there is a `build_key` but no `reuse_key`.
 
@@ -88,12 +89,13 @@ Source reuse lookup uses this order:
 3. actual source materialization
 
 On a source hit or successful materialization, the store creates or repairs the
-source build handle `builds/<object_hash>`.
+source's `builds/<object_hash>` mapping.
 
 If source materialization produces a different object than the declared
 `object_hash`, the actual object is still imported into `objects/`, but the
-canonical `object-records/<object_hash>.json` record and source build handle are
-not written, and the source import fails with the actual hash.
+canonical `object-records/<object_hash>.json` record and the
+`builds/<object_hash>` mapping are not written, and the source import fails with
+the actual hash.
 
 ## Store Layout
 
@@ -132,8 +134,8 @@ The filesystem layout mirrors the identity model:
 
 - `objects/` holds payloads addressed by `object_hash`.
 - `object-records/` holds canonical object records addressed by `object_hash`.
-- `reuses/` holds builder-only canonical reuse refs addressed by `reuse_key`.
-- `builds/` holds public build-handle refs addressed by `build_key`.
+- `reuses/` maps a `reuse_key` to its object (builder recipes only).
+- `builds/` maps a `build_key` to its object.
 - `object-refs/` holds human-facing refs from recipe name to the latest
   successful object for that name.
 - `fs-files/` holds regular-file payloads referenced by fs-tree manifest
@@ -164,16 +166,17 @@ Generic CAS objects may contain non-UTF-8 filesystem names. Such objects can
 still be imported and addressed by `object_hash`. Fs-tree objects are
 UTF-8-only because their manifest paths and symlink targets are JSON strings.
 
-`object-records/<object_hash>.json` stores one canonical object record. The
-record payload contains:
+`object-records/<object_hash>.json` stores one canonical object record,
+containing:
 
-- payload identity: `object_hash`
-- direct input identities under `inputs`, where each entry contains:
-  - `object_hash`
+- `object_hash` — the object this record describes
+- `build_key` — the build key that first materialized it
+- `inputs` — the `object_hash` of each direct input (for reuse accounting)
+- `run_id` — optional; the store run that recorded it
 
-`builds/<build_key>` stores the corresponding public build handle as a symlink
-to the canonical object record. `reuses/<reuse_key>` stores the canonical
-builder reuse index.
+`builds/<build_key>` and `reuses/<reuse_key>` are symlinks to the canonical
+object record; they provide the `BuildKey` → `ObjectHash` and `ReuseKey` →
+`ObjectHash` mappings used by reuse lookup.
 
 `logs/<run-id>/<serial>-<tag>[-<name>]/raw/` stores raw per-subject log files
 such as captured tool output. `tmp/<run-id>/<serial>-<tag>[-<name>]/` is the
@@ -183,10 +186,12 @@ the scratch directory is left in place.
 
 ## Object Refs
 
-Every recipe node carries a name.
+Every recipe carries a name. The name enters no identity computation — not
+`object_hash`, `build_key`, or `reuse_key`; it is used only to create the refs
+described here.
 
-When a named node successfully resolves to an object, the current object ref is
-updated:
+When a named recipe successfully resolves to an object, the current object ref
+is updated:
 
 - `object-refs/<name> -> ../objects/<object_hash>`
 
@@ -197,8 +202,8 @@ object ref never points directly at `fs-files/` or at a materialized
 `.json` to the referenced object hash and reading
 `object-records/<object_hash>.json`.
 
-`fs-tree-refs/` are not publication refs. They are created only when a
-filesystem root is actually materialized for a named input.
+Unlike `object-refs/`, `fs-tree-refs/` are inspection aids only, created when a
+filesystem root is materialized for a named input.
 
 If the current object ref already points at a different object, the old current
 ref is rotated into a timestamp-suffixed history ref.

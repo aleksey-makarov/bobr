@@ -17,8 +17,8 @@
    build/runtime dependencies, and synthetic builders that expand into a request.
 
 5. [Store](./STORE.md)
-   Content-addressed store, build identity, canonical object records, build
-   handles, and publication refs.
+   Content-addressed store, build identity, canonical object records, reuse
+   mappings, and name refs.
 
 6. [Split Outputs](./SPLIT_OUTPUTS.md)
    Naming convention for split package outputs and how those outputs are used
