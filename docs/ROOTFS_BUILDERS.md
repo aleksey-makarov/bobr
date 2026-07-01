@@ -247,3 +247,33 @@ Current limitations:
 - special files such as block devices, character devices, FIFOs, and sockets
   are not supported
 - xattrs, POSIX ACLs, file capabilities, and hardlink identity are not modeled
+
+# Временно перенесли сюда
+
+#### `Group`
+
+`Group` is the aggregate builder for requests that need one `root` but must
+realize several otherwise unrelated targets. It has empty config and one or more
+arbitrary inputs:
+
+```json
+{
+  "name": "all-targets",
+  "tag": "Group",
+  "config": {},
+  "inputs": { "in000": "toolchain", "in001": "rootfs", "in002": "image" }
+}
+```
+
+`Group` does not merge or inspect its inputs; it stages a constant zero-byte
+marker once all inputs are realized, so its object is only a completion marker.
+The meaningful artifacts are the input targets themselves.
+
+## Higher-level recipe tags
+
+Nickel recipes may use higher-level synthetic tags that are lowered before
+`bobr` sees the request. The package-aware helpers `Autotools`, `Makefile`,
+`Meson`, `PerlModule`, and `SandboxBuild` inject a generated build rootfs and
+lower to Rust-side `Sandbox` nodes. The explicit-rootfs variants are
+`AutotoolsRootfs`, `MakefileRootfs`, `MesonRootfs`, `PerlModuleRootfs`, and
+`SandboxBuildRootfs`.

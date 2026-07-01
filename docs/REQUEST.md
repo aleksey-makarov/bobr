@@ -30,16 +30,7 @@ The request is a single JSON object:
 The recipe DAG is a JSON object: each member's value is a recipe. The required
 key `root` holds the recipe to build; the others hold the recipes it depends on.
 
-<!--
-## Recipe nodes
-
-There are two node classes: **builder** nodes and **source** nodes. Both carry a
-`name` and a `tag`; dependencies are always referenced by node id.
--->
-
-### Source nodes
-
-A source node has this shape:
+A recipe for the `Source` builder has this shape:
 
 ```json
 {
@@ -54,30 +45,16 @@ A source node has this shape:
 }
 ```
 
-A source node has no `config` and no `inputs`, and its `BuildKey` is its declared
-`object_hash`. It supports three origins:
+- `name` — a human-facing name for the result
+- `tag` — must be `"Source"`
+- `object_hash` — the `ObjectHash` this source must produce
+- `origin` — how to obtain the object this recipe describes; defined below
 
-- **`Path`** — `origin.path` is an absolute host path; `origin.unpack` (default
-  `false`) treats it as a tar archive when true.
-- **`Http`** — `origin.url` is one HTTP(S) URL or an ordered fallback list;
-  `origin.unpack` (default `false`); `origin.archive_format` may override archive
-  detection for unpacked sources.
-- **`OciRegistry`** — `origin.image` is the registry image locator,
-  `origin.digest` the pinned manifest or index digest, and `origin.platform`
-  selects the platform when the digest names a manifest list or OCI index.
+A recipe for the `Source` builder may also omit `origin`. Then the object must
+already exist in the store under its `object_hash`, and `bobr` reuses it; if it
+does not, the source fails.
 
-A source may also omit `origin`. Then the object must already exist in the store
-under its `object_hash`; `bobr` reconstructs the canonical object record from the
-declared hash if it is missing.
-
-If a source materializes a different object than its declared `object_hash`,
-`bobr` still imports the actual object (under its real hash) but does not record
-it under the declared hash; the source fails, reporting the actual hash so the
-recipe can be corrected and rerun without downloading again.
-
-### Builder nodes
-
-A builder node has this shape:
+A recipe for any other builder has this shape:
 
 ```json
 {
@@ -101,10 +78,11 @@ A builder node has this shape:
 }
 ```
 
-- `name` — publication name
-- `tag` — builder tag from the Rust builder registry
-- `config` — opaque builder payload
-- `inputs` — object keyed by named input dependencies
+- `name` — a human-facing name for the result
+- `tag` — the name of the builder that builds this recipe
+- `config` — the builder's configuration; its shape is defined by the builder
+- `inputs` — dependencies keyed by input name; each value is the key of another
+  member of `nodes` — the recipe this one depends on
 
 Inputs are encoded generically:
 
@@ -119,37 +97,17 @@ The runtime rejects:
 - extra inputs for builders that do not allow them
 - non-string input values
 
-#### `Group`
+<!-- Дальше не смотри -- будем считать что дальше мы ещё не сделали -->
 
-`Group` is the aggregate builder for requests that need one `root` but must
-realize several otherwise unrelated targets. It has empty config and one or more
-arbitrary inputs:
+<!-- Дальше -- описание origins -->
 
-```json
-{
-  "name": "all-targets",
-  "tag": "Group",
-  "config": {},
-  "inputs": { "in000": "toolchain", "in001": "rootfs", "in002": "image" }
-}
-```
+- **`Path`** — `origin.path` is an absolute host path; `origin.unpack` (default
+  `false`) treats it as a tar archive when true.
+- **`Http`** — `origin.url` is one HTTP(S) URL or an ordered fallback list;
+  `origin.unpack` (default `false`); `origin.archive_format` may override archive
+  detection for unpacked sources.
+- **`OciRegistry`** — `origin.image` is the registry image locator,
+  `origin.digest` the pinned manifest or index digest, and `origin.platform`
+  selects the platform when the digest names a manifest list or OCI index.
 
-`Group` does not merge or inspect its inputs; it stages a constant zero-byte
-marker once all inputs are realized, so its object is only a completion marker.
-The meaningful artifacts are the input targets themselves.
-
-## Higher-level recipe tags
-
-Nickel recipes may use higher-level synthetic tags that are lowered before
-`bobr` sees the request. The package-aware helpers `Autotools`, `Makefile`,
-`Meson`, `PerlModule`, and `SandboxBuild` inject a generated build rootfs and
-lower to Rust-side `Sandbox` nodes. The explicit-rootfs variants are
-`AutotoolsRootfs`, `MakefileRootfs`, `MesonRootfs`, `PerlModuleRootfs`, and
-`SandboxBuildRootfs`.
-
-## See also
-
-- Concrete builder behavior: [OCI image inputs](./IMAGE_BUILDERS.md) and
-  [filesystem builders](./ROOTFS_BUILDERS.md).
-- The store layout, the `BuildKey`/`ReuseKey` computation, and refs:
-  [Store](./STORE.md).
+<!-- Дальше -- описание известных builders -->
