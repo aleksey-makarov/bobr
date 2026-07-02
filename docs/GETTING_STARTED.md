@@ -98,7 +98,8 @@ human-facing name for the result (see [Store](./STORE.md)).
 ## Building a real target
 
 Writing requests by hand does not scale; real targets are authored in
-[Nickel](https://nickel-lang.org/) in the separate **bobr-recipes** repository
+[Nickel](https://nickel-lang.org/) in the separate
+[**bobr-recipes**](https://github.com/aleksey-makarov/bobr-recipes) repository
 and lowered to a request. Clone it next to `bobr` (the tooling expects the two
 as siblings):
 

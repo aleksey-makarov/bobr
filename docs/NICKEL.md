@@ -25,19 +25,21 @@ A package module returns named recipes:
 
 ```nickel
 fun pkgs =>
-  let gzip_src = {
-    name = "gzip-src-1.14",
+  let libffi_src = fun version => {
+    name = "libffi-src-%{version}",
     tag = "Source",
     object_hash = "…",
-    origin = { tag = "Http", url = ["https://ftp.gnu.org/gnu/gzip/gzip-1.14.tar.xz"] },
+    origin = { tag = "Http", url = "https://github.com/libffi/libffi/releases/download/v%{version}/libffi-%{version}.tar.gz" },
   } in
-  let gzip = {
-    name = "gzip-1.14",
-    tag = "AutotoolsRootfs",
-    config = { configure_args = ["--disable-nls"] },
-    inputs = { _rootfs = pkgs.system_rootfs_1, source = gzip_src },
+  let libffi = {
+    version | default = "3.6.0",
+    name = "libffi-%{version}",
+    tag = "Autotools",
+    deps = { build = [], runtime = [pkgs.glibc_libs] },
+    config = { configure_args = ["--disable-static"] },
+    inputs = { source = libffi_src version },
   } in
-  { include [gzip] }
+  { include [libffi] }
 ```
 
 `request.ncl` ties it together: given a store path, the recipes-checkout path, a
@@ -70,7 +72,7 @@ flag, an input — can be reached and overridden from an overlay.
 
 ## Synthetic recipes
 
-The recipe above uses the tag `AutotoolsRootfs`, which is **not** a `bobr`
+The recipe above uses the tag `Autotools`, which is **not** a `bobr`
 builder — `bobr` has no such builder. It is a **synthetic recipe**: a
 high-level, Nickel-only tag that stands for a common build pattern and is
 *lowered* (expanded) into real builder nodes before the request reaches `bobr`.
