@@ -35,7 +35,7 @@ fun pkgs =>
     name = "gzip-1.14",
     tag = "AutotoolsRootfs",
     config = { configure_args = ["--disable-nls"] },
-    inputs = { rootfs = pkgs.system_rootfs_1, source = gzip_src },
+    inputs = { _rootfs = pkgs.system_rootfs_1, source = gzip_src },
   } in
   { include [gzip] }
 ```
@@ -141,7 +141,7 @@ flavors:
   rootfs from `deps.build`;
 - the explicit-rootfs variants (`AutotoolsRootfs`, `MakefileRootfs`,
   `MesonRootfs`, `PerlModuleRootfs`, `SandboxBuildRootfs`) take an explicit
-  `rootfs` input and no `deps`, for bootstrap recipes that must choose the build
+  `_rootfs` input and no `deps`, for bootstrap recipes that must choose the build
   rootfs directly.
 
 The **common native toolchain** referenced by the defaults below is
@@ -234,7 +234,7 @@ config as the built-in `Sandbox` builder (`steps`, `script_config`; see
 Source unpacking and patching are not automatic here; do them in your own steps.
 
 - **Inputs:** `source` and `deps` (the `SandboxBuildRootfs` variant is a
-  `Sandbox` with an explicit `rootfs`).
+  `Sandbox` with an explicit `_rootfs`).
 - **Default build tools:** `bash`, `tar`, `gzip`, `bzip2`, `xz`, and `patch`.
 
 ### `RootfsClosure`
