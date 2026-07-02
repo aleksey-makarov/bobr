@@ -20,7 +20,7 @@ pub struct TreeSubsetConfig {
 }
 
 static TREE_SUBSET_SPEC: InputSpec = InputSpec {
-    required_inputs: &[InputSlot::object("tree")],
+    required_inputs: &[InputSlot::named("tree")],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
@@ -153,7 +153,7 @@ mod tests {
         assert_eq!(TREE_SUBSET_SPEC.required_inputs.len(), 1);
         assert_eq!(
             TREE_SUBSET_SPEC.required_inputs[0],
-            InputSlot::object("tree")
+            InputSlot::named("tree")
         );
         assert!(TREE_SUBSET_SPEC.optional_inputs.is_empty());
         assert!(!TREE_SUBSET_SPEC.allow_extra_inputs);

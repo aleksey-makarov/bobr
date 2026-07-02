@@ -197,8 +197,13 @@ mod tests {
             BTreeMap::new(),
         )
         .unwrap();
-        let expected =
-            bobr_core::compute_build_key("Tree", "1", &config, &BTreeMap::new()).unwrap();
+        let expected = bobr_core::compute_build_key(
+            "Tree",
+            &format!("{}/1", bobr_core::CORE_KEY_VERSION),
+            &config,
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(subject.name(), "tree");
         assert_eq!(subject.tag(), "Tree");

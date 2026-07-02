@@ -384,7 +384,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("builder 'Sandbox' is missing required input 'rootfs'"),
+                .contains("builder 'Sandbox' is missing required input '_rootfs'"),
             "{error}"
         );
     }
@@ -441,7 +441,7 @@ mod tests {
                 "config": {},
                 "inputs": {
                     "source": "source",
-                    "rootfs": "rootfs",
+                    "_rootfs": "rootfs",
                     "script": "script"
                 }
             },
@@ -451,20 +451,25 @@ mod tests {
         });
 
         let (root_key, _) = collect_one(&nodes).unwrap();
+        let tree_token = format!("{}/1", bobr_core::CORE_KEY_VERSION);
         let rootfs_key =
-            compute_build_key("Tree", "1", &rootfs["config"], &BTreeMap::new()).unwrap();
+            compute_build_key("Tree", &tree_token, &rootfs["config"], &BTreeMap::new()).unwrap();
         let script_key =
-            compute_build_key("Tree", "1", &script["config"], &BTreeMap::new()).unwrap();
+            compute_build_key("Tree", &tree_token, &script["config"], &BTreeMap::new()).unwrap();
         let source_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             .parse()
             .unwrap();
         let source_key = BuildKey::from_object_hash(source_hash);
         let expected = compute_build_key(
             "Sandbox",
-            &format!("1@{}", std::env::consts::ARCH),
+            &format!(
+                "{}/1@{}",
+                bobr_core::CORE_KEY_VERSION,
+                std::env::consts::ARCH
+            ),
             &nodes["root"]["config"],
             &BTreeMap::from([
-                ("rootfs".to_string(), rootfs_key),
+                ("_rootfs".to_string(), rootfs_key),
                 ("script".to_string(), script_key),
                 ("source".to_string(), source_key),
             ]),
@@ -493,7 +498,7 @@ mod tests {
         let (_root_key, subjects) = collect_one(&nodes).unwrap();
         let deduped_key = compute_build_key(
             "Tree",
-            "1",
+            &format!("{}/1", bobr_core::CORE_KEY_VERSION),
             &tree_config("same.txt", "same", false),
             &BTreeMap::new(),
         )

@@ -14,39 +14,23 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Whether a builder input slot takes a content object or an fs-tree root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputKind {
-    /// A content-addressed object.
-    Object,
-    /// The root of a materialized fs-tree.
-    FsTreeRoot,
-}
-
-/// A declared input slot of a builder: its `name` and expected [`InputKind`].
+/// A declared input slot of a builder, identified by its `name`.
+///
+/// Whether an input is materialized into an fs-tree root or passed as the
+/// object itself is decided by the input **name**, not the slot: a name
+/// beginning with `_` is materialized (see `resolved_inputs`). The slot list
+/// only declares which names are required/optional and whether extras are
+/// allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputSlot {
     /// Slot name, as used in the recipe's `inputs`.
     pub name: &'static str,
-    /// What kind of input the slot accepts.
-    pub kind: InputKind,
 }
 
 impl InputSlot {
-    /// An object-input slot named `name`.
-    pub const fn object(name: &'static str) -> Self {
-        Self {
-            name,
-            kind: InputKind::Object,
-        }
-    }
-
-    /// An fs-tree-root-input slot named `name`.
-    pub const fn fs_tree_root(name: &'static str) -> Self {
-        Self {
-            name,
-            kind: InputKind::FsTreeRoot,
-        }
+    /// A slot named `name`.
+    pub const fn named(name: &'static str) -> Self {
+        Self { name }
     }
 }
 
@@ -121,14 +105,6 @@ impl InputSpec {
             .iter()
             .map(|slot| slot.name)
             .chain(self.optional_inputs.iter().map(|slot| slot.name))
-    }
-
-    /// The [`InputKind`] of the named slot, if it is declared.
-    pub fn input_kind(&self, name: &str) -> Option<InputKind> {
-        self.required_inputs
-            .iter()
-            .chain(self.optional_inputs.iter())
-            .find_map(|slot| (slot.name == name).then_some(slot.kind))
     }
 
     /// Whether `name` is a required slot.
@@ -591,8 +567,8 @@ mod tests {
     #[test]
     fn input_spec_validate_accepts_distinct_inputs() {
         static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::object("rootfs"), InputSlot::object("toolchain")],
-            optional_inputs: &[InputSlot::object("source")],
+            required_inputs: &[InputSlot::named("rootfs"), InputSlot::named("toolchain")],
+            optional_inputs: &[InputSlot::named("source")],
             allow_extra_inputs: true,
         };
 
@@ -602,7 +578,7 @@ mod tests {
     #[test]
     fn input_spec_validate_rejects_duplicate_required_inputs() {
         static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::object("rootfs"), InputSlot::object("rootfs")],
+            required_inputs: &[InputSlot::named("rootfs"), InputSlot::named("rootfs")],
             optional_inputs: &[],
             allow_extra_inputs: true,
         };
@@ -617,7 +593,7 @@ mod tests {
     fn input_spec_validate_rejects_duplicate_optional_inputs() {
         static SPEC: InputSpec = InputSpec {
             required_inputs: &[],
-            optional_inputs: &[InputSlot::object("source"), InputSlot::object("source")],
+            optional_inputs: &[InputSlot::named("source"), InputSlot::named("source")],
             allow_extra_inputs: true,
         };
 
@@ -630,8 +606,8 @@ mod tests {
     #[test]
     fn input_spec_validate_rejects_required_optional_overlap() {
         static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::object("rootfs")],
-            optional_inputs: &[InputSlot::object("rootfs")],
+            required_inputs: &[InputSlot::named("rootfs")],
+            optional_inputs: &[InputSlot::named("rootfs")],
             allow_extra_inputs: true,
         };
 
@@ -644,13 +620,13 @@ mod tests {
     #[test]
     fn input_spec_validate_rejects_invalid_declared_input_names() {
         static REQUIRED: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::object("bad-name")],
+            required_inputs: &[InputSlot::named("bad-name")],
             optional_inputs: &[],
             allow_extra_inputs: true,
         };
         static OPTIONAL: InputSpec = InputSpec {
             required_inputs: &[],
-            optional_inputs: &[InputSlot::object("1bad")],
+            optional_inputs: &[InputSlot::named("1bad")],
             allow_extra_inputs: true,
         };
 
@@ -673,8 +649,8 @@ mod tests {
         inputs.insert("patch", object.clone());
 
         static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::object("image")],
-            optional_inputs: &[InputSlot::object("base")],
+            required_inputs: &[InputSlot::named("image")],
+            optional_inputs: &[InputSlot::named("base")],
             allow_extra_inputs: true,
         };
 

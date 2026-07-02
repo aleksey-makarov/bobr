@@ -71,7 +71,7 @@ A recipe for any other builder has this shape:
     ]
   },
   "inputs": {
-    "rootfs": "rootfs_1",
+    "_rootfs": "rootfs_1",
     "script": "script_1",
     "source": "src_0"
   }
@@ -83,6 +83,12 @@ A recipe for any other builder has this shape:
 - `config` — the builder's configuration; its shape is defined by the builder
 - `inputs` — dependencies keyed by input name; each value is the key of another
   member of `nodes` — the recipe this one depends on
+
+An input whose name begins with `_` is **materialized**: its object must be a
+[filesystem tree](./FS_TREE.md) and the builder receives the path to a real
+directory of files. Any other input is passed as the object itself (for an
+fs-tree, that is the manifest object). This rule is uniform across builders and
+applies to both the slots a builder declares and any extra inputs it accepts.
 
 ## Builders
 
@@ -225,23 +231,25 @@ Extracts one OCI image layout into an fs-tree.
 **Behavior:**
 
 - extracts the image root filesystem into one fs-tree object
-- the result can be consumed as a `tree`/`rootfs` input by `TreeMerge`,
-  `TreeSubset`, `ErofsRootfs`, `Initramfs`, or `Sandbox`
+- the result can be consumed as an fs-tree input by `TreeMerge`, `TreeSubset`,
+  `ErofsRootfs`, `Initramfs`, or `Sandbox`
 
 ### `Sandbox`
 
 Runs an ordered plan of commands inside an isolated container — a set of Linux
-namespaces rooted at the `rootfs` input, with no network access — and captures
+namespaces rooted at the `_rootfs` input, with no network access — and captures
 the result as an fs-tree.
 
 **Inputs:**
 
-- required `rootfs` — one fs-tree, used as the container's read-only root
-  filesystem
+- required `_rootfs` — one fs-tree; materialized (its name begins with `_`) and
+  used as the container's read-only root filesystem
 - any number of extra inputs — each made available to the steps through its
   interpolation name `@{name}` (read-only). An input name must start with an
   ASCII letter or `_`, contain only ASCII letters, digits, or `_`, and must not
-  be `build`, `out`, or `config` (reserved).
+  be `build`, `out`, or `config` (reserved). An extra whose name begins with `_`
+  is materialized into a filesystem tree (see above) and `@{name}` is that
+  directory; otherwise `@{name}` is the object itself.
 
 **Config:**
 
@@ -288,7 +296,8 @@ are also exposed as `BOBR_BUILD_DIR`, `BOBR_OUT_DIR`, `BOBR_CONFIG_DIR`, and
 - `@{out}` — the writable output directory; its contents become the result
   fs-tree
 - `@{config}` — the materialized `script_config` directory
-- `@{<input>}` — the read-only mount of an extra input
+- `@{<input>}` — an extra input: the materialized directory if its name begins
+  with `_`, otherwise the read-only object path
 
 `@@{name}` escapes to the literal `@{name}`. Unknown variables and malformed
 interpolation are invalid config.
@@ -303,7 +312,7 @@ only ASCII letters, digits, `.`, `_`, and `-`.
 
 Builds an EROFS filesystem image from an fs-tree.
 
-**Inputs:** required `tree` — one fs-tree, materialized before execution.
+**Inputs:** required `_tree` — one fs-tree, materialized before execution.
 
 **Config:** optional `compression` and `label`:
 
@@ -327,7 +336,7 @@ mkfs.erofs --sort=path -T 0 -U clear [ -L label ] [ -z compression ] \
 
 Builds a deterministic Linux `newc` initramfs cpio archive from an fs-tree.
 
-**Inputs:** required `tree` — one fs-tree, materialized before execution.
+**Inputs:** required `_tree` — one fs-tree, materialized before execution.
 
 **Config:** none (`{}`).
 

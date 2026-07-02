@@ -37,7 +37,7 @@ pub struct ErofsRootfsConfig {
 }
 
 static EROFS_ROOTFS_SPEC: InputSpec = InputSpec {
-    required_inputs: &[InputSlot::fs_tree_root("tree")],
+    required_inputs: &[InputSlot::named("_tree")],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
@@ -64,7 +64,7 @@ impl TypedBuilder for ErofsRootfsBuilder {
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         validate_erofs_config(&config)?;
-        let source_root = inputs.required("tree")?.path.clone();
+        let source_root = inputs.required("_tree")?.path.clone();
         let mkfs_erofs = find_program_in_path("mkfs.erofs").ok_or_else(|| {
             BuilderError::ExecutionFailed(
                 "required tool 'mkfs.erofs' was not found in PATH; install erofs-utils".to_string(),
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(TypedBuilder::tag(&ErofsRootfsBuilder), "ErofsRootfs");
         assert_eq!(
             EROFS_ROOTFS_SPEC.required_inputs,
-            &[InputSlot::fs_tree_root("tree")]
+            &[InputSlot::named("_tree")]
         );
         assert!(!EROFS_ROOTFS_SPEC.allow_extra_inputs);
     }
@@ -302,7 +302,7 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(error.to_string().contains("required input slot 'tree'"));
+        assert!(error.to_string().contains("required input slot '_tree'"));
     }
 
     #[test]
@@ -311,7 +311,7 @@ mod tests {
         let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
         let mut inputs = BuilderInputs::empty();
         inputs.insert(
-            "tree",
+            "_tree",
             BuilderInputPath {
                 path: temp.path().join("root"),
             },

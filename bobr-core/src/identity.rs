@@ -14,6 +14,16 @@ use std::fmt;
 const INVOCATION_SCHEMA: &str = "bobr-build-invocation-v4";
 const REUSE_INVOCATION_SCHEMA: &str = "bobr-build-reuse-invocation-v4";
 
+/// Manually-bumped version of the bobr core build semantics.
+///
+/// It is folded into the per-builder version token that enters every build and
+/// reuse key (see the builder-subject code), so bumping it invalidates all
+/// keys. Bump it when a core change alters build outputs for an otherwise
+/// unchanged request. (The input-name materialization rule — an input is
+/// materialized into an fs-tree root iff its name begins with `_` — bumped this
+/// from "1" to "2".)
+pub const CORE_KEY_VERSION: &str = "2";
+
 define_hex_hash_type! {
     /// Stable key for a planned build graph node.
     ///

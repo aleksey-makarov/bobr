@@ -27,7 +27,7 @@ pub struct InitramfsBuilder;
 pub struct InitramfsConfig {}
 
 static INITRAMFS_SPEC: InputSpec = InputSpec {
-    required_inputs: &[InputSlot::fs_tree_root("tree")],
+    required_inputs: &[InputSlot::named("_tree")],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
@@ -53,7 +53,7 @@ impl TypedBuilder for InitramfsBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
-        let source_root = inputs.required("tree")?.path.clone();
+        let source_root = inputs.required("_tree")?.path.clone();
         let output_path = cx.temp_dir.join(OUTPUT_FILE_NAME);
 
         cx.log_event(
@@ -522,10 +522,7 @@ mod tests {
     #[test]
     fn input_spec_is_single_fs_tree_root_input() {
         assert_eq!(TypedBuilder::tag(&InitramfsBuilder), "Initramfs");
-        assert_eq!(
-            INITRAMFS_SPEC.required_inputs,
-            &[InputSlot::fs_tree_root("tree")]
-        );
+        assert_eq!(INITRAMFS_SPEC.required_inputs, &[InputSlot::named("_tree")]);
         assert!(!INITRAMFS_SPEC.allow_extra_inputs);
     }
 
@@ -538,7 +535,7 @@ mod tests {
             .build_typed(InitramfsConfig {}, BuilderInputs::empty(), &mut cx)
             .unwrap_err();
 
-        assert!(error.to_string().contains("required input slot 'tree'"));
+        assert!(error.to_string().contains("required input slot '_tree'"));
     }
 
     #[test]
@@ -672,14 +669,14 @@ mod tests {
     fn builder_accepts_tree_input_path_shape() {
         let mut inputs = BuilderInputs::empty();
         inputs.insert(
-            "tree",
+            "_tree",
             BuilderInputPath {
                 path: PathBuf::from("/fs-tree-root"),
             },
         );
 
         assert_eq!(
-            inputs.required("tree").unwrap().path,
+            inputs.required("_tree").unwrap().path,
             PathBuf::from("/fs-tree-root")
         );
     }

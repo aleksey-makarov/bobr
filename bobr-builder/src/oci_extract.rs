@@ -38,7 +38,7 @@ pub struct OciExtractConfig {}
 pub struct OciExtractBuilder;
 
 static OCI_EXTRACT_SPEC: InputSpec = InputSpec {
-    required_inputs: &[InputSlot::object("image")],
+    required_inputs: &[InputSlot::named("image")],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
@@ -993,7 +993,7 @@ mod tests {
         assert_eq!(TypedBuilder::tag(&OciExtractBuilder), "OciExtract");
         assert_eq!(
             OCI_EXTRACT_SPEC.required_inputs,
-            &[InputSlot::object("image")]
+            &[InputSlot::named("image")]
         );
         assert!(!OCI_EXTRACT_SPEC.allow_extra_inputs);
     }

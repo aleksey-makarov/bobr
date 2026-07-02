@@ -1536,7 +1536,7 @@ mod tests {
         struct RootBuilder;
         static ROOT_BUILDER: RootBuilder = RootBuilder;
         static DRAIN_ROOT_SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::object("fast"), InputSlot::object("slow")],
+            required_inputs: &[InputSlot::named("fast"), InputSlot::named("slow")],
             optional_inputs: &[],
             allow_extra_inputs: false,
         };

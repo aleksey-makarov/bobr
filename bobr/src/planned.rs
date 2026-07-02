@@ -109,8 +109,7 @@ fn execute_builder_subject(
             outcome: SubjectOutcome::CacheHit,
         });
     }
-    let builder_inputs =
-        inputs.prepare_builder_inputs(subject.input_spec(), cx.store, &cx.runtime_provider)?;
+    let builder_inputs = inputs.prepare_builder_inputs(cx.store, &cx.runtime_provider)?;
 
     // Miss: create the workspace and run the builder.
     let store_workspace = create_workspace(

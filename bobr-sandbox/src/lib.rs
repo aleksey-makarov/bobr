@@ -85,7 +85,7 @@ struct BuildStep {
 }
 
 static SANDBOX_SPEC: InputSpec = InputSpec {
-    required_inputs: &[InputSlot::fs_tree_root("rootfs")],
+    required_inputs: &[InputSlot::named("_rootfs")],
     optional_inputs: &[],
     allow_extra_inputs: true,
 };
@@ -125,7 +125,7 @@ fn build_sandbox(
     cx: &mut BuildContext,
 ) -> Result<StagedBuildResult, BuilderError> {
     validate_sandbox_config(&config).map_err(map_error)?;
-    let rootfs = inputs.required("rootfs")?.path.clone();
+    let rootfs = inputs.required("_rootfs")?.path.clone();
     validate_rootfs_path(&rootfs).map_err(map_error)?;
     let fs_tree = cx.fs_tree()?;
 
@@ -1005,7 +1005,7 @@ mod tests {
 
     fn inputs(rootfs: PathBuf) -> BuilderInputs {
         BuilderInputs::new(BTreeMap::from([(
-            "rootfs".to_string(),
+            "_rootfs".to_string(),
             BuilderInputPath { path: rootfs },
         )]))
     }
@@ -1014,10 +1014,7 @@ mod tests {
     fn spec_requires_fs_tree_root_rootfs_and_allows_extra_inputs() {
         assert_eq!(TypedBuilder::tag(&SandboxBuilder), "Sandbox");
         assert_eq!(SANDBOX_SPEC.required_inputs.len(), 1);
-        assert_eq!(
-            SANDBOX_SPEC.required_inputs[0],
-            InputSlot::fs_tree_root("rootfs")
-        );
+        assert_eq!(SANDBOX_SPEC.required_inputs[0], InputSlot::named("_rootfs"));
         assert!(SANDBOX_SPEC.optional_inputs.is_empty());
         assert!(SANDBOX_SPEC.allow_extra_inputs);
     }
@@ -1100,7 +1097,7 @@ mod tests {
             "Sandbox",
             &BuilderInputs::new(BTreeMap::from([
                 (
-                    "rootfs".to_string(),
+                    "_rootfs".to_string(),
                     BuilderInputPath {
                         path: rootfs.clone(),
                     },

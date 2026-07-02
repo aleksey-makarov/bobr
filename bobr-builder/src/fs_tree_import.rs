@@ -20,7 +20,7 @@ pub struct FsTreeImportConfig {
 pub struct FsTreeImportBuilder;
 
 static FS_TREE_IMPORT_SPEC: InputSpec = InputSpec {
-    required_inputs: &[InputSlot::object("input")],
+    required_inputs: &[InputSlot::named("input")],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };

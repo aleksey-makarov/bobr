@@ -3,8 +3,8 @@ use crate::{
     validate_input_name,
 };
 use bobr_core::{
-    BuildKey, BuildLogSubject, IdentityError, ReuseKey, SubjectRunContext, Workspace,
-    compute_build_key, compute_reuse_key,
+    BuildKey, BuildLogSubject, CORE_KEY_VERSION, IdentityError, ReuseKey, SubjectRunContext,
+    Workspace, compute_build_key, compute_reuse_key,
 };
 use bobr_store::fs_tree::FsTree;
 use fsobj_hash::ObjectHash;
@@ -123,10 +123,18 @@ impl BuilderPlannedSubject {
             }
         }
 
+        // Fold the core-semantics version into the per-builder version token, so
+        // a bump of CORE_KEY_VERSION invalidates every key without touching the
+        // key structure. Arch-dependent builders still pin the target arch.
         let impl_version_token = if builder.is_arch_dependent() {
-            format!("{}@{}", builder.impl_version(), std::env::consts::ARCH)
+            format!(
+                "{}/{}@{}",
+                CORE_KEY_VERSION,
+                builder.impl_version(),
+                std::env::consts::ARCH
+            )
         } else {
-            builder.impl_version().to_string()
+            format!("{}/{}", CORE_KEY_VERSION, builder.impl_version())
         };
         let build_key = compute_build_key(tag, &impl_version_token, &config, &inputs)
             .map_err(BuilderPlanError::identity)?;

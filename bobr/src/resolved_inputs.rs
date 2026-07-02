@@ -1,6 +1,6 @@
 use crate::execution::{ExecutionError, map_store_error};
 use bobr_builder::{
-    BuilderError, BuilderInputPath, BuilderInputs, InputKind, InputSpec, materialize_fs_tree_root,
+    BuilderError, BuilderInputPath, BuilderInputs, InputSpec, materialize_fs_tree_root,
 };
 use bobr_core::{ObjectHash, RuntimeProvider};
 use bobr_store::Store;
@@ -82,20 +82,22 @@ impl ResolvedInputs {
 
     pub(crate) fn prepare_builder_inputs(
         self,
-        spec: &InputSpec,
         store: &Store,
         runtime: &RuntimeProvider,
     ) -> Result<BuilderInputs, ExecutionError> {
         let mut slots = BTreeMap::new();
         for (name, value) in self.slots {
-            let path = match spec.input_kind(&name).unwrap_or(InputKind::Object) {
-                InputKind::Object => value.object_path,
-                InputKind::FsTreeRoot => prepare_fs_tree_root_input(
+            // An input whose name begins with `_` is materialized into an
+            // fs-tree root; every other input is passed as the object itself.
+            let path = if name.starts_with('_') {
+                prepare_fs_tree_root_input(
                     store,
                     runtime,
                     value.object_hash,
                     value.materialization_name.as_deref(),
-                )?,
+                )?
+            } else {
+                value.object_path
             };
             slots.insert(name, BuilderInputPath { path });
         }
@@ -157,8 +159,8 @@ mod tests {
         inputs.insert("source", object.clone());
 
         static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::object("rootfs")],
-            optional_inputs: &[InputSlot::object("base")],
+            required_inputs: &[InputSlot::named("rootfs")],
+            optional_inputs: &[InputSlot::named("base")],
             allow_extra_inputs: true,
         };
 
@@ -190,7 +192,7 @@ mod tests {
         let second = sample_object();
 
         static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::object("rootfs")],
+            required_inputs: &[InputSlot::named("rootfs")],
             optional_inputs: &[],
             allow_extra_inputs: true,
         };
@@ -231,14 +233,9 @@ mod tests {
         let store = Store::create(&store_root).unwrap();
         let object = sample_object();
         let inputs = ResolvedInputs::new(BTreeMap::from([("script".to_string(), object.clone())]));
-        static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::object("script")],
-            optional_inputs: &[],
-            allow_extra_inputs: false,
-        };
 
         let builder_inputs = inputs
-            .prepare_builder_inputs(&SPEC, &store, &RuntimeProvider::host())
+            .prepare_builder_inputs(&store, &RuntimeProvider::host())
             .unwrap();
         let resolved = builder_inputs.required("script").unwrap();
         assert_eq!(resolved.path, object.object_path);
@@ -266,24 +263,19 @@ mod tests {
         )
         .unwrap();
         let inputs = ResolvedInputs::new(BTreeMap::from([(
-            "tree".to_string(),
+            "_tree".to_string(),
             ResolvedDependency {
                 object_hash,
                 object_path: store.object_path(object_hash).unwrap().unwrap(),
                 materialization_name: Some("source-tree".to_string()),
             },
         )]));
-        static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::fs_tree_root("tree")],
-            optional_inputs: &[],
-            allow_extra_inputs: false,
-        };
 
         let builder_inputs = inputs
-            .prepare_builder_inputs(&SPEC, &store, &RuntimeProvider::host())
+            .prepare_builder_inputs(&store, &RuntimeProvider::host())
             .unwrap();
 
-        let resolved = builder_inputs.required("tree").unwrap();
+        let resolved = builder_inputs.required("_tree").unwrap();
         assert_eq!(
             resolved.path,
             store
@@ -327,24 +319,19 @@ mod tests {
             .ensure_materialized_root(None, object_hash)
             .unwrap();
         let inputs = ResolvedInputs::new(BTreeMap::from([(
-            "tree".to_string(),
+            "_tree".to_string(),
             ResolvedDependency {
                 object_hash,
                 object_path: store.object_path(object_hash).unwrap().unwrap(),
                 materialization_name: Some("cached-tree".to_string()),
             },
         )]));
-        static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::fs_tree_root("tree")],
-            optional_inputs: &[],
-            allow_extra_inputs: false,
-        };
 
         let builder_inputs = inputs
-            .prepare_builder_inputs(&SPEC, &store, &RuntimeProvider::namespace())
+            .prepare_builder_inputs(&store, &RuntimeProvider::namespace())
             .unwrap();
 
-        assert_eq!(builder_inputs.required("tree").unwrap().path, root);
+        assert_eq!(builder_inputs.required("_tree").unwrap().path, root);
         assert_eq!(
             fs::read_link(store_root.join("fs-tree-refs").join("cached-tree")).unwrap(),
             PathBuf::from("..")

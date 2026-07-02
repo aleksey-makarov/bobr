@@ -47,4 +47,8 @@ Among the built-in builders:
   materializing them;
 - `ErofsRootfs`, `Initramfs`, and `Sandbox` consume a materialized fs-tree.
 
+A recipe controls materialization by the **input name**: an input whose name
+begins with `_` (e.g. `_rootfs`, `_tree`) is materialized into a real directory
+before the builder runs; any other input is passed as the object itself.
+
 See [Request](./REQUEST.md) for each builder.
