@@ -1,5 +1,5 @@
 use crate::BuilderError;
-use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
+use crate::{BuildContext, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -109,7 +109,7 @@ impl TypedBuilder for TreeBuilder {
         config: Self::Config,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError> {
+    ) -> Result<PathBuf, BuilderError> {
         build_tree(config, inputs, cx)
     }
 }
@@ -118,7 +118,7 @@ fn build_tree(
     config: TreeConfig,
     inputs: BuilderInputs,
     cx: &mut BuildContext,
-) -> Result<StagedBuildResult, BuilderError> {
+) -> Result<PathBuf, BuilderError> {
     if !inputs.is_empty() {
         return Err(BuilderError::ExecutionFailed(
             "Tree builder does not accept input objects".to_string(),
@@ -142,9 +142,7 @@ fn build_tree(
         OutputKind::Directory => materialize_directory_output(&output_path, &normalized)?,
     }
 
-    Ok(StagedBuildResult {
-        staged_path: output_path,
-    })
+    Ok(output_path)
 }
 
 fn normalize_entries(entries: Vec<TreeEntry>) -> Result<Vec<NormalizedEntry>, BuilderError> {
@@ -463,13 +461,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(fs::read_to_string(&result.staged_path).unwrap(), "hello\n");
+        assert_eq!(fs::read_to_string(&result).unwrap(), "hello\n");
         assert_eq!(
-            fs::metadata(&result.staged_path)
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
+            fs::metadata(&result).unwrap().permissions().mode() & 0o777,
             0o755,
         );
     }
@@ -504,19 +498,19 @@ mod tests {
             )
             .unwrap();
 
-        assert!(result.staged_path.is_dir());
-        assert!(!result.staged_path.join("manifest.jsonl").exists());
-        assert!(!result.staged_path.join("root").exists());
+        assert!(result.is_dir());
+        assert!(!result.join("manifest.jsonl").exists());
+        assert!(!result.join("root").exists());
         assert_eq!(
-            fs::read_to_string(result.staged_path.join("etc/hostname")).unwrap(),
+            fs::read_to_string(result.join("etc/hostname")).unwrap(),
             "host\n",
         );
         assert_eq!(
-            fs::read_link(result.staged_path.join("bin")).unwrap(),
+            fs::read_link(result.join("bin")).unwrap(),
             PathBuf::from("usr/bin"),
         );
         assert_eq!(
-            fs::metadata(result.staged_path.join("etc/hostname"))
+            fs::metadata(result.join("etc/hostname"))
                 .unwrap()
                 .permissions()
                 .mode()

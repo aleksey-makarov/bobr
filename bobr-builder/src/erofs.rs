@@ -1,5 +1,5 @@
 use crate::BuilderError;
-use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
+use crate::{BuildContext, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
@@ -62,7 +62,7 @@ impl TypedBuilder for ErofsRootfsBuilder {
         config: Self::Config,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError> {
+    ) -> Result<PathBuf, BuilderError> {
         validate_erofs_config(&config)?;
         let source_root = inputs.required("_tree")?.clone();
         let mkfs_erofs = find_program_in_path("mkfs.erofs").ok_or_else(|| {
@@ -95,9 +95,7 @@ impl TypedBuilder for ErofsRootfsBuilder {
             )
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
 
-        Ok(StagedBuildResult {
-            staged_path: output_path,
-        })
+        Ok(output_path)
     }
 }
 

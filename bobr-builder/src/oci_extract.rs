@@ -1,6 +1,4 @@
-use crate::{
-    BuildContext, BuilderError, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
-};
+use crate::{BuildContext, BuilderError, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::{
     BuildLogLevel,
     oci::{self, OciDescriptor, OciManifest},
@@ -62,7 +60,7 @@ impl TypedBuilder for OciExtractBuilder {
         config: Self::Config,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError> {
+    ) -> Result<PathBuf, BuilderError> {
         self.build_typed_inner(config, inputs, cx)
     }
 }
@@ -73,7 +71,7 @@ impl OciExtractBuilder {
         _config: OciExtractConfig,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError> {
+    ) -> Result<PathBuf, BuilderError> {
         let image = inputs.required("image")?;
         validate_oci_layout_path(image).map_err(map_error)?;
 
@@ -135,9 +133,7 @@ impl OciExtractBuilder {
             format!("wrote fs-tree manifest with {} entries", output.entries),
         );
 
-        Ok(StagedBuildResult {
-            staged_path: output_manifest,
-        })
+        Ok(output_manifest)
     }
 }
 
@@ -1215,12 +1211,12 @@ mod tests {
             .build_typed(OciExtractConfig {}, inputs, &mut cx)
             .unwrap();
         assert_eq!(
-            result.staged_path,
+            result,
             temp.path().join("tmp").join(OUTPUT_MANIFEST_FILE_NAME)
         );
         assert!(!temp.path().join("tmp").join(EXTRACT_ROOT_DIR_NAME).exists());
 
-        let manifest = FsTreeManifest::read_canonical(&result.staged_path).unwrap();
+        let manifest = FsTreeManifest::read_canonical(&result).unwrap();
         assert!(manifest.entries().contains(&FsTreeEntry::directory(
             "",
             owner.uid(),
@@ -1248,7 +1244,7 @@ mod tests {
             "0".repeat(64).parse().unwrap(),
             "0".repeat(64).parse().unwrap(),
             Vec::new(),
-            &result.staged_path,
+            &result,
             "staged-object",
         )
         .unwrap();

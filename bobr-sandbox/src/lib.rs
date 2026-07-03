@@ -11,9 +11,7 @@ mod mounts;
 mod reports;
 mod tools;
 
-use bobr_builder::{
-    BuildContext, Builder, BuilderError, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
-};
+use bobr_builder::{BuildContext, Builder, BuilderError, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use bobr_sandbox_launcher::{
@@ -113,7 +111,7 @@ impl TypedBuilder for SandboxBuilder {
         config: Self::Config,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError> {
+    ) -> Result<PathBuf, BuilderError> {
         build_sandbox(config, inputs, cx)
     }
 }
@@ -122,7 +120,7 @@ fn build_sandbox(
     config: SandboxConfig,
     inputs: BuilderInputs,
     cx: &mut BuildContext,
-) -> Result<StagedBuildResult, BuilderError> {
+) -> Result<PathBuf, BuilderError> {
     validate_sandbox_config(&config).map_err(map_error)?;
     let rootfs = inputs.required("_rootfs")?.clone();
     validate_rootfs_path(&rootfs).map_err(map_error)?;
@@ -157,9 +155,7 @@ fn build_sandbox(
 
     // The runtime function produces its output artifact under cx.temp_dir and
     // guarantees it is host-owned; the builder stages it verbatim.
-    Ok(StagedBuildResult {
-        staged_path: output.output_path,
-    })
+    Ok(output.output_path)
 }
 
 fn prepare_sandbox_input(

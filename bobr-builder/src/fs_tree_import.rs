@@ -1,5 +1,5 @@
 use crate::BuilderError;
-use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
+use crate::{BuildContext, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use bobr_store::fs_tree::{FsTree, FsTreeInstall};
@@ -45,7 +45,7 @@ impl TypedBuilder for FsTreeImportBuilder {
         config: Self::Config,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError> {
+    ) -> Result<PathBuf, BuilderError> {
         let source_root = inputs.required("input")?.clone();
         let fs_tree = cx.fs_tree();
         let output_manifest = cx.temp_dir.join("fs-tree-manifest.jsonl");
@@ -78,9 +78,7 @@ impl TypedBuilder for FsTreeImportBuilder {
             format!("wrote fs-tree manifest with {} entries", output.entries),
         );
 
-        Ok(StagedBuildResult {
-            staged_path: output_manifest,
-        })
+        Ok(output_manifest)
     }
 }
 
@@ -180,10 +178,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            result.staged_path,
+            result,
             temp.path().join("tmp").join("fs-tree-manifest.jsonl")
         );
-        let manifest = FsTreeManifest::read_canonical(&result.staged_path).unwrap();
+        let manifest = FsTreeManifest::read_canonical(&result).unwrap();
         assert!(manifest.entries().contains(&FsTreeEntry::directory(
             "",
             owner.uid(),
@@ -211,7 +209,7 @@ mod tests {
             "0".repeat(64).parse().unwrap(),
             "0".repeat(64).parse().unwrap(),
             Vec::new(),
-            &result.staged_path,
+            &result,
             "staged-object",
         )
         .unwrap();

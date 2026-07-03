@@ -1,5 +1,5 @@
 use crate::BuilderError;
-use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
+use crate::{BuildContext, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,7 @@ impl TypedBuilder for InitramfsBuilder {
         _config: Self::Config,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError> {
+    ) -> Result<PathBuf, BuilderError> {
         let source_root = inputs.required("_tree")?.clone();
         let output_path = cx.temp_dir.join(OUTPUT_FILE_NAME);
 
@@ -76,9 +76,7 @@ impl TypedBuilder for InitramfsBuilder {
             )
             .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
 
-        Ok(StagedBuildResult {
-            staged_path: output_path,
-        })
+        Ok(output_path)
     }
 }
 

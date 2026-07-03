@@ -172,7 +172,7 @@ fn execute_builder_subject(
         build_key,
         reuse_key,
         input_hashes.values().copied().collect(),
-        &staged.staged_path,
+        &staged,
         subject.name(),
     )
     .map_err(|error| {

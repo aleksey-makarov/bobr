@@ -688,8 +688,7 @@ fn build_run_logger_for_store(store: &Store, quiet: bool) -> Result<BuildRunLogg
 mod tests {
     use super::*;
     use bobr_builder::{
-        BuildContext, BuilderInputs, BuilderPlannedSubject, InputSpec, StagedBuildResult,
-        TypedBuilder,
+        BuildContext, BuilderInputs, BuilderPlannedSubject, InputSpec, TypedBuilder,
     };
     use bobr_core::{BuildLogSubject, compute_build_key, compute_reuse_key};
     use bobr_source::{OriginContext, OriginSpec, ParsedOrigin, SourcePlannedSubject};
@@ -863,7 +862,7 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, BuilderError> {
+        ) -> Result<PathBuf, BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
@@ -871,9 +870,7 @@ mod tests {
             fs::create_dir_all(cx.temp_dir.join("out")).unwrap();
             fs::write(cx.temp_dir.join("out").join("payload"), b"ok\n").unwrap();
 
-            Ok(StagedBuildResult {
-                staged_path: cx.temp_dir.join("out"),
-            })
+            Ok(cx.temp_dir.join("out"))
         }
     }
 
@@ -908,7 +905,7 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, BuilderError> {
+        ) -> Result<PathBuf, BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
@@ -917,9 +914,7 @@ mod tests {
             fs::write(cx.temp_dir.join("out").join("payload"), b"ok\n").unwrap();
             fs::write(cx.temp_dir.join("sandbox-scratch"), b"sandbox scratch\n").unwrap();
 
-            Ok(StagedBuildResult {
-                staged_path: cx.temp_dir.join("out"),
-            })
+            Ok(cx.temp_dir.join("out"))
         }
     }
 
@@ -947,7 +942,7 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, BuilderError> {
+        ) -> Result<PathBuf, BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
@@ -983,15 +978,13 @@ mod tests {
             _config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, BuilderError> {
+        ) -> Result<PathBuf, BuilderError> {
             assert!(inputs.is_empty());
             assert!(cx.temp_dir.is_dir());
             assert_eq!(fs::read_dir(&cx.temp_dir).unwrap().count(), 0);
             fs::write(cx.temp_dir.join("scratch"), b"temp\n").unwrap();
 
-            Ok(StagedBuildResult {
-                staged_path: cx.temp_dir.join("missing-output"),
-            })
+            Ok(cx.temp_dir.join("missing-output"))
         }
     }
 
@@ -1468,12 +1461,10 @@ mod tests {
             allow_extra_inputs: false,
         };
 
-        fn stage_payload(cx: &mut BuildContext, body: &[u8]) -> StagedBuildResult {
+        fn stage_payload(cx: &mut BuildContext, body: &[u8]) -> PathBuf {
             fs::create_dir_all(cx.temp_dir.join("out")).unwrap();
             fs::write(cx.temp_dir.join("out").join("payload"), body).unwrap();
-            StagedBuildResult {
-                staged_path: cx.temp_dir.join("out"),
-            }
+            cx.temp_dir.join("out")
         }
 
         #[derive(Debug)]
@@ -1496,7 +1487,7 @@ mod tests {
                 _config: Self::Config,
                 _inputs: BuilderInputs,
                 cx: &mut BuildContext,
-            ) -> Result<StagedBuildResult, BuilderError> {
+            ) -> Result<PathBuf, BuilderError> {
                 Ok(stage_payload(cx, b"fast\n"))
             }
         }
@@ -1521,7 +1512,7 @@ mod tests {
                 _config: Self::Config,
                 _inputs: BuilderInputs,
                 cx: &mut BuildContext,
-            ) -> Result<StagedBuildResult, BuilderError> {
+            ) -> Result<PathBuf, BuilderError> {
                 thread::sleep(Duration::from_millis(300));
                 SLOW_FINISHED.store(true, Ordering::SeqCst);
                 Ok(stage_payload(cx, b"slow\n"))
@@ -1556,7 +1547,7 @@ mod tests {
                 _config: Self::Config,
                 _inputs: BuilderInputs,
                 cx: &mut BuildContext,
-            ) -> Result<StagedBuildResult, BuilderError> {
+            ) -> Result<PathBuf, BuilderError> {
                 // Never reached: the fast input fails to publish first.
                 Ok(stage_payload(cx, b"root\n"))
             }

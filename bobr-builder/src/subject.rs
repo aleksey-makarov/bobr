@@ -1,7 +1,4 @@
-use crate::{
-    BuildContext, Builder, BuilderError, BuilderInputs, InputSpec, StagedBuildResult,
-    validate_input_name,
-};
+use crate::{BuildContext, Builder, BuilderError, BuilderInputs, InputSpec, validate_input_name};
 use bobr_core::{
     BuildKey, BuildLogSubject, CORE_KEY_VERSION, IdentityError, ReuseKey, SubjectRunContext,
     Workspace, compute_build_key, compute_reuse_key,
@@ -11,6 +8,7 @@ use fsobj_hash::ObjectHash;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::PathBuf;
 
 /// Error returned while planning a builder subject.
 #[derive(Debug)]
@@ -193,7 +191,7 @@ impl BuilderPlannedSubject {
         &self,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError> {
+    ) -> Result<PathBuf, BuilderError> {
         self.builder.build_erased(self.config.clone(), inputs, cx)
     }
 
@@ -218,7 +216,7 @@ impl BuilderPlannedSubject {
         ctx: &SubjectRunContext,
         inputs: BuilderInputs,
         fs_tree: FsTree,
-    ) -> Result<StagedBuildResult, BuilderError> {
+    ) -> Result<PathBuf, BuilderError> {
         let mut context = BuildContext::with_noop_logger(ctx.temp_dir().to_path_buf(), fs_tree)
             .with_logger(ctx.logger().clone())
             .with_cancellation_token(ctx.cancellation().clone())
@@ -271,14 +269,14 @@ mod tests {
             _config: Self::Config,
             _inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, BuilderError> {
+        ) -> Result<PathBuf, BuilderError> {
             assert_eq!(cx.runtime().backend(), RuntimeBackend::Namespace);
             let out = cx.temp_dir.join("out");
             std::fs::create_dir_all(&out)
                 .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
             std::fs::write(out.join("payload"), b"ok")
                 .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-            Ok(StagedBuildResult { staged_path: out })
+            Ok(out)
         }
     }
 
@@ -308,7 +306,7 @@ mod tests {
             .execute(&ctx, BuilderInputs::empty(), store_fs_tree(temp.path()))
             .unwrap();
 
-        assert_eq!(staged.staged_path, temp.path().join("out"));
-        assert!(staged.staged_path.join("payload").is_file());
+        assert_eq!(staged, temp.path().join("out"));
+        assert!(staged.join("payload").is_file());
     }
 }

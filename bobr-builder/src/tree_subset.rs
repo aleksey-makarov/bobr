@@ -1,11 +1,12 @@
 use crate::BuilderError;
-use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
+use crate::{BuildContext, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
 use bobr_store::{
     StoreError,
     fs_tree::{FsTreeManifest, subset_manifest},
 };
 use serde::Deserialize;
+use std::path::PathBuf;
 
 /// Builds an fs-tree that is a subset of its input `tree`, keeping only the
 /// configured paths.
@@ -45,7 +46,7 @@ impl TypedBuilder for TreeSubsetBuilder {
         config: Self::Config,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError> {
+    ) -> Result<PathBuf, BuilderError> {
         build_tree_subset(config, inputs, cx)
     }
 }
@@ -54,7 +55,7 @@ fn build_tree_subset(
     config: TreeSubsetConfig,
     inputs: BuilderInputs,
     cx: &mut BuildContext,
-) -> Result<StagedBuildResult, BuilderError> {
+) -> Result<PathBuf, BuilderError> {
     let input = inputs.required("tree")?;
     let manifest = FsTreeManifest::read_canonical(input).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
@@ -89,9 +90,7 @@ fn build_tree_subset(
         ),
     );
 
-    Ok(StagedBuildResult {
-        staged_path: output_path,
-    })
+    Ok(output_path)
 }
 
 fn map_subset_error(error: StoreError) -> BuilderError {
@@ -185,12 +184,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            result.staged_path,
+            result,
             temp.path()
                 .join("tmp")
                 .join("fs-tree-subset-manifest.jsonl")
         );
-        let subset = FsTreeManifest::read_canonical(&result.staged_path).unwrap();
+        let subset = FsTreeManifest::read_canonical(&result).unwrap();
         let paths = subset
             .entries()
             .iter()
@@ -228,7 +227,7 @@ mod tests {
             )
             .unwrap();
 
-        let subset = FsTreeManifest::read_canonical(&result.staged_path).unwrap();
+        let subset = FsTreeManifest::read_canonical(&result).unwrap();
         let paths = subset
             .entries()
             .iter()

@@ -412,13 +412,6 @@ fn write_raw_log_atomic(path: &Path, content: &str) -> Result<(), String> {
     })
 }
 
-/// A builder's result: the staged output path the runtime then imports.
-#[derive(Debug, Clone)]
-pub struct StagedBuildResult {
-    /// Path (under the build's temp dir) holding the staged output.
-    pub staged_path: PathBuf,
-}
-
 /// Object-safe builder interface used by the registry and executor. Blanket-
 /// implemented for every [`TypedBuilder`]; builders implement [`TypedBuilder`].
 pub trait Builder: Send + Sync {
@@ -442,7 +435,7 @@ pub trait Builder: Send + Sync {
         config: Value,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError>;
+    ) -> Result<PathBuf, BuilderError>;
 }
 
 /// The trait builders implement: a typed `Config` plus the build logic. A
@@ -482,7 +475,7 @@ pub trait TypedBuilder: Send + Sync {
         config: Self::Config,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError>;
+    ) -> Result<PathBuf, BuilderError>;
 }
 
 impl<T> Builder for T
@@ -510,7 +503,7 @@ where
         config: Value,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError> {
+    ) -> Result<PathBuf, BuilderError> {
         let config = serde_json::from_value(config).map_err(|error| {
             BuilderError::InvalidRecipe(format!("invalid builder config: {error}"))
         })?;
@@ -661,7 +654,7 @@ mod tests {
             config: Self::Config,
             inputs: BuilderInputs,
             cx: &mut BuildContext,
-        ) -> Result<StagedBuildResult, BuilderError> {
+        ) -> Result<PathBuf, BuilderError> {
             assert_eq!(
                 config,
                 DummyConfig {
@@ -670,9 +663,7 @@ mod tests {
             );
             assert!(inputs.is_empty());
             assert_eq!(cx.temp_dir, PathBuf::from("/tmp/tmp"));
-            Ok(StagedBuildResult {
-                staged_path: PathBuf::from("/tmp/out"),
-            })
+            Ok(PathBuf::from("/tmp/out"))
         }
     }
 
@@ -691,7 +682,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(result.staged_path, PathBuf::from("/tmp/out"));
+        assert_eq!(result, PathBuf::from("/tmp/out"));
     }
 
     #[test]

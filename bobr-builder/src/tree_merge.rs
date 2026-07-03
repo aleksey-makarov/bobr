@@ -1,8 +1,9 @@
 use crate::BuilderError;
-use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
+use crate::{BuildContext, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
 use bobr_store::fs_tree::{FsTreeManifest, merge_manifests};
 use serde::Deserialize;
+use std::path::PathBuf;
 
 /// Builds a merged fs-tree by overlaying its input trees in order.
 #[derive(Debug)]
@@ -40,7 +41,7 @@ impl TypedBuilder for TreeMergeBuilder {
         config: Self::Config,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError> {
+    ) -> Result<PathBuf, BuilderError> {
         build_tree_merge(config, inputs, cx)
     }
 }
@@ -49,7 +50,7 @@ fn build_tree_merge(
     _config: TreeMergeConfig,
     inputs: BuilderInputs,
     cx: &mut BuildContext,
-) -> Result<StagedBuildResult, BuilderError> {
+) -> Result<PathBuf, BuilderError> {
     let inputs = inputs.extras(&TREE_MERGE_SPEC).collect::<Vec<_>>();
     if inputs.len() < 2 {
         return Err(BuilderError::ExecutionFailed(
@@ -92,9 +93,7 @@ fn build_tree_merge(
         ),
     );
 
-    Ok(StagedBuildResult {
-        staged_path: output_path,
-    })
+    Ok(output_path)
 }
 
 #[cfg(test)]
@@ -191,10 +190,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            result.staged_path,
+            result,
             temp.path().join("tmp").join("fs-tree-merge-manifest.jsonl")
         );
-        let merged = FsTreeManifest::read_canonical(&result.staged_path).unwrap();
+        let merged = FsTreeManifest::read_canonical(&result).unwrap();
         let paths = merged
             .entries()
             .iter()

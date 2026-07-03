@@ -1,10 +1,11 @@
 use crate::BuilderError;
-use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
+use crate::{BuildContext, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
 use serde::Deserialize;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 
 /// Configuration for [`GroupBuilder`] (no options).
 #[derive(Debug, Deserialize)]
@@ -41,7 +42,7 @@ impl TypedBuilder for GroupBuilder {
         _config: Self::Config,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
-    ) -> Result<StagedBuildResult, BuilderError> {
+    ) -> Result<PathBuf, BuilderError> {
         if inputs.extras(&GROUP_SPEC).next().is_none() {
             return Err(BuilderError::ExecutionFailed(
                 "Group builder requires at least one input".to_string(),
@@ -79,9 +80,7 @@ impl TypedBuilder for GroupBuilder {
             ))
         })?;
 
-        Ok(StagedBuildResult {
-            staged_path: marker_path,
-        })
+        Ok(marker_path)
     }
 }
 
@@ -101,8 +100,8 @@ mod tests {
         BuildContext::with_noop_logger(temp_dir.clone(), store_fs_tree(root))
     }
 
-    fn sample_input() -> std::path::PathBuf {
-        std::path::PathBuf::from("/tmp/object")
+    fn sample_input() -> PathBuf {
+        PathBuf::from("/tmp/object")
     }
 
     #[test]
@@ -143,11 +142,11 @@ mod tests {
             .build_typed(GroupConfig {}, inputs, &mut cx)
             .unwrap();
 
-        assert_eq!(fs::read(&result.staged_path).unwrap(), b"");
+        assert_eq!(fs::read(&result).unwrap(), b"");
 
         #[cfg(unix)]
         {
-            let metadata = fs::metadata(&result.staged_path).unwrap();
+            let metadata = fs::metadata(&result).unwrap();
             assert_eq!(metadata.permissions().mode() & 0o777, 0o644);
         }
     }
