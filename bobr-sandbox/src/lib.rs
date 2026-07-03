@@ -135,7 +135,7 @@ fn build_sandbox(
     cx.log_event(BuildLogLevel::Info, "sandbox", "preparing inputs");
     let launcher_path = tools::resolve_and_preflight_sandbox_launcher()
         .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-    let (runtime_input, output_manifest) =
+    let runtime_input =
         prepare_sandbox_input(&config, rootfs, extra_inputs, cx, fs_tree, launcher_path)
             .map_err(map_error)?;
 
@@ -155,8 +155,10 @@ fn build_sandbox(
         .map_err(|error| BuilderError::ExecutionFailed(format!("sandbox build failed: {error}")))?;
     write_build_report(cx, &output);
 
+    // The runtime function produces its output artifact under cx.temp_dir and
+    // guarantees it is host-owned; the builder stages it verbatim.
     Ok(StagedBuildResult {
-        staged_path: output_manifest,
+        staged_path: output.output_path,
     })
 }
 
@@ -167,9 +169,7 @@ fn prepare_sandbox_input(
     cx: &BuildContext,
     fs_tree: FsTree,
     launcher_path: PathBuf,
-) -> Result<(SandboxInput, PathBuf), SandboxError> {
-    let output_path = cx.temp_dir.join(OUTPUT_DIR_NAME);
-    recreate_empty_dir_force(&output_path)?;
+) -> Result<SandboxInput, SandboxError> {
     let config_path = cx.temp_dir.join(CONFIG_DIR_NAME);
     recreate_empty_dir_force(&config_path)?;
     write_script_config(&config_path, config.script_config.as_ref())?;
@@ -185,38 +185,15 @@ fn prepare_sandbox_input(
         .map(|step| build_sandbox_step(step, &extra_inputs, cx))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let workspace = cx.temp_dir.join(RUNTIME_DIR_NAME);
-    fs::create_dir_all(&workspace).map_err(|error| {
-        SandboxError::FsFailed(format!(
-            "failed to create sandbox runtime workspace '{}': {error}",
-            workspace.display()
-        ))
-    })?;
-
-    let output_manifest = cx.temp_dir.join(OUTPUT_MANIFEST_NAME);
-    if output_manifest.exists() {
-        fs::remove_file(&output_manifest).map_err(|error| {
-            SandboxError::FsFailed(format!(
-                "failed to remove previous Sandbox manifest '{}': {error}",
-                output_manifest.display()
-            ))
-        })?;
-    }
-
-    Ok((
-        SandboxInput {
-            rootfs,
-            out_dir: output_path,
-            config_dir: config_path,
-            workspace,
-            output_manifest: output_manifest.clone(),
-            fs_tree,
-            launcher_path,
-            extra_inputs: sandbox_inputs,
-            steps: sandbox_steps,
-        },
-        output_manifest,
-    ))
+    Ok(SandboxInput {
+        rootfs,
+        config_dir: config_path,
+        tmp: cx.temp_dir.clone(),
+        fs_tree,
+        launcher_path,
+        extra_inputs: sandbox_inputs,
+        steps: sandbox_steps,
+    })
 }
 
 /// Build one runtime step config consumed by `SandboxFunction`.
@@ -324,7 +301,6 @@ fn write_build_report(cx: &BuildContext, output: &SandboxOutput) {
         })
         .collect::<Vec<_>>();
     let report = serde_json::json!({
-        "entries": output.entries,
         "steps": steps,
     });
     if let Ok(text) = serde_json::to_string_pretty(&report) {
@@ -332,10 +308,7 @@ fn write_build_report(cx: &BuildContext, output: &SandboxOutput) {
         cx.log_event_with_details(
             BuildLogLevel::Info,
             "sandbox-result",
-            format!(
-                "sandbox wrote fs-tree manifest with {} entries",
-                output.entries
-            ),
+            format!("sandbox ran {} step(s)", output.steps.len()),
             None,
             log_path,
             Map::new(),
@@ -888,18 +861,20 @@ fn write_script_config_node(
 #[derive(Debug, Clone, Copy)]
 pub struct SandboxFunction;
 
-/// Typed input to [`SandboxFunction`]: the rootfs and output locations, the
-/// fs-tree to capture as output, the launcher binary, the extra named inputs,
-/// and the ordered steps to run. Serialized when the call is marshalled to a
-/// namespace worker.
+/// Typed input to [`SandboxFunction`]: the rootfs, the caller-owned config
+/// directory, a scratch `tmp` the function owns, the fs-tree to capture output
+/// into, the launcher binary, the extra named inputs, and the ordered steps to
+/// run. Serialized when the call is marshalled to a namespace worker.
+///
+/// The function creates its own working directories (build workspace and output
+/// staging) under `tmp`, and guarantees that on return nothing owned by an
+/// in-namespace sub-uid is left in `tmp`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxInput {
     rootfs: PathBuf,
-    out_dir: PathBuf,
     config_dir: PathBuf,
-    workspace: PathBuf,
-    output_manifest: PathBuf,
+    tmp: PathBuf,
     fs_tree: FsTree,
     launcher_path: PathBuf,
     extra_inputs: Vec<SandboxRuntimeInput>,
@@ -928,12 +903,14 @@ pub(crate) struct SandboxRuntimeStep {
     stderr_path: PathBuf,
 }
 
-/// Typed output of [`SandboxFunction`]: the number of captured fs-tree entries
-/// and a per-step execution report.
+/// Typed output of [`SandboxFunction`]: the host path of the produced artifact
+/// (opaque to the caller — currently an fs-tree manifest) and a per-step
+/// execution report. The artifact lives in the input `tmp` and is guaranteed
+/// not to be owned by an in-namespace sub-uid.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxOutput {
-    entries: usize,
+    output_path: PathBuf,
     steps: Vec<SandboxStepReport>,
 }
 
@@ -953,29 +930,61 @@ impl RuntimeFunction for SandboxFunction {
             )));
         }
 
-        let prepared = mounts::PreparedSandbox::create(&input)?;
-        let steps = lifecycle::run_sandbox_launcher(
-            &input.launcher_path,
-            &prepared.launcher_config,
-            &prepared.runtime_files.success_report,
-            &prepared.runtime_files.failure_report,
-        )?;
-        // Intern the sandbox output tree: scans it into fs-files and, when it is
-        // fully fresh, moves the tree itself into the fs-trees cache, consuming
-        // out_dir either way.
-        let out_dir = input.out_dir;
-        let manifest = input
-            .fs_tree
-            .intern_tree(out_dir)
+        // Create the working directories the function owns under `tmp`: the
+        // build workspace (mount scaffolding) and the output staging dir.
+        let workspace = input.tmp.join(RUNTIME_DIR_NAME);
+        recreate_empty_dir_force(&workspace)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
-        let entries = manifest.entries().len();
-        manifest
-            .write_canonical(&input.output_manifest)
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
-        let _ = fs::remove_dir_all(&prepared.dirs.root);
+        let out_dir = input.tmp.join(OUTPUT_DIR_NAME);
+        recreate_empty_dir_force(&out_dir).map_err(|error| RuntimeError::new(error.to_string()))?;
 
-        Ok(SandboxOutput { entries, steps })
+        let result = run_sandbox_and_capture(&input, &workspace, &out_dir);
+
+        // Guarantee that no in-namespace-owned files are left in `tmp`, on
+        // success or failure: the workspace (build tree) always, and the output
+        // staging dir if the run failed before `intern_tree` consumed it. These
+        // run as ns-root; the host user could not remove them afterwards. The
+        // output artifact and the caller's config/logs are host-owned and stay.
+        let _ = remove_dir_force(&out_dir);
+        let workspace_cleanup = remove_dir_force(&workspace);
+        let output = result?;
+        workspace_cleanup.map_err(|error| RuntimeError::new(error.to_string()))?;
+
+        Ok(output)
     }
+}
+
+/// Runs the sandbox and captures its output: prepares the mounts, runs the
+/// launcher, interns the output tree (consuming `out_dir`), and writes the
+/// manifest artifact under `tmp`. Its caller owns cleaning `workspace`/`out_dir`
+/// regardless of the outcome.
+fn run_sandbox_and_capture(
+    input: &SandboxInput,
+    workspace: &Path,
+    out_dir: &Path,
+) -> Result<SandboxOutput, RuntimeError> {
+    let prepared = mounts::PreparedSandbox::create(input, workspace, out_dir)?;
+    let steps = lifecycle::run_sandbox_launcher(
+        &input.launcher_path,
+        &prepared.launcher_config,
+        &prepared.runtime_files.success_report,
+        &prepared.runtime_files.failure_report,
+    )?;
+
+    // Intern the output tree: scans it into fs-files and, when it is fully
+    // fresh, moves the tree itself into the fs-trees cache, consuming out_dir
+    // either way. Then write the manifest (the output artifact) as a host-owned
+    // file under tmp.
+    let manifest = input
+        .fs_tree
+        .intern_tree(out_dir.to_path_buf())
+        .map_err(|error| RuntimeError::new(error.to_string()))?;
+    let output_path = input.tmp.join(OUTPUT_MANIFEST_NAME);
+    manifest
+        .write_canonical(&output_path)
+        .map_err(|error| RuntimeError::new(error.to_string()))?;
+
+    Ok(SandboxOutput { output_path, steps })
 }
 
 #[cfg(test)]
@@ -1105,7 +1114,7 @@ mod tests {
         )
         .unwrap();
 
-        let (input, output_manifest) = prepare_sandbox_input(
+        let input = prepare_sandbox_input(
             &config,
             rootfs.clone(),
             extra_inputs,
@@ -1116,10 +1125,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(input.rootfs, rootfs);
-        assert_eq!(
-            output_manifest,
-            temp.path().join("tmp").join("sandbox-fs-tree.jsonl")
-        );
+        assert_eq!(input.tmp, cx.temp_dir);
         assert_eq!(input.steps.len(), 1);
         assert_eq!(
             input.steps[0].cwd,

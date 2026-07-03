@@ -16,24 +16,26 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 pub(crate) struct PreparedSandbox {
-    pub(crate) dirs: SandboxDirs,
     pub(crate) runtime_files: SandboxRuntimeFiles,
     pub(crate) launcher_config: PathBuf,
 }
 
 impl PreparedSandbox {
-    pub(crate) fn create(config: &SandboxInput) -> Result<Self, RuntimeError> {
-        validate_config(config)?;
-        let dirs = SandboxDirs::create(&config.workspace)?;
+    pub(crate) fn create(
+        config: &SandboxInput,
+        workspace: &Path,
+        out_dir: &Path,
+    ) -> Result<Self, RuntimeError> {
+        validate_config(config, out_dir, workspace)?;
+        let dirs = SandboxDirs::create(workspace)?;
         let runtime_files = SandboxRuntimeFiles::create(&dirs.runtime_files, config)?;
         write_runner_config(config, &runtime_files)?;
         populate_root_skeleton(&dirs.rootfs, &config.rootfs, &runtime_files)?;
         let launcher_config = dirs.root.join("launcher-config.json");
-        let launcher = build_launcher_config(config, &dirs, &runtime_files)?;
+        let launcher = build_launcher_config(config, &dirs, &runtime_files, out_dir)?;
         serde_json::to_writer(File::create(&launcher_config)?, &launcher)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
         Ok(Self {
-            dirs,
             runtime_files,
             launcher_config,
         })
@@ -72,11 +74,15 @@ impl SandboxDirs {
     }
 }
 
-fn validate_config(config: &SandboxInput) -> Result<(), RuntimeError> {
+fn validate_config(
+    config: &SandboxInput,
+    out_dir: &Path,
+    workspace: &Path,
+) -> Result<(), RuntimeError> {
     require_directory(&config.rootfs, "sandbox rootfs")?;
-    require_directory(&config.out_dir, "sandbox output directory")?;
+    require_directory(out_dir, "sandbox output directory")?;
     require_directory(&config.config_dir, "sandbox config directory")?;
-    require_directory(&config.workspace, "sandbox workspace")?;
+    require_directory(workspace, "sandbox workspace")?;
     validate_rootfs_top_level(&config.rootfs)?;
     let mut input_names = std::collections::HashSet::new();
     for input in &config.extra_inputs {
@@ -273,6 +279,7 @@ fn build_launcher_config(
     config: &SandboxInput,
     dirs: &SandboxDirs,
     runtime_files: &SandboxRuntimeFiles,
+    out_dir: &Path,
 ) -> Result<SandboxLauncherConfig, RuntimeError> {
     let mut mounts = rootfs_top_level_mounts(&config.rootfs)?;
     mounts.extend([
@@ -286,7 +293,7 @@ fn build_launcher_config(
         tmpfs_mount(Path::new("/run"), true, &["mode=755"]),
         bind_mount(&dirs.build_dir, Path::new(CONTAINER_BUILD_DIR), false),
         bind_mount(&config.config_dir, Path::new(CONTAINER_CONFIG_DIR), true),
-        bind_mount(&config.out_dir, Path::new(CONTAINER_OUT_DIR), false),
+        bind_mount(out_dir, Path::new(CONTAINER_OUT_DIR), false),
         bind_mount(
             &config.launcher_path,
             &Path::new(CONTAINER_LAUNCHER_DIR).join(LAUNCHER_BINARY_NAME),
@@ -546,7 +553,10 @@ mod tests {
         }
     }
 
-    fn valid_input(temp: &tempfile::TempDir) -> SandboxInput {
+    // Returns the input plus the function-owned `out_dir` and `workspace` that
+    // the runtime function would create under `tmp`, so tests can drive the
+    // lower-level helpers directly.
+    fn valid_input(temp: &tempfile::TempDir) -> (SandboxInput, PathBuf, PathBuf) {
         let rootfs = temp.path().join("rootfs");
         let out_dir = temp.path().join("out");
         let config_dir = temp.path().join("config");
@@ -554,12 +564,10 @@ mod tests {
         for path in [&rootfs, &out_dir, &config_dir, &workspace] {
             fs::create_dir_all(path).unwrap();
         }
-        SandboxInput {
+        let input = SandboxInput {
             rootfs,
-            out_dir,
             config_dir,
-            workspace,
-            output_manifest: temp.path().join("manifest.jsonl"),
+            tmp: temp.path().to_path_buf(),
             fs_tree: {
                 let store_root = temp.path().join("store");
                 fs::create_dir(&store_root).unwrap();
@@ -568,7 +576,8 @@ mod tests {
             launcher_path: temp.path().join(LAUNCHER_BINARY_NAME),
             extra_inputs: Vec::new(),
             steps: Vec::new(),
-        }
+        };
+        (input, out_dir, workspace)
     }
 
     #[test]
@@ -577,7 +586,7 @@ mod tests {
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("main.c"), "int main(void) { return 0; }\n").unwrap();
-        let mut input = valid_input(&temp);
+        let (mut input, out_dir, workspace) = valid_input(&temp);
         for name in ["dev", "etc", "proc", "run", "tmp", "usr", "var"] {
             fs::create_dir(input.rootfs.join(name)).unwrap();
         }
@@ -586,11 +595,11 @@ mod tests {
             name: "source".to_string(),
             path: source.clone(),
         });
-        let dirs = SandboxDirs::create(&input.workspace).unwrap();
+        let dirs = SandboxDirs::create(&workspace).unwrap();
         let runtime_files = SandboxRuntimeFiles::create(&dirs.runtime_files, &input).unwrap();
         fs::write(&input.launcher_path, "#!/bin/sh\n").unwrap();
 
-        let launcher = build_launcher_config(&input, &dirs, &runtime_files).unwrap();
+        let launcher = build_launcher_config(&input, &dirs, &runtime_files, &out_dir).unwrap();
         let mounts = &launcher.mounts;
 
         assert_eq!(launcher.protocol_version, SANDBOX_PROTOCOL_VERSION);
@@ -617,7 +626,7 @@ mod tests {
         }));
         assert!(mounts.iter().any(|mount| {
             mount.target == Path::new(CONTAINER_OUT_DIR)
-                && mount.source.as_deref() == Some(input.out_dir.as_path())
+                && mount.source.as_deref() == Some(out_dir.as_path())
                 && !mount.readonly
         }));
         let source_bind = mounts
@@ -665,9 +674,9 @@ mod tests {
         fs::create_dir(lower.join("run")).unwrap();
         fs::create_dir(lower.join("usr")).unwrap();
         symlink("usr/bin", lower.join("bin")).unwrap();
-        let input = valid_input(&temp);
+        let (input, _out_dir, workspace) = valid_input(&temp);
         let runtime_files =
-            SandboxRuntimeFiles::create(&input.workspace.join("runtime-files"), &input).unwrap();
+            SandboxRuntimeFiles::create(&workspace.join("runtime-files"), &input).unwrap();
 
         populate_root_skeleton(&root, &lower, &runtime_files).unwrap();
 
@@ -710,14 +719,14 @@ mod tests {
     #[test]
     fn runner_config_serializes_effective_env_and_umask() {
         let temp = tempdir().unwrap();
-        let mut input = valid_input(&temp);
+        let (mut input, _out_dir, workspace) = valid_input(&temp);
         let mut step = runtime_step(&temp, "build");
         step.env_overrides
             .insert("SOURCE_DATE_EPOCH".to_string(), "123".to_string());
         step.umask = 0o077;
         input.steps.push(step);
         let runtime_files =
-            SandboxRuntimeFiles::create(&input.workspace.join("runtime-files"), &input).unwrap();
+            SandboxRuntimeFiles::create(&workspace.join("runtime-files"), &input).unwrap();
 
         write_runner_config(&input, &runtime_files).unwrap();
 
