@@ -56,11 +56,25 @@ pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxConfig {
-    /// Optional tree of config files exposed to build steps.
-    #[serde(default)]
-    script_config: Option<Value>,
+    /// Tree of config files exposed to build steps; `{}` means none.
+    #[serde(default = "default_script_config")]
+    script_config: Value,
     /// Ordered command steps to execute inside the sandbox.
     steps: Vec<BuildStep>,
+    /// Whether the output is captured as an ownership-aware fs-tree (the
+    /// default). When `false`, the output tree is instead chowned to a single
+    /// owner and captured as a plain object — for self-contained artifacts
+    /// (e.g. images) where per-file ownership is irrelevant.
+    #[serde(default = "default_preserve_ownership")]
+    preserve_ownership: bool,
+}
+
+fn default_script_config() -> Value {
+    Value::Object(Map::new())
+}
+
+fn default_preserve_ownership() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -168,7 +182,7 @@ fn prepare_sandbox_input(
 ) -> Result<SandboxInput, SandboxError> {
     let config_path = cx.temp_dir.join(CONFIG_DIR_NAME);
     recreate_empty_dir_force(&config_path)?;
-    write_script_config(&config_path, config.script_config.as_ref())?;
+    write_script_config(&config_path, &config.script_config)?;
 
     let sandbox_inputs = extra_inputs
         .iter()
@@ -189,6 +203,7 @@ fn prepare_sandbox_input(
         launcher_path,
         extra_inputs: sandbox_inputs,
         steps: sandbox_steps,
+        preserve_ownership: config.preserve_ownership,
     })
 }
 
@@ -346,7 +361,7 @@ fn map_error(error: SandboxError) -> BuilderError {
 
 /// Validate the full recipe-facing config before host paths are prepared.
 fn validate_sandbox_config(config: &SandboxConfig) -> Result<(), SandboxError> {
-    validate_script_config(config.script_config.as_ref())?;
+    validate_script_config(&config.script_config)?;
     validate_steps(&config.steps)
 }
 
@@ -758,11 +773,12 @@ fn make_tree_writable(path: &Path) -> Result<(), SandboxError> {
     Ok(())
 }
 
-/// Validate `script_config` before materializing it on disk.
-fn validate_script_config(value: Option<&Value>) -> Result<(), SandboxError> {
+/// Validate `script_config` before materializing it on disk. `{}` (or null)
+/// means no config files.
+fn validate_script_config(value: &Value) -> Result<(), SandboxError> {
     match value {
-        None | Some(Value::Null) => Ok(()),
-        Some(value) => validate_script_config_node(value, "<root>"),
+        Value::Null => Ok(()),
+        value => validate_script_config_node(value, "<root>"),
     }
 }
 
@@ -806,11 +822,11 @@ fn validate_script_config_key(key: &str, path: &str) -> Result<(), SandboxError>
     Ok(())
 }
 
-/// Materialize `script_config` under `root`.
-fn write_script_config(root: &Path, value: Option<&Value>) -> Result<(), SandboxError> {
+/// Materialize `script_config` under `root`. `{}` (or null) writes nothing.
+fn write_script_config(root: &Path, value: &Value) -> Result<(), SandboxError> {
     match value {
-        None | Some(Value::Null) => Ok(()),
-        Some(value) => write_script_config_node(root, value, "<root>"),
+        Value::Null => Ok(()),
+        value => write_script_config_node(root, value, "<root>"),
     }
 }
 
@@ -875,6 +891,9 @@ pub struct SandboxInput {
     launcher_path: PathBuf,
     extra_inputs: Vec<SandboxRuntimeInput>,
     steps: Vec<SandboxRuntimeStep>,
+    /// Capture the output as an ownership-aware fs-tree (`true`), or chown it to
+    /// a single owner and capture it as a plain object (`false`).
+    preserve_ownership: bool,
 }
 
 /// A named extra input exposed inside the sandbox: a `name` and the host `path`
@@ -936,12 +955,14 @@ impl RuntimeFunction for SandboxFunction {
 
         let result = run_sandbox_and_capture(&input, &workspace, &out_dir);
 
-        // Guarantee that no in-namespace-owned files are left in `tmp`, on
-        // success or failure: the workspace (build tree) always, and the output
-        // staging dir if the run failed before `intern_tree` consumed it. These
-        // run as ns-root; the host user could not remove them afterwards. The
-        // output artifact and the caller's config/logs are host-owned and stay.
-        let _ = remove_dir_force(&out_dir);
+        // Guarantee no in-namespace-owned files remain in `tmp`. The workspace
+        // (build tree) is always removed as ns-root. `out_dir` is consumed on
+        // the fs-tree path and is the artifact on the plain path, so on success
+        // it must stay — remove it only on failure, where ns files may remain
+        // and the host user could not clear them afterwards.
+        if result.is_err() {
+            let _ = remove_dir_force(&out_dir);
+        }
         let workspace_cleanup = remove_dir_force(&workspace);
         let output = result?;
         workspace_cleanup.map_err(|error| RuntimeError::new(error.to_string()))?;
@@ -951,9 +972,8 @@ impl RuntimeFunction for SandboxFunction {
 }
 
 /// Runs the sandbox and captures its output: prepares the mounts, runs the
-/// launcher, interns the output tree (consuming `out_dir`), and writes the
-/// manifest artifact under `tmp`. Its caller owns cleaning `workspace`/`out_dir`
-/// regardless of the outcome.
+/// launcher, then captures the output tree per `preserve_ownership`. Its caller
+/// owns cleaning `workspace`/`out_dir` regardless of the outcome.
 fn run_sandbox_and_capture(
     input: &SandboxInput,
     workspace: &Path,
@@ -967,20 +987,52 @@ fn run_sandbox_and_capture(
         &prepared.runtime_files.failure_report,
     )?;
 
-    // Intern the output tree: scans it into fs-files and, when it is fully
-    // fresh, moves the tree itself into the fs-trees cache, consuming out_dir
-    // either way. Then write the manifest (the output artifact) as a host-owned
-    // file under tmp.
-    let manifest = input
-        .fs_tree
-        .intern_tree(out_dir.to_path_buf())
-        .map_err(|error| RuntimeError::new(error.to_string()))?;
-    let output_path = input.tmp.join(OUTPUT_MANIFEST_NAME);
-    manifest
-        .write_canonical(&output_path)
-        .map_err(|error| RuntimeError::new(error.to_string()))?;
+    let output_path = if input.preserve_ownership {
+        // Ownership-aware fs-tree: intern the output (scans into fs-files and,
+        // when fully fresh, moves the tree into the fs-trees cache, consuming
+        // out_dir), then write the manifest as the host-owned artifact.
+        let manifest = input
+            .fs_tree
+            .intern_tree(out_dir.to_path_buf())
+            .map_err(|error| RuntimeError::new(error.to_string()))?;
+        let output_path = input.tmp.join(OUTPUT_MANIFEST_NAME);
+        manifest
+            .write_canonical(&output_path)
+            .map_err(|error| RuntimeError::new(error.to_string()))?;
+        output_path
+    } else {
+        // Plain object: chown the whole tree to a single owner (ns-root → host
+        // uid) so it is host-owned, and hand back the directory itself. Object
+        // hashing ignores uid/gid, so the result is uid-independent.
+        chown_tree_to_root(out_dir).map_err(|error| RuntimeError::new(error.to_string()))?;
+        out_dir.to_path_buf()
+    };
 
     Ok(SandboxOutput { output_path, steps })
+}
+
+/// Recursively chowns `path` to uid 0 / gid 0 (in-namespace root, which maps to
+/// the host owner) without following symlinks, so the tree becomes host-owned.
+fn chown_tree_to_root(path: &Path) -> Result<(), SandboxError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        SandboxError::FsFailed(format!("failed to inspect '{}': {error}", path.display()))
+    })?;
+    if metadata.file_type().is_dir() {
+        for entry in fs::read_dir(path).map_err(|error| {
+            SandboxError::FsFailed(format!("failed to read '{}': {error}", path.display()))
+        })? {
+            let entry = entry.map_err(|error| {
+                SandboxError::FsFailed(format!(
+                    "failed to read entry in '{}': {error}",
+                    path.display()
+                ))
+            })?;
+            chown_tree_to_root(&entry.path())?;
+        }
+    }
+    std::os::unix::fs::lchown(path, Some(0), Some(0)).map_err(|error| {
+        SandboxError::FsFailed(format!("failed to chown '{}': {error}", path.display()))
+    })
 }
 
 #[cfg(test)]
@@ -1002,7 +1054,7 @@ mod tests {
 
     fn valid_config() -> SandboxConfig {
         SandboxConfig {
-            script_config: None,
+            script_config: default_script_config(),
             steps: vec![BuildStep {
                 name: "build".to_string(),
                 run_as: StepUser::BuildUser,
@@ -1010,6 +1062,7 @@ mod tests {
                 argv: vec!["true".to_string()],
                 env: Map::new(),
             }],
+            preserve_ownership: true,
         }
     }
 
@@ -1062,8 +1115,9 @@ mod tests {
         let error = SandboxBuilder
             .build_typed(
                 SandboxConfig {
-                    script_config: None,
+                    script_config: default_script_config(),
                     steps: Vec::new(),
+                    preserve_ownership: true,
                 },
                 inputs(rootfs),
                 &mut cx,
@@ -1089,7 +1143,7 @@ mod tests {
         fs::create_dir(&rootfs).unwrap();
         fs::create_dir(&source).unwrap();
         let config = SandboxConfig {
-            script_config: Some(json!({"args": ["--flag"], "env": {"CC": "cc"}})),
+            script_config: json!({"args": ["--flag"], "env": {"CC": "cc"}}),
             steps: vec![BuildStep {
                 name: "compile/test".to_string(),
                 run_as: StepUser::Root,
@@ -1097,6 +1151,7 @@ mod tests {
                 argv: vec!["@{config}/args/00000000".to_string()],
                 env: Map::from_iter([("SRC".to_string(), Value::String("@{source}".to_string()))]),
             }],
+            preserve_ownership: true,
         };
         let cx = BuildContext::with_noop_logger(temp.path().join("tmp"), store.fs_tree());
         fs::create_dir(&cx.temp_dir).unwrap();

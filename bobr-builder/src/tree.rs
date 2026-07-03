@@ -1,7 +1,7 @@
 use crate::BuilderError;
 use crate::{BuildContext, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -10,19 +10,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Configuration for [`TreeBuilder`]: an inline `tree` of files, directories,
 /// and symlinks.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TreeConfig {
     tree: TreePayload,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TreePayload {
     entries: Vec<TreeEntry>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum TreeEntry {
     File {

@@ -1,14 +1,14 @@
 use crate::BuilderError;
 use crate::{BuildContext, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 /// Configuration for [`GroupBuilder`] (no options).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupConfig {}
 

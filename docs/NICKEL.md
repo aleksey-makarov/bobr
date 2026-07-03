@@ -231,8 +231,9 @@ after installing without leaving the synthetic builder.
 ### `SandboxBuild`
 
 Runs your own `Sandbox` step plan instead of the pipeline above — the same
-config as the built-in `Sandbox` builder (`steps`, `script_config`; see
-[Request](./REQUEST.md)) — but with a rootfs built automatically from `deps`.
+config as the built-in `Sandbox` builder (`steps`, `script_config`,
+`preserve_ownership`; see [Request](./REQUEST.md)) — but with a rootfs built
+automatically from `deps`.
 Source unpacking and patching are not automatic here; do them in your own steps.
 
 - **Inputs:** `source` and `deps` (the `SandboxBuildRootfs` variant is a

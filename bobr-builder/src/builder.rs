@@ -5,6 +5,7 @@ use bobr_core::{
 use bobr_runtime::runtime_provider::RuntimeProvider;
 use bobr_store::fs_tree::FsTree;
 use fsobj_hash::ObjectHash;
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -414,6 +415,26 @@ fn write_raw_log_atomic(path: &Path, content: &str) -> Result<(), String> {
 
 /// Object-safe builder interface used by the registry and executor. Blanket-
 /// implemented for every [`TypedBuilder`]; builders implement [`TypedBuilder`].
+///
+/// # Configuration is canonical, so identity ignores omitted defaults
+///
+/// A builder's configuration type must round-trip losslessly through serde:
+/// deserializing a recipe's config JSON and serializing it back yields a
+/// **canonical** form in which every field is present with its concrete value.
+/// [`normalize_config`](Builder::normalize_config) performs that round-trip, and
+/// the planner hashes the *normalized* config into the build/reuse keys (not the
+/// raw recipe JSON). Two consequences the config types must uphold:
+///
+/// - **No direct member of a configuration object may be `Option<_>`.** A field
+///   that can be left out of the recipe carries a serde default instead
+///   (`#[serde(default = "…")]`), so its absence and its explicit default value
+///   normalize to the same JSON — and therefore to the same key. (Nested types
+///   further down may still use `Option` where `None` is a genuinely distinct
+///   value, e.g. an install rule that overrides only some attributes; only the
+///   object's own top-level members are constrained.)
+/// - As a result, `{}`, `{"flag": <default>}`, and `{"flag": <default>, …}` all
+///   produce the same build key: writing a default explicitly never forks the
+///   cache from omitting it.
 pub trait Builder: Send + Sync {
     /// The builder's recipe tag.
     fn tag(&self) -> &'static str;
@@ -429,6 +450,13 @@ pub trait Builder: Send + Sync {
     /// [`TypedBuilder::is_arch_dependent`].
     fn is_arch_dependent(&self) -> bool;
 
+    /// Normalizes a recipe's raw `config` JSON into its canonical form by
+    /// round-tripping it through the typed configuration (which fills defaults
+    /// for omitted fields). The planner hashes this normalized value into the
+    /// keys, so omitted and explicitly-default fields yield the same key. Fails
+    /// if `config` does not match the builder's configuration shape.
+    fn normalize_config(&self, config: Value) -> Result<Value, BuilderError>;
+
     /// Builds from a raw JSON `config` (deserialized internally) and `inputs`.
     fn build_erased(
         &self,
@@ -442,7 +470,12 @@ pub trait Builder: Send + Sync {
 /// blanket impl exposes every `TypedBuilder` as a [`Builder`].
 pub trait TypedBuilder: Send + Sync {
     /// The builder's strongly-typed configuration, deserialized from the recipe.
-    type Config: DeserializeOwned;
+    ///
+    /// Must round-trip losslessly through serde (hence `Serialize`): the planner
+    /// normalizes recipe config by deserializing then reserializing it. Keep it
+    /// canonical — no top-level `Option<_>` members; use `#[serde(default = …)]`
+    /// for omittable fields. See [`Builder`] for the invariant this upholds.
+    type Config: DeserializeOwned + Serialize;
 
     /// The builder's recipe tag.
     fn tag(&self) -> &'static str;
@@ -496,6 +529,15 @@ where
 
     fn is_arch_dependent(&self) -> bool {
         <T as TypedBuilder>::is_arch_dependent(self)
+    }
+
+    fn normalize_config(&self, config: Value) -> Result<Value, BuilderError> {
+        let typed: T::Config = serde_json::from_value(config).map_err(|error| {
+            BuilderError::InvalidRecipe(format!("invalid builder config: {error}"))
+        })?;
+        serde_json::to_value(&typed).map_err(|error| {
+            BuilderError::ExecutionFailed(format!("failed to normalize builder config: {error}"))
+        })
     }
 
     fn build_erased(
@@ -622,7 +664,7 @@ mod tests {
     #[derive(Debug)]
     struct DummyBuilder;
 
-    #[derive(Debug, Deserialize, PartialEq, Eq)]
+    #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
     #[serde(deny_unknown_fields)]
     struct DummyConfig {
         demo: String,

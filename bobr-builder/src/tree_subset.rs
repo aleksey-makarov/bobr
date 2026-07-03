@@ -5,7 +5,7 @@ use bobr_store::{
     StoreError,
     fs_tree::{FsTreeManifest, subset_manifest},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Builds an fs-tree that is a subset of its input `tree`, keeping only the
@@ -14,7 +14,7 @@ use std::path::PathBuf;
 pub struct TreeSubsetBuilder;
 
 /// Configuration for [`TreeSubsetBuilder`].
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TreeSubsetConfig {
     include: Vec<String>,

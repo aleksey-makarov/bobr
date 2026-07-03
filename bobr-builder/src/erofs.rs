@@ -27,13 +27,13 @@ pub struct ErofsRootfsBuilder;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ErofsRootfsConfig {
-    /// Optional compression algorithm (e.g. `"lz4hc"`); uses the mkfs default
-    /// when `None`.
+    /// Compression algorithm (e.g. `"lz4hc"`); `""` uses the mkfs default (no
+    /// `-z`).
     #[serde(default)]
-    pub compression: Option<String>,
-    /// Optional filesystem label.
+    pub compression: String,
+    /// Filesystem label; `""` sets none (no `-L`).
     #[serde(default)]
-    pub label: Option<String>,
+    pub label: String,
 }
 
 static EROFS_ROOTFS_SPEC: InputSpec = InputSpec {
@@ -63,7 +63,6 @@ impl TypedBuilder for ErofsRootfsBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<PathBuf, BuilderError> {
-        validate_erofs_config(&config)?;
         let source_root = inputs.required("_tree")?.clone();
         let mkfs_erofs = find_program_in_path("mkfs.erofs").ok_or_else(|| {
             BuilderError::ExecutionFailed(
@@ -99,20 +98,6 @@ impl TypedBuilder for ErofsRootfsBuilder {
     }
 }
 
-fn validate_erofs_config(config: &ErofsRootfsConfig) -> Result<(), BuilderError> {
-    if matches!(config.compression.as_deref(), Some("")) {
-        return Err(BuilderError::InvalidRecipe(
-            "invalid builder config: compression must be null or a non-empty string".to_string(),
-        ));
-    }
-    if matches!(config.label.as_deref(), Some("")) {
-        return Err(BuilderError::InvalidRecipe(
-            "invalid builder config: label must be null or a non-empty string".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ErofsRootfsFunction;
 
@@ -122,8 +107,8 @@ pub(crate) struct ErofsRootfsInput {
     source_root: PathBuf,
     mkfs_erofs: PathBuf,
     output_path: PathBuf,
-    compression: Option<String>,
-    label: Option<String>,
+    compression: String,
+    label: String,
 }
 
 impl RuntimeFunction for ErofsRootfsFunction {
@@ -151,8 +136,8 @@ fn build_erofs_rootfs_image(input: ErofsRootfsInput) -> Result<(), ErofsRootfsEr
         &input.mkfs_erofs,
         &input.output_path,
         &input.source_root,
-        input.compression.as_deref(),
-        input.label.as_deref(),
+        &input.compression,
+        &input.label,
     )
 }
 
@@ -160,8 +145,8 @@ fn run_mkfs_erofs(
     mkfs_erofs: &Path,
     output_path: &Path,
     source_root: &Path,
-    compression: Option<&str>,
-    label: Option<&str>,
+    compression: &str,
+    label: &str,
 ) -> Result<(), ErofsRootfsError> {
     let mut command = mkfs_erofs_command(mkfs_erofs, output_path, source_root, compression, label);
     let output = command.output().map_err(|error| {
@@ -186,8 +171,8 @@ fn mkfs_erofs_command(
     mkfs_erofs: &Path,
     output_path: &Path,
     source_root: &Path,
-    compression: Option<&str>,
-    label: Option<&str>,
+    compression: &str,
+    label: &str,
 ) -> Command {
     let mut command = Command::new(mkfs_erofs);
     command
@@ -199,10 +184,10 @@ fn mkfs_erofs_command(
         .arg(REPRODUCIBLE_SOURCE_DATE_EPOCH)
         .arg("-U")
         .arg("clear");
-    if let Some(label) = label {
+    if !label.is_empty() {
         command.arg("-L").arg(label);
     }
-    if let Some(compression) = compression {
+    if !compression.is_empty() {
         command.arg("-z").arg(compression);
     }
     command.arg(output_path).arg(source_root);
@@ -290,8 +275,8 @@ mod tests {
         let error = ErofsRootfsBuilder
             .build_typed(
                 ErofsRootfsConfig {
-                    compression: None,
-                    label: None,
+                    compression: String::new(),
+                    label: String::new(),
                 },
                 BuilderInputs::empty(),
                 &mut cx,
@@ -299,39 +284,6 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("required input slot '_tree'"));
-    }
-
-    #[test]
-    fn build_rejects_empty_compression_and_label() {
-        let temp = tempdir().unwrap();
-        let mut cx =
-            BuildContext::with_noop_logger(temp.path().join("tmp"), store_fs_tree(temp.path()));
-        let mut inputs = BuilderInputs::empty();
-        inputs.insert("_tree", temp.path().join("root"));
-
-        let error = ErofsRootfsBuilder
-            .build_typed(
-                ErofsRootfsConfig {
-                    compression: Some(String::new()),
-                    label: None,
-                },
-                inputs.clone(),
-                &mut cx,
-            )
-            .unwrap_err();
-        assert!(error.to_string().contains("compression"));
-
-        let error = ErofsRootfsBuilder
-            .build_typed(
-                ErofsRootfsConfig {
-                    compression: None,
-                    label: Some(String::new()),
-                },
-                inputs,
-                &mut cx,
-            )
-            .unwrap_err();
-        assert!(error.to_string().contains("label"));
     }
 
     #[test]
@@ -347,8 +299,8 @@ mod tests {
             source_root: source,
             mkfs_erofs: mkfs,
             output_path,
-            compression: Some("lz4".to_string()),
-            label: Some("root".to_string()),
+            compression: "lz4".to_string(),
+            label: "root".to_string(),
         })
         .unwrap();
     }
@@ -359,7 +311,7 @@ mod tests {
         let source = temp.path().join("source");
         let output_path = temp.path().join("rootfs.erofs");
         let mkfs = PathBuf::from("/test/mkfs.erofs");
-        let command = mkfs_erofs_command(&mkfs, &output_path, &source, Some("lz4"), Some("root"));
+        let command = mkfs_erofs_command(&mkfs, &output_path, &source, "lz4", "root");
 
         assert_eq!(command.get_program(), mkfs.as_os_str());
         let args = command
@@ -402,8 +354,8 @@ mod tests {
             source_root: source,
             mkfs_erofs: mkfs,
             output_path: temp.path().join("rootfs.erofs"),
-            compression: None,
-            label: None,
+            compression: String::new(),
+            label: String::new(),
         })
         .unwrap_err();
 

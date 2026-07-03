@@ -693,7 +693,7 @@ mod tests {
     use bobr_core::{BuildLogSubject, compute_build_key, compute_reuse_key};
     use bobr_source::{OriginContext, OriginSpec, ParsedOrigin, SourcePlannedSubject};
     use bobr_store::{StoreWorkspace, create_workspace, import_build, resolve_reuse_for_build};
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
     use serde_json::{Map, Value, json};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -828,7 +828,7 @@ mod tests {
             .count()
     }
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
     struct ExecutionTestConfig {}
 
@@ -1451,7 +1451,7 @@ mod tests {
         // for it (drained) before returning the fast node's publish error.
         static SLOW_FINISHED: AtomicBool = AtomicBool::new(false);
 
-        #[derive(Debug, Deserialize)]
+        #[derive(Debug, Deserialize, Serialize)]
         #[serde(deny_unknown_fields)]
         struct EmptyConfig {}
 

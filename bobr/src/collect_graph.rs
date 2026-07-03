@@ -438,7 +438,9 @@ mod tests {
             "root": {
                 "name": "sandbox",
                 "tag": "Sandbox",
-                "config": {},
+                // Canonical (normalized) Sandbox config, so the key computed
+                // from it below matches the planner's normalized key.
+                "config": { "script_config": {}, "steps": [], "preserve_ownership": true },
                 "inputs": {
                     "source": "source",
                     "_rootfs": "rootfs",

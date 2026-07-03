@@ -121,6 +121,13 @@ impl BuilderPlannedSubject {
             }
         }
 
+        // Normalize the config to its canonical form (defaults filled) before it
+        // enters the keys, so omitting a field and writing its default produce
+        // the same build key. See the `Builder` trait docs.
+        let config = builder
+            .normalize_config(config)
+            .map_err(|error| BuilderPlanError::recipe(error.to_string()))?;
+
         // Fold the core-semantics version into the per-builder version token, so
         // a bump of CORE_KEY_VERSION invalidates every key without touching the
         // key structure. Arch-dependent builders still pin the target arch.
@@ -231,14 +238,14 @@ mod tests {
     use crate::test_support::store_fs_tree;
     use bobr_core::{CancellationToken, NoopBuildLogger};
     use bobr_runtime::runtime_provider::{RuntimeBackend, RuntimeProvider};
-    use serde::Deserialize;
+    use serde::{Deserialize, Serialize};
     use std::sync::Arc;
     use tempfile::tempdir;
 
     #[derive(Debug)]
     struct StagingBuilder;
 
-    #[derive(Debug, Deserialize)]
+    #[derive(Debug, Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
     struct EmptyConfig {}
 

@@ -576,6 +576,7 @@ mod tests {
             launcher_path: temp.path().join(LAUNCHER_BINARY_NAME),
             extra_inputs: Vec::new(),
             steps: Vec::new(),
+            preserve_ownership: true,
         };
         (input, out_dir, workspace)
     }

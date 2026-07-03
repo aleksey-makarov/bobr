@@ -238,7 +238,8 @@ Extracts one OCI image layout into an fs-tree.
 
 Runs an ordered plan of commands inside an isolated container — a set of Linux
 namespaces rooted at the `_rootfs` input, with no network access — and captures
-the result as an fs-tree.
+the `@{out}` directory as the result. By default the output is captured as an
+ownership-aware fs-tree; see `preserve_ownership`.
 
 **Inputs:**
 
@@ -254,7 +255,12 @@ the result as an fs-tree.
 **Config:**
 
 - `steps` — a required, non-empty array of steps
-- `script_config` — an optional config tree, available to the steps as `@{config}`
+- `script_config` — a config tree, available to the steps as `@{config}`
+  (default `{}`, an empty config directory)
+- `preserve_ownership` — whether the output is captured as an ownership-aware
+  fs-tree (default `true`). When `false`, the `@{out}` tree is instead chowned to
+  a single owner and captured as a plain object — for self-contained artifacts
+  (e.g. a disk image) where per-file ownership is irrelevant
 
 ```json
 {
@@ -294,7 +300,7 @@ are also exposed as `BOBR_BUILD_DIR`, `BOBR_OUT_DIR`, `BOBR_CONFIG_DIR`, and
 
 - `@{build}` — the writable build directory
 - `@{out}` — the writable output directory; its contents become the result
-  fs-tree
+  object
 - `@{config}` — the materialized `script_config` directory
 - `@{<input>}` — an extra input: the materialized directory if its name begins
   with `_`, otherwise the read-only object path
@@ -302,7 +308,7 @@ are also exposed as `BOBR_BUILD_DIR`, `BOBR_OUT_DIR`, `BOBR_CONFIG_DIR`, and
 `@@{name}` escapes to the literal `@{name}`. Unknown variables and malformed
 interpolation are invalid config.
 
-`script_config` may be absent or `null` (an empty config directory); otherwise
+`script_config` may be absent or `{}` (an empty config directory); otherwise
 it is a recursive tree: objects become directories, arrays become directories
 with zero-padded numeric entries (`00000000`, …) in order, and strings become
 file contents. Keys must be non-empty, must not be `.` or `..`, and may contain
@@ -314,15 +320,15 @@ Builds an EROFS filesystem image from an fs-tree.
 
 **Inputs:** required `_tree` — one fs-tree, materialized before execution.
 
-**Config:** optional `compression` and `label`:
+**Config:** optional `compression` and `label` (both strings, `""` = unset):
 
 ```json
-{ "compression": null, "label": null }
+{ "compression": "", "label": "" }
 ```
 
-- `compression` — `null` produces a plain image (no `-z`); a non-empty string is
+- `compression` — `""` produces a plain image (no `-z`); a non-empty string is
   passed as `-z <compression>`
-- `label` — a non-empty string is passed as `-L <label>`
+- `label` — `""` means no label; a non-empty string is passed as `-L <label>`
 
 **Behavior:** runs `mkfs.erofs` from `PATH` through a namespace function and
 produces one regular file containing the image:
