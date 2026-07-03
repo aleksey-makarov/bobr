@@ -19,6 +19,8 @@ mod initramfs;
 mod oci_extract;
 mod registry;
 mod subject;
+#[cfg(test)]
+mod test_support;
 mod tree;
 mod tree_merge;
 mod tree_subset;

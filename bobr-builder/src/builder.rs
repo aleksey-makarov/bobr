@@ -521,8 +521,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::store_fs_tree;
     use bobr_runtime::runtime_provider::{RuntimeBackend, RuntimeProvider};
     use serde::Deserialize;
+    use tempfile::tempdir;
 
     fn sample_builder_object() -> PathBuf {
         PathBuf::from("/tmp/object")
@@ -677,10 +679,9 @@ mod tests {
     #[test]
     fn typed_builder_adapter_decodes_config() {
         let builder = DummyBuilder;
-        let mut cx = BuildContext::with_noop_logger(
-            PathBuf::from("/tmp/tmp"),
-            FsTree::new(PathBuf::from("/tmp/tmp")),
-        );
+        let temp = tempdir().unwrap();
+        let mut cx =
+            BuildContext::with_noop_logger(PathBuf::from("/tmp/tmp"), store_fs_tree(temp.path()));
 
         let result = builder
             .build_erased(
@@ -695,21 +696,19 @@ mod tests {
 
     #[test]
     fn build_context_defaults_to_host_runtime() {
-        let cx = BuildContext::with_noop_logger(
-            PathBuf::from("/tmp/tmp"),
-            FsTree::new(PathBuf::from("/tmp/tmp")),
-        );
+        let temp = tempdir().unwrap();
+        let cx =
+            BuildContext::with_noop_logger(PathBuf::from("/tmp/tmp"), store_fs_tree(temp.path()));
 
         assert_eq!(cx.runtime().backend(), RuntimeBackend::Host);
     }
 
     #[test]
     fn build_context_can_override_runtime_provider() {
-        let cx = BuildContext::with_noop_logger(
-            PathBuf::from("/tmp/tmp"),
-            FsTree::new(PathBuf::from("/tmp/tmp")),
-        )
-        .with_runtime_provider(RuntimeProvider::namespace());
+        let temp = tempdir().unwrap();
+        let cx =
+            BuildContext::with_noop_logger(PathBuf::from("/tmp/tmp"), store_fs_tree(temp.path()))
+                .with_runtime_provider(RuntimeProvider::namespace());
 
         assert_eq!(cx.runtime().backend(), RuntimeBackend::Namespace);
     }

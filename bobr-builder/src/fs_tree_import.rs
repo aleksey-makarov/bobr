@@ -127,6 +127,7 @@ impl RuntimeFunction for FsTreeImportFunction {
 mod tests {
     use super::*;
     use crate::Builder;
+    use crate::test_support::store_fs_tree;
     use bobr_store::fs_tree::{FsTreeEntry, FsTreeInstallAttrs, FsTreeInstallRule, FsTreeManifest};
     use bobr_store::{Store, import_build};
     use std::collections::BTreeMap;
@@ -259,10 +260,8 @@ mod tests {
     #[test]
     fn erased_config_rejects_legacy_symlink_mode() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(
-            temp.path().join("tmp"),
-            FsTree::new(temp.path().to_path_buf()),
-        );
+        let mut cx =
+            BuildContext::with_noop_logger(temp.path().join("tmp"), store_fs_tree(temp.path()));
         let config = serde_json::json!({
             "install": {
                 "rules": [{

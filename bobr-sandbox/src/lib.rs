@@ -983,6 +983,14 @@ mod tests {
     use std::collections::BTreeMap;
     use tempfile::tempdir;
 
+    // An `FsTree` from a throwaway store under `<root>/store` (there is no
+    // public `FsTree` constructor — it comes only from a `Store`).
+    fn store_fs_tree(root: &Path) -> FsTree {
+        let store_root = root.join("store");
+        fs::create_dir_all(&store_root).unwrap();
+        Store::create(&store_root).unwrap().fs_tree()
+    }
+
     fn valid_config() -> SandboxConfig {
         SandboxConfig {
             script_config: None,
@@ -1020,10 +1028,8 @@ mod tests {
     #[test]
     fn erased_config_rejects_unknown_fields() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(
-            temp.path().join("tmp"),
-            FsTree::new(temp.path().to_path_buf()),
-        );
+        let mut cx =
+            BuildContext::with_noop_logger(temp.path().join("tmp"), store_fs_tree(temp.path()));
 
         let error = SandboxBuilder
             .build_erased(
@@ -1041,10 +1047,8 @@ mod tests {
         let temp = tempdir().unwrap();
         let rootfs = temp.path().join("rootfs");
         fs::create_dir(&rootfs).unwrap();
-        let mut cx = BuildContext::with_noop_logger(
-            temp.path().join("tmp"),
-            FsTree::new(temp.path().to_path_buf()),
-        );
+        let mut cx =
+            BuildContext::with_noop_logger(temp.path().join("tmp"), store_fs_tree(temp.path()));
 
         let error = SandboxBuilder
             .build_typed(
@@ -1135,10 +1139,8 @@ mod tests {
     fn build_reports_missing_rootfs_directory() {
         let temp = tempdir().unwrap();
         let rootfs = temp.path().join("missing-rootfs");
-        let mut cx = BuildContext::with_noop_logger(
-            temp.path().join("tmp"),
-            FsTree::new(temp.path().to_path_buf()),
-        );
+        let mut cx =
+            BuildContext::with_noop_logger(temp.path().join("tmp"), store_fs_tree(temp.path()));
 
         let error = SandboxBuilder
             .build_typed(valid_config(), inputs(rootfs), &mut cx)

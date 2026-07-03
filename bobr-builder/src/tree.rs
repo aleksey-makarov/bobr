@@ -432,14 +432,14 @@ fn current_epoch_nanos() -> Result<u128, BuilderError> {
 mod tests {
     use super::*;
     use crate::Builder;
-    use bobr_store::fs_tree::FsTree;
+    use crate::test_support::store_fs_tree;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     fn build_context(root: &Path) -> BuildContext {
         let temp_dir = root.join("tmp");
         fs::create_dir(&temp_dir).unwrap();
-        BuildContext::with_noop_logger(temp_dir.clone(), FsTree::new(temp_dir.clone()))
+        BuildContext::with_noop_logger(temp_dir.clone(), store_fs_tree(root))
     }
 
     #[test]

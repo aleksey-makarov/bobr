@@ -969,6 +969,7 @@ fn join_rel(parent: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::store_fs_tree;
     use crate::{Builder, TypedBuilder};
     use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
     use bobr_store::{Store, import_build};
@@ -1305,7 +1306,7 @@ mod tests {
     #[test]
     fn build_erased_rejects_unknown_config_field() {
         let temp = tempdir().unwrap();
-        let mut cx = build_context(temp.path(), FsTree::new(temp.path().to_path_buf()));
+        let mut cx = build_context(temp.path(), store_fs_tree(temp.path()));
         let mut inputs = BuilderInputs::empty();
         let image = create_oci_layout(temp.path(), vec![]);
         inputs.insert("image", image);

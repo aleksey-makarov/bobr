@@ -515,7 +515,7 @@ impl fmt::Display for InitramfsError {
 mod tests {
     use super::*;
     use crate::Builder;
-    use bobr_store::fs_tree::FsTree;
+    use crate::test_support::store_fs_tree;
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use tempfile::tempdir;
@@ -530,10 +530,8 @@ mod tests {
     #[test]
     fn build_rejects_missing_tree_input() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(
-            temp.path().join("tmp"),
-            FsTree::new(temp.path().to_path_buf()),
-        );
+        let mut cx =
+            BuildContext::with_noop_logger(temp.path().join("tmp"), store_fs_tree(temp.path()));
 
         let error = InitramfsBuilder
             .build_typed(InitramfsConfig {}, BuilderInputs::empty(), &mut cx)
@@ -658,13 +656,14 @@ mod tests {
 
     #[test]
     fn build_rejects_unknown_config_field() {
+        let temp = tempdir().unwrap();
         let error = InitramfsBuilder
             .build_erased(
                 serde_json::json!({"extra": true}),
                 BuilderInputs::empty(),
                 &mut BuildContext::with_noop_logger(
                     PathBuf::from("/tmp/unused"),
-                    FsTree::new(PathBuf::from("/tmp/unused")),
+                    store_fs_tree(temp.path()),
                 ),
             )
             .unwrap_err();

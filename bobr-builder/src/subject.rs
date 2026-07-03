@@ -230,6 +230,7 @@ impl BuilderPlannedSubject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::store_fs_tree;
     use bobr_core::{CancellationToken, NoopBuildLogger};
     use bobr_runtime::runtime_provider::{RuntimeBackend, RuntimeProvider};
     use serde::Deserialize;
@@ -304,11 +305,7 @@ mod tests {
         );
 
         let staged = subject
-            .execute(
-                &ctx,
-                BuilderInputs::empty(),
-                FsTree::new(temp.path().to_path_buf()),
-            )
+            .execute(&ctx, BuilderInputs::empty(), store_fs_tree(temp.path()))
             .unwrap();
 
         assert_eq!(staged.staged_path, temp.path().join("out"));
