@@ -960,9 +960,13 @@ impl RuntimeFunction for SandboxFunction {
             &prepared.runtime_files.success_report,
             &prepared.runtime_files.failure_report,
         )?;
+        // Intern the sandbox output tree: scans it into fs-files and, when it is
+        // fully fresh, moves the tree itself into the fs-trees cache, consuming
+        // out_dir either way.
+        let out_dir = input.out_dir;
         let manifest = input
             .fs_tree
-            .scan(&input.out_dir)
+            .intern_tree(out_dir)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
         let entries = manifest.entries().len();
         manifest

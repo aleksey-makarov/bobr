@@ -216,12 +216,17 @@ fn extract_oci_image_to_fs_tree_inner(
         extract_oci_image_layers(&input.oci_layout_dir, &input.extract_root, &mut warnings)?;
     read_oci_config_bytes(&input.oci_layout_dir)?;
     apply_extracted_metadata(&input.extract_root, &records)?;
-    let manifest = input.fs_tree.scan(&input.extract_root).map_err(|error| {
-        OciExtractError::Object(format!(
-            "failed to scan extracted OCI filesystem '{}': {error}",
-            input.extract_root.display()
-        ))
-    })?;
+    // Intern the extracted tree: scans it into fs-files and, when fully fresh,
+    // moves the tree into the fs-trees cache (consuming the extraction root).
+    let manifest = input
+        .fs_tree
+        .intern_tree(input.extract_root.clone())
+        .map_err(|error| {
+            OciExtractError::Object(format!(
+                "failed to intern extracted OCI filesystem '{}': {error}",
+                input.extract_root.display()
+            ))
+        })?;
     let entries = manifest.entries().len();
     manifest
         .write_canonical(&input.output_manifest)

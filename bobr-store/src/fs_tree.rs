@@ -8,6 +8,7 @@ use crate::StoreError;
 use crate::store::{FS_FILES_DIR, FS_TREE_REFS_DIR, FS_TREES_DIR, OBJECTS_DIR};
 use crate::validate_ref_name;
 use bobr_core::ObjectHash;
+use fsobj_hash::hash_file_bytes;
 use globset::{Glob, GlobMatcher};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::{Map, Value};
@@ -207,15 +208,57 @@ impl FsTree {
         self.fs_trees_dir().join(manifest_hash.to_hex())
     }
 
-    /// Scans an immutable filesystem tree into a manifest and imports regular
-    /// files into this store's `fs-files` directory using hardlinks.
+    /// Interns a freshly built filesystem tree as an fs-tree object, consuming
+    /// it, and returns the manifest for the caller to stage.
     ///
-    /// The source root must be an absolute existing real directory, not a
-    /// symlink. Regular files are hardlinked into `fs-files`; if the target
-    /// object already exists, it is trusted as a cache hit. Shard directories
-    /// are created lazily for objects that need to be imported.
-    pub fn scan(&self, source_root: &Path) -> Result<FsTreeManifest, StoreError> {
-        scan_fs_tree_with_root(source_root, &self.fs_files_dir())
+    /// Scans `source_root` into a manifest, hardlinking regular files into
+    /// `fs-files`. If every file was fresh (none already present in
+    /// `fs-files`), the scanned tree shares all its content with `fs-files`, so
+    /// it is moved wholesale into the materialized cache root
+    /// `<store>/fs-trees/<manifest-hash>` — a later
+    /// [`ensure_materialized_root`](Self::ensure_materialized_root) is then a
+    /// cache hit rather than a rebuild. If any file already existed in
+    /// `fs-files`, moving the tree would duplicate that content, so it is
+    /// discarded instead (the manifest and `fs-files` still let it be
+    /// materialized lazily on demand).
+    ///
+    /// Either way, `source_root` no longer exists on disk on return. The source
+    /// must be an absolute existing real directory, not a symlink.
+    pub fn intern_tree(&self, source_root: PathBuf) -> Result<FsTreeManifest, StoreError> {
+        let (manifest, all_fresh) =
+            scan_fs_tree_reporting_freshness(&source_root, &self.fs_files_dir())?;
+        if !all_fresh {
+            remove_scanned_root(&source_root)?;
+            return Ok(manifest);
+        }
+        // Every file is fresh, so the manifest is necessarily new; its object
+        // hash keys the cache. Computing it from the canonical bytes matches
+        // `hash_path` of the manifest file the caller will stage (a single
+        // non-executable regular file).
+        let manifest_hash = hash_file_bytes(false, &manifest.to_canonical_bytes()?);
+        self.publish_scanned_root(source_root, manifest_hash)?;
+        Ok(manifest)
+    }
+
+    /// Moves an already-scanned, all-fresh `source_root` into the materialized
+    /// cache `fs-trees/<manifest_hash>`, consuming it. Tolerates a concurrent
+    /// publisher of the same manifest by dropping the losing copy.
+    fn publish_scanned_root(
+        &self,
+        source_root: PathBuf,
+        manifest_hash: ObjectHash,
+    ) -> Result<(), StoreError> {
+        if self.lookup_materialized_root(manifest_hash)?.is_some() {
+            return remove_scanned_root(&source_root);
+        }
+        let final_root = self.materialized_root_path(manifest_hash);
+        if let Err(error) = publish_materialized_fs_tree(&source_root, &final_root) {
+            remove_scanned_root(&source_root)?;
+            if self.lookup_materialized_root(manifest_hash)?.is_none() {
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     /// Imports a filesystem tree into a manifest and this store's `fs-files`
@@ -741,17 +784,38 @@ fn hash_fs_file_parts(
     Ok(FsFileHash(bytes))
 }
 
+#[cfg(test)]
 fn scan_fs_tree_with_root(
     source_root: &Path,
     fs_files_root: &Path,
 ) -> Result<FsTreeManifest, StoreError> {
+    Ok(scan_fs_tree_reporting_freshness(source_root, fs_files_root)?.0)
+}
+
+/// Scans `source_root` and reports whether every regular file was freshly
+/// hardlinked into `fs-files` (`true`), or at least one already existed there
+/// (`false`). When all files are fresh, the scanned tree shares every inode
+/// with `fs-files` and can be moved into the materialized cache without
+/// duplicating content; otherwise it should be discarded.
+fn scan_fs_tree_reporting_freshness(
+    source_root: &Path,
+    fs_files_root: &Path,
+) -> Result<(FsTreeManifest, bool), StoreError> {
     require_existing_directory(source_root, "source root")?;
     require_existing_directory(fs_files_root, "fs-files root")?;
 
     let mut entries = Vec::new();
-    scan_entry(source_root, source_root, fs_files_root, &mut entries)?;
-    FsTreeManifest::from_entries(entries)
-        .map_err(|error| StoreError::InvalidData(error.to_string()))
+    let mut all_fresh = true;
+    scan_entry(
+        source_root,
+        source_root,
+        fs_files_root,
+        &mut entries,
+        &mut all_fresh,
+    )?;
+    let manifest = FsTreeManifest::from_entries(entries)
+        .map_err(|error| StoreError::InvalidData(error.to_string()))?;
+    Ok((manifest, all_fresh))
 }
 
 fn import_fs_tree_with_install_root(
@@ -904,6 +968,11 @@ fn publish_materialized_fs_tree(staging_root: &Path, final_root: &Path) -> Resul
     })
 }
 
+/// Force-removes a scanned tree that was not published into the cache.
+fn remove_scanned_root(root: &Path) -> Result<(), StoreError> {
+    crate::fsutil::remove_dir_force(root).map_err(crate::error::map_fsutil_error)
+}
+
 fn fs_tree_ref_target(manifest_hash: ObjectHash) -> PathBuf {
     PathBuf::from("..")
         .join(FS_TREES_DIR)
@@ -973,6 +1042,7 @@ fn scan_entry(
     current_path: &Path,
     fs_files_root: &Path,
     entries: &mut Vec<FsTreeEntry>,
+    all_fresh: &mut bool,
 ) -> Result<(), StoreError> {
     let metadata = fs::symlink_metadata(current_path)
         .map_err(|error| map_io(current_path, "inspect", error))?;
@@ -992,7 +1062,7 @@ fn scan_entry(
             .map_err(|error| map_io(current_path, "read directory entry", error))?;
         children.sort_by(|left, right| left.as_os_str().cmp(right.as_os_str()));
         for child in children {
-            scan_entry(scan_root, &child, fs_files_root, entries)?;
+            scan_entry(scan_root, &child, fs_files_root, entries, all_fresh)?;
         }
     } else if file_type.is_symlink() {
         let target = fs::read_link(current_path)
@@ -1013,12 +1083,18 @@ fn scan_entry(
         let hash = hash_fs_file_path(current_path)?;
         let object_path = fs_file_path(fs_files_root, hash)?;
         match fs::symlink_metadata(&object_path) {
-            Ok(_) => {}
+            // The fs-file already exists, so `current_path` is a distinct inode
+            // (not a hardlink into `fs-files`): the tree no longer shares all
+            // its content and is not worth caching wholesale.
+            Ok(_) => *all_fresh = false,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 create_fs_file_shard_dir(&object_path)?;
                 match fs::hard_link(current_path, &object_path) {
                     Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    // Lost the race to another writer; same conclusion as above.
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        *all_fresh = false;
+                    }
                     Err(error) => {
                         return Err(map_io(
                             &object_path,
@@ -2086,7 +2162,7 @@ mod tests {
         let source = temp_root.join(format!("source-{name}"));
         fs::create_dir(&source).unwrap();
         fs::write(source.join("file"), content).unwrap();
-        let manifest = store.fs_tree().scan(&source).unwrap();
+        let manifest = scan_fs_tree_with_root(&source, &store.fs_tree().fs_files_dir()).unwrap();
         let staged_manifest = temp_root.join(format!("manifest-{name}.jsonl"));
         manifest.write_canonical(&staged_manifest).unwrap();
         crate::import_object(store, &staged_manifest).unwrap()
@@ -3163,6 +3239,78 @@ mod tests {
     }
 
     #[test]
+    fn intern_tree_caches_fresh_tree_keyed_by_manifest_object_hash() {
+        let temp = tempfile::tempdir().unwrap();
+        let store_root = temp.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = crate::Store::create(&store_root).unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("file"), b"intern-fresh\n").unwrap();
+
+        let manifest = store.fs_tree().intern_tree(source.clone()).unwrap();
+
+        // The source tree is consumed.
+        assert!(!source.exists());
+
+        // The cache is keyed by the manifest object hash — exactly the hash
+        // `import_build` assigns to the staged manifest file. This guards the
+        // `hash_file_bytes(false, …) == hash_path(file)` equivalence intern_tree
+        // relies on.
+        let staged = temp.path().join("manifest.jsonl");
+        manifest.write_canonical(&staged).unwrap();
+        let manifest_hash = crate::import_object(&store, &staged).unwrap();
+        let cache_root = store.root().join(FS_TREES_DIR).join(manifest_hash.to_hex());
+        assert_eq!(
+            store
+                .fs_tree()
+                .lookup_materialized_root(manifest_hash)
+                .unwrap(),
+            Some(cache_root.clone()),
+        );
+        assert_eq!(
+            fs::read(cache_root.join("file")).unwrap(),
+            b"intern-fresh\n"
+        );
+    }
+
+    #[test]
+    fn intern_tree_discards_tree_sharing_existing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let store_root = temp.path().join("store");
+        fs::create_dir(&store_root).unwrap();
+        let store = crate::Store::create(&store_root).unwrap();
+
+        // A first tree interns a file into fs-files.
+        let first = temp.path().join("first");
+        fs::create_dir(&first).unwrap();
+        fs::write(first.join("x"), b"shared\n").unwrap();
+        store.fs_tree().intern_tree(first).unwrap();
+
+        // A second, differently-shaped tree reuses that file (so it is not
+        // fully fresh) plus a new one.
+        let second = temp.path().join("second");
+        fs::create_dir(&second).unwrap();
+        fs::write(second.join("x"), b"shared\n").unwrap();
+        fs::write(second.join("y"), b"unique\n").unwrap();
+        let manifest = store.fs_tree().intern_tree(second.clone()).unwrap();
+
+        // Consumed either way, but not cached: moving it would duplicate the
+        // shared file's content.
+        assert!(!second.exists());
+        let staged = temp.path().join("second.jsonl");
+        manifest.write_canonical(&staged).unwrap();
+        let manifest_hash = crate::import_object(&store, &staged).unwrap();
+        assert_eq!(
+            store
+                .fs_tree()
+                .lookup_materialized_root(manifest_hash)
+                .unwrap(),
+            None,
+        );
+    }
+
+    #[test]
     fn ensure_materialized_root_creates_fs_tree_cache_from_manifest_object() {
         let temp_dir = tempfile::tempdir().unwrap();
         let store_root = temp_dir.path().join("store");
@@ -3171,7 +3319,7 @@ mod tests {
         let source = temp_dir.path().join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("file"), b"hello\n").unwrap();
-        let manifest = store.fs_tree().scan(&source).unwrap();
+        let manifest = scan_fs_tree_with_root(&source, &store.fs_tree().fs_files_dir()).unwrap();
         let staged_manifest = temp_dir.path().join("manifest.jsonl");
         manifest.write_canonical(&staged_manifest).unwrap();
         let manifest_hash = crate::import_object(&store, &staged_manifest).unwrap();

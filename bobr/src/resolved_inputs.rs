@@ -247,9 +247,13 @@ mod tests {
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("file"), b"hello\n").unwrap();
-        let manifest = store.fs_tree().scan(&source).unwrap();
         let staged_manifest = temp.path().join("manifest.jsonl");
-        manifest.write_canonical(&staged_manifest).unwrap();
+        store
+            .fs_tree()
+            .intern_tree(source)
+            .unwrap()
+            .write_canonical(&staged_manifest)
+            .unwrap();
         let object_hash = import_build(
             &store,
             "0".repeat(64).parse().unwrap(),
@@ -299,9 +303,13 @@ mod tests {
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
         fs::write(source.join("file"), b"hello\n").unwrap();
-        let manifest = store.fs_tree().scan(&source).unwrap();
         let staged_manifest = temp.path().join("manifest.jsonl");
-        manifest.write_canonical(&staged_manifest).unwrap();
+        store
+            .fs_tree()
+            .intern_tree(source)
+            .unwrap()
+            .write_canonical(&staged_manifest)
+            .unwrap();
         let object_hash = import_build(
             &store,
             "0".repeat(64).parse().unwrap(),
