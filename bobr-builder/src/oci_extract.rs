@@ -1,6 +1,5 @@
 use crate::{
-    BuildContext, BuilderError, BuilderInputPath, BuilderInputs, InputSpec, StagedBuildResult,
-    TypedBuilder,
+    BuildContext, BuilderError, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
 };
 use bobr_core::{
     BuildLogLevel,
@@ -76,7 +75,7 @@ impl OciExtractBuilder {
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         let image = inputs.required("image")?;
-        validate_oci_layout_input(image).map_err(map_error)?;
+        validate_oci_layout_path(image).map_err(map_error)?;
 
         let output_manifest = cx.temp_dir.join(OUTPUT_MANIFEST_FILE_NAME);
         let extract_root = cx.temp_dir.join(EXTRACT_ROOT_DIR_NAME);
@@ -91,10 +90,7 @@ impl OciExtractBuilder {
         cx.log_event(
             BuildLogLevel::Info,
             "extract",
-            format!(
-                "extracting OCI image '{}' into fs-tree",
-                image.path.display()
-            ),
+            format!("extracting OCI image '{}' into fs-tree", image.display()),
         );
 
         let output = cx
@@ -102,7 +98,7 @@ impl OciExtractBuilder {
             .run(
                 &OciExtractFunction,
                 OciExtractInput {
-                    oci_layout_dir: image.path.clone(),
+                    oci_layout_dir: image.clone(),
                     extract_root,
                     output_manifest: output_manifest.clone(),
                     fs_tree,
@@ -242,10 +238,6 @@ fn remove_extraction_root(path: &Path) -> Result<(), OciExtractError> {
             path.display()
         ))),
     }
-}
-
-fn validate_oci_layout_input(image: &BuilderInputPath) -> Result<(), OciExtractError> {
-    validate_oci_layout_path(&image.path)
 }
 
 fn validate_oci_layout_path(path: &Path) -> Result<(), OciExtractError> {
@@ -977,7 +969,7 @@ fn join_rel(parent: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Builder, BuilderInputPath, TypedBuilder};
+    use crate::{Builder, TypedBuilder};
     use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
     use bobr_store::{Store, import_build};
     use flate2::Compression;
@@ -1211,7 +1203,7 @@ mod tests {
         });
         let oci = create_oci_layout(temp.path(), vec![(oci::MEDIA_TYPE_OCI_LAYER, gzip(&tar))]);
         let mut inputs = BuilderInputs::empty();
-        inputs.insert("image", BuilderInputPath { path: oci });
+        inputs.insert("image", oci);
 
         let result = OciExtractBuilder
             .build_typed(OciExtractConfig {}, inputs, &mut cx)
@@ -1316,7 +1308,7 @@ mod tests {
         let mut cx = build_context(temp.path());
         let mut inputs = BuilderInputs::empty();
         let image = create_oci_layout(temp.path(), vec![]);
-        inputs.insert("image", BuilderInputPath { path: image });
+        inputs.insert("image", image);
 
         let error = OciExtractBuilder
             .build_erased(serde_json::json!({ "unexpected": true }), inputs, &mut cx)

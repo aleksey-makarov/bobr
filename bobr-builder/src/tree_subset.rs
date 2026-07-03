@@ -56,7 +56,7 @@ fn build_tree_subset(
     cx: &mut BuildContext,
 ) -> Result<StagedBuildResult, BuilderError> {
     let input = inputs.required("tree")?;
-    let manifest = FsTreeManifest::read_canonical(&input.path).map_err(|error| {
+    let manifest = FsTreeManifest::read_canonical(input).map_err(|error| {
         BuilderError::ExecutionFailed(format!(
             "TreeSubset input 'tree' is not a valid fs-tree manifest: {error}"
         ))
@@ -104,9 +104,10 @@ fn map_subset_error(error: StoreError) -> BuilderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Builder, BuilderInputPath};
+    use crate::Builder;
     use bobr_store::fs_tree::{FsFileHash, FsTreeEntry};
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
     use std::str::FromStr;
     use tempfile::tempdir;
 
@@ -124,17 +125,13 @@ mod tests {
         FsTreeManifest::from_entries(entries).unwrap()
     }
 
-    fn write_manifest(
-        root: &std::path::Path,
-        name: &str,
-        manifest: &FsTreeManifest,
-    ) -> BuilderInputPath {
+    fn write_manifest(root: &std::path::Path, name: &str, manifest: &FsTreeManifest) -> PathBuf {
         let path = root.join(name);
         manifest.write_canonical(&path).unwrap();
-        BuilderInputPath { path }
+        path
     }
 
-    fn inputs(entries: Vec<(&str, BuilderInputPath)>) -> BuilderInputs {
+    fn inputs(entries: Vec<(&str, PathBuf)>) -> BuilderInputs {
         BuilderInputs::new(
             entries
                 .into_iter()
@@ -296,7 +293,7 @@ mod tests {
                 TreeSubsetConfig {
                     include: vec!["**".to_string()],
                 },
-                inputs(vec![("tree", BuilderInputPath { path: invalid_path })]),
+                inputs(vec![("tree", invalid_path)]),
                 &mut cx,
             )
             .unwrap_err();

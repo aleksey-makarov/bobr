@@ -53,7 +53,7 @@ impl TypedBuilder for InitramfsBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
-        let source_root = inputs.required("_tree")?.path.clone();
+        let source_root = inputs.required("_tree")?.clone();
         let output_path = cx.temp_dir.join(OUTPUT_FILE_NAME);
 
         cx.log_event(
@@ -514,7 +514,7 @@ impl fmt::Display for InitramfsError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Builder, BuilderInputPath};
+    use crate::Builder;
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use tempfile::tempdir;
@@ -668,15 +668,10 @@ mod tests {
     #[test]
     fn builder_accepts_tree_input_path_shape() {
         let mut inputs = BuilderInputs::empty();
-        inputs.insert(
-            "_tree",
-            BuilderInputPath {
-                path: PathBuf::from("/fs-tree-root"),
-            },
-        );
+        inputs.insert("_tree", PathBuf::from("/fs-tree-root"));
 
         assert_eq!(
-            inputs.required("_tree").unwrap().path,
+            *inputs.required("_tree").unwrap(),
             PathBuf::from("/fs-tree-root")
         );
     }

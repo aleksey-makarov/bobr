@@ -66,7 +66,7 @@ fn build_tree_merge(
     let manifests = inputs
         .iter()
         .map(|(name, input)| {
-            FsTreeManifest::read_canonical(&input.path).map_err(|error| {
+            FsTreeManifest::read_canonical(input).map_err(|error| {
                 BuilderError::ExecutionFailed(format!(
                     "TreeMerge input '{name}' is not a valid fs-tree manifest: {error}"
                 ))
@@ -100,9 +100,10 @@ fn build_tree_merge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Builder, BuilderInputPath};
+    use crate::Builder;
     use bobr_store::fs_tree::{FsFileHash, FsTreeEntry};
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
     use std::str::FromStr;
     use tempfile::tempdir;
 
@@ -120,17 +121,13 @@ mod tests {
         FsTreeManifest::from_entries(entries).unwrap()
     }
 
-    fn write_manifest(
-        root: &std::path::Path,
-        name: &str,
-        manifest: &FsTreeManifest,
-    ) -> BuilderInputPath {
+    fn write_manifest(root: &std::path::Path, name: &str, manifest: &FsTreeManifest) -> PathBuf {
         let path = root.join(name);
         manifest.write_canonical(&path).unwrap();
-        BuilderInputPath { path }
+        path
     }
 
-    fn inputs(entries: Vec<(&str, BuilderInputPath)>) -> BuilderInputs {
+    fn inputs(entries: Vec<(&str, PathBuf)>) -> BuilderInputs {
         BuilderInputs::new(
             entries
                 .into_iter()
@@ -245,7 +242,7 @@ mod tests {
             .build_typed(
                 TreeMergeConfig {},
                 inputs(vec![
-                    ("bad", BuilderInputPath { path: invalid_path }),
+                    ("bad", invalid_path),
                     ("valid", write_manifest(temp.path(), "valid.jsonl", &valid)),
                 ]),
                 &mut cx,

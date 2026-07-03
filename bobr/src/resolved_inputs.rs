@@ -1,7 +1,5 @@
 use crate::execution::{ExecutionError, map_store_error};
-use bobr_builder::{
-    BuilderError, BuilderInputPath, BuilderInputs, InputSpec, materialize_fs_tree_root,
-};
+use bobr_builder::{BuilderError, BuilderInputs, InputSpec, materialize_fs_tree_root};
 use bobr_core::{ObjectHash, RuntimeProvider};
 use bobr_store::Store;
 use std::collections::BTreeMap;
@@ -99,7 +97,7 @@ impl ResolvedInputs {
             } else {
                 value.object_path
             };
-            slots.insert(name, BuilderInputPath { path });
+            slots.insert(name, path);
         }
         Ok(BuilderInputs::new(slots))
     }
@@ -237,7 +235,7 @@ mod tests {
             .prepare_builder_inputs(&store, &RuntimeProvider::host())
             .unwrap();
         let resolved = builder_inputs.required("script").unwrap();
-        assert_eq!(resolved.path, object.object_path);
+        assert_eq!(*resolved, object.object_path);
     }
 
     #[test]
@@ -276,14 +274,14 @@ mod tests {
 
         let resolved = builder_inputs.required("_tree").unwrap();
         assert_eq!(
-            resolved.path,
+            *resolved,
             store
                 .fs_tree()
                 .lookup_materialized_root(object_hash)
                 .unwrap()
                 .unwrap()
         );
-        assert_eq!(fs::read(resolved.path.join("file")).unwrap(), b"hello\n");
+        assert_eq!(fs::read(resolved.join("file")).unwrap(), b"hello\n");
         assert_eq!(
             fs::read_link(store_root.join("fs-tree-refs").join("source-tree")).unwrap(),
             PathBuf::from("..")
@@ -330,7 +328,7 @@ mod tests {
             .prepare_builder_inputs(&store, &RuntimeProvider::namespace())
             .unwrap();
 
-        assert_eq!(builder_inputs.required("_tree").unwrap().path, root);
+        assert_eq!(*builder_inputs.required("_tree").unwrap(), root);
         assert_eq!(
             fs::read_link(store_root.join("fs-tree-refs").join("cached-tree")).unwrap(),
             PathBuf::from("..")

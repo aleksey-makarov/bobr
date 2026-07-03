@@ -12,8 +12,7 @@ mod reports;
 mod tools;
 
 use bobr_builder::{
-    BuildContext, Builder, BuilderError, BuilderInputPath, BuilderInputs, InputSpec,
-    StagedBuildResult, TypedBuilder,
+    BuildContext, Builder, BuilderError, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder,
 };
 use bobr_core::BuildLogLevel;
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
@@ -125,7 +124,7 @@ fn build_sandbox(
     cx: &mut BuildContext,
 ) -> Result<StagedBuildResult, BuilderError> {
     validate_sandbox_config(&config).map_err(map_error)?;
-    let rootfs = inputs.required("_rootfs")?.path.clone();
+    let rootfs = inputs.required("_rootfs")?.clone();
     validate_rootfs_path(&rootfs).map_err(map_error)?;
     let fs_tree = cx.fs_tree()?;
 
@@ -164,7 +163,7 @@ fn build_sandbox(
 fn prepare_sandbox_input(
     config: &SandboxConfig,
     rootfs: PathBuf,
-    extra_inputs: Vec<(String, BuilderInputPath)>,
+    extra_inputs: Vec<(String, PathBuf)>,
     cx: &BuildContext,
     fs_tree: FsTree,
     launcher_path: PathBuf,
@@ -223,7 +222,7 @@ fn prepare_sandbox_input(
 /// Build one runtime step config consumed by `SandboxFunction`.
 fn build_sandbox_step(
     step: &BuildStep,
-    inputs: &[(String, BuilderInputPath)],
+    inputs: &[(String, PathBuf)],
     cx: &BuildContext,
 ) -> Result<SandboxRuntimeStep, SandboxError> {
     let cwd = PathBuf::from(resolve_step_cwd(step, inputs)?);
@@ -501,11 +500,8 @@ fn input_mount_path(name: &str) -> String {
     format!("{CONTAINER_INPUTS_DIR}/{name}")
 }
 
-fn build_sandbox_input(
-    name: &str,
-    input: &BuilderInputPath,
-) -> Result<SandboxRuntimeInput, SandboxError> {
-    let path = input.path.clone();
+fn build_sandbox_input(name: &str, input: &Path) -> Result<SandboxRuntimeInput, SandboxError> {
+    let path = input.to_path_buf();
     if !path.is_dir() && !path.is_file() {
         return Err(SandboxError::InputResolutionFailed(format!(
             "sandbox input must resolve to a file or directory: {}",
@@ -523,7 +519,7 @@ fn collect_extra_inputs(
     spec: &InputSpec,
     builder_name: &str,
     inputs: &BuilderInputs,
-) -> Result<Vec<(String, BuilderInputPath)>, SandboxError> {
+) -> Result<Vec<(String, PathBuf)>, SandboxError> {
     let mut named = Vec::new();
     for (name, object) in inputs.extras(spec) {
         validate_input_name(name)?;
@@ -540,7 +536,7 @@ fn collect_extra_inputs(
 /// Render one step string by expanding `@{name}` interpolation variables.
 fn interpolate_step_string(
     value: &str,
-    inputs: &[(String, BuilderInputPath)],
+    inputs: &[(String, PathBuf)],
 ) -> Result<String, SandboxError> {
     let mut rendered = String::new();
     let mut index = 0;
@@ -611,10 +607,7 @@ fn validate_interpolation_name(key: &str, value: &str, escaped: bool) -> Result<
 }
 
 /// Resolve a built-in or named-input interpolation variable.
-fn interpolation_value(
-    key: &str,
-    inputs: &[(String, BuilderInputPath)],
-) -> Result<String, SandboxError> {
+fn interpolation_value(key: &str, inputs: &[(String, PathBuf)]) -> Result<String, SandboxError> {
     match key {
         "build" => Ok(CONTAINER_BUILD_DIR.to_string()),
         "out" => Ok(CONTAINER_OUT_DIR.to_string()),
@@ -637,7 +630,7 @@ fn interpolation_value(
 /// Resolve and validate a step working directory.
 fn resolve_step_cwd(
     step: &BuildStep,
-    inputs: &[(String, BuilderInputPath)],
+    inputs: &[(String, PathBuf)],
 ) -> Result<String, SandboxError> {
     let cwd = interpolate_step_string(&step.cwd, inputs)?;
     if cwd.is_empty() || !cwd.starts_with('/') {
@@ -652,7 +645,7 @@ fn resolve_step_cwd(
 /// Resolve all argv entries for a step.
 fn resolve_step_argv(
     step: &BuildStep,
-    inputs: &[(String, BuilderInputPath)],
+    inputs: &[(String, PathBuf)],
 ) -> Result<Vec<String>, SandboxError> {
     step.argv
         .iter()
@@ -663,7 +656,7 @@ fn resolve_step_argv(
 /// Resolve all environment values for a step.
 fn resolve_step_env(
     step: &BuildStep,
-    inputs: &[(String, BuilderInputPath)],
+    inputs: &[(String, PathBuf)],
 ) -> Result<Vec<(String, String)>, SandboxError> {
     let mut rendered = Vec::new();
     for (key, value) in &step.env {
@@ -681,7 +674,7 @@ fn resolve_step_env(
 /// Eagerly validate interpolation in every step field.
 fn validate_step_interpolations(
     steps: &[BuildStep],
-    inputs: &[(String, BuilderInputPath)],
+    inputs: &[(String, PathBuf)],
 ) -> Result<(), SandboxError> {
     for step in steps {
         let _ = resolve_step_cwd(step, inputs)?;
@@ -984,7 +977,7 @@ impl RuntimeFunction for SandboxFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bobr_builder::{Builder, BuilderInputPath};
+    use bobr_builder::Builder;
     use bobr_store::Store;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1004,10 +997,7 @@ mod tests {
     }
 
     fn inputs(rootfs: PathBuf) -> BuilderInputs {
-        BuilderInputs::new(BTreeMap::from([(
-            "_rootfs".to_string(),
-            BuilderInputPath { path: rootfs },
-        )]))
+        BuilderInputs::new(BTreeMap::from([("_rootfs".to_string(), rootfs)]))
     }
 
     #[test]
@@ -1096,13 +1086,8 @@ mod tests {
             &SANDBOX_SPEC,
             "Sandbox",
             &BuilderInputs::new(BTreeMap::from([
-                (
-                    "_rootfs".to_string(),
-                    BuilderInputPath {
-                        path: rootfs.clone(),
-                    },
-                ),
-                ("source".to_string(), BuilderInputPath { path: source }),
+                ("_rootfs".to_string(), rootfs.clone()),
+                ("source".to_string(), source),
             ])),
         )
         .unwrap();

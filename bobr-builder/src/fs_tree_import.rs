@@ -46,7 +46,7 @@ impl TypedBuilder for FsTreeImportBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
-        let source_root = inputs.required("input")?.path.clone();
+        let source_root = inputs.required("input")?.clone();
         let fs_tree = cx.fs_tree()?;
         let output_manifest = cx.temp_dir.join("fs-tree-manifest.jsonl");
 
@@ -126,7 +126,7 @@ impl RuntimeFunction for FsTreeImportFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Builder, BuilderInputPath};
+    use crate::Builder;
     use bobr_store::fs_tree::{FsTreeEntry, FsTreeInstallAttrs, FsTreeInstallRule, FsTreeManifest};
     use bobr_store::{Store, import_build};
     use std::collections::BTreeMap;
@@ -150,10 +150,7 @@ mod tests {
     }
 
     fn input_object(path: PathBuf) -> BuilderInputs {
-        BuilderInputs::new(BTreeMap::from([(
-            "input".to_string(),
-            BuilderInputPath { path },
-        )]))
+        BuilderInputs::new(BTreeMap::from([("input".to_string(), path)]))
     }
 
     #[test]

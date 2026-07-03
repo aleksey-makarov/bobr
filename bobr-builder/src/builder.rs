@@ -151,18 +151,11 @@ pub(crate) fn validate_input_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The materialized filesystem path of one resolved builder input.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderInputPath {
-    /// Path to the input's materialized content.
-    pub path: PathBuf,
-}
-
-/// The resolved inputs handed to a builder: a map from slot name to its
-/// materialized [`BuilderInputPath`].
+/// The resolved inputs handed to a builder: a map from slot name to the
+/// materialized filesystem path of its content.
 #[derive(Debug, Clone, Default)]
 pub struct BuilderInputs {
-    slots: BTreeMap<String, BuilderInputPath>,
+    slots: BTreeMap<String, PathBuf>,
 }
 
 impl BuilderInputs {
@@ -172,7 +165,7 @@ impl BuilderInputs {
     }
 
     /// Builds an input set from `slots`.
-    pub fn new(slots: BTreeMap<String, BuilderInputPath>) -> Self {
+    pub fn new(slots: BTreeMap<String, PathBuf>) -> Self {
         Self { slots }
     }
 
@@ -182,12 +175,12 @@ impl BuilderInputs {
     }
 
     /// Inserts an input under `name`.
-    pub fn insert(&mut self, name: impl Into<String>, value: BuilderInputPath) {
+    pub fn insert(&mut self, name: impl Into<String>, value: PathBuf) {
         self.slots.insert(name.into(), value);
     }
 
     /// Returns the required input `name`, or an error if it is missing.
-    pub fn required(&self, name: &str) -> Result<&BuilderInputPath, BuilderError> {
+    pub fn required(&self, name: &str) -> Result<&PathBuf, BuilderError> {
         match self.slots.get(name) {
             Some(object) => Ok(object),
             None => Err(BuilderError::ExecutionFailed(format!(
@@ -197,18 +190,18 @@ impl BuilderInputs {
     }
 
     /// Returns the optional input `name`, if present.
-    pub fn optional(&self, name: &str) -> Option<&BuilderInputPath> {
+    pub fn optional(&self, name: &str) -> Option<&PathBuf> {
         self.slots.get(name)
     }
 
     /// Returns the input `name`, if present.
-    pub fn get(&self, name: &str) -> Option<&BuilderInputPath> {
+    pub fn get(&self, name: &str) -> Option<&PathBuf> {
         self.slots.get(name)
     }
 
     /// Returns the input `name` only if it is an extra (not a declared slot of
     /// `spec`).
-    pub fn extra<'a>(&'a self, spec: &InputSpec, name: &str) -> Option<&'a BuilderInputPath> {
+    pub fn extra<'a>(&'a self, spec: &InputSpec, name: &str) -> Option<&'a PathBuf> {
         if spec.is_reserved_input(name) {
             None
         } else {
@@ -220,7 +213,7 @@ impl BuilderInputs {
     pub fn extras<'a>(
         &'a self,
         spec: &'a InputSpec,
-    ) -> impl Iterator<Item = (&'a str, &'a BuilderInputPath)> + 'a {
+    ) -> impl Iterator<Item = (&'a str, &'a PathBuf)> + 'a {
         self.slots.iter().filter_map(move |(name, object)| {
             if spec.is_reserved_input(name) {
                 None
@@ -543,10 +536,8 @@ mod tests {
     use bobr_runtime::runtime_provider::{RuntimeBackend, RuntimeProvider};
     use serde::Deserialize;
 
-    fn sample_builder_object() -> BuilderInputPath {
-        BuilderInputPath {
-            path: PathBuf::from("/tmp/object"),
-        }
+    fn sample_builder_object() -> PathBuf {
+        PathBuf::from("/tmp/object")
     }
 
     #[test]
@@ -639,7 +630,7 @@ mod tests {
             allow_extra_inputs: true,
         };
 
-        assert_eq!(inputs.required("script").unwrap().path, object.path);
+        assert_eq!(*inputs.required("script").unwrap(), object);
         assert!(inputs.optional("base").is_none());
         assert!(inputs.extra(&SPEC, "source").is_some());
         assert_eq!(inputs.extras(&SPEC).count(), 3);

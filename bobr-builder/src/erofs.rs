@@ -64,7 +64,7 @@ impl TypedBuilder for ErofsRootfsBuilder {
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         validate_erofs_config(&config)?;
-        let source_root = inputs.required("_tree")?.path.clone();
+        let source_root = inputs.required("_tree")?.clone();
         let mkfs_erofs = find_program_in_path("mkfs.erofs").ok_or_else(|| {
             BuilderError::ExecutionFailed(
                 "required tool 'mkfs.erofs' was not found in PATH; install erofs-utils".to_string(),
@@ -271,7 +271,6 @@ impl std::fmt::Display for ErofsRootfsError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BuilderInputPath;
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use tempfile::tempdir;
@@ -307,12 +306,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
         let mut inputs = BuilderInputs::empty();
-        inputs.insert(
-            "_tree",
-            BuilderInputPath {
-                path: temp.path().join("root"),
-            },
-        );
+        inputs.insert("_tree", temp.path().join("root"));
 
         let error = ErofsRootfsBuilder
             .build_typed(
