@@ -13,8 +13,6 @@ the Nickel recipes. For the ideas behind it all, see [Concepts](./CONCEPTS.md).
   runs each builder in a Linux user namespace when you are not root, and uses
   these setuid helpers to set up the uid/gid map. As root — or under `podman
   unshare` — bobr uses its in-process host runtime and needs neither.
-- `mkfs.erofs` (the `erofs-utils` package) — only if you build EROFS
-  root-filesystem images (the `ErofsRootfs` builder).
 - `nickel` — only for the recipe workflow below.
 
 ## Build bobr

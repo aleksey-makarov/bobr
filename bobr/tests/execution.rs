@@ -91,7 +91,6 @@ fn registered_builders_include_current_tags_only() {
         "Tree",
         "TreeSubset",
         "TreeMerge",
-        "ErofsRootfs",
         "Initramfs",
         "Sandbox",
         "OciExtract",
@@ -105,6 +104,7 @@ fn registered_builders_include_current_tags_only() {
         "Rootfs",
         "Ext4Rootfs",
         "Image",
+        "ErofsRootfs",
     ] {
         assert!(
             !tags.contains(&tag),

@@ -232,7 +232,7 @@ Extracts one OCI image layout into an fs-tree.
 
 - extracts the image root filesystem into one fs-tree object
 - the result can be consumed as an fs-tree input by `TreeMerge`, `TreeSubset`,
-  `ErofsRootfs`, `Initramfs`, or `Sandbox`
+  `Initramfs`, or `Sandbox`
 
 ### `Sandbox`
 
@@ -313,30 +313,6 @@ it is a recursive tree: objects become directories, arrays become directories
 with zero-padded numeric entries (`00000000`, …) in order, and strings become
 file contents. Keys must be non-empty, must not be `.` or `..`, and may contain
 only ASCII letters, digits, `.`, `_`, and `-`.
-
-### `ErofsRootfs`
-
-Builds an EROFS filesystem image from an fs-tree.
-
-**Inputs:** required `_tree` — one fs-tree, materialized before execution.
-
-**Config:** optional `compression` and `label` (both strings, `""` = unset):
-
-```json
-{ "compression": "", "label": "" }
-```
-
-- `compression` — `""` produces a plain image (no `-z`); a non-empty string is
-  passed as `-z <compression>`
-- `label` — `""` means no label; a non-empty string is passed as `-L <label>`
-
-**Behavior:** runs `mkfs.erofs` from `PATH` through a namespace function and
-produces one regular file containing the image:
-
-```sh
-mkfs.erofs --sort=path -T 0 -U clear [ -L label ] [ -z compression ] \
-  rootfs.erofs <materialized-root>
-```
 
 ### `Initramfs`
 

@@ -248,3 +248,20 @@ packages into a usable rootfs.
 
 - **Inputs:** one or more packages (the roots of the closure).
 - **Config:** none.
+
+## EROFS images
+
+There is no `ErofsRootfs` builder. To pack a filesystem tree into a reproducible
+EROFS image, use the `recipe.erofs_image` helper — it lowers to a
+`SandboxBuildRootfs` that runs `mkfs.erofs` (from `pkgs.erofs_utils`) over the
+materialized tree, in a rootfs assembled from the erofs-utils runtime closure:
+
+```nickel
+let erofs_rootfs = recipe.erofs_image pkgs { name = "erofs-rootfs", tree = rootfs }
+```
+
+The reproducibility flags (`--sort=path`, a fixed `-T`, `-U clear`, and a
+constant label) live in the `filesystem/mk-erofs.sh` build script. The result is
+a plain-object directory holding a single `erofs-rootfs.erofs` file
+(`preserve_ownership = false`), since the image blob has no per-file ownership of
+its own.

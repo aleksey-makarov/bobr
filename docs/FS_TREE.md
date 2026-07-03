@@ -45,7 +45,7 @@ Among the built-in builders:
   produces one from an OCI image;
 - `TreeMerge` and `TreeSubset` transform fs-trees at the manifest level, without
   materializing them;
-- `ErofsRootfs`, `Initramfs`, and `Sandbox` consume a materialized fs-tree.
+- `Initramfs` and `Sandbox` consume a materialized fs-tree.
 
 A recipe controls materialization by the **input name**: an input whose name
 begins with `_` (e.g. `_rootfs`, `_tree`) is materialized into a real directory

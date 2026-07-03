@@ -58,7 +58,7 @@ producer can neither forge nor omit envelope fields.
   "status": "done",                  // closed lifecycle enum (see below)
   "op": "mkfs",                      // optional, free-form builder operation
   "subject": {                       // omitted for run-level events
-    "tag": "Erofs",
+    "tag": "Sandbox",
     "name": "erofs-rootfs",
     "build_key": "<full build key>",
     "object_hash": "<full object hash>"   // optional (present on completion/cache hit)
