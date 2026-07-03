@@ -89,6 +89,7 @@ impl TypedBuilder for GroupBuilder {
 mod tests {
     use super::*;
     use crate::Builder;
+    use bobr_store::fs_tree::FsTree;
     use std::collections::BTreeMap;
     use std::path::Path;
     use tempfile::tempdir;
@@ -97,7 +98,7 @@ mod tests {
         let temp_dir = root.join("group").join("tmp");
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(&temp_dir).unwrap();
-        BuildContext::with_noop_logger(temp_dir)
+        BuildContext::with_noop_logger(temp_dir.clone(), FsTree::new(temp_dir.clone()))
     }
 
     fn sample_input() -> std::path::PathBuf {

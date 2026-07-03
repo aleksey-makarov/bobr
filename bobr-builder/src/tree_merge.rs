@@ -101,6 +101,7 @@ fn build_tree_merge(
 mod tests {
     use super::*;
     use crate::Builder;
+    use bobr_store::fs_tree::FsTree;
     use bobr_store::fs_tree::{FsFileHash, FsTreeEntry};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -151,7 +152,10 @@ mod tests {
     #[test]
     fn build_rejects_fewer_than_two_inputs() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
 
         let error = TreeMergeBuilder
             .build_typed(TreeMergeConfig {}, BuilderInputs::empty(), &mut cx)
@@ -163,7 +167,10 @@ mod tests {
     #[test]
     fn build_merges_disjoint_manifests_and_writes_canonical_output() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
         std::fs::create_dir(&cx.temp_dir).unwrap();
         let left = manifest(vec![
             root(),
@@ -203,7 +210,10 @@ mod tests {
     #[test]
     fn build_allows_identical_overlap() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
         std::fs::create_dir(&cx.temp_dir).unwrap();
         let manifest = manifest(vec![
             root(),
@@ -232,7 +242,10 @@ mod tests {
     #[test]
     fn build_reports_named_input_for_invalid_manifest() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
         std::fs::create_dir(&cx.temp_dir).unwrap();
         let valid = manifest(vec![root(), FsTreeEntry::file("a", hash())]);
         let invalid_path = temp.path().join("invalid.jsonl");
@@ -255,7 +268,10 @@ mod tests {
     #[test]
     fn build_rejects_merge_conflicts() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
         std::fs::create_dir(&cx.temp_dir).unwrap();
         let left = manifest(vec![root(), FsTreeEntry::file("a", hash())]);
         let right = manifest(vec![root(), FsTreeEntry::file("a", other_hash())]);
@@ -277,7 +293,10 @@ mod tests {
     #[test]
     fn erased_config_rejects_unknown_fields() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
 
         let error = TreeMergeBuilder
             .build_erased(

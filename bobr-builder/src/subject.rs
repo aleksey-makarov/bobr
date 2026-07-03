@@ -217,15 +217,12 @@ impl BuilderPlannedSubject {
         &self,
         ctx: &SubjectRunContext,
         inputs: BuilderInputs,
-        fs_tree: Option<FsTree>,
+        fs_tree: FsTree,
     ) -> Result<StagedBuildResult, BuilderError> {
-        let mut context = BuildContext::with_noop_logger(ctx.temp_dir().to_path_buf())
+        let mut context = BuildContext::with_noop_logger(ctx.temp_dir().to_path_buf(), fs_tree)
             .with_logger(ctx.logger().clone())
             .with_cancellation_token(ctx.cancellation().clone())
             .with_runtime_provider(ctx.runtime().clone());
-        if let Some(fs_tree) = fs_tree {
-            context = context.with_fs_tree(fs_tree);
-        }
         self.build_erased(inputs, &mut context)
     }
 }
@@ -306,7 +303,13 @@ mod tests {
             RuntimeProvider::namespace(),
         );
 
-        let staged = subject.execute(&ctx, BuilderInputs::empty(), None).unwrap();
+        let staged = subject
+            .execute(
+                &ctx,
+                BuilderInputs::empty(),
+                FsTree::new(temp.path().to_path_buf()),
+            )
+            .unwrap();
 
         assert_eq!(staged.staged_path, temp.path().join("out"));
         assert!(staged.staged_path.join("payload").is_file());

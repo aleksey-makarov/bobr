@@ -47,7 +47,7 @@ impl TypedBuilder for FsTreeImportBuilder {
         cx: &mut BuildContext,
     ) -> Result<StagedBuildResult, BuilderError> {
         let source_root = inputs.required("input")?.clone();
-        let fs_tree = cx.fs_tree()?;
+        let fs_tree = cx.fs_tree();
         let output_manifest = cx.temp_dir.join("fs-tree-manifest.jsonl");
 
         cx.log_event(
@@ -165,8 +165,7 @@ mod tests {
         fs::set_permissions(source.join("bin/tool"), fs::Permissions::from_mode(0o755)).unwrap();
         symlink("bin/tool", source.join("tool-link")).unwrap();
         let owner = fs::symlink_metadata(temp.path()).unwrap();
-        let mut cx =
-            BuildContext::with_noop_logger(temp.path().join("tmp")).with_fs_tree(store.fs_tree());
+        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"), store.fs_tree());
         fs::create_dir(cx.temp_dir.as_path()).unwrap();
 
         let result = FsTreeImportBuilder
@@ -235,40 +234,13 @@ mod tests {
     }
 
     #[test]
-    fn build_requires_fs_tree() {
-        let temp = tempdir().unwrap();
-        let source = temp.path().join("source");
-        fs::create_dir(&source).unwrap();
-        let owner = fs::symlink_metadata(temp.path()).unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
-        fs::create_dir(cx.temp_dir.as_path()).unwrap();
-
-        let error = FsTreeImportBuilder
-            .build_typed(
-                FsTreeImportConfig {
-                    install: install(owner.uid(), owner.gid()),
-                },
-                input_object(source),
-                &mut cx,
-            )
-            .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("requires store fs-tree operations")
-        );
-    }
-
-    #[test]
     fn build_requires_input_slot() {
         let temp = tempdir().unwrap();
         let store_root = temp.path().join("store");
         fs::create_dir(&store_root).unwrap();
         let store = Store::create(&store_root).unwrap();
         let owner = fs::symlink_metadata(temp.path()).unwrap();
-        let mut cx =
-            BuildContext::with_noop_logger(temp.path().join("tmp")).with_fs_tree(store.fs_tree());
+        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"), store.fs_tree());
         fs::create_dir(cx.temp_dir.as_path()).unwrap();
 
         let error = FsTreeImportBuilder
@@ -287,7 +259,10 @@ mod tests {
     #[test]
     fn erased_config_rejects_legacy_symlink_mode() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
         let config = serde_json::json!({
             "install": {
                 "rules": [{

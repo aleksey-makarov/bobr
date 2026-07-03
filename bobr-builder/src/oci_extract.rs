@@ -85,7 +85,7 @@ impl OciExtractBuilder {
                 cx.temp_dir.display()
             ))));
         }
-        let fs_tree = cx.fs_tree()?;
+        let fs_tree = cx.fs_tree();
 
         cx.log_event(
             BuildLogLevel::Info,
@@ -1176,7 +1176,7 @@ mod tests {
         fs::create_dir(&store_root).unwrap();
         let store = Store::create(&store_root).unwrap();
         let owner = fs::symlink_metadata(temp.path()).unwrap();
-        let mut cx = build_context(temp.path()).with_fs_tree(store.fs_tree());
+        let mut cx = build_context(temp.path(), store.fs_tree());
         let tar = make_tar(|builder| {
             append_dir(
                 builder,
@@ -1305,7 +1305,7 @@ mod tests {
     #[test]
     fn build_erased_rejects_unknown_config_field() {
         let temp = tempdir().unwrap();
-        let mut cx = build_context(temp.path());
+        let mut cx = build_context(temp.path(), FsTree::new(temp.path().to_path_buf()));
         let mut inputs = BuilderInputs::empty();
         let image = create_oci_layout(temp.path(), vec![]);
         inputs.insert("image", image);
@@ -1317,11 +1317,11 @@ mod tests {
         assert!(matches!(error, BuilderError::InvalidRecipe(_)));
     }
 
-    fn build_context(root: &Path) -> BuildContext {
+    fn build_context(root: &Path, fs_tree: FsTree) -> BuildContext {
         let temp_dir = root.join("tmp");
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(&temp_dir).unwrap();
-        BuildContext::with_noop_logger(temp_dir)
+        BuildContext::with_noop_logger(temp_dir, fs_tree)
     }
 
     fn create_oci_layout(root: &Path, layers: Vec<(&str, Vec<u8>)>) -> PathBuf {

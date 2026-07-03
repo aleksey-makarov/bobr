@@ -126,7 +126,7 @@ fn build_sandbox(
     validate_sandbox_config(&config).map_err(map_error)?;
     let rootfs = inputs.required("_rootfs")?.clone();
     validate_rootfs_path(&rootfs).map_err(map_error)?;
-    let fs_tree = cx.fs_tree()?;
+    let fs_tree = cx.fs_tree();
 
     let extra_inputs =
         collect_extra_inputs(&SANDBOX_SPEC, "Sandbox", &inputs).map_err(map_error)?;
@@ -1020,7 +1020,10 @@ mod tests {
     #[test]
     fn erased_config_rejects_unknown_fields() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
 
         let error = SandboxBuilder
             .build_erased(
@@ -1038,7 +1041,10 @@ mod tests {
         let temp = tempdir().unwrap();
         let rootfs = temp.path().join("rootfs");
         fs::create_dir(&rootfs).unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
 
         let error = SandboxBuilder
             .build_typed(
@@ -1079,8 +1085,7 @@ mod tests {
                 env: Map::from_iter([("SRC".to_string(), Value::String("@{source}".to_string()))]),
             }],
         };
-        let cx =
-            BuildContext::with_noop_logger(temp.path().join("tmp")).with_fs_tree(store.fs_tree());
+        let cx = BuildContext::with_noop_logger(temp.path().join("tmp"), store.fs_tree());
         fs::create_dir(&cx.temp_dir).unwrap();
         let extra_inputs = collect_extra_inputs(
             &SANDBOX_SPEC,
@@ -1127,28 +1132,13 @@ mod tests {
     }
 
     #[test]
-    fn build_requires_fs_tree() {
-        let temp = tempdir().unwrap();
-        let rootfs = temp.path().join("rootfs");
-        fs::create_dir(&rootfs).unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
-
-        let error = SandboxBuilder
-            .build_typed(valid_config(), inputs(rootfs), &mut cx)
-            .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("requires store fs-tree operations")
-        );
-    }
-
-    #[test]
     fn build_reports_missing_rootfs_directory() {
         let temp = tempdir().unwrap();
         let rootfs = temp.path().join("missing-rootfs");
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
 
         let error = SandboxBuilder
             .build_typed(valid_config(), inputs(rootfs), &mut cx)

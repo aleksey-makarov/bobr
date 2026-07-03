@@ -237,7 +237,7 @@ pub struct BuildContext {
     logger: Arc<dyn BuildLogger>,
     cancellation: CancellationToken,
     runtime: RuntimeProvider,
-    fs_tree: Option<FsTree>,
+    fs_tree: FsTree,
 }
 
 impl fmt::Debug for BuildContext {
@@ -245,21 +245,20 @@ impl fmt::Debug for BuildContext {
         f.debug_struct("BuildContext")
             .field("temp_dir", &self.temp_dir)
             .field("runtime_backend", &self.runtime.backend())
-            .field("has_fs_tree", &self.fs_tree.is_some())
             .finish_non_exhaustive()
     }
 }
 
 impl BuildContext {
-    /// A context with a no-op logger, the host runtime, and no fs-tree — for
-    /// tests and simple callers.
-    pub fn with_noop_logger(temp_dir: PathBuf) -> Self {
+    /// A context with a no-op logger and the host runtime, rooted at `fs_tree`
+    /// — for tests and simple callers.
+    pub fn with_noop_logger(temp_dir: PathBuf, fs_tree: FsTree) -> Self {
         Self {
             temp_dir,
             logger: Arc::new(NoopBuildLogger),
             cancellation: CancellationToken::new(),
             runtime: RuntimeProvider::host(),
-            fs_tree: None,
+            fs_tree,
         }
     }
 
@@ -281,12 +280,6 @@ impl BuildContext {
         self
     }
 
-    /// Returns the context with a store `fs_tree` attached.
-    pub fn with_fs_tree(mut self, fs_tree: FsTree) -> Self {
-        self.fs_tree = Some(fs_tree);
-        self
-    }
-
     /// The cancellation token for this build.
     pub fn cancellation_token(&self) -> &CancellationToken {
         &self.cancellation
@@ -297,14 +290,9 @@ impl BuildContext {
         &self.runtime
     }
 
-    /// The store fs-tree, or an error if the builder needs it but none was
-    /// provided.
-    pub fn fs_tree(&self) -> Result<FsTree, BuilderError> {
-        self.fs_tree.clone().ok_or_else(|| {
-            BuilderError::ExecutionFailed(
-                "builder requires store fs-tree operations, but none were provided".to_string(),
-            )
-        })
+    /// The store fs-tree for this build.
+    pub fn fs_tree(&self) -> FsTree {
+        self.fs_tree.clone()
     }
 
     /// Returns an error if the build has been cancelled.
@@ -689,7 +677,10 @@ mod tests {
     #[test]
     fn typed_builder_adapter_decodes_config() {
         let builder = DummyBuilder;
-        let mut cx = BuildContext::with_noop_logger(PathBuf::from("/tmp/tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            PathBuf::from("/tmp/tmp"),
+            FsTree::new(PathBuf::from("/tmp/tmp")),
+        );
 
         let result = builder
             .build_erased(
@@ -704,30 +695,23 @@ mod tests {
 
     #[test]
     fn build_context_defaults_to_host_runtime() {
-        let cx = BuildContext::with_noop_logger(PathBuf::from("/tmp/tmp"));
+        let cx = BuildContext::with_noop_logger(
+            PathBuf::from("/tmp/tmp"),
+            FsTree::new(PathBuf::from("/tmp/tmp")),
+        );
 
         assert_eq!(cx.runtime().backend(), RuntimeBackend::Host);
     }
 
     #[test]
     fn build_context_can_override_runtime_provider() {
-        let cx = BuildContext::with_noop_logger(PathBuf::from("/tmp/tmp"))
-            .with_runtime_provider(RuntimeProvider::namespace());
+        let cx = BuildContext::with_noop_logger(
+            PathBuf::from("/tmp/tmp"),
+            FsTree::new(PathBuf::from("/tmp/tmp")),
+        )
+        .with_runtime_provider(RuntimeProvider::namespace());
 
         assert_eq!(cx.runtime().backend(), RuntimeBackend::Namespace);
-    }
-
-    #[test]
-    fn build_context_reports_missing_fs_tree() {
-        let cx = BuildContext::with_noop_logger(PathBuf::from("/tmp/tmp"));
-
-        let error = cx.fs_tree().unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("requires store fs-tree operations")
-        );
     }
 
     #[test]

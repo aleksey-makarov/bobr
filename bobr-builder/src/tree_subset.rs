@@ -105,6 +105,7 @@ fn map_subset_error(error: StoreError) -> BuilderError {
 mod tests {
     use super::*;
     use crate::Builder;
+    use bobr_store::fs_tree::FsTree;
     use bobr_store::fs_tree::{FsFileHash, FsTreeEntry};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -156,7 +157,10 @@ mod tests {
     #[test]
     fn build_selects_subset_and_parent_directories() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
         std::fs::create_dir(&cx.temp_dir).unwrap();
         let input = manifest(vec![
             root(),
@@ -203,7 +207,10 @@ mod tests {
     #[test]
     fn build_double_star_pattern_selects_prefix_path() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
         std::fs::create_dir(&cx.temp_dir).unwrap();
         let input = manifest(vec![
             root(),
@@ -237,7 +244,10 @@ mod tests {
     #[test]
     fn build_rejects_empty_include() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
         std::fs::create_dir(&cx.temp_dir).unwrap();
         let input = manifest(vec![root(), FsTreeEntry::file("a", hash())]);
 
@@ -259,7 +269,10 @@ mod tests {
     #[test]
     fn build_rejects_no_match_include() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
         std::fs::create_dir(&cx.temp_dir).unwrap();
         let input = manifest(vec![root(), FsTreeEntry::file("a", hash())]);
 
@@ -283,7 +296,10 @@ mod tests {
     #[test]
     fn build_reports_tree_input_for_invalid_manifest() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
         std::fs::create_dir(&cx.temp_dir).unwrap();
         let invalid_path = temp.path().join("invalid.jsonl");
         std::fs::write(&invalid_path, b"not a manifest\n").unwrap();
@@ -304,7 +320,10 @@ mod tests {
     #[test]
     fn erased_config_rejects_unknown_fields() {
         let temp = tempdir().unwrap();
-        let mut cx = BuildContext::with_noop_logger(temp.path().join("tmp"));
+        let mut cx = BuildContext::with_noop_logger(
+            temp.path().join("tmp"),
+            FsTree::new(temp.path().to_path_buf()),
+        );
 
         let error = TreeSubsetBuilder
             .build_erased(

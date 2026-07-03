@@ -183,7 +183,13 @@ impl fmt::Display for ParseFsFileHashError {
 impl std::error::Error for ParseFsFileHashError {}
 
 impl FsTree {
-    pub(crate) fn new(root: PathBuf) -> Self {
+    /// Creates a handle rooted at `root`.
+    ///
+    /// Production code obtains an [`FsTree`] through [`Store::fs_tree`], which
+    /// roots it at a real store. This constructor exists for callers that hold a
+    /// store root directly (and for tests); the root is validated lazily by the
+    /// operations that need it.
+    pub fn new(root: PathBuf) -> Self {
         Self { root }
     }
 
