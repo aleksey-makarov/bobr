@@ -1451,7 +1451,6 @@ mod tests {
 
     #[test]
     fn execute_graph_drains_in_flight_workers_when_publish_fails() {
-        use bobr_builder::InputSlot;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
 
@@ -1536,7 +1535,7 @@ mod tests {
         struct RootBuilder;
         static ROOT_BUILDER: RootBuilder = RootBuilder;
         static DRAIN_ROOT_SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::named("fast"), InputSlot::named("slow")],
+            required_inputs: &["fast", "slow"],
             optional_inputs: &[],
             allow_extra_inputs: false,
         };

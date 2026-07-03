@@ -1,5 +1,5 @@
 use crate::BuilderError;
-use crate::{BuildContext, BuilderInputs, InputSlot, InputSpec, StagedBuildResult, TypedBuilder};
+use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
 use bobr_core::BuildLogLevel;
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
@@ -37,7 +37,7 @@ pub struct ErofsRootfsConfig {
 }
 
 static EROFS_ROOTFS_SPEC: InputSpec = InputSpec {
-    required_inputs: &[InputSlot::named("_tree")],
+    required_inputs: &["_tree"],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
@@ -279,10 +279,7 @@ mod tests {
     #[test]
     fn input_spec_is_single_tree_input() {
         assert_eq!(TypedBuilder::tag(&ErofsRootfsBuilder), "ErofsRootfs");
-        assert_eq!(
-            EROFS_ROOTFS_SPEC.required_inputs,
-            &[InputSlot::named("_tree")]
-        );
+        assert_eq!(EROFS_ROOTFS_SPEC.required_inputs, &["_tree"]);
         assert!(!EROFS_ROOTFS_SPEC.allow_extra_inputs);
     }
 

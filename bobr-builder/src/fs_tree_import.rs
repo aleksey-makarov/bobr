@@ -1,5 +1,5 @@
 use crate::BuilderError;
-use crate::{BuildContext, BuilderInputs, InputSlot, InputSpec, StagedBuildResult, TypedBuilder};
+use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
 use bobr_core::BuildLogLevel;
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use bobr_store::fs_tree::{FsTree, FsTreeInstall};
@@ -20,7 +20,7 @@ pub struct FsTreeImportConfig {
 pub struct FsTreeImportBuilder;
 
 static FS_TREE_IMPORT_SPEC: InputSpec = InputSpec {
-    required_inputs: &[InputSlot::named("input")],
+    required_inputs: &["input"],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };

@@ -1,6 +1,6 @@
 use crate::{
-    BuildContext, BuilderError, BuilderInputPath, BuilderInputs, InputSlot, InputSpec,
-    StagedBuildResult, TypedBuilder,
+    BuildContext, BuilderError, BuilderInputPath, BuilderInputs, InputSpec, StagedBuildResult,
+    TypedBuilder,
 };
 use bobr_core::{
     BuildLogLevel,
@@ -38,7 +38,7 @@ pub struct OciExtractConfig {}
 pub struct OciExtractBuilder;
 
 static OCI_EXTRACT_SPEC: InputSpec = InputSpec {
-    required_inputs: &[InputSlot::named("image")],
+    required_inputs: &["image"],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
@@ -991,10 +991,7 @@ mod tests {
     #[test]
     fn input_spec_is_registered_shape() {
         assert_eq!(TypedBuilder::tag(&OciExtractBuilder), "OciExtract");
-        assert_eq!(
-            OCI_EXTRACT_SPEC.required_inputs,
-            &[InputSlot::named("image")]
-        );
+        assert_eq!(OCI_EXTRACT_SPEC.required_inputs, &["image"]);
         assert!(!OCI_EXTRACT_SPEC.allow_extra_inputs);
     }
 

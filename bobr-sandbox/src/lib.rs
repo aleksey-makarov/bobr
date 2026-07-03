@@ -12,7 +12,7 @@ mod reports;
 mod tools;
 
 use bobr_builder::{
-    BuildContext, Builder, BuilderError, BuilderInputPath, BuilderInputs, InputSlot, InputSpec,
+    BuildContext, Builder, BuilderError, BuilderInputPath, BuilderInputs, InputSpec,
     StagedBuildResult, TypedBuilder,
 };
 use bobr_core::BuildLogLevel;
@@ -85,7 +85,7 @@ struct BuildStep {
 }
 
 static SANDBOX_SPEC: InputSpec = InputSpec {
-    required_inputs: &[InputSlot::named("_rootfs")],
+    required_inputs: &["_rootfs"],
     optional_inputs: &[],
     allow_extra_inputs: true,
 };
@@ -1014,7 +1014,7 @@ mod tests {
     fn spec_requires_fs_tree_root_rootfs_and_allows_extra_inputs() {
         assert_eq!(TypedBuilder::tag(&SandboxBuilder), "Sandbox");
         assert_eq!(SANDBOX_SPEC.required_inputs.len(), 1);
-        assert_eq!(SANDBOX_SPEC.required_inputs[0], InputSlot::named("_rootfs"));
+        assert_eq!(SANDBOX_SPEC.required_inputs[0], "_rootfs");
         assert!(SANDBOX_SPEC.optional_inputs.is_empty());
         assert!(SANDBOX_SPEC.allow_extra_inputs);
     }

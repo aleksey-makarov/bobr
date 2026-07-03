@@ -134,7 +134,6 @@ fn prepare_fs_tree_root_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bobr_builder::InputSlot;
     use bobr_store::{Store, import_build};
     use std::fs;
     use std::str::FromStr;
@@ -159,8 +158,8 @@ mod tests {
         inputs.insert("source", object.clone());
 
         static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::named("rootfs")],
-            optional_inputs: &[InputSlot::named("base")],
+            required_inputs: &["rootfs"],
+            optional_inputs: &["base"],
             allow_extra_inputs: true,
         };
 
@@ -192,7 +191,7 @@ mod tests {
         let second = sample_object();
 
         static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::named("rootfs")],
+            required_inputs: &["rootfs"],
             optional_inputs: &[],
             allow_extra_inputs: true,
         };

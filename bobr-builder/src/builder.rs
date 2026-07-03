@@ -14,34 +14,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// A declared input slot of a builder, identified by its `name`.
+/// A builder's input contract: which named slots it requires, which are
+/// optional, and whether extra (unlisted) inputs are accepted. Slots are
+/// identified by name.
 ///
 /// Whether an input is materialized into an fs-tree root or passed as the
-/// object itself is decided by the input **name**, not the slot: a name
+/// object itself is decided by the input **name**, not the spec: a name
 /// beginning with `_` is materialized (see `resolved_inputs`). The slot list
 /// only declares which names are required/optional and whether extras are
 /// allowed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InputSlot {
-    /// Slot name, as used in the recipe's `inputs`.
-    pub name: &'static str,
-}
-
-impl InputSlot {
-    /// A slot named `name`.
-    pub const fn named(name: &'static str) -> Self {
-        Self { name }
-    }
-}
-
-/// A builder's input contract: which named slots it requires, which are
-/// optional, and whether extra (unlisted) inputs are accepted.
 #[derive(Debug)]
 pub struct InputSpec {
-    /// Slots that must be present.
-    pub required_inputs: &'static [InputSlot],
-    /// Slots that may be present.
-    pub optional_inputs: &'static [InputSlot],
+    /// Names of slots that must be present.
+    pub required_inputs: &'static [&'static str],
+    /// Names of slots that may be present.
+    pub optional_inputs: &'static [&'static str],
     /// Whether inputs beyond the declared slots are allowed.
     pub allow_extra_inputs: bool,
 }
@@ -57,8 +44,7 @@ impl InputSpec {
     /// error messages.
     pub fn validate_for_builder(&self, builder_tag: &str) -> Result<(), String> {
         let mut required = BTreeSet::new();
-        for slot in self.required_inputs {
-            let name = slot.name;
+        for &name in self.required_inputs {
             validate_input_name(name).map_err(|error| {
                 format!(
                     "builder '{}' declares invalid required input '{}': {error}",
@@ -74,8 +60,7 @@ impl InputSpec {
         }
 
         let mut optional = BTreeSet::new();
-        for slot in self.optional_inputs {
-            let name = slot.name;
+        for &name in self.optional_inputs {
             validate_input_name(name).map_err(|error| {
                 format!(
                     "builder '{}' declares invalid optional input '{}': {error}",
@@ -103,18 +88,18 @@ impl InputSpec {
     pub fn reserved_input_names(&self) -> impl Iterator<Item = &'static str> {
         self.required_inputs
             .iter()
-            .map(|slot| slot.name)
-            .chain(self.optional_inputs.iter().map(|slot| slot.name))
+            .copied()
+            .chain(self.optional_inputs.iter().copied())
     }
 
     /// Whether `name` is a required slot.
     pub fn is_required_input(&self, name: &str) -> bool {
-        self.required_inputs.iter().any(|slot| slot.name == name)
+        self.required_inputs.contains(&name)
     }
 
     /// Whether `name` is an optional slot.
     pub fn is_optional_input(&self, name: &str) -> bool {
-        self.optional_inputs.iter().any(|slot| slot.name == name)
+        self.optional_inputs.contains(&name)
     }
 
     /// Whether `name` is a declared (required or optional) slot.
@@ -129,14 +114,14 @@ impl InputSpec {
         inputs: &'a BTreeMap<String, T>,
     ) -> Vec<&'a str> {
         let mut ordered = Vec::new();
-        for slot in self.required_inputs {
-            if inputs.contains_key(slot.name) {
-                ordered.push(slot.name);
+        for &name in self.required_inputs {
+            if inputs.contains_key(name) {
+                ordered.push(name);
             }
         }
-        for slot in self.optional_inputs {
-            if inputs.contains_key(slot.name) {
-                ordered.push(slot.name);
+        for &name in self.optional_inputs {
+            if inputs.contains_key(name) {
+                ordered.push(name);
             }
         }
         for name in inputs.keys() {
@@ -567,8 +552,8 @@ mod tests {
     #[test]
     fn input_spec_validate_accepts_distinct_inputs() {
         static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::named("rootfs"), InputSlot::named("toolchain")],
-            optional_inputs: &[InputSlot::named("source")],
+            required_inputs: &["rootfs", "toolchain"],
+            optional_inputs: &["source"],
             allow_extra_inputs: true,
         };
 
@@ -578,7 +563,7 @@ mod tests {
     #[test]
     fn input_spec_validate_rejects_duplicate_required_inputs() {
         static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::named("rootfs"), InputSlot::named("rootfs")],
+            required_inputs: &["rootfs", "rootfs"],
             optional_inputs: &[],
             allow_extra_inputs: true,
         };
@@ -593,7 +578,7 @@ mod tests {
     fn input_spec_validate_rejects_duplicate_optional_inputs() {
         static SPEC: InputSpec = InputSpec {
             required_inputs: &[],
-            optional_inputs: &[InputSlot::named("source"), InputSlot::named("source")],
+            optional_inputs: &["source", "source"],
             allow_extra_inputs: true,
         };
 
@@ -606,8 +591,8 @@ mod tests {
     #[test]
     fn input_spec_validate_rejects_required_optional_overlap() {
         static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::named("rootfs")],
-            optional_inputs: &[InputSlot::named("rootfs")],
+            required_inputs: &["rootfs"],
+            optional_inputs: &["rootfs"],
             allow_extra_inputs: true,
         };
 
@@ -620,13 +605,13 @@ mod tests {
     #[test]
     fn input_spec_validate_rejects_invalid_declared_input_names() {
         static REQUIRED: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::named("bad-name")],
+            required_inputs: &["bad-name"],
             optional_inputs: &[],
             allow_extra_inputs: true,
         };
         static OPTIONAL: InputSpec = InputSpec {
             required_inputs: &[],
-            optional_inputs: &[InputSlot::named("1bad")],
+            optional_inputs: &["1bad"],
             allow_extra_inputs: true,
         };
 
@@ -649,8 +634,8 @@ mod tests {
         inputs.insert("patch", object.clone());
 
         static SPEC: InputSpec = InputSpec {
-            required_inputs: &[InputSlot::named("image")],
-            optional_inputs: &[InputSlot::named("base")],
+            required_inputs: &["image"],
+            optional_inputs: &["base"],
             allow_extra_inputs: true,
         };
 

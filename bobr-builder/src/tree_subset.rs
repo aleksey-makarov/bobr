@@ -1,5 +1,5 @@
 use crate::BuilderError;
-use crate::{BuildContext, BuilderInputs, InputSlot, InputSpec, StagedBuildResult, TypedBuilder};
+use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
 use bobr_core::BuildLogLevel;
 use bobr_store::{
     StoreError,
@@ -20,7 +20,7 @@ pub struct TreeSubsetConfig {
 }
 
 static TREE_SUBSET_SPEC: InputSpec = InputSpec {
-    required_inputs: &[InputSlot::named("tree")],
+    required_inputs: &["tree"],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
@@ -151,10 +151,7 @@ mod tests {
     fn spec_requires_tree_input_only() {
         assert_eq!(TypedBuilder::tag(&TreeSubsetBuilder), "TreeSubset");
         assert_eq!(TREE_SUBSET_SPEC.required_inputs.len(), 1);
-        assert_eq!(
-            TREE_SUBSET_SPEC.required_inputs[0],
-            InputSlot::named("tree")
-        );
+        assert_eq!(TREE_SUBSET_SPEC.required_inputs[0], "tree");
         assert!(TREE_SUBSET_SPEC.optional_inputs.is_empty());
         assert!(!TREE_SUBSET_SPEC.allow_extra_inputs);
     }

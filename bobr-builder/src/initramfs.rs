@@ -1,5 +1,5 @@
 use crate::BuilderError;
-use crate::{BuildContext, BuilderInputs, InputSlot, InputSpec, StagedBuildResult, TypedBuilder};
+use crate::{BuildContext, BuilderInputs, InputSpec, StagedBuildResult, TypedBuilder};
 use bobr_core::BuildLogLevel;
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ pub struct InitramfsBuilder;
 pub struct InitramfsConfig {}
 
 static INITRAMFS_SPEC: InputSpec = InputSpec {
-    required_inputs: &[InputSlot::named("_tree")],
+    required_inputs: &["_tree"],
     optional_inputs: &[],
     allow_extra_inputs: false,
 };
@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn input_spec_is_single_fs_tree_root_input() {
         assert_eq!(TypedBuilder::tag(&InitramfsBuilder), "Initramfs");
-        assert_eq!(INITRAMFS_SPEC.required_inputs, &[InputSlot::named("_tree")]);
+        assert_eq!(INITRAMFS_SPEC.required_inputs, &["_tree"]);
         assert!(!INITRAMFS_SPEC.allow_extra_inputs);
     }
 
