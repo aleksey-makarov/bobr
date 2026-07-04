@@ -64,6 +64,39 @@ define_hex_hash_type! {
     pub struct ReuseKey;
 }
 
+define_hex_hash_type! {
+    /// Deterministic per-build seed for builders that need a "random-looking"
+    /// but reproducible value (e.g. a filesystem UUID).
+    ///
+    /// It is derived from the [`ReuseKey`], which already digests the builder
+    /// tag, version, normalized config, and the realized input object hashes.
+    /// Deriving from the reuse key — rather than the build key — is what keeps
+    /// the seed consistent with content-addressed reuse: two graphs that reach
+    /// the same inputs share one reuse key, hence one seed, hence identical
+    /// output. The seed is domain-separated so it is never equal to the reuse
+    /// key itself.
+    ///
+    /// The textual representation is exactly 64 lowercase hexadecimal
+    /// characters. This is deterministic, not secret and not real entropy; do
+    /// not use it for anything security-sensitive.
+    pub struct BuildSeed;
+}
+
+impl BuildSeed {
+    const DOMAIN: &'static [u8] = b"bobr-build-seed\0";
+
+    /// The all-zero seed, used by builders and tests that do not need one.
+    pub const ZERO: BuildSeed = BuildSeed([0u8; 32]);
+
+    /// Derives the seed for a build from its reuse key.
+    pub fn from_reuse_key(reuse_key: &ReuseKey) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(Self::DOMAIN);
+        hasher.update(reuse_key.as_bytes());
+        Self::from_bytes(hasher.finalize().into())
+    }
+}
+
 /// Error returned while computing build identities.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityError {
@@ -238,6 +271,35 @@ mod tests {
 
     const HEX_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const HEX_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn build_seed_is_deterministic_domain_separated_and_distinct() {
+        let key_a = ReuseKey::from_str(HEX_A).unwrap();
+        let key_b = ReuseKey::from_str(HEX_B).unwrap();
+
+        // Deterministic: same reuse key -> same seed.
+        assert_eq!(
+            BuildSeed::from_reuse_key(&key_a),
+            BuildSeed::from_reuse_key(&key_a)
+        );
+        // Distinct reuse keys -> distinct seeds.
+        assert_ne!(
+            BuildSeed::from_reuse_key(&key_a),
+            BuildSeed::from_reuse_key(&key_b)
+        );
+        // Domain-separated: the seed is never just the reuse key bytes.
+        assert_ne!(
+            BuildSeed::from_reuse_key(&key_a).as_bytes(),
+            key_a.as_bytes()
+        );
+        // Hex is 64 lowercase chars.
+        let hex = BuildSeed::from_reuse_key(&key_a).to_hex();
+        assert_eq!(hex.len(), 64);
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
+    }
 
     #[test]
     fn build_key_distinguishes_inputs_by_slot_name() {

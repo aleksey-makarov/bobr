@@ -204,6 +204,7 @@ fn prepare_sandbox_input(
         extra_inputs: sandbox_inputs,
         steps: sandbox_steps,
         preserve_ownership: config.preserve_ownership,
+        build_seed_hex: cx.build_seed().to_hex(),
     })
 }
 
@@ -894,6 +895,9 @@ pub struct SandboxInput {
     /// Capture the output as an ownership-aware fs-tree (`true`), or chown it to
     /// a single owner and capture it as a plain object (`false`).
     preserve_ownership: bool,
+    /// Deterministic per-build seed, exported to every step as
+    /// `BOBR_BUILD_SEED` (64 lowercase hex chars).
+    build_seed_hex: String,
 }
 
 /// A named extra input exposed inside the sandbox: a `name` and the host `path`

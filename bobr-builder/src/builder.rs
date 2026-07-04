@@ -1,6 +1,7 @@
 use crate::BuilderError;
 use bobr_core::{
-    BuildLogEvent, BuildLogLevel, BuildLogger, BuildStatus, CancellationToken, NoopBuildLogger,
+    BuildLogEvent, BuildLogLevel, BuildLogger, BuildSeed, BuildStatus, CancellationToken,
+    NoopBuildLogger,
 };
 use bobr_runtime::runtime_provider::RuntimeProvider;
 use bobr_store::fs_tree::FsTree;
@@ -239,6 +240,7 @@ pub struct BuildContext {
     cancellation: CancellationToken,
     runtime: RuntimeProvider,
     fs_tree: FsTree,
+    build_seed: BuildSeed,
 }
 
 impl fmt::Debug for BuildContext {
@@ -260,7 +262,19 @@ impl BuildContext {
             cancellation: CancellationToken::new(),
             runtime: RuntimeProvider::host(),
             fs_tree,
+            build_seed: BuildSeed::ZERO,
         }
+    }
+
+    /// Returns the context with the per-build `seed` attached.
+    pub fn with_build_seed(mut self, build_seed: BuildSeed) -> Self {
+        self.build_seed = build_seed;
+        self
+    }
+
+    /// The deterministic per-build seed (see [`BuildSeed`]).
+    pub fn build_seed(&self) -> BuildSeed {
+        self.build_seed
     }
 
     /// Returns the context with `logger` attached.

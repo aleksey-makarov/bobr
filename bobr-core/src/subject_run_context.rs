@@ -1,4 +1,5 @@
 use crate::cancellation::CancellationToken;
+use crate::identity::BuildSeed;
 use crate::logging::BuildLogger;
 use crate::workspace::Workspace;
 use bobr_runtime::runtime_provider::RuntimeProvider;
@@ -16,6 +17,7 @@ pub struct SubjectRunContext {
     logger: Arc<dyn BuildLogger>,
     cancellation: CancellationToken,
     runtime: RuntimeProvider,
+    build_seed: BuildSeed,
 }
 
 impl std::fmt::Debug for SubjectRunContext {
@@ -34,13 +36,20 @@ impl SubjectRunContext {
         logger: Arc<dyn BuildLogger>,
         cancellation: CancellationToken,
         runtime: RuntimeProvider,
+        build_seed: BuildSeed,
     ) -> Self {
         Self {
             workspace,
             logger,
             cancellation,
             runtime,
+            build_seed,
         }
+    }
+
+    /// Returns the deterministic per-build seed for this subject execution.
+    pub fn build_seed(&self) -> BuildSeed {
+        self.build_seed
     }
 
     /// Returns the per-run workspace paths.
@@ -88,6 +97,7 @@ mod tests {
             Arc::new(NoopBuildLogger),
             CancellationToken::new(),
             RuntimeProvider::namespace(),
+            BuildSeed::ZERO,
         );
 
         assert_eq!(context.runtime().backend(), RuntimeBackend::Namespace);

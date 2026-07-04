@@ -293,7 +293,10 @@ overrides: `PATH`, `HOME` (the build directory), `TMPDIR` (`/tmp`), `USER`
 epoch), and `PYTHONHASHSEED` (`0`) — locale, timezone, epoch, and hash seed are
 pinned for reproducibility. The build, output, config, and inputs directories
 are also exposed as `BOBR_BUILD_DIR`, `BOBR_OUT_DIR`, `BOBR_CONFIG_DIR`, and
-`BOBR_INPUTS_DIR`, and the step's name as `BOBR_STEP_NAME`.
+`BOBR_INPUTS_DIR`, and the step's name as `BOBR_STEP_NAME`. `BOBR_BUILD_SEED`
+carries a deterministic per-build seed (64 lowercase hex chars) for steps that
+need a reproducible "random" value, such as a filesystem UUID; it is derived
+from the build's reuse key, so identical inputs yield an identical seed.
 
 `cwd`, each `argv` item, and each `env` value support `@{…}` interpolation
 (`name`, `run_as`, `env` keys, and `script_config` do not):

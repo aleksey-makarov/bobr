@@ -210,7 +210,7 @@ fn write_runner_config(
             },
             cwd: step.cwd.clone(),
             argv: step.argv.clone(),
-            env: effective_step_env(step),
+            env: effective_step_env(step, &config.build_seed_hex),
             umask: step.umask,
             stdout_path: logs.container_stdout.clone(),
             stderr_path: logs.container_stderr.clone(),
@@ -497,7 +497,7 @@ fn tmpfs_mount(target: &Path, noexec: bool, extra_options: &[&str]) -> SandboxLa
     }
 }
 
-fn effective_step_env(step: &SandboxRuntimeStep) -> HashMap<String, String> {
+fn effective_step_env(step: &SandboxRuntimeStep, build_seed_hex: &str) -> HashMap<String, String> {
     let mut env = HashMap::from([
         (
             "PATH".to_string(),
@@ -529,6 +529,9 @@ fn effective_step_env(step: &SandboxRuntimeStep) -> HashMap<String, String> {
             CONTAINER_INPUTS_DIR.to_string(),
         ),
         ("BOBR_STEP_NAME".to_string(), step.name.clone()),
+        // Deterministic per-build seed (derived from the reuse key); builders
+        // that need a reproducible "random" value read this.
+        ("BOBR_BUILD_SEED".to_string(), build_seed_hex.to_string()),
     ]);
     env.extend(step.env_overrides.clone());
     env
@@ -577,6 +580,7 @@ mod tests {
             extra_inputs: Vec::new(),
             steps: Vec::new(),
             preserve_ownership: true,
+            build_seed_hex: String::new(),
         };
         (input, out_dir, workspace)
     }
@@ -706,7 +710,7 @@ mod tests {
         step.env_overrides
             .insert("SOURCE_DATE_EPOCH".to_string(), "123".to_string());
 
-        let env = effective_step_env(&step);
+        let env = effective_step_env(&step, "abcd1234");
 
         assert_eq!(env["BOBR_STEP_NAME"], "build");
         assert_eq!(env["LC_ALL"], "C");
@@ -715,6 +719,7 @@ mod tests {
         assert_eq!(env["PYTHONHASHSEED"], "0");
         assert_eq!(env["USER"], "custom");
         assert_eq!(env["SOURCE_DATE_EPOCH"], "123");
+        assert_eq!(env["BOBR_BUILD_SEED"], "abcd1234");
     }
 
     #[test]

@@ -260,8 +260,11 @@ materialized tree, in a rootfs assembled from the erofs-utils runtime closure:
 let erofs_rootfs = recipe.erofs_image pkgs { name = "erofs-rootfs", tree = rootfs }
 ```
 
-The reproducibility flags (`--sort=path`, a fixed `-T`, `-U clear`, and a
-constant label) live in the `filesystem/mk-erofs.sh` build script. The result is
-a plain-object directory holding a single `erofs-rootfs.erofs` file
-(`preserve_ownership = false`), since the image blob has no per-file ownership of
-its own.
+The reproducibility flags (`--sort=path`, a fixed `-T`) live in the
+`filesystem/mk-erofs.sh` build script, which also derives the image UUID (a
+version-8 UUID) and label (`bobr-rootfs-<seed>`) from `BOBR_BUILD_SEED` — the
+per-build seed the sandbox exports (see [Request](./REQUEST.md)). Same inputs
+give the same seed, so the image stays reproducible while distinct rootfs
+contents get distinct, non-null UUIDs. The result is a plain-object directory
+holding a single `erofs-rootfs.erofs` file (`preserve_ownership = false`), since
+the image blob has no per-file ownership of its own.

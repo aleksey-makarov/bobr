@@ -440,6 +440,7 @@ mod tests {
             Arc::new(NoopBuildLogger),
             cancellation,
             RuntimeProvider::host(),
+            bobr_core::BuildSeed::ZERO,
         )
     }
 

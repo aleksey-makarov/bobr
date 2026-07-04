@@ -227,7 +227,8 @@ impl BuilderPlannedSubject {
         let mut context = BuildContext::with_noop_logger(ctx.temp_dir().to_path_buf(), fs_tree)
             .with_logger(ctx.logger().clone())
             .with_cancellation_token(ctx.cancellation().clone())
-            .with_runtime_provider(ctx.runtime().clone());
+            .with_runtime_provider(ctx.runtime().clone())
+            .with_build_seed(ctx.build_seed());
         self.build_erased(inputs, &mut context)
     }
 }
@@ -307,6 +308,7 @@ mod tests {
             Arc::new(NoopBuildLogger),
             CancellationToken::new(),
             RuntimeProvider::namespace(),
+            bobr_core::BuildSeed::ZERO,
         );
 
         let staged = subject

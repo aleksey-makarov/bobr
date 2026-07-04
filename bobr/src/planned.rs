@@ -5,8 +5,8 @@ use crate::execution::{
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use bobr_builder::{BuilderPlanError, BuilderPlannedSubject};
 use bobr_core::{
-    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, BuildStatus, CancellationToken,
-    NoopBuildLogger, ObjectHash, SubjectRunContext, Workspace,
+    BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, BuildSeed, BuildStatus,
+    CancellationToken, NoopBuildLogger, ObjectHash, SubjectRunContext, Workspace,
 };
 use bobr_source::{SourceExecutionError, SourcePlannedSubject};
 use bobr_store::{
@@ -154,6 +154,7 @@ fn execute_builder_subject(
         logger.clone(),
         cx.cancellation.clone(),
         cx.runtime_provider.clone(),
+        BuildSeed::from_reuse_key(&reuse_key),
     );
     let staged = subject
         .execute(&ctx, builder_inputs, cx.store.fs_tree())
@@ -248,11 +249,14 @@ fn execute_source_subject(
     );
 
     check_cancelled(&cx.cancellation)?;
+    // Sources materialize an object with a fixed hash; they run no builder, so
+    // the per-build seed is irrelevant here.
     let ctx = SubjectRunContext::new(
         workspace,
         logger.clone(),
         cx.cancellation.clone(),
         cx.runtime_provider.clone(),
+        BuildSeed::ZERO,
     );
     let staged_path = subject.execute(&ctx).map_err(|error| {
         log_execution_event(
