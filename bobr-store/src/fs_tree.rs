@@ -208,6 +208,16 @@ impl FsTree {
         self.fs_trees_dir().join(manifest_hash.to_hex())
     }
 
+    /// Returns the store path of the fs-file with content hash `hash`.
+    ///
+    /// This is a path computation only; it does not check that the file exists.
+    /// The fs-file on disk carries the logical uid/gid/mode of its fs-tree
+    /// entry, so reading arbitrary fs-files may require privilege (a namespace
+    /// runtime function running as root).
+    pub fn fs_file_path(&self, hash: FsFileHash) -> Result<PathBuf, StoreError> {
+        fs_file_path(&self.fs_files_dir(), hash)
+    }
+
     /// Interns a freshly built filesystem tree as an fs-tree object, consuming
     /// it, and returns the manifest for the caller to stage.
     ///

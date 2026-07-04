@@ -1,10 +1,11 @@
 use crate::{
-    Builder, FsTreeImportBuilder, GroupBuilder, InitramfsBuilder, OciExtractBuilder, TreeBuilder,
-    TreeMergeBuilder, TreeSubsetBuilder,
+    Builder, FsTreeExportBuilder, FsTreeImportBuilder, GroupBuilder, InitramfsBuilder,
+    OciExtractBuilder, TreeBuilder, TreeMergeBuilder, TreeSubsetBuilder,
 };
 
 static GROUP_BUILDER: GroupBuilder = GroupBuilder;
 static FS_TREE_IMPORT_BUILDER: FsTreeImportBuilder = FsTreeImportBuilder;
+static FS_TREE_EXPORT_BUILDER: FsTreeExportBuilder = FsTreeExportBuilder;
 static OCI_EXTRACT_BUILDER: OciExtractBuilder = OciExtractBuilder;
 static TREE_BUILDER: TreeBuilder = TreeBuilder;
 static TREE_SUBSET_BUILDER: TreeSubsetBuilder = TreeSubsetBuilder;
@@ -15,6 +16,7 @@ static INITRAMFS_BUILDER: InitramfsBuilder = InitramfsBuilder;
 pub static BUILDERS: &[&'static dyn Builder] = &[
     &GROUP_BUILDER,
     &FS_TREE_IMPORT_BUILDER,
+    &FS_TREE_EXPORT_BUILDER,
     &TREE_BUILDER,
     &TREE_SUBSET_BUILDER,
     &TREE_MERGE_BUILDER,

@@ -169,6 +169,40 @@ logical ownership and mode.
 - runs as a namespace function, since importing needs namespace-root access to
   ownership metadata
 
+### `FsTreeExport`
+
+The inverse of `FsTreeImport`: extracts selected entries out of an fs-tree into
+an ordinary object. Its `input` is an fs-tree, passed as a plain object (so the
+builder receives the manifest and pulls matched files from shared storage by
+content hash — it does **not** materialize the whole tree).
+
+**Inputs:** required `input` — one fs-tree object.
+
+**Config:** `copies`, a non-empty ordered array of `{ from, to }` commands:
+
+```json
+{ "copies": [ { "from": "boot/bzImage", "to": "bzImage" },
+              { "from": "usr/lib/*.so.1", "to": "libs" } ] }
+```
+
+- `from` is a glob (or literal path) matched against the fs-tree's paths.
+- `to` is the destination in the output object. For a **literal** `from` naming
+  a single file or symlink, `to` is the exact output path (allowing rename). For
+  a **glob** (or a literal directory), `to` is a directory and each match is
+  placed under it preserving its path relative to the glob's literal base (for a
+  literal directory, relative to that directory). Directory entries never copy
+  on their own — parent directories are created as needed.
+- A command that matches nothing, or two commands writing the same destination,
+  is rejected.
+
+**Behavior:**
+
+- produces a plain-object directory: matched regular files (mode, including the
+  executable bit, preserved), matched symlinks recreated, all owned `0:0`
+- runs as a namespace function: reading arbitrary fs-files needs namespace-root
+  (they carry their entries' logical ownership and mode), and a plain object
+  must be single-owner
+
 ### `TreeMerge`
 
 Merges two or more fs-trees into one, with strict conflict checking.
