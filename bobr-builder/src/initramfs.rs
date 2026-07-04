@@ -653,18 +653,12 @@ mod tests {
     }
 
     #[test]
-    fn build_rejects_unknown_config_field() {
-        let temp = tempdir().unwrap();
-        let error = InitramfsBuilder
-            .build_erased(
-                serde_json::json!({"extra": true}),
-                BuilderInputs::empty(),
-                &mut BuildContext::with_noop_logger(
-                    PathBuf::from("/tmp/unused"),
-                    store_fs_tree(temp.path()),
-                ),
-            )
-            .unwrap_err();
+    fn plan_rejects_unknown_config_field() {
+        static BUILDER: InitramfsBuilder = InitramfsBuilder;
+        let error = BUILDER
+            .plan(serde_json::json!({"extra": true}))
+            .err()
+            .expect("plan should reject unknown config fields");
 
         assert!(error.to_string().contains("unknown field"));
     }

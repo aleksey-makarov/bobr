@@ -1092,18 +1092,12 @@ mod tests {
     }
 
     #[test]
-    fn erased_config_rejects_unknown_fields() {
-        let temp = tempdir().unwrap();
-        let mut cx =
-            BuildContext::with_noop_logger(temp.path().join("tmp"), store_fs_tree(temp.path()));
-
-        let error = SandboxBuilder
-            .build_erased(
-                json!({"steps": [], "unexpected": true}),
-                BuilderInputs::empty(),
-                &mut cx,
-            )
-            .unwrap_err();
+    fn plan_rejects_unknown_config_fields() {
+        static BUILDER: SandboxBuilder = SandboxBuilder;
+        let error = BUILDER
+            .plan(json!({"steps": [], "unexpected": true}))
+            .err()
+            .expect("plan should reject unknown config fields");
 
         assert!(error.to_string().contains("unknown field"));
     }

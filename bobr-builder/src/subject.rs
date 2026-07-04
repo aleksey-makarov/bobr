@@ -1,8 +1,8 @@
-use crate::{BuildContext, Builder, BuilderError, BuilderInputs, InputSpec, validate_input_name};
-use bobr_core::{
-    BuildKey, BuildLogSubject, CORE_KEY_VERSION, IdentityError, ReuseKey, SubjectRunContext,
-    Workspace, compute_build_key, compute_reuse_key,
+use crate::{
+    BuildContext, Builder, BuilderError, BuilderInputs, InputSpec, PlannedBuild,
+    validate_input_name,
 };
+use bobr_core::{BuildKey, BuildLogSubject, IdentityError, ReuseKey, SubjectRunContext, Workspace};
 use bobr_store::fs_tree::FsTree;
 use fsobj_hash::ObjectHash;
 use serde_json::Value;
@@ -64,20 +64,24 @@ impl fmt::Display for BuilderPlanError {
 impl std::error::Error for BuilderPlanError {}
 
 /// Planned builder node with its validated inputs and stable build key.
+///
+/// Holds a type-erased [`PlannedBuild`] handle (the builder plus its
+/// deserialized typed config); `tag` and `spec` are copied out of the builder at
+/// plan time so the subject needs no `&dyn Builder` afterwards.
 pub struct BuilderPlannedSubject {
-    builder: &'static dyn Builder,
+    tag: &'static str,
     name: String,
-    config: Value,
+    spec: &'static InputSpec,
     inputs: BTreeMap<String, BuildKey>,
     build_key: BuildKey,
-    impl_version_token: String,
+    plan: Box<dyn PlannedBuild>,
 }
 
 impl fmt::Debug for BuilderPlannedSubject {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BuilderPlannedSubject")
-            .field("tag", &self.tag())
+            .field("tag", &self.tag)
             .field("name", &self.name)
             .field("inputs", &self.inputs)
             .field("build_key", &self.build_key)
@@ -121,36 +125,24 @@ impl BuilderPlannedSubject {
             }
         }
 
-        // Normalize the config to its canonical form (defaults filled) before it
-        // enters the keys, so omitting a field and writing its default produce
-        // the same build key. See the `Builder` trait docs.
-        let config = builder
-            .normalize_config(config)
+        // Deserialize the config once into a type-erased handle that owns the
+        // typed config and computes this node's keys. (The handle also folds
+        // BOBR_BUILD_CORE_VERSION and, for arch-dependent builders, the target
+        // arch into its version token.)
+        let plan = builder
+            .plan(config)
             .map_err(|error| BuilderPlanError::recipe(error.to_string()))?;
-
-        // Fold the core-semantics version into the per-builder version token, so
-        // a bump of CORE_KEY_VERSION invalidates every key without touching the
-        // key structure. Arch-dependent builders still pin the target arch.
-        let impl_version_token = if builder.is_arch_dependent() {
-            format!(
-                "{}/{}@{}",
-                CORE_KEY_VERSION,
-                builder.impl_version(),
-                std::env::consts::ARCH
-            )
-        } else {
-            format!("{}/{}", CORE_KEY_VERSION, builder.impl_version())
-        };
-        let build_key = compute_build_key(tag, &impl_version_token, &config, &inputs)
+        let build_key = plan
+            .build_key(&inputs)
             .map_err(BuilderPlanError::identity)?;
 
         Ok(Self {
-            builder,
+            tag,
             name,
-            config,
+            spec,
             inputs,
             build_key,
-            impl_version_token,
+            plan,
         })
     }
 
@@ -161,7 +153,7 @@ impl BuilderPlannedSubject {
 
     /// Returns the builder class tag.
     pub fn tag(&self) -> &'static str {
-        self.builder.tag()
+        self.tag
     }
 
     /// Returns the stable build key for this planned builder.
@@ -176,7 +168,7 @@ impl BuilderPlannedSubject {
 
     /// Returns the input spec advertised by the builder class.
     pub fn input_spec(&self) -> &'static InputSpec {
-        self.builder.spec()
+        self.spec
     }
 
     /// Computes the reuse key for this builder and realized input hashes.
@@ -184,22 +176,18 @@ impl BuilderPlannedSubject {
         &self,
         input_hashes: &BTreeMap<String, ObjectHash>,
     ) -> Result<ReuseKey, BuilderPlanError> {
-        compute_reuse_key(
-            self.tag(),
-            &self.impl_version_token,
-            &self.config,
-            input_hashes,
-        )
-        .map_err(BuilderPlanError::identity)
+        self.plan
+            .reuse_key(input_hashes)
+            .map_err(BuilderPlanError::identity)
     }
 
     /// Executes the underlying builder implementation.
-    pub fn build_erased(
+    pub fn build(
         &self,
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<PathBuf, BuilderError> {
-        self.builder.build_erased(self.config.clone(), inputs, cx)
+        self.plan.build(inputs, cx)
     }
 
     /// Builds the per-run log subject from the runtime-allocated workspace.
@@ -229,7 +217,7 @@ impl BuilderPlannedSubject {
             .with_cancellation_token(ctx.cancellation().clone())
             .with_runtime_provider(ctx.runtime().clone())
             .with_build_seed(ctx.build_seed());
-        self.build_erased(inputs, &mut context)
+        self.build(inputs, &mut context)
     }
 }
 
@@ -246,7 +234,7 @@ mod tests {
     #[derive(Debug)]
     struct StagingBuilder;
 
-    #[derive(Debug, Deserialize, Serialize)]
+    #[derive(Debug, Clone, Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
     struct EmptyConfig {}
 

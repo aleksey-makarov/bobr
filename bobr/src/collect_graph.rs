@@ -3,7 +3,7 @@ use crate::planned::PlannedSubject;
 use bobr_builder::BuilderPlanError;
 use bobr_core::BuildKey;
 #[cfg(test)]
-use bobr_core::compute_build_key;
+use bobr_core::{ConfigDigest, compute_build_key};
 use bobr_source::parse_source_subject;
 use bobr_store::validate_ref_name;
 use serde_json::{Map, Value};
@@ -453,11 +453,21 @@ mod tests {
         });
 
         let (root_key, _) = collect_one(&nodes).unwrap();
-        let tree_token = format!("{}/1", bobr_core::CORE_KEY_VERSION);
-        let rootfs_key =
-            compute_build_key("Tree", &tree_token, &rootfs["config"], &BTreeMap::new()).unwrap();
-        let script_key =
-            compute_build_key("Tree", &tree_token, &script["config"], &BTreeMap::new()).unwrap();
+        let tree_token = format!("{}/1", bobr_core::BOBR_BUILD_CORE_VERSION);
+        let rootfs_key = compute_build_key(
+            "Tree",
+            &tree_token,
+            ConfigDigest::of(&rootfs["config"]).unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let script_key = compute_build_key(
+            "Tree",
+            &tree_token,
+            ConfigDigest::of(&script["config"]).unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let source_hash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             .parse()
             .unwrap();
@@ -466,10 +476,10 @@ mod tests {
             "Sandbox",
             &format!(
                 "{}/1@{}",
-                bobr_core::CORE_KEY_VERSION,
+                bobr_core::BOBR_BUILD_CORE_VERSION,
                 std::env::consts::ARCH
             ),
-            &nodes["root"]["config"],
+            ConfigDigest::of(&nodes["root"]["config"]).unwrap(),
             &BTreeMap::from([
                 ("_rootfs".to_string(), rootfs_key),
                 ("script".to_string(), script_key),
@@ -500,8 +510,8 @@ mod tests {
         let (_root_key, subjects) = collect_one(&nodes).unwrap();
         let deduped_key = compute_build_key(
             "Tree",
-            &format!("{}/1", bobr_core::CORE_KEY_VERSION),
-            &tree_config("same.txt", "same", false),
+            &format!("{}/1", bobr_core::BOBR_BUILD_CORE_VERSION),
+            ConfigDigest::of(&tree_config("same.txt", "same", false)).unwrap(),
             &BTreeMap::new(),
         )
         .unwrap();

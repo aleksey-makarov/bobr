@@ -125,7 +125,6 @@ impl RuntimeFunction for FsTreeImportFunction {
 mod tests {
     use super::*;
     use crate::Builder;
-    use crate::test_support::store_fs_tree;
     use bobr_store::fs_tree::{FsTreeEntry, FsTreeInstallAttrs, FsTreeInstallRule, FsTreeManifest};
     use bobr_store::{Store, import_build};
     use std::collections::BTreeMap;
@@ -256,10 +255,8 @@ mod tests {
     }
 
     #[test]
-    fn erased_config_rejects_legacy_symlink_mode() {
-        let temp = tempdir().unwrap();
-        let mut cx =
-            BuildContext::with_noop_logger(temp.path().join("tmp"), store_fs_tree(temp.path()));
+    fn plan_rejects_legacy_symlink_mode() {
+        static BUILDER: FsTreeImportBuilder = FsTreeImportBuilder;
         let config = serde_json::json!({
             "install": {
                 "rules": [{
@@ -276,9 +273,10 @@ mod tests {
             }
         });
 
-        let error = FsTreeImportBuilder
-            .build_erased(config, BuilderInputs::empty(), &mut cx)
-            .unwrap_err();
+        let error = BUILDER
+            .plan(config)
+            .err()
+            .expect("plan should reject the legacy symlink_mode field");
 
         assert!(error.to_string().contains("invalid builder config"));
     }

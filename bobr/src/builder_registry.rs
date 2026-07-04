@@ -199,8 +199,8 @@ mod tests {
         .unwrap();
         let expected = bobr_core::compute_build_key(
             "Tree",
-            &format!("{}/1", bobr_core::CORE_KEY_VERSION),
-            &config,
+            &format!("{}/1", bobr_core::BOBR_BUILD_CORE_VERSION),
+            bobr_core::ConfigDigest::of(&config).unwrap(),
             &BTreeMap::new(),
         )
         .unwrap();

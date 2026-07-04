@@ -1,7 +1,8 @@
 use crate::BuilderError;
 use bobr_core::{
-    BuildLogEvent, BuildLogLevel, BuildLogger, BuildSeed, BuildStatus, CancellationToken,
-    NoopBuildLogger,
+    BOBR_BUILD_CORE_VERSION, BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildSeed,
+    BuildStatus, CancellationToken, ConfigDigest, IdentityError, NoopBuildLogger, ReuseKey,
+    compute_build_key, compute_reuse_key,
 };
 use bobr_runtime::runtime_provider::RuntimeProvider;
 use bobr_store::fs_tree::FsTree;
@@ -435,9 +436,9 @@ fn write_raw_log_atomic(path: &Path, content: &str) -> Result<(), String> {
 /// A builder's configuration type must round-trip losslessly through serde:
 /// deserializing a recipe's config JSON and serializing it back yields a
 /// **canonical** form in which every field is present with its concrete value.
-/// [`normalize_config`](Builder::normalize_config) performs that round-trip, and
-/// the planner hashes the *normalized* config into the build/reuse keys (not the
-/// raw recipe JSON). Two consequences the config types must uphold:
+/// [`plan`](Builder::plan) does that round-trip once, and the planner hashes a
+/// digest of the *canonical* config into the build/reuse keys (not the raw
+/// recipe JSON). Two consequences the config types must uphold:
 ///
 /// - **No direct member of a configuration object may be `Option<_>`.** A field
 ///   that can be left out of the recipe carries a serde default instead
@@ -464,20 +465,34 @@ pub trait Builder: Send + Sync {
     /// [`TypedBuilder::is_arch_dependent`].
     fn is_arch_dependent(&self) -> bool;
 
-    /// Normalizes a recipe's raw `config` JSON into its canonical form by
-    /// round-tripping it through the typed configuration (which fills defaults
-    /// for omitted fields). The planner hashes this normalized value into the
-    /// keys, so omitted and explicitly-default fields yield the same key. Fails
-    /// if `config` does not match the builder's configuration shape.
-    fn normalize_config(&self, config: Value) -> Result<Value, BuilderError>;
+    /// Plans a build from a recipe's raw `config` JSON.
+    ///
+    /// Deserializes `config` **once** into the typed configuration (filling
+    /// serde defaults), and returns a type-erased [`PlannedBuild`] handle that
+    /// owns the typed config and can compute the node's build/reuse keys and run
+    /// the build. Fails if `config` does not match the builder's config shape.
+    ///
+    /// Takes `&'static self` so the returned handle can embed the builder (all
+    /// builders are `&'static` in the registry).
+    fn plan(&'static self, config: Value) -> Result<Box<dyn PlannedBuild>, BuilderError>;
+}
 
-    /// Builds from a raw JSON `config` (deserialized internally) and `inputs`.
-    fn build_erased(
-        &self,
-        config: Value,
-        inputs: BuilderInputs,
-        cx: &mut BuildContext,
-    ) -> Result<PathBuf, BuilderError>;
+/// Type-erased handle to a planned build node: the builder plus its already
+/// deserialized typed config. This is the object-safe boundary that lets a
+/// heterogeneous graph hold builders of different config types behind
+/// `Box<dyn PlannedBuild>`. Its methods traffic only in `BuildKey`, `ReuseKey`,
+/// `ObjectHash`, `BuilderInputs`, and `PathBuf` — never `Self::Config` — so the
+/// trait stays object-safe.
+pub trait PlannedBuild: Send + Sync {
+    /// The node's build key, from its config and the dependency build keys.
+    fn build_key(&self, deps: &BTreeMap<String, BuildKey>) -> Result<BuildKey, IdentityError>;
+
+    /// The node's reuse key, from its config and the realized dependency object
+    /// hashes.
+    fn reuse_key(&self, deps: &BTreeMap<String, ObjectHash>) -> Result<ReuseKey, IdentityError>;
+
+    /// Runs the builder over its typed config and the resolved `inputs`.
+    fn build(&self, inputs: BuilderInputs, cx: &mut BuildContext) -> Result<PathBuf, BuilderError>;
 }
 
 /// The trait builders implement: a typed `Config` plus the build logic. A
@@ -486,10 +501,14 @@ pub trait TypedBuilder: Send + Sync {
     /// The builder's strongly-typed configuration, deserialized from the recipe.
     ///
     /// Must round-trip losslessly through serde (hence `Serialize`): the planner
-    /// normalizes recipe config by deserializing then reserializing it. Keep it
+    /// digests recipe config by deserializing then reserializing it. Keep it
     /// canonical — no top-level `Option<_>` members; use `#[serde(default = …)]`
     /// for omittable fields. See [`Builder`] for the invariant this upholds.
-    type Config: DeserializeOwned + Serialize;
+    ///
+    /// `Clone` — the planned handle keeps the typed config and clones it into
+    /// [`build_typed`](TypedBuilder::build_typed) (configs are small plain data).
+    /// `Send + Sync` — the handle is shared across worker threads via `Arc`.
+    type Config: DeserializeOwned + Serialize + Clone + Send + Sync;
 
     /// The builder's recipe tag.
     fn tag(&self) -> &'static str;
@@ -545,25 +564,67 @@ where
         <T as TypedBuilder>::is_arch_dependent(self)
     }
 
-    fn normalize_config(&self, config: Value) -> Result<Value, BuilderError> {
+    fn plan(&'static self, config: Value) -> Result<Box<dyn PlannedBuild>, BuilderError> {
+        // The single deserialization: raw recipe JSON -> typed config (serde
+        // defaults filled), fail-fast on shape mismatch.
         let typed: T::Config = serde_json::from_value(config).map_err(|error| {
             BuilderError::InvalidRecipe(format!("invalid builder config: {error}"))
         })?;
-        serde_json::to_value(&typed).map_err(|error| {
-            BuilderError::ExecutionFailed(format!("failed to normalize builder config: {error}"))
-        })
+        // Canonical digest of the config, computed once (defaults already in).
+        let canonical = serde_json::to_value(&typed).map_err(|error| {
+            BuilderError::ExecutionFailed(format!("failed to serialize builder config: {error}"))
+        })?;
+        let config_digest = ConfigDigest::of(&canonical).map_err(|error| {
+            BuilderError::ExecutionFailed(format!("failed to digest builder config: {error}"))
+        })?;
+        // Fold the core-semantics version into the per-builder version token, so
+        // a bump of BOBR_BUILD_CORE_VERSION invalidates every key without
+        // touching the key structure. Arch-dependent builders pin the arch.
+        let impl_version_token = if <T as TypedBuilder>::is_arch_dependent(self) {
+            format!(
+                "{}/{}@{}",
+                BOBR_BUILD_CORE_VERSION,
+                <T as TypedBuilder>::impl_version(self),
+                std::env::consts::ARCH
+            )
+        } else {
+            format!(
+                "{}/{}",
+                BOBR_BUILD_CORE_VERSION,
+                <T as TypedBuilder>::impl_version(self)
+            )
+        };
+        Ok(Box::new(PlannedBuilder {
+            builder: self,
+            tag: <T as TypedBuilder>::tag(self),
+            config: typed,
+            impl_version_token,
+            config_digest,
+        }))
+    }
+}
+
+/// Concrete [`PlannedBuild`] behind the box: the `&'static` builder plus its
+/// deserialized typed config and the identity data computed once at plan time.
+struct PlannedBuilder<B: TypedBuilder + 'static> {
+    builder: &'static B,
+    tag: &'static str,
+    config: B::Config,
+    impl_version_token: String,
+    config_digest: ConfigDigest,
+}
+
+impl<B: TypedBuilder + 'static> PlannedBuild for PlannedBuilder<B> {
+    fn build_key(&self, deps: &BTreeMap<String, BuildKey>) -> Result<BuildKey, IdentityError> {
+        compute_build_key(self.tag, &self.impl_version_token, self.config_digest, deps)
     }
 
-    fn build_erased(
-        &self,
-        config: Value,
-        inputs: BuilderInputs,
-        cx: &mut BuildContext,
-    ) -> Result<PathBuf, BuilderError> {
-        let config = serde_json::from_value(config).map_err(|error| {
-            BuilderError::InvalidRecipe(format!("invalid builder config: {error}"))
-        })?;
-        self.build_typed(config, inputs, cx)
+    fn reuse_key(&self, deps: &BTreeMap<String, ObjectHash>) -> Result<ReuseKey, IdentityError> {
+        compute_reuse_key(self.tag, &self.impl_version_token, self.config_digest, deps)
+    }
+
+    fn build(&self, inputs: BuilderInputs, cx: &mut BuildContext) -> Result<PathBuf, BuilderError> {
+        self.builder.build_typed(self.config.clone(), inputs, cx)
     }
 }
 
@@ -678,7 +739,7 @@ mod tests {
     #[derive(Debug)]
     struct DummyBuilder;
 
-    #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+    #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
     #[serde(deny_unknown_fields)]
     struct DummyConfig {
         demo: String,
@@ -724,19 +785,16 @@ mod tests {
     }
 
     #[test]
-    fn typed_builder_adapter_decodes_config() {
-        let builder = DummyBuilder;
+    fn plan_decodes_valid_config() {
+        static BUILDER: DummyBuilder = DummyBuilder;
         let temp = tempdir().unwrap();
         let mut cx =
             BuildContext::with_noop_logger(PathBuf::from("/tmp/tmp"), store_fs_tree(temp.path()));
 
-        let result = builder
-            .build_erased(
-                serde_json::json!({ "demo": "demo" }),
-                BuilderInputs::empty(),
-                &mut cx,
-            )
-            .unwrap();
+        let plan = BUILDER
+            .plan(serde_json::json!({ "demo": "demo" }))
+            .expect("valid config plans");
+        let result = plan.build(BuilderInputs::empty(), &mut cx).unwrap();
 
         assert_eq!(result, PathBuf::from("/tmp/out"));
     }

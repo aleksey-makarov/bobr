@@ -10,19 +10,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Configuration for [`TreeBuilder`]: an inline `tree` of files, directories,
 /// and symlinks.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TreeConfig {
     tree: TreePayload,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TreePayload {
     entries: Vec<TreeEntry>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 enum TreeEntry {
     File {
@@ -520,27 +520,22 @@ mod tests {
     }
 
     #[test]
-    fn install_field_is_rejected() {
-        let temp = tempdir().unwrap();
-        let mut cx = build_context(temp.path());
-
-        let error = TreeBuilder
-            .build_erased(
-                serde_json::json!({
-                    "tree": {
-                        "entries": [{
-                            "type": "file",
-                            "path": "tool",
-                            "text": "hello",
-                            "executable": false
-                        }]
-                    },
-                    "install": {"rules": []}
-                }),
-                BuilderInputs::empty(),
-                &mut cx,
-            )
-            .unwrap_err();
+    fn plan_rejects_install_field() {
+        static BUILDER: TreeBuilder = TreeBuilder;
+        let error = BUILDER
+            .plan(serde_json::json!({
+                "tree": {
+                    "entries": [{
+                        "type": "file",
+                        "path": "tool",
+                        "text": "hello",
+                        "executable": false
+                    }]
+                },
+                "install": {"rules": []}
+            }))
+            .err()
+            .expect("plan should reject the install field");
 
         assert!(error.to_string().contains("unknown field `install`"));
     }

@@ -11,10 +11,10 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
-const INVOCATION_SCHEMA: &str = "bobr-build-invocation-v4";
-const REUSE_INVOCATION_SCHEMA: &str = "bobr-build-reuse-invocation-v4";
+const INVOCATION_SCHEMA: &str = "bobr-build-invocation-v5";
+const REUSE_INVOCATION_SCHEMA: &str = "bobr-build-reuse-invocation-v5";
 
-/// Manually-bumped version of the bobr core build semantics.
+/// Manually-bumped version of the bobr build subsystem's key semantics.
 ///
 /// It is folded into the per-builder version token that enters every build and
 /// reuse key (see the builder-subject code), so bumping it invalidates all
@@ -22,7 +22,7 @@ const REUSE_INVOCATION_SCHEMA: &str = "bobr-build-reuse-invocation-v4";
 /// unchanged request. (The input-name materialization rule — an input is
 /// materialized into an fs-tree root iff its name begins with `_` — bumped this
 /// from "1" to "2".)
-pub const CORE_KEY_VERSION: &str = "2";
+pub const BOBR_BUILD_CORE_VERSION: &str = "2";
 
 define_hex_hash_type! {
     /// Stable key for a planned build graph node.
@@ -119,108 +119,136 @@ impl fmt::Display for IdentityError {
 
 impl std::error::Error for IdentityError {}
 
-/// Computes the stable key for a normalized build invocation.
+/// Digest of a builder's normalized config, embedded in build and reuse keys.
 ///
-/// The key covers the builder tag, the normalized JSON payload, and the direct
-/// dependency build keys **keyed by input slot name**. The payload is serialized
-/// with the core canonical JSON encoder before hashing, so callers must pass the
-/// already normalized semantic payload rather than arbitrary user input.
+/// A key is a fingerprint built from fixed-size digests of its parts. The config
+/// enters as this digest rather than as an inlined JSON sub-document, so the key
+/// root stays small and uniform regardless of how large or nested the config is,
+/// and the config is canonicalized in exactly one place. Unlike [`BuildKey`] /
+/// [`ReuseKey`] this is a purely internal digest: it has no textual identity and
+/// is never stored or looked up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ConfigDigest([u8; 32]);
+
+impl ConfigDigest {
+    /// Digests a normalized config value: canonical JSON, then SHA-256.
+    pub fn of(config: &Value) -> Result<Self, IdentityError> {
+        let canonical = canonical_json_bytes(config)?;
+        Ok(Self(Sha256::digest(&canonical).into()))
+    }
+
+    fn to_hex(self) -> String {
+        let mut out = String::with_capacity(64);
+        for byte in self.0 {
+            out.push(b"0123456789abcdef"[(byte >> 4) as usize] as char);
+            out.push(b"0123456789abcdef"[(byte & 0x0f) as usize] as char);
+        }
+        out
+    }
+}
+
+/// A dependency hash that can be embedded in a key's `inputs` list. Lets the
+/// build key (dependency `build_key`s) and the reuse key (dependency
+/// `object_hash`es) share one key-encoding routine.
+trait KeyInputHash {
+    /// JSON field name under which the hash is recorded.
+    const FIELD: &'static str;
+    /// Textual (hex) encoding of the hash.
+    fn encode(&self) -> String;
+}
+
+impl KeyInputHash for BuildKey {
+    const FIELD: &'static str = "build_key";
+    fn encode(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl KeyInputHash for ObjectHash {
+    const FIELD: &'static str = "object_hash";
+    fn encode(&self) -> String {
+        self.to_string()
+    }
+}
+
+/// Encodes a build invocation into a canonical JSON fingerprint and hashes it.
 ///
-/// Inputs are identified by name: both the slot name and its build key enter the
-/// fingerprint, so two builds that wire the same objects into differently named
-/// slots get distinct keys. The `BTreeMap` makes the encoding order-independent
-/// and deterministic.
+/// The root records the schema, builder tag and version token, the config
+/// digest, and the dependency hashes **keyed by input slot name** (both the slot
+/// name and the hash enter the fingerprint, so wiring the same objects into
+/// differently named slots yields distinct keys). The `BTreeMap` makes the
+/// encoding order-independent and deterministic.
+fn compute_key<H: KeyInputHash>(
+    schema: &str,
+    builder_tag: &str,
+    builder_version: &str,
+    config: ConfigDigest,
+    inputs: &BTreeMap<String, H>,
+) -> Result<[u8; 32], IdentityError> {
+    let input_values = inputs
+        .iter()
+        .map(|(name, hash)| {
+            let mut input = Map::new();
+            input.insert("name".to_string(), Value::String(name.clone()));
+            input.insert(H::FIELD.to_string(), Value::String(hash.encode()));
+            Value::Object(input)
+        })
+        .collect::<Vec<_>>();
+
+    let mut root = Map::new();
+    root.insert("schema".to_string(), Value::String(schema.to_string()));
+    root.insert(
+        "builder_tag".to_string(),
+        Value::String(builder_tag.to_string()),
+    );
+    root.insert(
+        "builder_version".to_string(),
+        Value::String(builder_version.to_string()),
+    );
+    root.insert("config".to_string(), Value::String(config.to_hex()));
+    root.insert("inputs".to_string(), Value::Array(input_values));
+
+    let canonical = canonical_json_bytes(&Value::Object(root))?;
+    Ok(Sha256::digest(&canonical).into())
+}
+
+/// Computes the stable build key from the builder tag, version token, config
+/// digest, and the direct dependency build keys.
 ///
-/// `builder_version` is the builder's implementation-version token (see
-/// `Builder::impl_version`): it captures the identity of the build logic itself,
-/// so bumping it invalidates this builder's cached outputs.
+/// `builder_version` is the builder's implementation-version token: it captures
+/// the identity of the build logic itself, so bumping it invalidates this
+/// builder's cached outputs.
 pub fn compute_build_key(
     builder_tag: &str,
     builder_version: &str,
-    normalized_payload: &Value,
+    config: ConfigDigest,
     inputs: &BTreeMap<String, BuildKey>,
 ) -> Result<BuildKey, IdentityError> {
-    let input_values = inputs
-        .iter()
-        .map(|(name, build_key)| {
-            let mut input = Map::new();
-            input.insert("name".to_string(), Value::String(name.clone()));
-            input.insert(
-                "build_key".to_string(),
-                Value::String(build_key.to_string()),
-            );
-            Value::Object(input)
-        })
-        .collect::<Vec<_>>();
-
-    let mut root = Map::new();
-    root.insert(
-        "schema".to_string(),
-        Value::String(INVOCATION_SCHEMA.to_string()),
-    );
-    root.insert(
-        "builder_tag".to_string(),
-        Value::String(builder_tag.to_string()),
-    );
-    root.insert(
-        "builder_version".to_string(),
-        Value::String(builder_version.to_string()),
-    );
-    root.insert("payload".to_string(), normalized_payload.clone());
-    root.insert("inputs".to_string(), Value::Array(input_values));
-
-    let canonical = canonical_json_bytes(&Value::Object(root))?;
-    Ok(BuildKey::from_bytes(Sha256::digest(&canonical).into()))
+    Ok(BuildKey::from_bytes(compute_key(
+        INVOCATION_SCHEMA,
+        builder_tag,
+        builder_version,
+        config,
+        inputs,
+    )?))
 }
 
-/// Computes the stable reuse key for a normalized object invocation.
-///
-/// The key covers the builder tag, the normalized JSON payload, and the realized
-/// input object hashes **keyed by input slot name**. Runtime code uses this key
-/// to find a reusable object even when the current build key has not been seen
-/// before.
-///
-/// As with [`compute_build_key`], inputs are identified by name: both the slot
-/// name and its object hash enter the fingerprint. `builder_version` carries the
-/// builder's implementation-version token, so a behavior change (version bump)
-/// also prevents reusing an object produced by the old implementation.
+/// Computes the stable reuse key from the builder tag, version token, config
+/// digest, and the realized dependency object hashes. Runtime code uses it to
+/// find a reusable object even when the current build key has not been seen.
 pub fn compute_reuse_key(
     builder_tag: &str,
     builder_version: &str,
-    normalized_payload: &Value,
+    config: ConfigDigest,
     inputs: &BTreeMap<String, ObjectHash>,
 ) -> Result<ReuseKey, IdentityError> {
-    let input_values = inputs
-        .iter()
-        .map(|(name, object_hash)| {
-            let mut input = Map::new();
-            input.insert("name".to_string(), Value::String(name.clone()));
-            input.insert(
-                "object_hash".to_string(),
-                Value::String(object_hash.to_string()),
-            );
-            Value::Object(input)
-        })
-        .collect::<Vec<_>>();
-
-    let mut root = Map::new();
-    root.insert(
-        "schema".to_string(),
-        Value::String(REUSE_INVOCATION_SCHEMA.to_string()),
-    );
-    root.insert(
-        "builder_tag".to_string(),
-        Value::String(builder_tag.to_string()),
-    );
-    root.insert(
-        "builder_version".to_string(),
-        Value::String(builder_version.to_string()),
-    );
-    root.insert("payload".to_string(), normalized_payload.clone());
-    root.insert("inputs".to_string(), Value::Array(input_values));
-
-    let canonical = canonical_json_bytes(&Value::Object(root))?;
-    Ok(ReuseKey::from_bytes(Sha256::digest(&canonical).into()))
+    Ok(ReuseKey::from_bytes(compute_key(
+        REUSE_INVOCATION_SCHEMA,
+        builder_tag,
+        builder_version,
+        config,
+        inputs,
+    )?))
 }
 
 fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, IdentityError> {
@@ -307,14 +335,14 @@ mod tests {
         let under_a = compute_build_key(
             "T",
             "1",
-            &json!({}),
+            ConfigDigest::of(&json!({})).unwrap(),
             &BTreeMap::from([("a".to_string(), key)]),
         )
         .unwrap();
         let under_b = compute_build_key(
             "T",
             "1",
-            &json!({}),
+            ConfigDigest::of(&json!({})).unwrap(),
             &BTreeMap::from([("b".to_string(), key)]),
         )
         .unwrap();
@@ -328,14 +356,14 @@ mod tests {
         let forward = compute_build_key(
             "T",
             "1",
-            &json!({}),
+            ConfigDigest::of(&json!({})).unwrap(),
             &BTreeMap::from([("a".to_string(), k1), ("b".to_string(), k2)]),
         )
         .unwrap();
         let swapped = compute_build_key(
             "T",
             "1",
-            &json!({}),
+            ConfigDigest::of(&json!({})).unwrap(),
             &BTreeMap::from([("a".to_string(), k2), ("b".to_string(), k1)]),
         )
         .unwrap();
@@ -348,14 +376,14 @@ mod tests {
         let under_a = compute_reuse_key(
             "T",
             "1",
-            &json!({}),
+            ConfigDigest::of(&json!({})).unwrap(),
             &BTreeMap::from([("a".to_string(), hash)]),
         )
         .unwrap();
         let under_b = compute_reuse_key(
             "T",
             "1",
-            &json!({}),
+            ConfigDigest::of(&json!({})).unwrap(),
             &BTreeMap::from([("b".to_string(), hash)]),
         )
         .unwrap();
@@ -364,18 +392,29 @@ mod tests {
 
     #[test]
     fn builder_version_changes_both_keys() {
-        let payload = json!({});
+        let payload = ConfigDigest::of(&json!({})).unwrap();
         let build_inputs = BTreeMap::from([("a".to_string(), BuildKey::from_str(HEX_A).unwrap())]);
         let reuse_inputs =
             BTreeMap::from([("a".to_string(), ObjectHash::from_str(HEX_A).unwrap())]);
 
         assert_ne!(
-            compute_build_key("T", "1", &payload, &build_inputs).unwrap(),
-            compute_build_key("T", "2", &payload, &build_inputs).unwrap()
+            compute_build_key("T", "1", payload, &build_inputs).unwrap(),
+            compute_build_key("T", "2", payload, &build_inputs).unwrap()
         );
         assert_ne!(
-            compute_reuse_key("T", "1", &payload, &reuse_inputs).unwrap(),
-            compute_reuse_key("T", "2", &payload, &reuse_inputs).unwrap()
+            compute_reuse_key("T", "1", payload, &reuse_inputs).unwrap(),
+            compute_reuse_key("T", "2", payload, &reuse_inputs).unwrap()
+        );
+    }
+
+    #[test]
+    fn config_digest_changes_the_build_key() {
+        let inputs = BTreeMap::from([("a".to_string(), BuildKey::from_str(HEX_A).unwrap())]);
+        let empty = ConfigDigest::of(&json!({})).unwrap();
+        let nonempty = ConfigDigest::of(&json!({ "flag": true })).unwrap();
+        assert_ne!(
+            compute_build_key("T", "1", empty, &inputs).unwrap(),
+            compute_build_key("T", "1", nonempty, &inputs).unwrap()
         );
     }
 }

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 pub struct TreeSubsetBuilder;
 
 /// Configuration for [`TreeSubsetBuilder`].
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TreeSubsetConfig {
     include: Vec<String>,
@@ -307,18 +307,12 @@ mod tests {
     }
 
     #[test]
-    fn erased_config_rejects_unknown_fields() {
-        let temp = tempdir().unwrap();
-        let mut cx =
-            BuildContext::with_noop_logger(temp.path().join("tmp"), store_fs_tree(temp.path()));
-
-        let error = TreeSubsetBuilder
-            .build_erased(
-                serde_json::json!({"include": ["**"], "extra": true}),
-                BuilderInputs::empty(),
-                &mut cx,
-            )
-            .unwrap_err();
+    fn plan_rejects_unknown_config_fields() {
+        static BUILDER: TreeSubsetBuilder = TreeSubsetBuilder;
+        let error = BUILDER
+            .plan(serde_json::json!({"include": ["**"], "extra": true}))
+            .err()
+            .expect("plan should reject unknown config fields");
 
         assert!(error.to_string().contains("unknown field"));
     }

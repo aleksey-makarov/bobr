@@ -690,7 +690,7 @@ mod tests {
     use bobr_builder::{
         BuildContext, BuilderInputs, BuilderPlannedSubject, InputSpec, TypedBuilder,
     };
-    use bobr_core::{BuildLogSubject, compute_build_key, compute_reuse_key};
+    use bobr_core::{BuildLogSubject, ConfigDigest, compute_build_key, compute_reuse_key};
     use bobr_source::{OriginContext, OriginSpec, ParsedOrigin, SourcePlannedSubject};
     use bobr_store::{StoreWorkspace, create_workspace, import_build, resolve_reuse_for_build};
     use serde::{Deserialize, Serialize};
@@ -828,7 +828,7 @@ mod tests {
             .count()
     }
 
-    #[derive(Debug, Deserialize, Serialize)]
+    #[derive(Debug, Clone, Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
     struct ExecutionTestConfig {}
 
@@ -999,9 +999,10 @@ mod tests {
                 .parse()
                 .unwrap(),
         )]);
-        let payload = json!({ "source": "echo hi\n", "executable": true });
+        let payload =
+            ConfigDigest::of(&json!({ "source": "echo hi\n", "executable": true })).unwrap();
         let reuse_key =
-            compute_reuse_key("ExecutionLookupTest", "test", &payload, &matching_inputs).unwrap();
+            compute_reuse_key("ExecutionLookupTest", "test", payload, &matching_inputs).unwrap();
         let build_key_for_object =
             BuildKey::from_str("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
                 .unwrap();
@@ -1021,7 +1022,7 @@ mod tests {
         .unwrap();
 
         let matching_reuse_key =
-            compute_reuse_key("ExecutionLookupTest", "test", &payload, &matching_inputs).unwrap();
+            compute_reuse_key("ExecutionLookupTest", "test", payload, &matching_inputs).unwrap();
         let object_hash =
             resolve_reuse_for_build(&store, lookup_build_key, matching_reuse_key, "script")
                 .unwrap()
@@ -1038,8 +1039,7 @@ mod tests {
                 .unwrap(),
         )]);
         let mismatching_reuse_key =
-            compute_reuse_key("ExecutionLookupTest", "test", &payload, &mismatching_inputs)
-                .unwrap();
+            compute_reuse_key("ExecutionLookupTest", "test", payload, &mismatching_inputs).unwrap();
         assert!(
             resolve_reuse_for_build(&store, lookup_build_key, mismatching_reuse_key, "script")
                 .unwrap()
@@ -1078,8 +1078,13 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let config = json!({});
-        let build_key =
-            compute_build_key("ExecutionTest", "test", &config, &BTreeMap::new()).unwrap();
+        let build_key = compute_build_key(
+            "ExecutionTest",
+            "test",
+            ConfigDigest::of(&config).unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let run_logger = create_test_logger(&store);
         let (workspace, _logger) = create_test_run(
             &store,
@@ -1140,7 +1145,13 @@ mod tests {
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
         let config = json!({});
-        let build_key = compute_build_key("Sandbox", "test", &config, &BTreeMap::new()).unwrap();
+        let build_key = compute_build_key(
+            "Sandbox",
+            "test",
+            ConfigDigest::of(&config).unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let (workspace, _logger) = create_test_run(
             &store,
             &run_logger,
@@ -1187,8 +1198,13 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
-        let build_key =
-            compute_build_key("ExecutionTest", "test", &json!({}), &BTreeMap::new()).unwrap();
+        let build_key = compute_build_key(
+            "ExecutionTest",
+            "test",
+            ConfigDigest::of(&json!({})).unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let (workspace, logger) = create_test_run(
             &store,
             &run_logger,
@@ -1220,8 +1236,13 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
         let run_logger = create_test_logger(&store);
-        let build_key =
-            compute_build_key("ExecutionTest", "test", &json!({}), &BTreeMap::new()).unwrap();
+        let build_key = compute_build_key(
+            "ExecutionTest",
+            "test",
+            ConfigDigest::of(&json!({})).unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let (workspace, _logger) = create_test_run(
             &store,
             &run_logger,
@@ -1451,7 +1472,7 @@ mod tests {
         // for it (drained) before returning the fast node's publish error.
         static SLOW_FINISHED: AtomicBool = AtomicBool::new(false);
 
-        #[derive(Debug, Deserialize, Serialize)]
+        #[derive(Debug, Clone, Deserialize, Serialize)]
         #[serde(deny_unknown_fields)]
         struct EmptyConfig {}
 

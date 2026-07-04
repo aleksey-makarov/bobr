@@ -8,7 +8,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 /// Configuration for [`GroupBuilder`] (no options).
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupConfig {}
 
@@ -152,15 +152,12 @@ mod tests {
     }
 
     #[test]
-    fn erased_config_rejects_unknown_fields() {
-        let builder = GroupBuilder;
-        let temp = tempdir().unwrap();
-        let mut cx = build_context(temp.path());
-        let inputs = BuilderInputs::new(BTreeMap::from([("first".to_string(), sample_input())]));
-
-        let error = builder
-            .build_erased(serde_json::json!({ "unexpected": true }), inputs, &mut cx)
-            .unwrap_err();
+    fn plan_rejects_unknown_config_fields() {
+        static BUILDER: GroupBuilder = GroupBuilder;
+        let error = BUILDER
+            .plan(serde_json::json!({ "unexpected": true }))
+            .err()
+            .expect("plan should reject unknown config fields");
 
         assert!(error.to_string().contains("invalid builder config"));
     }

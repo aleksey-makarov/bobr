@@ -25,7 +25,7 @@ const MEDIA_TYPE_DOCKER_LAYER_GZIP: &str = "application/vnd.docker.image.rootfs.
 const MEDIA_TYPE_OCI_LAYER_TAR: &str = "application/vnd.oci.image.layer.v1.tar";
 
 /// Configuration for [`OciExtractBuilder`] (no options).
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OciExtractConfig {}
 
@@ -970,7 +970,6 @@ fn join_rel(parent: &str, name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::store_fs_tree;
     use crate::{Builder, TypedBuilder};
     use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
     use bobr_store::{Store, import_build};
@@ -1305,16 +1304,12 @@ mod tests {
     }
 
     #[test]
-    fn build_erased_rejects_unknown_config_field() {
-        let temp = tempdir().unwrap();
-        let mut cx = build_context(temp.path(), store_fs_tree(temp.path()));
-        let mut inputs = BuilderInputs::empty();
-        let image = create_oci_layout(temp.path(), vec![]);
-        inputs.insert("image", image);
-
-        let error = OciExtractBuilder
-            .build_erased(serde_json::json!({ "unexpected": true }), inputs, &mut cx)
-            .unwrap_err();
+    fn plan_rejects_unknown_config_field() {
+        static BUILDER: OciExtractBuilder = OciExtractBuilder;
+        let error = BUILDER
+            .plan(serde_json::json!({ "unexpected": true }))
+            .err()
+            .expect("plan should reject unknown config fields");
 
         assert!(matches!(error, BuilderError::InvalidRecipe(_)));
     }
