@@ -3,3 +3,9 @@ title = "Bobr"
 authors = ["Aleksei Makarov"]
 language = "en"
 src = "docs"
+
+[build]
+build-dir = "book"
+
+[output.html]
+site-url = "/bobr/"
