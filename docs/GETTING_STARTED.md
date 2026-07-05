@@ -105,15 +105,17 @@ as siblings):
 git clone https://github.com/aleksey-makarov/bobr-recipes
 ```
 
-Then build one package attribute with the driver, which refreshes the local
-hash locks, exports the request through `request.ncl`, and runs `bobr`:
+List the build targets — attribute names with their package names — with
+`tools/bobr-list-pkgs.sh`, then build one with the driver, which refreshes the
+local hash locks, exports the request through `request.ncl`, and runs `bobr`:
 
 ```sh
 cd bobr-recipes
+tools/bobr-list-pkgs.sh        # choose a target attribute
 tools/bobr-build.sh gzip
 ```
 
-List the available attributes with `tools/list-pkgs-attrs.sh`. Useful options:
+`tools/bobr-build.sh` options:
 
 - `--store PATH` — where to build (default: `../bobr-store`, next to the repos);
 - `--jobs N`, `--quiet` — the request's top-level knobs;
@@ -122,7 +124,20 @@ List the available attributes with `tools/list-pkgs-attrs.sh`. Useful options:
 
 The first real build bootstraps a toolchain from source (glibc, gcc, …), so it
 takes a while; later builds reuse cached objects and rebuild only what changed.
-The result lands in the store under `object-refs/<name>`.
+
+The result is referenced at `object-refs/<name>`, but do not expect a directory
+of installed files there: for a package like `gzip` that object is an
+[fs-tree](./FS_TREE.md) **manifest** — a small text file listing each entry and,
+for regular files, its content hash. The bytes themselves live deduplicated in
+`fs-files/`, each stored with its correct (in-namespace) owner, group, and mode.
+This manifest + `fs-files/` split exists so a tree can be reproduced *quickly*
+and with the exact per-file ownership and mode a container's root filesystem
+needs — which a plain single-owner store directory could never hold. When a
+builder consumes the fs-tree it is **materialized** into a real directory under
+`fs-trees/<hash>/` (files hardlinked from `fs-files/`), and `fs-tree-refs/<name>`
+is a by-name symlink to that materialized root; that tree is what gets
+bind-mounted as a container root. To pull specific files out as ordinary files,
+use an [`FsTreeExport`](./REQUEST.md) recipe.
 
 To author or extend recipes, see [Recipes in Nickel](./NICKEL.md).
 
@@ -132,6 +147,17 @@ To author or extend recipes, see [Recipes in Nickel](./NICKEL.md).
 (`bobr-store.<timestamp>`, with the `bobr-store` symlink repointed at it), seeds
 source objects from the previous store by hardlink, records the `bobr` and
 `bobr-recipes` commits, and runs the build through `bobr-build.sh`.
+
+## Booting a system under QEMU
+
+`tools/bobr-run-qemu.sh` is a quick smoke test: it builds the kernel, EROFS
+rootfs, and initrd (through `bobr-build.sh`) and boots them under
+`qemu-system-x86_64`. It needs KVM (`/dev/kvm`); `--store PATH` selects the store
+(default `../bobr-store`), and anything after `--` is passed through to QEMU.
+
+```sh
+tools/bobr-run-qemu.sh
+```
 
 ## Next steps
 
