@@ -1,22 +1,23 @@
 [package]
 name = "bobr-core"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
+description = "Core identity, keys, and request model for the bobr content-addressed build system."
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-bobr-runtime = { path = "../bobr-runtime" }
-fsobj-hash = { path = "../fsobj-hash" }
-indicatif = "0.18.4"
-libc = "0.2"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
-time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
+bobr-runtime.workspace = true
+fsobj-hash.workspace = true
+indicatif.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+time = { workspace = true, features = ["formatting", "macros", "parsing"] }
 
 [dev-dependencies]
-tempfile = "3.14"
+tempfile.workspace = true
 
 [lints]
 workspace = true

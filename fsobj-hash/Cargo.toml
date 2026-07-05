@@ -1,18 +1,19 @@
 [package]
 name = "fsobj-hash"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
+description = "Content-addressed hashing of filesystem objects for the bobr build system."
 license.workspace = true
 repository.workspace = true
 
 [dependencies]
-serde = "1.0"
-sha2 = "0.10"
-tar = "0.4"
+serde.workspace = true
+sha2.workspace = true
+tar.workspace = true
 
 [dev-dependencies]
-serde_json = "1.0"
-tempfile = "3.14"
+serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

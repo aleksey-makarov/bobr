@@ -1,33 +1,43 @@
 [package]
-name = "bobr"
-version = "0.1.0"
+name = "bobr-build"
+version.workspace = true
 edition = "2024"
+description = "A content-addressed build system; installs the `bobr` command."
 license.workspace = true
 repository.workspace = true
+
+# Package name is `bobr-build` (the crates.io name), but the library and the
+# installed binary keep the short `bobr` name.
+[lib]
+name = "bobr"
+
+[[bin]]
+name = "bobr"
+path = "src/main.rs"
 
 [features]
 integration-tests = ["bobr-builder/integration-tests"]
 
 [dependencies]
-bobr-runtime = { path = "../bobr-runtime" }
-bobr-sandbox = { path = "../bobr-sandbox" }
-bobr-store = { path = "../bobr-store" }
-fsobj-hash = { path = "../fsobj-hash" }
-libc = "0.2"
-bobr-core = { path = "../bobr-core" }
-bobr-builder = { path = "../bobr-builder" }
-bobr-source = { path = "../bobr-source" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+bobr-runtime.workspace = true
+bobr-sandbox.workspace = true
+bobr-store.workspace = true
+fsobj-hash.workspace = true
+libc.workspace = true
+bobr-core.workspace = true
+bobr-builder.workspace = true
+bobr-source.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time = { workspace = true, features = ["formatting", "local-offset", "macros"] }
 
 [dev-dependencies]
-bobr-source = { path = "../bobr-source", features = ["test-support"] }
-flate2 = "1.0"
-mockito = "1.6"
-sha2 = "0.10"
-tar = "0.4"
-tempfile = "3.14"
+bobr-source = { workspace = true, features = ["test-support"] }
+flate2.workspace = true
+mockito.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

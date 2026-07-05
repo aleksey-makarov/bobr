@@ -1,7 +1,8 @@
 [package]
 name = "bobr-builder"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
+description = "Builder implementations and fs-tree tooling for the bobr content-addressed build system."
 license.workspace = true
 repository.workspace = true
 
@@ -9,20 +10,20 @@ repository.workspace = true
 integration-tests = []
 
 [dependencies]
-flate2 = "1.0"
-fsobj-hash = { path = "../fsobj-hash" }
-globset = "0.4"
-libc = "0.2"
-bobr-runtime = { path = "../bobr-runtime" }
-bobr-store = { path = "../bobr-store" }
-bobr-core = { path = "../bobr-core" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
-tar = "0.4"
+flate2.workspace = true
+fsobj-hash.workspace = true
+globset.workspace = true
+libc.workspace = true
+bobr-runtime.workspace = true
+bobr-store.workspace = true
+bobr-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
 
 [dev-dependencies]
-tempfile = "3.14"
+tempfile.workspace = true
 
 [lints]
 workspace = true

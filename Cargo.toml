@@ -14,8 +14,41 @@ members = [
 resolver = "3"
 
 [workspace.package]
+version = "0.1.1"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/aleksey-makarov/bobr"
+
+[workspace.dependencies]
+# Internal crates. They share the [workspace.package] version and move in
+# lockstep, so a release bumps the version above and the requirements here.
+bobr-builder = { path = "bobr-builder", version = "0.1.1" }
+bobr-core = { path = "bobr-core", version = "0.1.1" }
+bobr-runtime = { path = "bobr-runtime", version = "0.1.1" }
+bobr-sandbox = { path = "bobr-sandbox", version = "0.1.1" }
+bobr-sandbox-launcher = { path = "bobr-sandbox-launcher", version = "0.1.1" }
+bobr-source = { path = "bobr-source", version = "0.1.1" }
+bobr-store = { path = "bobr-store", version = "0.1.1" }
+fsobj-hash = { path = "fsobj-hash", version = "0.1.1" }
+
+# External crates. Versions live here so the whole workspace stays on one
+# version of each; per-crate feature selections stay in the member manifests.
+bzip2 = "0.5"
+flate2 = "1.0"
+globset = "0.4"
+indicatif = "0.18.4"
+libc = "0.2"
+mockito = "1.6"
+nix = { version = "0.29", features = ["dir", "fs", "hostname", "mount", "process", "sched", "user"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tar = "0.4"
+tempfile = "3.14"
+time = { version = "0.3" }
+ureq = { version = "2", features = ["tls"] }
+xz2 = "0.1"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 [workspace.lints.rust]
 # Hygiene ratchets: the workspace is clean of all of these, so deny keeps it
