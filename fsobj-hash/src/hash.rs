@@ -16,6 +16,17 @@ pub(crate) fn hash_node(node: &Node) -> ObjectHash {
 }
 
 pub(crate) fn hash_file(file: &FileNode) -> ObjectHash {
+    // A non-executable regular file hashes to exactly the SHA-256 of its bytes
+    // (`content_hash` is that digest). This makes its object hash equal to the
+    // digest upstreams publish (crates.io / `Cargo.lock`, `sha256sum`, release
+    // digests), so a source can be pinned from a published checksum without
+    // fetching it first. Executable files keep the tagged form below so that an
+    // executable and a non-executable file with identical bytes stay distinct
+    // objects; directory and symlink hashes keep their own tags, so a file hash
+    // can never collide with them either.
+    if !file.executable {
+        return ObjectHash::from_bytes(file.content_hash);
+    }
     let mut hasher = Sha256::new();
     hasher.update(FILE_TAG);
     hasher.update([u8::from(file.executable)]);

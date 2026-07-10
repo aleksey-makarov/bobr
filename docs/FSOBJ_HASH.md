@@ -56,6 +56,20 @@ A regular file hash depends on:
 
 All other mode bits are ignored.
 
+A **non-executable** regular file hashes to *exactly* the SHA-256 of its bytes.
+Its `object_hash` therefore equals the digest upstreams publish (crates.io and
+`Cargo.lock`, `sha256sum`, release checksums), so a source can be pinned from a
+published checksum without fetching and re-hashing it first.
+
+An **executable** regular file uses a tagged hash instead (a SHA-256 over a
+domain-separation tag, the executable bit, the size, and the SHA-256 of the
+bytes). This keeps an executable and a non-executable file with identical bytes
+distinct — the executable bit is part of file identity. The asymmetry is
+deliberate: the "hash equals plain SHA-256" property holds only for
+non-executable files, which is the common case for source archives and crates.
+Directory and symlink hashes keep their own tags, so a non-executable file hash
+can never collide with a directory or symlink hash.
+
 This is intentionally narrower than install semantics:
 
 - install metadata controls the final installed `uid`, `gid`, and unix mode

@@ -9,6 +9,32 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use tempfile::tempdir;
 
 #[test]
+fn non_exec_file_hash_equals_plain_sha256() {
+    // A non-executable regular file must hash to exactly the SHA-256 of its
+    // bytes, so a source can be pinned straight from a published digest.
+    //   printf 'payload\n' | sha256sum
+    let expected = "d4e4877bac978b7952f0d544fc52ebff5411d351d129f1f056fa43f11da9af2b";
+    assert_eq!(hash_file_bytes(false, b"payload\n").to_string(), expected);
+
+    // Hashing a non-executable file on disk goes through the same rule.
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("payload");
+    fs::write(&path, b"payload\n").unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(hash_path(&path).unwrap().to_string(), expected);
+}
+
+#[test]
+fn exec_bit_is_part_of_file_identity() {
+    // The executable file keeps a tagged form, so identical bytes with the
+    // exec bit set hash differently from the plain-SHA-256 non-exec form.
+    let non_exec = hash_file_bytes(false, b"payload\n");
+    let exec = hash_file_bytes(true, b"payload\n");
+    assert_ne!(non_exec, exec);
+}
+
+#[test]
 fn non_exec_mode_changes_do_not_affect_hash() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("file.txt");
