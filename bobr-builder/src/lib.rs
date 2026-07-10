@@ -2,7 +2,7 @@
 //!
 //! Defines the [`Builder`]/[`TypedBuilder`] traits, the [`BuildContext`] and
 //! input contract ([`InputSpec`]/[`BuilderInputs`]), and the concrete builders
-//! bobr ships — tree, group, tree-merge, tree-subset, fs-tree-import,
+//! bobr ships — tree, bundle, group, tree-merge, tree-subset, fs-tree-import,
 //! fs-tree-export, OCI extract, and the initramfs rootfs builder. [`BUILDERS`]
 //! is the registry of all of them.
 
@@ -10,6 +10,7 @@
 compile_error!("bobr requires Linux");
 
 mod builder;
+mod bundle;
 mod error;
 mod fs_tree_export;
 mod fs_tree_import;
@@ -26,6 +27,7 @@ mod tree_merge;
 mod tree_subset;
 
 pub use builder::*;
+pub use bundle::{BundleBuilder, BundleConfig};
 pub use error::BuilderError;
 pub use fs_tree_export::{CopyCommand, FsTreeExportBuilder, FsTreeExportConfig};
 pub use fs_tree_import::{FsTreeImportBuilder, FsTreeImportConfig};

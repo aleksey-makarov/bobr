@@ -129,6 +129,24 @@ object.
 **Limitations:** only UTF-8 text files, symlinks, and explicit directories;
 binary files and richer file-mode control are not yet supported.
 
+### `Bundle`
+
+Collects an arbitrary number of file inputs into one directory object.
+
+**Inputs:** one or more file inputs (as extra inputs). Each input must be a
+regular file (not a directory or symlink).
+
+**Config:** none (`{}`).
+
+**Behavior:**
+
+- writes a plain directory object with one entry per input, a hardlink named by
+  the input's own name (inputs are hardlinked, never copied)
+- the result is ordinary data with no ownership or mode identity — unlike the
+  fs-tree builders; use it to hand a downstream build many inputs as a single
+  directory (one bind mount) instead of one bind mount per input, e.g. to bundle
+  vendored crate archives
+
 ### `FsTreeImport`
 
 Imports one ordinary object into an fs-tree, applying install rules that set
