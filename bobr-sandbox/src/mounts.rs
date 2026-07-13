@@ -291,6 +291,11 @@ fn build_launcher_config(
         proc_mount(Path::new("/proc")),
         tmpfs_mount(Path::new("/tmp"), false, &["mode=1777"]),
         tmpfs_mount(Path::new("/run"), true, &["mode=755"]),
+        // POSIX named semaphores (sem_open) and POSIX shared memory live in
+        // /dev/shm; Python's multiprocessing (ProcessPoolExecutor) and its
+        // configure-time semaphore probe need it, and it is a standard part of
+        // a Linux runtime a build may reasonably expect.
+        tmpfs_mount(Path::new("/dev/shm"), false, &["mode=1777"]),
         bind_mount(&dirs.build_dir, Path::new(CONTAINER_BUILD_DIR), false),
         bind_mount(&config.config_dir, Path::new(CONTAINER_CONFIG_DIR), true),
         bind_mount(out_dir, Path::new(CONTAINER_OUT_DIR), false),

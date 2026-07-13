@@ -109,7 +109,10 @@ impl TypedBuilder for SandboxBuilder {
     }
 
     fn impl_version(&self) -> &'static str {
-        "1"
+        // Bumped 1 -> 2: the sandbox now mounts a tmpfs at /dev/shm, which
+        // changes the environment every sandbox build runs in (e.g. Python's
+        // configure detects POSIX semaphores and builds _multiprocessing.SemLock).
+        "2"
     }
 
     fn is_arch_dependent(&self) -> bool {
