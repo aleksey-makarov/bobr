@@ -1028,19 +1028,13 @@ fn allocate_fs_tree_ref_generation_path(
 }
 
 fn create_fs_tree_generation_ref(target: &Path, link_path: &Path) -> Result<(), StoreError> {
-    if link_path.exists() || link_path.is_symlink() {
-        return Err(StoreError::Io(format!(
-            "fs-tree generation ref collision at '{}'",
-            link_path.display()
-        )));
-    }
-    symlink(target, link_path).map_err(|error| {
-        StoreError::Io(format!(
-            "failed to create fs-tree generation ref '{}' -> '{}': {error}",
-            link_path.display(),
-            target.display()
-        ))
-    })
+    // fs-tree generation refs are inspection aids, not load-bearing. Write the
+    // symlink with an atomic replace instead of a bare create so a pre-existing
+    // entry at this name -- e.g. a duplicate that
+    // `allocate_fs_tree_ref_generation_path` failed to see because of a cached
+    // negative stat on a networked store -- is overwritten rather than aborting
+    // the whole build with EEXIST.
+    crate::refs::replace_symlink(target, link_path)
 }
 
 fn map_io(path: &Path, action: &str, error: io::Error) -> StoreError {

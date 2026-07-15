@@ -331,13 +331,12 @@ fn allocate_generation_name(
 }
 
 fn create_generation_ref(target: &Path, link_path: &Path) -> Result<(), StoreError> {
-    if link_path.exists() || link_path.is_symlink() {
-        return Err(StoreError::Io(format!(
-            "ref generation collision at '{}'",
-            link_path.display()
-        )));
-    }
-    create_symlink(target, link_path)
+    // Generation refs are inspection aids, not load-bearing. Write the symlink
+    // with an atomic replace instead of a bare create so a pre-existing entry at
+    // this name -- e.g. a duplicate that `allocate_generation_name` failed to see
+    // because of a cached negative stat on a networked store -- is overwritten
+    // rather than aborting the whole build with EEXIST.
+    replace_symlink(target, link_path)
 }
 
 pub(crate) fn replace_symlink(target: &Path, link_path: &Path) -> Result<(), StoreError> {
@@ -375,10 +374,22 @@ pub(crate) fn replace_symlink(target: &Path, link_path: &Path) -> Result<(), Sto
 
     for attempt in 0..1000u32 {
         let temp_path = parent.join(format!(".{file_name}.tmp.{pid}.{attempt}"));
-        if temp_path.exists() || temp_path.is_symlink() {
-            continue;
+        // Create the temporary symlink atomically and treat an already-taken
+        // name as a collision to retry under the next attempt. A separate
+        // exists()-then-create check races: parallel builds updating the same
+        // ref (or the same generation ref) would both see the name free and one
+        // would then fail with EEXIST. symlink() itself is the atomic guard.
+        match unix_fs::symlink(target, &temp_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(StoreError::Io(format!(
+                    "failed to create ref symlink '{}' -> '{}': {error}",
+                    temp_path.display(),
+                    target.display()
+                )));
+            }
         }
-        create_symlink(target, &temp_path)?;
         match fs::rename(&temp_path, link_path) {
             Ok(()) => return Ok(()),
             Err(error) => {
@@ -396,14 +407,4 @@ pub(crate) fn replace_symlink(target: &Path, link_path: &Path) -> Result<(), Sto
         "failed to allocate temporary ref symlink for '{}'",
         link_path.display()
     )))
-}
-
-fn create_symlink(target: &Path, link_path: &Path) -> Result<(), StoreError> {
-    unix_fs::symlink(target, link_path).map_err(|error| {
-        StoreError::Io(format!(
-            "failed to create ref symlink '{}' -> '{}': {error}",
-            link_path.display(),
-            target.display()
-        ))
-    })
 }
