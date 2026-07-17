@@ -327,6 +327,7 @@ fn build_launcher_config(
         // Host path by design: the launcher opens this before chroot and
         // writes launcher-level failures through that fd afterwards.
         failure_report: runtime_files.failure_report.clone(),
+        root_overlay: None,
     };
     validate_launcher_config(&launcher).map_err(|error| RuntimeError::new(error.to_string()))?;
     Ok(launcher)
@@ -667,6 +668,7 @@ mod tests {
             mounts,
             runner_config: PathBuf::from(CONTAINER_RUNNER_CONFIG),
             failure_report: PathBuf::from("/tmp/failure.json"),
+            root_overlay: None,
         };
 
         let error = validate_launcher_config(&config).unwrap_err();

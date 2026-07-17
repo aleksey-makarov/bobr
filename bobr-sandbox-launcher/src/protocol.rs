@@ -109,6 +109,27 @@ pub struct SandboxLauncherConfig {
     pub runner_config: PathBuf,
     /// Host-visible path where launcher failures are reported.
     pub failure_report: PathBuf,
+    /// When set, the sandbox `root` is established as an overlay of these
+    /// layers, mounted before the interior mounts are applied. Writes to the
+    /// root land in `upper`, which becomes the captured layer.
+    #[serde(default)]
+    pub root_overlay: Option<SandboxRootOverlay>,
+}
+
+/// Overlay layers that establish the sandbox root.
+///
+/// The root is mounted as `overlay(lowerdir=lower, upperdir=upper,
+/// workdir=work)`. `upper` and `work` must live on the same filesystem, and
+/// that filesystem must support the extended attributes overlayfs needs (see
+/// the unprivileged `user.overlay.*` xattr namespace).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SandboxRootOverlay {
+    /// Read-only lower layer: the input rootfs.
+    pub lower: PathBuf,
+    /// Writable upper layer: all root writes land here.
+    pub upper: PathBuf,
+    /// Overlay work directory (kernel-owned scratch, same fs as `upper`).
+    pub work: PathBuf,
 }
 
 /// One mount entry in [`SandboxLauncherConfig`].
@@ -502,6 +523,7 @@ mod tests {
             ],
             runner_config: PathBuf::from(CONTAINER_RUNNER_CONFIG),
             failure_report: PathBuf::from("/tmp/failure.json"),
+            root_overlay: None,
         };
 
         let error = validate_launcher_config(&config).unwrap_err();

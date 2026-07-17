@@ -167,6 +167,7 @@ fn run_supervisor(config: &SandboxLauncherConfig, failure_report: &File) -> io::
 }
 
 fn run_pid1(config: &SandboxLauncherConfig, failure_report: &File) -> io::Result<i32> {
+    mount_root_overlay(config).map_err(|error| context_error("mount root overlay", error))?;
     mount_layout(config).map_err(|error| context_error("mount sandbox layout", error))?;
     set_no_new_privs().map_err(|error| context_error("set no_new_privs", error))?;
     chroot(&config.root)
@@ -298,6 +299,36 @@ fn tmpfs_mount(mount: &SandboxLauncherMount, target: &Path) -> io::Result<()> {
         data.as_deref(),
     )
     .map_err(|error| context_error(format!("mount tmpfs '{}'", mount.target.display()), error))
+}
+
+/// Establishes the sandbox root as an overlay when `config.root_overlay` is
+/// set, mounting it at `config.root` before the interior mounts. The upper and
+/// work dirs must already exist on a filesystem that supports the required
+/// xattrs; this runs unprivileged inside the sandbox user namespace. A no-op
+/// when no root overlay is configured.
+fn mount_root_overlay(config: &SandboxLauncherConfig) -> io::Result<()> {
+    let Some(overlay) = &config.root_overlay else {
+        return Ok(());
+    };
+    let data = format!(
+        "lowerdir={},upperdir={},workdir={}",
+        overlay.lower.display(),
+        overlay.upper.display(),
+        overlay.work.display()
+    );
+    do_mount(
+        Some(Path::new("overlay")),
+        &config.root,
+        Some("overlay"),
+        MsFlags::empty(),
+        Some(&data),
+    )
+    .map_err(|error| {
+        context_error(
+            format!("mount root overlay at '{}'", config.root.display()),
+            error,
+        )
+    })
 }
 
 /// Splits tmpfs mount options into kernel flag bits and the leftover `data`
@@ -491,6 +522,7 @@ fn write_launcher_report(file: &File, report: &SandboxRunnerFailureReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::SandboxRootOverlay;
 
     #[test]
     fn kept_capabilities_include_kill() {
@@ -593,5 +625,104 @@ mod tests {
 
         assert_eq!(written.label, "runner-config");
         assert!(written.message.contains("parse runner config"));
+    }
+
+    /// Real root overlay driven through [`mount_root_overlay`], inside a fresh
+    /// user+mount namespace. Confirms the lower layer is visible through the
+    /// mounted root and that a new write lands in `upperdir` (the layer we later
+    /// capture). Forks first: `unshare(CLONE_NEWUSER)` requires a
+    /// single-threaded process and the test harness is multithreaded. When
+    /// unprivileged user namespaces are unavailable the child exits 42 and the
+    /// test skips rather than fails.
+    #[test]
+    fn overlay_mount_captures_writes_in_upper() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base =
+            std::env::temp_dir().join(format!("bobr-overlay-{}-{suffix}", std::process::id()));
+        let lower = base.join("lower");
+        let upper = base.join("upper");
+        let work = base.join("work");
+        let mnt = base.join("mnt");
+        for dir in [&lower, &upper, &work, &mnt] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(lower.join("a.txt"), "hello\n").unwrap();
+
+        let config = SandboxLauncherConfig {
+            protocol_version: SANDBOX_PROTOCOL_VERSION,
+            root: mnt.clone(),
+            mounts: Vec::new(),
+            runner_config: "/runner-config.json".into(),
+            failure_report: "/failure.json".into(),
+            root_overlay: Some(SandboxRootOverlay {
+                lower: lower.clone(),
+                upper: upper.clone(),
+                work: work.clone(),
+            }),
+        };
+
+        let uid = nix::unistd::getuid().as_raw();
+        let gid = nix::unistd::getgid().as_raw();
+
+        // SAFETY: the same fork primitive run_supervisor uses. The child only
+        // makes syscalls and glibc-fork-safe allocations, then exits without
+        // returning into the test harness.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            // Child. Each failure maps to a distinct exit code; 42 means skip.
+            let code = (|| -> i32 {
+                if nix::sched::unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS).is_err()
+                {
+                    return 42;
+                }
+                if fs::write("/proc/self/setgroups", "deny").is_err()
+                    || fs::write("/proc/self/uid_map", format!("0 {uid} 1\n")).is_err()
+                    || fs::write("/proc/self/gid_map", format!("0 {gid} 1\n")).is_err()
+                {
+                    return 46;
+                }
+                if do_mount(
+                    None,
+                    Path::new("/"),
+                    None,
+                    MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+                    None,
+                )
+                .is_err()
+                {
+                    return 47;
+                }
+                if mount_root_overlay(&config).is_err() {
+                    return 43;
+                }
+                if fs::read_to_string(mnt.join("a.txt")).ok().as_deref() != Some("hello\n") {
+                    return 44;
+                }
+                if fs::write(mnt.join("b.txt"), "world\n").is_err()
+                    || fs::read_to_string(upper.join("b.txt")).ok().as_deref() != Some("world\n")
+                {
+                    return 45;
+                }
+                0
+            })();
+            std::process::exit(code);
+        }
+
+        let status = nix::sys::wait::waitpid(Pid::from_raw(pid), None).unwrap();
+        let _ = fs::remove_dir_all(&base);
+        match status {
+            WaitStatus::Exited(_, 0) => {}
+            WaitStatus::Exited(_, 42) => eprintln!(
+                "overlay_mount_captures_writes_in_upper: skipped \
+                 (unprivileged user namespaces unavailable)"
+            ),
+            other => panic!(
+                "overlay child failed: {other:?} (43 mount, 44 lower, 45 upper, 46 idmap, 47 private)"
+            ),
+        }
     }
 }
