@@ -21,7 +21,7 @@ pub use protocol::{
     CONTAINER_INPUTS_DIR, CONTAINER_LAUNCHER_DIR, CONTAINER_LOG_DIR, CONTAINER_OUT_DIR,
     CONTAINER_RUNNER_CONFIG, CONTAINER_RUNTIME_DIR, CONTAINER_SUCCESS_REPORT, LAUNCHER_BINARY_NAME,
     LauncherProtocolInfo, RunnerConfig, RunnerRunAs, RunnerStepConfig, SANDBOX_PROTOCOL_VERSION,
-    SandboxLauncherConfig, SandboxLauncherMount, SandboxLauncherMountKind,
+    SandboxLauncherConfig, SandboxLauncherMount, SandboxLauncherMountKind, SandboxRootOverlay,
     SandboxRunnerFailureReport, SandboxRunnerSuccessReport, SandboxStepReport, path_cstring,
     protocol_info, read_handshake_byte, relative_launcher_target, validate_launcher_config,
     write_handshake_byte,

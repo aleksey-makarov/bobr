@@ -1,12 +1,11 @@
 use crate::{SandboxInput, SandboxRuntimeStep, StepUser};
 use bobr_runtime::runtime::RuntimeError;
 use bobr_sandbox_launcher::{
-    CONTAINER_BOBR_DIR, CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_FAILURE_REPORT,
-    CONTAINER_INPUTS_DIR, CONTAINER_LAUNCHER_DIR, CONTAINER_LOG_DIR, CONTAINER_OUT_DIR,
-    CONTAINER_RUNNER_CONFIG, CONTAINER_RUNTIME_DIR, CONTAINER_SUCCESS_REPORT, LAUNCHER_BINARY_NAME,
-    RunnerConfig, RunnerRunAs, RunnerStepConfig, SANDBOX_PROTOCOL_VERSION, SandboxLauncherConfig,
-    SandboxLauncherMount, SandboxLauncherMountKind, relative_launcher_target,
-    validate_launcher_config,
+    CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_FAILURE_REPORT, CONTAINER_INPUTS_DIR,
+    CONTAINER_LAUNCHER_DIR, CONTAINER_LOG_DIR, CONTAINER_OUT_DIR, CONTAINER_RUNNER_CONFIG,
+    CONTAINER_RUNTIME_DIR, CONTAINER_SUCCESS_REPORT, LAUNCHER_BINARY_NAME, RunnerConfig,
+    RunnerRunAs, RunnerStepConfig, SANDBOX_PROTOCOL_VERSION, SandboxLauncherConfig,
+    SandboxLauncherMount, SandboxLauncherMountKind, SandboxRootOverlay, validate_launcher_config,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -30,7 +29,7 @@ impl PreparedSandbox {
         let dirs = SandboxDirs::create(workspace)?;
         let runtime_files = SandboxRuntimeFiles::create(&dirs.runtime_files, config)?;
         write_runner_config(config, &runtime_files)?;
-        populate_root_skeleton(&dirs.rootfs, &config.rootfs, &runtime_files)?;
+        populate_overlay_upper(&dirs.upper)?;
         let launcher_config = dirs.root.join("launcher-config.json");
         let launcher = build_launcher_config(config, &dirs, &runtime_files, out_dir)?;
         serde_json::to_writer(File::create(&launcher_config)?, &launcher)
@@ -47,6 +46,11 @@ pub(crate) struct SandboxDirs {
     rootfs: PathBuf,
     build_dir: PathBuf,
     runtime_files: PathBuf,
+    /// Overlay upper layer: every write to the root lands here, and this is the
+    /// layer the build output is captured from.
+    upper: PathBuf,
+    /// Overlay work directory (kernel-owned scratch, same fs as `upper`).
+    work: PathBuf,
 }
 
 impl SandboxDirs {
@@ -55,6 +59,8 @@ impl SandboxDirs {
         let rootfs = root.join("rootfs");
         let build_dir = root.join("build");
         let runtime_files = root.join("runtime-files");
+        let upper = root.join("upper");
+        let work = root.join("work");
 
         match fs::remove_dir_all(&root) {
             Ok(()) => {}
@@ -64,12 +70,16 @@ impl SandboxDirs {
         fs::create_dir_all(&rootfs)?;
         fs::create_dir_all(&build_dir)?;
         fs::create_dir_all(&runtime_files)?;
+        fs::create_dir_all(&upper)?;
+        fs::create_dir_all(&work)?;
 
         Ok(Self {
             root,
             rootfs,
             build_dir,
             runtime_files,
+            upper,
+            work,
         })
     }
 }
@@ -281,7 +291,9 @@ fn build_launcher_config(
     runtime_files: &SandboxRuntimeFiles,
     out_dir: &Path,
 ) -> Result<SandboxLauncherConfig, RuntimeError> {
-    let mut mounts = rootfs_top_level_mounts(&config.rootfs)?;
+    // The root itself is an overlay (see root_overlay below), so the rootfs is
+    // no longer bound entry by entry; these mounts only add things inside it.
+    let mut mounts: Vec<SandboxLauncherMount> = Vec::new();
     mounts.extend([
         bind_mount(Path::new("/dev/null"), Path::new("/dev/null"), false),
         bind_mount(Path::new("/dev/zero"), Path::new("/dev/zero"), false),
@@ -327,44 +339,17 @@ fn build_launcher_config(
         // Host path by design: the launcher opens this before chroot and
         // writes launcher-level failures through that fd afterwards.
         failure_report: runtime_files.failure_report.clone(),
-        root_overlay: None,
+        // The root is a read-write overlay: the input rootfs is the read-only
+        // lower layer, and every write to the root lands in `upper`, which the
+        // build output is captured from.
+        root_overlay: Some(SandboxRootOverlay {
+            lower: config.rootfs.clone(),
+            upper: dirs.upper.clone(),
+            work: dirs.work.clone(),
+        }),
     };
     validate_launcher_config(&launcher).map_err(|error| RuntimeError::new(error.to_string()))?;
     Ok(launcher)
-}
-
-fn rootfs_top_level_mounts(rootfs: &Path) -> Result<Vec<SandboxLauncherMount>, RuntimeError> {
-    let mut entries = rootfs_top_level_entries(rootfs)?;
-    entries.sort_by_key(|entry| entry.file_name());
-
-    let mut mounts = Vec::new();
-    for entry in entries {
-        let name = entry.file_name();
-        let name = name.to_str().ok_or_else(|| {
-            RuntimeError::new(format!(
-                "sandbox rootfs '{}' contains non-UTF-8 top-level entry",
-                rootfs.display()
-            ))
-        })?;
-        let source = entry.path();
-        let destination = Path::new("/").join(name);
-        let file_type = entry.file_type()?;
-
-        if !should_mount_rootfs_entry(name) {
-            continue;
-        }
-
-        if file_type.is_dir() || file_type.is_file() {
-            mounts.push(bind_mount(&source, &destination, true));
-        } else if !file_type.is_symlink() {
-            return Err(RuntimeError::new(format!(
-                "sandbox rootfs '{}' top-level entry '/{name}' must be a file, directory, or symlink",
-                rootfs.display()
-            )));
-        }
-    }
-
-    Ok(mounts)
 }
 
 fn rootfs_top_level_entries(rootfs: &Path) -> Result<Vec<fs::DirEntry>, RuntimeError> {
@@ -373,94 +358,25 @@ fn rootfs_top_level_entries(rootfs: &Path) -> Result<Vec<fs::DirEntry>, RuntimeE
         .map_err(RuntimeError::from)
 }
 
-fn should_mount_rootfs_entry(name: &str) -> bool {
-    !matches!(name, "__bobr" | "dev" | "proc" | "run" | "tmp")
-}
-
-fn populate_root_skeleton(
-    sandbox_root: &Path,
-    lower_rootfs: &Path,
-    runtime_files: &SandboxRuntimeFiles,
-) -> Result<(), RuntimeError> {
-    for entry in rootfs_top_level_entries(lower_rootfs)? {
-        let name = entry.file_name();
-        let destination = sandbox_root.join(&name);
-        let file_type = entry.file_type()?;
-
-        if file_type.is_symlink() {
-            if let Some(name) = name.to_str()
-                && should_mount_rootfs_entry(name)
-            {
-                let target = fs::read_link(entry.path())?;
-                if !destination.exists() && !destination.is_symlink() {
-                    symlink(target, destination)?;
-                }
-            }
-        } else if file_type.is_dir() {
-            let name = name.to_str().ok_or_else(|| {
-                RuntimeError::new(format!(
-                    "sandbox rootfs '{}' contains non-UTF-8 top-level entry",
-                    lower_rootfs.display()
-                ))
-            })?;
-            if !should_mount_rootfs_entry(name) {
-                fs::create_dir_all(destination)?;
-            }
-        }
-    }
-    for path in [
-        relative_container_path(CONTAINER_BOBR_DIR)?,
-        relative_container_path(CONTAINER_BUILD_DIR)?,
-        relative_container_path(CONTAINER_CONFIG_DIR)?,
-        relative_container_path(CONTAINER_INPUTS_DIR)?,
-        relative_container_path(CONTAINER_LOG_DIR)?,
-        relative_container_path(CONTAINER_OUT_DIR)?,
-        relative_container_path(CONTAINER_LAUNCHER_DIR)?,
-        relative_container_path(CONTAINER_RUNTIME_DIR)?,
-        PathBuf::from("dev"),
-        PathBuf::from("proc"),
-        PathBuf::from("run"),
-        PathBuf::from("tmp"),
-    ] {
-        fs::create_dir_all(sandbox_root.join(path))?;
-    }
-    create_dev_symlink(sandbox_root, "fd", "/proc/self/fd")?;
-    create_dev_symlink(sandbox_root, "stdin", "/proc/self/fd/0")?;
-    create_dev_symlink(sandbox_root, "stdout", "/proc/self/fd/1")?;
-    create_dev_symlink(sandbox_root, "stderr", "/proc/self/fd/2")?;
-    File::create(
-        sandbox_root
-            .join(relative_container_path(CONTAINER_LAUNCHER_DIR)?)
-            .join(LAUNCHER_BINARY_NAME),
-    )?;
-    for log in &runtime_files.step_logs {
-        create_mount_target(sandbox_root, &log.container_stdout)?;
-        create_mount_target(sandbox_root, &log.container_stderr)?;
-    }
+/// Seeds the overlay upper layer with the runtime-only entries that are neither
+/// part of the lower rootfs nor themselves mounts: the `/dev` convenience
+/// symlinks. Everything else in the merged root comes from the lower layer, and
+/// every mount target (mountpoint dirs, the launcher and step-log files) is
+/// created by the launcher when it applies the interior mounts.
+fn populate_overlay_upper(upper: &Path) -> Result<(), RuntimeError> {
+    fs::create_dir_all(upper.join("dev"))?;
+    create_dev_symlink(upper, "fd", "/proc/self/fd")?;
+    create_dev_symlink(upper, "stdin", "/proc/self/fd/0")?;
+    create_dev_symlink(upper, "stdout", "/proc/self/fd/1")?;
+    create_dev_symlink(upper, "stderr", "/proc/self/fd/2")?;
     Ok(())
 }
 
-fn relative_container_path(container_path: &str) -> Result<PathBuf, RuntimeError> {
-    relative_launcher_target(Path::new(container_path))
-        .map_err(|error| RuntimeError::new(error.to_string()))
-}
-
-fn create_dev_symlink(sandbox_root: &Path, name: &str, target: &str) -> Result<(), RuntimeError> {
-    let link = sandbox_root.join("dev").join(name);
+fn create_dev_symlink(root: &Path, name: &str, target: &str) -> Result<(), RuntimeError> {
+    let link = root.join("dev").join(name);
     if !link.exists() && !link.is_symlink() {
         symlink(target, link)?;
     }
-    Ok(())
-}
-
-fn create_mount_target(sandbox_root: &Path, container_path: &Path) -> Result<(), RuntimeError> {
-    let relative = relative_launcher_target(container_path)
-        .map_err(|error| RuntimeError::new(error.to_string()))?;
-    let target = sandbox_root.join(relative);
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    File::create(target)?;
     Ok(())
 }
 
@@ -592,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn launcher_config_uses_readonly_rootfs_binds_and_writable_runtime_mounts() {
+    fn launcher_config_uses_root_overlay_and_writable_runtime_mounts() {
         let temp = tempdir().unwrap();
         let source = temp.path().join("source");
         fs::create_dir(&source).unwrap();
@@ -615,21 +531,19 @@ mod tests {
 
         assert_eq!(launcher.protocol_version, SANDBOX_PROTOCOL_VERSION);
         assert_eq!(launcher.root, dirs.rootfs);
-        for name in ["usr", "etc", "var"] {
-            let destination = Path::new("/").join(name);
-            let mount = mounts
-                .iter()
-                .find(|mount| mount.target == destination)
-                .unwrap_or_else(|| panic!("/{name} readonly bind mount exists"));
-            assert_eq!(mount.kind, SandboxLauncherMountKind::Bind);
-            assert_eq!(
-                mount.source.as_deref(),
-                Some(input.rootfs.join(name).as_path())
-            );
-            assert!(mount.readonly);
+        let overlay = launcher
+            .root_overlay
+            .as_ref()
+            .expect("root is established via an overlay");
+        assert_eq!(overlay.lower, input.rootfs);
+        assert_eq!(overlay.upper, dirs.upper);
+        assert_eq!(overlay.work, dirs.work);
+        // The rootfs is no longer bound entry by entry; the overlay provides it.
+        for name in ["usr", "etc", "var", "dev"] {
+            assert!(!mounts.iter().any(|mount| {
+                mount.source.as_deref() == Some(input.rootfs.join(name).as_path())
+            }));
         }
-        assert!(!mounts.iter().any(|mount| mount.target == Path::new("/dev")
-            && mount.source.as_deref() == Some(input.rootfs.join("dev").as_path())));
         assert!(mounts.iter().any(|mount| {
             mount.target == Path::new(CONTAINER_BUILD_DIR)
                 && mount.source.as_deref() == Some(dirs.build_dir.as_path())
@@ -677,35 +591,33 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_root_skeleton_copies_top_level_symlinks_and_skipped_dirs() {
+    fn overlay_upper_seeds_dev_symlinks_only() {
         let temp = tempdir().unwrap();
-        let lower = temp.path().join("lower");
-        let root = temp.path().join("root");
-        fs::create_dir_all(&lower).unwrap();
-        fs::create_dir_all(&root).unwrap();
-        fs::create_dir(lower.join("run")).unwrap();
-        fs::create_dir(lower.join("usr")).unwrap();
-        symlink("usr/bin", lower.join("bin")).unwrap();
-        let (input, _out_dir, workspace) = valid_input(&temp);
-        let runtime_files =
-            SandboxRuntimeFiles::create(&workspace.join("runtime-files"), &input).unwrap();
+        let upper = temp.path().join("upper");
+        fs::create_dir_all(&upper).unwrap();
 
-        populate_root_skeleton(&root, &lower, &runtime_files).unwrap();
+        populate_overlay_upper(&upper).unwrap();
 
+        // The /dev convenience symlinks are the only thing seeded into upper.
         assert_eq!(
-            fs::read_link(root.join("bin")).unwrap(),
-            Path::new("usr/bin")
-        );
-        assert!(root.join("run").is_dir());
-        assert!(!root.join("usr").exists());
-        assert_eq!(
-            fs::read_link(root.join("dev/fd")).unwrap(),
+            fs::read_link(upper.join("dev/fd")).unwrap(),
             Path::new("/proc/self/fd")
         );
         assert_eq!(
-            fs::read_link(root.join("dev/stdin")).unwrap(),
+            fs::read_link(upper.join("dev/stdin")).unwrap(),
             Path::new("/proc/self/fd/0")
         );
+        assert_eq!(
+            fs::read_link(upper.join("dev/stdout")).unwrap(),
+            Path::new("/proc/self/fd/1")
+        );
+        assert_eq!(
+            fs::read_link(upper.join("dev/stderr")).unwrap(),
+            Path::new("/proc/self/fd/2")
+        );
+        // No top-level rootfs entries are recreated; the lower layer provides them.
+        assert!(!upper.join("usr").exists());
+        assert!(!upper.join("bin").is_symlink());
     }
 
     #[test]
