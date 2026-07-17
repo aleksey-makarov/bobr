@@ -23,9 +23,12 @@ use bobr_store::fs_tree::FsTree;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::fmt;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// Default file creation mask for sandbox steps.
@@ -998,12 +1001,16 @@ fn run_sandbox_and_capture(
     )?;
 
     let output_path = if input.preserve_ownership {
-        // Ownership-aware fs-tree: intern the output (scans into fs-files and,
-        // when fully fresh, moves the tree into the fs-trees cache, consuming
-        // out_dir), then write the manifest as the host-owned artifact.
+        // Ownership-aware fs-tree: the build ran with a read-write overlay root,
+        // so its output is the overlay upper layer. Drop the sandbox's own
+        // scaffolding, verify the layer is purely additive, then intern it
+        // (scans into fs-files and, when fully fresh, moves the tree into the
+        // fs-trees cache, consuming upper) and write the host-owned manifest.
+        mounts::strip_overlay_scaffolding(&prepared.upper)?;
+        validate_additive_layer(&prepared.upper, &input.rootfs)?;
         let manifest = input
             .fs_tree
-            .intern_tree(out_dir.to_path_buf())
+            .intern_tree(prepared.upper.clone())
             .map_err(|error| RuntimeError::new(error.to_string()))?;
         let output_path = input.tmp.join(OUTPUT_MANIFEST_NAME);
         manifest
@@ -1019,6 +1026,112 @@ fn run_sandbox_and_capture(
     };
 
     Ok(SandboxOutput { output_path, steps })
+}
+
+/// Verifies that the overlay upper layer holds only additions relative to the
+/// lower rootfs. Any non-additive change fails the build: overlay whiteouts
+/// (deletions), opaque directories (a replaced directory), and files, symlinks,
+/// or directories that already exist in the lower rootfs (a modification).
+/// Scaffolding must already have been stripped from `upper`.
+fn validate_additive_layer(upper: &Path, lower: &Path) -> Result<(), RuntimeError> {
+    validate_additive_dir(upper, upper, lower)
+}
+
+fn validate_additive_dir(dir: &Path, upper_root: &Path, lower: &Path) -> Result<(), RuntimeError> {
+    let mut entries = fs::read_dir(dir)
+        .map_err(|error| {
+            RuntimeError::new(format!("read overlay upper '{}': {error}", dir.display()))
+        })?
+        .collect::<Result<Vec<_>, io::Error>>()
+        .map_err(|error| RuntimeError::new(error.to_string()))?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let meta = fs::symlink_metadata(&path)
+            .map_err(|error| RuntimeError::new(format!("inspect '{}': {error}", path.display())))?;
+        let file_type = meta.file_type();
+        let relative = path.strip_prefix(upper_root).unwrap_or(&path);
+        let shown = Path::new("/").join(relative).display().to_string();
+        let lower_meta = fs::symlink_metadata(lower.join(relative)).ok();
+
+        // Overlay whiteout: a character device with rdev 0:0 marks a deletion.
+        if file_type.is_char_device() && meta.rdev() == 0 {
+            return Err(RuntimeError::new(format!(
+                "SandboxInstall build deleted '{shown}'; the builder only allows additions"
+            )));
+        }
+
+        if file_type.is_dir() {
+            if is_opaque_dir(&path)? {
+                return Err(RuntimeError::new(format!(
+                    "SandboxInstall build replaced directory '{shown}'; the builder only allows additions"
+                )));
+            }
+            if let Some(lower_meta) = &lower_meta {
+                // A directory shared with the lower rootfs is a legitimate
+                // passthrough parent of an addition only when it is unchanged.
+                if !lower_meta.is_dir()
+                    || lower_meta.uid() != meta.uid()
+                    || lower_meta.gid() != meta.gid()
+                    || lower_meta.mode() & 0o7777 != meta.mode() & 0o7777
+                {
+                    return Err(RuntimeError::new(format!(
+                        "SandboxInstall build modified existing directory '{shown}'; the builder only allows additions"
+                    )));
+                }
+            }
+            validate_additive_dir(&path, upper_root, lower)?;
+        } else if lower_meta.is_some() {
+            // A regular file or symlink whose path already exists below the
+            // overlay: the build modified an existing entry.
+            return Err(RuntimeError::new(format!(
+                "SandboxInstall build modified existing '{shown}'; the builder only allows additions"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Returns whether `dir` carries an overlayfs opaque marker, set when a build
+/// replaces a whole directory. Unprivileged overlays store it in the `user.*`
+/// xattr namespace, privileged ones in `trusted.*`.
+fn is_opaque_dir(dir: &Path) -> Result<bool, RuntimeError> {
+    for name in ["user.overlay.opaque", "trusted.overlay.opaque"] {
+        if xattr_equals(dir, name, b"y")? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Reads an extended attribute and compares it to `expected`. A missing
+/// attribute, an oversized value, or a filesystem without xattr support all
+/// read as "not equal".
+fn xattr_equals(path: &Path, name: &str, expected: &[u8]) -> Result<bool, RuntimeError> {
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| RuntimeError::new(format!("path contains NUL byte: '{}'", path.display())))?;
+    let c_name = CString::new(name).expect("xattr name has no interior NUL");
+    let mut buf = [0_u8; 16];
+    let len = unsafe {
+        libc::lgetxattr(
+            c_path.as_ptr(),
+            c_name.as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+        )
+    };
+    if len < 0 {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENODATA) | Some(libc::ENOTSUP) | Some(libc::ERANGE) => Ok(false),
+            _ => Err(RuntimeError::new(format!(
+                "read xattr '{name}' of '{}': {error}",
+                path.display()
+            ))),
+        };
+    }
+    Ok(&buf[..len as usize] == expected)
 }
 
 /// Recursively chowns `path` to uid 0 / gid 0 (in-namespace root, which maps to
@@ -1217,5 +1330,191 @@ mod tests {
                 .to_string()
                 .contains("rootfs input must be a materialized fs-tree directory")
         );
+    }
+
+    fn set_mode(path: &Path, mode: u32) {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    // Sets an xattr; returns false if the filesystem does not support it.
+    fn try_set_xattr(path: &Path, name: &str, value: &[u8]) -> bool {
+        let c_path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let c_name = CString::new(name).unwrap();
+        let rc = unsafe {
+            libc::lsetxattr(
+                c_path.as_ptr(),
+                c_name.as_ptr(),
+                value.as_ptr() as *const libc::c_void,
+                value.len(),
+                0,
+            )
+        };
+        rc == 0
+    }
+
+    #[test]
+    fn additive_layer_accepts_additions_and_passthrough_dirs() {
+        let temp = tempdir().unwrap();
+        let lower = temp.path().join("lower");
+        let upper = temp.path().join("upper");
+        // Lower has /usr; upper carries it through unchanged plus new entries.
+        fs::create_dir_all(lower.join("usr")).unwrap();
+        fs::create_dir_all(upper.join("usr/lib")).unwrap();
+        fs::write(upper.join("usr/lib/libfoo.so"), b"x").unwrap();
+        fs::write(upper.join("newtop.txt"), b"y").unwrap();
+
+        validate_additive_layer(&upper, &lower).unwrap();
+    }
+
+    #[test]
+    fn additive_layer_rejects_modified_file() {
+        let temp = tempdir().unwrap();
+        let lower = temp.path().join("lower");
+        let upper = temp.path().join("upper");
+        fs::create_dir_all(lower.join("etc")).unwrap();
+        fs::write(lower.join("etc/hosts"), b"orig").unwrap();
+        fs::create_dir_all(upper.join("etc")).unwrap();
+        fs::write(upper.join("etc/hosts"), b"changed").unwrap();
+
+        let error = validate_additive_layer(&upper, &lower).unwrap_err();
+        assert!(error.to_string().contains("modified existing"));
+        assert!(error.to_string().contains("/etc/hosts"));
+    }
+
+    #[test]
+    fn additive_layer_rejects_changed_directory_metadata() {
+        let temp = tempdir().unwrap();
+        let lower = temp.path().join("lower");
+        let upper = temp.path().join("upper");
+        fs::create_dir_all(lower.join("opt")).unwrap();
+        set_mode(&lower.join("opt"), 0o755);
+        fs::create_dir_all(upper.join("opt")).unwrap();
+        set_mode(&upper.join("opt"), 0o700);
+
+        let error = validate_additive_layer(&upper, &lower).unwrap_err();
+        assert!(error.to_string().contains("modified existing directory"));
+        assert!(error.to_string().contains("/opt"));
+    }
+
+    #[test]
+    fn additive_layer_rejects_opaque_directory() {
+        let temp = tempdir().unwrap();
+        let lower = temp.path().join("lower");
+        let upper = temp.path().join("upper");
+        fs::create_dir_all(&lower).unwrap();
+        fs::create_dir_all(upper.join("etc")).unwrap();
+        if !try_set_xattr(&upper.join("etc"), "user.overlay.opaque", b"y") {
+            eprintln!("additive_layer_rejects_opaque_directory: skipped (no xattr support)");
+            return;
+        }
+
+        let error = validate_additive_layer(&upper, &lower).unwrap_err();
+        assert!(error.to_string().contains("replaced directory"));
+        assert!(error.to_string().contains("/etc"));
+    }
+
+    #[test]
+    fn strip_overlay_scaffolding_removes_injected_top_level() {
+        let temp = tempdir().unwrap();
+        let upper = temp.path().join("upper");
+        for name in ["__bobr", "dev", "proc", "run", "tmp", "usr"] {
+            fs::create_dir_all(upper.join(name)).unwrap();
+        }
+        fs::write(upper.join("dev/null"), b"").unwrap();
+        fs::write(upper.join("usr/foo"), b"x").unwrap();
+
+        mounts::strip_overlay_scaffolding(&upper).unwrap();
+
+        for name in ["__bobr", "dev", "proc", "run", "tmp"] {
+            assert!(!upper.join(name).exists(), "{name} should be stripped");
+        }
+        assert!(upper.join("usr/foo").exists());
+    }
+
+    /// Deletes a lower file through a real overlay so the kernel writes a
+    /// whiteout into upper, then confirms validation rejects it. Forks first:
+    /// `unshare(CLONE_NEWUSER)` needs a single-threaded process. Skips where
+    /// unprivileged user namespaces are unavailable.
+    #[test]
+    fn additive_layer_rejects_whiteout_from_real_overlay() {
+        let temp = tempdir().unwrap();
+        let base = temp.path();
+        let lower = base.join("lower");
+        let upper = base.join("upper");
+        let work = base.join("work");
+        let mnt = base.join("mnt");
+        for dir in [&lower, &upper, &work, &mnt] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(lower.join("victim.txt"), b"bye\n").unwrap();
+
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let data = CString::new(format!(
+            "lowerdir={},upperdir={},workdir={}",
+            lower.display(),
+            upper.display(),
+            work.display()
+        ))
+        .unwrap();
+        let mnt_c = CString::new(mnt.as_os_str().as_bytes()).unwrap();
+        let overlay = CString::new("overlay").unwrap();
+
+        // SAFETY: the child only makes syscalls and glibc-fork-safe allocations,
+        // then exits without returning into the test harness.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            let code = (|| -> i32 {
+                if unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) } != 0 {
+                    return 42;
+                }
+                if fs::write("/proc/self/setgroups", "deny").is_err()
+                    || fs::write("/proc/self/uid_map", format!("0 {uid} 1\n")).is_err()
+                    || fs::write("/proc/self/gid_map", format!("0 {gid} 1\n")).is_err()
+                {
+                    return 46;
+                }
+                let rc = unsafe {
+                    libc::mount(
+                        overlay.as_ptr(),
+                        mnt_c.as_ptr(),
+                        overlay.as_ptr(),
+                        0,
+                        data.as_ptr() as *const libc::c_void,
+                    )
+                };
+                if rc != 0 {
+                    return 43;
+                }
+                if fs::remove_file(mnt.join("victim.txt")).is_err() {
+                    return 44;
+                }
+                // The whiteout now lives in upper; validation must reject it.
+                if validate_additive_layer(&upper, &lower).is_ok() {
+                    return 45;
+                }
+                0
+            })();
+            std::process::exit(code);
+        }
+
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        let code = if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else {
+            -1
+        };
+        match code {
+            0 => {}
+            42 => eprintln!(
+                "additive_layer_rejects_whiteout_from_real_overlay: skipped \
+                 (unprivileged user namespaces unavailable)"
+            ),
+            other => panic!(
+                "whiteout child failed with code {other} (43 mount, 44 rm, 45 not-rejected, 46 idmap)"
+            ),
+        }
     }
 }

@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 pub(crate) struct PreparedSandbox {
     pub(crate) runtime_files: SandboxRuntimeFiles,
     pub(crate) launcher_config: PathBuf,
+    /// Overlay upper layer: the build output is captured from here.
+    pub(crate) upper: PathBuf,
 }
 
 impl PreparedSandbox {
@@ -37,6 +39,7 @@ impl PreparedSandbox {
         Ok(Self {
             runtime_files,
             launcher_config,
+            upper: dirs.upper.clone(),
         })
     }
 }
@@ -376,6 +379,32 @@ fn create_dev_symlink(root: &Path, name: &str, target: &str) -> Result<(), Runti
     let link = root.join("dev").join(name);
     if !link.exists() && !link.is_symlink() {
         symlink(target, link)?;
+    }
+    Ok(())
+}
+
+/// Top-level entries the sandbox itself injects into the overlay upper: the
+/// mount points for the interior mounts (all under `/__bobr`, plus `/dev`,
+/// `/proc`, `/run`, `/tmp`) and the seeded `/dev` symlinks. None of them are
+/// part of the build's output.
+const OVERLAY_SCAFFOLDING_TOP_LEVEL: &[&str] = &["__bobr", "dev", "proc", "run", "tmp"];
+
+/// Removes the sandbox's own scaffolding from the overlay upper, leaving only
+/// what the build itself wrote, so the captured layer holds no mount points or
+/// seeded `/dev` symlinks.
+pub(crate) fn strip_overlay_scaffolding(upper: &Path) -> Result<(), RuntimeError> {
+    for name in OVERLAY_SCAFFOLDING_TOP_LEVEL {
+        let path = upper.join(name);
+        match fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(RuntimeError::new(format!(
+                    "remove overlay scaffolding '{}': {error}",
+                    path.display()
+                )));
+            }
+        }
     }
     Ok(())
 }
