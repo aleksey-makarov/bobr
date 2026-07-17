@@ -16,8 +16,7 @@ use bobr_builder::{BuildContext, Builder, BuilderError, BuilderInputs, InputSpec
 use bobr_core::BuildLogLevel;
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use bobr_sandbox_launcher::{
-    CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_INPUTS_DIR, CONTAINER_OUT_DIR,
-    SandboxStepReport,
+    CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_INPUTS_DIR, SandboxStepReport,
 };
 use bobr_store::fs_tree::FsTree;
 use serde::{Deserialize, Serialize};
@@ -33,7 +32,6 @@ use std::path::{Path, PathBuf};
 
 /// Default file creation mask for sandbox steps.
 const DEFAULT_SANDBOX_UMASK: u32 = 0o022;
-const OUTPUT_DIR_NAME: &str = "out";
 const CONFIG_DIR_NAME: &str = "config";
 const RUNTIME_DIR_NAME: &str = "runtime";
 const STEP_LOG_DIR_NAME: &str = "step-logs";
@@ -57,8 +55,9 @@ pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
 
 /// Recipe-facing `SandboxInstall` builder config.
 ///
-/// This shape intentionally matches the existing `Sandbox` config. The input
-/// contract differs: `rootfs` is a materialized fs-tree root.
+/// The build runs with a read-write overlay root; the output is whatever it
+/// installs into that root, captured as an additive fs-tree layer. The `rootfs`
+/// input is a materialized fs-tree root.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxConfig {
@@ -67,20 +66,10 @@ pub struct SandboxConfig {
     script_config: Value,
     /// Ordered command steps to execute inside the sandbox.
     steps: Vec<BuildStep>,
-    /// Whether the output is captured as an ownership-aware fs-tree (the
-    /// default). When `false`, the output tree is instead chowned to a single
-    /// owner and captured as a plain object — for self-contained artifacts
-    /// (e.g. images) where per-file ownership is irrelevant.
-    #[serde(default = "default_preserve_ownership")]
-    preserve_ownership: bool,
 }
 
 fn default_script_config() -> Value {
     Value::Object(Map::new())
-}
-
-fn default_preserve_ownership() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -118,7 +107,10 @@ impl TypedBuilder for SandboxInstallBuilder {
         // Bumped 1 -> 2: the sandbox now mounts a tmpfs at /dev/shm, which
         // changes the environment every sandbox build runs in (e.g. Python's
         // configure detects POSIX semaphores and builds _multiprocessing.SemLock).
-        "2"
+        // Bumped 2 -> 3: the build runs with a read-write overlay root and its
+        // output is the additive upper layer captured as an fs-tree; there is no
+        // $out / BOBR_OUT_DIR mount or interpolation.
+        "3"
     }
 
     fn is_arch_dependent(&self) -> bool {
@@ -212,7 +204,6 @@ fn prepare_sandbox_input(
         launcher_path,
         extra_inputs: sandbox_inputs,
         steps: sandbox_steps,
-        preserve_ownership: config.preserve_ownership,
         build_seed_hex: cx.build_seed().to_hex(),
     })
 }
@@ -517,7 +508,7 @@ fn collect_extra_inputs(
     let mut named = Vec::new();
     for (name, object) in inputs.extras(spec) {
         validate_input_name(name)?;
-        if matches!(name, "build" | "out" | "config") {
+        if matches!(name, "build" | "config") {
             return Err(SandboxError::InvalidConfig(format!(
                 "input name '{name}' conflicts with a reserved {builder_name} interpolation variable"
             )));
@@ -604,7 +595,6 @@ fn validate_interpolation_name(key: &str, value: &str, escaped: bool) -> Result<
 fn interpolation_value(key: &str, inputs: &[(String, PathBuf)]) -> Result<String, SandboxError> {
     match key {
         "build" => Ok(CONTAINER_BUILD_DIR.to_string()),
-        "out" => Ok(CONTAINER_OUT_DIR.to_string()),
         "config" => Ok(CONTAINER_CONFIG_DIR.to_string()),
         _ => inputs
             .iter()
@@ -901,9 +891,6 @@ pub struct SandboxInput {
     launcher_path: PathBuf,
     extra_inputs: Vec<SandboxRuntimeInput>,
     steps: Vec<SandboxRuntimeStep>,
-    /// Capture the output as an ownership-aware fs-tree (`true`), or chown it to
-    /// a single owner and capture it as a plain object (`false`).
-    preserve_ownership: bool,
     /// Deterministic per-build seed, exported to every step as
     /// `BOBR_BUILD_SEED` (64 lowercase hex chars).
     build_seed_hex: String,
@@ -931,10 +918,9 @@ pub(crate) struct SandboxRuntimeStep {
     stderr_path: PathBuf,
 }
 
-/// Typed output of [`SandboxInstallFunction`]: the host path of the produced artifact
-/// (opaque to the caller — currently an fs-tree manifest) and a per-step
-/// execution report. The artifact lives in the input `tmp` and is guaranteed
-/// not to be owned by an in-namespace sub-uid.
+/// Typed output of [`SandboxInstallFunction`]: the host path of the produced
+/// fs-tree manifest and a per-step execution report. The manifest lives in the
+/// input `tmp` and is guaranteed not to be owned by an in-namespace sub-uid.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxOutput {
@@ -958,24 +944,17 @@ impl RuntimeFunction for SandboxInstallFunction {
             )));
         }
 
-        // Create the working directories the function owns under `tmp`: the
-        // build workspace (mount scaffolding) and the output staging dir.
+        // Create the working directory the function owns under `tmp`: the build
+        // workspace (mount scaffolding). The captured artifact is an fs-tree
+        // manifest written directly under `tmp`.
         let workspace = input.tmp.join(RUNTIME_DIR_NAME);
         recreate_empty_dir_force(&workspace)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
-        let out_dir = input.tmp.join(OUTPUT_DIR_NAME);
-        recreate_empty_dir_force(&out_dir).map_err(|error| RuntimeError::new(error.to_string()))?;
 
-        let result = run_sandbox_and_capture(&input, &workspace, &out_dir);
+        let result = run_sandbox_and_capture(&input, &workspace);
 
-        // Guarantee no in-namespace-owned files remain in `tmp`. The workspace
-        // (build tree) is always removed as ns-root. `out_dir` is consumed on
-        // the fs-tree path and is the artifact on the plain path, so on success
-        // it must stay — remove it only on failure, where ns files may remain
-        // and the host user could not clear them afterwards.
-        if result.is_err() {
-            let _ = remove_dir_force(&out_dir);
-        }
+        // Guarantee no in-namespace-owned files remain in `tmp`: the workspace
+        // (build tree) is always removed as ns-root.
         let workspace_cleanup = remove_dir_force(&workspace);
         let output = result?;
         workspace_cleanup.map_err(|error| RuntimeError::new(error.to_string()))?;
@@ -985,14 +964,13 @@ impl RuntimeFunction for SandboxInstallFunction {
 }
 
 /// Runs the sandbox and captures its output: prepares the mounts, runs the
-/// launcher, then captures the output tree per `preserve_ownership`. Its caller
-/// owns cleaning `workspace`/`out_dir` regardless of the outcome.
+/// launcher, then captures the overlay upper layer as an additive fs-tree
+/// manifest. Its caller owns cleaning `workspace` regardless of the outcome.
 fn run_sandbox_and_capture(
     input: &SandboxInput,
     workspace: &Path,
-    out_dir: &Path,
 ) -> Result<SandboxOutput, RuntimeError> {
-    let prepared = mounts::PreparedSandbox::create(input, workspace, out_dir)?;
+    let prepared = mounts::PreparedSandbox::create(input, workspace)?;
     let steps = lifecycle::run_sandbox_launcher(
         &input.launcher_path,
         &prepared.launcher_config,
@@ -1000,30 +978,21 @@ fn run_sandbox_and_capture(
         &prepared.runtime_files.failure_report,
     )?;
 
-    let output_path = if input.preserve_ownership {
-        // Ownership-aware fs-tree: the build ran with a read-write overlay root,
-        // so its output is the overlay upper layer. Drop the sandbox's own
-        // scaffolding, verify the layer is purely additive, then intern it
-        // (scans into fs-files and, when fully fresh, moves the tree into the
-        // fs-trees cache, consuming upper) and write the host-owned manifest.
-        mounts::strip_overlay_scaffolding(&prepared.upper)?;
-        validate_additive_layer(&prepared.upper, &input.rootfs)?;
-        let manifest = input
-            .fs_tree
-            .intern_tree(prepared.upper.clone())
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
-        let output_path = input.tmp.join(OUTPUT_MANIFEST_NAME);
-        manifest
-            .write_canonical(&output_path)
-            .map_err(|error| RuntimeError::new(error.to_string()))?;
-        output_path
-    } else {
-        // Plain object: chown the whole tree to a single owner (ns-root → host
-        // uid) so it is host-owned, and hand back the directory itself. Object
-        // hashing ignores uid/gid, so the result is uid-independent.
-        chown_tree_to_root(out_dir).map_err(|error| RuntimeError::new(error.to_string()))?;
-        out_dir.to_path_buf()
-    };
+    // The build ran with a read-write overlay root, so its output is the overlay
+    // upper layer. Drop the sandbox's own scaffolding, verify the layer is
+    // purely additive, then intern it (scans into fs-files and, when fully
+    // fresh, moves the tree into the fs-trees cache, consuming upper) and write
+    // the host-owned manifest.
+    mounts::strip_overlay_scaffolding(&prepared.upper)?;
+    validate_additive_layer(&prepared.upper, &input.rootfs)?;
+    let manifest = input
+        .fs_tree
+        .intern_tree(prepared.upper.clone())
+        .map_err(|error| RuntimeError::new(error.to_string()))?;
+    let output_path = input.tmp.join(OUTPUT_MANIFEST_NAME);
+    manifest
+        .write_canonical(&output_path)
+        .map_err(|error| RuntimeError::new(error.to_string()))?;
 
     Ok(SandboxOutput { output_path, steps })
 }
@@ -1134,30 +1103,6 @@ fn xattr_equals(path: &Path, name: &str, expected: &[u8]) -> Result<bool, Runtim
     Ok(&buf[..len as usize] == expected)
 }
 
-/// Recursively chowns `path` to uid 0 / gid 0 (in-namespace root, which maps to
-/// the host owner) without following symlinks, so the tree becomes host-owned.
-fn chown_tree_to_root(path: &Path) -> Result<(), SandboxError> {
-    let metadata = fs::symlink_metadata(path).map_err(|error| {
-        SandboxError::FsFailed(format!("failed to inspect '{}': {error}", path.display()))
-    })?;
-    if metadata.file_type().is_dir() {
-        for entry in fs::read_dir(path).map_err(|error| {
-            SandboxError::FsFailed(format!("failed to read '{}': {error}", path.display()))
-        })? {
-            let entry = entry.map_err(|error| {
-                SandboxError::FsFailed(format!(
-                    "failed to read entry in '{}': {error}",
-                    path.display()
-                ))
-            })?;
-            chown_tree_to_root(&entry.path())?;
-        }
-    }
-    std::os::unix::fs::lchown(path, Some(0), Some(0)).map_err(|error| {
-        SandboxError::FsFailed(format!("failed to chown '{}': {error}", path.display()))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1185,7 +1130,6 @@ mod tests {
                 argv: vec!["true".to_string()],
                 env: Map::new(),
             }],
-            preserve_ownership: true,
         }
     }
 
@@ -1234,7 +1178,6 @@ mod tests {
                 SandboxConfig {
                     script_config: default_script_config(),
                     steps: Vec::new(),
-                    preserve_ownership: true,
                 },
                 inputs(rootfs),
                 &mut cx,
@@ -1268,7 +1211,6 @@ mod tests {
                 argv: vec!["@{config}/args/00000000".to_string()],
                 env: Map::from_iter([("SRC".to_string(), Value::String("@{source}".to_string()))]),
             }],
-            preserve_ownership: true,
         };
         let cx = BuildContext::with_noop_logger(temp.path().join("tmp"), store.fs_tree());
         fs::create_dir(&cx.temp_dir).unwrap();
