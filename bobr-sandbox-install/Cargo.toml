@@ -1,0 +1,23 @@
+[package]
+name = "bobr-sandbox-install"
+version.workspace = true
+edition = "2024"
+description = "Sandboxed build execution capturing installed files as an fs-tree object, for the bobr content-addressed build system."
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bobr-runtime.workspace = true
+bobr-store.workspace = true
+libc.workspace = true
+bobr-builder.workspace = true
+bobr-core.workspace = true
+bobr-sandbox-launcher.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -77,6 +77,7 @@ dependencies = [
  "bobr-core",
  "bobr-runtime",
  "bobr-sandbox",
+ "bobr-sandbox-install",
  "bobr-source",
  "bobr-store",
  "flate2",
@@ -135,6 +136,21 @@ dependencies = [
 
 [[package]]
 name = "bobr-sandbox"
+version = "0.1.1"
+dependencies = [
+ "bobr-builder",
+ "bobr-core",
+ "bobr-runtime",
+ "bobr-sandbox-launcher",
+ "bobr-store",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "bobr-sandbox-install"
 version = "0.1.1"
 dependencies = [
  "bobr-builder",

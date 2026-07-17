@@ -11,6 +11,7 @@ fn registered_builders() -> impl Iterator<Item = &'static dyn Builder> {
         .iter()
         .copied()
         .chain(bobr_sandbox::BUILDERS.iter().copied())
+        .chain(bobr_sandbox_install::BUILDERS.iter().copied())
 }
 
 /// Parses and plans one builder recipe object against the registered builders.
