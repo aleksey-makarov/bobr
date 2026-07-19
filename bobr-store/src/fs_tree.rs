@@ -623,6 +623,88 @@ pub fn merge_manifests(manifests: &[FsTreeManifest]) -> Result<FsTreeManifest, S
     FsTreeManifest::from_entries(by_path.into_values().collect())
 }
 
+/// Re-roots a canonical fs-tree manifest at the `strip_prefix` subdirectory.
+///
+/// Every entry must be the root, an ancestor of `strip_prefix` (including
+/// `strip_prefix` itself), or nested under `strip_prefix/`. The prefix and its
+/// ancestors collapse into the preserved root entry; every nested path has the
+/// leading `strip_prefix/` removed. Any entry outside `strip_prefix` is rejected
+/// (a build that wrote outside its stage), as is a prefix that matches no nested
+/// path.
+///
+/// This is a pure manifest operation: only path keys change; regular-file hashes
+/// (hence the fs-files blobs) are untouched.
+pub fn strip_prefix_manifest(
+    manifest: &FsTreeManifest,
+    strip_prefix: &str,
+) -> Result<FsTreeManifest, StoreError> {
+    if strip_prefix.is_empty()
+        || strip_prefix.starts_with('/')
+        || strip_prefix.ends_with('/')
+        || strip_prefix
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(StoreError::InvalidInput(format!(
+            "fs-tree move strip_prefix must be a non-empty relative path \
+             without empty, '.', or '..' components: '{strip_prefix}'"
+        )));
+    }
+
+    let nested = format!("{strip_prefix}/");
+    let mut entries = Vec::new();
+    let mut moved_any = false;
+    for entry in manifest.entries() {
+        let path = entry.path();
+        if path.is_empty() {
+            // Preserve the root entry with its metadata; the prefix re-homes into
+            // it.
+            entries.push(entry.clone());
+        } else if strip_prefix == path || strip_prefix.starts_with(&format!("{path}/")) {
+            // The prefix directory itself, and any ancestor of it, collapse into
+            // the preserved root.
+            continue;
+        } else if let Some(rest) = path.strip_prefix(&nested) {
+            entries.push(reparent_entry(entry, rest.to_string()));
+            moved_any = true;
+        } else {
+            return Err(StoreError::InvalidInput(format!(
+                "fs-tree move: entry '{path}' is outside strip_prefix '{strip_prefix}'"
+            )));
+        }
+    }
+
+    if !moved_any {
+        return Err(StoreError::InvalidInput(format!(
+            "fs-tree move strip_prefix '{strip_prefix}' selected no paths"
+        )));
+    }
+
+    FsTreeManifest::from_entries(entries)
+}
+
+/// Returns a copy of `entry` with its path replaced, preserving kind, metadata,
+/// and payload (file hash / symlink target).
+fn reparent_entry(entry: &FsTreeEntry, path: String) -> FsTreeEntry {
+    match entry {
+        FsTreeEntry::File { hash, .. } => FsTreeEntry::File { path, hash: *hash },
+        FsTreeEntry::Directory { uid, gid, mode, .. } => FsTreeEntry::Directory {
+            path,
+            uid: *uid,
+            gid: *gid,
+            mode: *mode,
+        },
+        FsTreeEntry::Symlink {
+            uid, gid, target, ..
+        } => FsTreeEntry::Symlink {
+            path,
+            uid: *uid,
+            gid: *gid,
+            target: target.clone(),
+        },
+    }
+}
+
 impl FsTreeEntry {
     /// Creates a regular file entry.
     pub fn file(path: impl Into<String>, hash: FsFileHash) -> Self {

@@ -24,6 +24,7 @@ mod subject;
 mod test_support;
 mod tree;
 mod tree_merge;
+mod tree_move;
 mod tree_subset;
 
 pub use builder::*;
@@ -39,6 +40,7 @@ pub use registry::BUILDERS;
 pub use subject::{BuilderPlanError, BuilderPlannedSubject};
 pub use tree::{TreeBuilder, TreeConfig};
 pub use tree_merge::{TreeMergeBuilder, TreeMergeConfig};
+pub use tree_move::{TreeMoveBuilder, TreeMoveConfig};
 pub use tree_subset::{TreeSubsetBuilder, TreeSubsetConfig};
 
 /// Return runtime functions supported by built-in builders.
