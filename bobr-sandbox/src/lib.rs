@@ -112,7 +112,9 @@ impl TypedBuilder for SandboxBuilder {
         // Bumped 1 -> 2: the sandbox now mounts a tmpfs at /dev/shm, which
         // changes the environment every sandbox build runs in (e.g. Python's
         // configure detects POSIX semaphores and builds _multiprocessing.SemLock).
-        "2"
+        // Bumped 2 -> 3: PYTHONDONTWRITEBYTECODE=1 added to the base env, which
+        // suppresses non-reproducible import-time .pyc in the build output.
+        "3"
     }
 
     fn is_arch_dependent(&self) -> bool {

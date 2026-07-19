@@ -110,7 +110,9 @@ impl TypedBuilder for SandboxInstallBuilder {
         // Bumped 2 -> 3: the build runs with a read-write overlay root and its
         // output is the additive upper layer captured as an fs-tree; there is no
         // $out / BOBR_OUT_DIR mount or interpolation.
-        "3"
+        // Bumped 3 -> 4: PYTHONDONTWRITEBYTECODE=1 added to the base env, which
+        // suppresses non-reproducible import-time .pyc in the build output.
+        "4"
     }
 
     fn is_arch_dependent(&self) -> bool {

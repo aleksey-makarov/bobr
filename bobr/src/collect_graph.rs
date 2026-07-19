@@ -475,7 +475,7 @@ mod tests {
         let expected = compute_build_key(
             "Sandbox",
             &format!(
-                "{}/2@{}",
+                "{}/3@{}",
                 bobr_core::BOBR_BUILD_CORE_VERSION,
                 std::env::consts::ARCH
             ),

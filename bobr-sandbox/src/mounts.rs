@@ -521,6 +521,11 @@ fn effective_step_env(step: &SandboxRuntimeStep, build_seed_hex: &str) -> HashMa
         // break DOS-derived tools (zip). Matches nixpkgs.
         ("SOURCE_DATE_EPOCH".to_string(), "315532800".to_string()),
         ("PYTHONHASHSEED".to_string(), "0".to_string()),
+        // Suppress import-time .pyc writes: CPython stamps them with the source
+        // mtime, so any tool that imports a Python module during the build (e.g.
+        // gdbus-codegen) can leave a non-reproducible __pycache__ entry in the
+        // upper layer. Explicit compileall/py_compile still write bytecode.
+        ("PYTHONDONTWRITEBYTECODE".to_string(), "1".to_string()),
         (
             "BOBR_CONFIG_DIR".to_string(),
             CONTAINER_CONFIG_DIR.to_string(),
@@ -724,6 +729,7 @@ mod tests {
         assert_eq!(env["LANG"], "C");
         assert_eq!(env["TZ"], "UTC");
         assert_eq!(env["PYTHONHASHSEED"], "0");
+        assert_eq!(env["PYTHONDONTWRITEBYTECODE"], "1");
         assert_eq!(env["USER"], "custom");
         assert_eq!(env["SOURCE_DATE_EPOCH"], "123");
         assert_eq!(env["BOBR_BUILD_SEED"], "abcd1234");
