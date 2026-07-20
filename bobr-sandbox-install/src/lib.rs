@@ -112,7 +112,10 @@ impl TypedBuilder for SandboxInstallBuilder {
         // $out / BOBR_OUT_DIR mount or interpolation.
         // Bumped 3 -> 4: PYTHONDONTWRITEBYTECODE=1 added to the base env, which
         // suppresses non-reproducible import-time .pyc in the build output.
-        "4"
+        // Bumped 4 -> 5: the captured upper layer is now pruned of pure copy-up
+        // noise -- lower directories the build only touched (e.g. autoconf
+        // probing /var/tmp for writability) no longer appear in the output.
+        "5"
     }
 
     fn is_arch_dependent(&self) -> bool {
@@ -982,11 +985,13 @@ fn run_sandbox_and_capture(
 
     // The build ran with a read-write overlay root, so its output is the overlay
     // upper layer. Drop the sandbox's own scaffolding, verify the layer is
-    // purely additive, then intern it (scans into fs-files and, when fully
-    // fresh, moves the tree into the fs-trees cache, consuming upper) and write
-    // the host-owned manifest.
+    // purely additive, prune pure copy-up noise (lower dirs the build only
+    // touched, e.g. autoconf probing /var/tmp), then intern it (scans into
+    // fs-files and, when fully fresh, moves the tree into the fs-trees cache,
+    // consuming upper) and write the host-owned manifest.
     mounts::strip_overlay_scaffolding(&prepared.upper)?;
     validate_additive_layer(&prepared.upper, &input.rootfs)?;
+    prune_passthrough_noise(&prepared.upper, &input.rootfs)?;
     let manifest = input
         .fs_tree
         .intern_tree(prepared.upper.clone())
@@ -1062,6 +1067,70 @@ fn validate_additive_dir(dir: &Path, upper_root: &Path, lower: &Path) -> Result<
         }
     }
     Ok(())
+}
+
+/// Removes pure copy-up noise from the validated upper layer: directories that
+/// also exist in the lower rootfs and, once their children are processed, hold
+/// no genuine additions. Overlayfs copies a lower directory up whenever a build
+/// merely touches something inside it -- e.g. autoconf probing `/var/tmp` for
+/// writability -- leaving an unchanged passthrough directory in the upper that
+/// is not part of the package's output. For an additive-into-`/` build such a
+/// dir is harmless (it re-merges over the identical lower dir), but a
+/// `*StageRootfs` build re-roots the upper at `/stage`, and these stray dirs
+/// then sit outside it. Prune bottom-up so an emptied parent is pruned in turn.
+/// A directory that is new (absent from the lower) or that still holds any entry
+/// is kept, so genuine output -- including a file mis-installed outside the
+/// intended prefix -- always survives to be seen downstream. Scaffolding must
+/// already be stripped and the layer validated additive.
+fn prune_passthrough_noise(upper: &Path, lower: &Path) -> Result<(), RuntimeError> {
+    prune_passthrough_dir(upper, upper, lower)?;
+    Ok(())
+}
+
+/// Prunes empty passthrough child directories of `dir` (see
+/// [`prune_passthrough_noise`]) and returns whether `dir` itself is empty
+/// afterwards, so the caller can prune it in turn.
+fn prune_passthrough_dir(
+    dir: &Path,
+    upper_root: &Path,
+    lower: &Path,
+) -> Result<bool, RuntimeError> {
+    let entries = fs::read_dir(dir)
+        .map_err(|error| {
+            RuntimeError::new(format!("read overlay upper '{}': {error}", dir.display()))
+        })?
+        .collect::<Result<Vec<_>, io::Error>>()
+        .map_err(|error| RuntimeError::new(error.to_string()))?;
+
+    for entry in entries {
+        let path = entry.path();
+        let meta = fs::symlink_metadata(&path)
+            .map_err(|error| RuntimeError::new(format!("inspect '{}': {error}", path.display())))?;
+        if !meta.file_type().is_dir() {
+            continue;
+        }
+        // Prune the child's subtree first; only an emptied child can be removed.
+        if !prune_passthrough_dir(&path, upper_root, lower)? {
+            continue;
+        }
+        let relative = path.strip_prefix(upper_root).unwrap_or(&path);
+        let in_lower = fs::symlink_metadata(lower.join(relative))
+            .map(|m| m.file_type().is_dir())
+            .unwrap_or(false);
+        if in_lower {
+            fs::remove_dir(&path).map_err(|error| {
+                RuntimeError::new(format!("prune passthrough '{}': {error}", path.display()))
+            })?;
+        }
+    }
+
+    let empty = fs::read_dir(dir)
+        .map_err(|error| {
+            RuntimeError::new(format!("read overlay upper '{}': {error}", dir.display()))
+        })?
+        .next()
+        .is_none();
+    Ok(empty)
 }
 
 /// Returns whether `dir` carries an overlayfs opaque marker, set when a build
@@ -1355,6 +1424,71 @@ mod tests {
         let error = validate_additive_layer(&upper, &lower).unwrap_err();
         assert!(error.to_string().contains("replaced directory"));
         assert!(error.to_string().contains("/etc"));
+    }
+
+    #[test]
+    fn prune_removes_empty_passthrough_dir() {
+        let temp = tempdir().unwrap();
+        let lower = temp.path().join("lower");
+        let upper = temp.path().join("upper");
+        // Lower has /var/tmp; the build only copied it up unchanged (an autoconf
+        // writability probe) while installing a real file under /stage.
+        fs::create_dir_all(lower.join("var/tmp")).unwrap();
+        fs::create_dir_all(upper.join("var/tmp")).unwrap();
+        fs::create_dir_all(upper.join("stage/usr/bin")).unwrap();
+        fs::write(upper.join("stage/usr/bin/patch"), b"x").unwrap();
+
+        prune_passthrough_noise(&upper, &lower).unwrap();
+
+        assert!(
+            !upper.join("var").exists(),
+            "empty passthrough /var is pruned"
+        );
+        assert!(
+            upper.join("stage/usr/bin/patch").exists(),
+            "the real addition survives"
+        );
+    }
+
+    #[test]
+    fn prune_keeps_passthrough_dir_holding_addition() {
+        let temp = tempdir().unwrap();
+        let lower = temp.path().join("lower");
+        let upper = temp.path().join("upper");
+        // /usr is a passthrough parent, but it holds a genuine addition.
+        fs::create_dir_all(lower.join("usr")).unwrap();
+        fs::create_dir_all(upper.join("usr/lib")).unwrap();
+        fs::write(upper.join("usr/lib/libfoo.so"), b"x").unwrap();
+
+        prune_passthrough_noise(&upper, &lower).unwrap();
+
+        assert!(
+            upper.join("usr/lib/libfoo.so").exists(),
+            "the addition survives"
+        );
+        assert!(
+            upper.join("usr").is_dir(),
+            "its passthrough parent survives"
+        );
+    }
+
+    #[test]
+    fn prune_keeps_new_empty_dir() {
+        let temp = tempdir().unwrap();
+        let lower = temp.path().join("lower");
+        let upper = temp.path().join("upper");
+        // /opt exists in the lower, but /opt/created is a brand-new empty dir the
+        // build genuinely produced -- absent from the lower, so it must survive
+        // (this is what keeps a real mis-install visible, not hidden).
+        fs::create_dir_all(lower.join("opt")).unwrap();
+        fs::create_dir_all(upper.join("opt/created")).unwrap();
+
+        prune_passthrough_noise(&upper, &lower).unwrap();
+
+        assert!(
+            upper.join("opt/created").is_dir(),
+            "a new empty dir survives"
+        );
     }
 
     #[test]
