@@ -1,0 +1,33 @@
+name: CI
+
+# Fast checks on every push to master and every pull request: formatting,
+# clippy, and the test suite. Release artifacts are handled separately by
+# release.yml (on version tags).
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# A newer push to the same branch/PR cancels the in-progress run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked
+
+      - name: Tests
+        run: cargo test --workspace --locked
