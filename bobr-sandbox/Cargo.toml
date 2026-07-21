@@ -1,5 +1,5 @@
 [package]
-name = "bobr-sandbox-install"
+name = "bobr-sandbox"
 version.workspace = true
 edition = "2024"
 description = "Sandboxed build execution capturing installed files as an fs-tree object, for the bobr content-addressed build system."

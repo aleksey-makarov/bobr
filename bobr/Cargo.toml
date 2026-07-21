@@ -20,7 +20,7 @@ integration-tests = ["bobr-builder/integration-tests"]
 
 [dependencies]
 bobr-runtime.workspace = true
-bobr-sandbox-install.workspace = true
+bobr-sandbox.workspace = true
 bobr-store.workspace = true
 fsobj-hash.workspace = true
 libc.workspace = true

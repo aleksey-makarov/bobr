@@ -59,7 +59,7 @@ static SANDBOX_BUILDER: SandboxBuilder = SandboxBuilder;
 /// Builder classes provided by this crate.
 pub static BUILDERS: &[&'static dyn Builder] = &[&SANDBOX_INSTALL_BUILDER, &SANDBOX_BUILDER];
 
-/// Return runtime functions supported by `bobr-sandbox-install`.
+/// Return runtime functions supported by `bobr-sandbox`.
 pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
     vec![bobr_runtime::runtime_ns::NsFunction::new(
         SandboxInstallFunction,
