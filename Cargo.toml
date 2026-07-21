@@ -8,7 +8,6 @@ members = [
   "bobr-store",
   "fsobj-hash",
   "bobr-runtime",
-  "bobr-sandbox",
   "bobr-sandbox-install",
 ]
 
@@ -25,7 +24,6 @@ repository = "https://github.com/aleksey-makarov/bobr"
 bobr-builder = { path = "bobr-builder", version = "0.1.1" }
 bobr-core = { path = "bobr-core", version = "0.1.1" }
 bobr-runtime = { path = "bobr-runtime", version = "0.1.1" }
-bobr-sandbox = { path = "bobr-sandbox", version = "0.1.1" }
 bobr-sandbox-install = { path = "bobr-sandbox-install", version = "0.1.1" }
 bobr-sandbox-launcher = { path = "bobr-sandbox-launcher", version = "0.1.1" }
 bobr-source = { path = "bobr-source", version = "0.1.1" }
