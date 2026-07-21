@@ -82,7 +82,7 @@ fn run_request_via_cli(request_path: &Path) -> ObjectHash {
 fn registered_builders_include_current_tags_only() {
     let tags: Vec<&str> = bobr_builder::BUILDERS
         .iter()
-        .chain(bobr_sandbox::BUILDERS)
+        .chain(bobr_sandbox_install::BUILDERS)
         .map(|builder| builder.tag())
         .collect();
     for tag in [

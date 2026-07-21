@@ -2,10 +2,10 @@ use crate::{SandboxInput, SandboxRuntimeStep, StepUser};
 use bobr_runtime::runtime::RuntimeError;
 use bobr_sandbox_launcher::{
     CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_FAILURE_REPORT, CONTAINER_INPUTS_DIR,
-    CONTAINER_LAUNCHER_DIR, CONTAINER_LOG_DIR, CONTAINER_RUNNER_CONFIG, CONTAINER_RUNTIME_DIR,
-    CONTAINER_SUCCESS_REPORT, LAUNCHER_BINARY_NAME, RunnerConfig, RunnerRunAs, RunnerStepConfig,
-    SANDBOX_PROTOCOL_VERSION, SandboxLauncherConfig, SandboxLauncherMount,
-    SandboxLauncherMountKind, SandboxRootOverlay, validate_launcher_config,
+    CONTAINER_LAUNCHER_DIR, CONTAINER_LOG_DIR, CONTAINER_OUT_DIR, CONTAINER_RUNNER_CONFIG,
+    CONTAINER_RUNTIME_DIR, CONTAINER_SUCCESS_REPORT, LAUNCHER_BINARY_NAME, RunnerConfig,
+    RunnerRunAs, RunnerStepConfig, SANDBOX_PROTOCOL_VERSION, SandboxLauncherConfig,
+    SandboxLauncherMount, SandboxLauncherMountKind, SandboxRootOverlay, validate_launcher_config,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -22,14 +22,18 @@ pub(crate) struct PreparedSandbox {
 }
 
 impl PreparedSandbox {
-    pub(crate) fn create(config: &SandboxInput, workspace: &Path) -> Result<Self, RuntimeError> {
+    pub(crate) fn create(
+        config: &SandboxInput,
+        workspace: &Path,
+        out_dir: Option<&Path>,
+    ) -> Result<Self, RuntimeError> {
         validate_config(config, workspace)?;
         let dirs = SandboxDirs::create(workspace)?;
         let runtime_files = SandboxRuntimeFiles::create(&dirs.runtime_files, config)?;
         write_runner_config(config, &runtime_files)?;
         populate_overlay_upper(&dirs.upper)?;
         let launcher_config = dirs.root.join("launcher-config.json");
-        let launcher = build_launcher_config(config, &dirs, &runtime_files)?;
+        let launcher = build_launcher_config(config, &dirs, &runtime_files, out_dir)?;
         serde_json::to_writer(File::create(&launcher_config)?, &launcher)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
         Ok(Self {
@@ -214,7 +218,7 @@ fn write_runner_config(
             },
             cwd: step.cwd.clone(),
             argv: step.argv.clone(),
-            env: effective_step_env(step, &config.build_seed_hex),
+            env: effective_step_env(step, &config.build_seed_hex, config.plain_object),
             umask: step.umask,
             stdout_path: logs.container_stdout.clone(),
             stderr_path: logs.container_stderr.clone(),
@@ -283,6 +287,7 @@ fn build_launcher_config(
     config: &SandboxInput,
     dirs: &SandboxDirs,
     runtime_files: &SandboxRuntimeFiles,
+    out_dir: Option<&Path>,
 ) -> Result<SandboxLauncherConfig, RuntimeError> {
     // The root itself is an overlay (see root_overlay below), so the rootfs is
     // no longer bound entry by entry; these mounts only add things inside it.
@@ -310,6 +315,13 @@ fn build_launcher_config(
         ),
         bind_mount(&runtime_files.root, Path::new(CONTAINER_RUNTIME_DIR), false),
     ]);
+
+    // The plain-object `Sandbox` path installs into `$out` (writable), captured
+    // as a standalone object; the additive path has no `$out` and captures the
+    // overlay upper instead.
+    if let Some(out_dir) = out_dir {
+        mounts.push(bind_mount(out_dir, Path::new(CONTAINER_OUT_DIR), false));
+    }
 
     for log in &runtime_files.step_logs {
         mounts.push(bind_mount(&log.host_stdout, &log.container_stdout, false));
@@ -437,7 +449,11 @@ fn tmpfs_mount(target: &Path, noexec: bool, extra_options: &[&str]) -> SandboxLa
     }
 }
 
-fn effective_step_env(step: &SandboxRuntimeStep, build_seed_hex: &str) -> HashMap<String, String> {
+fn effective_step_env(
+    step: &SandboxRuntimeStep,
+    build_seed_hex: &str,
+    plain_object: bool,
+) -> HashMap<String, String> {
     let mut env = HashMap::from([
         (
             "PATH".to_string(),
@@ -477,6 +493,11 @@ fn effective_step_env(step: &SandboxRuntimeStep, build_seed_hex: &str) -> HashMa
         // that need a reproducible "random" value read this.
         ("BOBR_BUILD_SEED".to_string(), build_seed_hex.to_string()),
     ]);
+    // `$out` staging dir, only for the plain-object `Sandbox` path (it is the one
+    // that binds `$out`). The additive path has no `$out`.
+    if plain_object {
+        env.insert("BOBR_OUT_DIR".to_string(), CONTAINER_OUT_DIR.to_string());
+    }
     env.extend(step.env_overrides.clone());
     env
 }
@@ -523,6 +544,7 @@ mod tests {
             extra_inputs: Vec::new(),
             steps: Vec::new(),
             build_seed_hex: String::new(),
+            plain_object: false,
         };
         (input, workspace)
     }
@@ -546,7 +568,7 @@ mod tests {
         let runtime_files = SandboxRuntimeFiles::create(&dirs.runtime_files, &input).unwrap();
         fs::write(&input.launcher_path, "#!/bin/sh\n").unwrap();
 
-        let launcher = build_launcher_config(&input, &dirs, &runtime_files).unwrap();
+        let launcher = build_launcher_config(&input, &dirs, &runtime_files, None).unwrap();
         let mounts = &launcher.mounts;
 
         assert_eq!(launcher.protocol_version, SANDBOX_PROTOCOL_VERSION);
@@ -644,7 +666,7 @@ mod tests {
         step.env_overrides
             .insert("SOURCE_DATE_EPOCH".to_string(), "123".to_string());
 
-        let env = effective_step_env(&step, "abcd1234");
+        let env = effective_step_env(&step, "abcd1234", false);
 
         assert_eq!(env["BOBR_STEP_NAME"], "build");
         assert_eq!(env["LC_ALL"], "C");

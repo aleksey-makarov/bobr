@@ -16,7 +16,8 @@ use bobr_builder::{BuildContext, Builder, BuilderError, BuilderInputs, InputSpec
 use bobr_core::BuildLogLevel;
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use bobr_sandbox_launcher::{
-    CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_INPUTS_DIR, SandboxStepReport,
+    CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_INPUTS_DIR, CONTAINER_OUT_DIR,
+    SandboxStepReport,
 };
 use bobr_store::fs_tree::FsTree;
 use serde::{Deserialize, Serialize};
@@ -36,15 +37,27 @@ const CONFIG_DIR_NAME: &str = "config";
 const RUNTIME_DIR_NAME: &str = "runtime";
 const STEP_LOG_DIR_NAME: &str = "step-logs";
 const OUTPUT_MANIFEST_NAME: &str = "sandbox-fs-tree.jsonl";
+/// Function-owned staging dir bind-mounted at `$out` for the `Sandbox` tag.
+const OUTPUT_DIR_NAME: &str = "out";
 
-/// Builder implementation registered for recipe nodes tagged `SandboxInstall`.
+/// Builder implementation registered for recipe nodes tagged `SandboxInstall`
+/// (fs-tree, additive: the output is the overlay upper layer captured as a
+/// delta to the build rootfs).
 #[derive(Debug)]
 pub struct SandboxInstallBuilder;
 
+/// Builder implementation registered for recipe nodes tagged `Sandbox`
+/// (plain-object: the same overlay run, but the output is whatever the build
+/// installs into a `$out` staging dir, captured as a standalone object). Shares
+/// the whole `SandboxInstall` machinery, diverging only at the capture seam.
+#[derive(Debug)]
+pub struct SandboxBuilder;
+
 static SANDBOX_INSTALL_BUILDER: SandboxInstallBuilder = SandboxInstallBuilder;
+static SANDBOX_BUILDER: SandboxBuilder = SandboxBuilder;
 
 /// Builder classes provided by this crate.
-pub static BUILDERS: &[&'static dyn Builder] = &[&SANDBOX_INSTALL_BUILDER];
+pub static BUILDERS: &[&'static dyn Builder] = &[&SANDBOX_INSTALL_BUILDER, &SANDBOX_BUILDER];
 
 /// Return runtime functions supported by `bobr-sandbox-install`.
 pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
@@ -132,7 +145,47 @@ impl TypedBuilder for SandboxInstallBuilder {
         inputs: BuilderInputs,
         cx: &mut BuildContext,
     ) -> Result<PathBuf, BuilderError> {
-        build_sandbox(config, inputs, cx)
+        build_sandbox(config, inputs, cx, false)
+    }
+}
+
+impl TypedBuilder for SandboxBuilder {
+    type Config = SandboxConfig;
+
+    fn tag(&self) -> &'static str {
+        "Sandbox"
+    }
+
+    fn impl_version(&self) -> &'static str {
+        // History carried over from the standalone bobr-sandbox crate (whose
+        // `Sandbox` builder this replaces):
+        // Bumped 1 -> 2: the sandbox now mounts a tmpfs at /dev/shm, which
+        // changes the environment every sandbox build runs in (e.g. Python's
+        // configure detects POSIX semaphores and builds _multiprocessing.SemLock).
+        // Bumped 2 -> 3: PYTHONDONTWRITEBYTECODE=1 added to the base env, which
+        // suppresses non-reproducible import-time .pyc in the build output.
+        // Bumped 3 -> 4: the build now runs with the same read-write overlay root
+        // as SandboxInstall (plus a writable `$out` bind), dropping the old
+        // per-entry read-only bind mount scheme; the output is still `$out`,
+        // chowned to a single owner and captured as a standalone object.
+        "4"
+    }
+
+    fn is_arch_dependent(&self) -> bool {
+        true
+    }
+
+    fn spec(&self) -> &'static InputSpec {
+        &SANDBOX_SPEC
+    }
+
+    fn build_typed(
+        &self,
+        config: Self::Config,
+        inputs: BuilderInputs,
+        cx: &mut BuildContext,
+    ) -> Result<PathBuf, BuilderError> {
+        build_sandbox(config, inputs, cx, true)
     }
 }
 
@@ -140,26 +193,43 @@ fn build_sandbox(
     config: SandboxConfig,
     inputs: BuilderInputs,
     cx: &mut BuildContext,
+    plain_object: bool,
 ) -> Result<PathBuf, BuilderError> {
+    let tag_name = if plain_object {
+        "Sandbox"
+    } else {
+        "SandboxInstall"
+    };
+    let log_component = if plain_object {
+        "sandbox"
+    } else {
+        "sandbox-install"
+    };
     validate_sandbox_config(&config).map_err(map_error)?;
     let rootfs = inputs.required("_rootfs")?.clone();
     validate_rootfs_path(&rootfs).map_err(map_error)?;
     let fs_tree = cx.fs_tree();
 
-    let extra_inputs =
-        collect_extra_inputs(&SANDBOX_SPEC, "SandboxInstall", &inputs).map_err(map_error)?;
-    validate_step_interpolations(&config.steps, &extra_inputs).map_err(map_error)?;
+    let extra_inputs = collect_extra_inputs(&SANDBOX_SPEC, tag_name, &inputs).map_err(map_error)?;
+    validate_step_interpolations(&config.steps, &extra_inputs, plain_object).map_err(map_error)?;
 
-    cx.log_event(BuildLogLevel::Info, "sandbox-install", "preparing inputs");
+    cx.log_event(BuildLogLevel::Info, log_component, "preparing inputs");
     let launcher_path = tools::resolve_and_preflight_sandbox_launcher()
         .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
-    let runtime_input =
-        prepare_sandbox_input(&config, rootfs, extra_inputs, cx, fs_tree, launcher_path)
-            .map_err(map_error)?;
+    let runtime_input = prepare_sandbox_input(
+        &config,
+        rootfs,
+        extra_inputs,
+        cx,
+        fs_tree,
+        launcher_path,
+        plain_object,
+    )
+    .map_err(map_error)?;
 
     cx.log_event(
         BuildLogLevel::Info,
-        "sandbox-install",
+        log_component,
         format!(
             "running with {} step(s) and {} extra input(s)",
             runtime_input.steps.len(),
@@ -185,6 +255,7 @@ fn prepare_sandbox_input(
     cx: &BuildContext,
     fs_tree: FsTree,
     launcher_path: PathBuf,
+    plain_object: bool,
 ) -> Result<SandboxInput, SandboxError> {
     let config_path = cx.temp_dir.join(CONFIG_DIR_NAME);
     recreate_empty_dir_force(&config_path)?;
@@ -198,7 +269,7 @@ fn prepare_sandbox_input(
     let sandbox_steps = config
         .steps
         .iter()
-        .map(|step| build_sandbox_step(step, &extra_inputs, cx))
+        .map(|step| build_sandbox_step(step, &extra_inputs, cx, plain_object))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(SandboxInput {
@@ -210,6 +281,7 @@ fn prepare_sandbox_input(
         extra_inputs: sandbox_inputs,
         steps: sandbox_steps,
         build_seed_hex: cx.build_seed().to_hex(),
+        plain_object,
     })
 }
 
@@ -218,10 +290,11 @@ fn build_sandbox_step(
     step: &BuildStep,
     inputs: &[(String, PathBuf)],
     cx: &BuildContext,
+    plain_object: bool,
 ) -> Result<SandboxRuntimeStep, SandboxError> {
-    let cwd = PathBuf::from(resolve_step_cwd(step, inputs)?);
-    let argv = resolve_step_argv(step, inputs)?;
-    let env_overrides = resolve_step_env(step, inputs)?
+    let cwd = PathBuf::from(resolve_step_cwd(step, inputs, plain_object)?);
+    let argv = resolve_step_argv(step, inputs, plain_object)?;
+    let env_overrides = resolve_step_env(step, inputs, plain_object)?
         .into_iter()
         .collect::<HashMap<_, _>>();
     let logs = cx.temp_dir.join(STEP_LOG_DIR_NAME);
@@ -513,7 +586,7 @@ fn collect_extra_inputs(
     let mut named = Vec::new();
     for (name, object) in inputs.extras(spec) {
         validate_input_name(name)?;
-        if matches!(name, "build" | "config") {
+        if matches!(name, "build" | "config" | "out") {
             return Err(SandboxError::InvalidConfig(format!(
                 "input name '{name}' conflicts with a reserved {builder_name} interpolation variable"
             )));
@@ -527,6 +600,7 @@ fn collect_extra_inputs(
 fn interpolate_step_string(
     value: &str,
     inputs: &[(String, PathBuf)],
+    plain_object: bool,
 ) -> Result<String, SandboxError> {
     let mut rendered = String::new();
     let mut index = 0;
@@ -555,7 +629,7 @@ fn interpolate_step_string(
             };
             let key = &after_start[..end];
             validate_interpolation_name(key, value, false)?;
-            rendered.push_str(&interpolation_value(key, inputs)?);
+            rendered.push_str(&interpolation_value(key, inputs, plain_object)?);
             index += 2 + end + 1;
             continue;
         }
@@ -596,11 +670,18 @@ fn validate_interpolation_name(key: &str, value: &str, escaped: bool) -> Result<
     Ok(())
 }
 
-/// Resolve a built-in or named-input interpolation variable.
-fn interpolation_value(key: &str, inputs: &[(String, PathBuf)]) -> Result<String, SandboxError> {
+/// Resolve a built-in or named-input interpolation variable. `@{out}` is only
+/// defined for the plain-object `Sandbox` tag (which mounts `$out`); on the
+/// additive `SandboxInstall` tag it falls through to the unknown-variable error.
+fn interpolation_value(
+    key: &str,
+    inputs: &[(String, PathBuf)],
+    plain_object: bool,
+) -> Result<String, SandboxError> {
     match key {
         "build" => Ok(CONTAINER_BUILD_DIR.to_string()),
         "config" => Ok(CONTAINER_CONFIG_DIR.to_string()),
+        "out" if plain_object => Ok(CONTAINER_OUT_DIR.to_string()),
         _ => inputs
             .iter()
             .find_map(|(name, _)| {
@@ -620,8 +701,9 @@ fn interpolation_value(key: &str, inputs: &[(String, PathBuf)]) -> Result<String
 fn resolve_step_cwd(
     step: &BuildStep,
     inputs: &[(String, PathBuf)],
+    plain_object: bool,
 ) -> Result<String, SandboxError> {
-    let cwd = interpolate_step_string(&step.cwd, inputs)?;
+    let cwd = interpolate_step_string(&step.cwd, inputs, plain_object)?;
     if cwd.is_empty() || !cwd.starts_with('/') {
         return Err(SandboxError::InvalidConfig(format!(
             "step '{}' resolved cwd must be an absolute path, got '{}'",
@@ -635,10 +717,11 @@ fn resolve_step_cwd(
 fn resolve_step_argv(
     step: &BuildStep,
     inputs: &[(String, PathBuf)],
+    plain_object: bool,
 ) -> Result<Vec<String>, SandboxError> {
     step.argv
         .iter()
-        .map(|arg| interpolate_step_string(arg, inputs))
+        .map(|arg| interpolate_step_string(arg, inputs, plain_object))
         .collect()
 }
 
@@ -646,6 +729,7 @@ fn resolve_step_argv(
 fn resolve_step_env(
     step: &BuildStep,
     inputs: &[(String, PathBuf)],
+    plain_object: bool,
 ) -> Result<Vec<(String, String)>, SandboxError> {
     let mut rendered = Vec::new();
     for (key, value) in &step.env {
@@ -655,7 +739,10 @@ fn resolve_step_env(
                 step.name, key
             ))
         })?;
-        rendered.push((key.clone(), interpolate_step_string(string_value, inputs)?));
+        rendered.push((
+            key.clone(),
+            interpolate_step_string(string_value, inputs, plain_object)?,
+        ));
     }
     Ok(rendered)
 }
@@ -664,11 +751,12 @@ fn resolve_step_env(
 fn validate_step_interpolations(
     steps: &[BuildStep],
     inputs: &[(String, PathBuf)],
+    plain_object: bool,
 ) -> Result<(), SandboxError> {
     for step in steps {
-        let _ = resolve_step_cwd(step, inputs)?;
-        let _ = resolve_step_argv(step, inputs)?;
-        let _ = resolve_step_env(step, inputs)?;
+        let _ = resolve_step_cwd(step, inputs, plain_object)?;
+        let _ = resolve_step_argv(step, inputs, plain_object)?;
+        let _ = resolve_step_env(step, inputs, plain_object)?;
     }
     Ok(())
 }
@@ -899,6 +987,11 @@ pub struct SandboxInput {
     /// Deterministic per-build seed, exported to every step as
     /// `BOBR_BUILD_SEED` (64 lowercase hex chars).
     build_seed_hex: String,
+    /// Plain-object (`Sandbox`) vs additive fs-tree (`SandboxInstall`) capture.
+    /// When set, the run gets a writable `$out` bind and the output is `$out`
+    /// captured as a standalone object; when clear, the overlay upper is
+    /// captured as an additive fs-tree delta.
+    plain_object: bool,
 }
 
 /// A named extra input exposed inside the sandbox: a `name` and the host `path`
@@ -949,17 +1042,32 @@ impl RuntimeFunction for SandboxInstallFunction {
             )));
         }
 
-        // Create the working directory the function owns under `tmp`: the build
-        // workspace (mount scaffolding). The captured artifact is an fs-tree
-        // manifest written directly under `tmp`.
+        // Create the working directories the function owns under `tmp`: the build
+        // workspace (mount scaffolding), and -- for the plain-object `Sandbox`
+        // path -- the `$out` staging dir bound writable inside the sandbox. The
+        // additive path captures the overlay upper instead and needs no `$out`.
         let workspace = input.tmp.join(RUNTIME_DIR_NAME);
         recreate_empty_dir_force(&workspace)
             .map_err(|error| RuntimeError::new(error.to_string()))?;
+        let out_dir = if input.plain_object {
+            let out = input.tmp.join(OUTPUT_DIR_NAME);
+            recreate_empty_dir_force(&out).map_err(|error| RuntimeError::new(error.to_string()))?;
+            Some(out)
+        } else {
+            None
+        };
 
-        let result = run_sandbox_and_capture(&input, &workspace);
+        let result = run_sandbox_and_capture(&input, &workspace, out_dir.as_deref());
 
-        // Guarantee no in-namespace-owned files remain in `tmp`: the workspace
-        // (build tree) is always removed as ns-root.
+        // Guarantee no in-namespace-owned files remain in `tmp`. The workspace
+        // (build tree) is always removed as ns-root. `$out` is the artifact on
+        // success (must stay) but may hold ns-owned files on failure, where the
+        // host user could not clear them -- so remove it only on failure.
+        if result.is_err()
+            && let Some(out) = &out_dir
+        {
+            let _ = remove_dir_force(out);
+        }
         let workspace_cleanup = remove_dir_force(&workspace);
         let output = result?;
         workspace_cleanup.map_err(|error| RuntimeError::new(error.to_string()))?;
@@ -968,14 +1076,18 @@ impl RuntimeFunction for SandboxInstallFunction {
     }
 }
 
-/// Runs the sandbox and captures its output: prepares the mounts, runs the
-/// launcher, then captures the overlay upper layer as an additive fs-tree
-/// manifest. Its caller owns cleaning `workspace` regardless of the outcome.
+/// Runs the sandbox and captures its output: prepares the mounts (always a
+/// read-write overlay root, plus a writable `$out` bind for the plain-object
+/// path), runs the launcher, then captures the result. With `out_dir` (the
+/// plain-object `Sandbox` path) the output is `$out` itself; without it (the
+/// additive `SandboxInstall` path) it is the overlay upper as an fs-tree delta.
+/// Its caller owns cleaning `workspace`/`out_dir` regardless of the outcome.
 fn run_sandbox_and_capture(
     input: &SandboxInput,
     workspace: &Path,
+    out_dir: Option<&Path>,
 ) -> Result<SandboxOutput, RuntimeError> {
-    let prepared = mounts::PreparedSandbox::create(input, workspace)?;
+    let prepared = mounts::PreparedSandbox::create(input, workspace, out_dir)?;
     let steps = lifecycle::run_sandbox_launcher(
         &input.launcher_path,
         &prepared.launcher_config,
@@ -983,25 +1095,60 @@ fn run_sandbox_and_capture(
         &prepared.runtime_files.failure_report,
     )?;
 
-    // The build ran with a read-write overlay root, so its output is the overlay
-    // upper layer. Drop the sandbox's own scaffolding, verify the layer is
-    // purely additive, prune pure copy-up noise (lower dirs the build only
-    // touched, e.g. autoconf probing /var/tmp), then intern it (scans into
-    // fs-files and, when fully fresh, moves the tree into the fs-trees cache,
-    // consuming upper) and write the host-owned manifest.
-    mounts::strip_overlay_scaffolding(&prepared.upper)?;
-    validate_additive_layer(&prepared.upper, &input.rootfs)?;
-    prune_passthrough_noise(&prepared.upper, &input.rootfs)?;
-    let manifest = input
-        .fs_tree
-        .intern_tree(prepared.upper.clone())
-        .map_err(|error| RuntimeError::new(error.to_string()))?;
-    let output_path = input.tmp.join(OUTPUT_MANIFEST_NAME);
-    manifest
-        .write_canonical(&output_path)
-        .map_err(|error| RuntimeError::new(error.to_string()))?;
+    let output_path = if let Some(out_dir) = out_dir {
+        // Plain object: chown the whole `$out` tree to a single owner (ns-root ->
+        // host uid) so it is host-owned, and hand back the directory itself.
+        // Object hashing ignores uid/gid, so the result is uid-independent. The
+        // overlay upper (temporary writes to the live root) is simply discarded.
+        chown_tree_to_root(out_dir).map_err(|error| RuntimeError::new(error.to_string()))?;
+        out_dir.to_path_buf()
+    } else {
+        // Additive fs-tree: the build's output is the overlay upper layer. Drop
+        // the sandbox's own scaffolding, verify the layer is purely additive,
+        // prune pure copy-up noise (lower dirs the build only touched, e.g.
+        // autoconf probing /var/tmp), then intern it (scans into fs-files and,
+        // when fully fresh, moves the tree into the fs-trees cache, consuming
+        // upper) and write the host-owned manifest.
+        mounts::strip_overlay_scaffolding(&prepared.upper)?;
+        validate_additive_layer(&prepared.upper, &input.rootfs)?;
+        prune_passthrough_noise(&prepared.upper, &input.rootfs)?;
+        let manifest = input
+            .fs_tree
+            .intern_tree(prepared.upper.clone())
+            .map_err(|error| RuntimeError::new(error.to_string()))?;
+        let output_path = input.tmp.join(OUTPUT_MANIFEST_NAME);
+        manifest
+            .write_canonical(&output_path)
+            .map_err(|error| RuntimeError::new(error.to_string()))?;
+        output_path
+    };
 
     Ok(SandboxOutput { output_path, steps })
+}
+
+/// Recursively chowns `path` to uid 0 / gid 0 (in-namespace root, which maps to
+/// the host owner) without following symlinks, so the plain-object tree becomes
+/// host-owned. Object hashing ignores uid/gid, so the hash is unaffected.
+fn chown_tree_to_root(path: &Path) -> Result<(), SandboxError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        SandboxError::FsFailed(format!("failed to inspect '{}': {error}", path.display()))
+    })?;
+    if metadata.file_type().is_dir() {
+        for entry in fs::read_dir(path).map_err(|error| {
+            SandboxError::FsFailed(format!("failed to read '{}': {error}", path.display()))
+        })? {
+            let entry = entry.map_err(|error| {
+                SandboxError::FsFailed(format!(
+                    "failed to read entry in '{}': {error}",
+                    path.display()
+                ))
+            })?;
+            chown_tree_to_root(&entry.path())?;
+        }
+    }
+    std::os::unix::fs::lchown(path, Some(0), Some(0)).map_err(|error| {
+        SandboxError::FsFailed(format!("failed to chown '{}': {error}", path.display()))
+    })
 }
 
 /// Verifies that the overlay upper layer holds only additions relative to the
@@ -1302,6 +1449,7 @@ mod tests {
             &cx,
             store.fs_tree(),
             PathBuf::from("/runner"),
+            false,
         )
         .unwrap();
 

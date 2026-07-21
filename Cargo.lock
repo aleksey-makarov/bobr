@@ -76,7 +76,6 @@ dependencies = [
  "bobr-builder",
  "bobr-core",
  "bobr-runtime",
- "bobr-sandbox",
  "bobr-sandbox-install",
  "bobr-source",
  "bobr-store",

@@ -10,7 +10,6 @@ fn registered_builders() -> impl Iterator<Item = &'static dyn Builder> {
     bobr_builder::BUILDERS
         .iter()
         .copied()
-        .chain(bobr_sandbox::BUILDERS.iter().copied())
         .chain(bobr_sandbox_install::BUILDERS.iter().copied())
 }
 

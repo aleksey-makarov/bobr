@@ -440,7 +440,7 @@ mod tests {
                 "tag": "Sandbox",
                 // Canonical (normalized) Sandbox config, so the key computed
                 // from it below matches the planner's normalized key.
-                "config": { "script_config": {}, "steps": [], "preserve_ownership": true },
+                "config": { "script_config": {}, "steps": [] },
                 "inputs": {
                     "source": "source",
                     "_rootfs": "rootfs",
@@ -475,7 +475,7 @@ mod tests {
         let expected = compute_build_key(
             "Sandbox",
             &format!(
-                "{}/3@{}",
+                "{}/4@{}",
                 bobr_core::BOBR_BUILD_CORE_VERSION,
                 std::env::consts::ARCH
             ),
