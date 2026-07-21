@@ -1,0 +1,53 @@
+name: Release
+
+# Runs when you push a version tag (v1.2.3). It runs the test suite, builds
+# the release binaries, and attaches them to a GitHub Release for that tag.
+# workflow_dispatch lets you exercise test+build manually without publishing.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write  # create the release and upload assets
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # The sandbox launcher is built as a static musl binary.
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --locked -p bobr-build -p fsobj-hash
+          cargo build-sandbox-launcher --release --locked
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/release/bobr dist/
+          cp target/release/fsobj-hash dist/
+          cp target/x86_64-unknown-linux-musl/release/bobr-sandbox-launcher dist/
+          tar -C dist -czf "bobr-${GITHUB_REF_NAME}-x86_64-linux.tar.gz" .
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bobr-*-x86_64-linux.tar.gz
+          generate_release_notes: true
