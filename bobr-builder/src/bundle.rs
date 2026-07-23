@@ -10,13 +10,17 @@ use std::path::PathBuf;
 #[serde(deny_unknown_fields)]
 pub struct BundleConfig {}
 
-/// Collects an arbitrary number of file inputs into a single directory object.
+/// Collects an arbitrary number of inputs into a single directory object.
 ///
-/// Each extra input must be a regular file. The output is a plain directory
-/// object holding one hardlink per input, named by the input's own name. It
-/// lets a downstream build receive many inputs as a single directory (one bind
-/// mount) instead of one bind mount per input — useful for bundling many
-/// fetched source archives (e.g. vendored crates) into one object.
+/// Each extra input is either a regular file, or a directory holding exactly
+/// one regular file (a plain-object build output whose payload is a single
+/// file — e.g. a `Sandbox` check node that writes one report). Either way the
+/// output is a plain directory object holding one hardlink per input, named by
+/// the input's own name. It lets a downstream build receive many inputs as a
+/// single directory (one bind mount) instead of one bind mount per input —
+/// useful for bundling many fetched source archives (e.g. vendored crates) or
+/// many single-file build outputs (e.g. per-rootfs check reports) into one
+/// object.
 ///
 /// Unlike the fs-tree builders, the output is ordinary data: it carries no
 /// ownership or mode identity. Inputs are hardlinked (never copied): both the
@@ -38,7 +42,10 @@ impl TypedBuilder for BundleBuilder {
     }
 
     fn impl_version(&self) -> &'static str {
-        "1"
+        // Bumped 1 -> 2: a bundle source may now be a directory containing
+        // exactly one regular file (the file is taken as the source), not only a
+        // plain file input.
+        "2"
     }
 
     fn spec(&self) -> &'static InputSpec {
@@ -82,29 +89,69 @@ fn build_bundle(inputs: BuilderInputs, cx: &mut BuildContext) -> Result<PathBuf,
     );
 
     for (name, path) in extras {
-        let metadata = fs::symlink_metadata(path).map_err(|error| {
-            BuilderError::ExecutionFailed(format!(
-                "failed to inspect Bundle input '{name}' ('{}'): {error}",
-                path.display()
-            ))
-        })?;
-        if !metadata.file_type().is_file() {
-            return Err(BuilderError::ExecutionFailed(format!(
-                "Bundle input '{name}' ('{}') is not a regular file",
-                path.display()
-            )));
-        }
+        let source = resolve_bundle_source(name, path)?;
         let destination = output_dir.join(name);
-        fs::hard_link(path, &destination).map_err(|error| {
+        fs::hard_link(&source, &destination).map_err(|error| {
             BuilderError::ExecutionFailed(format!(
                 "failed to hardlink Bundle input '{name}' ('{}') into '{}': {error}",
-                path.display(),
+                source.display(),
                 destination.display()
             ))
         })?;
     }
 
     Ok(output_dir)
+}
+
+/// The regular file an input contributes to the bundle: the input itself if it
+/// is a file, or the single regular file inside it if it is a directory.
+fn resolve_bundle_source(name: &str, path: &std::path::Path) -> Result<PathBuf, BuilderError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to inspect Bundle input '{name}' ('{}'): {error}",
+            path.display()
+        ))
+    })?;
+
+    if metadata.file_type().is_file() {
+        return Ok(path.to_path_buf());
+    }
+
+    if metadata.file_type().is_dir() {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(path).map_err(|error| {
+            BuilderError::ExecutionFailed(format!(
+                "failed to read Bundle directory input '{name}' ('{}'): {error}",
+                path.display()
+            ))
+        })? {
+            let entry = entry.map_err(|error| {
+                BuilderError::ExecutionFailed(format!(
+                    "failed to read entry of Bundle directory input '{name}' ('{}'): {error}",
+                    path.display()
+                ))
+            })?;
+            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                files.push(entry.path());
+            }
+        }
+        return match files.len() {
+            1 => Ok(files.pop().unwrap()),
+            0 => Err(BuilderError::ExecutionFailed(format!(
+                "Bundle directory input '{name}' ('{}') contains no regular file",
+                path.display()
+            ))),
+            n => Err(BuilderError::ExecutionFailed(format!(
+                "Bundle directory input '{name}' ('{}') contains {n} regular files, expected exactly one",
+                path.display()
+            ))),
+        };
+    }
+
+    Err(BuilderError::ExecutionFailed(format!(
+        "Bundle input '{name}' ('{}') is neither a regular file nor a directory",
+        path.display()
+    )))
 }
 
 #[cfg(test)]
@@ -169,7 +216,38 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_file_input() {
+    fn bundles_single_file_directory_input_as_hardlink_named_by_input() {
+        let temp = tempdir().unwrap();
+        // A plain-object build output whose payload is a single file inside a
+        // directory (e.g. a Sandbox check node writing one report).
+        let report_dir = temp.path().join("check-out");
+        fs::create_dir(&report_dir).unwrap();
+        let report = report_dir.join("report-native-toolchain-ok.txt");
+        fs::write(&report, b"status: ok\n").unwrap();
+        let mut cx = build_context(temp.path());
+
+        let result = BundleBuilder
+            .build_typed(
+                BundleConfig {},
+                inputs(vec![("check_native", report_dir)]),
+                &mut cx,
+            )
+            .unwrap();
+
+        assert!(result.is_dir());
+        // Named by the input node name, not the inner file name.
+        assert_eq!(
+            fs::read(result.join("check_native")).unwrap(),
+            b"status: ok\n"
+        );
+        assert_eq!(
+            fs::metadata(result.join("check_native")).unwrap().ino(),
+            fs::metadata(&report).unwrap().ino()
+        );
+    }
+
+    #[test]
+    fn rejects_empty_directory_input() {
         let temp = tempdir().unwrap();
         let dir_input = temp.path().join("a-dir");
         fs::create_dir(&dir_input).unwrap();
@@ -178,13 +256,36 @@ mod tests {
         let error = BundleBuilder
             .build_typed(
                 BundleConfig {},
-                inputs(vec![("crate_dir", dir_input)]),
+                inputs(vec![("empty_dir", dir_input)]),
                 &mut cx,
             )
             .unwrap_err();
 
         assert!(
-            error.to_string().contains("is not a regular file"),
+            error.to_string().contains("contains no regular file"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_multi_file_directory_input() {
+        let temp = tempdir().unwrap();
+        let dir_input = temp.path().join("multi");
+        fs::create_dir(&dir_input).unwrap();
+        fs::write(dir_input.join("a.txt"), b"a\n").unwrap();
+        fs::write(dir_input.join("b.txt"), b"b\n").unwrap();
+        let mut cx = build_context(temp.path());
+
+        let error = BundleBuilder
+            .build_typed(
+                BundleConfig {},
+                inputs(vec![("multi_dir", dir_input)]),
+                &mut cx,
+            )
+            .unwrap_err();
+
+        assert!(
+            error.to_string().contains("expected exactly one"),
             "{error}"
         );
     }
