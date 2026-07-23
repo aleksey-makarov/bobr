@@ -456,8 +456,16 @@ fn effective_step_env(
 ) -> HashMap<String, String> {
     let mut env = HashMap::from([
         (
+            // `/usr/bin` before `/usr/sbin` (and `/bin` before `/sbin`). The
+            // rootfs is fully merged (`/usr/sbin -> bin`, `/sbin -> usr/bin`), so
+            // both entries at each tier resolve to the same directory and the
+            // order is functionally irrelevant to what gets executed. It matters
+            // only for tools that record the PATH-resolved absolute path of an
+            // interpreter: with sbin first, meson bakes `/usr/sbin/python3` into
+            // installed script shebangs (e.g. g-ir-scanner); bin first yields the
+            // canonical `/usr/bin/python3`, as in mainstream distros.
             "PATH".to_string(),
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+            "/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin".to_string(),
         ),
         ("HOME".to_string(), CONTAINER_BUILD_DIR.to_string()),
         ("TMPDIR".to_string(), "/tmp".to_string()),

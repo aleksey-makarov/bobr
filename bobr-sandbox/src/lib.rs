@@ -128,7 +128,10 @@ impl TypedBuilder for SandboxInstallBuilder {
         // Bumped 4 -> 5: the captured upper layer is now pruned of pure copy-up
         // noise -- lower directories the build only touched (e.g. autoconf
         // probing /var/tmp for writability) no longer appear in the output.
-        "5"
+        // Bumped 5 -> 6: PATH now lists /usr/bin before /usr/sbin, so tools that
+        // record a PATH-resolved interpreter (meson) bake the canonical
+        // /usr/bin/python3 into shebangs instead of /usr/sbin/python3.
+        "6"
     }
 
     fn is_arch_dependent(&self) -> bool {
@@ -168,7 +171,10 @@ impl TypedBuilder for SandboxBuilder {
         // as SandboxInstall (plus a writable `$out` bind), dropping the old
         // per-entry read-only bind mount scheme; the output is still `$out`,
         // chowned to a single owner and captured as a standalone object.
-        "4"
+        // Bumped 4 -> 5: PATH now lists /usr/bin before /usr/sbin, so tools that
+        // record a PATH-resolved interpreter (meson) bake the canonical
+        // /usr/bin/python3 into shebangs instead of /usr/sbin/python3.
+        "5"
     }
 
     fn is_arch_dependent(&self) -> bool {
