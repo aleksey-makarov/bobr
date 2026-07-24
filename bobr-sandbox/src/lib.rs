@@ -1665,8 +1665,11 @@ mod tests {
 
     /// Deletes a lower file through a real overlay so the kernel writes a
     /// whiteout into upper, then confirms validation rejects it. Forks first:
-    /// `unshare(CLONE_NEWUSER)` needs a single-threaded process. Skips where
-    /// unprivileged user namespaces are unavailable.
+    /// `unshare(CLONE_NEWUSER)` needs a single-threaded process. Skips where the
+    /// environment cannot build the scenario -- no unprivileged user namespaces,
+    /// no user-namespace id-mapping (e.g. AppArmor restricts it), or no
+    /// unprivileged overlayfs mount. Only a whiteout that was created but not
+    /// rejected counts as a failure.
     #[test]
     fn additive_layer_rejects_whiteout_from_real_overlay() {
         let temp = tempdir().unwrap();
@@ -1738,15 +1741,24 @@ mod tests {
         } else {
             -1
         };
+        // 42/43/46 mean the environment could not build the scenario (no
+        // unprivileged user namespaces / id-mapping / overlayfs) -- skip, not
+        // fail. 44 (rm failed) and 45 (whiteout not rejected) are real failures.
         match code {
             0 => {}
             42 => eprintln!(
                 "additive_layer_rejects_whiteout_from_real_overlay: skipped \
                  (unprivileged user namespaces unavailable)"
             ),
-            other => panic!(
-                "whiteout child failed with code {other} (43 mount, 44 rm, 45 not-rejected, 46 idmap)"
+            46 => eprintln!(
+                "additive_layer_rejects_whiteout_from_real_overlay: skipped \
+                 (user-namespace id-mapping unavailable)"
             ),
+            43 => eprintln!(
+                "additive_layer_rejects_whiteout_from_real_overlay: skipped \
+                 (unprivileged overlayfs mount unavailable)"
+            ),
+            other => panic!("whiteout child failed with code {other} (44 rm, 45 not-rejected)"),
         }
     }
 }
