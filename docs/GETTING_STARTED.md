@@ -75,17 +75,17 @@ Build it:
 bobr prints the object's hash:
 
 ```text
-354650604fa434e975eff93f27d72f688fc1c41d839ab3e97a6c89ddc6381fb4
+f9deedd4f7809f00b0ef6fe93d4001fd70f8495478dafdaa8a01c34ef0269af1
 ```
 
 The hash is derived from the content, not from the path or name, so you will get
 the same value. The result is in the store:
 
 ```sh
-$ cat /tmp/bobr-store/objects/354650604fa434e975eff93f27d72f688fc1c41d839ab3e97a6c89ddc6381fb4
+$ cat /tmp/bobr-store/objects/f9deedd4f7809f00b0ef6fe93d4001fd70f8495478dafdaa8a01c34ef0269af1
 hello, bobr
 $ readlink /tmp/bobr-store/object-refs/hello
-../objects/354650604fa434e975eff93f27d72f688fc1c41d839ab3e97a6c89ddc6381fb4
+../objects/f9deedd4f7809f00b0ef6fe93d4001fd70f8495478dafdaa8a01c34ef0269af1
 ```
 
 Because the single entry is one top-level file, the object is that file; a tree
@@ -107,12 +107,14 @@ git clone https://github.com/aleksey-makarov/bobr-recipes
 
 List the build targets — attribute names with their package names — with
 `tools/bobr-list-pkgs.sh`, then build one with the driver, which refreshes the
-local hash locks, exports the request through `request.ncl`, and runs `bobr`:
+local `fsobj-hash` locks (with the `fsobj-hash` binary built above), exports the
+request through `request.ncl`, and runs `bobr`:
 
 ```sh
 cd bobr-recipes
-tools/bobr-list-pkgs.sh        # choose a target attribute
-tools/bobr-build.sh gzip
+tools/bobr-list-pkgs.sh              # choose a target attribute
+tools/bobr-build.sh gzip            # build one package
+tools/bobr-build.sh test_all_recipes  # or the whole shipped set: kernel, images, initrd
 ```
 
 `tools/bobr-build.sh` options:
@@ -150,13 +152,14 @@ source objects from the previous store by hardlink, records the `bobr` and
 
 ## Booting a system under QEMU
 
-`tools/bobr-run-qemu.sh` is a quick smoke test: it builds the kernel, EROFS
-rootfs, and initrd (through `bobr-build.sh`) and boots them under
-`qemu-system-x86_64`. It needs KVM (`/dev/kvm`); `--store PATH` selects the store
-(default `../bobr-store`), and anything after `--` is passed through to QEMU.
+`tools/bobr-run-qemu-gnome.sh` is a quick smoke test: it builds the kernel, the
+GNOME EROFS rootfs, and initrd (through `bobr-build.sh`) and boots them under the
+host's `qemu-system-x86_64` in a graphical window. It needs KVM (`/dev/kvm`);
+`--store PATH` selects the store (default `../bobr-store`), and anything after
+`--` is passed through to QEMU.
 
 ```sh
-tools/bobr-run-qemu.sh
+tools/bobr-run-qemu-gnome.sh
 ```
 
 ## Next steps

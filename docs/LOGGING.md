@@ -56,10 +56,10 @@ producer can neither forge nor omit envelope fields.
   "ts": "2026-06-23T21:21:51.229Z",  // UTC, RFC3339, milliseconds, always 'Z'
   "level": "info",                   // info | warn | error
   "status": "done",                  // closed lifecycle enum (see below)
-  "op": "mkfs",                      // optional, free-form builder operation
+  "op": "sandbox",                   // optional, free-form builder operation
   "subject": {                       // omitted for run-level events
     "tag": "Sandbox",
-    "name": "erofs-rootfs",
+    "name": "qemu-image",
     "build_key": "<full build key>",
     "object_hash": "<full object hash>"   // optional (present on completion/cache hit)
   },
@@ -106,7 +106,7 @@ filtering by lifecycle is reliable while builders stay free to name their work.
 | `cleanup`      | post-execution cleanup (e.g. temp-dir removal warning)         |
 
 Builder operations ride inside `running` and name themselves with `op`. Current
-values: `stage`, `mkfs`, `merge`, `subset`, `extract`, `initramfs`, `sandbox`,
+values: `stage`, `merge`, `move`, `subset`, `extract`, `initramfs`, `sandbox`,
 `sandbox-result`, and `fetch` (source download), plus the meta operations
 `log-warning` and `oci-extract-warnings`. `op` is intentionally open; tooling
 must not assume a closed set.

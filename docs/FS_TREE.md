@@ -41,11 +41,13 @@ modeled yet).
 
 Among the built-in builders:
 
-- `FsTreeImport` turns an ordinary object into an fs-tree, and `OciExtract`
-  produces one from an OCI image;
-- `TreeMerge` and `TreeSubset` transform fs-trees at the manifest level, without
-  materializing them;
-- `Initramfs` and `Sandbox` consume a materialized fs-tree.
+- `FsTreeImport` turns an ordinary object into an fs-tree, `OciExtract` produces
+  one from an OCI image, and `SandboxInstall` captures a sandboxed build's
+  changes as an additive fs-tree layer;
+- `TreeMerge`, `TreeSubset`, and `TreeMove` transform fs-trees at the manifest
+  level, without materializing them;
+- `Initramfs` consumes a materialized fs-tree; `Sandbox` and `SandboxInstall`
+  use one as the image their build runs on.
 
 A recipe controls materialization by the **input name**: an input whose name
 begins with `_` (e.g. `_rootfs`, `_tree`) is materialized into a real directory

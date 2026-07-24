@@ -10,7 +10,8 @@ symlink metadata, and references to regular file payloads stored in
 `<store>/fs-files/`.
 
 The manifest itself is an ordinary store object, produced by builders such as
-`FsTreeImport`, `OciExtract`, `TreeMerge`, `TreeSubset`, and `Sandbox`.
+`FsTreeImport`, `OciExtract`, `TreeMerge`, `TreeMove`, `TreeSubset`, and
+`SandboxInstall`.
 Materialized roots are cache entries under
 `<store>/fs-trees/<manifest-object-hash>/`, not the payload stored in
 `<store>/objects/`.
@@ -143,9 +144,9 @@ filesystem root. The cache path is `<store>/fs-trees/<manifest-object-hash>/`.
 For named materializations, the runtime also updates
 `<store>/fs-tree-refs/<name>` to point at that cache root. These refs are
 user-facing inspection aids; runtime cache lookup does not read them.
-Builders that only need to read or transform manifests, such as `TreeMerge`
-and `TreeSubset`, consume the manifest object directly and do not materialize
-the tree.
+Builders that only need to read or transform manifests, such as `TreeMerge`,
+`TreeMove`, and `TreeSubset`, consume the manifest object directly and do not
+materialize the tree.
 
 ## Scope Boundaries
 

@@ -271,6 +271,28 @@ Produces an fs-tree containing only the paths that match its `include` patterns.
   containing `..`
 - writes one fs-tree object
 
+### `TreeMove`
+
+Re-roots an fs-tree at one of its subdirectories: the `strip_prefix` directory
+becomes the new root and its leading path component is dropped from every nested
+entry. A pure manifest operation — the same fs-files are referenced under shorter
+paths.
+
+**Inputs:** required `tree` — one fs-tree.
+
+**Config:** `strip_prefix`, the subdirectory to promote to the root:
+
+```json
+{ "strip_prefix": "stage" }
+```
+
+**Behavior:**
+
+- reads the input manifest directly and does not materialize it
+- promotes the `strip_prefix` subtree to the root — each entry keeps its content
+  and metadata, with the leading `strip_prefix` component removed — and writes
+  one fs-tree object
+
 ### `OciExtract`
 
 Extracts one OCI image layout into an fs-tree.
@@ -283,20 +305,22 @@ Extracts one OCI image layout into an fs-tree.
 **Behavior:**
 
 - extracts the image root filesystem into one fs-tree object
-- the result can be consumed as an fs-tree input by `TreeMerge`, `TreeSubset`,
-  `Initramfs`, or `Sandbox`
+- the result can be consumed as an fs-tree input by `TreeMerge`, `TreeMove`,
+  `TreeSubset`, `Initramfs`, `Sandbox`, or `SandboxInstall`
 
 ### `Sandbox`
 
-Runs an ordered plan of commands inside an isolated container — a set of Linux
-namespaces rooted at the `_rootfs` input, with no network access — and captures
-the `@{out}` directory as the result. By default the output is captured as an
-ownership-aware fs-tree; see `preserve_ownership`.
+Runs an ordered plan of commands on a read-write overlay root — a set of Linux
+namespaces with no network access, over the materialized `_rootfs` — and captures
+the `@{out}` staging directory as the result: chowned to a single owner and
+stored as a plain object. Changes the steps make to the root itself are
+discarded; only `@{out}` is kept. To keep those changes instead, see
+[`SandboxInstall`](#sandboxinstall).
 
 **Inputs:**
 
 - required `_rootfs` — one fs-tree; materialized (its name begins with `_`) and
-  used as the container's read-only root filesystem
+  used as the read-only lower layer of the build's read-write overlay root
 - any number of extra inputs — each made available to the steps through its
   interpolation name `@{name}` (read-only). An input name must start with an
   ASCII letter or `_`, contain only ASCII letters, digits, or `_`, and must not
@@ -309,10 +333,6 @@ ownership-aware fs-tree; see `preserve_ownership`.
 - `steps` — a required, non-empty array of steps
 - `script_config` — a config tree, available to the steps as `@{config}`
   (default `{}`, an empty config directory)
-- `preserve_ownership` — whether the output is captured as an ownership-aware
-  fs-tree (default `true`). When `false`, the `@{out}` tree is instead chowned to
-  a single owner and captured as a plain object — for self-contained artifacts
-  (e.g. a disk image) where per-file ownership is irrelevant
 
 ```json
 {
@@ -355,7 +375,7 @@ from the build's reuse key, so identical inputs yield an identical seed.
 
 - `@{build}` — the writable build directory
 - `@{out}` — the writable output directory; its contents become the result
-  object
+  object (`Sandbox` only)
 - `@{config}` — the materialized `script_config` directory
 - `@{<input>}` — an extra input: the materialized directory if its name begins
   with `_`, otherwise the read-only object path
@@ -368,6 +388,28 @@ it is a recursive tree: objects become directories, arrays become directories
 with zero-padded numeric entries (`00000000`, …) in order, and strings become
 file contents. Keys must be non-empty, must not be `.` or `..`, and may contain
 only ASCII letters, digits, `.`, `_`, and `-`.
+
+### `SandboxInstall`
+
+The additive counterpart of `Sandbox`: the same overlay run — identical
+`_rootfs`, extra inputs, `steps`, `script_config`, environment, and `@{…}`
+interpolation — but instead of a separate `@{out}` it captures the changes the
+steps make to the root as an **additive fs-tree layer**: the overlay's upper
+layer, an ownership-aware delta over `_rootfs` meant to be `TreeMerge`d back onto
+it.
+
+**Inputs:** required `_rootfs` plus any number of extra inputs — as
+[`Sandbox`](#sandbox).
+
+**Config:** `steps` and `script_config` — as [`Sandbox`](#sandbox).
+
+**Behavior:**
+
+- runs the steps on the same read-write overlay root, then writes one fs-tree
+  object from the upper layer (created and modified entries, pruned of pure
+  copy-ups)
+- there is no `@{out}` / `BOBR_OUT_DIR`; using `@{out}` is an unknown-variable
+  error — the result is the delta, not a staging directory
 
 ### `Initramfs`
 

@@ -24,11 +24,12 @@ EROFS/initramfs root filesystems — and a sandbox builder runs arbitrary build
 steps. Recipes are written declaratively (in [Nickel](https://nickel-lang.org/))
 and lower to the JSON request `bobr` executes.
 
-## How it differs from Yocto and Nix
+## What `bobr` is like
 
-`bobr` is like Yocto, but with sane recipe syntax. It does not support
-cross-compilation yet, and only a handful of recipes exist so far — but those
-are a matter of filling in over time, not design limits.
+`bobr` is like Yocto, but with sane recipe syntax. Recipes are a separate
+Nickel layer — a real type-and-contract system, with Nix-style overlays for
+composing them. And where Yocto is built around cross-compiling for embedded
+targets, `bobr` so far builds ordinary systems natively.
 
 `bobr` is like Nix, but with sane filesystem structure — a recipe choice, not a
 `bobr` constraint; the same engine could produce a Nix-style store. The trade-off
@@ -40,6 +41,10 @@ results in a hash-keyed store with hermetic, sandboxed builds and heavy
 deduplication. Unlike Nix, it is content-addressed from the start, whereas Nix
 store paths are input-addressed and content-addressed derivations remain
 experimental.
+
+`bobr` borrows ideas from OSTree — a content-addressed store, and an immutable
+read-only rootfs. But OSTree is about delivering and updating that OS on the
+machine (atomic upgrades, rollback), where `bobr` builds the images.
 
 ## Documentation
 

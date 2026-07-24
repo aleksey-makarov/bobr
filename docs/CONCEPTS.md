@@ -2,7 +2,7 @@
 
 The result of a `bobr` build is an **object**: an immutable payload — a file or a
 directory. Its identity is its `ObjectHash`, the hash of its content, computed by
-[fobj-hash](./FSOBJ_HASH.md).
+[fsobj-hash](./FSOBJ_HASH.md).
 
 Each object is produced by a **builder** — a component inside `bobr` — according
 to a **recipe** describing how to build it. There are two kinds of builder:
@@ -41,86 +41,6 @@ instructions plus the `ObjectHash`es of those inputs, and looks that up — a hi
 even from a different graph that reached the same inputs, is reused too. Only
 when both miss does it produce the object, store it, and add both mappings.
 
-<!-- 
-
- `bobr` uses the `BuildKey` to
-recognize work it has already done and skip it.
-
-    and, usually, an `origin`
-  saying where to fetch it from (a local path, an HTTP URL, an OCI registry).
- The hash both names the source and verifies it after fetching.
-
- has a `tag` (which builder to run), an opaque `config`, and
-  named `inputs` (its dependencies). The builder turns its config and resolved
-  inputs into one object.
-
-
-`bobr` turns a graph of recipes into content-addressed artifacts on Linux. You
-describe what you want as a set of *recipe nodes*; `bobr` plans the graph, builds
-only what is missing, and stores each result as an immutable object named by the
-hash of its content.
-
-Recipes are normally written declaratively in
-[Nickel](https://nickel-lang.org/) and lowered to a single JSON request — a flat
-DAG of nodes — which the engine executes. `bobr` itself only ever sees that JSON
-request; it has no embedded recipe language. The exact request shape is the
-[Request](./REQUEST.md).
-
-
-## Recipes and the request graph
-
-A request is a directed acyclic graph (DAG) of nodes, each with a technical id.
-Dependencies are id references, so one node can be shared by many parents. The
-reserved id `root` is the target of the current build.
-
-## Objects and the store
-
-
-Alongside each object, `bobr` keeps a small **object record** capturing the
-identities of the object's direct inputs. Human-facing **names** are mutable
-*refs* layered on top — `object-refs/<name>` points at the latest object built
-for that name — so names can move while objects stay immutable. The full on-disk
-layout is in [Store](./STORE.md).
-
-## Keys: build identity
-
-`bobr` uses three distinct identities, and keeping them apart is the key to how it
-caches and reuses work:
-
-- **`object_hash`** — *content* identity. Names a finished object by what it
-  contains.
-- **`build_key`** — *planning* identity. Computed from a builder's tag, its
-  normalized config, and the `build_key`s of its dependencies. It names a node
-  in the graph before anything is built, so `bobr` can check whether a result
-  already exists without first realizing the inputs. For a source node, the
-  `build_key` is just its declared `object_hash`.
-- **`reuse_key`** — *reuse* identity. Computed from a builder's tag, its config,
-  and the `object_hash`es of its (now realized) dependencies. Because it depends
-  on input *content* rather than on which graph produced it, two different
-  graphs that reach the same inputs can share one stored object.
-
-The exact computation and ordering rules are in
-[Store](./STORE.md#identity-model).
-
-## How a build runs
-
-`bobr` plans top-down from `root` and builds bottom-up:
-
-1. **Plan.** For each builder node, `bobr` first checks for a build handle on its
-   `build_key`; failing that, a canonical object for its `reuse_key`; only if
-   both miss does it recurse into the node's inputs. This finds the smallest set
-   of nodes that actually need building.
-2. **Build.** A node becomes ready once all its inputs are reused or built;
-   ready nodes run in parallel in a worker pool, and no `build_key` is ever
-   built twice.
-3. **Sources** join the same flow: `bobr` looks for the object by `object_hash`,
-   otherwise fetches it from its origin and verifies the hash before importing
-   it.
-
-The result of the whole request is the `root` object, published under its name.
-
--->
-
 ## Glossary
 
 **builder** — A named component inside `bobr` that produces a recipe's object.
@@ -139,7 +59,7 @@ builder consumes when it builds.
 and stores, named by its `ObjectHash`.
 
 **`ObjectHash`** — An object's identity: a 64-character lowercase hex string that
-names it by the hash of its content. Computed by [fobj-hash](./FSOBJ_HASH.md).
+names it by the hash of its content. Computed by [fsobj-hash](./FSOBJ_HASH.md).
 
 **origin** — A named component inside `bobr` that the `Source` builder uses to
 obtain its object: `Path`, `Http`, or `OciRegistry`.

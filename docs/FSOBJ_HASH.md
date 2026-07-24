@@ -9,7 +9,9 @@ This document defines the hashing rules for filesystem objects.
 > are different: they make ownership and mode part of file identity, so their
 > files are content-addressed by a separate fs-file hash, described in
 > [Filesystem trees](./FS_TREE.md) and the
-> [fs-tree Manifest](./FS_TREE_MANIFEST.md).
+> [fs-tree Manifest](./FS_TREE_MANIFEST.md). These are two distinct hash domains:
+> an `object_hash` is never an fs-file hash, and the two must not be compared or
+> interchanged.
 
 ## Summary
 
