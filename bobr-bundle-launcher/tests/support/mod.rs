@@ -23,8 +23,10 @@ impl BundleFixture {
         fs::create_dir_all(root.join("root/usr/lib64")).unwrap();
 
         let launcher = root.join("libexec/bobr-bundle-launcher");
-        fs::copy(env!("CARGO_BIN_EXE_bobr-bundle-launcher"), &launcher).unwrap();
-        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        let staged_launcher = root.join("libexec/.bobr-bundle-launcher.tmp");
+        fs::copy(env!("CARGO_BIN_EXE_bobr-bundle-launcher"), &staged_launcher).unwrap();
+        fs::set_permissions(&staged_launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(staged_launcher, &launcher).unwrap();
 
         Self { _temp: temp, root }
     }
@@ -79,9 +81,23 @@ argv0 = "{argv0}"
         path
     }
 
+    pub(crate) fn write_script_fixture(&self, relative: &str, contents: &[u8]) -> PathBuf {
+        let path = self.root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, contents).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
     pub(crate) fn add_public_wrapper(&self, name: &str) -> PathBuf {
         let path = self.root.join("bin").join(name);
         symlink("../libexec/bobr-bundle-launcher", &path).unwrap();
+        path
+    }
+
+    pub(crate) fn add_internal_wrapper(&self, name: &str) -> PathBuf {
+        let path = self.root.join("libexec/wrapped-bin").join(name);
+        symlink("../bobr-bundle-launcher", &path).unwrap();
         path
     }
 

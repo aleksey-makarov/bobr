@@ -148,13 +148,36 @@ pub fn prepare_dynamic_launch(
     interpreter: &Path,
     payload_arguments: &[OsString],
 ) -> Result<DynamicLaunchPlan, DynamicLaunchError> {
+    prepare_dynamic_program(
+        location,
+        bundle,
+        tool.payload_root(),
+        tool.target(),
+        OsStr::new(&tool.config().argv0),
+        interpreter,
+        payload_arguments,
+    )
+}
+
+/// Maps an arbitrary bundled dynamic program to its loader and arguments.
+///
+/// This is used for shebang interpreters as well as configured tools.
+pub fn prepare_dynamic_program(
+    location: &BundleLocation,
+    bundle: &BundleConfig,
+    payload_root: &Path,
+    target: &Path,
+    argv0: &OsStr,
+    interpreter: &Path,
+    payload_arguments: &[OsString],
+) -> Result<DynamicLaunchPlan, DynamicLaunchError> {
     match bundle.loader.kind {
         LoaderKind::Glibc => {}
     }
-    let relative_interpreter = validate_interpreter(interpreter)
+    let relative_interpreter = validate_absolute_payload_path(interpreter)
         .ok_or_else(|| DynamicLaunchError::InvalidInterpreter(interpreter.to_path_buf()))?;
-    let loader_candidate = tool.payload_root().join(relative_interpreter);
-    let loader = resolve_inside_payload("ELF interpreter", &loader_candidate, tool.payload_root())?;
+    let loader_candidate = payload_root.join(relative_interpreter);
+    let loader = resolve_inside_payload("ELF interpreter", &loader_candidate, payload_root)?;
     let metadata = fs::metadata(&loader).map_err(|source| DynamicLaunchError::ResolvePath {
         field: "ELF interpreter".to_string(),
         path: loader.clone(),
@@ -192,7 +215,7 @@ pub fn prepare_dynamic_launch(
         let directory = resolve_inside_payload(
             &format!("loader.library_dirs[{index}]"),
             &bundle_root.join(relative),
-            tool.payload_root(),
+            payload_root,
         )?;
         if !directory.is_dir() {
             return Err(DynamicLaunchError::LibraryPathNotDirectory(directory));
@@ -206,16 +229,16 @@ pub fn prepare_dynamic_launch(
         arguments.push(OsString::from("--inhibit-cache"));
     }
     arguments.push(OsString::from("--argv0"));
-    arguments.push(OsString::from(&tool.config().argv0));
+    arguments.push(argv0.to_os_string());
     arguments.push(OsString::from("--library-path"));
     arguments.push(join_paths(&library_dirs));
-    arguments.push(tool.target().as_os_str().to_os_string());
+    arguments.push(target.as_os_str().to_os_string());
     arguments.extend_from_slice(payload_arguments);
 
     Ok(DynamicLaunchPlan { loader, arguments })
 }
 
-fn validate_interpreter(path: &Path) -> Option<&Path> {
+pub(crate) fn validate_absolute_payload_path(path: &Path) -> Option<&Path> {
     let bytes = path.as_os_str().as_bytes();
     if !bytes.starts_with(b"/") {
         return None;
@@ -279,7 +302,7 @@ mod tests {
     #[test]
     fn validates_absolute_interpreter_without_special_components() {
         assert_eq!(
-            validate_interpreter(Path::new("/lib64/ld-linux.so")),
+            validate_absolute_payload_path(Path::new("/lib64/ld-linux.so")),
             Some(Path::new("lib64/ld-linux.so"))
         );
         for invalid in [
@@ -291,7 +314,7 @@ mod tests {
             "/lib/../ld.so",
             "/lib/ld.so/",
         ] {
-            assert_eq!(validate_interpreter(Path::new(invalid)), None);
+            assert_eq!(validate_absolute_payload_path(Path::new(invalid)), None);
         }
     }
 

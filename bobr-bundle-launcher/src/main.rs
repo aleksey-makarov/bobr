@@ -4,8 +4,8 @@
 compile_error!("bobr requires Linux");
 
 use bobr_bundle_launcher::{
-    ElfLinkage, build_environment, exec_dynamic, exec_static, inspect_elf, locate_current_bundle,
-    parse_invocation, prepare_dynamic_launch, read_bundle_config, resolve_tool,
+    ElfLinkage, ExecutableFormat, build_environment, exec_prepared, locate_current_bundle,
+    parse_invocation, prepare_tool_launch, read_bundle_config, resolve_tool,
 };
 
 fn main() {
@@ -29,58 +29,37 @@ fn main() {
         Ok(environment) => environment,
         Err(error) => exit_with_error(error),
     };
-    let elf = match inspect_elf(tool.target()) {
-        Ok(elf) => elf,
+    let launch = match prepare_tool_launch(&location, &config, &tool, invocation.args()) {
+        Ok(launch) => launch,
         Err(error) => exit_with_error(error),
-    };
-    let dynamic_plan = match elf.linkage() {
-        ElfLinkage::Static => None,
-        ElfLinkage::Dynamic { interpreter } => Some(
-            match prepare_dynamic_launch(&location, &config, &tool, interpreter, invocation.args())
-            {
-                Ok(plan) => plan,
-                Err(error) => exit_with_error(error),
-            },
-        ),
     };
     if invocation.is_diagnose() {
         println!("tool={}", tool.name());
         println!("target={}", tool.target().display());
-        println!(
-            "linkage={}",
-            match elf.linkage() {
-                ElfLinkage::Static => "static",
-                ElfLinkage::Dynamic { .. } => "dynamic",
+        match launch.format() {
+            ExecutableFormat::Elf(elf) => {
+                println!(
+                    "linkage={}",
+                    match elf.linkage() {
+                        ElfLinkage::Static => "static",
+                        ElfLinkage::Dynamic { .. } => "dynamic",
+                    }
+                );
             }
-        );
+            ExecutableFormat::Script(shebang) => {
+                println!("linkage=script");
+                println!("interpreter={}", shebang.interpreter().display());
+            }
+        }
         println!("environment_variables={}", environment.len());
-        if let Some(plan) = &dynamic_plan {
-            println!("loader={}", plan.loader().display());
+        if let Some(loader) = launch.process().loader() {
+            println!("loader={}", loader.display());
         }
         return;
     }
 
-    match elf.linkage() {
-        ElfLinkage::Static => {
-            let error = exec_static(&tool, invocation.args(), &environment);
-            exit_with_error(format!(
-                "failed to execute static tool '{}': {error}",
-                tool.name()
-            ));
-        }
-        ElfLinkage::Dynamic { .. } => {
-            let error = exec_dynamic(
-                dynamic_plan
-                    .as_ref()
-                    .expect("dynamic ELF must have a prepared loader plan"),
-                &environment,
-            );
-            exit_with_error(format!(
-                "failed to execute bundled loader for '{}': {error}",
-                tool.name()
-            ));
-        }
-    }
+    let error = exec_prepared(&launch, &environment);
+    exit_with_error(format!("failed to execute tool '{}': {error}", tool.name()));
 }
 
 fn exit_with_error(error: impl std::fmt::Display) -> ! {
