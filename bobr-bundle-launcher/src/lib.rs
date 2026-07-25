@@ -4,6 +4,7 @@
 compile_error!("bobr requires Linux");
 
 mod config;
+mod elf;
 mod environment;
 mod invocation;
 mod location;
@@ -14,6 +15,7 @@ pub use config::{
     HostPolicy, LoaderConfig, LoaderKind, PlatformArch, PlatformConfig, PlatformOs, ToolConfig,
     read_bundle_config,
 };
+pub use elf::{ElfError, ElfExecutable, ElfLinkage, inspect_elf};
 pub use environment::{EnvironmentError, ProcessEnvironment, build_environment};
 pub use invocation::{Invocation, InvocationError, parse_invocation};
 pub use location::{
