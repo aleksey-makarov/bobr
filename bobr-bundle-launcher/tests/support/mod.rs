@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
@@ -69,6 +71,14 @@ argv0 = "{argv0}"
         path
     }
 
+    pub(crate) fn write_dynamic_fixture(&self, relative: &str, interpreter: &str) -> PathBuf {
+        let path = self.root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, dynamic_elf(interpreter)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
     pub(crate) fn add_public_wrapper(&self, name: &str) -> PathBuf {
         let path = self.root.join("bin").join(name);
         symlink("../libexec/bobr-bundle-launcher", &path).unwrap();
@@ -125,5 +135,33 @@ fn static_exit_elf(exit_code: u32) -> Vec<u8> {
     elf[ph + 40..ph + 48].copy_from_slice(&(file_size as u64).to_le_bytes());
     elf[ph + 48..ph + 56].copy_from_slice(&0x1000_u64.to_le_bytes());
     elf[code_offset..].copy_from_slice(&code);
+    elf
+}
+
+fn dynamic_elf(interpreter: &str) -> Vec<u8> {
+    const HEADER_SIZE: usize = 64;
+    const PROGRAM_HEADER_SIZE: usize = 56;
+    let mut interpreter = interpreter.as_bytes().to_vec();
+    interpreter.push(0);
+    let content_offset = HEADER_SIZE + PROGRAM_HEADER_SIZE;
+    let mut elf = vec![0_u8; content_offset + interpreter.len()];
+
+    elf[..4].copy_from_slice(b"\x7fELF");
+    elf[4] = 2;
+    elf[5] = 1;
+    elf[6] = 1;
+    elf[16..18].copy_from_slice(&3_u16.to_le_bytes());
+    elf[18..20].copy_from_slice(&62_u16.to_le_bytes());
+    elf[20..24].copy_from_slice(&1_u32.to_le_bytes());
+    elf[32..40].copy_from_slice(&(HEADER_SIZE as u64).to_le_bytes());
+    elf[52..54].copy_from_slice(&(HEADER_SIZE as u16).to_le_bytes());
+    elf[54..56].copy_from_slice(&(PROGRAM_HEADER_SIZE as u16).to_le_bytes());
+    elf[56..58].copy_from_slice(&1_u16.to_le_bytes());
+
+    let ph = HEADER_SIZE;
+    elf[ph..ph + 4].copy_from_slice(&3_u32.to_le_bytes());
+    elf[ph + 8..ph + 16].copy_from_slice(&(content_offset as u64).to_le_bytes());
+    elf[ph + 32..ph + 40].copy_from_slice(&(interpreter.len() as u64).to_le_bytes());
+    elf[content_offset..].copy_from_slice(&interpreter);
     elf
 }

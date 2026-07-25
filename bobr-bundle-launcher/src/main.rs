@@ -4,8 +4,8 @@
 compile_error!("bobr requires Linux");
 
 use bobr_bundle_launcher::{
-    ElfLinkage, build_environment, exec_static, inspect_elf, locate_current_bundle,
-    parse_invocation, read_bundle_config, resolve_tool,
+    ElfLinkage, build_environment, exec_dynamic, exec_static, inspect_elf, locate_current_bundle,
+    parse_invocation, prepare_dynamic_launch, read_bundle_config, resolve_tool,
 };
 
 fn main() {
@@ -33,6 +33,16 @@ fn main() {
         Ok(elf) => elf,
         Err(error) => exit_with_error(error),
     };
+    let dynamic_plan = match elf.linkage() {
+        ElfLinkage::Static => None,
+        ElfLinkage::Dynamic { interpreter } => Some(
+            match prepare_dynamic_launch(&location, &config, &tool, interpreter, invocation.args())
+            {
+                Ok(plan) => plan,
+                Err(error) => exit_with_error(error),
+            },
+        ),
+    };
     if invocation.is_diagnose() {
         println!("tool={}", tool.name());
         println!("target={}", tool.target().display());
@@ -44,6 +54,9 @@ fn main() {
             }
         );
         println!("environment_variables={}", environment.len());
+        if let Some(plan) = &dynamic_plan {
+            println!("loader={}", plan.loader().display());
+        }
         return;
     }
 
@@ -56,8 +69,14 @@ fn main() {
             ));
         }
         ElfLinkage::Dynamic { .. } => {
+            let error = exec_dynamic(
+                dynamic_plan
+                    .as_ref()
+                    .expect("dynamic ELF must have a prepared loader plan"),
+                &environment,
+            );
             exit_with_error(format!(
-                "dynamic tool '{}' is not supported yet",
+                "failed to execute bundled loader for '{}': {error}",
                 tool.name()
             ));
         }
