@@ -3,9 +3,15 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 
+mod config;
 mod invocation;
 mod location;
 
+pub use config::{
+    BUNDLE_FORMAT_V1, BundleConfig, BundleConfigError, EnvironmentOperation, EnvironmentRule,
+    HostPolicy, LoaderConfig, LoaderKind, PlatformArch, PlatformConfig, PlatformOs, ToolConfig,
+    read_bundle_config,
+};
 pub use invocation::{Invocation, InvocationError, parse_invocation};
 pub use location::{
     BUNDLE_CONFIG_NAME, BUNDLE_LIBEXEC_DIR, BundleLocation, BundleLocationError,
