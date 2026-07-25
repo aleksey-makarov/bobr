@@ -2,6 +2,7 @@
 members = [
   "bobr",
   "bobr-builder",
+  "bobr-bundle-launcher",
   "bobr-core",
   "bobr-source",
   "bobr-sandbox-launcher",
@@ -22,6 +23,7 @@ repository = "https://github.com/aleksey-makarov/bobr"
 # Internal crates. They share the [workspace.package] version and move in
 # lockstep, so a release bumps the version above and the requirements here.
 bobr-builder = { path = "bobr-builder", version = "0.1.1" }
+bobr-bundle-launcher = { path = "bobr-bundle-launcher", version = "0.1.1" }
 bobr-core = { path = "bobr-core", version = "0.1.1" }
 bobr-runtime = { path = "bobr-runtime", version = "0.1.1" }
 bobr-sandbox = { path = "bobr-sandbox", version = "0.1.1" }

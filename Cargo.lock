@@ -110,6 +110,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bobr-bundle-launcher"
+version = "0.1.1"
+
+[[package]]
 name = "bobr-core"
 version = "0.1.1"
 dependencies = [

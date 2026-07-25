@@ -1,0 +1,10 @@
+[package]
+name = "bobr-bundle-launcher"
+version.workspace = true
+edition = "2024"
+description = "Static launcher for programs packaged in a bobr HostBundle."
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
