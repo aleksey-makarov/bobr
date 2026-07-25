@@ -30,6 +30,28 @@ pub enum Invocation {
     },
 }
 
+impl Invocation {
+    /// Returns the tool name selected by this invocation.
+    pub fn tool(&self) -> &str {
+        match self {
+            Self::MultiCall { tool, .. } | Self::Run { tool, .. } | Self::Diagnose { tool } => tool,
+        }
+    }
+
+    /// Returns whether this invocation requests diagnostics without execution.
+    pub fn is_diagnose(&self) -> bool {
+        matches!(self, Self::Diagnose { .. })
+    }
+
+    /// Returns payload arguments, excluding `argv[0]`.
+    pub fn args(&self) -> &[OsString] {
+        match self {
+            Self::MultiCall { args, .. } | Self::Run { args, .. } => args,
+            Self::Diagnose { .. } => &[],
+        }
+    }
+}
+
 /// Invalid bundle-launcher command-line syntax.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvocationError {

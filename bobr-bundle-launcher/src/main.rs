@@ -3,7 +3,9 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 
-use bobr_bundle_launcher::{locate_current_bundle, parse_invocation, read_bundle_config};
+use bobr_bundle_launcher::{
+    locate_current_bundle, parse_invocation, read_bundle_config, resolve_tool,
+};
 
 fn main() {
     let invocation = match parse_invocation(std::env::args_os()) {
@@ -18,9 +20,13 @@ fn main() {
         Ok(config) => config,
         Err(error) => exit_with_error(error),
     };
+    let tool = match resolve_tool(&location, &config, invocation.tool()) {
+        Ok(tool) => tool,
+        Err(error) => exit_with_error(error),
+    };
     eprintln!(
-        "bobr-bundle-launcher: launching is not implemented yet; bundle root is '{}', format is '{}', invocation is {invocation:?}",
-        location.root().display(),
+        "bobr-bundle-launcher: launching is not implemented yet; target is '{}', format is '{}', invocation is {invocation:?}",
+        tool.target().display(),
         config.format()
     );
     std::process::exit(2)
