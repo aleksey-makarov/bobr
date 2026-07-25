@@ -4,7 +4,7 @@
 compile_error!("bobr requires Linux");
 
 use bobr_bundle_launcher::{
-    locate_current_bundle, parse_invocation, read_bundle_config, resolve_tool,
+    build_environment, locate_current_bundle, parse_invocation, read_bundle_config, resolve_tool,
 };
 
 fn main() {
@@ -24,10 +24,14 @@ fn main() {
         Ok(tool) => tool,
         Err(error) => exit_with_error(error),
     };
+    let environment = match build_environment(&location, &config, &tool, std::env::vars_os()) {
+        Ok(environment) => environment,
+        Err(error) => exit_with_error(error),
+    };
     eprintln!(
-        "bobr-bundle-launcher: launching is not implemented yet; target is '{}', format is '{}', invocation is {invocation:?}",
+        "bobr-bundle-launcher: launching is not implemented yet; target is '{}', environment has {} variables, invocation is {invocation:?}",
         tool.target().display(),
-        config.format()
+        environment.len()
     );
     std::process::exit(2)
 }

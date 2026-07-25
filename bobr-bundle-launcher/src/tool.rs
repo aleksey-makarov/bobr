@@ -234,7 +234,7 @@ pub fn resolve_tool(
     })
 }
 
-fn validate_relative_path(field: &str, value: &str) -> Result<(), ToolResolutionError> {
+pub(crate) fn validate_relative_path(field: &str, value: &str) -> Result<(), ToolResolutionError> {
     let invalid = |reason| ToolResolutionError::InvalidRelativePath {
         field: field.to_string(),
         value: value.to_string(),

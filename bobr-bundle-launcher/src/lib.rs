@@ -4,6 +4,7 @@
 compile_error!("bobr requires Linux");
 
 mod config;
+mod environment;
 mod invocation;
 mod location;
 mod tool;
@@ -13,6 +14,7 @@ pub use config::{
     HostPolicy, LoaderConfig, LoaderKind, PlatformArch, PlatformConfig, PlatformOs, ToolConfig,
     read_bundle_config,
 };
+pub use environment::{EnvironmentError, ProcessEnvironment, build_environment};
 pub use invocation::{Invocation, InvocationError, parse_invocation};
 pub use location::{
     BUNDLE_CONFIG_NAME, BUNDLE_LIBEXEC_DIR, BundleLocation, BundleLocationError,
