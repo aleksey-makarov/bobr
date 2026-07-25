@@ -3,7 +3,7 @@
 //! Defines the [`Builder`]/[`TypedBuilder`] traits, the [`BuildContext`] and
 //! input contract ([`InputSpec`]/[`BuilderInputs`]), and the concrete builders
 //! bobr ships — tree, bundle, group, tree-merge, tree-subset, fs-tree-import,
-//! fs-tree-export, OCI extract, and the initramfs rootfs builder. [`BUILDERS`]
+//! fs-tree-export, tree-move, and OCI extract. [`BUILDERS`]
 //! is the registry of all of them.
 
 #[cfg(not(target_os = "linux"))]
@@ -16,7 +16,6 @@ mod fs_tree_export;
 mod fs_tree_import;
 mod fs_tree_materialize;
 mod group;
-mod initramfs;
 mod oci_extract;
 mod registry;
 mod subject;
@@ -34,7 +33,6 @@ pub use fs_tree_export::{CopyCommand, FsTreeExportBuilder, FsTreeExportConfig};
 pub use fs_tree_import::{FsTreeImportBuilder, FsTreeImportConfig};
 pub use fs_tree_materialize::materialize_fs_tree_root;
 pub use group::{GroupBuilder, GroupConfig};
-pub use initramfs::{InitramfsBuilder, InitramfsConfig};
 pub use oci_extract::{OciExtractBuilder, OciExtractConfig};
 pub use registry::BUILDERS;
 pub use subject::{BuilderPlanError, BuilderPlannedSubject};
@@ -49,7 +47,6 @@ pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
         bobr_runtime::runtime_ns::NsFunction::new(fs_tree_export::FsTreeExportFunction),
         bobr_runtime::runtime_ns::NsFunction::new(fs_tree_import::FsTreeImportFunction),
         bobr_runtime::runtime_ns::NsFunction::new(fs_tree_materialize::FsTreeMaterializeFunction),
-        bobr_runtime::runtime_ns::NsFunction::new(initramfs::InitramfsFunction),
         bobr_runtime::runtime_ns::NsFunction::new(oci_extract::OciExtractFunction),
     ]
 }
@@ -60,11 +57,10 @@ mod tests {
     fn runtime_function_registry_includes_fs_tree_import() {
         let functions = crate::runtime_functions();
 
-        assert_eq!(functions.len(), 5);
+        assert_eq!(functions.len(), 4);
         assert_eq!(functions[0].name(), "fs-tree-export");
         assert_eq!(functions[1].name(), "fs-tree-import");
         assert_eq!(functions[2].name(), "fs-tree-materialize");
-        assert_eq!(functions[3].name(), "initramfs");
-        assert_eq!(functions[4].name(), "oci-extract");
+        assert_eq!(functions[3].name(), "oci-extract");
     }
 }

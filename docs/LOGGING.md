@@ -106,7 +106,7 @@ filtering by lifecycle is reliable while builders stay free to name their work.
 | `cleanup`      | post-execution cleanup (e.g. temp-dir removal warning)         |
 
 Builder operations ride inside `running` and name themselves with `op`. Current
-values: `stage`, `merge`, `move`, `subset`, `extract`, `initramfs`, `sandbox`,
+values: `stage`, `merge`, `move`, `subset`, `extract`, `sandbox`,
 `sandbox-result`, and `fetch` (source download), plus the meta operations
 `log-warning` and `oci-extract-warnings`. `op` is intentionally open; tooling
 must not assume a closed set.

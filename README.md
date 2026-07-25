@@ -19,9 +19,9 @@ Builders run in Linux user-namespace sandboxes with an explicit root filesystem
 and a controlled environment, so a build cannot silently depend on the host.
 Sources are pinned by content hash (HTTP fetches support mirror fallback). A
 handful of composable builders cover the common needs — assembling and
-transforming filesystem trees, extracting OCI images, and producing
-EROFS/initramfs root filesystems — and a sandbox builder runs arbitrary build
-steps. Recipes are written declaratively (in [Nickel](https://nickel-lang.org/))
+transforming filesystem trees, and extracting OCI images — and a sandbox builder
+runs arbitrary build steps, from compiling a package to packing a tree into a
+bootable image. Recipes are written declaratively (in [Nickel](https://nickel-lang.org/))
 and lower to the JSON request `bobr` executes.
 
 ## What `bobr` is like

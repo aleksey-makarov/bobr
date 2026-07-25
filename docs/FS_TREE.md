@@ -46,8 +46,9 @@ Among the built-in builders:
   changes as an additive fs-tree layer;
 - `TreeMerge`, `TreeSubset`, and `TreeMove` transform fs-trees at the manifest
   level, without materializing them;
-- `Initramfs` consumes a materialized fs-tree; `Sandbox` and `SandboxInstall`
-  use one as the image their build runs on.
+- `Sandbox` and `SandboxInstall` use a materialized fs-tree as the image their
+  build runs on -- which is also how a tree is packed into an image (an EROFS
+  blob, an initramfs cpio), by a recipe running the packer over the tree.
 
 A recipe controls materialization by the **input name**: an input whose name
 begins with `_` (e.g. `_rootfs`, `_tree`) is materialized into a real directory

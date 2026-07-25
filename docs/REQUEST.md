@@ -306,7 +306,7 @@ Extracts one OCI image layout into an fs-tree.
 
 - extracts the image root filesystem into one fs-tree object
 - the result can be consumed as an fs-tree input by `TreeMerge`, `TreeMove`,
-  `TreeSubset`, `Initramfs`, `Sandbox`, or `SandboxInstall`
+  `TreeSubset`, `Sandbox`, or `SandboxInstall`
 
 ### `Sandbox`
 
@@ -410,24 +410,6 @@ it.
   copy-ups)
 - there is no `@{out}` / `BOBR_OUT_DIR`; using `@{out}` is an unknown-variable
   error — the result is the delta, not a staging directory
-
-### `Initramfs`
-
-Builds a deterministic Linux `newc` initramfs cpio archive from an fs-tree.
-
-**Inputs:** required `_tree` — one fs-tree, materialized before execution.
-
-**Config:** none (`{}`).
-
-**Behavior:**
-
-- scans the materialized root inside a namespace function and writes the `newc`
-  cpio archive directly, without invoking any `cpio` program
-- encodes the root as `.`; takes `uid`, `gid`, and mode from the materialized
-  metadata with `mtime = 0`; symlink mode is encoded as `0777`; the archive ends
-  with `TRAILER!!!`
-- the result is one regular file — an uncompressed initramfs suitable for Linux
-  `-initrd` users such as QEMU
 
 ### `Group`
 

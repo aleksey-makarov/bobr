@@ -92,7 +92,6 @@ fn registered_builders_include_current_tags_only() {
         "Tree",
         "TreeSubset",
         "TreeMerge",
-        "Initramfs",
         "Sandbox",
         "OciExtract",
     ] {

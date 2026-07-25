@@ -314,7 +314,14 @@ packages into a usable rootfs.
 - **Inputs:** one or more packages (the roots of the closure).
 - **Config:** none.
 
-## EROFS images
+## Filesystem images
+
+Packing a filesystem tree into an image is a recipe's job, not a builder's:
+`bobr` has no image builders at all. An image recipe is an ordinary plain-object
+`Sandbox` that takes the tree as a materialized `_tree` input and runs the packer
+over it, in a rootfs assembled from that packer's runtime closure.
+
+### EROFS
 
 There is no `ErofsRootfs` builder. To pack a filesystem tree into a reproducible
 EROFS image, use the `recipe.erofs_image` helper — it lowers to a low-level
@@ -333,3 +340,19 @@ the image stays reproducible while distinct rootfs contents get distinct,
 non-null UUIDs. Being a plain-object `Sandbox`, the result is a plain-object
 directory holding a single `erofs-rootfs.erofs` file, since the image blob has no
 per-file ownership of its own.
+
+### initramfs
+
+The initrd is packed the same way, in `linux/initrd.ncl`: a `Sandbox` over the
+merged initrd tree that runs `linux/mk-initramfs.sh` and writes a single
+`initramfs.img`, so the boot artifact is `<object>/initramfs.img`.
+
+The archive is written by the kernel's own `gen_init_cpio` (built from the kernel
+source as `pkgs.gen_init_cpio`), driven by a spec file the script generates from
+the tree — the two-stage scheme the kernel uses for `CONFIG_INITRAMFS_SOURCE`.
+That split is what makes the image reproducible: the spec carries only path,
+type, permissions, and ownership, and `gen_init_cpio` synthesizes the rest
+(inode numbers from a constant, fixed link counts, one `SOURCE_DATE_EPOCH`
+timestamp). Running `cpio(1)` over the tree instead would copy the on-disk inode
+numbers, link counts, and mtimes — and a materialized fs-tree hardlinks its files
+from the store's shared fs-files, so those vary with what else the store holds.
