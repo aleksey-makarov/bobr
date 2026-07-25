@@ -4,8 +4,8 @@
 compile_error!("bobr requires Linux");
 
 use bobr_bundle_launcher::{
-    build_environment, inspect_elf, locate_current_bundle, parse_invocation, read_bundle_config,
-    resolve_tool,
+    ElfLinkage, build_environment, exec_static, inspect_elf, locate_current_bundle,
+    parse_invocation, read_bundle_config, resolve_tool,
 };
 
 fn main() {
@@ -33,13 +33,35 @@ fn main() {
         Ok(elf) => elf,
         Err(error) => exit_with_error(error),
     };
-    eprintln!(
-        "bobr-bundle-launcher: launching is not implemented yet; target is '{}', ELF is {:?}, environment has {} variables, invocation is {invocation:?}",
-        tool.target().display(),
-        elf.linkage(),
-        environment.len()
-    );
-    std::process::exit(2)
+    if invocation.is_diagnose() {
+        println!("tool={}", tool.name());
+        println!("target={}", tool.target().display());
+        println!(
+            "linkage={}",
+            match elf.linkage() {
+                ElfLinkage::Static => "static",
+                ElfLinkage::Dynamic { .. } => "dynamic",
+            }
+        );
+        println!("environment_variables={}", environment.len());
+        return;
+    }
+
+    match elf.linkage() {
+        ElfLinkage::Static => {
+            let error = exec_static(&tool, invocation.args(), &environment);
+            exit_with_error(format!(
+                "failed to execute static tool '{}': {error}",
+                tool.name()
+            ));
+        }
+        ElfLinkage::Dynamic { .. } => {
+            exit_with_error(format!(
+                "dynamic tool '{}' is not supported yet",
+                tool.name()
+            ));
+        }
+    }
 }
 
 fn exit_with_error(error: impl std::fmt::Display) -> ! {

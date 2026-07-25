@@ -7,6 +7,7 @@ mod config;
 mod elf;
 mod environment;
 mod invocation;
+mod launch;
 mod location;
 mod tool;
 
@@ -18,6 +19,7 @@ pub use config::{
 pub use elf::{ElfError, ElfExecutable, ElfLinkage, inspect_elf};
 pub use environment::{EnvironmentError, ProcessEnvironment, build_environment};
 pub use invocation::{Invocation, InvocationError, parse_invocation};
+pub use launch::exec_static;
 pub use location::{
     BUNDLE_CONFIG_NAME, BUNDLE_LIBEXEC_DIR, BundleLocation, BundleLocationError,
     LAUNCHER_BINARY_NAME, locate_bundle_from_launcher, locate_current_bundle,
