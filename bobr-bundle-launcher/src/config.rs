@@ -35,22 +35,53 @@ pub struct BundleConfig {
 }
 
 impl BundleConfig {
+    /// Constructs and validates the current runtime configuration format.
+    ///
+    /// The caller supplies semantic runtime fields; the format identifier is
+    /// owned by the launcher and cannot be selected by a recipe.
+    pub fn new_v1(
+        payload_root: impl Into<String>,
+        policy: HostPolicy,
+        platform: PlatformConfig,
+        loader: LoaderConfig,
+        environment: BTreeMap<String, EnvironmentRule>,
+        tools: BTreeMap<String, ToolConfig>,
+    ) -> Result<Self, BundleConfigError> {
+        let config = Self {
+            format: BUNDLE_FORMAT_V1.to_string(),
+            payload_root: payload_root.into(),
+            policy,
+            platform,
+            loader,
+            environment,
+            tools,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Parses and validates one v1 runtime configuration document.
     pub fn parse(contents: &str) -> Result<Self, BundleConfigError> {
         let config = toml::from_str::<Self>(contents).map_err(BundleConfigError::Parse)?;
-        if config.format != BUNDLE_FORMAT_V1 {
-            return Err(BundleConfigError::UnsupportedFormat(config.format));
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validates semantic invariants independent of the bundle filesystem.
+    pub fn validate(&self) -> Result<(), BundleConfigError> {
+        if self.format != BUNDLE_FORMAT_V1 {
+            return Err(BundleConfigError::UnsupportedFormat(self.format.clone()));
         }
-        if config.tools.is_empty() {
+        if self.tools.is_empty() {
             return Err(BundleConfigError::NoTools);
         }
-        KernelVersion::parse_required(&config.platform.min_kernel).map_err(|reason| {
+        KernelVersion::parse_required(&self.platform.min_kernel).map_err(|reason| {
             BundleConfigError::InvalidMinimumKernel {
-                value: config.platform.min_kernel.clone(),
+                value: self.platform.min_kernel.clone(),
                 reason,
             }
         })?;
-        for name in config.tools.keys() {
+        for name in self.tools.keys() {
             if name == crate::LAUNCHER_BINARY_NAME {
                 return Err(BundleConfigError::ReservedToolName(name.clone()));
             }
@@ -63,7 +94,16 @@ impl BundleConfig {
                 return Err(BundleConfigError::InvalidToolName(name.clone()));
             }
         }
-        Ok(config)
+        Ok(())
+    }
+
+    /// Serializes the configuration as deterministic TOML with a final newline.
+    pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
+        let mut contents = toml::to_string_pretty(self)?;
+        if !contents.ends_with('\n') {
+            contents.push('\n');
+        }
+        Ok(contents)
     }
 
     /// Returns the exact runtime format identifier from the parsed document.
@@ -344,6 +384,61 @@ visibility = "public"
             config.tools["qemu-system-x86_64"].environment["QEMU_AUDIO_DRV"].operation,
             EnvironmentOperation::Default
         );
+    }
+
+    #[test]
+    fn constructed_config_serializes_and_parses_without_semantic_changes() {
+        let parsed = BundleConfig::parse(COMPLETE_CONFIG).unwrap();
+        let constructed = BundleConfig::new_v1(
+            parsed.payload_root.clone(),
+            parsed.policy,
+            parsed.platform.clone(),
+            parsed.loader.clone(),
+            parsed.environment.clone(),
+            parsed.tools.clone(),
+        )
+        .unwrap();
+
+        let serialized = constructed.to_toml().unwrap();
+        let reparsed = BundleConfig::parse(&serialized).unwrap();
+
+        assert!(serialized.ends_with('\n'));
+        assert_eq!(reparsed, constructed);
+        assert_eq!(reparsed.format(), BUNDLE_FORMAT_V1);
+    }
+
+    #[test]
+    fn constructor_enforces_the_same_semantic_validation_as_parser() {
+        let error = BundleConfig::new_v1(
+            "root",
+            HostPolicy::Strict,
+            PlatformConfig {
+                os: PlatformOs::Linux,
+                arch: PlatformArch::X86_64,
+                min_kernel: "invalid".to_string(),
+            },
+            LoaderConfig {
+                kind: LoaderKind::Glibc,
+                library_dirs: Vec::new(),
+                inhibit_cache: true,
+            },
+            BTreeMap::new(),
+            BTreeMap::from([(
+                "demo".to_string(),
+                ToolConfig {
+                    path: "root/usr/bin/demo".to_string(),
+                    argv0: "demo".to_string(),
+                    visibility: ToolVisibility::Public,
+                    environment: BTreeMap::new(),
+                },
+            )]),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            BundleConfigError::InvalidMinimumKernel { .. }
+        ));
     }
 
     #[test]
