@@ -13,6 +13,7 @@ integration-tests = []
 flate2.workspace = true
 fsobj-hash.workspace = true
 globset.workspace = true
+goblin.workspace = true
 libc.workspace = true
 bobr-runtime.workspace = true
 bobr-store.workspace = true

@@ -1,6 +1,6 @@
 //! HostBundle declaration, filesystem composition, and runtime-config lowering.
 
-use crate::host_bundle_verify::verify_structure;
+use crate::host_bundle_verify::{verify_startup_closure, verify_structure};
 use crate::plain_tree_copy::{PlainTreeCopy, PlainTreeCopyFunction, PlainTreeCopyInput};
 use crate::plain_tree_copy::{make_tree_read_only, verify_tree_read_only};
 use crate::{BuildContext, BuilderError, BuilderInputs, InputSpec, TypedBuilder};
@@ -116,7 +116,10 @@ fn build_host_bundle(
         .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
 
     materialize_facade(&output_root, &runtime_config)?;
-    verify_structure(&output_root, &runtime_config).map_err(BuilderError::ExecutionFailed)?;
+    let structure =
+        verify_structure(&output_root, &runtime_config).map_err(BuilderError::ExecutionFailed)?;
+    verify_startup_closure(&output_root, &runtime_config, &structure)
+        .map_err(BuilderError::ExecutionFailed)?;
     make_tree_read_only(&output_root).map_err(BuilderError::ExecutionFailed)?;
     verify_tree_read_only(&output_root).map_err(BuilderError::ExecutionFailed)?;
     Ok(output_root)

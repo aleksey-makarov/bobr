@@ -296,10 +296,9 @@ mod tests {
             fs::read_link(output.join("root/tool-link")).unwrap(),
             PathBuf::from("tool")
         );
-        assert_eq!(
-            fs::metadata(source.join("tool")).unwrap().ino()
-                == fs::metadata(output.join("root/tool")).unwrap().ino(),
-            false
+        assert_ne!(
+            fs::metadata(source.join("tool")).unwrap().ino(),
+            fs::metadata(output.join("root/tool")).unwrap().ino()
         );
         assert_eq!(
             fs::metadata(output.join("root/tool"))
