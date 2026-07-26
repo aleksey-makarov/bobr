@@ -38,6 +38,8 @@ pub struct HostBundleConfig {
     /// Minimum Linux kernel version accepted by the launcher.
     #[serde(default = "default_min_kernel")]
     pub min_kernel: String,
+    /// Ordered library directories relative to the payload root.
+    pub library_dirs: Vec<String>,
     /// Commands exposed through the bundle's top-level `bin/`.
     pub public_tools: BTreeMap<String, HostBundleToolConfig>,
     /// Helpers exposed only through `libexec/wrapped-bin/`.
@@ -207,6 +209,16 @@ impl HostBundleConfig {
                 scope: "environment".to_string(),
             });
         }
+        let library_dirs = self
+            .library_dirs
+            .iter()
+            .enumerate()
+            .map(|(index, path)| {
+                validate_relative_path(&format!("library_dirs[{index}]"), path)
+                    .map_err(|source| HostBundleConfigError::InvalidPath { source })?;
+                Ok(format!("{PAYLOAD_ROOT}/{path}"))
+            })
+            .collect::<Result<Vec<_>, HostBundleConfigError>>()?;
 
         let mut environment = lower_environment("environment", &self.environment, has_overrides)?;
         environment.insert(
@@ -246,10 +258,7 @@ impl HostBundleConfig {
             },
             LoaderConfig {
                 kind: LoaderKind::Glibc,
-                library_dirs: vec![
-                    format!("{PAYLOAD_ROOT}/usr/lib64"),
-                    format!("{PAYLOAD_ROOT}/usr/lib"),
-                ],
+                library_dirs,
                 inhibit_cache: true,
             },
             environment,
@@ -374,6 +383,7 @@ mod tests {
 
     fn minimal_config() -> HostBundleConfig {
         config(json!({
+            "library_dirs": ["usr/lib64", "usr/lib"],
             "public_tools": {
                 "mc": {
                     "path": "usr/bin/mc"
@@ -400,11 +410,13 @@ mod tests {
 
         assert_eq!(config.policy, HostPolicy::Strict);
         assert_eq!(config.min_kernel, DEFAULT_MIN_KERNEL);
+        assert_eq!(config.library_dirs, ["usr/lib64", "usr/lib"]);
         assert!(config.internal_tools.is_empty());
         assert!(config.environment.is_empty());
         assert!(config.public_tools["mc"].argv0.is_none());
         assert_eq!(canonical["policy"], "strict");
         assert_eq!(canonical["min_kernel"], DEFAULT_MIN_KERNEL);
+        assert_eq!(canonical["library_dirs"], json!(["usr/lib64", "usr/lib"]));
         assert_eq!(canonical["internal_tools"], json!({}));
         assert_eq!(canonical["environment"], json!({}));
         assert_eq!(canonical["public_tools"]["mc"]["argv0"], json!(null));
@@ -413,6 +425,7 @@ mod tests {
     #[test]
     fn builder_config_rejects_unknown_fields() {
         let error = serde_json::from_value::<HostBundleConfig>(json!({
+            "library_dirs": [],
             "public_tools": {},
             "format": "user-selected"
         }))
@@ -427,6 +440,7 @@ mod tests {
         let config = config(json!({
             "policy": "integrated",
             "min_kernel": "5.10",
+            "library_dirs": ["usr/lib/x86_64-linux-gnu", "lib64"],
             "public_tools": {
                 "mc": {
                     "path": "usr/bin/mc"
@@ -474,7 +488,7 @@ mod tests {
         assert_eq!(runtime.platform.min_kernel, "5.10");
         assert_eq!(
             runtime.loader.library_dirs,
-            ["root/usr/lib64", "root/usr/lib"]
+            ["root/usr/lib/x86_64-linux-gnu", "root/lib64"]
         );
         assert!(runtime.loader.inhibit_cache);
         assert_eq!(runtime.tools["mc"].path, "root/usr/bin/mc");
@@ -519,6 +533,7 @@ mod tests {
     #[test]
     fn rejects_empty_public_set_and_public_internal_collision() {
         let no_public = config(json!({
+            "library_dirs": [],
             "public_tools": {},
             "internal_tools": {
                 "helper": { "path": "usr/bin/helper" }
@@ -530,6 +545,7 @@ mod tests {
         ));
 
         let collision = config(json!({
+            "library_dirs": [],
             "public_tools": {
                 "tool": { "path": "usr/bin/tool" }
             },
@@ -546,6 +562,7 @@ mod tests {
     #[test]
     fn rejects_common_and_per_tool_path_rules() {
         let common = config(json!({
+            "library_dirs": [],
             "public_tools": {
                 "tool": { "path": "usr/bin/tool" }
             },
@@ -562,6 +579,7 @@ mod tests {
         ));
 
         let per_tool = config(json!({
+            "library_dirs": [],
             "public_tools": {
                 "tool": {
                     "path": "usr/bin/tool",
@@ -582,6 +600,7 @@ mod tests {
     #[test]
     fn rejects_missing_overrides_unsafe_paths_and_invalid_rule_shapes() {
         let overrides = config(json!({
+            "library_dirs": [],
             "public_tools": {
                 "tool": { "path": "usr/bin/tool" }
             },
@@ -600,6 +619,7 @@ mod tests {
         ));
 
         let unsafe_tool = config(json!({
+            "library_dirs": [],
             "public_tools": {
                 "tool": { "path": "../usr/bin/tool" }
             }
@@ -610,6 +630,7 @@ mod tests {
         ));
 
         let mixed = config(json!({
+            "library_dirs": [],
             "public_tools": {
                 "tool": { "path": "usr/bin/tool" }
             },
