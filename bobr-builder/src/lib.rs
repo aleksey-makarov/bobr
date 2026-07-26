@@ -36,8 +36,8 @@ pub use fs_tree_import::{FsTreeImportBuilder, FsTreeImportConfig};
 pub use fs_tree_materialize::materialize_fs_tree_root;
 pub use group::{GroupBuilder, GroupConfig};
 pub use host_bundle::{
-    HOST_BUNDLE_INPUT_SPEC, HostBundleConfig, HostBundleConfigError, HostBundleEnvironmentRule,
-    HostBundlePath, HostBundleToolConfig,
+    HOST_BUNDLE_INPUT_SPEC, HostBundleBuilder, HostBundleConfig, HostBundleConfigError,
+    HostBundleEnvironmentRule, HostBundlePath, HostBundleToolConfig,
 };
 pub use oci_extract::{OciExtractBuilder, OciExtractConfig};
 pub use registry::BUILDERS;

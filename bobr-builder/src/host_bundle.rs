@@ -1,25 +1,30 @@
-//! Typed declaration and runtime-config lowering for the HostBundle builder.
-//!
-//! This module intentionally does not implement or register a builder yet.
-//! It fixes the input and configuration contracts while filesystem composition
-//! and mandatory verification are still under development.
+//! HostBundle declaration, filesystem composition, and runtime-config lowering.
 
-use crate::InputSpec;
+use crate::plain_tree_copy::{PlainTreeCopy, PlainTreeCopyFunction, PlainTreeCopyInput};
+use crate::{BuildContext, BuilderError, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_bundle_launcher::{
     BundleConfig, BundleConfigError, EnvironmentOperation, EnvironmentRule,
-    EnvironmentRuleValidationError, HostPolicy, LoaderConfig, LoaderKind, PlatformArch,
-    PlatformConfig, PlatformOs, ToolConfig, ToolResolutionError, ToolVisibility,
+    EnvironmentRuleValidationError, HostPolicy, LAUNCHER_BINARY_NAME, LoaderConfig, LoaderKind,
+    PlatformArch, PlatformConfig, PlatformOs, ToolConfig, ToolResolutionError, ToolVisibility,
     validate_relative_path,
 };
+use bobr_core::BuildLogLevel;
+use bobr_runtime::runtime::Runtime;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::fs;
+use std::os::unix::fs::symlink;
+use std::path::PathBuf;
 
 const PAYLOAD_ROOT: &str = "root";
 const OVERRIDES_ROOT: &str = "overrides";
 const WRAPPED_BIN: &str = "libexec/wrapped-bin";
 const DEFAULT_MIN_KERNEL: &str = "4.19";
+const OUTPUT_DIR_NAME: &str = "host-bundle";
+const INPUT_LAUNCHER_PATH: &str = "usr/libexec/bobr-bundle-launcher";
+const OUTPUT_LAUNCHER_PATH: &str = "libexec/bobr-bundle-launcher";
 
 /// Materialized input contract reserved for the future HostBundle builder.
 pub static HOST_BUNDLE_INPUT_SPEC: InputSpec = InputSpec {
@@ -27,6 +32,140 @@ pub static HOST_BUNDLE_INPUT_SPEC: InputSpec = InputSpec {
     optional_inputs: &["_overrides"],
     allow_extra_inputs: false,
 };
+
+/// Builds a complete HostBundle directory object.
+///
+/// Registration is intentionally deferred until mandatory structural and
+/// startup-closure verification is part of this implementation.
+#[derive(Debug)]
+pub struct HostBundleBuilder;
+
+impl TypedBuilder for HostBundleBuilder {
+    type Config = HostBundleConfig;
+
+    fn tag(&self) -> &'static str {
+        "HostBundle"
+    }
+
+    fn spec(&self) -> &'static InputSpec {
+        &HOST_BUNDLE_INPUT_SPEC
+    }
+
+    fn impl_version(&self) -> &'static str {
+        "1"
+    }
+
+    fn build_typed(
+        &self,
+        config: Self::Config,
+        inputs: BuilderInputs,
+        cx: &mut BuildContext,
+    ) -> Result<PathBuf, BuilderError> {
+        build_host_bundle(config, inputs, cx)
+    }
+}
+
+fn build_host_bundle(
+    config: HostBundleConfig,
+    inputs: BuilderInputs,
+    cx: &mut BuildContext,
+) -> Result<PathBuf, BuilderError> {
+    let has_overrides = inputs.optional("_overrides").is_some();
+    let runtime_config = config
+        .lower_runtime_config(has_overrides)
+        .map_err(|error| BuilderError::InvalidRecipe(error.to_string()))?;
+    let root = inputs.required("_root")?.clone();
+    let launcher_tree = inputs.required("_launcher")?.clone();
+    let output_root = cx.temp_dir.join(OUTPUT_DIR_NAME);
+
+    let mut copies = vec![
+        PlainTreeCopy::Tree {
+            source: root,
+            dest: PAYLOAD_ROOT.to_string(),
+        },
+        PlainTreeCopy::File {
+            source: launcher_tree.join(INPUT_LAUNCHER_PATH),
+            dest: OUTPUT_LAUNCHER_PATH.to_string(),
+        },
+    ];
+    if let Some(overrides) = inputs.optional("_overrides") {
+        copies.push(PlainTreeCopy::Tree {
+            source: overrides.clone(),
+            dest: OVERRIDES_ROOT.to_string(),
+        });
+    }
+
+    cx.log_event(
+        BuildLogLevel::Info,
+        "compose",
+        format!(
+            "copying HostBundle payload and {} tool declaration(s)",
+            runtime_config.tools.len()
+        ),
+    );
+    cx.runtime()
+        .run(
+            &PlainTreeCopyFunction,
+            PlainTreeCopyInput {
+                output_root: output_root.clone(),
+                copies,
+            },
+        )
+        .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
+
+    materialize_facade(&output_root, &runtime_config)?;
+    Ok(output_root)
+}
+
+fn materialize_facade(
+    output_root: &std::path::Path,
+    runtime_config: &BundleConfig,
+) -> Result<(), BuilderError> {
+    let public_bin = output_root.join("bin");
+    let wrapped_bin = output_root.join(WRAPPED_BIN);
+    fs::create_dir(&public_bin).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to create public bin directory '{}': {error}",
+            public_bin.display()
+        ))
+    })?;
+    fs::create_dir_all(&wrapped_bin).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to create wrapped-bin directory '{}': {error}",
+            wrapped_bin.display()
+        ))
+    })?;
+
+    for (name, tool) in &runtime_config.tools {
+        let wrapped = wrapped_bin.join(name);
+        symlink(format!("../{LAUNCHER_BINARY_NAME}"), &wrapped).map_err(|error| {
+            BuilderError::ExecutionFailed(format!(
+                "failed to create internal wrapper '{}': {error}",
+                wrapped.display()
+            ))
+        })?;
+        if tool.visibility == ToolVisibility::Public {
+            let public = public_bin.join(name);
+            symlink(format!("../libexec/{LAUNCHER_BINARY_NAME}"), &public).map_err(|error| {
+                BuilderError::ExecutionFailed(format!(
+                    "failed to create public wrapper '{}': {error}",
+                    public.display()
+                ))
+            })?;
+        }
+    }
+
+    let config_path = output_root.join("bundle.toml");
+    let config_contents = runtime_config.to_toml().map_err(|error| {
+        BuilderError::ExecutionFailed(format!("failed to serialize bundle.toml: {error}"))
+    })?;
+    fs::write(&config_path, config_contents).map_err(|error| {
+        BuilderError::ExecutionFailed(format!(
+            "failed to write '{}': {error}",
+            config_path.display()
+        ))
+    })
+}
 
 /// User-facing build-time declaration of one HostBundle.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -374,8 +513,11 @@ fn default_min_kernel() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::store_fs_tree;
     use bobr_bundle_launcher::{BUNDLE_FORMAT_V1, ToolVisibility};
     use serde_json::json;
+    use std::os::unix::fs::MetadataExt;
+    use tempfile::tempdir;
 
     fn config(value: serde_json::Value) -> HostBundleConfig {
         serde_json::from_value(value).unwrap()
@@ -648,5 +790,74 @@ mod tests {
             mixed.lower_runtime_config(false),
             Err(HostBundleConfigError::InvalidEnvironmentRule { .. })
         ));
+    }
+
+    #[test]
+    fn composes_independent_payload_launcher_config_and_wrappers() {
+        let temp = tempdir().unwrap();
+        let payload = temp.path().join("payload");
+        let launcher = temp.path().join("launcher");
+        let overrides = temp.path().join("overrides");
+        fs::create_dir_all(payload.join("usr/bin")).unwrap();
+        fs::create_dir_all(launcher.join("usr/libexec")).unwrap();
+        fs::create_dir(&overrides).unwrap();
+        fs::write(payload.join("usr/bin/demo"), b"payload executable").unwrap();
+        fs::write(
+            launcher.join(INPUT_LAUNCHER_PATH),
+            b"static launcher placeholder",
+        )
+        .unwrap();
+        fs::write(overrides.join("registry"), b"override").unwrap();
+
+        let mut slots = BTreeMap::new();
+        slots.insert("_root".to_string(), payload.clone());
+        slots.insert("_launcher".to_string(), launcher);
+        slots.insert("_overrides".to_string(), overrides);
+        let build_temp = temp.path().join("build");
+        fs::create_dir(&build_temp).unwrap();
+        let mut cx = BuildContext::with_noop_logger(build_temp, store_fs_tree(temp.path()));
+        let config = config(json!({
+            "library_dirs": ["usr/lib"],
+            "public_tools": {
+                "demo": { "path": "usr/bin/demo" }
+            },
+            "internal_tools": {
+                "helper": { "path": "usr/bin/demo", "argv0": "helper" }
+            }
+        }));
+
+        let output = HostBundleBuilder
+            .build_typed(config, BuilderInputs::new(slots), &mut cx)
+            .unwrap();
+
+        assert_eq!(
+            fs::read_link(output.join("bin/demo")).unwrap(),
+            PathBuf::from("../libexec/bobr-bundle-launcher")
+        );
+        assert_eq!(
+            fs::read_link(output.join("libexec/wrapped-bin/demo")).unwrap(),
+            PathBuf::from("../bobr-bundle-launcher")
+        );
+        assert_eq!(
+            fs::read_link(output.join("libexec/wrapped-bin/helper")).unwrap(),
+            PathBuf::from("../bobr-bundle-launcher")
+        );
+        assert!(!output.join("bin/helper").exists());
+        assert_eq!(
+            fs::read(output.join("overrides/registry")).unwrap(),
+            b"override"
+        );
+        assert_ne!(
+            fs::metadata(payload.join("usr/bin/demo")).unwrap().ino(),
+            fs::metadata(output.join("root/usr/bin/demo"))
+                .unwrap()
+                .ino()
+        );
+
+        let runtime =
+            BundleConfig::parse(&fs::read_to_string(output.join("bundle.toml")).unwrap()).unwrap();
+        assert_eq!(runtime.loader.library_dirs, ["root/usr/lib"]);
+        assert_eq!(runtime.tools["demo"].visibility, ToolVisibility::Public);
+        assert_eq!(runtime.tools["helper"].visibility, ToolVisibility::Internal);
     }
 }
