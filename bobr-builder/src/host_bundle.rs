@@ -1,6 +1,8 @@
 //! HostBundle declaration, filesystem composition, and runtime-config lowering.
 
+use crate::host_bundle_verify::verify_structure;
 use crate::plain_tree_copy::{PlainTreeCopy, PlainTreeCopyFunction, PlainTreeCopyInput};
+use crate::plain_tree_copy::{make_tree_read_only, verify_tree_read_only};
 use crate::{BuildContext, BuilderError, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_bundle_launcher::{
     BundleConfig, BundleConfigError, EnvironmentOperation, EnvironmentRule,
@@ -114,6 +116,9 @@ fn build_host_bundle(
         .map_err(|error| BuilderError::ExecutionFailed(error.to_string()))?;
 
     materialize_facade(&output_root, &runtime_config)?;
+    verify_structure(&output_root, &runtime_config).map_err(BuilderError::ExecutionFailed)?;
+    make_tree_read_only(&output_root).map_err(BuilderError::ExecutionFailed)?;
+    verify_tree_read_only(&output_root).map_err(BuilderError::ExecutionFailed)?;
     Ok(output_root)
 }
 
@@ -517,6 +522,7 @@ mod tests {
     use bobr_bundle_launcher::{BUNDLE_FORMAT_V1, ToolVisibility};
     use serde_json::json;
     use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     fn config(value: serde_json::Value) -> HostBundleConfig {
@@ -532,6 +538,21 @@ mod tests {
                 }
             }
         }))
+    }
+
+    fn write_static_elf(path: &std::path::Path) {
+        let mut bytes = vec![0_u8; 64];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[6] = 1;
+        bytes[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        bytes[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[52..54].copy_from_slice(&64_u16.to_le_bytes());
+        bytes[54..56].copy_from_slice(&56_u16.to_le_bytes());
+        fs::write(path, bytes).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
@@ -799,14 +820,11 @@ mod tests {
         let launcher = temp.path().join("launcher");
         let overrides = temp.path().join("overrides");
         fs::create_dir_all(payload.join("usr/bin")).unwrap();
+        fs::create_dir_all(payload.join("usr/lib")).unwrap();
         fs::create_dir_all(launcher.join("usr/libexec")).unwrap();
         fs::create_dir(&overrides).unwrap();
-        fs::write(payload.join("usr/bin/demo"), b"payload executable").unwrap();
-        fs::write(
-            launcher.join(INPUT_LAUNCHER_PATH),
-            b"static launcher placeholder",
-        )
-        .unwrap();
+        write_static_elf(&payload.join("usr/bin/demo"));
+        write_static_elf(&launcher.join(INPUT_LAUNCHER_PATH));
         fs::write(overrides.join("registry"), b"override").unwrap();
 
         let mut slots = BTreeMap::new();
@@ -859,5 +877,10 @@ mod tests {
         assert_eq!(runtime.loader.library_dirs, ["root/usr/lib"]);
         assert_eq!(runtime.tools["demo"].visibility, ToolVisibility::Public);
         assert_eq!(runtime.tools["helper"].visibility, ToolVisibility::Internal);
+        assert_eq!(
+            fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o555
+        );
+        verify_tree_read_only(&output).unwrap();
     }
 }

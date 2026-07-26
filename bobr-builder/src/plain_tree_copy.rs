@@ -218,6 +218,52 @@ fn normalize_owner(path: &Path) -> Result<(), String> {
         .map_err(|error| format!("failed to normalize owner of '{}': {error}", path.display()))
 }
 
+/// Removes write, setuid, and setgid bits from a completed plain directory tree.
+pub(crate) fn make_tree_read_only(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to inspect '{}': {error}", path.display()))?;
+    if metadata.file_type().is_dir() {
+        let mut entries = fs::read_dir(path)
+            .map_err(|error| format!("failed to read '{}': {error}", path.display()))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+        entries.sort();
+        for entry in entries {
+            make_tree_read_only(&entry)?;
+        }
+    }
+    if !metadata.file_type().is_symlink() {
+        let mode = metadata.permissions().mode() & 0o7777 & !0o6222;
+        set_mode(path, mode)?;
+    }
+    Ok(())
+}
+
+/// Verifies the final permission invariant without following symlinks.
+pub(crate) fn verify_tree_read_only(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("failed to inspect '{}': {error}", path.display()))?;
+    if !metadata.file_type().is_symlink() && metadata.permissions().mode() & 0o6222 != 0 {
+        return Err(format!(
+            "published HostBundle path '{}' retains write, setuid, or setgid bits",
+            path.display()
+        ));
+    }
+    if metadata.file_type().is_dir() {
+        let mut entries = fs::read_dir(path)
+            .map_err(|error| format!("failed to read '{}': {error}", path.display()))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
+        entries.sort();
+        for entry in entries {
+            verify_tree_read_only(&entry)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +370,32 @@ mod tests {
             })
             .unwrap_err();
         assert!(error.to_string().contains("unsafe path component"));
+    }
+
+    #[test]
+    fn finalization_removes_write_setuid_and_setgid_bits() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("bundle");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("tool"), b"tool").unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o2775)).unwrap();
+        fs::set_permissions(root.join("tool"), fs::Permissions::from_mode(0o6755)).unwrap();
+        symlink("tool", root.join("link")).unwrap();
+
+        make_tree_read_only(&root).unwrap();
+        verify_tree_read_only(&root).unwrap();
+
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o7777,
+            0o555
+        );
+        assert_eq!(
+            fs::metadata(root.join("tool"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o555
+        );
     }
 }

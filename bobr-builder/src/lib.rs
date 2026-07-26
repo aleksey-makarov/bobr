@@ -17,6 +17,7 @@ mod fs_tree_import;
 mod fs_tree_materialize;
 mod group;
 mod host_bundle;
+mod host_bundle_verify;
 mod oci_extract;
 mod plain_tree_copy;
 mod registry;
