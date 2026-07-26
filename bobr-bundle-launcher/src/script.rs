@@ -1,6 +1,6 @@
 //! Strict executable-format and shebang inspection.
 
-use crate::{ElfError, ElfExecutable, inspect_elf};
+use crate::{ElfError, ElfExecutable, PlatformArch, inspect_elf_for_arch};
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -53,8 +53,8 @@ pub enum ExecutableInspectionError {
     Elf(ElfError),
     /// The file is neither ELF nor a shebang script.
     UnknownFormat,
-    /// The interpreter path may have been truncated by the kernel-sized buffer.
-    TruncatedInterpreter,
+    /// The shebang line exceeds the kernel-sized inspection buffer.
+    TruncatedShebang,
     /// The shebang contains no interpreter.
     MissingInterpreter,
     /// The shebang interpreter is not an absolute safe payload path.
@@ -77,9 +77,9 @@ impl fmt::Display for ExecutableInspectionError {
             Self::UnknownFormat => {
                 formatter.write_str("unknown executable format (expected ELF or shebang)")
             }
-            Self::TruncatedInterpreter => write!(
+            Self::TruncatedShebang => write!(
                 formatter,
-                "shebang interpreter does not terminate within {SHEBANG_BUFFER_SIZE} bytes"
+                "shebang line does not terminate within {SHEBANG_BUFFER_SIZE} bytes"
             ),
             Self::MissingInterpreter => formatter.write_str("shebang has no interpreter"),
             Self::InvalidInterpreter(path) => write!(
@@ -104,6 +104,14 @@ impl Error for ExecutableInspectionError {
 
 /// Identifies an executable without falling back to host format handling.
 pub fn inspect_executable(path: &Path) -> Result<ExecutableFormat, ExecutableInspectionError> {
+    inspect_executable_for_arch(path, PlatformArch::X86_64)
+}
+
+/// Identifies an executable for the architecture declared by its bundle.
+pub fn inspect_executable_for_arch(
+    path: &Path,
+    expected_arch: PlatformArch,
+) -> Result<ExecutableFormat, ExecutableInspectionError> {
     let mut file = File::open(path).map_err(|source| ExecutableInspectionError::Read {
         path: path.to_path_buf(),
         source,
@@ -118,7 +126,7 @@ pub fn inspect_executable(path: &Path) -> Result<ExecutableFormat, ExecutableIns
         })?;
 
     if prefix.starts_with(b"\x7fELF") {
-        return inspect_elf(path)
+        return inspect_elf_for_arch(path, expected_arch)
             .map(ExecutableFormat::Elf)
             .map_err(ExecutableInspectionError::Elf);
     }
@@ -138,16 +146,7 @@ fn parse_shebang(prefix: &[u8]) -> Result<Shebang, ExecutableInspectionError> {
         return Err(ExecutableInspectionError::ShebangContainsNul);
     }
     if buffer_is_full {
-        let interpreter_start = raw_line
-            .iter()
-            .position(|byte| !matches!(byte, b' ' | b'\t'))
-            .ok_or(ExecutableInspectionError::MissingInterpreter)?;
-        if !raw_line[interpreter_start..]
-            .iter()
-            .any(|byte| matches!(byte, b' ' | b'\t'))
-        {
-            return Err(ExecutableInspectionError::TruncatedInterpreter);
-        }
+        return Err(ExecutableInspectionError::TruncatedShebang);
     }
     let line = trim_ascii_space_tab(raw_line);
     if line.is_empty() {
@@ -246,21 +245,18 @@ mod tests {
 
         assert!(matches!(
             inspect(&contents),
-            Err(ExecutableInspectionError::TruncatedInterpreter)
+            Err(ExecutableInspectionError::TruncatedShebang)
         ));
     }
 
     #[test]
-    fn accepts_a_full_buffer_when_the_interpreter_is_terminated() {
+    fn rejects_a_full_buffer_even_when_only_the_argument_is_truncated() {
         let mut contents = b"#!/bin/interpreter argument".to_vec();
         contents.resize(SHEBANG_BUFFER_SIZE, b'x');
-        let format = inspect(&contents).unwrap();
-        let ExecutableFormat::Script(shebang) = format else {
-            panic!("expected script");
-        };
-
-        assert_eq!(shebang.interpreter(), Path::new("/bin/interpreter"));
-        assert!(shebang.argument().is_some());
+        assert!(matches!(
+            inspect(&contents),
+            Err(ExecutableInspectionError::TruncatedShebang)
+        ));
     }
 
     #[test]

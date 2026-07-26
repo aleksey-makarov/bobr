@@ -8,6 +8,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::platform::KernelVersion;
+
 /// Runtime configuration format understood by this launcher.
 pub const BUNDLE_FORMAT_V1: &str = "bobr-host-bundle-v1";
 
@@ -41,6 +43,25 @@ impl BundleConfig {
         }
         if config.tools.is_empty() {
             return Err(BundleConfigError::NoTools);
+        }
+        KernelVersion::parse_required(&config.platform.min_kernel).map_err(|reason| {
+            BundleConfigError::InvalidMinimumKernel {
+                value: config.platform.min_kernel.clone(),
+                reason,
+            }
+        })?;
+        for name in config.tools.keys() {
+            if name == crate::LAUNCHER_BINARY_NAME {
+                return Err(BundleConfigError::ReservedToolName(name.clone()));
+            }
+            if name.is_empty()
+                || name == "."
+                || name == ".."
+                || name.as_bytes().contains(&b'/')
+                || name.as_bytes().contains(&b'\0')
+            {
+                return Err(BundleConfigError::InvalidToolName(name.clone()));
+            }
         }
         Ok(config)
     }
@@ -117,9 +138,21 @@ pub struct ToolConfig {
     pub path: String,
     /// Logical `argv[0]` passed to the payload.
     pub argv0: String,
+    /// Whether a wrapper is part of the public interface or only for children.
+    pub visibility: ToolVisibility,
     /// Environment operations applied after the common environment.
     #[serde(default)]
     pub environment: BTreeMap<String, EnvironmentRule>,
+}
+
+/// How a configured tool is exposed by the HostBundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToolVisibility {
+    /// The tool has an entry in top-level `bin/`.
+    Public,
+    /// The tool is reachable only through `libexec/wrapped-bin/`.
+    Internal,
 }
 
 /// One typed operation applied to a process environment variable.
@@ -131,6 +164,9 @@ pub struct EnvironmentRule {
     /// Ordered bundle-relative path entries.
     #[serde(default)]
     pub paths: Vec<String>,
+    /// Ordered literal entries, used without bundle-path resolution.
+    #[serde(default)]
+    pub values: Vec<String>,
     /// Whether an existing host value participates in the operation.
     #[serde(default)]
     pub inherit: bool,
@@ -171,6 +207,17 @@ pub enum BundleConfigError {
     UnsupportedFormat(String),
     /// The document contains no addressable tools.
     NoTools,
+    /// A tool name cannot be selected safely through multi-call dispatch.
+    InvalidToolName(String),
+    /// The real launcher name is reserved for direct-mode invocation.
+    ReservedToolName(String),
+    /// `platform.min_kernel` is not a supported numeric version.
+    InvalidMinimumKernel {
+        /// Rejected version text.
+        value: String,
+        /// Specific syntax failure.
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for BundleConfigError {
@@ -189,6 +236,21 @@ impl fmt::Display for BundleConfigError {
                 "unsupported bundle config format '{format}' (expected '{BUNDLE_FORMAT_V1}')"
             ),
             Self::NoTools => formatter.write_str("bundle config defines no tools"),
+            Self::InvalidToolName(name) => {
+                write!(formatter, "invalid bundle tool name '{name}'")
+            }
+            Self::ReservedToolName(name) => {
+                write!(
+                    formatter,
+                    "bundle tool name '{name}' is reserved by the launcher"
+                )
+            }
+            Self::InvalidMinimumKernel { value, reason } => {
+                write!(
+                    formatter,
+                    "invalid minimum kernel version '{value}': {reason}"
+                )
+            }
         }
     }
 }
@@ -198,7 +260,11 @@ impl Error for BundleConfigError {
         match self {
             Self::Read { source, .. } => Some(source),
             Self::Parse(error) => Some(error),
-            Self::UnsupportedFormat(_) | Self::NoTools => None,
+            Self::UnsupportedFormat(_)
+            | Self::NoTools
+            | Self::InvalidToolName(_)
+            | Self::ReservedToolName(_)
+            | Self::InvalidMinimumKernel { .. } => None,
         }
     }
 }
@@ -250,14 +316,16 @@ paths = ["root/usr/lib/dri"]
 [tools.qemu-system-x86_64]
 path = "root/usr/bin/qemu-system-x86_64"
 argv0 = "qemu-system-x86_64"
+visibility = "public"
 
 [tools.qemu-system-x86_64.environment.QEMU_AUDIO_DRV]
 operation = "default"
-paths = ["none"]
+values = ["none"]
 
 [tools.qemu-img]
 path = "root/usr/bin/qemu-img"
 argv0 = "qemu-img"
+visibility = "public"
 "#;
 
     #[test]
@@ -296,6 +364,7 @@ inhibit_cache = false
 [tools.echo]
 path = "root/usr/bin/echo"
 argv0 = "echo"
+visibility = "public"
 "#,
         )
         .unwrap();
@@ -389,6 +458,34 @@ argv0 = "echo"
         let error = BundleConfig::parse(invalid).unwrap_err();
 
         assert!(matches!(error, BundleConfigError::NoTools));
+    }
+
+    #[test]
+    fn rejects_invalid_reserved_and_unreachable_tool_names() {
+        for name in ["", ".", "..", "path/name", "bobr-bundle-launcher"] {
+            let invalid =
+                COMPLETE_CONFIG.replace("[tools.qemu-img]", &format!("[tools.\"{name}\"]"));
+            let error = BundleConfig::parse(&invalid).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    BundleConfigError::InvalidToolName(_) | BundleConfigError::ReservedToolName(_)
+                ),
+                "unexpected error for {name:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_minimum_kernel_version() {
+        for value in ["", "linux-6.1", "6", "6.x", "6.1.2.3"] {
+            let invalid = COMPLETE_CONFIG
+                .replace("min_kernel = \"4.19\"", &format!("min_kernel = {value:?}"));
+            assert!(matches!(
+                BundleConfig::parse(&invalid),
+                Err(BundleConfigError::InvalidMinimumKernel { .. })
+            ));
+        }
     }
 
     #[test]

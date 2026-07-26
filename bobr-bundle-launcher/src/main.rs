@@ -4,8 +4,8 @@
 compile_error!("bobr requires Linux");
 
 use bobr_bundle_launcher::{
-    ElfLinkage, ExecutableFormat, build_environment, exec_prepared, locate_current_bundle,
-    parse_invocation, prepare_tool_launch, read_bundle_config, resolve_tool,
+    DiagnosticOutput, DiagnosticReport, build_environment, check_host_platform, exec_prepared,
+    locate_current_bundle, parse_invocation, prepare_tool_launch, read_bundle_config, resolve_tool,
 };
 
 fn main() {
@@ -21,6 +21,18 @@ fn main() {
         Ok(config) => config,
         Err(error) => exit_with_error(error),
     };
+    let host_platform = match check_host_platform(&config.platform) {
+        Ok(platform) => platform,
+        Err(error) => exit_with_error(error),
+    };
+    if !invocation.is_diagnose() && !host_platform.is_compatible() {
+        exit_with_error(format!(
+            "host platform does not satisfy bundle requirements \
+             (required linux/x86_64 kernel >= {}, host kernel {})",
+            config.platform.min_kernel,
+            host_platform.kernel_release()
+        ));
+    }
     let tool = match resolve_tool(&location, &config, invocation.tool()) {
         Ok(tool) => tool,
         Err(error) => exit_with_error(error),
@@ -34,32 +46,33 @@ fn main() {
         Err(error) => exit_with_error(error),
     };
     if invocation.is_diagnose() {
-        println!("tool={}", tool.name());
-        println!("target={}", tool.target().display());
-        match launch.format() {
-            ExecutableFormat::Elf(elf) => {
-                println!(
-                    "linkage={}",
-                    match elf.linkage() {
-                        ElfLinkage::Static => "static",
-                        ElfLinkage::Dynamic { .. } => "dynamic",
-                    }
-                );
-            }
-            ExecutableFormat::Script(shebang) => {
-                println!("linkage=script");
-                println!("interpreter={}", shebang.interpreter().display());
-            }
-        }
-        println!("environment_variables={}", environment.len());
-        if let Some(loader) = launch.process().loader() {
-            println!("loader={}", loader.display());
+        let report = DiagnosticReport::new(
+            &location,
+            &config,
+            &tool,
+            &environment,
+            &launch,
+            &host_platform,
+        );
+        match invocation
+            .diagnostic_output()
+            .expect("diagnostic invocation has an output format")
+        {
+            DiagnosticOutput::Human => println!("{}", report.to_human()),
+            DiagnosticOutput::Json => println!("{}", report.to_json()),
         }
         return;
     }
 
     let error = exec_prepared(&launch, &environment);
-    exit_with_error(format!("failed to execute tool '{}': {error}", tool.name()));
+    eprintln!(
+        "bobr-bundle-launcher: failed to execute tool '{}': {error}",
+        tool.name()
+    );
+    std::process::exit(match error.kind() {
+        std::io::ErrorKind::NotFound => 127,
+        _ => 126,
+    });
 }
 
 fn exit_with_error(error: impl std::fmt::Display) -> ! {

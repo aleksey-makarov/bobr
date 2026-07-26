@@ -4,6 +4,25 @@ use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
+
+struct SharedLauncher {
+    _temp: tempfile::TempDir,
+    path: PathBuf,
+}
+
+fn shared_launcher() -> &'static PathBuf {
+    static LAUNCHER: OnceLock<SharedLauncher> = OnceLock::new();
+    &LAUNCHER
+        .get_or_init(|| {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("bobr-bundle-launcher");
+            fs::copy(env!("CARGO_BIN_EXE_bobr-bundle-launcher"), &path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+            SharedLauncher { _temp: temp, path }
+        })
+        .path
+}
 
 pub(crate) struct BundleFixture {
     _temp: tempfile::TempDir,
@@ -23,10 +42,10 @@ impl BundleFixture {
         fs::create_dir_all(root.join("root/usr/lib64")).unwrap();
 
         let launcher = root.join("libexec/bobr-bundle-launcher");
-        let staged_launcher = root.join("libexec/.bobr-bundle-launcher.tmp");
-        fs::copy(env!("CARGO_BIN_EXE_bobr-bundle-launcher"), &staged_launcher).unwrap();
-        fs::set_permissions(&staged_launcher, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::rename(staged_launcher, &launcher).unwrap();
+        // The shared inode is fully written before any test can spawn it.
+        // Per-fixture copies would let forked children inherit another test
+        // thread's write fd and intermittently fail execve with ETXTBSY.
+        fs::hard_link(shared_launcher(), &launcher).unwrap();
 
         Self { _temp: temp, root }
     }
@@ -36,6 +55,16 @@ impl BundleFixture {
     }
 
     pub(crate) fn write_config(&self, tool_path: &str, argv0: &str, loader_dirs: &[&str]) {
+        self.write_config_with_environment(tool_path, argv0, loader_dirs, "");
+    }
+
+    pub(crate) fn write_config_with_environment(
+        &self,
+        tool_path: &str,
+        argv0: &str,
+        loader_dirs: &[&str],
+        environment: &str,
+    ) {
         let library_dirs = loader_dirs
             .iter()
             .map(|path| format!("{path:?}"))
@@ -56,9 +85,11 @@ min_kernel = "4.19"
 kind = "glibc"
 library_dirs = [{library_dirs}]
 inhibit_cache = true
+{environment}
 [tools.demo]
 path = "{tool_path}"
 argv0 = "{argv0}"
+visibility = "public"
 "#
             ),
         )

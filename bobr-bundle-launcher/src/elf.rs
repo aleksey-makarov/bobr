@@ -1,5 +1,6 @@
 //! Minimal strict ELF64 inspection for HostBundle executable dispatch.
 
+use crate::PlatformArch;
 use std::error::Error;
 use std::ffi::OsString;
 use std::fmt;
@@ -156,6 +157,14 @@ impl Error for ElfError {
 
 /// Inspects one x86-64 ELF executable and determines its linkage.
 pub fn inspect_elf(path: &Path) -> Result<ElfExecutable, ElfError> {
+    inspect_elf_for_arch(path, PlatformArch::X86_64)
+}
+
+/// Inspects one ELF executable for the architecture declared by its bundle.
+pub fn inspect_elf_for_arch(
+    path: &Path,
+    expected_arch: PlatformArch,
+) -> Result<ElfExecutable, ElfError> {
     let file = File::open(path).map_err(|source| ElfError::Read {
         path: path.to_path_buf(),
         source,
@@ -191,7 +200,10 @@ pub fn inspect_elf(path: &Path) -> Result<ElfExecutable, ElfError> {
         return Err(ElfError::UnsupportedType(elf_type));
     }
     let machine = read_u16(&header, 18);
-    if machine != EM_X86_64 {
+    let expected_machine = match expected_arch {
+        PlatformArch::X86_64 => EM_X86_64,
+    };
+    if machine != expected_machine {
         return Err(ElfError::UnsupportedMachine(machine));
     }
     let version = read_u32(&header, 20);

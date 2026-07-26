@@ -307,6 +307,7 @@ inhibit_cache = true
 [tools.demo]
 path = "{tool_path}"
 argv0 = "demo"
+visibility = "public"
 "#
             ))
             .unwrap();

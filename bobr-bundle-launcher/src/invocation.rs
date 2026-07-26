@@ -27,14 +27,27 @@ pub enum Invocation {
     Diagnose {
         /// Tool name looked up in `bundle.toml`.
         tool: String,
+        /// Requested diagnostics serialization.
+        output: DiagnosticOutput,
     },
+}
+
+/// Output format for a diagnostic invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticOutput {
+    /// Stable line-oriented output intended for people.
+    Human,
+    /// Structured JSON intended for tests and other tools.
+    Json,
 }
 
 impl Invocation {
     /// Returns the tool name selected by this invocation.
     pub fn tool(&self) -> &str {
         match self {
-            Self::MultiCall { tool, .. } | Self::Run { tool, .. } | Self::Diagnose { tool } => tool,
+            Self::MultiCall { tool, .. } | Self::Run { tool, .. } | Self::Diagnose { tool, .. } => {
+                tool
+            }
         }
     }
 
@@ -48,6 +61,14 @@ impl Invocation {
         match self {
             Self::MultiCall { args, .. } | Self::Run { args, .. } => args,
             Self::Diagnose { .. } => &[],
+        }
+    }
+
+    /// Returns the requested diagnostic output, if this is diagnostic mode.
+    pub fn diagnostic_output(&self) -> Option<DiagnosticOutput> {
+        match self {
+            Self::Diagnose { output, .. } => Some(*output),
+            _ => None,
         }
     }
 }
@@ -115,11 +136,16 @@ fn parse_run(args: &[OsString]) -> Result<Invocation, InvocationError> {
 }
 
 fn parse_diagnose(args: &[OsString]) -> Result<Invocation, InvocationError> {
-    if args.len() != 3 {
+    if !matches!(args.len(), 3 | 4) || (args.len() == 4 && args[3] != OsStr::new("--json")) {
         return Err(usage_error());
     }
     Ok(Invocation::Diagnose {
         tool: parse_tool_name(&args[2], "--diagnose tool")?,
+        output: if args.len() == 4 {
+            DiagnosticOutput::Json
+        } else {
+            DiagnosticOutput::Human
+        },
     })
 }
 
@@ -138,7 +164,7 @@ fn parse_tool_name(value: &OsStr, field: &str) -> Result<String, InvocationError
 fn usage_error() -> InvocationError {
     InvocationError::new(format!(
         "usage: {LAUNCHER_BINARY_NAME} --run TOOL -- [ARGS...]\n       \
-         {LAUNCHER_BINARY_NAME} --diagnose TOOL"
+         {LAUNCHER_BINARY_NAME} --diagnose TOOL [--json]"
     ))
 }
 
@@ -225,8 +251,22 @@ mod tests {
             invocation,
             Invocation::Diagnose {
                 tool: "qemu-img".to_string(),
+                output: DiagnosticOutput::Human,
             }
         );
+    }
+
+    #[test]
+    fn parses_json_diagnostics() {
+        let invocation = parse_invocation(args(&[
+            LAUNCHER_BINARY_NAME,
+            "--diagnose",
+            "qemu-img",
+            "--json",
+        ]))
+        .unwrap();
+
+        assert_eq!(invocation.diagnostic_output(), Some(DiagnosticOutput::Json));
     }
 
     #[test]

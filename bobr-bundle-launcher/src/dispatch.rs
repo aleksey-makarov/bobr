@@ -2,8 +2,8 @@
 
 use crate::{
     BundleConfig, BundleLocation, DynamicLaunchError, DynamicLaunchPlan, ElfLinkage,
-    ExecutableFormat, ExecutableInspectionError, ResolvedTool, inspect_executable,
-    prepare_dynamic_program,
+    ExecutableFormat, ExecutableInspectionError, PlatformArch, ResolvedTool,
+    inspect_executable_for_arch, prepare_dynamic_program,
 };
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
@@ -187,7 +187,7 @@ pub fn prepare_tool_launch(
     tool: &ResolvedTool,
     arguments: &[OsString],
 ) -> Result<PreparedToolLaunch, DispatchError> {
-    let format = inspect(tool.target())?;
+    let format = inspect(tool.target(), bundle.platform.arch)?;
     let process = prepare_inspected(
         location,
         bundle,
@@ -236,7 +236,7 @@ fn prepare_inspected(
                 return Err(DispatchError::ScriptRecursionLimit(target.to_path_buf()));
             }
             let interpreter = resolve_script_interpreter(payload_root, shebang.interpreter())?;
-            let interpreter_format = inspect(&interpreter)?;
+            let interpreter_format = inspect(&interpreter, bundle.platform.arch)?;
             let mut interpreter_arguments =
                 Vec::with_capacity(arguments.len() + usize::from(shebang.argument().is_some()) + 1);
             if let Some(argument) = shebang.argument() {
@@ -249,6 +249,9 @@ fn prepare_inspected(
                 bundle,
                 payload_root,
                 &interpreter,
+                // Like the kernel, a script replaces configured argv[0] with
+                // the logical shebang interpreter name. The canonical script
+                // target becomes the next argument.
                 shebang.interpreter().as_os_str(),
                 &interpreter_arguments,
                 &interpreter_format,
@@ -258,8 +261,8 @@ fn prepare_inspected(
     }
 }
 
-fn inspect(path: &Path) -> Result<ExecutableFormat, DispatchError> {
-    inspect_executable(path).map_err(|source| DispatchError::Inspect {
+fn inspect(path: &Path, expected_arch: PlatformArch) -> Result<ExecutableFormat, DispatchError> {
+    inspect_executable_for_arch(path, expected_arch).map_err(|source| DispatchError::Inspect {
         path: path.to_path_buf(),
         source,
     })
@@ -338,6 +341,7 @@ inhibit_cache = true
 [tools.demo]
 path = "root/usr/bin/demo"
 argv0 = "logical-demo"
+visibility = "public"
 "#,
             )
             .unwrap();

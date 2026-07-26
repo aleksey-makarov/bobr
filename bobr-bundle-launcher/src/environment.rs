@@ -12,10 +12,22 @@ use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
+/// Origin of the final value of one process environment variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvironmentOrigin {
+    /// The value was inherited unchanged from the launching process.
+    Host,
+    /// A common bundle rule produced the final value.
+    Common(EnvironmentOperation),
+    /// A per-tool rule produced the final value.
+    Tool(EnvironmentOperation),
+}
+
 /// Fully evaluated process environment, including inherited host values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessEnvironment {
     values: BTreeMap<OsString, OsString>,
+    traces: BTreeMap<OsString, Vec<EnvironmentOrigin>>,
 }
 
 impl ProcessEnvironment {
@@ -39,6 +51,16 @@ impl ProcessEnvironment {
         self.values
             .iter()
             .map(|(name, value)| (name.as_os_str(), value.as_os_str()))
+    }
+
+    /// Returns where the final value of `name` came from.
+    pub fn origin(&self, name: impl AsRef<OsStr>) -> Option<EnvironmentOrigin> {
+        self.traces.get(name.as_ref())?.last().copied()
+    }
+
+    /// Returns all sources that contributed to the final value, in order.
+    pub fn trace(&self, name: impl AsRef<OsStr>) -> Option<&[EnvironmentOrigin]> {
+        self.traces.get(name.as_ref()).map(Vec::as_slice)
     }
 }
 
@@ -148,6 +170,11 @@ pub fn build_environment(
         .into_iter()
         .filter(|(name, _)| !is_loader_sensitive(name))
         .collect::<BTreeMap<_, _>>();
+    let mut traces = values
+        .keys()
+        .cloned()
+        .map(|name| (name, vec![EnvironmentOrigin::Host]))
+        .collect::<BTreeMap<_, _>>();
     let bundle_root =
         fs::canonicalize(location.root()).map_err(|source| EnvironmentError::ResolvePath {
             variable: "<bundle-root>".to_string(),
@@ -155,32 +182,63 @@ pub fn build_environment(
             source,
         })?;
 
-    apply_rules(&mut values, &bundle_root, &bundle.environment)?;
-    apply_rules(&mut values, &bundle_root, &tool.config().environment)?;
+    apply_rules(
+        &mut values,
+        &mut traces,
+        &bundle_root,
+        &bundle.environment,
+        RuleScope::Common,
+    )?;
+    apply_rules(
+        &mut values,
+        &mut traces,
+        &bundle_root,
+        &tool.config().environment,
+        RuleScope::Tool,
+    )?;
 
-    Ok(ProcessEnvironment { values })
+    Ok(ProcessEnvironment { values, traces })
+}
+
+#[derive(Clone, Copy)]
+enum RuleScope {
+    Common,
+    Tool,
+}
+
+impl RuleScope {
+    fn origin(self, operation: EnvironmentOperation) -> EnvironmentOrigin {
+        match self {
+            Self::Common => EnvironmentOrigin::Common(operation),
+            Self::Tool => EnvironmentOrigin::Tool(operation),
+        }
+    }
 }
 
 fn apply_rules(
     values: &mut BTreeMap<OsString, OsString>,
+    traces: &mut BTreeMap<OsString, Vec<EnvironmentOrigin>>,
     bundle_root: &Path,
     rules: &BTreeMap<String, EnvironmentRule>,
+    scope: RuleScope,
 ) -> Result<(), EnvironmentError> {
     for (variable, rule) in rules {
         validate_variable_name(variable)?;
         validate_rule(variable, rule)?;
-        let bundle_values = resolve_bundle_values(bundle_root, variable, &rule.paths)?;
+        let configured_values = configured_values(bundle_root, variable, rule)?;
         let name = OsString::from(variable);
 
         match rule.operation {
             EnvironmentOperation::Unset => {
                 values.remove(&name);
+                traces.remove(&name);
             }
             EnvironmentOperation::Replace => {
                 values.insert(
-                    name,
-                    join_list(bundle_values.iter().map(OsString::as_os_str)),
+                    name.clone(),
+                    join_list(configured_values.iter().map(OsString::as_os_str)),
                 );
+                traces.insert(name, vec![scope.origin(rule.operation)]);
             }
             EnvironmentOperation::Prepend | EnvironmentOperation::Append => {
                 let inherited = if rule.inherit {
@@ -191,23 +249,33 @@ fn apply_rules(
                 } else {
                     None
                 };
-                let bundle_value = join_list(bundle_values.iter().map(OsString::as_os_str));
+                let inherited_contributes =
+                    inherited.as_ref().is_some_and(|value| !value.is_empty());
+                let bundle_value = join_list(configured_values.iter().map(OsString::as_os_str));
                 let combined = match (rule.operation, inherited) {
                     (EnvironmentOperation::Prepend, Some(host)) => join_pair(&bundle_value, &host),
                     (EnvironmentOperation::Append, Some(host)) => join_pair(&host, &bundle_value),
                     (_, None) => bundle_value,
                     _ => unreachable!("operation was restricted to prepend or append"),
                 };
-                values.insert(name, combined);
+                values.insert(name.clone(), combined);
+                let origin = scope.origin(rule.operation);
+                if inherited_contributes {
+                    traces.entry(name).or_default().push(origin);
+                } else {
+                    traces.insert(name, vec![origin]);
+                }
             }
             EnvironmentOperation::Default => {
-                values.entry(name).or_insert_with(|| {
-                    if bundle_values.is_empty() {
+                if !values.contains_key(&name) {
+                    let value = if configured_values.is_empty() {
                         host_default_value(&rule.host_default).unwrap_or_default()
                     } else {
-                        join_list(bundle_values.iter().map(OsString::as_os_str))
-                    }
-                });
+                        join_list(configured_values.iter().map(OsString::as_os_str))
+                    };
+                    values.insert(name.clone(), value);
+                    traces.insert(name, vec![scope.origin(rule.operation)]);
+                }
             }
         }
     }
@@ -226,38 +294,68 @@ fn validate_rule(variable: &str, rule: &EnvironmentRule) -> Result<(), Environme
         variable: variable.to_string(),
         reason,
     };
+    if !rule.paths.is_empty() && !rule.values.is_empty() {
+        return Err(invalid("paths and literal values cannot be combined"));
+    }
+    if rule
+        .values
+        .iter()
+        .chain(&rule.host_default)
+        .any(|value| value.as_bytes().contains(&b'\0'))
+    {
+        return Err(invalid("literal values cannot contain NUL"));
+    }
+    let configured_is_empty = rule.paths.is_empty() && rule.values.is_empty();
     match rule.operation {
         EnvironmentOperation::Replace => {
-            if rule.paths.is_empty() {
-                return Err(invalid("replace requires at least one path"));
+            if configured_is_empty {
+                return Err(invalid("replace requires paths or literal values"));
             }
             if rule.inherit || !rule.host_default.is_empty() {
                 return Err(invalid("replace cannot inherit host values"));
             }
         }
         EnvironmentOperation::Prepend | EnvironmentOperation::Append => {
-            if rule.paths.is_empty() {
-                return Err(invalid("prepend and append require at least one path"));
+            if configured_is_empty {
+                return Err(invalid(
+                    "prepend and append require paths or literal values",
+                ));
             }
             if !rule.inherit && !rule.host_default.is_empty() {
                 return Err(invalid("host_default requires inherit = true"));
             }
         }
         EnvironmentOperation::Unset => {
-            if !rule.paths.is_empty() || rule.inherit || !rule.host_default.is_empty() {
-                return Err(invalid("unset accepts no paths or inheritance fields"));
+            if !configured_is_empty || rule.inherit || !rule.host_default.is_empty() {
+                return Err(invalid(
+                    "unset accepts no paths, values, or inheritance fields",
+                ));
             }
         }
         EnvironmentOperation::Default => {
             if rule.inherit {
                 return Err(invalid("default does not use inherit"));
             }
-            if rule.paths.is_empty() && rule.host_default.is_empty() {
-                return Err(invalid("default requires paths or host_default"));
+            if configured_is_empty && rule.host_default.is_empty() {
+                return Err(invalid(
+                    "default requires paths, literal values, or host_default",
+                ));
             }
         }
     }
     Ok(())
+}
+
+fn configured_values(
+    bundle_root: &Path,
+    variable: &str,
+    rule: &EnvironmentRule,
+) -> Result<Vec<OsString>, EnvironmentError> {
+    if !rule.paths.is_empty() {
+        resolve_bundle_values(bundle_root, variable, &rule.paths)
+    } else {
+        Ok(rule.values.iter().map(OsString::from).collect())
+    }
 }
 
 fn resolve_bundle_values(
@@ -312,7 +410,12 @@ fn join_list<'a>(values: impl IntoIterator<Item = &'a OsStr>) -> OsString {
 }
 
 fn join_pair(first: &OsStr, second: &OsStr) -> OsString {
-    join_list([first, second])
+    match (first.is_empty(), second.is_empty()) {
+        (true, true) => OsString::new(),
+        (true, false) => second.to_os_string(),
+        (false, true) => first.to_os_string(),
+        (false, false) => join_list([first, second]),
+    }
 }
 
 fn is_loader_sensitive(name: &OsStr) -> bool {
@@ -365,6 +468,7 @@ inhibit_cache = true
 [tools.demo]
 path = "root/usr/bin/demo"
 argv0 = "demo"
+visibility = "public"
 {per_tool}
 "#
             ))
@@ -445,9 +549,10 @@ host_default = ["/usr/local/share", "/usr/share"]
             present.get("XDG_DATA_DIRS"),
             Some(OsStr::new(&format!("{}:/host/share", prefix.display())))
         );
+        assert_eq!(empty.get("XDG_DATA_DIRS"), Some(prefix.as_os_str()));
         assert_eq!(
-            empty.get("XDG_DATA_DIRS"),
-            Some(OsStr::new(&format!("{}:", prefix.display())))
+            empty.trace("XDG_DATA_DIRS"),
+            Some([EnvironmentOrigin::Common(EnvironmentOperation::Prepend)].as_slice())
         );
     }
 
@@ -475,6 +580,16 @@ inherit = true
                     .join("libexec/wrapped-bin")
                     .display()
             )))
+        );
+        assert_eq!(
+            environment.trace("PATH"),
+            Some(
+                [
+                    EnvironmentOrigin::Host,
+                    EnvironmentOrigin::Common(EnvironmentOperation::Append),
+                ]
+                .as_slice()
+            )
         );
     }
 
@@ -515,6 +630,53 @@ paths = ["root/usr/share"]
     }
 
     #[test]
+    fn literal_values_are_not_resolved_as_bundle_paths() {
+        let fixture = Fixture::new(
+            r#"
+[environment.QEMU_AUDIO_DRV]
+operation = "default"
+values = ["none"]
+"#,
+            "",
+        );
+
+        let environment = fixture.environment(host(&[])).unwrap();
+
+        assert_eq!(environment.get("QEMU_AUDIO_DRV"), Some(OsStr::new("none")));
+        assert_eq!(
+            environment.origin("QEMU_AUDIO_DRV"),
+            Some(EnvironmentOrigin::Common(EnvironmentOperation::Default))
+        );
+    }
+
+    #[test]
+    fn records_host_common_and_tool_origins() {
+        let fixture = Fixture::new(
+            r#"
+[environment.COMMON]
+operation = "replace"
+values = ["common"]
+"#,
+            r#"
+[tools.demo.environment.TOOL]
+operation = "replace"
+values = ["tool"]
+"#,
+        );
+        let environment = fixture.environment(host(&[("HOST", "host")])).unwrap();
+
+        assert_eq!(environment.origin("HOST"), Some(EnvironmentOrigin::Host));
+        assert_eq!(
+            environment.origin("COMMON"),
+            Some(EnvironmentOrigin::Common(EnvironmentOperation::Replace))
+        );
+        assert_eq!(
+            environment.origin("TOOL"),
+            Some(EnvironmentOrigin::Tool(EnvironmentOperation::Replace))
+        );
+    }
+
+    #[test]
     fn per_tool_rules_apply_after_common_rules() {
         let fixture = Fixture::new(
             r#"
@@ -544,6 +706,17 @@ inherit = true
                     .join("libexec/wrapped-bin")
                     .display()
             )))
+        );
+        assert_eq!(
+            environment.trace("PATH"),
+            Some(
+                [
+                    EnvironmentOrigin::Host,
+                    EnvironmentOrigin::Common(EnvironmentOperation::Prepend),
+                    EnvironmentOrigin::Tool(EnvironmentOperation::Prepend),
+                ]
+                .as_slice()
+            )
         );
     }
 
@@ -627,6 +800,15 @@ paths = ["root/usr/share"]
 host_default = ["/host"]
 "#,
                 "host_default requires",
+            ),
+            (
+                r#"
+[environment.BAD]
+operation = "replace"
+paths = ["root/usr/share"]
+values = ["literal"]
+"#,
+                "cannot be combined",
             ),
         ];
 

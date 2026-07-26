@@ -1,7 +1,8 @@
 //! Bundled glibc loader resolution and command planning.
 
 use crate::{
-    BundleConfig, BundleLocation, ElfError, ElfLinkage, LoaderKind, ResolvedTool, inspect_elf,
+    BundleConfig, BundleLocation, ElfError, ElfLinkage, LoaderKind, ResolvedTool,
+    inspect_elf_for_arch,
 };
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DynamicLaunchPlan {
     loader: PathBuf,
+    library_dirs: Vec<PathBuf>,
     arguments: Vec<OsString>,
 }
 
@@ -28,6 +30,11 @@ impl DynamicLaunchPlan {
     /// Returns loader arguments, excluding the loader's own `argv[0]`.
     pub fn arguments(&self) -> &[OsString] {
         &self.arguments
+    }
+
+    /// Returns the canonical ordered library search path.
+    pub fn library_dirs(&self) -> &[PathBuf] {
+        &self.library_dirs
     }
 }
 
@@ -186,11 +193,12 @@ pub fn prepare_dynamic_program(
     if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
         return Err(DynamicLaunchError::InvalidLoaderFile(loader));
     }
-    let loader_elf =
-        inspect_elf(&loader).map_err(|source| DynamicLaunchError::InvalidLoaderElf {
+    let loader_elf = inspect_elf_for_arch(&loader, bundle.platform.arch).map_err(|source| {
+        DynamicLaunchError::InvalidLoaderElf {
             path: loader.clone(),
             source,
-        })?;
+        }
+    })?;
     if !matches!(loader_elf.linkage(), ElfLinkage::Static) {
         return Err(DynamicLaunchError::ChainedLoader(loader));
     }
@@ -221,7 +229,7 @@ pub fn prepare_dynamic_program(
             return Err(DynamicLaunchError::LibraryPathNotDirectory(directory));
         }
         ensure_no_separator(&directory)?;
-        library_dirs.push(directory.into_os_string());
+        library_dirs.push(directory);
     }
 
     let mut arguments = Vec::new();
@@ -231,11 +239,20 @@ pub fn prepare_dynamic_program(
     arguments.push(OsString::from("--argv0"));
     arguments.push(argv0.to_os_string());
     arguments.push(OsString::from("--library-path"));
-    arguments.push(join_paths(&library_dirs));
+    arguments.push(join_paths(
+        &library_dirs
+            .iter()
+            .map(|path| path.as_os_str().to_os_string())
+            .collect::<Vec<_>>(),
+    ));
     arguments.push(target.as_os_str().to_os_string());
     arguments.extend_from_slice(payload_arguments);
 
-    Ok(DynamicLaunchPlan { loader, arguments })
+    Ok(DynamicLaunchPlan {
+        loader,
+        library_dirs,
+        arguments,
+    })
 }
 
 pub(crate) fn validate_absolute_payload_path(path: &Path) -> Option<&Path> {
