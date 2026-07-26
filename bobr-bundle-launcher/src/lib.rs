@@ -22,7 +22,9 @@ pub use config::{
     PlatformConfig, PlatformOs, ToolConfig, ToolVisibility, read_bundle_config,
 };
 pub use diagnostics::DiagnosticReport;
-pub use dispatch::{DispatchError, PreparedToolLaunch, ProcessLaunchPlan, prepare_tool_launch};
+pub use dispatch::{
+    DispatchError, MAX_SCRIPT_DEPTH, PreparedToolLaunch, ProcessLaunchPlan, prepare_tool_launch,
+};
 pub use dynamic::{
     DynamicLaunchError, DynamicLaunchPlan, prepare_dynamic_launch, prepare_dynamic_program,
 };

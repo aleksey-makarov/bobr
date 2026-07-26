@@ -13,7 +13,11 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-const MAX_SCRIPT_DEPTH: usize = 4;
+/// Maximum number of script nodes accepted in one launcher dispatch chain.
+///
+/// The builder imports this value so its startup verifier accepts exactly the
+/// same shebang subset as the runtime launcher.
+pub const MAX_SCRIPT_DEPTH: usize = 4;
 
 /// Final process command after recursively resolving any shebang interpreters.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,6 +399,21 @@ visibility = "public"
                 OsString::from("caller-argument"),
             ]
         );
+    }
+
+    #[test]
+    fn accepts_exactly_four_nested_scripts() {
+        let fixture = Fixture::new();
+        fixture.write_executable("root/usr/bin/demo", b"#!/bin/one\n");
+        fixture.write_executable("root/bin/one", b"#!/bin/two\n");
+        fixture.write_executable("root/bin/two", b"#!/bin/three\n");
+        fixture.write_executable("root/bin/three", b"#!/bin/final\n");
+        let final_executable = fixture.write_executable("root/bin/final", &minimal_static_elf());
+
+        let launch =
+            prepare_tool_launch(&fixture.location, &fixture.config, &fixture.tool(), &[]).unwrap();
+
+        assert_eq!(launch.process().direct_parts().unwrap().0, final_executable);
     }
 
     #[test]

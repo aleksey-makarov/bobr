@@ -181,6 +181,9 @@ fn copy_regular_file_with_metadata(
             destination.display()
         )
     })?;
+    // Do not rely on fs::copy's platform-specific permission behavior: the
+    // copied mode is part of the plain-tree contract and is normalized again
+    // only when the complete HostBundle is finalized.
     set_mode(destination, metadata.mode())
 }
 
@@ -234,6 +237,9 @@ pub(crate) fn make_tree_read_only(path: &Path) -> Result<(), String> {
         }
     }
     if !metadata.file_type().is_symlink() {
+        // Input modes, including setuid/setgid, are preserved only in the
+        // private staged tree so composition can inspect an accurate copy.
+        // No staged path is published before this recursive finalization.
         let mode = metadata.permissions().mode() & 0o7777 & !0o6222;
         set_mode(path, mode)?;
     }
