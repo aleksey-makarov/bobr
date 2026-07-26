@@ -631,9 +631,9 @@ mod tests {
     /// user+mount namespace. Confirms the lower layer is visible through the
     /// mounted root and that a new write lands in `upperdir` (the layer we later
     /// capture). Forks first: `unshare(CLONE_NEWUSER)` requires a
-    /// single-threaded process and the test harness is multithreaded. When
-    /// unprivileged user namespaces are unavailable the child exits 42 and the
-    /// test skips rather than fails.
+    /// single-threaded process and the test harness is multithreaded. The test
+    /// skips when the environment cannot construct the scenario because user
+    /// namespaces, their id mappings, or unprivileged overlayfs are unavailable.
     #[test]
     fn overlay_mount_captures_writes_in_upper() {
         let suffix = std::time::SystemTime::now()
@@ -666,6 +666,8 @@ mod tests {
 
         let uid = nix::unistd::getuid().as_raw();
         let gid = nix::unistd::getgid().as_raw();
+        let uid_map = format!("0 {uid} 1\n");
+        let gid_map = format!("0 {gid} 1\n");
 
         // SAFETY: the same fork primitive run_supervisor uses. The child only
         // makes syscalls and glibc-fork-safe allocations, then exits without
@@ -673,17 +675,23 @@ mod tests {
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0, "fork failed");
         if pid == 0 {
-            // Child. Each failure maps to a distinct exit code; 42 means skip.
+            // Child. Each failure maps to a distinct exit code. Environment
+            // capability failures (42, 43, 46, 48, 49) are skips; failed
+            // assertions about an overlay that was mounted (44, 45) are test
+            // failures.
             let code = (|| -> i32 {
                 if nix::sched::unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS).is_err()
                 {
                     return 42;
                 }
-                if fs::write("/proc/self/setgroups", "deny").is_err()
-                    || fs::write("/proc/self/uid_map", format!("0 {uid} 1\n")).is_err()
-                    || fs::write("/proc/self/gid_map", format!("0 {gid} 1\n")).is_err()
-                {
+                if fs::write("/proc/self/setgroups", "deny").is_err() {
                     return 46;
+                }
+                if fs::write("/proc/self/uid_map", &uid_map).is_err() {
+                    return 48;
+                }
+                if fs::write("/proc/self/gid_map", &gid_map).is_err() {
+                    return 49;
                 }
                 if do_mount(
                     None,
@@ -720,9 +728,23 @@ mod tests {
                 "overlay_mount_captures_writes_in_upper: skipped \
                  (unprivileged user namespaces unavailable)"
             ),
-            other => panic!(
-                "overlay child failed: {other:?} (43 mount, 44 lower, 45 upper, 46 idmap, 47 private)"
+            WaitStatus::Exited(_, 46) => eprintln!(
+                "overlay_mount_captures_writes_in_upper: skipped \
+                 (cannot disable setgroups for user-namespace id mapping)"
             ),
+            WaitStatus::Exited(_, 48) => eprintln!(
+                "overlay_mount_captures_writes_in_upper: skipped \
+                 (cannot configure user-namespace uid_map)"
+            ),
+            WaitStatus::Exited(_, 49) => eprintln!(
+                "overlay_mount_captures_writes_in_upper: skipped \
+                 (cannot configure user-namespace gid_map)"
+            ),
+            WaitStatus::Exited(_, 43) => eprintln!(
+                "overlay_mount_captures_writes_in_upper: skipped \
+                 (unprivileged overlayfs mount unavailable)"
+            ),
+            other => panic!("overlay child failed: {other:?} (44 lower, 45 upper, 47 private)"),
         }
     }
 }
