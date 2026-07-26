@@ -234,7 +234,8 @@ pub fn resolve_tool(
     })
 }
 
-pub(crate) fn validate_relative_path(field: &str, value: &str) -> Result<(), ToolResolutionError> {
+/// Validates a UTF-8 bundle-relative path without touching the filesystem.
+pub fn validate_relative_path(field: &str, value: &str) -> Result<(), ToolResolutionError> {
     let invalid = |reason| ToolResolutionError::InvalidRelativePath {
         field: field.to_string(),
         value: value.to_string(),

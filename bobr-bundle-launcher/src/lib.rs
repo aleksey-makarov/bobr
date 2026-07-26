@@ -18,8 +18,8 @@ mod tool;
 
 pub use config::{
     BUNDLE_FORMAT_V1, BundleConfig, BundleConfigError, EnvironmentOperation, EnvironmentRule,
-    HostPolicy, LoaderConfig, LoaderKind, PlatformArch, PlatformConfig, PlatformOs, ToolConfig,
-    ToolVisibility, read_bundle_config,
+    EnvironmentRuleValidationError, HostPolicy, LoaderConfig, LoaderKind, PlatformArch,
+    PlatformConfig, PlatformOs, ToolConfig, ToolVisibility, read_bundle_config,
 };
 pub use diagnostics::DiagnosticReport;
 pub use dispatch::{DispatchError, PreparedToolLaunch, ProcessLaunchPlan, prepare_tool_launch};
@@ -39,4 +39,4 @@ pub use script::{
     ExecutableFormat, ExecutableInspectionError, Shebang, inspect_executable,
     inspect_executable_for_arch,
 };
-pub use tool::{ResolvedTool, ToolResolutionError, resolve_tool};
+pub use tool::{ResolvedTool, ToolResolutionError, resolve_tool, validate_relative_path};

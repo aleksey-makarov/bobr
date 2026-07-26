@@ -1,8 +1,8 @@
 //! Typed HostBundle process-environment construction.
 
 use crate::{
-    BundleConfig, BundleLocation, EnvironmentOperation, EnvironmentRule, ResolvedTool,
-    ToolResolutionError,
+    BundleConfig, BundleLocation, EnvironmentOperation, EnvironmentRule,
+    EnvironmentRuleValidationError, ResolvedTool, ToolResolutionError,
 };
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -223,8 +223,7 @@ fn apply_rules(
     scope: RuleScope,
 ) -> Result<(), EnvironmentError> {
     for (variable, rule) in rules {
-        validate_variable_name(variable)?;
-        validate_rule(variable, rule)?;
+        rule.validate(variable).map_err(map_rule_validation_error)?;
         let configured_values = configured_values(bundle_root, variable, rule)?;
         let name = OsString::from(variable);
 
@@ -282,68 +281,15 @@ fn apply_rules(
     Ok(())
 }
 
-fn validate_variable_name(name: &str) -> Result<(), EnvironmentError> {
-    if name.is_empty() || name.as_bytes().contains(&b'=') || name.as_bytes().contains(&b'\0') {
-        return Err(EnvironmentError::InvalidVariableName(name.to_string()));
-    }
-    Ok(())
-}
-
-fn validate_rule(variable: &str, rule: &EnvironmentRule) -> Result<(), EnvironmentError> {
-    let invalid = |reason| EnvironmentError::InvalidRule {
-        variable: variable.to_string(),
-        reason,
-    };
-    if !rule.paths.is_empty() && !rule.values.is_empty() {
-        return Err(invalid("paths and literal values cannot be combined"));
-    }
-    if rule
-        .values
-        .iter()
-        .chain(&rule.host_default)
-        .any(|value| value.as_bytes().contains(&b'\0'))
-    {
-        return Err(invalid("literal values cannot contain NUL"));
-    }
-    let configured_is_empty = rule.paths.is_empty() && rule.values.is_empty();
-    match rule.operation {
-        EnvironmentOperation::Replace => {
-            if configured_is_empty {
-                return Err(invalid("replace requires paths or literal values"));
-            }
-            if rule.inherit || !rule.host_default.is_empty() {
-                return Err(invalid("replace cannot inherit host values"));
-            }
+fn map_rule_validation_error(error: EnvironmentRuleValidationError) -> EnvironmentError {
+    match error {
+        EnvironmentRuleValidationError::InvalidVariableName(name) => {
+            EnvironmentError::InvalidVariableName(name)
         }
-        EnvironmentOperation::Prepend | EnvironmentOperation::Append => {
-            if configured_is_empty {
-                return Err(invalid(
-                    "prepend and append require paths or literal values",
-                ));
-            }
-            if !rule.inherit && !rule.host_default.is_empty() {
-                return Err(invalid("host_default requires inherit = true"));
-            }
-        }
-        EnvironmentOperation::Unset => {
-            if !configured_is_empty || rule.inherit || !rule.host_default.is_empty() {
-                return Err(invalid(
-                    "unset accepts no paths, values, or inheritance fields",
-                ));
-            }
-        }
-        EnvironmentOperation::Default => {
-            if rule.inherit {
-                return Err(invalid("default does not use inherit"));
-            }
-            if configured_is_empty && rule.host_default.is_empty() {
-                return Err(invalid(
-                    "default requires paths, literal values, or host_default",
-                ));
-            }
+        EnvironmentRuleValidationError::InvalidRule { variable, reason } => {
+            EnvironmentError::InvalidRule { variable, reason }
         }
     }
-    Ok(())
 }
 
 fn configured_values(

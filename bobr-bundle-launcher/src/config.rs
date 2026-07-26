@@ -215,6 +215,107 @@ pub struct EnvironmentRule {
     pub host_default: Vec<String>,
 }
 
+impl EnvironmentRule {
+    /// Validates the variable name and operation-specific field combinations.
+    pub fn validate(&self, variable: &str) -> Result<(), EnvironmentRuleValidationError> {
+        if variable.is_empty()
+            || variable.as_bytes().contains(&b'=')
+            || variable.as_bytes().contains(&b'\0')
+        {
+            return Err(EnvironmentRuleValidationError::InvalidVariableName(
+                variable.to_string(),
+            ));
+        }
+
+        let invalid = |reason| EnvironmentRuleValidationError::InvalidRule {
+            variable: variable.to_string(),
+            reason,
+        };
+        if !self.paths.is_empty() && !self.values.is_empty() {
+            return Err(invalid("paths and literal values cannot be combined"));
+        }
+        if self
+            .values
+            .iter()
+            .chain(&self.host_default)
+            .any(|value| value.as_bytes().contains(&b'\0'))
+        {
+            return Err(invalid("literal values cannot contain NUL"));
+        }
+        let configured_is_empty = self.paths.is_empty() && self.values.is_empty();
+        match self.operation {
+            EnvironmentOperation::Replace => {
+                if configured_is_empty {
+                    return Err(invalid("replace requires paths or literal values"));
+                }
+                if self.inherit || !self.host_default.is_empty() {
+                    return Err(invalid("replace cannot inherit host values"));
+                }
+            }
+            EnvironmentOperation::Prepend | EnvironmentOperation::Append => {
+                if configured_is_empty {
+                    return Err(invalid(
+                        "prepend and append require paths or literal values",
+                    ));
+                }
+                if !self.inherit && !self.host_default.is_empty() {
+                    return Err(invalid("host_default requires inherit = true"));
+                }
+            }
+            EnvironmentOperation::Unset => {
+                if !configured_is_empty || self.inherit || !self.host_default.is_empty() {
+                    return Err(invalid(
+                        "unset accepts no paths, values, or inheritance fields",
+                    ));
+                }
+            }
+            EnvironmentOperation::Default => {
+                if self.inherit {
+                    return Err(invalid("default does not use inherit"));
+                }
+                if configured_is_empty && self.host_default.is_empty() {
+                    return Err(invalid(
+                        "default requires paths, literal values, or host_default",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Invalid variable name or operation-specific environment rule shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvironmentRuleValidationError {
+    /// A variable name is empty or cannot be passed to `execve`.
+    InvalidVariableName(String),
+    /// An operation is combined with fields that have no defined meaning.
+    InvalidRule {
+        /// Variable whose rule is invalid.
+        variable: String,
+        /// Human-readable semantic failure.
+        reason: &'static str,
+    },
+}
+
+impl fmt::Display for EnvironmentRuleValidationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidVariableName(name) => {
+                write!(formatter, "invalid environment variable name '{name}'")
+            }
+            Self::InvalidRule { variable, reason } => {
+                write!(
+                    formatter,
+                    "invalid environment rule for {variable}: {reason}"
+                )
+            }
+        }
+    }
+}
+
+impl Error for EnvironmentRuleValidationError {}
+
 /// Supported typed environment operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

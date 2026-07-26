@@ -16,6 +16,7 @@ mod fs_tree_export;
 mod fs_tree_import;
 mod fs_tree_materialize;
 mod group;
+mod host_bundle;
 mod oci_extract;
 mod registry;
 mod subject;
@@ -33,6 +34,10 @@ pub use fs_tree_export::{CopyCommand, FsTreeExportBuilder, FsTreeExportConfig};
 pub use fs_tree_import::{FsTreeImportBuilder, FsTreeImportConfig};
 pub use fs_tree_materialize::materialize_fs_tree_root;
 pub use group::{GroupBuilder, GroupConfig};
+pub use host_bundle::{
+    HOST_BUNDLE_INPUT_SPEC, HostBundleConfig, HostBundleConfigError, HostBundleEnvironmentRule,
+    HostBundlePath, HostBundleToolConfig,
+};
 pub use oci_extract::{OciExtractBuilder, OciExtractConfig};
 pub use registry::BUILDERS;
 pub use subject::{BuilderPlanError, BuilderPlannedSubject};
