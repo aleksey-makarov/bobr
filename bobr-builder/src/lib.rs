@@ -3,7 +3,7 @@
 //! Defines the [`Builder`]/[`TypedBuilder`] traits, the [`BuildContext`] and
 //! input contract ([`InputSpec`]/[`BuilderInputs`]), and the concrete builders
 //! bobr ships — tree, bundle, group, tree-merge, tree-subset, fs-tree-import,
-//! fs-tree-export, tree-move, and OCI extract. [`BUILDERS`]
+//! fs-tree-export, tree-move, HostBundle, and OCI extract. [`BUILDERS`]
 //! is the registry of all of them.
 
 #[cfg(not(target_os = "linux"))]

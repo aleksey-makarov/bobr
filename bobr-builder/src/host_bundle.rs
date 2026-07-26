@@ -28,17 +28,14 @@ const OUTPUT_DIR_NAME: &str = "host-bundle";
 const INPUT_LAUNCHER_PATH: &str = "usr/libexec/bobr-bundle-launcher";
 const OUTPUT_LAUNCHER_PATH: &str = "libexec/bobr-bundle-launcher";
 
-/// Materialized input contract reserved for the future HostBundle builder.
+/// Materialized input contract for the HostBundle builder.
 pub static HOST_BUNDLE_INPUT_SPEC: InputSpec = InputSpec {
     required_inputs: &["_root", "_launcher"],
     optional_inputs: &["_overrides"],
     allow_extra_inputs: false,
 };
 
-/// Builds a complete HostBundle directory object.
-///
-/// Registration is intentionally deferred until mandatory structural and
-/// startup-closure verification is part of this implementation.
+/// Builds a verified, read-only HostBundle directory object.
 #[derive(Debug)]
 pub struct HostBundleBuilder;
 
@@ -847,9 +844,13 @@ mod tests {
             }
         }));
 
-        let output = HostBundleBuilder
-            .build_typed(config, BuilderInputs::new(slots), &mut cx)
+        let builder = crate::BUILDERS
+            .iter()
+            .copied()
+            .find(|builder| builder.tag() == "HostBundle")
             .unwrap();
+        let plan = builder.plan(serde_json::to_value(config).unwrap()).unwrap();
+        let output = plan.build(BuilderInputs::new(slots), &mut cx).unwrap();
 
         assert_eq!(
             fs::read_link(output.join("bin/demo")).unwrap(),
@@ -885,5 +886,46 @@ mod tests {
             0o555
         );
         verify_tree_read_only(&output).unwrap();
+    }
+
+    #[test]
+    fn registered_builder_rejects_an_invalid_launcher_during_execution() {
+        let temp = tempdir().unwrap();
+        let payload = temp.path().join("payload");
+        let launcher = temp.path().join("launcher");
+        fs::create_dir_all(payload.join("usr/bin")).unwrap();
+        fs::create_dir_all(payload.join("usr/lib")).unwrap();
+        fs::create_dir_all(launcher.join("usr/libexec")).unwrap();
+        write_static_elf(&payload.join("usr/bin/demo"));
+        fs::write(launcher.join(INPUT_LAUNCHER_PATH), b"not an ELF").unwrap();
+        fs::set_permissions(
+            launcher.join(INPUT_LAUNCHER_PATH),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let build_temp = temp.path().join("build");
+        fs::create_dir(&build_temp).unwrap();
+        let mut cx = BuildContext::with_noop_logger(build_temp, store_fs_tree(temp.path()));
+        let inputs = BuilderInputs::new(BTreeMap::from([
+            ("_root".to_string(), payload),
+            ("_launcher".to_string(), launcher),
+        ]));
+        let builder = crate::BUILDERS
+            .iter()
+            .copied()
+            .find(|builder| builder.tag() == "HostBundle")
+            .unwrap();
+        let plan = builder
+            .plan(json!({
+                "library_dirs": ["usr/lib"],
+                "public_tools": {
+                    "demo": { "path": "usr/bin/demo" }
+                }
+            }))
+            .unwrap();
+
+        let error = plan.build(inputs, &mut cx).unwrap_err();
+
+        assert!(error.to_string().contains("invalid HostBundle launcher"));
     }
 }
