@@ -448,13 +448,10 @@ impl StartupVerifier {
         }
         self.bump_state(&canonical)?;
         let info = parse_elf(&canonical, self.platform_arch)?;
-        if info.interpreter.is_some() {
-            self.active_libraries.remove(&canonical);
-            return Err(format!(
-                "DT_NEEDED library '{}' unexpectedly contains PT_INTERP",
-                canonical.display()
-            ));
-        }
+        // PT_INTERP is only consulted when the kernel executes an ELF. It is
+        // ignored when the same ET_DYN object is loaded through DT_NEEDED;
+        // glibc's libc.so.6 intentionally has PT_INTERP so it can also be run
+        // as a program.
         let result = self.audit_dependencies(&canonical, &info, inherited_rpaths);
         self.active_libraries.remove(&canonical);
         if result.is_ok() {
@@ -1120,6 +1117,26 @@ mod tests {
     }
 
     #[test]
+    fn accepts_pt_interp_in_a_dt_needed_shared_object() {
+        let (temp, config) = fixture();
+        let loader = "/lib64/ld-linux-x86-64.so.2";
+        dynamic_elf(
+            &temp.path().join("root/usr/bin/demo"),
+            Some(loader),
+            &["libc.so.6"],
+            None,
+        );
+        fs::create_dir_all(temp.path().join("root/lib64")).unwrap();
+        static_elf(&temp.path().join("root/lib64/ld-linux-x86-64.so.2"));
+        let libc = temp.path().join("root/usr/lib/libc.so.6");
+        dynamic_elf(&libc, Some(loader), &[], Some("libc.so.6"));
+        set_elf_type(&libc, 3);
+
+        let structure = verify_structure(temp.path(), &config).unwrap();
+        verify_startup_closure(temp.path(), &config, &structure).unwrap();
+    }
+
+    #[test]
     fn reports_missing_gnu_symbol_versions() {
         let required = BTreeSet::from(["GLIBC_2.38".to_string(), "GLIBC_2.39".to_string()]);
         let provided = BTreeSet::from(["GLIBC_2.38".to_string()]);
@@ -1268,6 +1285,12 @@ mod tests {
 
     fn dynamic_elf(path: &Path, interpreter: Option<&str>, needed: &[&str], soname: Option<&str>) {
         dynamic_elf_with_paths(path, interpreter, needed, soname, None, None);
+    }
+
+    fn set_elf_type(path: &Path, elf_type: u16) {
+        let mut bytes = fs::read(path).unwrap();
+        bytes[16..18].copy_from_slice(&elf_type.to_le_bytes());
+        fs::write(path, bytes).unwrap();
     }
 
     fn dynamic_elf_with_paths(
