@@ -916,6 +916,33 @@ fn import_object_does_not_write_leaf_index_when_hashing_staged_path() {
 }
 
 #[test]
+fn import_object_atomically_publishes_a_read_only_directory() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+    let stage_dir = temp.path().join("stage");
+    fs::create_dir(&stage_dir).unwrap();
+    fs::write(stage_dir.join("payload"), b"hello\n").unwrap();
+    fs::set_permissions(&stage_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let object_hash = import_object(&layout, &stage_dir).unwrap();
+
+    assert!(!stage_dir.exists());
+    let object_path = layout.object_path_unchecked(object_hash);
+    assert!(object_path.join("payload").is_file());
+    assert_eq!(
+        fs::metadata(&object_path).unwrap().permissions().mode() & 0o7777,
+        0o555
+    );
+    assert!(fs::read_dir(layout.objects_dir()).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".bobr-import-")
+    }));
+}
+
+#[test]
 fn existing_object_reuse_removes_staged_path() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
