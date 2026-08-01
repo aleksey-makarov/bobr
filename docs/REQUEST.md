@@ -314,20 +314,31 @@ materialized runtime root and a static launcher package.
   "policy": "strict",
   "library_dirs": ["usr/lib64", "usr/lib"],
   "public_tools": {
-    "demo": { "path": "usr/bin/demo" }
+    "demo": {
+      "path": "usr/bin/demo",
+      "argument_prefix": [
+        { "value": "--data-dir" },
+        { "source": "payload", "path": "usr/share/demo" }
+      ]
+    }
   }
 }
 ```
 
 `internal_tools` declares commands exposed only to bundled child processes.
 `environment` and per-tool `environment` contain typed environment rules.
+An optional per-tool `argument_prefix` inserts fixed arguments before caller
+arguments. An entry is either a literal `{ "value": "..." }` or a safe path
+selected from `payload` or `overrides`; path entries are resolved inside the
+finished bundle at launch time. Referencing `overrides` requires the optional
+input to be present.
 `min_kernel` defaults to `4.19`; `policy` defaults to `strict`.
 
 **Behavior:**
 
 - writes a read-only ordinary directory object with public wrappers in `bin/`
-- generates `bundle.toml` and records the selected architecture as
-  `[platform].arch`
+- generates the versioned `bobr-host-bundle-v2` `bundle.toml` and records the
+  selected architecture as `[platform].arch`
 - verifies that the launcher, tools, dynamic loaders, and complete startup
   `DT_NEEDED` closure are ELF64 objects for the declared architecture
 - never executes target code while composing the bundle, so the builder itself

@@ -1,7 +1,8 @@
 //! Safe resolution of configured tool paths inside a HostBundle payload.
 
-use crate::{BundleConfig, BundleLocation, ToolConfig};
+use crate::{BundleConfig, BundleLocation, ToolArgument, ToolConfig};
 use std::error::Error;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -14,6 +15,7 @@ pub struct ResolvedTool {
     name: String,
     target: PathBuf,
     payload_root: PathBuf,
+    argument_prefix: Vec<OsString>,
     config: ToolConfig,
 }
 
@@ -31,6 +33,11 @@ impl ResolvedTool {
     /// Returns the canonical payload root containing the executable.
     pub fn payload_root(&self) -> &Path {
         &self.payload_root
+    }
+
+    /// Returns fixed arguments resolved for this concrete HostBundle location.
+    pub fn argument_prefix(&self) -> &[OsString] {
+        &self.argument_prefix
     }
 
     /// Returns the tool's typed runtime configuration.
@@ -76,6 +83,17 @@ pub enum ToolResolutionError {
         /// Canonical payload root.
         payload_root: PathBuf,
         /// Canonical escaped target.
+        target: PathBuf,
+    },
+    /// A fixed path argument resolves outside the HostBundle.
+    ArgumentEscapesBundle {
+        /// Tool containing the argument.
+        tool: String,
+        /// Zero-based argument position.
+        index: usize,
+        /// Canonical HostBundle root.
+        bundle_root: PathBuf,
+        /// Canonical escaped path.
         target: PathBuf,
     },
     /// The resolved target is not a regular file.
@@ -139,6 +157,17 @@ impl fmt::Display for ToolResolutionError {
                 "tool '{tool}' target '{}' is not a regular file",
                 target.display()
             ),
+            Self::ArgumentEscapesBundle {
+                tool,
+                index,
+                bundle_root,
+                target,
+            } => write!(
+                formatter,
+                "argument_prefix[{index}] for tool '{tool}' resolves to '{}' outside bundle root '{}'",
+                target.display(),
+                bundle_root.display()
+            ),
             Self::NotExecutable { tool, target } => write!(
                 formatter,
                 "tool '{tool}' target '{}' is not executable",
@@ -156,6 +185,7 @@ impl Error for ToolResolutionError {
             | Self::InvalidRelativePath { .. }
             | Self::PayloadEscapesBundle { .. }
             | Self::ToolEscapesPayload { .. }
+            | Self::ArgumentEscapesBundle { .. }
             | Self::NotRegularFile { .. }
             | Self::NotExecutable { .. } => None,
         }
@@ -226,10 +256,33 @@ pub fn resolve_tool(
         });
     }
 
+    let mut argument_prefix = Vec::with_capacity(tool.argument_prefix.len());
+    for (index, argument) in tool.argument_prefix.iter().enumerate() {
+        match argument {
+            ToolArgument::Literal { value } => argument_prefix.push(OsString::from(value)),
+            ToolArgument::Path { path } => {
+                let field = format!("tools.{tool_name}.argument_prefix[{index}].path");
+                validate_relative_path(&field, path)?;
+                let candidate = bundle_root.join(path);
+                let resolved = canonicalize(&field, &candidate, candidate.clone())?;
+                if !resolved.starts_with(&bundle_root) {
+                    return Err(ToolResolutionError::ArgumentEscapesBundle {
+                        tool: tool_name.to_string(),
+                        index,
+                        bundle_root,
+                        target: resolved,
+                    });
+                }
+                argument_prefix.push(resolved.into_os_string());
+            }
+        }
+    }
+
     Ok(ResolvedTool {
         name: tool_name.to_string(),
         target,
         payload_root,
+        argument_prefix,
         config: tool.clone(),
     })
 }
@@ -274,7 +327,7 @@ fn canonicalize(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BUNDLE_FORMAT_V1, locate_bundle_from_launcher};
+    use crate::{BUNDLE_FORMAT_V2, locate_bundle_from_launcher};
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
@@ -294,7 +347,7 @@ mod tests {
             let location = locate_bundle_from_launcher(&launcher).unwrap();
             let config = BundleConfig::parse(&format!(
                 r#"
-format = "{BUNDLE_FORMAT_V1}"
+format = "{BUNDLE_FORMAT_V2}"
 payload_root = "root"
 policy = "strict"
 [platform]
@@ -344,6 +397,60 @@ visibility = "public"
         );
         assert_eq!(tool.payload_root(), fixture.root().join("root").as_path());
         assert_eq!(tool.config().argv0, "demo");
+    }
+
+    #[test]
+    fn resolves_literal_and_bundle_path_argument_prefix() {
+        let mut fixture = Fixture::new("root/usr/bin/demo");
+        fixture.write_executable("root/usr/bin/demo");
+        fs::create_dir_all(fixture.root().join("root/usr/share/qemu")).unwrap();
+        fixture
+            .config
+            .tools
+            .get_mut("demo")
+            .unwrap()
+            .argument_prefix = vec![
+            ToolArgument::Literal {
+                value: "-L".to_string(),
+            },
+            ToolArgument::Path {
+                path: "root/usr/share/qemu".to_string(),
+            },
+        ];
+
+        let tool = resolve_tool(&fixture.location, &fixture.config, "demo").unwrap();
+
+        assert_eq!(
+            tool.argument_prefix(),
+            [
+                OsString::from("-L"),
+                fixture.root().join("root/usr/share/qemu").into_os_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_argument_path_symlink_that_escapes_bundle() {
+        let mut fixture = Fixture::new("root/usr/bin/demo");
+        fixture.write_executable("root/usr/bin/demo");
+        let outside = fixture.root().parent().unwrap().join("outside-data");
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, fixture.root().join("qemu-data")).unwrap();
+        fixture
+            .config
+            .tools
+            .get_mut("demo")
+            .unwrap()
+            .argument_prefix = vec![ToolArgument::Path {
+            path: "qemu-data".to_string(),
+        }];
+
+        let error = resolve_tool(&fixture.location, &fixture.config, "demo").unwrap_err();
+
+        assert!(matches!(
+            error,
+            ToolResolutionError::ArgumentEscapesBundle { .. }
+        ));
     }
 
     #[test]

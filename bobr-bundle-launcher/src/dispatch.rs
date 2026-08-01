@@ -192,13 +192,16 @@ pub fn prepare_tool_launch(
     arguments: &[OsString],
 ) -> Result<PreparedToolLaunch, DispatchError> {
     let format = inspect(tool.target(), bundle.platform.arch)?;
+    let mut complete_arguments = Vec::with_capacity(tool.argument_prefix().len() + arguments.len());
+    complete_arguments.extend_from_slice(tool.argument_prefix());
+    complete_arguments.extend_from_slice(arguments);
     let process = prepare_inspected(
         location,
         bundle,
         tool.payload_root(),
         tool.target(),
         OsStr::new(&tool.config().argv0),
-        arguments,
+        &complete_arguments,
         &format,
         0,
     )?;
@@ -331,7 +334,7 @@ mod tests {
                 locate_bundle_from_launcher(&root.join("libexec/bobr-bundle-launcher")).unwrap();
             let config = BundleConfig::parse(
                 r#"
-format = "bobr-host-bundle-v1"
+format = "bobr-host-bundle-v2"
 payload_root = "root"
 policy = "strict"
 [platform]
@@ -399,6 +402,46 @@ visibility = "public"
                 OsString::from("caller-argument"),
             ]
         );
+    }
+
+    #[test]
+    fn fixed_arguments_precede_caller_arguments_for_scripts() {
+        let mut fixture = Fixture::new();
+        fixture.write_executable("root/usr/bin/demo", b"#!/bin/interpreter\n");
+        let interpreter = fixture.write_executable("root/bin/interpreter", &minimal_static_elf());
+        fs::create_dir_all(fixture.root.join("root/usr/share/qemu")).unwrap();
+        fixture
+            .config
+            .tools
+            .get_mut("demo")
+            .unwrap()
+            .argument_prefix = vec![
+            crate::ToolArgument::Literal {
+                value: "-L".to_string(),
+            },
+            crate::ToolArgument::Path {
+                path: "root/usr/share/qemu".to_string(),
+            },
+        ];
+        let tool = fixture.tool();
+
+        let launch = prepare_tool_launch(
+            &fixture.location,
+            &fixture.config,
+            &tool,
+            &[OsString::from("caller")],
+        )
+        .unwrap();
+
+        let (executable, _, arguments) = launch.process().direct_parts().unwrap();
+        assert_eq!(executable, interpreter);
+        assert_eq!(arguments[0], tool.target().as_os_str());
+        assert_eq!(arguments[1], OsStr::new("-L"));
+        assert_eq!(
+            arguments[2],
+            fixture.root.join("root/usr/share/qemu").as_os_str()
+        );
+        assert_eq!(arguments[3], OsStr::new("caller"));
     }
 
     #[test]

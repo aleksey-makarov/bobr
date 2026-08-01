@@ -44,7 +44,7 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].spec().required_inputs, &["_root", "_launcher"]);
         assert_eq!(matches[0].spec().optional_inputs, &["overrides"]);
-        assert_eq!(matches[0].impl_version(), "3");
+        assert_eq!(matches[0].impl_version(), "4");
         assert!(!matches[0].is_arch_dependent());
     }
 

@@ -38,6 +38,7 @@ struct ToolDiagnostic {
     name: String,
     visibility: &'static str,
     target: String,
+    argument_prefix: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +150,11 @@ impl DiagnosticReport {
                     ToolVisibility::Internal => "internal",
                 },
                 target: escape_os(tool.target().as_os_str()),
+                argument_prefix: tool
+                    .argument_prefix()
+                    .iter()
+                    .map(|argument| escape_os(argument))
+                    .collect(),
             },
             executable,
             environment,
@@ -174,6 +180,7 @@ impl DiagnosticReport {
             format!("tool={}", self.tool.name),
             format!("visibility={}", self.tool.visibility),
             format!("target={}", self.tool.target),
+            format!("argument_prefix={}", self.tool.argument_prefix.join(" ")),
             format!("format={}", self.executable.format),
             format!("linkage={}", self.executable.linkage),
         ];

@@ -17,9 +17,9 @@ mod script;
 mod tool;
 
 pub use config::{
-    BUNDLE_FORMAT_V1, BundleConfig, BundleConfigError, EnvironmentOperation, EnvironmentRule,
+    BUNDLE_FORMAT_V2, BundleConfig, BundleConfigError, EnvironmentOperation, EnvironmentRule,
     EnvironmentRuleValidationError, HostPolicy, LoaderConfig, LoaderKind, PlatformArch,
-    PlatformConfig, PlatformOs, ToolConfig, ToolVisibility, read_bundle_config,
+    PlatformConfig, PlatformOs, ToolArgument, ToolConfig, ToolVisibility, read_bundle_config,
 };
 pub use diagnostics::DiagnosticReport;
 pub use dispatch::{

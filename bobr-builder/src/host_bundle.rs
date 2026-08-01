@@ -7,8 +7,8 @@ use crate::{BuildContext, BuilderError, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_bundle_launcher::{
     BundleConfig, BundleConfigError, EnvironmentOperation, EnvironmentRule,
     EnvironmentRuleValidationError, HostPolicy, LAUNCHER_BINARY_NAME, LoaderConfig, LoaderKind,
-    PlatformArch, PlatformConfig, PlatformOs, ToolConfig, ToolResolutionError, ToolVisibility,
-    validate_relative_path,
+    PlatformArch, PlatformConfig, PlatformOs, ToolArgument, ToolConfig, ToolResolutionError,
+    ToolVisibility, validate_relative_path,
 };
 use bobr_core::BuildLogLevel;
 use bobr_runtime::runtime::Runtime;
@@ -60,7 +60,10 @@ impl TypedBuilder for HostBundleBuilder {
         // Bumped 2 -> 3: the target architecture became a required builder
         // config field and now drives runtime-config lowering and ELF startup
         // verification, with both x86-64 and AArch64 supported.
-        "3"
+        // Bumped 3 -> 4: tools gained a typed fixed argument prefix whose
+        // bundle-relative path entries are validated during composition and
+        // resolved by the launcher before caller-provided arguments.
+        "4"
     }
 
     fn build_typed(
@@ -214,9 +217,30 @@ pub struct HostBundleToolConfig {
     /// Optional logical `argv[0]`; the tool name is used when omitted.
     #[serde(default)]
     pub argv0: Option<String>,
+    /// Fixed arguments inserted before arguments supplied by the caller.
+    #[serde(default)]
+    pub argument_prefix: Vec<HostBundleArgument>,
     /// Environment rules applied after the common rules for this tool.
     #[serde(default)]
     pub environment: BTreeMap<String, HostBundleEnvironmentRule>,
+}
+
+/// One fixed argument in a build-time HostBundle declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum HostBundleArgument {
+    /// A literal UTF-8 argument.
+    Literal(HostBundleLiteralArgument),
+    /// A path selected from one of the copied input namespaces.
+    Path(HostBundlePath),
+}
+
+/// Strict shape of a literal fixed argument.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostBundleLiteralArgument {
+    /// Argument contents.
+    pub value: String,
 }
 
 /// One environment operation in a build-time HostBundle declaration.
@@ -403,7 +427,7 @@ impl HostBundleConfig {
             &mut tools,
         )?;
 
-        BundleConfig::new_v1(
+        BundleConfig::new_v2(
             PAYLOAD_ROOT,
             self.policy,
             PlatformConfig {
@@ -445,12 +469,29 @@ fn lower_tools(
             });
         }
         let environment = lower_environment(&environment_scope, &tool.environment, has_overrides)?;
+        let argument_prefix = tool
+            .argument_prefix
+            .iter()
+            .enumerate()
+            .map(|(index, argument)| match argument {
+                HostBundleArgument::Literal(argument) => Ok(ToolArgument::Literal {
+                    value: argument.value.clone(),
+                }),
+                HostBundleArgument::Path(path) => lower_path(
+                    &format!("{scope}.{name}.argument_prefix[{index}]"),
+                    path,
+                    has_overrides,
+                )
+                .map(|path| ToolArgument::Path { path }),
+            })
+            .collect::<Result<Vec<_>, HostBundleConfigError>>()?;
         output.insert(
             name.clone(),
             ToolConfig {
                 path: format!("{PAYLOAD_ROOT}/{}", tool.path),
                 argv0,
                 visibility,
+                argument_prefix,
                 environment,
             },
         );
@@ -530,7 +571,7 @@ fn default_min_kernel() -> String {
 mod tests {
     use super::*;
     use crate::test_support::store_fs_tree;
-    use bobr_bundle_launcher::{BUNDLE_FORMAT_V1, ToolVisibility};
+    use bobr_bundle_launcher::{BUNDLE_FORMAT_V2, ToolVisibility};
     use serde_json::json;
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
@@ -594,6 +635,7 @@ mod tests {
         assert!(config.internal_tools.is_empty());
         assert!(config.environment.is_empty());
         assert!(config.public_tools["mc"].argv0.is_none());
+        assert!(config.public_tools["mc"].argument_prefix.is_empty());
         assert_eq!(canonical["arch"], "x86_64");
         assert_eq!(canonical["policy"], "strict");
         assert_eq!(canonical["min_kernel"], DEFAULT_MIN_KERNEL);
@@ -648,7 +690,12 @@ mod tests {
             "library_dirs": ["usr/lib/aarch64-linux-gnu", "lib"],
             "public_tools": {
                 "mc": {
-                    "path": "usr/bin/mc"
+                    "path": "usr/bin/mc",
+                    "argument_prefix": [
+                        { "value": "--data-dir" },
+                        { "source": "payload", "path": "usr/share/mc" },
+                        { "source": "overrides", "path": "mc/config" }
+                    ]
                 }
             },
             "internal_tools": {
@@ -687,7 +734,7 @@ mod tests {
 
         let runtime = config.lower_runtime_config(true).unwrap();
 
-        assert_eq!(runtime.format(), BUNDLE_FORMAT_V1);
+        assert_eq!(runtime.format(), BUNDLE_FORMAT_V2);
         assert_eq!(runtime.payload_root, "root");
         assert_eq!(runtime.policy, HostPolicy::Integrated);
         assert_eq!(runtime.platform.arch, PlatformArch::Aarch64);
@@ -700,6 +747,20 @@ mod tests {
         assert_eq!(runtime.tools["mc"].path, "root/usr/bin/mc");
         assert_eq!(runtime.tools["mc"].argv0, "mc");
         assert_eq!(runtime.tools["mc"].visibility, ToolVisibility::Public);
+        assert_eq!(
+            runtime.tools["mc"].argument_prefix,
+            [
+                ToolArgument::Literal {
+                    value: "--data-dir".to_string(),
+                },
+                ToolArgument::Path {
+                    path: "root/usr/share/mc".to_string(),
+                },
+                ToolArgument::Path {
+                    path: "overrides/mc/config".to_string(),
+                },
+            ]
+        );
         assert_eq!(runtime.tools["sh"].path, "root/usr/bin/bash");
         assert_eq!(runtime.tools["sh"].argv0, "sh");
         assert_eq!(runtime.tools["sh"].visibility, ToolVisibility::Internal);
@@ -733,7 +794,7 @@ mod tests {
         assert_eq!(reparsed, runtime);
         assert!(!toml.contains("public_tools"));
         assert!(!toml.contains("internal_tools"));
-        assert!(toml.contains("format = \"bobr-host-bundle-v1\""));
+        assert!(toml.contains("format = \"bobr-host-bundle-v2\""));
     }
 
     #[test]

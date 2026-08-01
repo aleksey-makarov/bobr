@@ -850,7 +850,7 @@ mod tests {
             temp.path().join("bin/demo"),
         )
         .unwrap();
-        let config = BundleConfig::new_v1(
+        let config = BundleConfig::new_v2(
             "root",
             HostPolicy::Strict,
             PlatformConfig {
@@ -879,6 +879,7 @@ mod tests {
                     path: "root/usr/bin/demo".to_string(),
                     argv0: "demo".to_string(),
                     visibility: ToolVisibility::Public,
+                    argument_prefix: Vec::new(),
                     environment: BTreeMap::new(),
                 },
             )]),
@@ -947,6 +948,7 @@ mod tests {
                     path: format!("root/usr/bin/{name}"),
                     argv0: name.to_string(),
                     visibility: ToolVisibility::Internal,
+                    argument_prefix: Vec::new(),
                     environment: BTreeMap::new(),
                 },
             );

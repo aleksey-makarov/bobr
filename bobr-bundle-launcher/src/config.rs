@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::platform::KernelVersion;
 
 /// Runtime configuration format understood by this launcher.
-pub const BUNDLE_FORMAT_V1: &str = "bobr-host-bundle-v1";
+pub const BUNDLE_FORMAT_V2: &str = "bobr-host-bundle-v2";
 
 /// Complete contents of `bundle.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,7 +39,7 @@ impl BundleConfig {
     ///
     /// The caller supplies semantic runtime fields; the format identifier is
     /// owned by the launcher and cannot be selected by a recipe.
-    pub fn new_v1(
+    pub fn new_v2(
         payload_root: impl Into<String>,
         policy: HostPolicy,
         platform: PlatformConfig,
@@ -48,7 +48,7 @@ impl BundleConfig {
         tools: BTreeMap<String, ToolConfig>,
     ) -> Result<Self, BundleConfigError> {
         let config = Self {
-            format: BUNDLE_FORMAT_V1.to_string(),
+            format: BUNDLE_FORMAT_V2.to_string(),
             payload_root: payload_root.into(),
             policy,
             platform,
@@ -60,7 +60,7 @@ impl BundleConfig {
         Ok(config)
     }
 
-    /// Parses and validates one v1 runtime configuration document.
+    /// Parses and validates one v2 runtime configuration document.
     pub fn parse(contents: &str) -> Result<Self, BundleConfigError> {
         let config = toml::from_str::<Self>(contents).map_err(BundleConfigError::Parse)?;
         config.validate()?;
@@ -69,7 +69,7 @@ impl BundleConfig {
 
     /// Validates semantic invariants independent of the bundle filesystem.
     pub fn validate(&self) -> Result<(), BundleConfigError> {
-        if self.format != BUNDLE_FORMAT_V1 {
+        if self.format != BUNDLE_FORMAT_V2 {
             return Err(BundleConfigError::UnsupportedFormat(self.format.clone()));
         }
         if self.tools.is_empty() {
@@ -92,6 +92,30 @@ impl BundleConfig {
                 || name.as_bytes().contains(&b'\0')
             {
                 return Err(BundleConfigError::InvalidToolName(name.clone()));
+            }
+        }
+        for (tool_name, tool) in &self.tools {
+            for (index, argument) in tool.argument_prefix.iter().enumerate() {
+                match argument {
+                    ToolArgument::Literal { value } => {
+                        if value.as_bytes().contains(&b'\0') {
+                            return Err(BundleConfigError::InvalidToolArgument {
+                                tool: tool_name.clone(),
+                                index,
+                                reason: "literal arguments cannot contain NUL",
+                            });
+                        }
+                    }
+                    ToolArgument::Path { path } => {
+                        if !is_safe_relative_path(path) {
+                            return Err(BundleConfigError::InvalidToolArgument {
+                                tool: tool_name.clone(),
+                                index,
+                                reason: "path arguments must be safe bundle-relative paths",
+                            });
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -217,9 +241,28 @@ pub struct ToolConfig {
     pub argv0: String,
     /// Whether a wrapper is part of the public interface or only for children.
     pub visibility: ToolVisibility,
+    /// Fixed arguments inserted before arguments supplied by the caller.
+    #[serde(default)]
+    pub argument_prefix: Vec<ToolArgument>,
     /// Environment operations applied after the common environment.
     #[serde(default)]
     pub environment: BTreeMap<String, EnvironmentRule>,
+}
+
+/// One fixed argument supplied by the HostBundle before caller arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum ToolArgument {
+    /// A literal argument passed byte-for-byte as UTF-8.
+    Literal {
+        /// Argument contents.
+        value: String,
+    },
+    /// A path resolved relative to the HostBundle root at launch time.
+    Path {
+        /// Safe bundle-relative path.
+        path: String,
+    },
 }
 
 /// How a configured tool is exposed by the HostBundle.
@@ -387,6 +430,15 @@ pub enum BundleConfigError {
     NoTools,
     /// A tool name cannot be selected safely through multi-call dispatch.
     InvalidToolName(String),
+    /// A fixed tool argument is unsafe or cannot be passed to `execve`.
+    InvalidToolArgument {
+        /// Tool containing the argument.
+        tool: String,
+        /// Zero-based position inside `argument_prefix`.
+        index: usize,
+        /// Stable explanation of the rejected shape.
+        reason: &'static str,
+    },
     /// The real launcher name is reserved for direct-mode invocation.
     ReservedToolName(String),
     /// `platform.min_kernel` is not a supported numeric version.
@@ -411,12 +463,20 @@ impl fmt::Display for BundleConfigError {
             Self::Parse(error) => write!(formatter, "invalid bundle config: {error}"),
             Self::UnsupportedFormat(format) => write!(
                 formatter,
-                "unsupported bundle config format '{format}' (expected '{BUNDLE_FORMAT_V1}')"
+                "unsupported bundle config format '{format}' (expected '{BUNDLE_FORMAT_V2}')"
             ),
             Self::NoTools => formatter.write_str("bundle config defines no tools"),
             Self::InvalidToolName(name) => {
                 write!(formatter, "invalid bundle tool name '{name}'")
             }
+            Self::InvalidToolArgument {
+                tool,
+                index,
+                reason,
+            } => write!(
+                formatter,
+                "invalid argument_prefix[{index}] for bundle tool '{tool}': {reason}"
+            ),
             Self::ReservedToolName(name) => {
                 write!(
                     formatter,
@@ -441,10 +501,20 @@ impl Error for BundleConfigError {
             Self::UnsupportedFormat(_)
             | Self::NoTools
             | Self::InvalidToolName(_)
+            | Self::InvalidToolArgument { .. }
             | Self::ReservedToolName(_)
             | Self::InvalidMinimumKernel { .. } => None,
         }
     }
+}
+
+fn is_safe_relative_path(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('/')
+        && !value.contains('\0')
+        && !value
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
 }
 
 /// Reads and strictly parses `bundle.toml` from `path`.
@@ -462,7 +532,7 @@ mod tests {
     use std::fs;
 
     const COMPLETE_CONFIG: &str = r#"
-format = "bobr-host-bundle-v1"
+format = "bobr-host-bundle-v2"
 payload_root = "root"
 policy = "strict"
 
@@ -496,6 +566,14 @@ path = "root/usr/bin/qemu-system-x86_64"
 argv0 = "qemu-system-x86_64"
 visibility = "public"
 
+[[tools.qemu-system-x86_64.argument_prefix]]
+kind = "literal"
+value = "-L"
+
+[[tools.qemu-system-x86_64.argument_prefix]]
+kind = "path"
+path = "root/usr/share/qemu"
+
 [tools.qemu-system-x86_64.environment.QEMU_AUDIO_DRV]
 operation = "default"
 values = ["none"]
@@ -507,10 +585,10 @@ visibility = "public"
 "#;
 
     #[test]
-    fn parses_complete_v1_config() {
+    fn parses_complete_v2_config() {
         let config = BundleConfig::parse(COMPLETE_CONFIG).unwrap();
 
-        assert_eq!(config.format(), BUNDLE_FORMAT_V1);
+        assert_eq!(config.format(), BUNDLE_FORMAT_V2);
         assert_eq!(config.payload_root, "root");
         assert_eq!(config.policy, HostPolicy::Strict);
         assert_eq!(config.platform.arch, PlatformArch::X86_64);
@@ -518,6 +596,17 @@ visibility = "public"
         assert!(config.loader.inhibit_cache);
         assert_eq!(config.environment.len(), 3);
         assert_eq!(config.tools.len(), 2);
+        assert_eq!(
+            config.tools["qemu-system-x86_64"].argument_prefix,
+            [
+                ToolArgument::Literal {
+                    value: "-L".to_string(),
+                },
+                ToolArgument::Path {
+                    path: "root/usr/share/qemu".to_string(),
+                },
+            ]
+        );
         assert_eq!(
             config.tools["qemu-system-x86_64"].environment["QEMU_AUDIO_DRV"].operation,
             EnvironmentOperation::Default
@@ -538,7 +627,7 @@ visibility = "public"
     #[test]
     fn constructed_config_serializes_and_parses_without_semantic_changes() {
         let parsed = BundleConfig::parse(COMPLETE_CONFIG).unwrap();
-        let constructed = BundleConfig::new_v1(
+        let constructed = BundleConfig::new_v2(
             parsed.payload_root.clone(),
             parsed.policy,
             parsed.platform.clone(),
@@ -553,12 +642,12 @@ visibility = "public"
 
         assert!(serialized.ends_with('\n'));
         assert_eq!(reparsed, constructed);
-        assert_eq!(reparsed.format(), BUNDLE_FORMAT_V1);
+        assert_eq!(reparsed.format(), BUNDLE_FORMAT_V2);
     }
 
     #[test]
     fn constructor_enforces_the_same_semantic_validation_as_parser() {
-        let error = BundleConfig::new_v1(
+        let error = BundleConfig::new_v2(
             "root",
             HostPolicy::Strict,
             PlatformConfig {
@@ -578,6 +667,7 @@ visibility = "public"
                     path: "root/usr/bin/demo".to_string(),
                     argv0: "demo".to_string(),
                     visibility: ToolVisibility::Public,
+                    argument_prefix: Vec::new(),
                     environment: BTreeMap::new(),
                 },
             )]),
@@ -594,7 +684,7 @@ visibility = "public"
     fn defaults_optional_environment_maps_and_rule_fields() {
         let config = BundleConfig::parse(
             r#"
-format = "bobr-host-bundle-v1"
+format = "bobr-host-bundle-v2"
 payload_root = "root"
 policy = "integrated"
 [platform]
@@ -650,6 +740,24 @@ visibility = "public"
     }
 
     #[test]
+    fn rejects_invalid_fixed_arguments() {
+        let unsafe_path =
+            COMPLETE_CONFIG.replace("path = \"root/usr/share/qemu\"", "path = \"../host/qemu\"");
+        let error = BundleConfig::parse(&unsafe_path).unwrap_err();
+        assert!(matches!(
+            error,
+            BundleConfigError::InvalidToolArgument { index: 1, .. }
+        ));
+
+        let nul = COMPLETE_CONFIG.replace("value = \"-L\"", "value = \"-L\\u0000host\"");
+        let error = BundleConfig::parse(&nul).unwrap_err();
+        assert!(matches!(
+            error,
+            BundleConfigError::InvalidToolArgument { index: 0, .. }
+        ));
+    }
+
+    #[test]
     fn rejects_unknown_environment_rule_field() {
         let invalid = COMPLETE_CONFIG.replace(
             "paths = [\"root/usr/lib/dri\"]",
@@ -663,7 +771,7 @@ visibility = "public"
 
     #[test]
     fn rejects_unsupported_format() {
-        let invalid = COMPLETE_CONFIG.replace(BUNDLE_FORMAT_V1, "bobr-host-bundle-v999");
+        let invalid = COMPLETE_CONFIG.replace(BUNDLE_FORMAT_V2, "bobr-host-bundle-v999");
 
         let error = BundleConfig::parse(&invalid).unwrap_err();
 
@@ -740,7 +848,7 @@ visibility = "public"
 
         let config = read_bundle_config(&path).unwrap();
 
-        assert_eq!(config.format(), BUNDLE_FORMAT_V1);
+        assert_eq!(config.format(), BUNDLE_FORMAT_V2);
     }
 
     #[test]

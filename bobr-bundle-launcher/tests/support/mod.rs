@@ -76,7 +76,7 @@ impl BundleFixture {
             self.root.join("bundle.toml"),
             format!(
                 r#"
-format = "bobr-host-bundle-v1"
+format = "bobr-host-bundle-v2"
 payload_root = "root"
 policy = "strict"
 [platform]

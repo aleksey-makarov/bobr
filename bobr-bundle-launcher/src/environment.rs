@@ -372,7 +372,7 @@ fn is_loader_sensitive(name: &OsStr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BUNDLE_FORMAT_V1, locate_bundle_from_launcher, resolve_tool};
+    use crate::{BUNDLE_FORMAT_V2, locate_bundle_from_launcher, resolve_tool};
     use std::fs;
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::PermissionsExt;
@@ -399,7 +399,7 @@ mod tests {
                 locate_bundle_from_launcher(&root.join("libexec/bobr-bundle-launcher")).unwrap();
             let config = BundleConfig::parse(&format!(
                 r#"
-format = "{BUNDLE_FORMAT_V1}"
+format = "{BUNDLE_FORMAT_V2}"
 payload_root = "root"
 policy = "strict"
 [platform]
