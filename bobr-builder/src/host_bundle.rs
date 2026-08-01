@@ -28,10 +28,10 @@ const OUTPUT_DIR_NAME: &str = "host-bundle";
 const INPUT_LAUNCHER_PATH: &str = "usr/libexec/bobr-bundle-launcher";
 const OUTPUT_LAUNCHER_PATH: &str = "libexec/bobr-bundle-launcher";
 
-/// Materialized input contract for the HostBundle builder.
+/// Input contract for the HostBundle builder.
 pub static HOST_BUNDLE_INPUT_SPEC: InputSpec = InputSpec {
     required_inputs: &["_root", "_launcher"],
-    optional_inputs: &["_overrides"],
+    optional_inputs: &["overrides"],
     allow_extra_inputs: false,
 };
 
@@ -51,7 +51,7 @@ impl TypedBuilder for HostBundleBuilder {
     }
 
     fn impl_version(&self) -> &'static str {
-        "1"
+        "2"
     }
 
     fn build_typed(
@@ -69,7 +69,7 @@ fn build_host_bundle(
     inputs: BuilderInputs,
     cx: &mut BuildContext,
 ) -> Result<PathBuf, BuilderError> {
-    let has_overrides = inputs.optional("_overrides").is_some();
+    let has_overrides = inputs.optional("overrides").is_some();
     let runtime_config = config
         .lower_runtime_config(has_overrides)
         .map_err(|error| BuilderError::InvalidRecipe(error.to_string()))?;
@@ -87,7 +87,7 @@ fn build_host_bundle(
             dest: OUTPUT_LAUNCHER_PATH.to_string(),
         },
     ];
-    if let Some(overrides) = inputs.optional("_overrides") {
+    if let Some(overrides) = inputs.optional("overrides") {
         copies.push(PlainTreeCopy::Tree {
             source: overrides.clone(),
             dest: OVERRIDES_ROOT.to_string(),
@@ -237,7 +237,7 @@ pub enum HostBundlePath {
         /// Relative path inside the payload.
         path: String,
     },
-    /// A path relative to the optional `_overrides` tree.
+    /// A path relative to the optional `overrides` directory object.
     Overrides {
         /// Relative path inside the overrides tree.
         path: String,
@@ -261,7 +261,7 @@ pub enum HostBundleConfigError {
         /// Underlying path validation failure.
         source: ToolResolutionError,
     },
-    /// An overrides path was declared without an `_overrides` input.
+    /// An overrides path was declared without an `overrides` input.
     MissingOverridesInput {
         /// Configuration field containing the path.
         field: String,
@@ -301,7 +301,7 @@ impl fmt::Display for HostBundleConfigError {
             Self::InvalidPath { source } => source.fmt(formatter),
             Self::MissingOverridesInput { field, path } => write!(
                 formatter,
-                "{field} references overrides path '{path}' but input '_overrides' is absent"
+                "{field} references overrides path '{path}' but input 'overrides' is absent"
             ),
             Self::InvalidArgv0 { tool } => {
                 write!(formatter, "HostBundle tool '{tool}' has an invalid argv0")
@@ -334,7 +334,7 @@ impl Error for HostBundleConfigError {
 impl HostBundleConfig {
     /// Lowers this build-time declaration into the canonical runtime model.
     ///
-    /// `has_overrides` records whether the optional `_overrides` input is
+    /// `has_overrides` records whether the optional `overrides` input is
     /// present. No input filesystem is read at this stage.
     pub fn lower_runtime_config(
         &self,
@@ -556,12 +556,12 @@ mod tests {
     }
 
     #[test]
-    fn input_contract_materializes_only_declared_trees() {
+    fn input_contract_materializes_packages_but_not_overrides() {
         assert_eq!(
             HOST_BUNDLE_INPUT_SPEC.required_inputs,
             &["_root", "_launcher"]
         );
-        assert_eq!(HOST_BUNDLE_INPUT_SPEC.optional_inputs, &["_overrides"]);
+        assert_eq!(HOST_BUNDLE_INPUT_SPEC.optional_inputs, &["overrides"]);
         assert!(!HOST_BUNDLE_INPUT_SPEC.allow_extra_inputs);
         HOST_BUNDLE_INPUT_SPEC.validate().unwrap();
     }
@@ -830,7 +830,7 @@ mod tests {
         let mut slots = BTreeMap::new();
         slots.insert("_root".to_string(), payload.clone());
         slots.insert("_launcher".to_string(), launcher);
-        slots.insert("_overrides".to_string(), overrides);
+        slots.insert("overrides".to_string(), overrides);
         let build_temp = temp.path().join("build");
         fs::create_dir(&build_temp).unwrap();
         let mut cx = BuildContext::with_noop_logger(build_temp, store_fs_tree(temp.path()));
@@ -886,6 +886,46 @@ mod tests {
             0o555
         );
         verify_tree_read_only(&output).unwrap();
+    }
+
+    #[test]
+    fn rejects_a_non_directory_overrides_object() {
+        let temp = tempdir().unwrap();
+        let payload = temp.path().join("payload");
+        let launcher = temp.path().join("launcher");
+        let overrides = temp.path().join("overrides-file");
+        fs::create_dir_all(payload.join("usr/bin")).unwrap();
+        fs::create_dir_all(payload.join("usr/lib")).unwrap();
+        fs::create_dir_all(launcher.join("usr/libexec")).unwrap();
+        write_static_elf(&payload.join("usr/bin/demo"));
+        write_static_elf(&launcher.join(INPUT_LAUNCHER_PATH));
+        fs::write(&overrides, b"not a directory").unwrap();
+
+        let inputs = BuilderInputs::new(BTreeMap::from([
+            ("_root".to_string(), payload),
+            ("_launcher".to_string(), launcher),
+            ("overrides".to_string(), overrides),
+        ]));
+        let build_temp = temp.path().join("build");
+        fs::create_dir(&build_temp).unwrap();
+        let mut cx = BuildContext::with_noop_logger(build_temp, store_fs_tree(temp.path()));
+        let builder = crate::BUILDERS
+            .iter()
+            .copied()
+            .find(|builder| builder.tag() == "HostBundle")
+            .unwrap();
+        let plan = builder
+            .plan(json!({
+                "library_dirs": ["usr/lib"],
+                "public_tools": {
+                    "demo": { "path": "usr/bin/demo" }
+                }
+            }))
+            .unwrap();
+
+        let error = plan.build(inputs, &mut cx).unwrap_err();
+
+        assert!(error.to_string().contains("is not a real directory"));
     }
 
     #[test]

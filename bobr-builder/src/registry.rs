@@ -43,8 +43,8 @@ mod tests {
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].spec().required_inputs, &["_root", "_launcher"]);
-        assert_eq!(matches[0].spec().optional_inputs, &["_overrides"]);
-        assert_eq!(matches[0].impl_version(), "1");
+        assert_eq!(matches[0].spec().optional_inputs, &["overrides"]);
+        assert_eq!(matches[0].impl_version(), "2");
     }
 
     #[test]
