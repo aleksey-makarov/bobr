@@ -102,11 +102,6 @@ impl Error for ExecutableInspectionError {
     }
 }
 
-/// Identifies an executable without falling back to host format handling.
-pub fn inspect_executable(path: &Path) -> Result<ExecutableFormat, ExecutableInspectionError> {
-    inspect_executable_for_arch(path, PlatformArch::X86_64)
-}
-
 /// Identifies an executable for the architecture declared by its bundle.
 pub fn inspect_executable_for_arch(
     path: &Path,
@@ -189,7 +184,7 @@ mod tests {
     fn inspect(contents: &[u8]) -> Result<ExecutableFormat, ExecutableInspectionError> {
         let temp = tempfile::NamedTempFile::new().unwrap();
         fs::write(temp.path(), contents).unwrap();
-        inspect_executable(temp.path())
+        inspect_executable_for_arch(temp.path(), PlatformArch::X86_64)
     }
 
     #[test]

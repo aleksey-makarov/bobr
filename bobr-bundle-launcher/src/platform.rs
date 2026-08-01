@@ -157,8 +157,7 @@ pub fn check_host_platform(
         kernel_release: release,
         kernel_compatible: current_kernel >= required_kernel,
         os_compatible: matches!(required.os, PlatformOs::Linux),
-        arch_compatible: cfg!(target_arch = "x86_64")
-            && matches!(required.arch, PlatformArch::X86_64),
+        arch_compatible: PlatformArch::current() == Some(required.arch),
     })
 }
 
@@ -181,15 +180,28 @@ mod tests {
 
     #[test]
     fn checks_the_current_linux_host() {
+        let current_arch = PlatformArch::current().expect("tests require a supported architecture");
         let check = check_host_platform(&PlatformConfig {
             os: PlatformOs::Linux,
-            arch: PlatformArch::X86_64,
+            arch: current_arch,
             min_kernel: "1.0".to_string(),
         })
         .unwrap();
 
         assert!(check.kernel_compatible());
         assert!(check.os_compatible());
-        assert_eq!(check.arch_compatible(), cfg!(target_arch = "x86_64"));
+        assert!(check.arch_compatible());
+
+        let other_arch = match current_arch {
+            PlatformArch::X86_64 => PlatformArch::Aarch64,
+            PlatformArch::Aarch64 => PlatformArch::X86_64,
+        };
+        let mismatch = check_host_platform(&PlatformConfig {
+            os: PlatformOs::Linux,
+            arch: other_arch,
+            min_kernel: "1.0".to_string(),
+        })
+        .unwrap();
+        assert!(!mismatch.arch_compatible());
     }
 }

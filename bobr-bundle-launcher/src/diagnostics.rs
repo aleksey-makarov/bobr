@@ -134,7 +134,7 @@ impl DiagnosticReport {
             },
             platform: PlatformDiagnostic {
                 required_os: "linux",
-                required_arch: "x86_64",
+                required_arch: bundle.platform.arch.as_str(),
                 minimum_kernel: bundle.platform.min_kernel.clone(),
                 host_kernel: host.kernel_release().to_string(),
                 os_compatible: host.os_compatible(),

@@ -5,7 +5,7 @@ use bobr_bundle_launcher::{
     Shebang, ToolVisibility, inspect_elf_for_arch, inspect_executable_for_arch,
     locate_bundle_from_launcher, resolve_tool,
 };
-use goblin::elf::{Elf, header};
+use goblin::elf::Elf;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -686,12 +686,10 @@ fn parse_elf(path: &Path, expected_arch: PlatformArch) -> Result<ElfInfo, String
         .map_err(|error| format!("failed to read ELF '{}': {error}", path.display()))?;
     let elf = Elf::parse(&bytes)
         .map_err(|error| format!("failed to parse ELF '{}': {error}", path.display()))?;
-    let expected_machine = match expected_arch {
-        PlatformArch::X86_64 => header::EM_X86_64,
-    };
+    let expected_machine = expected_arch.elf_machine();
     if !elf.is_64 || !elf.little_endian || elf.header.e_machine != expected_machine {
         return Err(format!(
-            "ELF '{}' does not match HostBundle architecture {expected_arch:?}",
+            "ELF '{}' does not match HostBundle architecture {expected_arch}",
             path.display(),
         ));
     }

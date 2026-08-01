@@ -35,7 +35,7 @@ jobs:
       - name: Build release binaries
         run: |
           cargo build --release --locked -p bobr-build -p fsobj-hash
-          cargo build-sandbox-launcher --release --locked
+          cargo build-sandbox-launcher-x86_64 --release --locked
 
       - name: Package
         run: |

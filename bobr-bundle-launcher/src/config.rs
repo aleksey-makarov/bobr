@@ -148,6 +148,43 @@ pub enum PlatformOs {
 pub enum PlatformArch {
     /// 64-bit x86 System V ABI.
     X86_64,
+    /// 64-bit Arm A-profile ABI.
+    Aarch64,
+}
+
+impl PlatformArch {
+    /// Returns the canonical HostBundle spelling of this architecture.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::X86_64 => "x86_64",
+            Self::Aarch64 => "aarch64",
+        }
+    }
+
+    /// Returns the ELF `e_machine` value required for this architecture.
+    pub const fn elf_machine(self) -> u16 {
+        match self {
+            Self::X86_64 => 62,
+            Self::Aarch64 => 183,
+        }
+    }
+
+    /// Returns the architecture of the currently compiled launcher, if supported.
+    pub const fn current() -> Option<Self> {
+        if cfg!(target_arch = "x86_64") {
+            Some(Self::X86_64)
+        } else if cfg!(target_arch = "aarch64") {
+            Some(Self::Aarch64)
+        } else {
+            None
+        }
+    }
+}
+
+impl fmt::Display for PlatformArch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// Runtime dynamic-loader configuration.
@@ -485,6 +522,17 @@ visibility = "public"
             config.tools["qemu-system-x86_64"].environment["QEMU_AUDIO_DRV"].operation,
             EnvironmentOperation::Default
         );
+    }
+
+    #[test]
+    fn parses_and_serializes_aarch64_platform() {
+        let source = COMPLETE_CONFIG.replace("arch = \"x86_64\"", "arch = \"aarch64\"");
+        let config = BundleConfig::parse(&source).unwrap();
+
+        assert_eq!(config.platform.arch, PlatformArch::Aarch64);
+        assert_eq!(config.platform.arch.as_str(), "aarch64");
+        assert_eq!(config.platform.arch.elf_machine(), 183);
+        assert!(config.to_toml().unwrap().contains("arch = \"aarch64\""));
     }
 
     #[test]

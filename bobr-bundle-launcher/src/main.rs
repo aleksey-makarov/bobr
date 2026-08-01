@@ -28,7 +28,8 @@ fn main() {
     if !invocation.is_diagnose() && !host_platform.is_compatible() {
         exit_with_error(format!(
             "host platform does not satisfy bundle requirements \
-             (required linux/x86_64 kernel >= {}, host kernel {})",
+             (required linux/{} kernel >= {}, host kernel {})",
+            config.platform.arch,
             config.platform.min_kernel,
             host_platform.kernel_release()
         ));

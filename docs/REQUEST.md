@@ -293,6 +293,47 @@ paths.
   and metadata, with the leading `strip_prefix` component removed — and writes
   one fs-tree object
 
+### `HostBundle`
+
+Builds a verified, relocatable host-side application directory from an already
+materialized runtime root and a static launcher package.
+
+**Inputs:**
+
+- required `_root` — the materialized payload fs-tree
+- required `_launcher` — a materialized fs-tree containing
+  `usr/libexec/bobr-bundle-launcher`
+- optional `overrides` — an ordinary directory object copied under the
+  bundle's `overrides/`
+
+**Config:** `arch` is required and accepts `x86_64` or `aarch64`:
+
+```json
+{
+  "arch": "x86_64",
+  "policy": "strict",
+  "library_dirs": ["usr/lib64", "usr/lib"],
+  "public_tools": {
+    "demo": { "path": "usr/bin/demo" }
+  }
+}
+```
+
+`internal_tools` declares commands exposed only to bundled child processes.
+`environment` and per-tool `environment` contain typed environment rules.
+`min_kernel` defaults to `4.19`; `policy` defaults to `strict`.
+
+**Behavior:**
+
+- writes a read-only ordinary directory object with public wrappers in `bin/`
+- generates `bundle.toml` and records the selected architecture as
+  `[platform].arch`
+- verifies that the launcher, tools, dynamic loaders, and complete startup
+  `DT_NEEDED` closure are ELF64 objects for the declared architecture
+- never executes target code while composing the bundle, so the builder itself
+  is host-architecture-independent; the explicit config and input hashes carry
+  all target-architecture differences into the build key
+
 ### `OciExtract`
 
 Extracts one OCI image layout into an fs-tree.

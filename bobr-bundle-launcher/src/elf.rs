@@ -17,7 +17,6 @@ const ELFDATA2LSB: u8 = 1;
 const EV_CURRENT: u8 = 1;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
-const EM_X86_64: u16 = 62;
 const PT_INTERP: u32 = 3;
 const MAX_INTERPRETER_SIZE: u64 = 4096;
 
@@ -72,8 +71,13 @@ pub enum ElfError {
     UnsupportedEndian(u8),
     /// The ELF identification or header version is unsupported.
     UnsupportedVersion(u32),
-    /// The file targets a machine other than x86-64.
-    UnsupportedMachine(u16),
+    /// The file targets a machine other than the bundle architecture.
+    UnsupportedMachine {
+        /// ELF `e_machine` value found in the file.
+        actual: u16,
+        /// Architecture declared by the HostBundle.
+        expected: PlatformArch,
+    },
     /// The ELF type is neither executable nor position-independent.
     UnsupportedType(u16),
     /// The ELF header advertises an incompatible header size.
@@ -119,10 +123,11 @@ impl fmt::Display for ElfError {
             Self::UnsupportedVersion(version) => {
                 write!(formatter, "unsupported ELF version {version}")
             }
-            Self::UnsupportedMachine(machine) => {
+            Self::UnsupportedMachine { actual, expected } => {
                 write!(
                     formatter,
-                    "unsupported ELF machine {machine} (expected x86-64)"
+                    "unsupported ELF machine {actual} (expected {expected}, e_machine {})",
+                    expected.elf_machine()
                 )
             }
             Self::UnsupportedType(kind) => write!(formatter, "unsupported ELF type {kind}"),
@@ -153,11 +158,6 @@ impl Error for ElfError {
             _ => None,
         }
     }
-}
-
-/// Inspects one x86-64 ELF executable and determines its linkage.
-pub fn inspect_elf(path: &Path) -> Result<ElfExecutable, ElfError> {
-    inspect_elf_for_arch(path, PlatformArch::X86_64)
 }
 
 /// Inspects one ELF executable for the architecture declared by its bundle.
@@ -200,11 +200,12 @@ pub fn inspect_elf_for_arch(
         return Err(ElfError::UnsupportedType(elf_type));
     }
     let machine = read_u16(&header, 18);
-    let expected_machine = match expected_arch {
-        PlatformArch::X86_64 => EM_X86_64,
-    };
+    let expected_machine = expected_arch.elf_machine();
     if machine != expected_machine {
-        return Err(ElfError::UnsupportedMachine(machine));
+        return Err(ElfError::UnsupportedMachine {
+            actual: machine,
+            expected: expected_arch,
+        });
     }
     let version = read_u32(&header, 20);
     if version != u32::from(EV_CURRENT) {
@@ -300,7 +301,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn elf(elf_type: u16, interpreters: &[&[u8]]) -> Vec<u8> {
+    fn elf_for_arch(arch: PlatformArch, elf_type: u16, interpreters: &[&[u8]]) -> Vec<u8> {
         let program_header_offset = ELF_HEADER_SIZE;
         let table_size = interpreters.len() * ELF64_PROGRAM_HEADER_SIZE;
         let mut bytes = vec![0_u8; program_header_offset + table_size];
@@ -309,7 +310,7 @@ mod tests {
         bytes[5] = ELFDATA2LSB;
         bytes[6] = EV_CURRENT;
         bytes[16..18].copy_from_slice(&elf_type.to_le_bytes());
-        bytes[18..20].copy_from_slice(&EM_X86_64.to_le_bytes());
+        bytes[18..20].copy_from_slice(&arch.elf_machine().to_le_bytes());
         bytes[20..24].copy_from_slice(&u32::from(EV_CURRENT).to_le_bytes());
         bytes[32..40].copy_from_slice(&(program_header_offset as u64).to_le_bytes());
         bytes[52..54].copy_from_slice(&(ELF_HEADER_SIZE as u16).to_le_bytes());
@@ -329,10 +330,14 @@ mod tests {
         bytes
     }
 
+    fn elf(elf_type: u16, interpreters: &[&[u8]]) -> Vec<u8> {
+        elf_for_arch(PlatformArch::X86_64, elf_type, interpreters)
+    }
+
     fn inspect(bytes: &[u8]) -> Result<ElfExecutable, ElfError> {
         let temp = tempfile::NamedTempFile::new().unwrap();
         fs::write(temp.path(), bytes).unwrap();
-        inspect_elf(temp.path())
+        inspect_elf_for_arch(temp.path(), PlatformArch::X86_64)
     }
 
     #[test]
@@ -365,9 +370,29 @@ mod tests {
 
     #[test]
     fn identifies_current_test_binary_as_dynamic_elf() {
-        let executable = inspect_elf(&std::env::current_exe().unwrap()).unwrap();
+        let arch = PlatformArch::current().expect("tests require a supported architecture");
+        let executable = inspect_elf_for_arch(&std::env::current_exe().unwrap(), arch).unwrap();
 
         assert!(matches!(executable.linkage(), ElfLinkage::Dynamic { .. }));
+    }
+
+    #[test]
+    fn accepts_aarch64_and_rejects_cross_architecture_elf() {
+        let aarch64 = elf_for_arch(PlatformArch::Aarch64, ET_EXEC, &[]);
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(temp.path(), &aarch64).unwrap();
+
+        assert!(
+            inspect_elf_for_arch(temp.path(), PlatformArch::Aarch64).is_ok(),
+            "AArch64 ELF must be accepted for an AArch64 bundle"
+        );
+        assert!(matches!(
+            inspect_elf_for_arch(temp.path(), PlatformArch::X86_64),
+            Err(ElfError::UnsupportedMachine {
+                actual: 183,
+                expected: PlatformArch::X86_64,
+            })
+        ));
     }
 
     #[test]
@@ -403,7 +428,13 @@ mod tests {
                 let mut bytes = elf(ET_EXEC, &[]);
                 bytes[18..20].copy_from_slice(&3_u16.to_le_bytes());
                 (bytes, |error| {
-                    matches!(error, ElfError::UnsupportedMachine(3))
+                    matches!(
+                        error,
+                        ElfError::UnsupportedMachine {
+                            actual: 3,
+                            expected: PlatformArch::X86_64,
+                        }
+                    )
                 })
             },
             {
@@ -470,7 +501,7 @@ mod tests {
     fn read_error_reports_path() {
         let path = Path::new("/definitely/missing/elf");
 
-        let error = inspect_elf(path).unwrap_err();
+        let error = inspect_elf_for_arch(path, PlatformArch::X86_64).unwrap_err();
 
         assert!(error.to_string().contains(&path.display().to_string()));
         assert!(error.source().is_some());

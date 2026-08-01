@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use bobr_bundle_launcher::PlatformArch;
 use std::fs;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
@@ -65,6 +66,7 @@ impl BundleFixture {
         loader_dirs: &[&str],
         environment: &str,
     ) {
+        let arch = PlatformArch::current().expect("tests require a supported architecture");
         let library_dirs = loader_dirs
             .iter()
             .map(|path| format!("{path:?}"))
@@ -79,7 +81,7 @@ payload_root = "root"
 policy = "strict"
 [platform]
 os = "linux"
-arch = "x86_64"
+arch = "{arch}"
 min_kernel = "4.19"
 [loader]
 kind = "glibc"
@@ -141,20 +143,35 @@ fn static_exit_elf(exit_code: u32) -> Vec<u8> {
     const HEADER_SIZE: usize = 64;
     const PROGRAM_HEADER_SIZE: usize = 56;
     const BASE: u64 = 0x400000;
-    let code = [
-        0xb8,
-        60,
-        0,
-        0,
-        0, // mov eax, SYS_exit
-        0xbf,
-        exit_code as u8,
-        (exit_code >> 8) as u8,
-        (exit_code >> 16) as u8,
-        (exit_code >> 24) as u8, // mov edi, exit_code
-        0x0f,
-        0x05, // syscall
-    ];
+    let arch = PlatformArch::current().expect("tests require a supported architecture");
+    let code = match arch {
+        PlatformArch::X86_64 => vec![
+            0xb8,
+            60,
+            0,
+            0,
+            0, // mov eax, SYS_exit
+            0xbf,
+            exit_code as u8,
+            (exit_code >> 8) as u8,
+            (exit_code >> 16) as u8,
+            (exit_code >> 24) as u8, // mov edi, exit_code
+            0x0f,
+            0x05, // syscall
+        ],
+        PlatformArch::Aarch64 => {
+            assert!(exit_code <= u32::from(u16::MAX));
+            let instructions = [
+                0x5280_0000 | (exit_code << 5), // mov w0, #exit_code
+                0xd280_0000 | (93 << 5) | 8,    // mov x8, #SYS_exit
+                0xd400_0001,                    // svc #0
+            ];
+            instructions
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect()
+        }
+    };
     let code_offset = HEADER_SIZE + PROGRAM_HEADER_SIZE;
     let file_size = code_offset + code.len();
     let mut elf = vec![0_u8; file_size];
@@ -164,7 +181,7 @@ fn static_exit_elf(exit_code: u32) -> Vec<u8> {
     elf[5] = 1;
     elf[6] = 1;
     elf[16..18].copy_from_slice(&2_u16.to_le_bytes());
-    elf[18..20].copy_from_slice(&62_u16.to_le_bytes());
+    elf[18..20].copy_from_slice(&arch.elf_machine().to_le_bytes());
     elf[20..24].copy_from_slice(&1_u32.to_le_bytes());
     elf[24..32].copy_from_slice(&(BASE + code_offset as u64).to_le_bytes());
     elf[32..40].copy_from_slice(&(HEADER_SIZE as u64).to_le_bytes());
@@ -192,13 +209,14 @@ fn dynamic_elf(interpreter: &str) -> Vec<u8> {
     interpreter.push(0);
     let content_offset = HEADER_SIZE + PROGRAM_HEADER_SIZE;
     let mut elf = vec![0_u8; content_offset + interpreter.len()];
+    let arch = PlatformArch::current().expect("tests require a supported architecture");
 
     elf[..4].copy_from_slice(b"\x7fELF");
     elf[4] = 2;
     elf[5] = 1;
     elf[6] = 1;
     elf[16..18].copy_from_slice(&3_u16.to_le_bytes());
-    elf[18..20].copy_from_slice(&62_u16.to_le_bytes());
+    elf[18..20].copy_from_slice(&arch.elf_machine().to_le_bytes());
     elf[20..24].copy_from_slice(&1_u32.to_le_bytes());
     elf[32..40].copy_from_slice(&(HEADER_SIZE as u64).to_le_bytes());
     elf[52..54].copy_from_slice(&(HEADER_SIZE as u16).to_le_bytes());

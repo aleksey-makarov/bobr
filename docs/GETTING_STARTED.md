@@ -6,9 +6,9 @@ the Nickel recipes. For the ideas behind it all, see [Concepts](./CONCEPTS.md).
 
 ## Prerequisites
 
-- A stable Rust toolchain with the `x86_64-unknown-linux-musl` target added
-  (`rustup target add x86_64-unknown-linux-musl`) — needed to build the sandbox
-  launcher.
+- A stable Rust toolchain with the native Linux musl target added —
+  `x86_64-unknown-linux-musl` on x86-64 or `aarch64-unknown-linux-musl` on
+  AArch64. This target is needed to build the sandbox launcher.
 - `newuidmap` and `newgidmap` on `PATH` (the `shadow` / `uidmap` package). Bobr
   runs each builder in a Linux user namespace when you are not root, and uses
   these setuid helpers to set up the uid/gid map. As root — or under `podman
@@ -21,14 +21,16 @@ the Nickel recipes. For the ideas behind it all, see [Concepts](./CONCEPTS.md).
 git clone https://github.com/aleksey-makarov/bobr
 cd bobr
 cargo build                    # builds target/debug/bobr and target/debug/fsobj-hash
-cargo build-sandbox-launcher   # builds the static musl sandbox launcher
+cargo build-sandbox-launcher-x86_64  # use the aarch64 alias on AArch64
 ```
 
-`cargo build-sandbox-launcher` is a workspace alias that builds
-`bobr-sandbox-launcher` for the musl target; `bobr` locates the launcher next to
-its own binary, so no further setup is needed. The launcher is used only by the
-`Sandbox` builder, so you can skip it until you build something that runs
-commands.
+Choose the architecture-specific workspace alias that matches the machine:
+`build-sandbox-launcher-x86_64` or `build-sandbox-launcher-aarch64`. `bobr`
+locates the result in Cargo's corresponding musl target directory, so no
+further setup is needed. The launcher is used only by the `Sandbox` builder, so
+you can skip it until you build something that runs commands. The HostBundle
+launcher has matching `build-bundle-launcher-x86_64` and
+`build-bundle-launcher-aarch64` aliases.
 
 ## Your first build
 

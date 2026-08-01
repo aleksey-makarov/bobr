@@ -60,6 +60,7 @@ fn resolve_sandbox_launcher_path_from(
     path_env: Option<OsString>,
 ) -> Result<PathBuf, RuntimeError> {
     let mut checked = Vec::new();
+    let host_musl_target = host_musl_target_triple();
     if let Some(path) = env_override {
         checked.push(path.clone());
         if path.exists() {
@@ -70,7 +71,7 @@ fn resolve_sandbox_launcher_path_from(
     if let Some(current_exe) = current_exe {
         if let Some((target_dir, profile)) = cargo_target_dir_and_profile(current_exe) {
             let candidate = target_dir
-                .join("x86_64-unknown-linux-musl")
+                .join(&host_musl_target)
                 .join(profile)
                 .join(LAUNCHER_BINARY_NAME);
             checked.push(candidate.clone());
@@ -89,7 +90,7 @@ fn resolve_sandbox_launcher_path_from(
             let target_dir = ancestor.join("target");
             for profile in ["debug", "release"] {
                 let candidate = target_dir
-                    .join("x86_64-unknown-linux-musl")
+                    .join(&host_musl_target)
                     .join(profile)
                     .join(LAUNCHER_BINARY_NAME);
                 checked.push(candidate.clone());
@@ -119,6 +120,10 @@ fn resolve_sandbox_launcher_path_from(
             .collect::<Vec<_>>()
             .join(", ")
     )))
+}
+
+fn host_musl_target_triple() -> String {
+    format!("{}-unknown-linux-musl", env::consts::ARCH)
 }
 
 fn cargo_target_dir_and_profile(current_exe: &Path) -> Option<(&Path, &str)> {
@@ -251,7 +256,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let target = temp.path().join("target");
         let debug = target.join("debug");
-        let musl_debug = target.join("x86_64-unknown-linux-musl").join("debug");
+        let musl_debug = target.join(host_musl_target_triple()).join("debug");
         fs::create_dir_all(&debug).unwrap();
         fs::create_dir_all(&musl_debug).unwrap();
         let current_exe = debug.join("bobr");

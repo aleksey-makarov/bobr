@@ -8,7 +8,7 @@ non-Linux `compile_error!` guard, so it will not build on other platforms.
 Run all three from the workspace root:
 
 ```sh
-cargo build ; cargo build-sandbox-launcher
+cargo build ; cargo build-sandbox-launcher-x86_64  # use the aarch64 alias on AArch64
 cargo test --workspace --all-features   # all tests, incl. feature-gated
 cargo clippy --workspace --all-targets  # lints
 cargo fmt --check                       # formatting

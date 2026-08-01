@@ -4,7 +4,7 @@ mod support;
 
 use support::BundleFixture;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn explicit_run_executes_static_payload_and_propagates_status() {
     let fixture = BundleFixture::new();
@@ -20,7 +20,7 @@ fn explicit_run_executes_static_payload_and_propagates_status() {
     assert_eq!(status.code(), Some(42));
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn public_multicall_wrapper_executes_static_payload() {
     let fixture = BundleFixture::new();
@@ -33,7 +33,7 @@ fn public_multicall_wrapper_executes_static_payload() {
     assert_eq!(status.code(), Some(23));
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn diagnose_reports_static_target_without_executing_it() {
     let fixture = BundleFixture::new();
@@ -56,7 +56,7 @@ fn diagnose_reports_static_target_without_executing_it() {
     assert!(stdout.contains("library_path="));
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn json_diagnostics_report_platform_policy_and_environment_origin() {
     let fixture = BundleFixture::new();

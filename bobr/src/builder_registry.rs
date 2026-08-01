@@ -210,4 +210,38 @@ mod tests {
         assert_eq!(subject.build_key(), expected);
         assert!(subject.inputs().is_empty());
     }
+
+    #[test]
+    fn host_bundle_target_architecture_is_part_of_the_build_key() {
+        let input_key =
+            BuildKey::from_str("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap();
+        let inputs = BTreeMap::from([
+            ("_root".to_string(), input_key),
+            ("_launcher".to_string(), input_key),
+        ]);
+        let config = |arch| {
+            json!({
+                "arch": arch,
+                "library_dirs": [],
+                "public_tools": {
+                    "demo": { "path": "usr/bin/demo" }
+                }
+            })
+        };
+        let x86_64 = parse_subject(
+            "HostBundle",
+            object_of(json!({"name": "bundle", "config": config("x86_64")})),
+            inputs.clone(),
+        )
+        .unwrap();
+        let aarch64 = parse_subject(
+            "HostBundle",
+            object_of(json!({"name": "bundle", "config": config("aarch64")})),
+            inputs,
+        )
+        .unwrap();
+
+        assert_ne!(x86_64.build_key(), aarch64.build_key());
+    }
 }

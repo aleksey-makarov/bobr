@@ -51,7 +51,16 @@ impl TypedBuilder for HostBundleBuilder {
     }
 
     fn impl_version(&self) -> &'static str {
-        "2"
+        // Version 1: the initial complete HostBundle builder copied materialized
+        // payload, launcher, and overrides trees; generated the facade and
+        // bundle.toml; verified the startup closure; and published a read-only
+        // ordinary directory object.
+        // Bumped 1 -> 2: the optional overrides input changed from a materialized
+        // `_overrides` fs-tree to an ordinary `overrides` directory object.
+        // Bumped 2 -> 3: the target architecture became a required builder
+        // config field and now drives runtime-config lowering and ELF startup
+        // verification, with both x86-64 and AArch64 supported.
+        "3"
     }
 
     fn build_typed(
@@ -176,6 +185,8 @@ fn materialize_facade(
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostBundleConfig {
+    /// Machine architecture required by the payload and launcher.
+    pub arch: PlatformArch,
     /// Host-integration policy recorded in the runtime configuration.
     #[serde(default = "default_policy")]
     pub policy: HostPolicy,
@@ -397,7 +408,7 @@ impl HostBundleConfig {
             self.policy,
             PlatformConfig {
                 os: PlatformOs::Linux,
-                arch: PlatformArch::X86_64,
+                arch: self.arch,
                 min_kernel: self.min_kernel.clone(),
             },
             LoaderConfig {
@@ -531,6 +542,7 @@ mod tests {
 
     fn minimal_config() -> HostBundleConfig {
         config(json!({
+            "arch": "x86_64",
             "library_dirs": ["usr/lib64", "usr/lib"],
             "public_tools": {
                 "mc": {
@@ -541,13 +553,17 @@ mod tests {
     }
 
     fn write_static_elf(path: &std::path::Path) {
+        write_static_elf_for_arch(path, PlatformArch::X86_64);
+    }
+
+    fn write_static_elf_for_arch(path: &std::path::Path, arch: PlatformArch) {
         let mut bytes = vec![0_u8; 64];
         bytes[..4].copy_from_slice(b"\x7fELF");
         bytes[4] = 2;
         bytes[5] = 1;
         bytes[6] = 1;
         bytes[16..18].copy_from_slice(&2_u16.to_le_bytes());
-        bytes[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        bytes[18..20].copy_from_slice(&arch.elf_machine().to_le_bytes());
         bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
         bytes[52..54].copy_from_slice(&64_u16.to_le_bytes());
         bytes[54..56].copy_from_slice(&56_u16.to_le_bytes());
@@ -571,12 +587,14 @@ mod tests {
         let config = minimal_config();
         let canonical = serde_json::to_value(&config).unwrap();
 
+        assert_eq!(config.arch, PlatformArch::X86_64);
         assert_eq!(config.policy, HostPolicy::Strict);
         assert_eq!(config.min_kernel, DEFAULT_MIN_KERNEL);
         assert_eq!(config.library_dirs, ["usr/lib64", "usr/lib"]);
         assert!(config.internal_tools.is_empty());
         assert!(config.environment.is_empty());
         assert!(config.public_tools["mc"].argv0.is_none());
+        assert_eq!(canonical["arch"], "x86_64");
         assert_eq!(canonical["policy"], "strict");
         assert_eq!(canonical["min_kernel"], DEFAULT_MIN_KERNEL);
         assert_eq!(canonical["library_dirs"], json!(["usr/lib64", "usr/lib"]));
@@ -588,6 +606,7 @@ mod tests {
     #[test]
     fn builder_config_rejects_unknown_fields() {
         let error = serde_json::from_value::<HostBundleConfig>(json!({
+            "arch": "x86_64",
             "library_dirs": [],
             "public_tools": {},
             "format": "user-selected"
@@ -599,11 +618,34 @@ mod tests {
     }
 
     #[test]
+    fn builder_config_requires_a_supported_architecture() {
+        let missing = serde_json::from_value::<HostBundleConfig>(json!({
+            "library_dirs": [],
+            "public_tools": { "demo": { "path": "usr/bin/demo" } }
+        }))
+        .unwrap_err();
+        assert!(missing.to_string().contains("missing field `arch`"));
+
+        let unsupported = serde_json::from_value::<HostBundleConfig>(json!({
+            "arch": "riscv64",
+            "library_dirs": [],
+            "public_tools": { "demo": { "path": "usr/bin/demo" } }
+        }))
+        .unwrap_err();
+        assert!(
+            unsupported
+                .to_string()
+                .contains("unknown variant `riscv64`")
+        );
+    }
+
+    #[test]
     fn lowers_tools_paths_environment_and_builder_owned_fields() {
         let config = config(json!({
+            "arch": "aarch64",
             "policy": "integrated",
             "min_kernel": "5.10",
-            "library_dirs": ["usr/lib/x86_64-linux-gnu", "lib64"],
+            "library_dirs": ["usr/lib/aarch64-linux-gnu", "lib"],
             "public_tools": {
                 "mc": {
                     "path": "usr/bin/mc"
@@ -648,10 +690,11 @@ mod tests {
         assert_eq!(runtime.format(), BUNDLE_FORMAT_V1);
         assert_eq!(runtime.payload_root, "root");
         assert_eq!(runtime.policy, HostPolicy::Integrated);
+        assert_eq!(runtime.platform.arch, PlatformArch::Aarch64);
         assert_eq!(runtime.platform.min_kernel, "5.10");
         assert_eq!(
             runtime.loader.library_dirs,
-            ["root/usr/lib/x86_64-linux-gnu", "root/lib64"]
+            ["root/usr/lib/aarch64-linux-gnu", "root/lib"]
         );
         assert!(runtime.loader.inhibit_cache);
         assert_eq!(runtime.tools["mc"].path, "root/usr/bin/mc");
@@ -696,6 +739,7 @@ mod tests {
     #[test]
     fn rejects_empty_public_set_and_public_internal_collision() {
         let no_public = config(json!({
+            "arch": "x86_64",
             "library_dirs": [],
             "public_tools": {},
             "internal_tools": {
@@ -708,6 +752,7 @@ mod tests {
         ));
 
         let collision = config(json!({
+            "arch": "x86_64",
             "library_dirs": [],
             "public_tools": {
                 "tool": { "path": "usr/bin/tool" }
@@ -725,6 +770,7 @@ mod tests {
     #[test]
     fn rejects_common_and_per_tool_path_rules() {
         let common = config(json!({
+            "arch": "x86_64",
             "library_dirs": [],
             "public_tools": {
                 "tool": { "path": "usr/bin/tool" }
@@ -742,6 +788,7 @@ mod tests {
         ));
 
         let per_tool = config(json!({
+            "arch": "x86_64",
             "library_dirs": [],
             "public_tools": {
                 "tool": {
@@ -763,6 +810,7 @@ mod tests {
     #[test]
     fn rejects_missing_overrides_unsafe_paths_and_invalid_rule_shapes() {
         let overrides = config(json!({
+            "arch": "x86_64",
             "library_dirs": [],
             "public_tools": {
                 "tool": { "path": "usr/bin/tool" }
@@ -782,6 +830,7 @@ mod tests {
         ));
 
         let unsafe_tool = config(json!({
+            "arch": "x86_64",
             "library_dirs": [],
             "public_tools": {
                 "tool": { "path": "../usr/bin/tool" }
@@ -793,6 +842,7 @@ mod tests {
         ));
 
         let mixed = config(json!({
+            "arch": "x86_64",
             "library_dirs": [],
             "public_tools": {
                 "tool": { "path": "usr/bin/tool" }
@@ -835,6 +885,7 @@ mod tests {
         fs::create_dir(&build_temp).unwrap();
         let mut cx = BuildContext::with_noop_logger(build_temp, store_fs_tree(temp.path()));
         let config = config(json!({
+            "arch": "x86_64",
             "library_dirs": ["usr/lib"],
             "public_tools": {
                 "demo": { "path": "usr/bin/demo" }
@@ -889,6 +940,47 @@ mod tests {
     }
 
     #[test]
+    fn composes_an_aarch64_bundle_without_executing_target_code() {
+        let temp = tempdir().unwrap();
+        let payload = temp.path().join("payload");
+        let launcher = temp.path().join("launcher");
+        fs::create_dir_all(payload.join("usr/bin")).unwrap();
+        fs::create_dir_all(payload.join("usr/lib")).unwrap();
+        fs::create_dir_all(launcher.join("usr/libexec")).unwrap();
+        write_static_elf_for_arch(&payload.join("usr/bin/demo"), PlatformArch::Aarch64);
+        write_static_elf_for_arch(&launcher.join(INPUT_LAUNCHER_PATH), PlatformArch::Aarch64);
+
+        let inputs = BuilderInputs::new(BTreeMap::from([
+            ("_root".to_string(), payload),
+            ("_launcher".to_string(), launcher),
+        ]));
+        let build_temp = temp.path().join("build");
+        fs::create_dir(&build_temp).unwrap();
+        let mut cx = BuildContext::with_noop_logger(build_temp, store_fs_tree(temp.path()));
+        let builder = crate::BUILDERS
+            .iter()
+            .copied()
+            .find(|builder| builder.tag() == "HostBundle")
+            .unwrap();
+        let plan = builder
+            .plan(json!({
+                "arch": "aarch64",
+                "library_dirs": ["usr/lib"],
+                "public_tools": {
+                    "demo": { "path": "usr/bin/demo" }
+                }
+            }))
+            .unwrap();
+
+        let output = plan.build(inputs, &mut cx).unwrap();
+        let runtime =
+            BundleConfig::parse(&fs::read_to_string(output.join("bundle.toml")).unwrap()).unwrap();
+
+        assert_eq!(runtime.platform.arch, PlatformArch::Aarch64);
+        verify_tree_read_only(&output).unwrap();
+    }
+
+    #[test]
     fn rejects_a_non_directory_overrides_object() {
         let temp = tempdir().unwrap();
         let payload = temp.path().join("payload");
@@ -916,6 +1008,7 @@ mod tests {
             .unwrap();
         let plan = builder
             .plan(json!({
+                "arch": "x86_64",
                 "library_dirs": ["usr/lib"],
                 "public_tools": {
                     "demo": { "path": "usr/bin/demo" }
@@ -957,6 +1050,7 @@ mod tests {
             .unwrap();
         let plan = builder
             .plan(json!({
+                "arch": "x86_64",
                 "library_dirs": ["usr/lib"],
                 "public_tools": {
                     "demo": { "path": "usr/bin/demo" }

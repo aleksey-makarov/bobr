@@ -28,7 +28,7 @@ pub use dispatch::{
 pub use dynamic::{
     DynamicLaunchError, DynamicLaunchPlan, prepare_dynamic_launch, prepare_dynamic_program,
 };
-pub use elf::{ElfError, ElfExecutable, ElfLinkage, inspect_elf, inspect_elf_for_arch};
+pub use elf::{ElfError, ElfExecutable, ElfLinkage, inspect_elf_for_arch};
 pub use environment::{EnvironmentError, EnvironmentOrigin, ProcessEnvironment, build_environment};
 pub use invocation::{DiagnosticOutput, Invocation, InvocationError, parse_invocation};
 pub use launch::exec_prepared;
@@ -38,7 +38,6 @@ pub use location::{
 };
 pub use platform::{HostPlatformCheck, HostPlatformError, check_host_platform};
 pub use script::{
-    ExecutableFormat, ExecutableInspectionError, Shebang, inspect_executable,
-    inspect_executable_for_arch,
+    ExecutableFormat, ExecutableInspectionError, Shebang, inspect_executable_for_arch,
 };
 pub use tool::{ResolvedTool, ToolResolutionError, resolve_tool, validate_relative_path};

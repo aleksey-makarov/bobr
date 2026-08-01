@@ -4,7 +4,7 @@ mod support;
 
 use support::BundleFixture;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn script_runs_its_bundled_static_interpreter() {
     let fixture = BundleFixture::new();
@@ -24,7 +24,7 @@ fn script_runs_its_bundled_static_interpreter() {
     assert_eq!(status.code(), Some(51));
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn script_runs_a_dynamic_interpreter_through_the_bundled_loader() {
     let fixture = BundleFixture::new();
@@ -42,7 +42,7 @@ fn script_runs_a_dynamic_interpreter_through_the_bundled_loader() {
     assert_eq!(status.code(), Some(52));
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn script_never_falls_back_to_a_host_interpreter() {
     let fixture = BundleFixture::new();
@@ -61,7 +61,7 @@ fn script_never_falls_back_to_a_host_interpreter() {
     assert!(stderr.contains("root/bin/sh"));
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn nested_shebangs_are_resolved_inside_the_payload() {
     let fixture = BundleFixture::new();
@@ -79,7 +79,7 @@ fn nested_shebangs_are_resolved_inside_the_payload() {
     assert_eq!(status.code(), Some(53));
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn internal_multicall_wrapper_selects_its_declared_tool() {
     let fixture = BundleFixture::new();
@@ -95,7 +95,7 @@ fn internal_multicall_wrapper_selects_its_declared_tool() {
     assert_eq!(status.code(), Some(54));
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn diagnose_reports_script_and_logical_interpreter() {
     let fixture = BundleFixture::new();

@@ -4,7 +4,7 @@ mod support;
 
 use support::BundleFixture;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn dynamic_payload_runs_through_bundled_loader() {
     let fixture = BundleFixture::new();
@@ -21,7 +21,7 @@ fn dynamic_payload_runs_through_bundled_loader() {
     assert_eq!(status.code(), Some(37));
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn diagnose_reports_bundled_loader_without_running_it() {
     let fixture = BundleFixture::new();
@@ -42,7 +42,7 @@ fn diagnose_reports_bundled_loader_without_running_it() {
     assert!(stdout.contains("root/lib64/test-loader"));
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[test]
 fn missing_bundled_loader_is_an_error_without_host_fallback() {
     let fixture = BundleFixture::new();
