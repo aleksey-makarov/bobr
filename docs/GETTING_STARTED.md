@@ -1,36 +1,44 @@
 # Getting Started
 
-This chapter goes from a fresh checkout to a built object twice: first by
-running `bobr` on a tiny request by hand, then by building a real target from
-the Nickel recipes. For the ideas behind it all, see [Concepts](./CONCEPTS.md).
+This chapter goes from a downloaded `bobr` release to a built object twice:
+first by running `bobr` on a tiny request by hand, then by building a real
+target from the Nickel recipes. For the ideas behind it all, see
+[Concepts](./CONCEPTS.md).
 
 ## Prerequisites
 
-- A stable Rust toolchain with the native Linux musl target added —
-  `x86_64-unknown-linux-musl` on x86-64 or `aarch64-unknown-linux-musl` on
-  AArch64. This target is needed to build the sandbox launcher.
+- An x86-64 Linux host. The main release archive is currently published for
+  `x86_64-unknown-linux-musl`.
+- `curl`, `tar`, and `sha256sum` to download, unpack, and verify the release.
 - `newuidmap` and `newgidmap` on `PATH` (the `shadow` / `uidmap` package). Bobr
   runs each builder in a Linux user namespace when you are not root, and uses
   these setuid helpers to set up the uid/gid map. As root — or under `podman
   unshare` — bobr uses its in-process host runtime and needs neither.
-- `nickel` — only for the recipe workflow below.
+- `git` and `nickel` — only for the recipe workflow below.
 
-## Build bobr
+## Install bobr
+
+Choose a release from the
+[bobr releases](https://github.com/aleksey-makarov/bobr/releases), download the
+main archive and its checksum file, and verify it before unpacking. For example,
+for version 0.1.4:
 
 ```sh
-git clone https://github.com/aleksey-makarov/bobr
-cd bobr
-cargo build                    # builds target/debug/bobr and target/debug/fsobj-hash
-cargo build-sandbox-launcher-x86_64  # use the aarch64 alias on AArch64
+BOBR_VERSION=0.1.4
+BOBR_TARGET=x86_64-unknown-linux-musl
+BOBR_ARCHIVE="bobr-v${BOBR_VERSION}-${BOBR_TARGET}.tar.xz"
+BOBR_RELEASE="https://github.com/aleksey-makarov/bobr/releases/download/v${BOBR_VERSION}"
+
+curl -fLO "${BOBR_RELEASE}/${BOBR_ARCHIVE}"
+curl -fLO "${BOBR_RELEASE}/SHA256SUMS"
+sha256sum --ignore-missing --check SHA256SUMS
+tar -xf "${BOBR_ARCHIVE}"
+export PATH="${PWD}/bobr-v${BOBR_VERSION}-${BOBR_TARGET}/bin:${PATH}"
 ```
 
-Choose the architecture-specific workspace alias that matches the machine:
-`build-sandbox-launcher-x86_64` or `build-sandbox-launcher-aarch64`. `bobr`
-locates the result in Cargo's corresponding musl target directory, so no
-further setup is needed. The launcher is used only by the `Sandbox` builder, so
-you can skip it until you build something that runs commands. The HostBundle
-launcher has matching `build-bundle-launcher-x86_64` and
-`build-bundle-launcher-aarch64` aliases.
+The archive contains static `bobr`, `fsobj-hash`, and
+`bobr-sandbox-launcher` binaries. Keep its `bin/` on `PATH` for the rest of
+this chapter; `bobr` finds the sandbox launcher next to its own executable.
 
 ## Your first build
 
@@ -71,7 +79,7 @@ mkdir -p /tmp/bobr-store
 Build it:
 
 ```sh
-./target/debug/bobr < hello.json
+bobr < hello.json
 ```
 
 bobr prints the object's hash:
@@ -100,8 +108,7 @@ human-facing name for the result (see [Store](./STORE.md)).
 Writing requests by hand does not scale; real targets are authored in
 [Nickel](https://nickel-lang.org/) in the separate
 [**bobr-recipes**](https://github.com/aleksey-makarov/bobr-recipes) repository
-and lowered to a request. Clone it next to `bobr` (the tooling expects the two
-as siblings):
+and lowered to a request. Clone it into the current working directory:
 
 ```sh
 git clone https://github.com/aleksey-makarov/bobr-recipes
@@ -109,7 +116,7 @@ git clone https://github.com/aleksey-makarov/bobr-recipes
 
 List the build targets — attribute names with their package names — with
 `tools/bobr-list-pkgs.sh`, then build one with the driver, which refreshes the
-local `fsobj-hash` locks (with the `fsobj-hash` binary built above), exports the
+local `fsobj-hash` locks with the binary from the release archive, exports the
 request through `request.ncl`, and runs `bobr`:
 
 ```sh
