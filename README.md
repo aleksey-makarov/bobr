@@ -35,16 +35,19 @@ targets, `bobr` so far builds ordinary systems natively.
 `bobr` constraint; the same engine could produce a Nix-style store. The trade-off
 is that such a layout can't keep several versions of a package side by side, the
 way Nix can; in exchange it should feel more like a normal system and be more
-convenient to use; and — again — the small set of packages today is just a
-matter of catching up. Like Nix, `bobr` keeps
-results in a hash-keyed store with hermetic, sandboxed builds and heavy
-deduplication. Unlike Nix, it is content-addressed from the start, whereas Nix
-store paths are input-addressed and content-addressed derivations remain
-experimental.
+convenient to use. Like Nix, `bobr` keeps results in a hash-keyed store with
+hermetic, sandboxed builds and heavy deduplication. Unlike Nix, it is
+content-addressed from the start, whereas Nix store paths are input-addressed
+and content-addressed derivations remain experimental.
 
 `bobr` borrows ideas from OSTree — a content-addressed store, and an immutable
 read-only rootfs. But OSTree is about delivering and updating that OS on the
 machine (atomic upgrades, rollback), where `bobr` builds the images.
+
+`bobr` HostBundles offer container-like portability without a container
+runtime: a relocatable directory carrying the program, its loader, libraries,
+data, and a tiny static launcher. Run it from the store or copy it to another
+compatible Linux machine — it keeps using its bundled runtime, not the host's.
 
 ## Documentation
 

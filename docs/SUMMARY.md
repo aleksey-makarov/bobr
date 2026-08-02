@@ -7,6 +7,7 @@
 - [Filesystem trees](FS_TREE.md)
 - [Request](REQUEST.md)
 - [Recipes in Nickel](NICKEL.md)
+- [HostBundle](HOST_BUNDLE.md)
 - [Store](STORE.md)
 - [Build logging](LOGGING.md)
 - [Filesystem Object Hashing](FSOBJ_HASH.md)

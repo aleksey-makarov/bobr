@@ -164,9 +164,51 @@ host's `qemu-system-x86_64` in a graphical window. It needs KVM (`/dev/kvm`);
 tools/bobr-run-qemu-gnome.sh
 ```
 
+## Running QEMU from a HostBundle
+
+The previous helper uses `qemu-system-x86_64` installed on the host. For
+contrast, `host_bundle_qemu` is a self-contained directory object carrying
+QEMU, its userspace runtime, and the kernel, initramfs, and EROFS image it
+boots. Build it like any other recipe target:
+
+```sh
+tools/bobr-build.sh host_bundle_qemu
+```
+
+The result is an ordinary directory rather than an fs-tree manifest. Add its
+public `bin/` to `PATH` before leaving the recipes checkout, then run from a
+writable working directory:
+
+```sh
+export PATH="$(readlink -f ../bobr-store/object-refs/host-bundle-qemu)/bin:${PATH}"
+mkdir -p /tmp/bobr-qemu-run
+cd /tmp/bobr-qemu-run
+bobr-run-qemu
+```
+
+The runner uses the QEMU and boot artifacts inside the bundle, while still
+using host interfaces such as `/dev/kvm`. It boots the plain image headlessly,
+puts the serial console on the terminal, creates a sparse 1 GiB `home.img` in
+the working directory, creates `diag.sock`, and forwards host TCP port 2222 to
+the guest's SSH port. Run it with `--help` for resource and path options; QEMU's
+`Ctrl-A X` escape exits the VM.
+
+The other public entries can be used directly as well:
+
+```sh
+qemu-img --help
+qemu-system-x86_64 --version
+```
+
+No QEMU installation is needed on the host. Adding `bin/` to `PATH` only
+exposes the public commands; the launcher selects the copied glibc loader,
+libraries, and per-command environment. See [HostBundle](./HOST_BUNDLE.md) for
+the directory layout, verifier, wrappers, and portability boundary.
+
 ## Next steps
 
 - [Concepts](./CONCEPTS.md) — content addressing, objects, keys, and recipes.
 - [Request](./REQUEST.md) — the request format and the built-in builders.
 - [Recipes in Nickel](./NICKEL.md) — authoring recipes.
+- [HostBundle](./HOST_BUNDLE.md) — relocatable host-side application bundles.
 - [Store](./STORE.md) — how results are stored, named, and reused.

@@ -296,7 +296,9 @@ paths.
 ### `HostBundle`
 
 Builds a verified, relocatable host-side application directory from an already
-materialized runtime root and a static launcher package.
+materialized runtime root and a static launcher package. See
+[HostBundle](./HOST_BUNDLE.md) for the complete composition, verification, and
+runtime model.
 
 **Inputs:**
 
@@ -306,41 +308,124 @@ materialized runtime root and a static launcher package.
 - optional `overrides` — an ordinary directory object copied under the
   bundle's `overrides/`
 
-**Config:** `arch` is required and accepts `x86_64` or `aarch64`:
+**Config:**
 
 ```json
 {
   "arch": "x86_64",
   "policy": "strict",
+  "min_kernel": "4.19",
   "library_dirs": ["usr/lib64", "usr/lib"],
   "public_tools": {
     "demo": {
       "path": "usr/bin/demo",
+      "argv0": "demo",
       "argument_prefix": [
         { "value": "--data-dir" },
         { "source": "payload", "path": "usr/share/demo" }
+      ],
+      "environment": {
+        "DEMO_CONFIG": {
+          "operation": "replace",
+          "paths": [
+            { "source": "payload", "path": "etc/demo/config.toml" }
+          ]
+        }
+      }
+    }
+  },
+  "internal_tools": {
+    "demo-helper": { "path": "usr/libexec/demo/helper" }
+  },
+  "environment": {
+    "LOCALE_ARCHIVE": {
+      "operation": "replace",
+      "paths": [
+        { "source": "payload", "path": "usr/lib/locale/locale-archive" }
       ]
     }
   }
 }
 ```
 
-`internal_tools` declares commands exposed only to bundled child processes.
-`environment` and per-tool `environment` contain typed environment rules.
-An optional per-tool `argument_prefix` inserts fixed arguments before caller
-arguments. An entry is either a literal `{ "value": "..." }` or a safe path
-selected from `payload` or `overrides`; path entries are resolved inside the
-finished bundle at launch time. Referencing `overrides` requires the optional
-input to be present.
-`min_kernel` defaults to `4.19`; `policy` defaults to `strict`.
+Top-level fields:
+
+- required `arch` — `"x86_64"` or `"aarch64"`
+- optional `policy` — `"strict"` (the default) or `"integrated"`; the current
+  runtime records and reports this value, but both values use the same launch
+  and verification rules
+- optional `min_kernel` — `MAJOR.MINOR` or `MAJOR.MINOR.PATCH`, default `4.19`
+- required `library_dirs` — ordered safe paths relative to `_root`; it may be
+  empty only for a completely static configured startup closure
+- required non-empty `public_tools` — commands exposed in top-level `bin/`
+- optional `internal_tools` — commands exposed only through the managed child
+  process `PATH`
+- optional `environment` — rules shared by all tools
+
+A tool declaration requires `path`, a safe path relative to `_root` resolving
+to an executable regular file. Optional `argv0` defaults to the tool name.
+Optional `argument_prefix` inserts entries before caller arguments; each entry
+is either a literal `{ "value": "..." }` or a path selected from `payload` or
+`overrides`. Optional per-tool `environment` is applied after the common rules.
+
+Tool names are non-empty UTF-8 basenames: `.`, `..`, names containing `/` or
+NUL, and the reserved `bobr-bundle-launcher` name are invalid. A name cannot be
+both public and internal. `argv0` must be non-empty and contain no NUL.
+
+An environment rule has this shape:
+
+```json
+{
+  "operation": "prepend",
+  "paths": [
+    { "source": "payload", "path": "usr/share/example" }
+  ],
+  "values": [],
+  "inherit": true,
+  "host_default": ["/fallback"]
+}
+```
+
+`paths`, `values`, `inherit`, and `host_default` are optional and default to an
+empty array or `false`. `paths` and `values` are mutually exclusive; multiple
+entries are joined with `:`. Operations are:
+
+- `replace` — require configured paths or values and ignore the host;
+  `inherit` and `host_default` are invalid
+- `prepend` / `append` — require configured paths or values; include the
+  current value only with `inherit = true`, using `host_default` when that
+  value is absent
+- `unset` — remove the variable and accept none of the other fields
+- `default` — preserve an existing variable, otherwise use configured paths or
+  values, or `host_default`; `inherit` is invalid
+
+For `prepend` and `append`, `host_default` requires `inherit = true`. Variable
+names must be non-empty and contain neither `=` nor NUL. `PATH` is reserved in
+both common and per-tool rules: the builder always prepends
+`libexec/wrapped-bin` to the inherited host `PATH`.
+
+A typed path has source `"payload"` or `"overrides"` and a safe path relative
+to that source. Paths must be non-empty and relative, with no NUL and no empty,
+`.` or `..` component. Referencing `overrides` requires the optional input to
+be present. Paths are canonicalized and must remain inside the corresponding
+completed bundle tree. The top-level config, tool declarations, literal
+arguments, and environment rules reject unknown fields.
 
 **Behavior:**
 
+- independently copies the payload to `root/`, the launcher to `libexec/`, and
+  optional overrides to `overrides/`; it creates no hardlinks to input/store
+  objects
 - writes a read-only ordinary directory object with public wrappers in `bin/`
+  and wrappers for every public/internal tool in `libexec/wrapped-bin/`
 - generates the versioned `bobr-host-bundle-v2` `bundle.toml` and records the
   selected architecture as `[platform].arch`
 - verifies that the launcher, tools, dynamic loaders, and complete startup
-  `DT_NEEDED` closure are ELF64 objects for the declared architecture
+  `DT_NEEDED` closure are ELF64 objects for the declared architecture; scripts
+  and their bundled shebang interpreters are verified recursively
+- resolves startup libraries only inside the payload, accepting safe
+  `$ORIGIN` RPATH/RUNPATH entries and rejecting unsupported or escaping paths
+- removes write, setuid, and setgid bits before publication
 - never executes target code while composing the bundle, so the builder itself
   is host-architecture-independent; the explicit config and input hashes carry
   all target-architecture differences into the build key

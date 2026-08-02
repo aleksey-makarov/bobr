@@ -21,16 +21,21 @@
    build/runtime dependencies, split outputs, and synthetic builders that expand
    into a request.
 
-6. [Store](./STORE.md)
+6. [HostBundle](./HOST_BUNDLE.md)
+   Building verified, relocatable host-side application directories: payloads,
+   launchers, wrappers, typed environment, startup verification, and runtime
+   behavior.
+
+7. [Store](./STORE.md)
    Content-addressed store, build identity, canonical object records, reuse
    mappings, and name refs.
 
-7. [Build logging](./LOGGING.md)
+8. [Build logging](./LOGGING.md)
    Logging channels, store-log layout, the structured event record, the closed
    `status` vocabulary, and the format guarantees.
 
-8. [Filesystem Object Hashing](./FSOBJ_HASH.md)
+9. [Filesystem Object Hashing](./FSOBJ_HASH.md)
    Structural hashing rules shared by filesystem paths and tar archives.
 
-9. [fs-tree Manifest](./FS_TREE_MANIFEST.md)
+10. [fs-tree Manifest](./FS_TREE_MANIFEST.md)
    Canonical manifest format for manifest-addressed fs-tree artifacts.
