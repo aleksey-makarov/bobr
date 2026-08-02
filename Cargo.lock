@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-build"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bobr-builder",
  "bobr-core",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-builder"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bobr-bundle-launcher",
  "bobr-core",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-bundle-launcher"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "libc",
  "serde",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bobr-runtime",
  "fsobj-hash",
@@ -139,7 +139,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-runtime"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "libc",
  "serde",
@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-sandbox"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bobr-builder",
  "bobr-core",
@@ -163,7 +163,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-sandbox-launcher"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "libc",
  "nix",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-source"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bobr-core",
  "bzip2",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-store"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bobr-core",
  "fsobj-hash",
@@ -442,7 +442,7 @@ dependencies = [
 
 [[package]]
 name = "fsobj-hash"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "serde",
  "serde_json",
