@@ -1,53 +1,166 @@
 name: Release
 
-# Runs when you push a version tag (v1.2.3). It runs the test suite, builds
-# the release binaries, and attaches them to a GitHub Release for that tag.
-# workflow_dispatch lets you exercise test+build manually without publishing.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
 
 permissions:
-  contents: write  # create the release and upload assets
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: '1.97.0'
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Run tests
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Resolve release metadata
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -n '/^\[workspace.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml)"
+          [ -n "${version}" ] || { echo "failed to read workspace version" >&2; exit 1; }
+          release_tag="v${version}"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]] && [ "${GITHUB_REF_NAME}" != "${release_tag}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match workspace version ${release_tag}" >&2
+            exit 1
+          fi
+          echo "release_tag=${release_tag}" >>"${GITHUB_OUTPUT}"
+          echo "source_date_epoch=$(git show -s --format=%ct HEAD)" >>"${GITHUB_OUTPUT}"
+
+  test:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Tests
         run: cargo test --workspace --locked
 
-  build:
-    needs: test
-    runs-on: ubuntu-latest
+  build-main-x86_64:
+    needs: [prepare, test]
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
-          # The sandbox launcher is built as a static musl binary.
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: x86_64-unknown-linux-musl
-      - uses: Swatinem/rust-cache@v2
 
-      - name: Build release binaries
+      - name: Build static x86_64 release
         run: |
-          cargo build --release --locked -p bobr-build -p fsobj-hash
-          cargo build-sandbox-launcher-x86_64 --release --locked
+          cargo build --release --locked \
+            --target x86_64-unknown-linux-musl \
+            -p bobr-build \
+            -p fsobj-hash \
+            -p bobr-sandbox-launcher
 
-      - name: Package
+      - name: Verify and package
         run: |
-          mkdir -p dist
-          cp target/release/bobr dist/
-          cp target/release/fsobj-hash dist/
-          cp target/x86_64-unknown-linux-musl/release/bobr-sandbox-launcher dist/
-          tar -C dist -czf "bobr-${GITHUB_REF_NAME}-x86_64-linux.tar.gz" .
+          .github/scripts/package-release.sh \
+            main \
+            "${{ needs.prepare.outputs.release_tag }}" \
+            x86_64-unknown-linux-musl \
+            "${{ needs.prepare.outputs.source_date_epoch }}" \
+            dist
 
-      - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          files: bobr-*-x86_64-linux.tar.gz
+          name: main-x86_64
+          path: dist/*.tar.xz
+          if-no-files-found: error
+          retention-days: 7
+
+  build-bundle-launcher:
+    needs: [prepare, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - name: Test bundle launcher natively
+        run: cargo test --locked -p bobr-bundle-launcher
+
+      - name: Build static bundle launcher
+        run: |
+          cargo build --release --locked \
+            --target "${{ matrix.target }}" \
+            -p bobr-bundle-launcher
+
+      - name: Verify and package
+        run: |
+          .github/scripts/package-release.sh \
+            bundle \
+            "${{ needs.prepare.outputs.release_tag }}" \
+            "${{ matrix.target }}" \
+            "${{ needs.prepare.outputs.source_date_epoch }}" \
+            dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bundle-launcher-${{ matrix.target }}
+          path: dist/*.tar.xz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [prepare, test, build-main-x86_64, build-bundle-launcher]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-artifacts
+          [ "$(find . -maxdepth 1 -type f -name '*.tar.xz' | wc -l)" -eq 3 ]
+          sha256sum ./*.tar.xz | LC_ALL=C sort -k2 >SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          name: bobr ${{ needs.prepare.outputs.release_tag }}
           generate_release_notes: true
+          files: |
+            release-artifacts/*.tar.xz
+            release-artifacts/SHA256SUMS

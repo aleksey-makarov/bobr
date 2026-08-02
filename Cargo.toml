@@ -15,22 +15,22 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/aleksey-makarov/bobr"
 
 [workspace.dependencies]
 # Internal crates. They share the [workspace.package] version and move in
 # lockstep, so a release bumps the version above and the requirements here.
-bobr-builder = { path = "bobr-builder", version = "0.1.1" }
-bobr-bundle-launcher = { path = "bobr-bundle-launcher", version = "0.1.1" }
-bobr-core = { path = "bobr-core", version = "0.1.1" }
-bobr-runtime = { path = "bobr-runtime", version = "0.1.1" }
-bobr-sandbox = { path = "bobr-sandbox", version = "0.1.1" }
-bobr-sandbox-launcher = { path = "bobr-sandbox-launcher", version = "0.1.1" }
-bobr-source = { path = "bobr-source", version = "0.1.1" }
-bobr-store = { path = "bobr-store", version = "0.1.1" }
-fsobj-hash = { path = "fsobj-hash", version = "0.1.1" }
+bobr-builder = { path = "bobr-builder", version = "0.1.2" }
+bobr-bundle-launcher = { path = "bobr-bundle-launcher", version = "0.1.2" }
+bobr-core = { path = "bobr-core", version = "0.1.2" }
+bobr-runtime = { path = "bobr-runtime", version = "0.1.2" }
+bobr-sandbox = { path = "bobr-sandbox", version = "0.1.2" }
+bobr-sandbox-launcher = { path = "bobr-sandbox-launcher", version = "0.1.2" }
+bobr-source = { path = "bobr-source", version = "0.1.2" }
+bobr-store = { path = "bobr-store", version = "0.1.2" }
+fsobj-hash = { path = "fsobj-hash", version = "0.1.2" }
 
 # External crates. Versions live here so the whole workspace stays on one
 # version of each; per-crate feature selections stay in the member manifests.
