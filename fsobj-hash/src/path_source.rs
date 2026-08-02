@@ -1,16 +1,18 @@
 use crate::error::Error;
-use crate::hash::sha256_bytes;
 use crate::node::{DirectoryEntry, DirectoryNode, FileNode, Node, SymlinkNode};
+use sha2::{Digest, Sha256};
 use std::ffi::OsStr;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-fn io_at_path(path: &Path, action: &'static str, error: std::io::Error) -> Error {
+const FILE_HASH_BUFFER_SIZE: usize = 64 * 1024;
+
+fn io_at_path(path: &Path, action: &'static str, error: io::Error) -> Error {
     Error::IoAtPath {
         path: path.to_path_buf(),
         action,
@@ -51,14 +53,32 @@ pub(crate) fn load_directory_path(path: &Path) -> Result<Node, Error> {
 
 fn read_file_node(path: &Path, mode: u32) -> Result<Node, Error> {
     let mut file = fs::File::open(path).map_err(|error| io_at_path(path, "opening file", error))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|error| io_at_path(path, "reading file", error))?;
+    let (content_hash, size) =
+        sha256_reader(&mut file).map_err(|error| io_at_path(path, "reading file", error))?;
     Ok(Node::File(FileNode {
         executable: is_executable(mode),
-        content_hash: sha256_bytes(&bytes),
-        size: bytes.len() as u64,
+        content_hash,
+        size,
     }))
+}
+
+fn sha256_reader(reader: &mut (impl Read + ?Sized)) -> io::Result<([u8; 32], u64)> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; FILE_HASH_BUFFER_SIZE];
+    let mut size = 0_u64;
+
+    loop {
+        let bytes_read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(bytes_read) => bytes_read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        hasher.update(&buffer[..bytes_read]);
+        size += bytes_read as u64;
+    }
+
+    Ok((hasher.finalize().into(), size))
 }
 
 fn read_symlink_node(path: &Path) -> Result<Node, Error> {
@@ -106,7 +126,52 @@ fn os_str_bytes(value: &OsStr) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::sha256_bytes;
+    use std::io::Cursor;
     use tempfile::tempdir;
+
+    struct BoundedReader<R> {
+        inner: R,
+        largest_buffer: usize,
+    }
+
+    impl<R: Read> Read for BoundedReader<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.largest_buffer = self.largest_buffer.max(buffer.len());
+            self.inner.read(buffer)
+        }
+    }
+
+    #[test]
+    fn sha256_reader_hashes_empty_small_and_multiblock_inputs() {
+        let payloads = [
+            Vec::new(),
+            b"small payload\n".to_vec(),
+            vec![0x5a; FILE_HASH_BUFFER_SIZE * 3 + 17],
+        ];
+
+        for payload in payloads {
+            let mut reader = Cursor::new(&payload);
+            let (actual_hash, actual_size) = sha256_reader(&mut reader).unwrap();
+            assert_eq!(actual_hash, sha256_bytes(&payload));
+            assert_eq!(actual_size, payload.len() as u64);
+        }
+    }
+
+    #[test]
+    fn sha256_reader_uses_a_bounded_buffer() {
+        let payload = vec![0xa5; FILE_HASH_BUFFER_SIZE * 2 + 1];
+        let mut reader = BoundedReader {
+            inner: Cursor::new(&payload),
+            largest_buffer: 0,
+        };
+
+        let (actual_hash, actual_size) = sha256_reader(&mut reader).unwrap();
+
+        assert_eq!(actual_hash, sha256_bytes(&payload));
+        assert_eq!(actual_size, payload.len() as u64);
+        assert_eq!(reader.largest_buffer, FILE_HASH_BUFFER_SIZE);
+    }
 
     #[test]
     fn missing_file_error_includes_exact_path() {

@@ -274,7 +274,7 @@ fn execute_source_subject(
         logger.as_ref(),
         BuildLogLevel::Info,
         BuildStatus::Running,
-        "materializing source origin",
+        "hashing and importing source object",
     );
 
     let import_outcome = import_source_object(
