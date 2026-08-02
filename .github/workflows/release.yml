@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RUST_TOOLCHAIN: '1.97.0'
+  RUST_TOOLCHAIN: '1.97.1'
 
 jobs:
   prepare:

@@ -2,6 +2,7 @@
 
 use bobr_bundle_launcher::PlatformArch;
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::process::Command;
@@ -99,26 +100,35 @@ visibility = "public"
     }
 
     pub(crate) fn write_static_exit_fixture(&self, relative: &str, exit_code: u32) -> PathBuf {
-        let path = self.root.join(relative);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, static_exit_elf(exit_code)).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        self.write_executable_fixture(relative, &static_exit_elf(exit_code))
     }
 
     pub(crate) fn write_dynamic_fixture(&self, relative: &str, interpreter: &str) -> PathBuf {
-        let path = self.root.join(relative);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, dynamic_elf(interpreter)).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
-        path
+        self.write_executable_fixture(relative, &dynamic_elf(interpreter))
     }
 
     pub(crate) fn write_script_fixture(&self, relative: &str, contents: &[u8]) -> PathBuf {
+        self.write_executable_fixture(relative, contents)
+    }
+
+    fn write_executable_fixture(&self, relative: &str, contents: &[u8]) -> PathBuf {
         let path = self.root.join(relative);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, contents).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let parent = path.parent().unwrap();
+        fs::create_dir_all(parent).unwrap();
+
+        let mut staged = tempfile::NamedTempFile::new_in(parent).unwrap();
+        staged.write_all(contents).unwrap();
+        staged
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o755))
+            .unwrap();
+        staged.as_file().sync_all().unwrap();
+
+        // Publish the executable inode only after its writable descriptor is
+        // closed. This makes execve's no-open-writers invariant explicit.
+        let (file, staged_path) = staged.into_parts();
+        drop(file);
+        staged_path.persist(&path).unwrap();
         path
     }
 
