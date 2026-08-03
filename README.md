@@ -44,10 +44,11 @@ and content-addressed derivations remain experimental.
 read-only rootfs. But OSTree is about delivering and updating that OS on the
 machine (atomic upgrades, rollback), where `bobr` builds the images.
 
-`bobr` HostBundles offer container-like portability without a container
-runtime: a relocatable directory carrying the program, its loader, libraries,
-data, and a tiny static launcher. Run it from the store or copy it to another
-compatible Linux machine — it keeps using its bundled runtime, not the host's.
+`bobr` [HostBundles](./docs/HOST_BUNDLE.md) offer container-like portability
+without a container runtime: a relocatable directory carrying the program, its
+loader, libraries, data, and a tiny static launcher. Run it from the store or
+copy it to another compatible Linux machine — it keeps using its bundled
+runtime, not the host's.
 
 ## Documentation
 
