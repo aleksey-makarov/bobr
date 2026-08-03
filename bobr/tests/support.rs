@@ -6,8 +6,10 @@ use bobr_core::{CancellationToken, ObjectHash};
 use bobr_source::oci_registry::{OciPlatform, fetch_image_authenticated};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Reads, parses, and executes a request file through the public API
 /// (`Request::parse_json` + `execute`) — what the `bobr` CLI does for a request
@@ -25,13 +27,68 @@ pub(crate) fn execute_request(request_path: &Path) -> Result<ObjectHash, Executi
             request_path.display()
         ))
     })?;
-    let request = Request::parse_json(&request_bytes)?;
+    let request = Request::parse_json(&with_fresh_run(&request_bytes))?;
     execute(request, CancellationToken::new())
+}
+
+/// Gives the request its own run, as a caller invoking `bobr` again would: a
+/// fresh name and a fresh pair of directories under the store. Requests that
+/// name no usable store are passed through untouched, so tests about malformed
+/// requests still see what they wrote.
+fn with_fresh_run(request_bytes: &[u8]) -> Vec<u8> {
+    static NEXT_RUN: AtomicU64 = AtomicU64::new(0);
+
+    let Ok(Value::Object(mut request)) = serde_json::from_slice::<Value>(request_bytes) else {
+        return request_bytes.to_vec();
+    };
+    let Some(Value::String(store)) = request.get("store") else {
+        return request_bytes.to_vec();
+    };
+    let store = PathBuf::from(store);
+    if !store.is_dir() {
+        return request_bytes.to_vec();
+    }
+
+    let run_id = format!("run-{}", NEXT_RUN.fetch_add(1, Ordering::SeqCst));
+    let logs = store.join("logs").join(&run_id);
+    let work = store.join("work").join(&run_id);
+    if fs::create_dir_all(&logs).is_err() || fs::create_dir_all(&work).is_err() {
+        return request_bytes.to_vec();
+    }
+
+    request.insert(
+        "logs".to_string(),
+        Value::String(logs.to_string_lossy().into_owned()),
+    );
+    request.insert(
+        "work".to_string(),
+        Value::String(work.to_string_lossy().into_owned()),
+    );
+    request.insert("run_id".to_string(), Value::String(run_id));
+    LAST_RUN_LOGS.with(|last| *last.borrow_mut() = Some(logs));
+    serde_json::to_vec(&Value::Object(request)).unwrap_or_else(|_| request_bytes.to_vec())
+}
+
+thread_local! {
+    /// Log directory of the run [`execute_request`] last started on this
+    /// thread. Tests run on their own threads, so this identifies their own run
+    /// without guessing from directory names.
+    static LAST_RUN_LOGS: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Returns the log directory of the run this thread started last.
+pub(crate) fn last_run_logs_dir() -> PathBuf {
+    LAST_RUN_LOGS
+        .with(|last| last.borrow().clone())
+        .expect("execute_request must have started a run on this thread")
 }
 
 pub(crate) fn write_request(request_path: &Path, recipe: &Value) {
     write_request_with_options(request_path, recipe, &json!({}));
 }
+
+/// The run name the test requests are written with.
+pub(crate) const TEST_RUN_ID: &str = "test-run";
 
 pub(crate) fn write_request_with_options(request_path: &Path, recipe: &Value, options: &Value) {
     if let Some(parent) = request_path.parent() {
@@ -42,16 +99,31 @@ pub(crate) fn write_request_with_options(request_path: &Path, recipe: &Value, op
         .expect("recipe path for tests must have a parent");
     let store = store_root(root);
     fs::create_dir_all(&store).unwrap();
+    // The caller of `bobr` owns the run: it names it and creates its
+    // directories.
+    let logs = store.join("logs").join(TEST_RUN_ID);
+    let work = store.join("work").join(TEST_RUN_ID);
+    fs::create_dir_all(&logs).unwrap();
+    fs::create_dir_all(&work).unwrap();
     let nodes = normalize_request(recipe);
     let mut request = options.as_object().cloned().unwrap_or_default();
     request.insert(
         "schema".to_string(),
-        Value::String("bobr-request-v1".to_string()),
+        Value::String("bobr-request-v2".to_string()),
     );
     request.insert(
         "store".to_string(),
         Value::String(store.to_string_lossy().into_owned()),
     );
+    request.insert(
+        "logs".to_string(),
+        Value::String(logs.to_string_lossy().into_owned()),
+    );
+    request.insert(
+        "work".to_string(),
+        Value::String(work.to_string_lossy().into_owned()),
+    );
+    request.insert("run_id".to_string(), Value::String(TEST_RUN_ID.to_string()));
     request.insert("nodes".to_string(), nodes);
     fs::write(
         request_path,
@@ -182,6 +254,16 @@ pub(crate) fn remove_object_record(root: &Path, object_hash: ObjectHash) {
 
 pub(crate) fn store_root(root: &Path) -> PathBuf {
     root.join("store")
+}
+
+/// Creates the log and work directories for one run, as the caller of `bobr`
+/// would, and returns them.
+pub(crate) fn make_run_dirs(root: &Path) -> (PathBuf, PathBuf) {
+    let logs = root.join("run-logs");
+    let work = root.join("run-work");
+    fs::create_dir_all(&logs).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    (logs, work)
 }
 
 pub(crate) fn recipe_node(name: &str, tag: &str, config: Value, inputs: Value) -> Value {

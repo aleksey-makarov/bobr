@@ -18,9 +18,9 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 use support::{
-    base_image_recipe, build_ref_count, execute_request, group_recipe, recipe_node,
-    remove_build_ref, remove_object_record, source_recipe, spawn_test_oci_registry, store_root,
-    tree_file_recipe, write_request, write_request_with_options,
+    base_image_recipe, build_ref_count, execute_request, group_recipe, last_run_logs_dir,
+    recipe_node, remove_build_ref, remove_object_record, source_recipe, spawn_test_oci_registry,
+    store_root, tree_file_recipe, write_request, write_request_with_options,
 };
 #[cfg(feature = "integration-tests")]
 use support::{tree_directory_recipe, tree_symlink_recipe};
@@ -609,18 +609,9 @@ fn second_cached_run_creates_no_new_workspaces() {
     );
 }
 
-/// Parses the run-level `events.jsonl` of the most recent run.
-fn latest_run_events(workspace_root: &Path) -> Vec<Value> {
-    let logs = store_root(workspace_root).join("logs");
-    let mut runs = fs::read_dir(&logs)
-        .unwrap()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.is_dir())
-        .collect::<Vec<_>>();
-    runs.sort();
-    let last = runs.last().expect("at least one run directory");
-    fs::read_to_string(last.join("events.jsonl"))
+/// Parses the run-level `events.jsonl` of the run this test started last.
+fn latest_run_events(_workspace_root: &Path) -> Vec<Value> {
+    fs::read_to_string(last_run_logs_dir().join("events.jsonl"))
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())

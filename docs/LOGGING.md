@@ -8,11 +8,13 @@ closed `status` vocabulary, and the format guarantees tooling may rely on.
 
 There are three non-overlapping output channels:
 
-- **Store logs** (`<store>/logs/<run-id>/…`) are the single source of truth for
-  a run, for both humans (rendered) and machines (JSONL). Everything
-  build-significant goes here, at every level.
+- **Run logs** (the request's `logs` directory) are the single source of truth
+  for a run, for both humans (rendered) and machines (JSONL). Everything
+  build-significant goes here, at every level. The caller names the directory
+  and creates it; by convention it is `<store>/logs/<run-id>` (see
+  [Request](./REQUEST.md)).
 - **stderr** is the live UI only: build progress plus warnings and errors, as a
-  projection of the store logs onto the screen. The progress renderer is the
+  projection of the run logs onto the screen. The progress renderer is the
   only writer of stderr. In an interactive terminal (and not `quiet`) it draws a
   **live block** (one updating line per active subject, a bottom summary line,
   with warnings/errors printed above) via `indicatif`; otherwise (non-TTY, e.g.
@@ -26,7 +28,7 @@ There are three non-overlapping output channels:
 ## On-disk layout
 
 ```text
-<store>/logs/<run-id>/
+<logs>/
   events.jsonl                         run-level event log (the full audit log)
   index.jsonl                          workspace allocation index
   <serial>-<tag>[-<name>]/             one directory per built/materialized subject
@@ -35,8 +37,10 @@ There are three non-overlapping output channels:
     raw/                               raw logs (step stdout/stderr, reports, …)
 ```
 
-The run-level `events.jsonl` is the full audit log of the run: it contains
-run-level events plus a copy of every subject event. Each subject's own
+The run-level `events.jsonl` is created exclusively: a run given a log directory
+another run already wrote to fails at once, rather than appending to someone
+else's audit trail. It is the full audit log of the run: it contains run-level
+events plus a copy of every subject event. Each subject's own
 `events.jsonl` contains only that subject's events. A subject event's run-level
 and subject-level copies are byte-identical, so tooling can match them.
 
@@ -71,9 +75,9 @@ producer can neither forge nor omit envelope fields.
 
 Field notes:
 
-- **`run_id` is not a field.** It is the run directory name
-  (`logs/<run-id>/`), constant for the whole run, so it is not repeated per
-  line.
+- **`run_id` is not a field.** The request names the run, and by convention its
+  log directory is named after it; the id is constant for the whole run, so it is
+  not repeated per line.
 - **`seq`** is the primary order: a run-global monotonic counter, stamped once
   when the event is emitted. It is reliable regardless of timestamp granularity
   or parallelism. **`ts`** is secondary.

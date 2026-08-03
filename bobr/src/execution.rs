@@ -15,8 +15,8 @@ use bobr_runtime::runtime_provider::runtime_provider_for_current_process;
 use bobr_store::{Store, StoreError, load_build_handle};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-#[cfg(test)]
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
@@ -185,6 +185,9 @@ pub fn execute(
 ) -> Result<ObjectHash, ExecutionError> {
     let Request {
         store,
+        logs,
+        work,
+        run_id,
         quiet,
         jobs,
         nodes,
@@ -203,7 +206,8 @@ pub fn execute(
     let root_key = collect_graph(&nodes, &mut subjects)?;
 
     let store = Store::create(&store).map_err(map_store_error)?;
-    let run = Arc::new(Run::allocate_in_store(store.root())?);
+    let run = Arc::new(Run::new(run_id, &logs, &work)?);
+    check_same_filesystem(&store, &run)?;
     let logger: Arc<BuildRunLogger> =
         Arc::new(build_run_logger(&run, quiet).map_err(ExecutionError::Store)?);
     let runtime_provider = runtime_provider_for_current_process();
@@ -689,6 +693,39 @@ fn log_run_finished(
     });
 }
 
+/// Refuses a work directory on another filesystem than the store.
+///
+/// Builders stage their output in the work directory, and the store publishes it
+/// by renaming it into `objects/` and hardlinking its files into `fs-files/`.
+/// Neither crosses a filesystem boundary, and the failure would otherwise land
+/// mid-build on the first import rather than here.
+fn check_same_filesystem(store: &Store, run: &Run) -> Result<(), ExecutionError> {
+    let device_of = |path: &Path, label: &str| -> Result<u64, ExecutionError> {
+        fs::metadata(path)
+            .map(|metadata| metadata.dev())
+            .map_err(|error| {
+                ExecutionError::Run(format!(
+                    "failed to inspect the {label} '{}': {error}",
+                    path.display()
+                ))
+            })
+    };
+
+    let store_device = device_of(store.root(), "store")?;
+    let work_device = device_of(run.work_dir(), "run work directory")?;
+    if store_device == work_device {
+        return Ok(());
+    }
+
+    Err(ExecutionError::InvalidRequest(format!(
+        "run work directory '{}' is on a different filesystem than the store '{}'; \
+         builds stage their output in the work directory and the store publishes it \
+         by renaming and hardlinking, which cannot cross a filesystem boundary",
+        run.work_dir().display(),
+        store.root().display()
+    )))
+}
+
 fn build_run_logger(run: &Run, quiet: bool) -> Result<BuildRunLogger, String> {
     BuildRunLogger::new(run.logs_dir(), run.run_id(), quiet)
 }
@@ -716,7 +753,12 @@ mod tests {
     }
 
     fn create_test_run_dirs(store: &Store) -> Arc<Run> {
-        Arc::new(Run::allocate_in_store(store.root()).unwrap())
+        // The driver is given ready directories; in tests we play the caller.
+        let logs_dir = store.root().join("logs").join("test-run");
+        let work_dir = store.root().join("work").join("test-run");
+        fs::create_dir_all(&logs_dir).unwrap();
+        fs::create_dir_all(&work_dir).unwrap();
+        Arc::new(Run::new("test-run".to_string(), &logs_dir, &work_dir).unwrap())
     }
 
     fn create_test_logger(run: &Run) -> Arc<BuildRunLogger> {
@@ -1063,6 +1105,46 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// Needs a second filesystem to point the work directory at; skips where
+    /// `/dev/shm` turns out to be the same one as the store's.
+    #[test]
+    fn work_directory_on_another_filesystem_is_refused() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+        let Ok(elsewhere) = tempfile::TempDir::new_in("/dev/shm") else {
+            eprintln!("work_directory_on_another_filesystem_is_refused: skipped (no /dev/shm)");
+            return;
+        };
+        let logs_dir = elsewhere.path().join("logs");
+        let work_dir = elsewhere.path().join("work");
+        fs::create_dir(&logs_dir).unwrap();
+        fs::create_dir(&work_dir).unwrap();
+        let run = Run::new("run".to_string(), &logs_dir, &work_dir).unwrap();
+
+        let store_device = fs::metadata(store.root()).unwrap().dev();
+        let work_device = fs::metadata(run.work_dir()).unwrap().dev();
+        if store_device == work_device {
+            eprintln!(
+                "work_directory_on_another_filesystem_is_refused: skipped (/dev/shm is the store's filesystem)"
+            );
+            return;
+        }
+
+        let error = check_same_filesystem(&store, &run).unwrap_err();
+
+        assert_eq!(error.class(), "invalid-request");
+        assert!(error.message().contains("different filesystem"), "{error}");
+    }
+
+    #[test]
+    fn work_directory_on_the_store_filesystem_is_accepted() {
+        let temp = tempdir().unwrap();
+        let store = create_test_store(temp.path());
+        let run = create_test_run_dirs(&store);
+
+        check_same_filesystem(&store, &run).unwrap();
     }
 
     #[test]

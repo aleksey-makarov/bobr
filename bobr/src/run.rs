@@ -9,6 +9,10 @@
 //! deliberate: the store answers questions about objects, not about where one
 //! particular build writes its logs and scratch.
 //!
+//! All three come from the request: `bobr` neither picks the name nor creates
+//! the directories. Whoever names a run is the one who can keep two runs from
+//! claiming the same one.
+//!
 //! [`Store`]: bobr_store::Store
 
 use crate::execution::ExecutionError;
@@ -20,11 +24,6 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use time::macros::format_description;
-use time::{OffsetDateTime, UtcOffset};
-
-const LOGS_DIR: &str = "logs";
-const WORK_DIR: &str = "tmp";
 
 /// One build run: where it writes and what it calls itself.
 #[derive(Debug)]
@@ -40,83 +39,27 @@ pub(crate) struct Run {
 }
 
 impl Run {
-    /// Allocates a run under a store root, in `<root>/logs/<run-id>` and
-    /// `<root>/tmp/<run-id>`.
+    /// Takes the directories and the name of one run, as given in the request.
     ///
-    /// The run id is the local timestamp, with `.1`, `.2`, … appended until a
-    /// pair of directories is free. `create_dir` is what claims them: it fails
-    /// rather than reuses, so two runs started in the same second cannot land
-    /// on the same directories.
-    pub(crate) fn allocate_in_store(store_root: &Path) -> Result<Self, ExecutionError> {
-        let logs_root = store_root.join(LOGS_DIR);
-        let work_root = store_root.join(WORK_DIR);
-        for (root, label) in [(&logs_root, "log"), (&work_root, "work")] {
-            fs::create_dir_all(root).map_err(|error| {
-                ExecutionError::Run(format!(
-                    "failed to create run {label} root '{}': {error}",
-                    root.display()
-                ))
-            })?;
-        }
-
-        let now = OffsetDateTime::now_utc();
-        let offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-        let local = now.to_offset(offset);
-        let run_id_format =
-            format_description!("[year repr:last_two][month][day][hour][minute][second]");
-        let run_id_base = local
-            .format(&run_id_format)
-            .unwrap_or_else(|_| "000000000000".to_string());
-
-        for attempt in 0..1000 {
-            let run_id = if attempt == 0 {
-                run_id_base.to_string()
-            } else {
-                format!("{run_id_base}.{attempt}")
-            };
-            let logs_dir = logs_root.join(&run_id);
-            let work_dir = work_root.join(&run_id);
-            match fs::create_dir(&logs_dir) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(ExecutionError::Run(format!(
-                        "failed to create run log directory '{}': {error}",
-                        logs_dir.display()
-                    )));
-                }
-            }
-
-            if let Err(error) = fs::create_dir(&work_dir) {
-                fs::remove_dir(&logs_dir).map_err(|cleanup_error| {
-                    ExecutionError::Run(format!(
-                        "failed to remove unused run log directory '{}' after work directory allocation failed at '{}': {cleanup_error}",
-                        logs_dir.display(),
-                        work_dir.display()
-                    ))
-                })?;
-                return Err(ExecutionError::Run(format!(
-                    "failed to create run work directory '{}': {error}",
-                    work_dir.display()
-                )));
-            }
-
-            return Ok(Self::new(run_id, logs_dir, work_dir));
-        }
-
-        Err(ExecutionError::Run(format!(
-            "failed to allocate a unique run id for '{run_id_base}'"
-        )))
-    }
-
-    fn new(run_id: String, logs_dir: PathBuf, work_dir: PathBuf) -> Self {
-        Self {
+    /// Both directories must already exist: whoever names a run is also the one
+    /// who creates its directories, and that is where uniqueness is decided.
+    /// `bobr` writes into what it is given -- two runs pointed at one directory
+    /// will collide when the first workspace is created, not silently merge.
+    pub(crate) fn new(
+        run_id: String,
+        logs_dir: &Path,
+        work_dir: &Path,
+    ) -> Result<Self, ExecutionError> {
+        validate_run_id(&run_id)?;
+        let logs_dir = validate_run_dir(logs_dir, "log")?;
+        let work_dir = validate_run_dir(work_dir, "work")?;
+        Ok(Self {
             run_id,
             logs_dir,
             work_dir,
             next_serial: AtomicU64::new(0),
             index_lock: Mutex::new(()),
-        }
+        })
     }
 
     /// Returns the id this run is recorded under.
@@ -357,110 +300,153 @@ fn safe_log_component(value: &str) -> String {
         .collect()
 }
 
+/// A run id names the run in the records it leaves behind, and callers
+/// conventionally name the run directories after it. Keep it to something that
+/// reads well in both places, and that cannot be mistaken for a path.
+fn validate_run_id(run_id: &str) -> Result<(), ExecutionError> {
+    const MAX_RUN_ID_LEN: usize = 64;
+
+    let valid = !run_id.is_empty()
+        && run_id.len() <= MAX_RUN_ID_LEN
+        && run_id
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric())
+        && run_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'));
+    if valid {
+        return Ok(());
+    }
+
+    Err(ExecutionError::InvalidRequest(format!(
+        "run id '{run_id}' must start with an ASCII letter or digit and may contain \
+         only ASCII letters, digits, '.', '_', and '-' (at most {MAX_RUN_ID_LEN} characters)"
+    )))
+}
+
+/// Resolves one of the run's directories, which the caller must have created.
+fn validate_run_dir(dir: &Path, label: &str) -> Result<PathBuf, ExecutionError> {
+    if !dir.is_absolute() {
+        return Err(ExecutionError::InvalidRequest(format!(
+            "run {label} directory must be absolute: '{}'",
+            dir.display()
+        )));
+    }
+    let canonical = fs::canonicalize(dir).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ExecutionError::InvalidRequest(format!(
+                "run {label} directory must exist: '{}'",
+                dir.display()
+            ))
+        } else {
+            ExecutionError::Run(format!(
+                "failed to resolve run {label} directory '{}': {error}",
+                dir.display()
+            ))
+        }
+    })?;
+    if !canonical.is_dir() {
+        return Err(ExecutionError::InvalidRequest(format!(
+            "run {label} directory must be a directory: '{}'",
+            dir.display()
+        )));
+    }
+    Ok(canonical)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use std::sync::Arc;
     use std::thread;
+    use tempfile::TempDir;
     use tempfile::tempdir;
 
+    /// Creates the two directories a caller would have made, and the run over
+    /// them.
+    fn run_in(temp: &TempDir) -> Run {
+        let logs_dir = temp.path().join("logs");
+        let work_dir = temp.path().join("work");
+        fs::create_dir(&logs_dir).unwrap();
+        fs::create_dir(&work_dir).unwrap();
+        Run::new("260803120000".to_string(), &logs_dir, &work_dir).unwrap()
+    }
+
     #[test]
-    fn allocates_matching_log_and_work_directories() {
+    fn takes_the_directories_and_name_it_is_given() {
         let temp = tempdir().unwrap();
+        let run = run_in(&temp);
 
-        let first = Run::allocate_in_store(temp.path()).unwrap();
-        let second = Run::allocate_in_store(temp.path()).unwrap();
+        assert_eq!(run.run_id(), "260803120000");
+        assert_eq!(
+            run.logs_dir(),
+            temp.path().join("logs").canonicalize().unwrap()
+        );
+        assert_eq!(
+            run.work_dir(),
+            temp.path().join("work").canonicalize().unwrap()
+        );
+    }
 
-        assert_ne!(first.logs_dir(), second.logs_dir());
-        assert_ne!(first.work_dir(), second.work_dir());
-        for run in [&first, &second] {
-            assert!(run.logs_dir().is_dir());
-            assert!(run.work_dir().is_dir());
-            // One run id names both directories.
-            assert_eq!(
-                run.logs_dir().file_name().unwrap(),
-                run.work_dir().file_name().unwrap()
+    #[test]
+    fn rejects_directories_that_are_not_ready() {
+        let temp = tempdir().unwrap();
+        let logs_dir = temp.path().join("logs");
+        let work_dir = temp.path().join("work");
+        fs::create_dir(&logs_dir).unwrap();
+
+        // The work directory is the caller's to create.
+        let error = Run::new("run".to_string(), &logs_dir, &work_dir).unwrap_err();
+        assert!(matches!(
+            error,
+            ExecutionError::InvalidRequest(message)
+                if message.contains("run work directory must exist")
+        ));
+
+        fs::write(&work_dir, b"not a directory\n").unwrap();
+        let error = Run::new("run".to_string(), &logs_dir, &work_dir).unwrap_err();
+        assert!(matches!(
+            error,
+            ExecutionError::InvalidRequest(message)
+                if message.contains("run work directory must be a directory")
+        ));
+
+        let error = Run::new("run".to_string(), Path::new("logs"), &work_dir).unwrap_err();
+        assert!(matches!(
+            error,
+            ExecutionError::InvalidRequest(message)
+                if message.contains("run log directory must be absolute")
+        ));
+    }
+
+    #[test]
+    fn rejects_run_ids_that_do_not_read_as_a_name() {
+        let temp = tempdir().unwrap();
+        let logs_dir = temp.path().join("logs");
+        let work_dir = temp.path().join("work");
+        fs::create_dir(&logs_dir).unwrap();
+        fs::create_dir(&work_dir).unwrap();
+
+        for candidate in ["", "-leading", ".hidden", "with/slash", "with space", "имя"] {
+            let error = Run::new(candidate.to_string(), &logs_dir, &work_dir).unwrap_err();
+            assert!(
+                matches!(&error, ExecutionError::InvalidRequest(message) if message.contains("run id")),
+                "expected {candidate:?} to be rejected, got {error:?}"
             );
-            assert_eq!(run.logs_dir().file_name().unwrap(), run.run_id());
-        }
-    }
-
-    #[test]
-    fn allocation_disambiguates_by_log_directory() {
-        for _ in 0..100 {
-            let temp = tempdir().unwrap();
-            let logs_root = temp.path().join(LOGS_DIR);
-            let work_root = temp.path().join(WORK_DIR);
-
-            let first = Run::allocate_in_store(temp.path()).unwrap();
-            let first_suffix = format!("{}.1", first.run_id());
-            let second_suffix = format!("{}.2", first.run_id());
-            fs::create_dir(logs_root.join(&first_suffix)).unwrap();
-
-            let run = Run::allocate_in_store(temp.path()).unwrap();
-            if run.run_id() != second_suffix {
-                // The second allocation landed in a later timestamp second.
-                assert!(
-                    !run.run_id().starts_with(&format!("{}.", first.run_id())),
-                    "unexpected run id suffix after log directory collision: {}",
-                    run.run_id()
-                );
-                continue;
-            }
-
-            assert!(run.logs_dir().is_dir());
-            assert!(run.work_dir().is_dir());
-            assert!(logs_root.join(&first_suffix).is_dir());
-            assert!(!work_root.join(&first_suffix).exists());
-            return;
         }
 
-        panic!("could not perform two run id allocations inside one timestamp second");
-    }
-
-    #[test]
-    fn allocation_fails_when_only_the_work_directory_is_taken() {
-        for _ in 0..100 {
-            let temp = tempdir().unwrap();
-            let logs_root = temp.path().join(LOGS_DIR);
-            let work_root = temp.path().join(WORK_DIR);
-
-            let first = Run::allocate_in_store(temp.path()).unwrap();
-            let conflicting = format!("{}.1", first.run_id());
-            fs::create_dir(work_root.join(&conflicting)).unwrap();
-
-            match Run::allocate_in_store(temp.path()) {
-                Ok(run) => {
-                    assert!(
-                        !run.run_id().starts_with(&format!("{}.", first.run_id())),
-                        "allocator ignored a taken work directory: {}",
-                        run.run_id()
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    assert!(matches!(
-                        error,
-                        ExecutionError::Run(message)
-                            if message.contains("failed to create run work directory")
-                    ));
-                    // The log directory claimed for the failed attempt is given back.
-                    assert!(!logs_root.join(&conflicting).exists());
-                    assert!(!logs_root.join(format!("{}.2", first.run_id())).exists());
-                    assert!(work_root.join(&conflicting).is_dir());
-                    return;
-                }
-            }
+        for candidate in ["260803120000", "260803120000.1", "nightly_build-3", "a"] {
+            Run::new(candidate.to_string(), &logs_dir, &work_dir)
+                .unwrap_or_else(|error| panic!("expected {candidate:?} to be accepted: {error:?}"));
         }
-
-        panic!("could not test a taken work directory inside one timestamp second");
     }
 
     #[test]
     fn workspace_allocation_writes_metadata_index_and_sanitized_paths() {
         let temp = tempdir().unwrap();
-        let run = Run::allocate_in_store(temp.path()).unwrap();
+        let run = run_in(&temp);
 
         let workspace = run
             .create_workspace(
@@ -514,7 +500,7 @@ mod tests {
     #[test]
     fn workspace_serials_count_up_within_one_run() {
         let temp = tempdir().unwrap();
-        let run = Run::allocate_in_store(temp.path()).unwrap();
+        let run = run_in(&temp);
 
         let first = run.create_workspace("Tree", "left", "build-left").unwrap();
         let second = run
@@ -536,9 +522,36 @@ mod tests {
     }
 
     #[test]
+    fn a_reused_run_directory_collides_instead_of_merging() {
+        let temp = tempdir().unwrap();
+        let logs_dir = temp.path().join("logs");
+        let work_dir = temp.path().join("work");
+        fs::create_dir(&logs_dir).unwrap();
+        fs::create_dir(&work_dir).unwrap();
+
+        let first = Run::new("run".to_string(), &logs_dir, &work_dir).unwrap();
+        first
+            .create_workspace("Tree", "demo", "build-demo")
+            .unwrap();
+
+        // A second run given the same directories starts numbering from zero
+        // again, so its first workspace lands on the one already there.
+        let second = Run::new("run".to_string(), &logs_dir, &work_dir).unwrap();
+        let error = second
+            .create_workspace("Tree", "demo", "build-demo")
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ExecutionError::Run(message)
+                if message.contains("failed to create workspace log directory")
+        ));
+    }
+
+    #[test]
     fn parallel_workspace_allocation_does_not_reuse_serials() {
         let temp = tempdir().unwrap();
-        let run = Arc::new(Run::allocate_in_store(temp.path()).unwrap());
+        let run = Arc::new(run_in(&temp));
         let mut handles = Vec::new();
 
         for index in 0..8 {
@@ -569,7 +582,7 @@ mod tests {
     #[test]
     fn scratch_is_prepared_empty_and_removed() {
         let temp = tempdir().unwrap();
-        let run = Run::allocate_in_store(temp.path()).unwrap();
+        let run = run_in(&temp);
         let workspace = run.create_workspace("Tree", "demo", "build-demo").unwrap();
         let scratch = workspace.temp_dir().to_path_buf();
         fs::write(scratch.join("stale"), b"old\n").unwrap();
@@ -589,7 +602,7 @@ mod tests {
     #[test]
     fn scratch_operations_refuse_paths_outside_the_run() {
         let temp = tempdir().unwrap();
-        let run = Run::allocate_in_store(temp.path()).unwrap();
+        let run = run_in(&temp);
         let outside = temp.path().join("elsewhere");
         fs::create_dir(&outside).unwrap();
 

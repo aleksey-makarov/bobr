@@ -29,7 +29,6 @@ bobr-builder.workspace = true
 bobr-source.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-time = { workspace = true, features = ["formatting", "local-offset", "macros"] }
 
 [dev-dependencies]
 bobr-source = { workspace = true, features = ["test-support"] }

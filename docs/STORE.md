@@ -119,17 +119,25 @@ The filesystem layout mirrors the identity model:
     <manifest-object-hash>/
   fs-tree-refs/
     <name> -> ../fs-trees/<manifest-object-hash>
-  logs/
-    <YYMMDDhhmmss>[.N]/
-      events.jsonl
-      index.jsonl
-      <00000000>-<tag>[-<name>]/
-        meta.json
-        events.jsonl
-        raw/
-  tmp/
-    <YYMMDDhhmmss>[.N]/
-      <00000000>-<tag>[-<name>]/
+```
+
+A run's log and work directories are **not** part of this layout: the request
+names them, and the caller creates them (see [Request](./REQUEST.md)). By
+convention they live under the store — `<store>/logs/<run-id>` and
+`<store>/work/<run-id>`, which is what `bobr-build.sh` does by default — and the
+work directory has to be on the store's filesystem, since build output is
+published out of it by renaming and hardlinking. Their contents are:
+
+```text
+<logs>/
+  events.jsonl
+  index.jsonl
+  <00000000>-<tag>[-<name>]/
+    meta.json
+    events.jsonl
+    raw/
+<work>/
+  <00000000>-<tag>[-<name>]/
 ```
 
 - `objects/` holds payloads addressed by `object_hash`.
@@ -178,11 +186,11 @@ containing:
 object record; they provide the `BuildKey` → `ObjectHash` and `ReuseKey` →
 `ObjectHash` mappings used by reuse lookup.
 
-`logs/<run-id>/<serial>-<tag>[-<name>]/raw/` stores raw per-subject log files
-such as captured tool output. `tmp/<run-id>/<serial>-<tag>[-<name>]/` is the
-matching per-subject scratch directory. Scratch directories are removed after
-execution on a best-effort basis; cleanup failures are logged as warnings and
-the scratch directory is left in place.
+`<logs>/<serial>-<tag>[-<name>]/raw/` stores raw per-subject log files such as
+captured tool output. `<work>/<serial>-<tag>[-<name>]/` is the matching
+per-subject scratch directory. Scratch directories are removed after execution on
+a best-effort basis; cleanup failures are logged as warnings and the scratch
+directory is left in place.
 
 ## Object Refs
 
@@ -212,13 +220,13 @@ ref is rotated into a timestamp-suffixed history ref.
 
 Each run writes:
 
-- one run-level structured event log under `<store>/logs/<run-id>/events.jsonl`
-- one workspace index under `<store>/logs/<run-id>/index.jsonl`
-- per-subject logs under
-  `<store>/logs/<run-id>/<00000000>-<tag>[-<name>]/`
+- one run-level structured event log under `<logs>/events.jsonl`
+- one workspace index under `<logs>/index.jsonl`
+- per-subject logs under `<logs>/<00000000>-<tag>[-<name>]/`
 
-`run-id` uses the local `<YYMMDDhhmmss>` timestamp. If another run has already
-claimed that directory, `.1`, `.2`, and so on are appended. Each builder,
+The run id comes from the request; `bobr-build.sh` derives it from the local
+`<YYMMDDhhmmss>` timestamp and appends `.1`, `.2`, and so on when a directory of
+that name is already taken. Each builder,
 source, or scheduler subject gets a store-allocated serial number for its log
 directory name. The serial is an internal allocation detail; the full original
 tag, recipe name, subject key, and workspace paths are stored in that subject's

@@ -46,19 +46,25 @@ this chapter; `bobr` finds the sandbox launcher next to its own executable.
 input (or a file named on the command line), builds the `root` recipe, and
 prints its [`ObjectHash`](./CONCEPTS.md) to standard output.
 
-Create a store (an absolute path to an existing directory) and a tiny request
-that stages one text file with the [`Tree`](./REQUEST.md#tree) builder:
+Create the directories the request names — the store, plus a log and a work
+directory for this run — and write a tiny request that stages one text file with
+the [`Tree`](./REQUEST.md#tree) builder. `bobr` writes into directories you give
+it and creates none of them itself, which is what lets you decide where a run's
+logs and scratch go, and keeps two runs from sharing them:
 
 ```sh
-mkdir -p /tmp/bobr-store
+mkdir -p /tmp/bobr-store /tmp/bobr-store/logs/first /tmp/bobr-store/work/first
 ```
 
 `hello.json`:
 
 ```json
 {
-  "schema": "bobr-request-v1",
+  "schema": "bobr-request-v2",
   "store": "/tmp/bobr-store",
+  "logs": "/tmp/bobr-store/logs/first",
+  "work": "/tmp/bobr-store/work/first",
+  "run_id": "first",
   "nodes": {
     "root": {
       "name": "hello",
@@ -129,6 +135,10 @@ tools/bobr-build.sh test_all_recipes  # or the whole shipped set: kernel, images
 `tools/bobr-build.sh` options:
 
 - `--store PATH` — where to build (default: `../bobr-store`, next to the repos);
+- `--logs PATH`, `--work PATH` — roots for the run directories (default:
+  `<store>/logs` and `<store>/work`), and `--run-id NAME` to name the run
+  yourself; by default the driver names it after the local timestamp and creates
+  both directories for you;
 - `--jobs N`, `--quiet` — the request's top-level knobs;
 - `--podman-unshare` — run under `podman unshare` on hosts that forbid
   unprivileged user namespaces.

@@ -6,7 +6,8 @@ use serde_json::json;
 use std::fs;
 use std::process::{Command, Stdio};
 use support::{
-    recipe_node, store_root, tree_file_recipe, write_request, write_request_with_options,
+    make_run_dirs, recipe_node, store_root, tree_file_recipe, write_request,
+    write_request_with_options,
 };
 use tempfile::tempdir;
 
@@ -100,7 +101,7 @@ fn cli_reports_missing_store_option() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v1",
+            "schema": "bobr-request-v2",
             "nodes": {
                 "root": tree_file_recipe("missing-store-option", "missing.txt", "hello", false)
             }
@@ -196,14 +197,18 @@ fn cli_reports_invalid_request() {
 #[test]
 fn cli_reports_invalid_generic_input_shape() {
     let workspace = tempdir().unwrap();
+    let (logs, work) = make_run_dirs(workspace.path());
     let request_path = workspace.path().join("broken-shape.json");
     let store = store_root(workspace.path());
     fs::create_dir_all(&store).unwrap();
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v1",
+            "schema": "bobr-request-v2",
             "store": store.to_string_lossy(),
+            "logs": logs.to_string_lossy(),
+            "work": work.to_string_lossy(),
+            "run_id": "test-run",
             "nodes": {
                 "root": {
                     "name": "sandbox",
@@ -234,12 +239,16 @@ fn cli_reports_invalid_generic_input_shape() {
 #[test]
 fn cli_reports_relative_store_path() {
     let workspace = tempdir().unwrap();
+    let (logs, work) = make_run_dirs(workspace.path());
     let request_path = workspace.path().join("relative-store.json");
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v1",
+            "schema": "bobr-request-v2",
             "store": "relative/store",
+            "logs": logs.to_string_lossy(),
+            "work": work.to_string_lossy(),
+            "run_id": "test-run",
             "nodes": {
                 "root": {
                     "name": "tree",
@@ -277,14 +286,18 @@ fn cli_reports_relative_store_path() {
 #[test]
 fn cli_reports_unexpected_local_path() {
     let workspace = tempdir().unwrap();
+    let (logs, work) = make_run_dirs(workspace.path());
     let request_path = workspace.path().join("unexpected-local.json");
     let store = store_root(workspace.path());
     fs::create_dir_all(&store).unwrap();
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v1",
+            "schema": "bobr-request-v2",
             "store": store.to_string_lossy(),
+            "logs": logs.to_string_lossy(),
+            "work": work.to_string_lossy(),
+            "run_id": "test-run",
             "local": "relative/local",
             "nodes": {
                 "root": {
@@ -316,14 +329,18 @@ fn cli_reports_unexpected_local_path() {
 #[test]
 fn cli_reports_relative_source_path() {
     let workspace = tempdir().unwrap();
+    let (logs, work) = make_run_dirs(workspace.path());
     let request_path = workspace.path().join("relative-source-path.json");
     let store = store_root(workspace.path());
     fs::create_dir_all(&store).unwrap();
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v1",
+            "schema": "bobr-request-v2",
             "store": store.to_string_lossy(),
+            "logs": logs.to_string_lossy(),
+            "work": work.to_string_lossy(),
+            "run_id": "test-run",
             "nodes": {
                 "root": {
                     "name": "source",
@@ -358,13 +375,17 @@ fn cli_reports_relative_source_path() {
 #[test]
 fn cli_reports_missing_store_directory() {
     let workspace = tempdir().unwrap();
+    let (logs, work) = make_run_dirs(workspace.path());
     let request_path = workspace.path().join("missing-store.json");
     let missing_store = workspace.path().join("missing-store");
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v1",
+            "schema": "bobr-request-v2",
             "store": missing_store.to_string_lossy(),
+            "logs": logs.to_string_lossy(),
+            "work": work.to_string_lossy(),
+            "run_id": "test-run",
             "nodes": {
                 "root": {
                     "name": "tree",

@@ -8,12 +8,12 @@ use std::path::PathBuf;
 /// schema string, so the format version is enforced declaratively at parse
 /// time and never needs to live as data on `Request`.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RequestSchemaV1;
+pub(crate) struct RequestSchemaV2;
 
-impl<'de> Deserialize<'de> for RequestSchemaV1 {
+impl<'de> Deserialize<'de> for RequestSchemaV2 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match String::deserialize(deserializer)?.as_str() {
-            "bobr-request-v1" => Ok(RequestSchemaV1),
+            "bobr-request-v2" => Ok(RequestSchemaV2),
             other => Err(D::Error::custom(format!(
                 "unsupported request schema '{other}'"
             ))),
@@ -21,16 +21,20 @@ impl<'de> Deserialize<'de> for RequestSchemaV1 {
     }
 }
 
-/// A parsed, validated build request: the content-addressed store path plus the
-/// table of recipe nodes to build (see the crate docs for the request shape).
-/// Construct it with [`Request::parse_json`].
+/// A parsed, validated build request: where to build (the store, and this run's
+/// log and work directories), what to call the run, and the table of recipe
+/// nodes to build (see the crate docs for the request shape). Construct it with
+/// [`Request::parse_json`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    // Validated at deserialization via RequestSchemaV1; never read afterwards.
+    // Validated at deserialization via RequestSchemaV2; never read afterwards.
     #[allow(dead_code)]
-    pub(crate) schema: RequestSchemaV1,
+    pub(crate) schema: RequestSchemaV2,
     pub(crate) store: PathBuf,
+    pub(crate) logs: PathBuf,
+    pub(crate) work: PathBuf,
+    pub(crate) run_id: String,
     pub(crate) quiet: Option<bool>,
     pub(crate) jobs: Option<usize>,
     pub(crate) nodes: BTreeMap<String, Value>,
@@ -86,6 +90,68 @@ pub(crate) fn parse_request_nodes(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn request_names_the_run_and_its_directories() {
+        let request = Request::parse_json(
+            json!({
+                "schema": "bobr-request-v2",
+                "store": "/store",
+                "logs": "/logs/run",
+                "work": "/work/run",
+                "run_id": "260803120000",
+                "nodes": { "root": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+
+        assert_eq!(request.store, PathBuf::from("/store"));
+        assert_eq!(request.logs, PathBuf::from("/logs/run"));
+        assert_eq!(request.work, PathBuf::from("/work/run"));
+        assert_eq!(request.run_id, "260803120000");
+    }
+
+    #[test]
+    fn request_without_a_run_is_rejected() {
+        let error = Request::parse_json(
+            json!({
+                "schema": "bobr-request-v2",
+                "store": "/store",
+                "nodes": { "root": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("missing field `logs`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_previous_request_schema_is_rejected() {
+        let error = Request::parse_json(
+            json!({
+                "schema": "bobr-request-v1",
+                "store": "/store",
+                "nodes": { "root": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported request schema 'bobr-request-v1'"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn request_requires_top_level_root_node() {

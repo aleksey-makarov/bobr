@@ -10,8 +10,11 @@ The request is a single JSON object:
 
 ```json
 {
-  "schema": "bobr-request-v1",
+  "schema": "bobr-request-v2",
   "store": "/abs/path/to/store",
+  "logs": "/abs/path/to/logs/260803120000",
+  "work": "/abs/path/to/work/260803120000",
+  "run_id": "260803120000",
   "quiet": false,
   "jobs": 8,
   "nodes": {
@@ -20,12 +23,32 @@ The request is a single JSON object:
 }
 ```
 
-- `schema` — format version; must be `"bobr-request-v1"`
+- `schema` — format version; must be `"bobr-request-v2"`
 - `store` — the store root for this request: an absolute path to an existing
   directory (see [Store](./STORE.md))
+- `logs` — this run's log directory: an absolute path to an existing directory,
+  which `bobr` fills with the run log and one subdirectory per subject (see
+  [Build logging](./LOGGING.md))
+- `work` — this run's work directory: an absolute path to an existing directory,
+  which `bobr` fills with one scratch directory per subject
+- `run_id` — what to call this run; recorded in the object records it writes and
+  in each subject's `meta.json`. It must start with an ASCII letter or digit and
+  may contain only ASCII letters, digits, `.`, `_`, and `-`, up to 64 characters
 - `quiet` — optional bool; suppress the live progress log
 - `jobs` — optional integer; limit on parallel builder execution
 - `nodes` — the recipe DAG
+
+`bobr` neither names the run nor creates its two directories: the caller does
+both, which is also what keeps two runs from writing into one another. `bobr`
+writes into what it is given, and refuses to share it: the run's `events.jsonl`
+is created exclusively, so a second run pointed at a log directory already in use
+(or left by an earlier run) fails immediately instead of interleaving with it.
+
+The **work directory must be on the same filesystem as the store**. Builders
+stage their output there, and the store publishes it by renaming it into
+`objects/` and hardlinking its files into `fs-files/`; neither crosses a
+filesystem boundary. `bobr` checks this before building rather than failing on
+the first import. The log directory has no such constraint.
 
 The recipe DAG is a JSON object: each member's value is a recipe. The required
 key `root` holds the recipe to build; the others hold the recipes it depends on.
