@@ -14,6 +14,7 @@ pub use bobr_runtime::runtime_provider::{RuntimeBackend, RuntimeProvider};
 // These modules organize the code; their public items are re-exported at the
 // crate root below, which is the single supported path.
 mod cancellation;
+pub mod fsutil;
 mod identity;
 mod logging;
 mod subject_run_context;

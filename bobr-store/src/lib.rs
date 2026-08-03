@@ -19,7 +19,6 @@ compile_error!("bobr requires Linux");
 
 mod error;
 pub mod fs_tree;
-mod fsutil;
 mod object;
 mod record;
 mod ref_name;
@@ -33,7 +32,7 @@ pub use record::{ObjectRecord, load_object_record};
 pub use ref_name::validate_ref_name;
 pub use refs::{load_build_handle, resolve_build_handle, resolve_reuse_for_build};
 pub use source::{SourceImportOutcome, import_source_object, record_existing_source_object};
-pub use store::{Store, StoreRunLogLocations, StoreTempDir, StoreWorkspace, create_workspace};
+pub use store::Store;
 
 #[cfg(test)]
 pub(crate) use object::import_object;
@@ -42,7 +41,7 @@ pub(crate) use record::{OBJECT_RECORD_SCHEMA, parse_object_record_value};
 #[cfg(test)]
 pub(crate) use refs::{load_reuse_object_record, replace_symlink};
 #[cfg(test)]
-pub(crate) use store::{LOGS_DIR, OBJECT_RECORDS_DIR, OBJECTS_DIR, TMP_DIR};
+pub(crate) use store::{OBJECT_RECORDS_DIR, OBJECTS_DIR};
 
 #[cfg(test)]
 mod tests;

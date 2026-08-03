@@ -1,6 +1,6 @@
-use crate::fsutil as private_fs;
 use crate::record::ObjectRecordSchemaV4;
 use crate::{ObjectRecord, Store, StoreError};
+use bobr_core::fsutil as private_fs;
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use fsobj_hash::hash_path;
 use std::fs;
@@ -199,6 +199,7 @@ pub fn import_build(
     inputs: Vec<ObjectHash>,
     staged_path: &Path,
     object_ref_name: &str,
+    run_id: &str,
 ) -> Result<ObjectHash, StoreError> {
     crate::validate_ref_name(object_ref_name)?;
     let object_hash = import_object(store, staged_path)?;
@@ -206,7 +207,7 @@ pub fn import_build(
         schema: ObjectRecordSchemaV4,
         build_key,
         object_hash,
-        run_id: Some(store.run_id().to_string()),
+        run_id: Some(run_id.to_string()),
         inputs,
     };
     crate::record::store_object_record(store, &object_record)?;

@@ -149,9 +149,9 @@ fn map_execution_error(error: bobr::ExecutionError) -> BobrError {
         | bobr::ExecutionError::UnknownBuilder(_)
         | bobr::ExecutionError::RequestLoad(_) => BobrError::InvalidInput(error.to_string()),
         bobr::ExecutionError::Cancelled(_) => BobrError::Cancelled(error.to_string()),
-        bobr::ExecutionError::Build(_) | bobr::ExecutionError::Store(_) => {
-            BobrError::BuildFailed(error.to_string())
-        }
+        bobr::ExecutionError::Build(_)
+        | bobr::ExecutionError::Store(_)
+        | bobr::ExecutionError::Run(_) => BobrError::BuildFailed(error.to_string()),
     }
 }
 

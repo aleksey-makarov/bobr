@@ -46,6 +46,6 @@ impl fmt::Display for StoreError {
 
 impl std::error::Error for StoreError {}
 
-pub(crate) fn map_fsutil_error(error: crate::fsutil::FsUtilError) -> StoreError {
+pub(crate) fn map_fsutil_error(error: bobr_core::fsutil::FsUtilError) -> StoreError {
     StoreError::Io(error.to_string())
 }

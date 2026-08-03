@@ -1,5 +1,5 @@
-use crate::fsutil as private_fs;
 use crate::{Store, StoreError};
+use bobr_core::fsutil as private_fs;
 use bobr_core::{BuildKey, ObjectHash};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use serde_json::Value;
@@ -86,6 +86,7 @@ pub fn load_object_record(
 pub(crate) fn record_existing_source_object(
     store: &Store,
     object_hash: ObjectHash,
+    run_id: &str,
 ) -> Result<(), StoreError> {
     if store.object_path(object_hash)?.is_none() {
         return Err(StoreError::Io(format!(
@@ -97,7 +98,7 @@ pub(crate) fn record_existing_source_object(
         schema: ObjectRecordSchemaV4,
         build_key: BuildKey::from_object_hash(object_hash),
         object_hash,
-        run_id: Some(store.run_id().to_string()),
+        run_id: Some(run_id.to_string()),
         inputs: Vec::new(),
     };
     store_object_record(store, &object_record)

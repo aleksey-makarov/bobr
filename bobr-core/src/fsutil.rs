@@ -1,11 +1,20 @@
+//! Filesystem helpers shared by the store and the build runtime.
+//!
+//! These go beyond `std::fs` in one respect: they force their way through
+//! read-only directories. A sandboxed build leaves trees whose directories
+//! deny writes, and `remove_dir_all` cannot delete those without first
+//! restoring the write bit.
+
 use std::fmt;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Failure of a filesystem helper in this module.
 #[derive(Debug)]
-pub(crate) enum FsUtilError {
+pub enum FsUtilError {
+    /// The underlying filesystem operation failed; the message names the path.
     Io(String),
 }
 
@@ -17,7 +26,8 @@ impl fmt::Display for FsUtilError {
     }
 }
 
-pub(crate) fn recreate_empty_dir_force(path: &Path) -> Result<(), FsUtilError> {
+/// Recreates `path` as an empty directory, removing whatever was there before.
+pub fn recreate_empty_dir_force(path: &Path) -> Result<(), FsUtilError> {
     if path.exists() {
         if path.is_dir() {
             remove_dir_force(path)?;
@@ -39,7 +49,9 @@ pub(crate) fn recreate_empty_dir_force(path: &Path) -> Result<(), FsUtilError> {
     })
 }
 
-pub(crate) fn remove_path_force(path: &Path) -> Result<(), FsUtilError> {
+/// Removes `path` whatever it is -- file, symlink, or directory tree. A missing
+/// path is success.
+pub fn remove_path_force(path: &Path) -> Result<(), FsUtilError> {
     if !path.exists() && !path.is_symlink() {
         return Ok(());
     }
@@ -61,7 +73,9 @@ pub(crate) fn remove_path_force(path: &Path) -> Result<(), FsUtilError> {
     }
 }
 
-pub(crate) fn remove_dir_force(path: &Path) -> Result<(), FsUtilError> {
+/// Removes the directory tree at `path`, restoring write permission on
+/// directories that deny it. A missing path is success.
+pub fn remove_dir_force(path: &Path) -> Result<(), FsUtilError> {
     if !path.exists() {
         return Ok(());
     }
@@ -74,7 +88,9 @@ pub(crate) fn remove_dir_force(path: &Path) -> Result<(), FsUtilError> {
     })
 }
 
-pub(crate) fn write_atomic(path: &Path, content: &str) -> Result<(), FsUtilError> {
+/// Writes `content` to `path` atomically: through a temporary file in the same
+/// directory, then a rename.
+pub fn write_atomic(path: &Path, content: &str) -> Result<(), FsUtilError> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())

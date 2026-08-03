@@ -1062,7 +1062,7 @@ fn publish_materialized_fs_tree(staging_root: &Path, final_root: &Path) -> Resul
 
 /// Force-removes a scanned tree that was not published into the cache.
 fn remove_scanned_root(root: &Path) -> Result<(), StoreError> {
-    crate::fsutil::remove_dir_force(root).map_err(crate::error::map_fsutil_error)
+    bobr_core::fsutil::remove_dir_force(root).map_err(crate::error::map_fsutil_error)
 }
 
 fn fs_tree_ref_target(manifest_hash: ObjectHash) -> PathBuf {

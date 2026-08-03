@@ -93,6 +93,7 @@ mod tests {
             Vec::new(),
             &staged_manifest,
             "staged-object",
+            "test-run",
         )
         .unwrap();
 

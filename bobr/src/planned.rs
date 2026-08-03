@@ -1,17 +1,18 @@
 use crate::execution::{
     ExecutionError, TempDirGuard, check_cancelled, log_execution_event, map_builder_error,
-    map_store_error, prepare_temp,
+    map_store_error,
 };
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
+use crate::run::Run;
 use bobr_builder::{BuilderPlanError, BuilderPlannedSubject};
 use bobr_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, BuildSeed, BuildStatus,
-    CancellationToken, NoopBuildLogger, ObjectHash, SubjectRunContext, Workspace,
+    CancellationToken, NoopBuildLogger, ObjectHash, SubjectRunContext,
 };
 use bobr_source::{SourceExecutionError, SourcePlannedSubject};
 use bobr_store::{
-    SourceImportOutcome, Store, create_workspace, import_build, import_source_object,
-    record_existing_source_object, resolve_build_handle, resolve_reuse_for_build,
+    SourceImportOutcome, Store, import_build, import_source_object, record_existing_source_object,
+    resolve_build_handle, resolve_reuse_for_build,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -39,6 +40,7 @@ impl PlannedSubject {
 
 pub(crate) struct PlannedExecutionContext<'a> {
     pub(crate) store: &'a Store,
+    pub(crate) run: Arc<Run>,
     pub(crate) run_logger: Arc<BuildRunLogger>,
     pub(crate) runtime_provider: bobr_core::RuntimeProvider,
     pub(crate) cancellation: CancellationToken,
@@ -112,18 +114,13 @@ fn execute_builder_subject(
     let builder_inputs = inputs.prepare_builder_inputs(cx.store, &cx.runtime_provider)?;
 
     // Miss: create the workspace and run the builder.
-    let store_workspace = create_workspace(
-        cx.store,
-        subject.tag(),
-        subject.name(),
-        build_key.to_string(),
-    )
-    .map_err(map_store_error)?;
-    let temp_dir_handle = store_workspace.temp_dir_handle().clone();
-    let workspace = core_workspace(store_workspace);
+    let workspace =
+        cx.run
+            .create_workspace(subject.tag(), subject.name(), build_key.to_string())?;
+    let scratch_dir = workspace.temp_dir().to_path_buf();
     // Owns the temp dir from here on: every return path (bind error below, and
     // panics) cleans it via Drop.
-    let mut temp_guard = TempDirGuard::for_builder(temp_dir_handle.clone());
+    let mut temp_guard = TempDirGuard::for_builder(cx.run.clone(), scratch_dir.clone());
     let logger = cx
         .run_logger
         .bind_subject(subject.log_subject(&workspace))
@@ -142,7 +139,7 @@ fn execute_builder_subject(
         "executing builder",
     );
     check_cancelled(&cx.cancellation)?;
-    prepare_temp(&temp_dir_handle)?;
+    cx.run.prepare_scratch(&scratch_dir)?;
     log_execution_event(
         logger.as_ref(),
         BuildLogLevel::Info,
@@ -175,6 +172,7 @@ fn execute_builder_subject(
         input_hashes.values().copied().collect(),
         &staged,
         subject.name(),
+        cx.run.run_id(),
     )
     .map_err(|error| {
         log_execution_event(
@@ -210,9 +208,13 @@ fn execute_source_subject(
             outcome: SubjectOutcome::CacheHit,
         });
     }
-    if let Some(object_hash) =
-        record_existing_source_object(cx.store, subject.declared_object_hash(), subject.name())
-            .map_err(map_store_error)?
+    if let Some(object_hash) = record_existing_source_object(
+        cx.store,
+        subject.declared_object_hash(),
+        subject.name(),
+        cx.run.run_id(),
+    )
+    .map_err(map_store_error)?
     {
         return Ok(SubjectExecution {
             object_hash,
@@ -222,14 +224,13 @@ fn execute_source_subject(
     }
 
     // Miss: create the workspace and materialize the source.
-    let store_workspace =
-        create_workspace(cx.store, "Source", subject.name(), build_key.to_string())
-            .map_err(map_store_error)?;
-    let temp_dir_handle = store_workspace.temp_dir_handle().clone();
-    let workspace = core_workspace(store_workspace);
+    let workspace = cx
+        .run
+        .create_workspace("Source", subject.name(), build_key.to_string())?;
     // Owns the temp dir from here on: every return path (bind error below, and
     // panics) cleans it via Drop.
-    let mut temp_guard = TempDirGuard::for_source(temp_dir_handle);
+    let mut temp_guard =
+        TempDirGuard::for_source(cx.run.clone(), workspace.temp_dir().to_path_buf());
     let logger = cx
         .run_logger
         .bind_subject(subject.log_subject(&workspace))
@@ -282,6 +283,7 @@ fn execute_source_subject(
         subject.declared_object_hash(),
         &staged_path,
         subject.name(),
+        cx.run.run_id(),
     )
     .map_err(map_store_error)?;
     check_cancelled(&cx.cancellation)?;
@@ -370,14 +372,6 @@ fn map_source_execution_error(error: SourceExecutionError) -> ExecutionError {
         SourceExecutionError::Cancelled(message) => ExecutionError::Cancelled(message),
         SourceExecutionError::Build(message) => ExecutionError::Build(message),
     }
-}
-
-fn core_workspace(workspace: bobr_store::StoreWorkspace) -> Workspace {
-    Workspace::new(
-        workspace.log_dir().to_path_buf(),
-        workspace.raw_log_dir().to_path_buf(),
-        workspace.temp_dir().to_path_buf(),
-    )
 }
 
 #[cfg(test)]

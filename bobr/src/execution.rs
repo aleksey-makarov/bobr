@@ -4,6 +4,7 @@ use crate::planned::{
     execute_subject,
 };
 use crate::request::Request;
+use crate::run::Run;
 use bobr_builder::{BuilderError, BuilderPlannedSubject};
 use bobr_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuildStatus,
@@ -11,14 +12,13 @@ use bobr_core::{
     SubjectIdentity,
 };
 use bobr_runtime::runtime_provider::runtime_provider_for_current_process;
-use bobr_store::{Store, StoreError, StoreTempDir, load_build_handle};
+use bobr_store::{Store, StoreError, load_build_handle};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 #[cfg(test)]
 use std::fs;
 use std::panic::{self, AssertUnwindSafe};
-#[cfg(test)]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Instant;
@@ -42,6 +42,9 @@ pub enum ExecutionError {
     Build(String),
     /// A content-addressed store operation failed.
     Store(String),
+    /// A run-scoped operation failed: allocating a workspace, recording it, or
+    /// preparing its scratch directory.
+    Run(String),
 }
 
 impl ExecutionError {
@@ -53,6 +56,7 @@ impl ExecutionError {
             Self::Cancelled(_) => "cancelled",
             Self::Build(_) => "build",
             Self::Store(_) => "store",
+            Self::Run(_) => "run",
         }
     }
 
@@ -63,7 +67,8 @@ impl ExecutionError {
             | Self::RequestLoad(message)
             | Self::Cancelled(message)
             | Self::Build(message)
-            | Self::Store(message) => message,
+            | Self::Store(message)
+            | Self::Run(message) => message,
         }
     }
 }
@@ -75,13 +80,6 @@ impl fmt::Display for ExecutionError {
 }
 
 impl std::error::Error for ExecutionError {}
-
-/// Prepares an empty temp directory for a builder run. Builders own their
-/// staging area, so this runs before
-/// `BuilderPlannedSubject::execute` constructs its `BuildContext`.
-pub(crate) fn prepare_temp(temp_dir: &StoreTempDir) -> Result<(), ExecutionError> {
-    temp_dir.prepare_empty().map_err(map_store_error)
-}
 
 pub(crate) fn map_builder_error(error: BuilderError) -> ExecutionError {
     match error {
@@ -121,15 +119,15 @@ pub(crate) fn check_cancelled(cancellation: &CancellationToken) -> Result<(), Ex
     }
 }
 
-fn cleanup_temp_dir(temp_dir: &StoreTempDir, logger: &dyn BuildLogger) {
-    if let Err(error) = temp_dir.remove_force() {
+fn cleanup_scratch_dir(run: &Run, scratch_dir: &Path, logger: &dyn BuildLogger) {
+    if let Err(error) = run.remove_scratch(scratch_dir) {
         log_execution_event(
             logger,
             BuildLogLevel::Warn,
             BuildStatus::Cleanup,
             format!(
                 "failed to remove temp dir '{}': {error}",
-                temp_dir.path().display()
+                scratch_dir.display()
             ),
         );
     }
@@ -144,21 +142,24 @@ fn cleanup_temp_dir(temp_dir: &StoreTempDir, logger: &dyn BuildLogger) {
 /// attached with [`TempDirGuard::set_logger`], cleanup warnings go to a no-op
 /// logger.
 pub(crate) struct TempDirGuard {
-    temp_dir: StoreTempDir,
+    run: Arc<Run>,
+    scratch_dir: PathBuf,
     logger: Arc<dyn BuildLogger>,
 }
 
 impl TempDirGuard {
-    pub(crate) fn for_builder(temp_dir: StoreTempDir) -> Self {
+    pub(crate) fn for_builder(run: Arc<Run>, scratch_dir: PathBuf) -> Self {
         Self {
-            temp_dir,
+            run,
+            scratch_dir,
             logger: Arc::new(NoopBuildLogger),
         }
     }
 
-    pub(crate) fn for_source(temp_dir: StoreTempDir) -> Self {
+    pub(crate) fn for_source(run: Arc<Run>, scratch_dir: PathBuf) -> Self {
         Self {
-            temp_dir,
+            run,
+            scratch_dir,
             logger: Arc::new(NoopBuildLogger),
         }
     }
@@ -170,7 +171,7 @@ impl TempDirGuard {
 
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
-        cleanup_temp_dir(&self.temp_dir, self.logger.as_ref());
+        cleanup_scratch_dir(&self.run, &self.scratch_dir, self.logger.as_ref());
     }
 }
 
@@ -202,12 +203,14 @@ pub fn execute(
     let root_key = collect_graph(&nodes, &mut subjects)?;
 
     let store = Store::create(&store).map_err(map_store_error)?;
+    let run = Arc::new(Run::allocate_in_store(store.root())?);
     let logger: Arc<BuildRunLogger> =
-        Arc::new(build_run_logger_for_store(&store, quiet).map_err(ExecutionError::Store)?);
+        Arc::new(build_run_logger(&run, quiet).map_err(ExecutionError::Store)?);
     let runtime_provider = runtime_provider_for_current_process();
 
     execute_graph(
         &store,
+        run,
         logger,
         runtime_provider,
         &subjects,
@@ -253,8 +256,13 @@ fn completed_inputs_for_builder(
     Ok(realized_inputs)
 }
 
+// The store and the run are separate on purpose (the store knows nothing about
+// where this build writes), which puts the argument count one over the lint's
+// taste; grouping them again would undo that split.
+#[allow(clippy::too_many_arguments)]
 fn execute_graph(
     store: &Store,
+    run: Arc<Run>,
     logger: Arc<BuildRunLogger>,
     runtime_provider: RuntimeProvider,
     subjects: &SubjectGraph,
@@ -358,6 +366,7 @@ fn execute_graph(
                 }
             };
             let store = store.clone();
+            let run = run.clone();
             let logger = logger.clone();
             let runtime_provider = runtime_provider.clone();
             let tx = tx.clone();
@@ -381,6 +390,7 @@ fn execute_graph(
                         &subject,
                         PlannedExecutionContext {
                             store: &store,
+                            run,
                             run_logger: logger,
                             runtime_provider,
                             cancellation,
@@ -679,9 +689,8 @@ fn log_run_finished(
     });
 }
 
-fn build_run_logger_for_store(store: &Store, quiet: bool) -> Result<BuildRunLogger, String> {
-    let locations = store.run_log_locations();
-    BuildRunLogger::new(locations.run_log_dir(), locations.run_id(), quiet)
+fn build_run_logger(run: &Run, quiet: bool) -> Result<BuildRunLogger, String> {
+    BuildRunLogger::new(run.logs_dir(), run.run_id(), quiet)
 }
 
 #[cfg(test)]
@@ -692,7 +701,7 @@ mod tests {
     };
     use bobr_core::{BuildLogSubject, ConfigDigest, compute_build_key, compute_reuse_key};
     use bobr_source::{OriginContext, OriginSpec, ParsedOrigin, SourcePlannedSubject};
-    use bobr_store::{StoreWorkspace, create_workspace, import_build, resolve_reuse_for_build};
+    use bobr_store::{import_build, resolve_reuse_for_build};
     use serde::{Deserialize, Serialize};
     use serde_json::{Map, Value, json};
     use std::collections::BTreeMap;
@@ -706,18 +715,24 @@ mod tests {
         Store::create(&store_root).unwrap()
     }
 
-    fn create_test_logger(store: &Store) -> Arc<BuildRunLogger> {
-        Arc::new(build_run_logger_for_store(store, true).unwrap())
+    fn create_test_run_dirs(store: &Store) -> Arc<Run> {
+        Arc::new(Run::allocate_in_store(store.root()).unwrap())
+    }
+
+    fn create_test_logger(run: &Run) -> Arc<BuildRunLogger> {
+        Arc::new(build_run_logger(run, true).unwrap())
     }
 
     fn create_test_run(
-        store: &Store,
+        run: &Run,
         run_logger: &Arc<BuildRunLogger>,
         tag: &str,
         name: &str,
         build_key: BuildKey,
-    ) -> (StoreWorkspace, Arc<dyn BuildLogger>) {
-        let workspace = create_workspace(store, tag, name, build_key.to_string()).unwrap();
+    ) -> (bobr_core::Workspace, Arc<dyn BuildLogger>) {
+        let workspace = run
+            .create_workspace(tag, name, build_key.to_string())
+            .unwrap();
         let subject = BuildLogSubject::new(
             tag,
             name,
@@ -731,6 +746,7 @@ mod tests {
 
     fn run_builder_subject(
         store: &Store,
+        run: Arc<Run>,
         run_logger: Arc<BuildRunLogger>,
         builder: &'static dyn bobr_builder::Builder,
         name: &str,
@@ -744,6 +760,7 @@ mod tests {
             &PlannedSubject::Builder(subject),
             PlannedExecutionContext {
                 store,
+                run,
                 run_logger,
                 runtime_provider: RuntimeProvider::host(),
                 cancellation,
@@ -1018,6 +1035,7 @@ mod tests {
             matching_inputs.values().copied().collect(),
             &stage,
             "script",
+            "test-run",
         )
         .unwrap();
 
@@ -1051,9 +1069,11 @@ mod tests {
     fn execute_builder_node_prepares_dirs_and_cleans_temp_on_success() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
-        let logger = create_test_logger(&store);
+        let run = create_test_run_dirs(&store);
+        let logger = create_test_logger(&run);
         let executed = run_builder_subject(
             &store,
+            run,
             logger,
             &EXECUTION_TEST_BUILDER,
             "runtime-test",
@@ -1085,9 +1105,10 @@ mod tests {
             &BTreeMap::new(),
         )
         .unwrap();
-        let run_logger = create_test_logger(&store);
+        let run = create_test_run_dirs(&store);
+        let run_logger = create_test_logger(&run);
         let (workspace, _logger) = create_test_run(
-            &store,
+            &run,
             &run_logger,
             "ExecutionTest",
             "runtime-test",
@@ -1098,10 +1119,14 @@ mod tests {
         let stale_target = temp.path().join("missing-stale-target");
         symlink(&stale_target, &temp_dir).unwrap();
 
-        let error = prepare_temp(workspace.temp_dir_handle()).unwrap_err();
+        let error = run.prepare_scratch(workspace.temp_dir()).unwrap_err();
 
-        assert_eq!(error.class(), "store");
-        assert!(error.message().contains("failed to create directory"));
+        assert_eq!(error.class(), "run");
+        assert!(
+            error
+                .message()
+                .contains("failed to prepare scratch directory")
+        );
         assert!(
             fs::symlink_metadata(&temp_dir)
                 .unwrap()
@@ -1115,10 +1140,12 @@ mod tests {
     fn execute_sandbox_builder_removes_temp_on_success() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
-        let logger = create_test_logger(&store);
+        let run = create_test_run_dirs(&store);
+        let logger = create_test_logger(&run);
 
         let executed = run_builder_subject(
             &store,
+            run,
             logger,
             &SANDBOX_EXECUTION_TEST_BUILDER,
             "sandbox-runtime-test",
@@ -1143,7 +1170,8 @@ mod tests {
     fn prepare_temp_removes_stale_sandbox_temp_before_recreate() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
-        let run_logger = create_test_logger(&store);
+        let run = create_test_run_dirs(&store);
+        let run_logger = create_test_logger(&run);
         let config = json!({});
         let build_key = compute_build_key(
             "Sandbox",
@@ -1153,7 +1181,7 @@ mod tests {
         )
         .unwrap();
         let (workspace, _logger) = create_test_run(
-            &store,
+            &run,
             &run_logger,
             "Sandbox",
             "sandbox-runtime-test",
@@ -1164,7 +1192,7 @@ mod tests {
         fs::create_dir_all(&temp_dir).unwrap();
         fs::write(temp_dir.join("stale"), b"old\n").unwrap();
 
-        prepare_temp(workspace.temp_dir_handle()).unwrap();
+        run.prepare_scratch(workspace.temp_dir()).unwrap();
 
         assert!(temp_dir.is_dir());
         assert_eq!(fs::read_dir(&temp_dir).unwrap().count(), 0);
@@ -1175,9 +1203,11 @@ mod tests {
     fn execute_builder_node_cleans_temp_on_failure() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
-        let logger = create_test_logger(&store);
+        let run = create_test_run_dirs(&store);
+        let logger = create_test_logger(&run);
         let error = run_builder_subject(
             &store,
+            run,
             logger,
             &EXECUTION_FAIL_BUILDER,
             "runtime-fail",
@@ -1197,7 +1227,8 @@ mod tests {
     fn cleanup_temp_dir_warns_when_remove_fails() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
-        let run_logger = create_test_logger(&store);
+        let run = create_test_run_dirs(&store);
+        let run_logger = create_test_logger(&run);
         let build_key = compute_build_key(
             "ExecutionTest",
             "test",
@@ -1206,7 +1237,7 @@ mod tests {
         )
         .unwrap();
         let (workspace, logger) = create_test_run(
-            &store,
+            &run,
             &run_logger,
             "ExecutionTest",
             "runtime-test",
@@ -1216,7 +1247,7 @@ mod tests {
         fs::remove_dir_all(&temp_dir).unwrap();
         fs::write(&temp_dir, b"not a directory\n").unwrap();
 
-        cleanup_temp_dir(workspace.temp_dir_handle(), logger.as_ref());
+        cleanup_scratch_dir(&run, workspace.temp_dir(), logger.as_ref());
 
         assert!(temp_dir.is_file());
         assert_cleanup_warning_event(
@@ -1235,7 +1266,8 @@ mod tests {
         // workspace, must still clean the temp dir on drop via the no-op logger.
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
-        let run_logger = create_test_logger(&store);
+        let run = create_test_run_dirs(&store);
+        let run_logger = create_test_logger(&run);
         let build_key = compute_build_key(
             "ExecutionTest",
             "test",
@@ -1243,19 +1275,14 @@ mod tests {
             &BTreeMap::new(),
         )
         .unwrap();
-        let (workspace, _logger) = create_test_run(
-            &store,
-            &run_logger,
-            "ExecutionTest",
-            "guard-test",
-            build_key,
-        );
+        let (workspace, _logger) =
+            create_test_run(&run, &run_logger, "ExecutionTest", "guard-test", build_key);
         let temp_dir = workspace.temp_dir().to_path_buf();
         assert!(temp_dir.is_dir());
 
         {
             // No set_logger call: the node logger was never bound.
-            let _guard = TempDirGuard::for_builder(workspace.temp_dir_handle().clone());
+            let _guard = TempDirGuard::for_builder(run.clone(), workspace.temp_dir().to_path_buf());
         }
 
         assert!(!temp_dir.exists());
@@ -1265,9 +1292,11 @@ mod tests {
     fn execute_builder_node_cleans_temp_on_materialize_failure() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
-        let logger = create_test_logger(&store);
+        let run = create_test_run_dirs(&store);
+        let logger = create_test_logger(&run);
         let error = run_builder_subject(
             &store,
+            run,
             logger,
             &EXECUTION_BROKEN_STAGE_BUILDER,
             "runtime-broken-stage",
@@ -1286,12 +1315,14 @@ mod tests {
     fn execute_builder_node_pre_cancelled_does_not_start_builder() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
-        let logger = create_test_logger(&store);
+        let run = create_test_run_dirs(&store);
+        let logger = create_test_logger(&run);
         let cancellation = CancellationToken::new();
         cancellation.cancel();
 
         let error = run_builder_subject(
             &store,
+            run,
             logger,
             &EXECUTION_TEST_BUILDER,
             "runtime-test",
@@ -1361,7 +1392,8 @@ mod tests {
     fn source_temp_dir_is_removed_when_cancelled_after_materialize() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
-        let logger = create_test_logger(&store);
+        let run = create_test_run_dirs(&store);
+        let logger = create_test_logger(&run);
         let cancellation = CancellationToken::new();
         let object_hash = "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
@@ -1379,6 +1411,7 @@ mod tests {
             &subject,
             PlannedExecutionContext {
                 store: &store,
+                run,
                 run_logger: logger,
                 runtime_provider: RuntimeProvider::host(),
                 cancellation,
@@ -1397,7 +1430,8 @@ mod tests {
     fn source_origin_staged_path_must_remain_under_temp_root() {
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
-        let logger = create_test_logger(&store);
+        let run = create_test_run_dirs(&store);
+        let logger = create_test_logger(&run);
         let object_hash = "3333333333333333333333333333333333333333333333333333333333333333"
             .parse()
             .unwrap();
@@ -1412,6 +1446,7 @@ mod tests {
             &subject,
             PlannedExecutionContext {
                 store: &store,
+                run,
                 run_logger: logger,
                 runtime_provider: RuntimeProvider::host(),
                 cancellation: CancellationToken::new(),
@@ -1434,7 +1469,8 @@ mod tests {
         // must still be cleaned — i.e. the RAII guard cleans this error path.
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
-        let logger = create_test_logger(&store);
+        let run = create_test_run_dirs(&store);
+        let logger = create_test_logger(&run);
         let object_hash = "2222222222222222222222222222222222222222222222222222222222222222"
             .parse()
             .unwrap();
@@ -1449,6 +1485,7 @@ mod tests {
             &subject,
             PlannedExecutionContext {
                 store: &store,
+                run,
                 run_logger: logger,
                 runtime_provider: RuntimeProvider::host(),
                 cancellation: CancellationToken::new(),
@@ -1576,7 +1613,8 @@ mod tests {
 
         let temp = tempdir().unwrap();
         let store = create_test_store(temp.path());
-        let logger = create_test_logger(&store);
+        let run = create_test_run_dirs(&store);
+        let logger = create_test_logger(&run);
         fs::create_dir(temp.path().join(".bobr").join("object-refs").join("bad")).unwrap();
 
         // Fast node publishes to a pre-existing non-symlink ref path, so its
@@ -1620,6 +1658,7 @@ mod tests {
         // before returning the error.
         let error = execute_graph(
             &store,
+            run,
             logger,
             RuntimeProvider::host(),
             &subjects,

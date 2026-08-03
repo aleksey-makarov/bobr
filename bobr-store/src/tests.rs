@@ -10,7 +10,6 @@ use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::thread;
 use tempfile::tempdir;
 
 fn create_test_store(root: &Path) -> Store {
@@ -18,6 +17,9 @@ fn create_test_store(root: &Path) -> Store {
     fs::create_dir_all(&store_root).unwrap();
     Store::create(&store_root).unwrap()
 }
+
+/// Stands in for the run id a driver would stamp into object records.
+const TEST_RUN_ID: &str = "test-run";
 
 fn fs_files_dir(store: &Store) -> PathBuf {
     store.root().join(store::FS_FILES_DIR)
@@ -201,10 +203,7 @@ fn import_build_writes_build_record_and_object_ref() {
         build_json["schema"],
         Value::String(OBJECT_RECORD_SCHEMA.to_string())
     );
-    assert_eq!(
-        build_json["run_id"],
-        Value::String(layout.run_id().to_string())
-    );
+    assert_eq!(build_json["run_id"], Value::String(TEST_RUN_ID.to_string()));
     assert_eq!(
         build_json["object_hash"],
         Value::String(published.object_hash.to_string())
@@ -311,7 +310,8 @@ fn record_existing_source_object_requires_existing_object() {
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
 
-    let error = record::record_existing_source_object(&layout, object_hash).unwrap_err();
+    let error =
+        record::record_existing_source_object(&layout, object_hash, TEST_RUN_ID).unwrap_err();
 
     assert!(matches!(error, StoreError::Io(message) if message.contains("source object")));
     assert!(!layout.object_record_path(object_hash).exists());
@@ -324,7 +324,8 @@ fn record_existing_source_object_returns_none_when_object_absent() {
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
 
-    let recorded = record_existing_source_object(&layout, object_hash, "source").unwrap();
+    let recorded =
+        record_existing_source_object(&layout, object_hash, "source", TEST_RUN_ID).unwrap();
 
     assert!(recorded.is_none());
     assert!(!layout.object_record_path(object_hash).exists());
@@ -342,14 +343,14 @@ fn record_existing_source_object_reuses_canonical_record() {
     let stage = temp.path().join("source.txt");
     fs::write(&stage, b"hello").unwrap();
     let object_hash = import_object(&layout, &stage).unwrap();
-    record::record_existing_source_object(&layout, object_hash).unwrap();
+    record::record_existing_source_object(&layout, object_hash, TEST_RUN_ID).unwrap();
 
-    let hit = record_existing_source_object(&layout, object_hash, "source")
+    let hit = record_existing_source_object(&layout, object_hash, "source", TEST_RUN_ID)
         .unwrap()
         .expect("expected source hit");
     assert_eq!(hit, object_hash);
     let record = load_object_record(&layout, object_hash).unwrap().unwrap();
-    assert_eq!(record.run_id.as_deref(), Some(layout.run_id()));
+    assert_eq!(record.run_id.as_deref(), Some(TEST_RUN_ID));
     let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
         .unwrap()
         .expect("expected source build handle");
@@ -372,13 +373,13 @@ fn record_existing_source_object_records_existing_object_as_source_object() {
     let object_record_path = layout.object_record_path(object_hash);
     assert!(!object_record_path.exists());
 
-    let hit = record_existing_source_object(&layout, object_hash, "source")
+    let hit = record_existing_source_object(&layout, object_hash, "source", TEST_RUN_ID)
         .unwrap()
         .expect("expected source hit");
     assert_eq!(hit, object_hash);
     let record = load_object_record(&layout, object_hash).unwrap().unwrap();
     assert_eq!(record.inputs, Vec::new());
-    assert_eq!(record.run_id.as_deref(), Some(layout.run_id()));
+    assert_eq!(record.run_id.as_deref(), Some(TEST_RUN_ID));
     assert!(object_record_path.exists());
     let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
         .unwrap()
@@ -400,14 +401,15 @@ fn import_source_object_on_match_imports_object_and_writes_canonical_record() {
     fs::write(&stage, b"hello").unwrap();
     let object_hash = hash_path(&stage).unwrap();
 
-    let outcome = import_source_object(&layout, object_hash, &stage, "source").unwrap();
+    let outcome =
+        import_source_object(&layout, object_hash, &stage, "source", TEST_RUN_ID).unwrap();
 
     let SourceImportOutcome::Matched(matched_hash) = outcome else {
         panic!("expected source import match");
     };
     assert_eq!(matched_hash, object_hash);
     let record = load_object_record(&layout, object_hash).unwrap().unwrap();
-    assert_eq!(record.run_id.as_deref(), Some(layout.run_id()));
+    assert_eq!(record.run_id.as_deref(), Some(TEST_RUN_ID));
     assert!(layout.object_path_unchecked(object_hash).exists());
     assert!(layout.object_record_path(object_hash).exists());
     let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
@@ -434,7 +436,8 @@ fn import_source_object_on_mismatch_imports_actual_object_without_declared_recor
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
     assert_ne!(actual_hash, declared_hash);
 
-    let outcome = import_source_object(&layout, declared_hash, &stage, "source").unwrap();
+    let outcome =
+        import_source_object(&layout, declared_hash, &stage, "source", TEST_RUN_ID).unwrap();
 
     let SourceImportOutcome::Mismatched {
         actual_hash: imported_hash,
@@ -476,6 +479,7 @@ fn object_ref_update_rejects_non_canonical_current_target() {
         vec![],
         &next_stage,
         "script",
+        TEST_RUN_ID,
     )
     .unwrap_err();
 
@@ -834,6 +838,7 @@ fn invalid_ref_name_is_rejected() {
             vec![],
             &stage,
             invalid_name,
+            TEST_RUN_ID,
         )
         .unwrap_err();
 
@@ -1027,12 +1032,9 @@ fn store_create_creates_full_layout() {
     assert!(fs_files_dir(&layout).is_dir());
     assert!(fs_trees_dir(&layout).is_dir());
     assert!(fs_tree_refs_dir(&layout).is_dir());
-    assert!(temp.path().join(LOGS_DIR).is_dir());
-    assert!(temp.path().join(TMP_DIR).is_dir());
-    assert!(layout.run_log_dir().is_dir());
-    assert!(layout.run_tmp_dir().is_dir());
-    assert!(layout.run_log_dir().starts_with(temp.path().join(LOGS_DIR)));
-    assert!(layout.run_tmp_dir().starts_with(temp.path().join(TMP_DIR)));
+    // Where a build writes its logs and scratch belongs to a run, not here.
+    assert!(!temp.path().join("logs").exists());
+    assert!(!temp.path().join("tmp").exists());
 }
 
 #[test]
@@ -1110,248 +1112,6 @@ fn store_fs_tree_imports_with_install_into_store_fs_files() {
 }
 
 #[test]
-fn store_create_allocates_unique_run_directories() {
-    let temp = tempdir().unwrap();
-
-    let first = Store::create(temp.path()).unwrap();
-    let second = Store::create(temp.path()).unwrap();
-
-    assert_ne!(first.run_log_dir(), second.run_log_dir());
-    assert_ne!(first.run_tmp_dir(), second.run_tmp_dir());
-    assert!(first.run_log_dir().is_dir());
-    assert!(second.run_log_dir().is_dir());
-    assert!(first.run_tmp_dir().is_dir());
-    assert!(second.run_tmp_dir().is_dir());
-    assert_eq!(
-        first.run_log_dir().file_name().unwrap(),
-        first.run_tmp_dir().file_name().unwrap()
-    );
-    assert_eq!(
-        second.run_log_dir().file_name().unwrap(),
-        second.run_tmp_dir().file_name().unwrap()
-    );
-}
-
-#[test]
-fn run_dir_allocation_disambiguates_by_logs_dir() {
-    for _ in 0..100 {
-        let temp = tempdir().unwrap();
-        let logs_dir = temp.path().join(LOGS_DIR);
-        let tmp_dir = temp.path().join(TMP_DIR);
-        fs::create_dir_all(&logs_dir).unwrap();
-        fs::create_dir_all(&tmp_dir).unwrap();
-
-        let first_run_id = store::allocate_store_run_id(temp.path()).unwrap();
-        let first_suffix = format!("{first_run_id}.1");
-        let second_suffix = format!("{first_run_id}.2");
-        fs::create_dir(logs_dir.join(&first_suffix)).unwrap();
-
-        let run_id = store::allocate_store_run_id(temp.path()).unwrap();
-        if run_id != second_suffix {
-            assert!(
-                !run_id.starts_with(&format!("{first_run_id}.")),
-                "unexpected run id suffix after log directory collision: {run_id}"
-            );
-            continue;
-        }
-
-        let allocated_logs = logs_dir.join(&run_id);
-        let allocated_tmp = tmp_dir.join(&run_id);
-
-        assert!(allocated_logs.is_dir());
-        assert!(allocated_tmp.is_dir());
-        assert!(logs_dir.join(&first_suffix).is_dir());
-        assert!(!tmp_dir.join(&first_suffix).exists());
-        return;
-    }
-
-    panic!("could not perform two run id allocations inside one timestamp second");
-}
-
-#[test]
-fn run_dir_allocation_errors_when_matching_tmp_dir_exists() {
-    for _ in 0..100 {
-        let temp = tempdir().unwrap();
-        let logs_dir = temp.path().join(LOGS_DIR);
-        let tmp_dir = temp.path().join(TMP_DIR);
-        fs::create_dir_all(&logs_dir).unwrap();
-        fs::create_dir_all(&tmp_dir).unwrap();
-
-        let first_run_id = store::allocate_store_run_id(temp.path()).unwrap();
-        let conflicting_run_id = format!("{first_run_id}.1");
-        fs::create_dir(tmp_dir.join(&conflicting_run_id)).unwrap();
-
-        match store::allocate_store_run_id(temp.path()) {
-            Ok(run_id) => {
-                assert!(
-                    !run_id.starts_with(&format!("{first_run_id}.")),
-                    "allocator ignored matching tmp directory collision: {run_id}"
-                );
-                continue;
-            }
-            Err(error) => {
-                assert!(
-                    matches!(error, StoreError::Io(message) if message.contains("failed to create run temp directory"))
-                );
-                assert!(!logs_dir.join(&conflicting_run_id).exists());
-                assert!(!logs_dir.join(format!("{first_run_id}.2")).exists());
-                assert!(tmp_dir.join(&conflicting_run_id).is_dir());
-                return;
-            }
-        }
-    }
-
-    panic!("could not test matching tmp directory collision inside one timestamp second");
-}
-
-#[test]
-fn store_exposes_run_log_locations() {
-    let temp = tempdir().unwrap();
-    let layout = Store::create(temp.path()).unwrap();
-    let locations = layout.run_log_locations();
-
-    assert_eq!(locations.run_log_dir(), layout.run_log_dir());
-    assert_eq!(locations.run_id(), layout.run_id());
-    assert!(locations.run_log_dir().is_dir());
-}
-
-#[test]
-fn store_clone_shares_run_directories_and_serial_counter() {
-    let temp = tempdir().unwrap();
-    let layout = Store::create(temp.path()).unwrap();
-    let clone = layout.clone();
-
-    let first = create_workspace(&layout, "Tree", "left", "build-left").unwrap();
-    let second = create_workspace(&clone, "Tree", "right", "build-right").unwrap();
-
-    assert!(first.log_dir().starts_with(layout.run_log_dir()));
-    assert!(second.log_dir().starts_with(layout.run_log_dir()));
-    assert!(first.temp_dir().starts_with(layout.run_tmp_dir()));
-    assert!(second.temp_dir().starts_with(layout.run_tmp_dir()));
-    assert_eq!(
-        first.log_dir().file_name().unwrap().to_str().unwrap(),
-        "00000000-Tree-left"
-    );
-    assert_eq!(
-        second.log_dir().file_name().unwrap().to_str().unwrap(),
-        "00000001-Tree-right"
-    );
-    assert_eq!(
-        first.temp_dir().file_name().unwrap().to_str().unwrap(),
-        "00000000-Tree-left"
-    );
-    assert_eq!(
-        second.temp_dir().file_name().unwrap().to_str().unwrap(),
-        "00000001-Tree-right"
-    );
-}
-
-#[test]
-fn workspace_allocation_writes_metadata_index_and_sanitized_paths() {
-    let temp = tempdir().unwrap();
-    let layout = Store::create(temp.path()).unwrap();
-    let workspace = create_workspace(
-        &layout,
-        "Source Builder",
-        "name / demo",
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    )
-    .unwrap();
-
-    assert_eq!(
-        workspace.log_dir().file_name().unwrap().to_str().unwrap(),
-        "00000000-Source_Builder-name___demo"
-    );
-    assert!(workspace.raw_log_dir().is_dir());
-    assert!(workspace.temp_dir().is_dir());
-    assert!(workspace.log_dir().starts_with(layout.run_log_dir()));
-    assert!(workspace.raw_log_dir().starts_with(workspace.log_dir()));
-    assert!(workspace.temp_dir().starts_with(layout.run_tmp_dir()));
-    assert!(!workspace.temp_dir().starts_with(workspace.log_dir()));
-    assert_eq!(
-        workspace.log_dir().file_name().unwrap(),
-        workspace.temp_dir().file_name().unwrap()
-    );
-    let metadata: Value =
-        serde_json::from_slice(&fs::read(workspace.log_dir().join("meta.json")).unwrap()).unwrap();
-    assert_eq!(metadata["schema"], "bobr-workspace-v2");
-    assert_eq!(metadata["serial"], 0);
-    assert_eq!(metadata["tag"], "Source Builder");
-    assert_eq!(metadata["name"], "name / demo");
-    assert_eq!(
-        metadata["build_key"],
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    );
-    assert_eq!(
-        metadata["temp_dir"],
-        workspace.temp_dir().display().to_string()
-    );
-
-    let index = fs::read_to_string(layout.run_log_dir().join("index.jsonl")).unwrap();
-    let records = index.lines().collect::<Vec<_>>();
-    assert_eq!(records.len(), 1);
-    let record: Value = serde_json::from_str(records[0]).unwrap();
-    assert_eq!(record["serial"], 0);
-    assert_eq!(record["tag"], "Source Builder");
-    assert_eq!(record["name"], "name / demo");
-}
-
-#[test]
-fn store_temp_dir_handle_prepares_and_removes_temp() {
-    let temp = tempdir().unwrap();
-    let layout = Store::create(temp.path()).unwrap();
-    let workspace = create_workspace(&layout, "Tree", "demo", "build-demo").unwrap();
-    let temp_dir = workspace.temp_dir().to_path_buf();
-    fs::write(temp_dir.join("stale"), b"old\n").unwrap();
-
-    workspace.temp_dir_handle().prepare_empty().unwrap();
-
-    assert!(temp_dir.is_dir());
-    assert_eq!(fs::read_dir(&temp_dir).unwrap().count(), 0);
-
-    workspace.temp_dir_handle().remove_force().unwrap();
-
-    assert!(!temp_dir.exists());
-    workspace.temp_dir_handle().remove_force().unwrap();
-}
-
-#[test]
-fn parallel_workspace_allocation_does_not_reuse_serials() {
-    let temp = tempdir().unwrap();
-    let layout = Store::create(temp.path()).unwrap();
-    let mut handles = Vec::new();
-
-    for index in 0..8 {
-        let layout = layout.clone();
-        handles.push(thread::spawn(move || {
-            create_workspace(
-                &layout,
-                "Tree",
-                format!("node-{index}"),
-                format!("build-{index}"),
-            )
-            .unwrap()
-            .log_dir()
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_string()
-        }));
-    }
-
-    let names = handles
-        .into_iter()
-        .map(|handle| handle.join().unwrap())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(names.len(), 8);
-    for serial in 0..8 {
-        let prefix = format!("{serial:08}-Tree-node-");
-        assert!(names.iter().any(|name| name.starts_with(&prefix)));
-    }
-}
-
-#[test]
 fn store_handle_is_send_sync_and_clone() {
     fn assert_send_sync_clone<T: Send + Sync + Clone>() {}
 
@@ -1414,30 +1174,22 @@ fn store_create_pins_symlink_root_to_initial_target() {
     let link = temp.path().join("current-store");
     symlink(&store_a, &link).unwrap();
     let store = Store::create(&link).unwrap();
-    let run_id = store.run_id().to_string();
 
     fs::remove_file(&link).unwrap();
     symlink(&store_b, &link).unwrap();
 
-    create_workspace(&store, "Tree", "node", "build-key").unwrap();
+    let stage = temp.path().join("payload");
+    fs::write(&stage, b"payload\n").unwrap();
+    let object_hash = import_object(&store, &stage).unwrap();
 
-    let workspace_dir = "00000000-Tree-node".to_string();
+    // The handle keeps writing to the target it resolved at creation.
     assert!(
         store_a
-            .join(LOGS_DIR)
-            .join(&run_id)
-            .join(&workspace_dir)
-            .is_dir()
+            .join(OBJECTS_DIR)
+            .join(object_hash.to_hex())
+            .is_file()
     );
-    assert!(
-        store_a
-            .join(TMP_DIR)
-            .join(&run_id)
-            .join(&workspace_dir)
-            .is_dir()
-    );
-    assert!(!store_b.join(LOGS_DIR).exists());
-    assert!(!store_b.join(TMP_DIR).exists());
+    assert!(!store_b.join(OBJECTS_DIR).exists());
 }
 
 #[test]
@@ -1537,6 +1289,7 @@ fn materialize_text_object(
         vec![],
         &stage,
         object_ref_name,
+        TEST_RUN_ID,
     )
     .unwrap();
     TestBuild {
@@ -1560,6 +1313,7 @@ fn materialize_named_test_build(
         inputs,
         staged_path,
         object_ref_name,
+        TEST_RUN_ID,
     )
     .unwrap();
     TestBuild {

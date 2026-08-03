@@ -261,6 +261,7 @@ mod tests {
             Vec::new(),
             &staged_manifest,
             "staged-object",
+            "test-run",
         )
         .unwrap();
         let inputs = ResolvedInputs::new(BTreeMap::from([(
@@ -317,6 +318,7 @@ mod tests {
             Vec::new(),
             &staged_manifest,
             "staged-object",
+            "test-run",
         )
         .unwrap();
         let root = store

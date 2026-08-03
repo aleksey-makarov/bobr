@@ -19,6 +19,7 @@ mod execution;
 mod planned;
 mod request;
 mod resolved_inputs;
+mod run;
 
 pub use execution::{ExecutionError, execute};
 pub use request::Request;

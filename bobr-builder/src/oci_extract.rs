@@ -1245,6 +1245,7 @@ mod tests {
             Vec::new(),
             &result,
             "staged-object",
+            "test-run",
         )
         .unwrap();
         let root = store
