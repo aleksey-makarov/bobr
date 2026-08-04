@@ -769,10 +769,6 @@ impl LiveProgress {
         }
     }
 
-    fn detail_u64(record: &EventLogRecord, key: &str) -> u64 {
-        record.details.get(key).and_then(Value::as_u64).unwrap_or(0)
-    }
-
     fn running(&self) -> usize {
         self.index_of.len()
     }
@@ -852,7 +848,7 @@ impl LiveProgress {
         let status = record.status.as_str();
 
         if status == BuildStatus::RunStarted.as_str() {
-            self.total = Self::detail_u64(record, "subjects") as usize;
+            self.total = detail_u64(record, "subjects") as usize;
             self.update_summary();
             return;
         }
@@ -860,9 +856,9 @@ impl LiveProgress {
             self.clear();
             let _ = self.multi.println(format!(
                 "done: {} built · {} cache-hit · {} failed",
-                Self::detail_u64(record, "built"),
-                Self::detail_u64(record, "cache_hit"),
-                Self::detail_u64(record, "failed"),
+                detail_u64(record, "built"),
+                detail_u64(record, "cache_hit"),
+                detail_u64(record, "failed"),
             ));
             return;
         }
@@ -1000,6 +996,11 @@ impl EventLogRecord {
     }
 }
 
+/// One numeric field of an event's `details`, defaulting to 0 when absent.
+fn detail_u64(record: &EventLogRecord, key: &str) -> u64 {
+    record.details.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
 fn format_progress_line(record: &EventLogRecord, run_log_dir: &Path) -> String {
     let mut line = if let Some(subject) = &record.subject {
         // Subject lines lead with the builder/source tag and recipe name; the
@@ -1021,6 +1022,19 @@ fn format_progress_line(record: &EventLogRecord, run_log_dir: &Path) -> String {
     if !record.message.is_empty() {
         line.push_str(": ");
         line.push_str(&record.message);
+    }
+
+    // The run's totals live in the event details, and until now only the live
+    // progress block rendered them. Off a terminal -- CI logs, the
+    // rebuild-world log, the MCP build server -- that left the run ending on
+    // "build finished" with no outcome at all.
+    if record.status == BuildStatus::RunFinished.as_str() {
+        line.push_str(&format!(
+            "; {} built · {} cache-hit · {} failed",
+            detail_u64(record, "built"),
+            detail_u64(record, "cache_hit"),
+            detail_u64(record, "failed"),
+        ));
     }
 
     if let Some(raw_log) = &record.raw_log {
@@ -1339,6 +1353,55 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn plain_run_finished_line_carries_the_run_totals() {
+        // Off a terminal the live block never renders, so the counts have to be
+        // in the line itself -- otherwise a CI log or a build server sees a run
+        // end with "build finished" and no outcome.
+        let mut details = Map::new();
+        details.insert("built".to_string(), Value::from(12));
+        details.insert("cache_hit".to_string(), Value::from(340));
+        details.insert("failed".to_string(), Value::from(2));
+        let event = BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status: BuildStatus::RunFinished,
+            op: None,
+            message: "build finished".to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details,
+        };
+        let run_log_dir = PathBuf::from("/run");
+        let record = EventLogRecord::assemble(7, None, None, &event, &run_log_dir);
+
+        let line = format_progress_line(&record, &run_log_dir);
+        assert_eq!(
+            line,
+            "[run-finished]: build finished; 12 built · 340 cache-hit · 2 failed"
+        );
+    }
+
+    #[test]
+    fn a_missing_total_reads_as_zero_rather_than_vanishing() {
+        // Details are best-effort: a run that failed early may carry none. The
+        // line must still say what happened rather than lose its tail.
+        let event = BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status: BuildStatus::RunFinished,
+            op: None,
+            message: "build finished".to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details: Map::new(),
+        };
+        let run_log_dir = PathBuf::from("/run");
+        let record = EventLogRecord::assemble(0, None, None, &event, &run_log_dir);
+        assert!(
+            format_progress_line(&record, &run_log_dir)
+                .ends_with("0 built · 0 cache-hit · 0 failed")
+        );
     }
 
     #[test]
