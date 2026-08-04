@@ -2,11 +2,13 @@
 
 use bobr_bundle_launcher::PlatformArch;
 use std::fs;
+use std::io;
 use std::io::Write;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::OnceLock;
+use std::process::{Child, ExitStatus, Output, Stdio};
+use std::sync::{OnceLock, RwLock};
 
 struct SharedLauncher {
     _temp: tempfile::TempDir,
@@ -24,6 +26,46 @@ fn shared_launcher() -> &'static PathBuf {
             SharedLauncher { _temp: temp, path }
         })
         .path
+}
+
+/// Guards the window between opening a writable fixture descriptor and closing
+/// it against any other test thread forking.
+///
+/// `fork` copies the descriptor table, so a child spawned by another test
+/// inherits our writable descriptor and keeps it open until its own `exec` --
+/// and `execve` refuses a file that anyone holds open for writing, with
+/// ETXTBSY. Writers take the write lock while a descriptor is open; spawns take
+/// the read lock across the fork, so the two cannot overlap. Spawns still run
+/// concurrently with each other, and the lock is released before waiting on the
+/// child, so this costs no test parallelism.
+static SPAWN_LOCK: RwLock<()> = RwLock::new(());
+
+fn spawn_guarded(command: &mut Command) -> io::Result<Child> {
+    let _guard = SPAWN_LOCK.read().unwrap();
+    command.spawn()
+}
+
+/// `Command::status` and `Command::output`, with the fork taken under the spawn
+/// lock. Waiting happens after the guard is dropped, so children still run
+/// concurrently.
+pub(crate) trait GuardedCommand {
+    fn guarded_status(&mut self) -> io::Result<ExitStatus>;
+    fn guarded_output(&mut self) -> io::Result<Output>;
+}
+
+impl GuardedCommand for Command {
+    fn guarded_status(&mut self) -> io::Result<ExitStatus> {
+        spawn_guarded(self)?.wait()
+    }
+
+    fn guarded_output(&mut self) -> io::Result<Output> {
+        // Command::output also detaches stdin; keep that, so switching a call
+        // site over cannot change what the child sees.
+        self.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        spawn_guarded(self)?.wait_with_output()
+    }
 }
 
 pub(crate) struct BundleFixture {
@@ -116,18 +158,23 @@ visibility = "public"
         let parent = path.parent().unwrap();
         fs::create_dir_all(parent).unwrap();
 
-        let mut staged = tempfile::NamedTempFile::new_in(parent).unwrap();
-        staged.write_all(contents).unwrap();
-        staged
-            .as_file()
-            .set_permissions(fs::Permissions::from_mode(0o755))
-            .unwrap();
-        staged.as_file().sync_all().unwrap();
+        let staged_path = {
+            // Held until the writable descriptor is closed: see SPAWN_LOCK.
+            let _guard = SPAWN_LOCK.write().unwrap();
+            let mut staged = tempfile::NamedTempFile::new_in(parent).unwrap();
+            staged.write_all(contents).unwrap();
+            staged
+                .as_file()
+                .set_permissions(fs::Permissions::from_mode(0o755))
+                .unwrap();
+            staged.as_file().sync_all().unwrap();
 
-        // Publish the executable inode only after its writable descriptor is
-        // closed. This makes execve's no-open-writers invariant explicit.
-        let (file, staged_path) = staged.into_parts();
-        drop(file);
+            // Publish the executable inode only after its writable descriptor is
+            // closed. This makes execve's no-open-writers invariant explicit.
+            let (file, staged_path) = staged.into_parts();
+            drop(file);
+            staged_path
+        };
         staged_path.persist(&path).unwrap();
         path
     }

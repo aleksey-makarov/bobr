@@ -2,6 +2,8 @@
 
 mod support;
 
+use support::GuardedCommand;
+
 use support::BundleFixture;
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -15,7 +17,7 @@ fn dynamic_payload_runs_through_bundled_loader() {
     let status = fixture
         .command()
         .args(["--run", "demo", "--", "payload-argument"])
-        .status()
+        .guarded_status()
         .unwrap();
 
     assert_eq!(status.code(), Some(37));
@@ -32,7 +34,7 @@ fn diagnose_reports_bundled_loader_without_running_it() {
     let output = fixture
         .command()
         .args(["--diagnose", "demo"])
-        .output()
+        .guarded_output()
         .unwrap();
 
     assert!(output.status.success());
@@ -52,7 +54,7 @@ fn missing_bundled_loader_is_an_error_without_host_fallback() {
     let output = fixture
         .command()
         .args(["--run", "demo", "--"])
-        .output()
+        .guarded_output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));

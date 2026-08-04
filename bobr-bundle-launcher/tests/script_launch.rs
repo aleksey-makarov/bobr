@@ -2,6 +2,8 @@
 
 mod support;
 
+use support::GuardedCommand;
+
 use support::BundleFixture;
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -18,7 +20,7 @@ fn script_runs_its_bundled_static_interpreter() {
     let status = fixture
         .command()
         .args(["--run", "demo", "--", "payload-argument"])
-        .status()
+        .guarded_status()
         .unwrap();
 
     assert_eq!(status.code(), Some(51));
@@ -36,7 +38,7 @@ fn script_runs_a_dynamic_interpreter_through_the_bundled_loader() {
     let status = fixture
         .command()
         .args(["--run", "demo", "--"])
-        .status()
+        .guarded_status()
         .unwrap();
 
     assert_eq!(status.code(), Some(52));
@@ -52,7 +54,7 @@ fn script_never_falls_back_to_a_host_interpreter() {
     let output = fixture
         .command()
         .args(["--run", "demo", "--"])
-        .output()
+        .guarded_output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(2));
@@ -73,7 +75,7 @@ fn nested_shebangs_are_resolved_inside_the_payload() {
     let status = fixture
         .command()
         .args(["--run", "demo", "--"])
-        .status()
+        .guarded_status()
         .unwrap();
 
     assert_eq!(status.code(), Some(53));
@@ -89,7 +91,7 @@ fn internal_multicall_wrapper_selects_its_declared_tool() {
 
     let status = std::process::Command::new(wrapper)
         .arg("payload-argument")
-        .status()
+        .guarded_status()
         .unwrap();
 
     assert_eq!(status.code(), Some(54));
@@ -106,7 +108,7 @@ fn diagnose_reports_script_and_logical_interpreter() {
     let output = fixture
         .command()
         .args(["--diagnose", "demo"])
-        .output()
+        .guarded_output()
         .unwrap();
 
     assert!(output.status.success());

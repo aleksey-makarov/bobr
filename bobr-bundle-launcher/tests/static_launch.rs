@@ -2,6 +2,8 @@
 
 mod support;
 
+use support::GuardedCommand;
+
 use support::BundleFixture;
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -14,7 +16,7 @@ fn explicit_run_executes_static_payload_and_propagates_status() {
     let status = fixture
         .command()
         .args(["--run", "demo", "--", "opaque-argument"])
-        .status()
+        .guarded_status()
         .unwrap();
 
     assert_eq!(status.code(), Some(42));
@@ -28,7 +30,9 @@ fn public_multicall_wrapper_executes_static_payload() {
     fixture.write_static_exit_fixture("root/usr/bin/demo", 23);
     let wrapper = fixture.add_public_wrapper("demo");
 
-    let status = std::process::Command::new(wrapper).status().unwrap();
+    let status = std::process::Command::new(wrapper)
+        .guarded_status()
+        .unwrap();
 
     assert_eq!(status.code(), Some(23));
 }
@@ -43,7 +47,7 @@ fn diagnose_reports_static_target_without_executing_it() {
     let output = fixture
         .command()
         .args(["--diagnose", "demo"])
-        .output()
+        .guarded_output()
         .unwrap();
 
     assert!(output.status.success());
@@ -76,7 +80,7 @@ values = ["none"]
         .command()
         .args(["--diagnose", "demo", "--json"])
         .env_remove("QEMU_AUDIO_DRV")
-        .output()
+        .guarded_output()
         .unwrap();
 
     assert!(output.status.success());
