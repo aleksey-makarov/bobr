@@ -7,9 +7,9 @@ one you keep changing.
 
 The arrangement is deliberately the same as a user's. You build the binaries into
 a directory and keep that directory on `PATH`; from there, everything —
-`bin/bobr-build.sh`, the QEMU runners, `bobr-rebuild-world.sh` — finds them
-exactly as it finds an unpacked release. Nothing downstream knows or cares that
-the binaries came from source.
+the recipes' `bin/bobr-build.sh`, the QEMU bundles, `bobr-rebuild-world.sh` —
+finds them exactly as it finds an unpacked release. Nothing downstream knows or
+cares that the binaries came from source.
 
 ```text
 <workspace>/
@@ -24,11 +24,10 @@ provide `bobr`, and the rest of this chapter follows.
 
 ## Installing the binaries
 
-`tools/dev/bobr-build-dev.sh` in the recipes repository builds `bobr` from the
-sibling checkout and installs it:
+`tools/build-dev.sh` builds this checkout and installs it:
 
 ```sh
-tools/dev/bobr-build-dev.sh [--quick] [--debug]
+tools/build-dev.sh [--quick] [--debug]
 ```
 
 It runs the checks you would otherwise run by hand, then installs — in this
@@ -91,12 +90,35 @@ bin/bobr-update-fsobj-hashes.sh
 
 The build tells you when this is needed, and names the tool.
 
+## Before tagging a release
+
+```sh
+tools/release-check.sh [TAG]
+```
+
+`TAG` defaults to `v` plus the workspace version, and giving a different one is
+refused — the release workflow reads the version the same way and rejects a tag
+that disagrees, so it is worth learning here rather than from a job that has
+already started.
+
+It then runs what that workflow runs, short of publishing: the formatting,
+clippy and test pass, then a static musl build and the real packaging script for
+both archives. That last part is the point. The packaging script writes a
+request by hand, checks the sandbox launcher's protocol version and verifies
+static linkage, and none of it is reached by `cargo test` or by CI on master —
+so it can rot unnoticed until a tag is pushed, which is exactly how a request
+schema bump once broke a release.
+
+The aarch64 half stays with CI. The build is skipped unless that target is
+installed, and the launcher tests need a machine of that architecture to run on
+at all.
+
 ## Rebuilding the world
 
-`tools/dev/bobr-rebuild-world.sh` rebuilds everything from scratch, into a store
-that has never been written to. Use it to prove a build works from nothing — a
-cached store can hide a recipe that no longer builds, because the object it
-would produce is already there.
+`tools/dev/bobr-rebuild-world.sh`, in the recipes repository, rebuilds
+everything from scratch, into a store that has never been written to. Use it to
+prove a build works from nothing — a cached store can hide a recipe that no
+longer builds, because the object it would produce is already there.
 
 ```sh
 tools/dev/bobr-rebuild-world.sh [--no-pull] [--jobs N] [TARGET]
@@ -105,7 +127,7 @@ tools/dev/bobr-rebuild-world.sh [--no-pull] [--jobs N] [TARGET]
 `TARGET` defaults to `test_all`. In order, the script:
 
 1. pulls both repositories (`--no-pull` builds what is checked out instead);
-2. installs the binaries through `bobr-build-dev.sh --quick`;
+2. installs the binaries through the engine's `tools/build-dev.sh --quick`;
 3. creates `<workspace>/bobr-store.<YYMMDDhhmmss>` and writes a build profile
    inside it naming that store and the target;
 4. **seeds source objects** from the previous store by hardlink, so the same
