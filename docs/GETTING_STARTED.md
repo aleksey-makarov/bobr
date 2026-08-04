@@ -185,21 +185,10 @@ To author or extend recipes, see [Recipes in Nickel](./NICKEL.md).
 
 ## Booting a system under QEMU
 
-`bin/bobr-run-qemu-gnome.sh` is a quick smoke test: it builds the kernel, the
-GNOME EROFS rootfs, and initrd (through `bobr-build.sh`) and boots them under the
-host's `qemu-system-x86_64` in a graphical window. It needs KVM (`/dev/kvm`), and
-anything after `--` is passed through to QEMU.
-
-```sh
-bin/bobr-run-qemu-gnome.sh
-```
-
-## Running QEMU from a HostBundle
-
-The previous helper uses `qemu-system-x86_64` installed on the host. For
-contrast, `host_bundle_qemu` is a self-contained directory object carrying
-QEMU, its userspace runtime, and the kernel, initramfs, and EROFS image it
-boots. Build it like any other recipe target:
+`host_bundle_qemu` is a self-contained directory object carrying QEMU, its
+userspace runtime, and the kernel, initramfs, and EROFS image it boots. Nothing
+has to be installed on the host — not even QEMU. Build it like any other recipe
+target:
 
 ```sh
 bin/bobr-build.sh --target host_bundle_qemu
@@ -223,6 +212,11 @@ the working directory, creates `diag.sock`, and forwards host TCP port 2222 to
 the guest's SSH port. Run it with `--help` for resource and path options; QEMU's
 `Ctrl-A X` escape exits the VM.
 
+The graphical systems come as their own bundles, built and run the same way:
+`host_bundle_qemu_weston` and `host_bundle_qemu_gnome`. Those open a window and
+need KVM. Each names its `home.img` and `diag.sock` after itself, so all three
+can run side by side in one working directory.
+
 The other public entries can be used directly as well:
 
 ```sh
@@ -230,10 +224,10 @@ qemu-img --help
 qemu-system-x86_64 --version
 ```
 
-No QEMU installation is needed on the host. Adding `bin/` to `PATH` only
-exposes the public commands; the launcher selects the copied glibc loader,
-libraries, and per-command environment. See [HostBundle](./HOST_BUNDLE.md) for
-the directory layout, verifier, wrappers, and portability boundary.
+Adding `bin/` to `PATH` only exposes the public commands; the launcher selects
+the copied glibc loader, libraries, and per-command environment. See
+[HostBundle](./HOST_BUNDLE.md) for the directory layout, verifier, wrappers, and
+portability boundary.
 
 ## Next steps
 
