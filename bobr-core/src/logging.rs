@@ -184,6 +184,12 @@ pub trait EventSink: fmt::Debug + Send + Sync {
         Ok(())
     }
 
+    /// Notifies the sink that a subject is done and no further events for it
+    /// will arrive, so any per-subject state can be released. Called when the
+    /// subject's logger is dropped, which covers success, failure and
+    /// cancellation alike. The default is a no-op.
+    fn release_subject(&self, _identity: &SubjectIdentity) {}
+
     /// Flushes any buffered output to the OS. Default no-op for sinks that do
     /// not buffer.
     fn flush(&self) {}
@@ -273,6 +279,16 @@ impl BuildRunLogger {
             subject_seq: AtomicU64::new(0),
             raw_log_counters: Mutex::new(BTreeMap::new()),
         }))
+    }
+
+    /// Releases every sink's state for a finished subject. Called from
+    /// `BoundBuildLogger::drop`: the bound logger is the only handle through
+    /// which subject events can be emitted, so once it is gone no further event
+    /// can reach that subject's state.
+    fn release_subject(&self, identity: &SubjectIdentity) {
+        for sink in &self.sinks {
+            sink.release_subject(identity);
+        }
     }
 
     /// Logs a run-level event that belongs to no single subject (build start,
@@ -403,12 +419,28 @@ impl BuildLogger for BoundBuildLogger {
     }
 }
 
+/// Releasing on drop rather than on a "subject finished" event is deliberate:
+/// the executor drops this logger on every path out of a subject -- success,
+/// builder failure, cancellation, panic -- so no path can leak the subject's
+/// open log file. A run builds far more subjects than it runs concurrently, so
+/// holding a file per *finished* subject would exhaust the process's descriptor
+/// limit part-way through a large build.
+impl Drop for BoundBuildLogger {
+    fn drop(&mut self) {
+        self.inner.release_subject(self.subject.identity());
+    }
+}
+
 /// File sink: persists records to the run-level and per-subject `events.jsonl`.
 ///
-/// Owns the run-level writer plus a writer per bound subject (keyed by the full
-/// build key). A subject event is written to both the run log and that
+/// Owns the run-level writer plus a writer per *live* subject (keyed by the
+/// full build key). A subject event is written to both the run log and that
 /// subject's log; the serialized line is identical in both, so tooling can
 /// match records byte-for-byte.
+///
+/// A subject's writer is created by `register_subject` and closed again by
+/// `release_subject`, so the number of open files tracks how many subjects are
+/// running at once, not how many the run has built.
 #[derive(Debug)]
 struct FileSink {
     run_event_log_path: PathBuf,
@@ -589,6 +621,30 @@ impl EventSink for FileSink {
             },
         );
         Ok(())
+    }
+
+    /// Closes the subject's `events.jsonl`, flushing what is still buffered.
+    ///
+    /// Flushing explicitly rather than leaving it to `BufWriter::drop` is what
+    /// makes a lost tail visible: drop swallows the error, this counts it.
+    fn release_subject(&self, identity: &SubjectIdentity) {
+        let removed = match self.subject_writers.lock() {
+            Ok(mut writers) => writers.remove(&identity.build_key),
+            Err(error) => {
+                self.note_error(error.to_string());
+                return;
+            }
+        };
+        let Some(mut subject_writer) = removed else {
+            return;
+        };
+        if let Err(error) = Self::flush_writer(
+            &mut subject_writer.writer,
+            false,
+            &subject_writer.event_log_path,
+        ) {
+            self.note_error(error);
+        }
     }
 }
 
@@ -1046,6 +1102,105 @@ mod tests {
 
     fn run_event_log(run_log_dir: &Path) -> String {
         fs::read_to_string(run_log_dir.join("events.jsonl")).unwrap()
+    }
+
+    /// Helper: a log subject with a build key derived from `index`.
+    fn test_subject(run_log_dir: &Path, index: usize) -> BuildLogSubject {
+        let subject_dir = run_log_dir.join(format!("{index:08}-Sandbox-node"));
+        BuildLogSubject::new(
+            "Sandbox",
+            "node",
+            format!("{index:064}"),
+            subject_dir.clone(),
+            subject_dir.join("raw"),
+        )
+    }
+
+    fn info_event(message: &str) -> BuildLogEvent {
+        BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status: BuildStatus::Start,
+            op: None,
+            message: message.to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details: Map::new(),
+        }
+    }
+
+    #[test]
+    fn releasing_a_subject_closes_its_log_file() {
+        // The leak this guards against: one open events.jsonl per subject, held
+        // for the whole run, exhausting the process descriptor limit part-way
+        // through a large build. Only live subjects may hold a writer.
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        fs::create_dir_all(&run_log_dir).unwrap();
+        let sink = FileSink::new(&run_log_dir).unwrap();
+
+        for index in 0..50 {
+            let subject = test_subject(&run_log_dir, index);
+            sink.register_subject(&subject).unwrap();
+            sink.release_subject(subject.identity());
+        }
+        assert_eq!(sink.subject_writers.lock().unwrap().len(), 0);
+
+        // A registered-but-not-released subject keeps exactly its own writer.
+        let live = test_subject(&run_log_dir, 100);
+        sink.register_subject(&live).unwrap();
+        assert_eq!(sink.subject_writers.lock().unwrap().len(), 1);
+        sink.release_subject(live.identity());
+        assert_eq!(sink.subject_writers.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_released_subject_is_not_reopened_by_a_late_event() {
+        // Cache-hit events carry a subject identity but no bound logger. Such an
+        // event must land in the run log only, never resurrect a subject writer.
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        fs::create_dir_all(&run_log_dir).unwrap();
+        let sink = FileSink::new(&run_log_dir).unwrap();
+
+        let subject = test_subject(&run_log_dir, 3);
+        sink.register_subject(&subject).unwrap();
+        sink.release_subject(subject.identity());
+
+        let record = EventLogRecord::assemble(
+            0,
+            Some(0),
+            Some(subject.identity()),
+            &info_event("late"),
+            &run_log_dir,
+        );
+        sink.write_event(&record);
+        assert_eq!(sink.subject_writers.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn dropping_a_bound_logger_flushes_and_closes_the_subject_log() {
+        // End-to-end over the path the executor actually takes: it drops the
+        // bound logger when a subject ends. Info events stay buffered and
+        // nothing flushes a finished subject afterwards, so the drop must --
+        // otherwise the tail of every subject log would survive only by luck.
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        let logger = Arc::new(
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
+        );
+
+        let subject = test_subject(&run_log_dir, 7);
+        let subject_dir = run_log_dir.join("00000007-Sandbox-node");
+        let node_logger = logger.bind_subject(subject).unwrap();
+        node_logger.log_event(info_event("buffered info"));
+
+        let event_log = subject_dir.join("events.jsonl");
+        assert_eq!(fs::read_to_string(&event_log).unwrap(), "");
+
+        drop(node_logger);
+        let contents = fs::read_to_string(&event_log).unwrap();
+        let event: Value = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(event["message"], Value::String("buffered info".to_string()));
     }
 
     #[test]
