@@ -106,11 +106,17 @@ if [ "${kind}" = "main" ]; then
     || die "unexpected sandbox launcher protocol info: ${protocol_info}"
 
   smoke="${staging}/smoke"
-  mkdir -p "${smoke}/store"
+  # bobr creates none of these itself, so that a mistyped path fails at once.
+  # The run directories share the store's filesystem, which it also checks.
+  mkdir -p "${smoke}/store" "${smoke}/store/logs/release-smoke" \
+    "${smoke}/store/work/release-smoke"
   cat >"${smoke}/request.json" <<EOF
 {
-  "schema": "bobr-request-v1",
+  "schema": "bobr-request-v2",
   "store": "${smoke}/store",
+  "logs": "${smoke}/store/logs/release-smoke",
+  "work": "${smoke}/store/work/release-smoke",
+  "run_id": "release-smoke",
   "nodes": {
     "root": {
       "name": "release-smoke",
