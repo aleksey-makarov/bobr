@@ -120,28 +120,41 @@ and lowered to a request. Clone it into the current working directory:
 git clone https://github.com/aleksey-makarov/bobr-recipes
 ```
 
-List the build targets — attribute names with their package names — with
-`tools/bobr-list-pkgs.sh`, then build one with the driver, which refreshes the
-local `fsobj-hash` locks with the binary from the release archive, exports the
-request through `request.ncl`, and runs `bobr`:
+Building takes two things: a **store** to build into, and a **build profile**
+describing your installation. The profile is a small Nickel file you keep in your
+working directory; start from the shipped example and read what is in it:
 
 ```sh
-cd bobr-recipes
-tools/bobr-list-pkgs.sh              # choose a target attribute
-tools/bobr-build.sh gzip            # build one package
-tools/bobr-build.sh test_all_recipes  # or the whole shipped set: kernel, images, initrd
+cp bobr-recipes/bobr.ncl.example bobr.ncl
+mkdir bobr-store
+bobr-recipes/bin/bobr-build.sh
 ```
 
-`tools/bobr-build.sh` options:
+That builds the profile's `target`, which the example sets to `test_all` — the
+shipped artifacts plus their checks. To pick something else, list what there is
+and name it:
 
-- `--store PATH` — where to build (default: `../bobr-store`, next to the repos);
-- `--logs PATH`, `--work PATH` — roots for the run directories (default:
-  `<store>/logs` and `<store>/work`), and `--run-id NAME` to name the run
-  yourself; by default the driver names it after the local timestamp and creates
-  both directories for you;
-- `--jobs N`, `--quiet` — the request's top-level knobs;
-- `--podman-unshare` — run under `podman unshare` on hosts that forbid
-  unprivileged user namespaces.
+```sh
+bobr-recipes/bin/bobr-list-pkgs.sh          # attribute, recipe name, tag
+bobr-recipes/bin/bobr-build.sh --target gzip
+```
+
+`bobr-list-pkgs.sh` reads the same profile, so the list already reflects any
+overlays it applies.
+
+The profile holds what does not change between builds — the store, the log and
+work directories, overlays to apply, whether to run under `podman unshare`. The
+few things that belong to one invocation stay on the command line:
+
+- `--target NAME` — build this instead of the profile's target;
+- `--jobs N`, `--quiet` — for this run only;
+- `--dry-run` — print the resolved profile and the JSON request, build nothing;
+- a positional argument names a different profile (`bobr-build.sh ../ci/bobr.ncl`).
+
+`bobr` and `fsobj-hash` are taken from `PATH` — the ones from the release archive
+you unpacked earlier. Nothing is guessed, so what gets used is what `bobr
+--version` reports; the driver checks that its request format matches these
+recipes before it starts, and says so plainly when it does not.
 
 The first real build bootstraps a toolchain from source (glibc, gcc, …), so it
 takes a while; later builds reuse cached objects and rebuild only what changed.
@@ -164,21 +177,26 @@ To author or extend recipes, see [Recipes in Nickel](./NICKEL.md).
 
 ## Rebuilding the world
 
-`tools/bobr-rebuild-world.sh [attr]` builds into a fresh, timestamped store
-(`bobr-store.<timestamp>`, with the `bobr-store` symlink repointed at it), seeds
-source objects from the previous store by hardlink, records the `bobr` and
-`bobr-recipes` commits, and runs the build through `bobr-build.sh`.
+`tools/dev/rebuild-world.sh [TARGET]` is for working on bobr itself rather than
+with it: it pulls both repositories, builds the binaries from source, and builds
+TARGET into a fresh, timestamped store (`bobr-store.<timestamp>`), seeding source
+objects from the previous store by hardlink so tarballs are not fetched again.
+The `bobr-store` symlink is repointed only after the build succeeds.
+
+The same is true of `tools/dev/bobr-build-dev.sh`, which builds the binaries from
+a sibling `bobr` checkout, refreshes the recipes' hash locks, and then runs the
+ordinary `bin/bobr-build.sh` with them on `PATH` — so a source checkout and a
+release follow one build path.
 
 ## Booting a system under QEMU
 
-`tools/bobr-run-qemu-gnome.sh` is a quick smoke test: it builds the kernel, the
+`bin/bobr-run-qemu-gnome.sh` is a quick smoke test: it builds the kernel, the
 GNOME EROFS rootfs, and initrd (through `bobr-build.sh`) and boots them under the
-host's `qemu-system-x86_64` in a graphical window. It needs KVM (`/dev/kvm`);
-`--store PATH` selects the store (default `../bobr-store`), and anything after
-`--` is passed through to QEMU.
+host's `qemu-system-x86_64` in a graphical window. It needs KVM (`/dev/kvm`), and
+anything after `--` is passed through to QEMU.
 
 ```sh
-tools/bobr-run-qemu-gnome.sh
+bin/bobr-run-qemu-gnome.sh
 ```
 
 ## Running QEMU from a HostBundle
@@ -189,7 +207,7 @@ QEMU, its userspace runtime, and the kernel, initramfs, and EROFS image it
 boots. Build it like any other recipe target:
 
 ```sh
-tools/bobr-build.sh host_bundle_qemu
+bin/bobr-build.sh --target host_bundle_qemu
 ```
 
 The result is an ordinary directory rather than an fs-tree manifest. Add its

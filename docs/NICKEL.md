@@ -45,10 +45,12 @@ fun pkgs =>
   { include [libffi] }
 ```
 
-`request.ncl` ties it together: given a store path, the recipes-checkout path, a
-target package name, and optional overlays, it selects that package from
-`mkPkgs overlays` and lowers it to a full request
-(`schema`, `store`, `nodes`).
+`request.ncl` ties it together: given the paths of one run, a target attribute,
+and optional overlays, it selects that recipe from `mkPkgs overlays` and lowers
+it to a full [request](./REQUEST.md). Callers rarely invoke it directly —
+`bin/bobr-build.sh` does, reading everything but the run's own identity from a
+**build profile** (`bobr.ncl`, shaped by `build-profile.ncl`; copy
+`bobr.ncl.example` to start one).
 
 ## Overlays
 
