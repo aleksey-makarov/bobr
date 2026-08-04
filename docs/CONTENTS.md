@@ -39,3 +39,7 @@
 
 10. [fs-tree Manifest](./FS_TREE_MANIFEST.md)
    Canonical manifest format for manifest-addressed fs-tree artifacts.
+
+11. [Development](./DEVELOPMENT.md)
+   Working on bobr rather than with it: building from a source checkout, and
+   rebuilding the world into a fresh store.
