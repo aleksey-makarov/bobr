@@ -7,9 +7,9 @@ one you keep changing.
 
 The arrangement is deliberately the same as a user's. You build the binaries into
 a directory and keep that directory on `PATH`; from there, everything —
-`bin/bobr-build.sh`, the QEMU runners, `rebuild-world.sh` — finds them exactly as
-it finds an unpacked release. Nothing downstream knows or cares that the binaries
-came from source.
+`bin/bobr-build.sh`, the QEMU runners, `bobr-rebuild-world.sh` — finds them
+exactly as it finds an unpacked release. Nothing downstream knows or cares that
+the binaries came from source.
 
 ```text
 <workspace>/
@@ -93,13 +93,13 @@ The build tells you when this is needed, and names the tool.
 
 ## Rebuilding the world
 
-`tools/dev/rebuild-world.sh` rebuilds everything from scratch, into a store that
-has never been written to. Use it to prove a build works from nothing — a cached
-store can hide a recipe that no longer builds, because the object it would
-produce is already there.
+`tools/dev/bobr-rebuild-world.sh` rebuilds everything from scratch, into a store
+that has never been written to. Use it to prove a build works from nothing — a
+cached store can hide a recipe that no longer builds, because the object it
+would produce is already there.
 
 ```sh
-tools/dev/rebuild-world.sh [--no-pull] [--jobs N] [TARGET]
+tools/dev/bobr-rebuild-world.sh [--no-pull] [--jobs N] [TARGET]
 ```
 
 `TARGET` defaults to `test_all`. In order, the script:
@@ -116,9 +116,9 @@ tools/dev/rebuild-world.sh [--no-pull] [--jobs N] [TARGET]
    succeeded**, so a failed rebuild leaves you with the last good one.
 
 Beside the store it records what produced it: `hashes.txt` with both commits,
-`request.json` with the lowered request, `rebuild-world.log` with the per-phase
-timings, and `host-stats.log` with load and memory samples taken around each
-phase.
+`request.json` with the lowered request, `bobr-rebuild-world.log` with the
+per-phase timings, and `host-stats.log` with load and memory samples taken
+around each phase.
 
 Expect hours. Recorded runs took 76 and 106 minutes with the sources already
 present; from an empty workspace the downloads add to that. Old stores are left
