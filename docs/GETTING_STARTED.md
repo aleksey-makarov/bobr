@@ -183,6 +183,84 @@ use an [`FsTreeExport`](./REQUEST.md) recipe.
 
 To author or extend recipes, see [Recipes in Nickel](./NICKEL.md).
 
+## Changing a recipe without editing it
+
+The recipes are a fixed-point set of plain data records, and an **overlay** is a
+function over that set: given the set as it stands, it returns the fields that
+should differ. The profile lists the overlays to apply, so your changes live
+next to your profile rather than as edits inside the recipes checkout — which
+keeps them intact when you update it.
+
+Put this in `overlay.ncl`, beside your `bobr.ncl`:
+
+```nickel
+fun final => fun prev => {
+  linux = prev.linux & {
+    config_options = prev.linux.config_options & { LOCALVERSION = "-mine" },
+  },
+}
+```
+
+`CONFIG_LOCALVERSION` is appended to the kernel release, so this is a change you
+can see rather than infer. Note what is being reached into: the kernel
+configuration is an ordinary record of option names, the same kind of data as a
+package's version, and an overlay gets at it the same way. There is no separate
+mechanism for the kernel.
+
+Point the profile at it:
+
+```nickel
+overlays = ["./overlay.ncl"],
+```
+
+Nothing needs building to check that an overlay took effect — `bobr-list-pkgs.sh`
+and `--dry-run` both apply overlays, so the lowered request already shows the
+result:
+
+```sh
+bobr-recipes/bin/bobr-build.sh --target linux --dry-run | grep LOCALVERSION
+```
+
+Then build and boot (see the next section), and the guest answers for itself:
+
+```sh
+uname -r          # 6.18.38-mine, where it used to say 6.18.38-bobr
+```
+
+### Two things that catch people out
+
+**Merging a field that already has a value fails.** Above, `config_options` is
+declared with `| default`, and overriding a default is what merging is for. A
+field holding a plain value is different: `&` refuses, and for arrays it says so
+in terms of an equality contract, which reads like a bug in your overlay rather
+than a rule. Force the field instead:
+
+```nickel
+less = prev.less & {
+  config.configure_args
+    | force
+    = prev.less.config.configure_args @ ["--with-editor=vim"],
+},
+```
+
+**A version pin needs the matching source hash.** A different version is a
+different tarball, and the hash in the recipe is what proves the download is the
+right one. Set `version` and `source_object_hash` together; build once with a
+wrong hash on purpose, and the error reports the real one to paste in.
+
+### What a change costs
+
+An override rebuilds the recipe it names and everything downstream of it, so
+where you aim matters. Tagging the kernel rebuilds the kernel, the initramfs,
+every root filesystem and image built from them. Changing a package that only a
+few things use costs a fraction of that.
+
+Downstream is decided by the *result*, not by the edit: if a rebuilt recipe
+produces the identical object — a configure flag that turns out to select what
+was already the default, say — then everything depending on it sees an unchanged
+input and stays cached. A build reporting one rebuilt recipe and hundreds of
+cache hits is that working, not a sign the overlay was ignored.
+
 ## Booting a system under QEMU
 
 `host_bundle_qemu` is a self-contained directory object carrying QEMU, its

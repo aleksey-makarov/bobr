@@ -2,7 +2,8 @@
 
 1. [Getting Started](./GETTING_STARTED.md)
    Build bobr and run it end to end: a tiny hand-written request, then a real
-   target built from the Nickel recipes.
+   target built from the Nickel recipes, and how to change a recipe without
+   editing it.
 
 2. [Concepts](./CONCEPTS.md)
    The ideas bobr is built on — content addressing, objects, keys, and
