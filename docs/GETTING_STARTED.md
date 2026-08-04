@@ -14,17 +14,17 @@ target from the Nickel recipes. For the ideas behind it all, see
   runs each builder in a Linux user namespace when you are not root, and uses
   these setuid helpers to set up the uid/gid map. As root — or under `podman
   unshare` — bobr uses its in-process host runtime and needs neither.
-- `git` and `nickel` — only for the recipe workflow below.
+- `nickel` — for the recipe workflow below.
 
 ## Install bobr
 
 Choose a release from the
 [bobr releases](https://github.com/aleksey-makarov/bobr/releases), download the
 main archive and its checksum file, and verify it before unpacking. For example,
-for version 0.1.4:
+for version 0.1.5:
 
 ```sh
-BOBR_VERSION=0.1.4
+BOBR_VERSION=0.1.5
 BOBR_TARGET=x86_64-unknown-linux-musl
 BOBR_ARCHIVE="bobr-v${BOBR_VERSION}-${BOBR_TARGET}.tar.xz"
 BOBR_RELEASE="https://github.com/aleksey-makarov/bobr/releases/download/v${BOBR_VERSION}"
@@ -114,11 +114,18 @@ human-facing name for the result (see [Store](./STORE.md)).
 Writing requests by hand does not scale; real targets are authored in
 [Nickel](https://nickel-lang.org/) in the separate
 [**bobr-recipes**](https://github.com/aleksey-makarov/bobr-recipes) repository
-and lowered to a request. Clone it into the current working directory:
+and lowered to a request. The two are released together, so take the recipes
+release matching the `bobr` you unpacked above:
 
 ```sh
-git clone https://github.com/aleksey-makarov/bobr-recipes
+curl -fLO "https://github.com/aleksey-makarov/bobr-recipes/archive/refs/tags/v${BOBR_VERSION}.tar.gz"
+tar -xf "v${BOBR_VERSION}.tar.gz"
+mv "bobr-recipes-${BOBR_VERSION}" bobr-recipes
 ```
+
+Versions that disagree are caught rather than left to misbehave: the recipes
+name the request format they emit, and the build driver checks it against what
+`bobr --version` accepts before doing anything.
 
 Building takes two things: a **store** to build into, and a **build profile**
 describing your installation. The profile is a small Nickel file you keep in your
@@ -130,9 +137,10 @@ mkdir bobr-store
 bobr-recipes/bin/bobr-build.sh
 ```
 
-That builds the profile's `target`, which the example sets to `test_all` — the
-shipped artifacts plus their checks. To pick something else, list what there is
-and name it:
+That builds the profile's `target`, which the example sets to `test_all` — every
+shipped artifact plus the checks over them. Expect it to run for hours: nothing
+arrives pre-built, so the first build starts at the toolchain and works its way
+up. To try something smaller first, list what there is and name it:
 
 ```sh
 bobr-recipes/bin/bobr-list-pkgs.sh          # attribute, recipe name, tag
@@ -156,8 +164,8 @@ you unpacked earlier. Nothing is guessed, so what gets used is what `bobr
 --version` reports; the driver checks that its request format matches these
 recipes before it starts, and says so plainly when it does not.
 
-The first real build bootstraps a toolchain from source (glibc, gcc, …), so it
-takes a while; later builds reuse cached objects and rebuild only what changed.
+Later builds reuse cached objects and rebuild only what a change actually
+reaches, so that cost is paid once rather than on every build.
 
 The result is referenced at `object-refs/<name>`, but do not expect a directory
 of installed files there: for a package like `gzip` that object is an
@@ -174,19 +182,6 @@ bind-mounted as a container root. To pull specific files out as ordinary files,
 use an [`FsTreeExport`](./REQUEST.md) recipe.
 
 To author or extend recipes, see [Recipes in Nickel](./NICKEL.md).
-
-## Rebuilding the world
-
-`tools/dev/rebuild-world.sh [TARGET]` is for working on bobr itself rather than
-with it: it pulls both repositories, builds the binaries from source, and builds
-TARGET into a fresh, timestamped store (`bobr-store.<timestamp>`), seeding source
-objects from the previous store by hardlink so tarballs are not fetched again.
-The `bobr-store` symlink is repointed only after the build succeeds.
-
-The same is true of `tools/dev/bobr-build-dev.sh`, which builds the binaries from
-a sibling `bobr` checkout, refreshes the recipes' hash locks, and then runs the
-ordinary `bin/bobr-build.sh` with them on `PATH` — so a source checkout and a
-release follow one build path.
 
 ## Booting a system under QEMU
 
