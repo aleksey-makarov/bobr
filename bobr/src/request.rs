@@ -4,6 +4,14 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// The request format this build of `bobr` accepts.
+///
+/// It is the compatibility contract between `bobr` and whoever writes requests:
+/// a recipe layer emitting a different schema is talking to the wrong version.
+/// `bobr --version` reports it, so a caller can compare before building rather
+/// than discovering the mismatch in the parse error.
+pub const REQUEST_SCHEMA: &str = "bobr-request-v2";
+
 /// Schema marker for the request format. It deserializes only from the exact
 /// schema string, so the format version is enforced declaratively at parse
 /// time and never needs to live as data on `Request`.
@@ -13,7 +21,7 @@ pub(crate) struct RequestSchemaV2;
 impl<'de> Deserialize<'de> for RequestSchemaV2 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match String::deserialize(deserializer)?.as_str() {
-            "bobr-request-v2" => Ok(RequestSchemaV2),
+            REQUEST_SCHEMA => Ok(RequestSchemaV2),
             other => Err(D::Error::custom(format!(
                 "unsupported request schema '{other}'"
             ))),

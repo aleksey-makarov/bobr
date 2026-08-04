@@ -53,6 +53,11 @@ fn main() -> ExitCode {
         return exit_code;
     }
 
+    if wants_version() {
+        print_version();
+        return ExitCode::SUCCESS;
+    }
+
     let cancellation = CancellationToken::new();
     signal::install_handlers(cancellation.clone());
     let result = build(cancellation);
@@ -110,6 +115,25 @@ fn build(cancellation: CancellationToken) -> MResult<()> {
     Ok(())
 }
 
+fn wants_version() -> bool {
+    env::args_os()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V")
+}
+
+/// Prints the build's own version and the request schema it accepts.
+///
+/// The two answer different questions: the version identifies this build in a
+/// report, while the schema is what decides whether a given recipe layer can
+/// talk to it at all.
+fn print_version() {
+    println!(
+        "bobr {} (request {})",
+        env!("CARGO_PKG_VERSION"),
+        bobr::REQUEST_SCHEMA
+    );
+}
+
 fn request_file_from_args() -> MResult<Option<PathBuf>> {
     let mut args = env::args_os();
     let _program = args.next();
@@ -118,7 +142,7 @@ fn request_file_from_args() -> MResult<Option<PathBuf>> {
     };
     if let Some(extra) = args.next() {
         return Err(BobrError::InvalidInput(format!(
-            "unexpected argument '{}'; usage: bobr [request.json]",
+            "unexpected argument '{}'; usage: bobr [--version] [request.json]",
             extra.to_string_lossy()
         )));
     }

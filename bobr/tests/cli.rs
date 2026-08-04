@@ -12,6 +12,30 @@ use support::{
 use tempfile::tempdir;
 
 #[test]
+fn cli_reports_its_version_and_request_schema() {
+    for flag in ["--version", "-V"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
+            .arg(flag)
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{flag} failed");
+        let line = String::from_utf8(output.stdout).unwrap();
+        let line = line.trim();
+        // Two answers in one line: which build this is, and which requests it
+        // accepts.
+        assert!(
+            line.starts_with(&format!("bobr {}", env!("CARGO_PKG_VERSION"))),
+            "{line}"
+        );
+        assert!(
+            line.ends_with(&format!("(request {})", bobr::REQUEST_SCHEMA)),
+            "{line}"
+        );
+    }
+}
+
+#[test]
 fn cli_reads_request_from_stdin_when_path_is_omitted() {
     let workspace = tempdir().unwrap();
     let request_path = workspace.path().join("stdin.json");
@@ -91,7 +115,10 @@ fn cli_rejects_more_than_one_request_argument() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
     assert!(stderr.contains("unexpected argument"), "{stderr}");
-    assert!(stderr.contains("usage: bobr [request.json]"), "{stderr}");
+    assert!(
+        stderr.contains("usage: bobr [--version] [request.json]"),
+        "{stderr}"
+    );
 }
 
 #[test]

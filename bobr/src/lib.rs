@@ -22,4 +22,4 @@ mod resolved_inputs;
 mod run;
 
 pub use execution::{ExecutionError, execute};
-pub use request::Request;
+pub use request::{REQUEST_SCHEMA, Request};

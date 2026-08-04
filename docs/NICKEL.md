@@ -14,12 +14,15 @@ layer produces. This chapter describes how that layer works in bobr-recipes.
 
 ## The package set
 
-`pkgs.ncl` exports `mkPkgs`, a function from a list of overlays to the **package
-set**; `(import "pkgs.ncl") []` builds the default set. Each package module is a
-function of the finished set, so packages refer to one another by name —
-`pkgs.gcc`, `pkgs.glibc_libs`, `pkgs.base_filesystem`. The set is a **fixed
-point**: every package sees the fully assembled `pkgs`, which is what lets
-recipes depend on each other and lets overlays override anything.
+`recipe-set.ncl` exports `mkPkgs`, a function from a list of overlays to the
+**recipe set**; `(import "recipe-set.ncl") []` builds the default set. It folds
+together the package recipes — one module per package, listed in `pkgs/pkgs.ncl`
+and living beside it in `pkgs/` — with the modules that assemble images, tests,
+and bundles. Each module is a function of the finished set, so recipes refer to
+one another by name — `pkgs.gcc`, `pkgs.glibc_libs`,
+`pkgs.base_filesystem`. The set is a **fixed point**: every package sees the
+fully assembled `pkgs`, which is what lets recipes depend on each other and lets
+overlays override anything.
 
 A package module returns named recipes:
 
