@@ -656,7 +656,7 @@ fn log_run_finished(
     result: &Result<ObjectHash, ExecutionError>,
     counters: &RunCounters,
 ) {
-    let (level, object_hash, outcome, message) = match result {
+    let (level, object_hash, outcome, mut message) = match result {
         Ok(object_hash) => (
             BuildLogLevel::Info,
             Some(*object_hash),
@@ -676,6 +676,26 @@ fn log_run_finished(
             error.message().to_string(),
         ),
     };
+    // Downloads that had to be retried are worth surfacing even when the run
+    // succeeded: a build that only finished on the second try looks identical
+    // to one that never stumbled, and the difference is a host to look at.
+    let retries = logger.download_retries();
+    let mut details = serde_json::json!({
+        "result": outcome,
+        "built": counters.built,
+        "cache_hit": counters.cache_hit,
+        "failed": counters.failed,
+        "logging_errors": logger.logging_errors(),
+    });
+    if !retries.is_empty() {
+        let total: u64 = retries.values().sum();
+        details["download_retries"] = serde_json::json!(total);
+        details["download_retries_by_host"] = serde_json::json!(retries);
+        message.push_str(&format!(
+            "; {total} download retries ({})",
+            by_host(&retries)
+        ));
+    }
     logger.log_run_event(BuildLogEvent {
         level,
         status: BuildStatus::RunFinished,
@@ -683,14 +703,19 @@ fn log_run_finished(
         message,
         object_hash,
         raw_log_path: None,
-        details: json_object(serde_json::json!({
-            "result": outcome,
-            "built": counters.built,
-            "cache_hit": counters.cache_hit,
-            "failed": counters.failed,
-            "logging_errors": logger.logging_errors(),
-        })),
+        details: json_object(details),
     });
+}
+
+/// Renders retry counts as "host xN, host xN", busiest first.
+fn by_host(retries: &std::collections::BTreeMap<String, u64>) -> String {
+    let mut hosts: Vec<_> = retries.iter().collect();
+    hosts.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    hosts
+        .iter()
+        .map(|(host, count)| format!("{host} x{count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Refuses a work directory on another filesystem than the store.

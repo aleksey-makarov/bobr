@@ -202,6 +202,37 @@ pub trait EventSink: fmt::Debug + Send + Sync {
     }
 }
 
+/// Counts download retries by host.
+///
+/// Retries are reported per subject, as they happen, which says nothing about
+/// whether one host was behind all of them. Counting here -- where every event
+/// already passes -- turns that into a fact the run can report, without a
+/// counter threaded through the source layer or a global to hold it.
+#[derive(Debug, Default)]
+struct RetrySink {
+    hosts: Mutex<BTreeMap<String, u64>>,
+}
+
+impl RetrySink {
+    fn counts(&self) -> BTreeMap<String, u64> {
+        self.hosts
+            .lock()
+            .map(|hosts| hosts.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl EventSink for RetrySink {
+    fn write_event(&self, record: &EventLogRecord) {
+        let Some(Value::String(host)) = record.details.get("retry_host") else {
+            return;
+        };
+        if let Ok(mut hosts) = self.hosts.lock() {
+            *hosts.entry(host.clone()).or_insert(0) += 1;
+        }
+    }
+}
+
 /// The event bus: stamps the envelope once and fans every event out to sinks.
 ///
 /// `BuildRunLogger` no longer writes files or stderr itself; it owns the sink
@@ -213,6 +244,7 @@ pub struct BuildRunLogger {
     run_id: String,
     seq: AtomicU64,
     sinks: Vec<Arc<dyn EventSink>>,
+    retries: Arc<RetrySink>,
 }
 
 impl BuildRunLogger {
@@ -229,12 +261,18 @@ impl BuildRunLogger {
 
         let file_sink = Arc::new(FileSink::new(run_log_dir)?);
         let progress_sink = Arc::new(ProgressSink::new(run_log_dir.to_path_buf(), quiet));
+        let retries = Arc::new(RetrySink::default());
 
         Ok(Self {
             run_log_dir: run_log_dir.to_path_buf(),
             run_id: run_id.to_string(),
             seq: AtomicU64::new(0),
-            sinks: vec![file_sink, progress_sink],
+            sinks: vec![
+                file_sink,
+                progress_sink,
+                Arc::clone(&retries) as Arc<dyn EventSink>,
+            ],
+            retries,
         })
     }
 
@@ -255,6 +293,13 @@ impl BuildRunLogger {
         for sink in &self.sinks {
             sink.flush();
         }
+    }
+
+    /// How many download retries this run made, by host.
+    ///
+    /// Empty when nothing had to be retried, which is the ordinary case.
+    pub fn download_retries(&self) -> BTreeMap<String, u64> {
+        self.retries.counts()
     }
 
     /// Total number of best-effort logging failures swallowed across sinks.
@@ -1353,6 +1398,42 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn download_retries_are_counted_per_host() {
+        // Counted from the event's fields, not from its sentence: the message is
+        // written for a person and may be reworded at any time.
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        let logger = Arc::new(
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
+        );
+        assert!(logger.download_retries().is_empty());
+
+        let retry = |host: &str| {
+            let mut details = Map::new();
+            details.insert("retry_host".to_string(), Value::String(host.to_string()));
+            BuildLogEvent {
+                level: BuildLogLevel::Info,
+                status: BuildStatus::Running,
+                op: Some("fetch".to_string()),
+                message: "retrying".to_string(),
+                object_hash: None,
+                raw_log_path: None,
+                details,
+            }
+        };
+        logger.log_run_event(retry("github.com"));
+        logger.log_run_event(retry("static.crates.io"));
+        logger.log_run_event(retry("github.com"));
+        // An ordinary fetch milestone carries no host and must not be counted.
+        logger.log_run_event(info_event("fetching something"));
+
+        let counts = logger.download_retries();
+        assert_eq!(counts.get("github.com"), Some(&2));
+        assert_eq!(counts.get("static.crates.io"), Some(&1));
+        assert_eq!(counts.len(), 2);
     }
 
     #[test]

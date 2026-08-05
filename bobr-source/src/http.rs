@@ -5,9 +5,11 @@ use reqwest::StatusCode;
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use serde_json::{Map, Value};
+use std::collections::hash_map::DefaultHasher;
 use std::fmt;
 use std::fs;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -27,6 +29,8 @@ const HTTP_RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
 /// Also the ceiling for a server-sent Retry-After: a mirror asking us to come
 /// back in an hour should not hold a build hostage.
 const HTTP_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+/// How much a wait may be stretched to spread simultaneous retries out.
+const HTTP_RETRY_JITTER: f64 = 0.5;
 /// How often a wait between attempts checks for cancellation.
 const HTTP_RETRY_POLL: Duration = Duration::from_millis(100);
 
@@ -125,6 +129,9 @@ struct HttpRetryPolicy {
     attempts: u32,
     base_delay: Duration,
     max_delay: Duration,
+    /// How far past the backoff a wait may be stretched, as a fraction of it.
+    /// Zero makes delays exact, which is what the tests want.
+    jitter: f64,
 }
 
 impl HttpRetryPolicy {
@@ -133,20 +140,49 @@ impl HttpRetryPolicy {
             attempts: HTTP_RETRY_ATTEMPTS,
             base_delay: HTTP_RETRY_BASE_DELAY,
             max_delay: HTTP_RETRY_MAX_DELAY,
+            jitter: HTTP_RETRY_JITTER,
         }
     }
 
     /// Delay before attempt `attempt` (1-based), doubling from the base and
     /// capped. `retry_after` from the server wins when it asked for longer.
-    fn delay_before(&self, attempt: u32, retry_after: Option<Duration>) -> Duration {
+    ///
+    /// `url` only ever lengthens the wait, and only by a fraction of it. Two
+    /// downloads knocked out by the same event -- ten of them hitting one host
+    /// at once, say -- would otherwise come back in lockstep and recreate the
+    /// pile-up that felled them, since the backoff alone is the same number for
+    /// everyone. Spreading them is the whole point; never shortening the wait
+    /// keeps a server's own Retry-After from being undercut.
+    fn delay_before(&self, attempt: u32, retry_after: Option<Duration>, url: &str) -> Duration {
         let backoff = self
             .base_delay
             .saturating_mul(1_u32 << (attempt.saturating_sub(2)).min(16))
             .min(self.max_delay);
-        match retry_after {
+        let delay = match retry_after {
             Some(server) if server > backoff => server.min(self.max_delay),
             _ => backoff,
+        };
+        delay.saturating_add(self.jitter_for(delay, attempt, url))
+    }
+
+    /// A per-URL offset in `[0, delay * jitter)`.
+    ///
+    /// Derived from the URL and the attempt rather than drawn at random: it
+    /// needs to differ between concurrent downloads, not to be unpredictable,
+    /// and deriving it keeps a build's timing reproducible and the crate free of
+    /// a random-number dependency. Two nodes fetching the identical URL land on
+    /// the same offset, which is harmless -- they are one request's worth of
+    /// load, not a herd.
+    fn jitter_for(&self, delay: Duration, attempt: u32, url: &str) -> Duration {
+        if self.jitter <= 0.0 || delay.is_zero() {
+            return Duration::ZERO;
         }
+        let mut hasher = DefaultHasher::new();
+        url.hash(&mut hasher);
+        attempt.hash(&mut hasher);
+        // Map the hash onto [0, 1) and scale it by the allowed spread.
+        let fraction = (hasher.finish() >> 11) as f64 / (1_u64 << 53) as f64;
+        delay.mul_f64(self.jitter * fraction)
     }
 }
 
@@ -420,18 +456,42 @@ fn download_with_retries(
         }
         // A partial download must not be mistaken for the next attempt's.
         let _ = fs::remove_file(destination);
-        let delay = policy.delay_before(attempt + 1, retry_after);
-        cx.milestone(format!(
-            "retrying {url} in {:.1}s (attempt {} of {}): {error}",
-            delay.as_secs_f64(),
-            attempt + 1,
-            policy.attempts
-        ));
+        let delay = policy.delay_before(attempt + 1, retry_after, url);
+        // The host travels as a field, not only inside the sentence: the run
+        // summary counts retries per host, and counting should not mean parsing
+        // a message written for a human.
+        let mut details = Map::new();
+        details.insert(
+            "retry_host".to_string(),
+            Value::String(url_host(url).to_string()),
+        );
+        details.insert("attempt".to_string(), Value::Number((attempt + 1).into()));
+        cx.milestone_with_details(
+            format!(
+                "retrying {url} in {:.1}s (attempt {} of {}): {error}",
+                delay.as_secs_f64(),
+                attempt + 1,
+                policy.attempts
+            ),
+            details,
+        );
         if let Err(cancelled) = sleep_unless_cancelled(cx, delay) {
             return Err((cancelled, attempt));
         }
     }
     unreachable!("the loop returns on the last attempt")
+}
+
+/// The host part of a URL, for grouping retries by who was slow.
+fn url_host(url: &str) -> &str {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let host = rest.split('/').next().unwrap_or(rest);
+    // Strip userinfo and port, so one host counts as one host.
+    let host = host.rsplit('@').next().unwrap_or(host);
+    host.split(':').next().unwrap_or(host)
 }
 
 /// Waits, giving up early if the run is cancelled.
@@ -1075,6 +1135,7 @@ mod tests {
             attempts: HTTP_RETRY_ATTEMPTS,
             base_delay: Duration::ZERO,
             max_delay: Duration::ZERO,
+            jitter: 0.0,
         }
     }
 
@@ -1241,6 +1302,7 @@ mod tests {
                 attempts: 3,
                 base_delay: Duration::from_secs(30),
                 max_delay: Duration::from_secs(30),
+                jitter: 0.0,
             },
         )
         .unwrap_err();
@@ -1255,25 +1317,66 @@ mod tests {
         drop(handle);
     }
 
+    const URL: &str = "https://example.invalid/payload.tar.xz";
+
+    #[test]
+    fn jitter_spreads_simultaneous_retries_without_shortening_them() {
+        // Ten downloads knocked out by one event must not come back together:
+        // the backoff is the same number for all of them, so only the spread
+        // keeps them from recreating the pile-up.
+        let policy = HttpRetryPolicy::production();
+        let delays: Vec<Duration> = (0..10)
+            .map(|n| {
+                policy.delay_before(2, None, &format!("https://example.invalid/pkg-{n}.tar.xz"))
+            })
+            .collect();
+
+        let distinct: std::collections::BTreeSet<_> = delays.iter().collect();
+        assert!(distinct.len() >= 8, "{delays:?}");
+        for delay in &delays {
+            // Never shorter than the backoff, so a Retry-After cannot be
+            // undercut, and never more than half again as long.
+            assert!(*delay >= HTTP_RETRY_BASE_DELAY, "{delay:?}");
+            assert!(*delay <= HTTP_RETRY_BASE_DELAY.mul_f64(1.5), "{delay:?}");
+        }
+    }
+
+    #[test]
+    fn jitter_is_the_same_for_one_url_and_attempt() {
+        // Derived, not drawn: a build's timing stays reproducible.
+        let policy = HttpRetryPolicy::production();
+        assert_eq!(
+            policy.delay_before(3, None, URL),
+            policy.delay_before(3, None, URL)
+        );
+        assert_ne!(
+            policy.delay_before(2, None, URL),
+            policy.delay_before(3, None, URL)
+        );
+    }
+
     #[test]
     fn retry_after_is_honoured_but_capped() {
-        let policy = HttpRetryPolicy::production();
+        let policy = HttpRetryPolicy {
+            jitter: 0.0,
+            ..HttpRetryPolicy::production()
+        };
         // Plain backoff doubles from the base.
-        assert_eq!(policy.delay_before(2, None), HTTP_RETRY_BASE_DELAY);
-        assert_eq!(policy.delay_before(3, None), HTTP_RETRY_BASE_DELAY * 2);
+        assert_eq!(policy.delay_before(2, None, URL), HTTP_RETRY_BASE_DELAY);
+        assert_eq!(policy.delay_before(3, None, URL), HTTP_RETRY_BASE_DELAY * 2);
         // A server asking for longer than the backoff gets it ...
         assert_eq!(
-            policy.delay_before(2, Some(Duration::from_secs(5))),
+            policy.delay_before(2, Some(Duration::from_secs(5)), URL),
             Duration::from_secs(5)
         );
         // ... but not enough to hold a build hostage.
         assert_eq!(
-            policy.delay_before(2, Some(Duration::from_secs(3600))),
+            policy.delay_before(2, Some(Duration::from_secs(3600)), URL),
             HTTP_RETRY_MAX_DELAY
         );
         // And a server asking for less does not shorten the backoff.
         assert_eq!(
-            policy.delay_before(3, Some(Duration::from_millis(1))),
+            policy.delay_before(3, Some(Duration::from_millis(1)), URL),
             HTTP_RETRY_BASE_DELAY * 2
         );
     }

@@ -41,7 +41,20 @@ impl OriginContext<'_> {
         self.event(BuildLogLevel::Progress, message);
     }
 
+    /// Emits a milestone that also carries structured fields.
+    ///
+    /// Use where something downstream counts rather than reads: the fields land
+    /// in the event log next to the message, so a consumer does not have to
+    /// parse English out of it.
+    pub fn milestone_with_details(&self, message: impl Into<String>, details: Map<String, Value>) {
+        self.emit(BuildLogLevel::Info, message, details);
+    }
+
     fn event(&self, level: BuildLogLevel, message: impl Into<String>) {
+        self.emit(level, message, Map::new());
+    }
+
+    fn emit(&self, level: BuildLogLevel, message: impl Into<String>, details: Map<String, Value>) {
         self.logger.log_event(BuildLogEvent {
             level,
             status: BuildStatus::Running,
@@ -49,7 +62,7 @@ impl OriginContext<'_> {
             message: message.into(),
             object_hash: None,
             raw_log_path: None,
-            details: Map::new(),
+            details,
         });
     }
 
