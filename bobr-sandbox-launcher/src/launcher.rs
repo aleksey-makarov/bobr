@@ -3,7 +3,7 @@
 
 use crate::protocol::{
     SANDBOX_PROTOCOL_VERSION, SandboxLauncherConfig, SandboxLauncherMount,
-    SandboxLauncherMountKind, SandboxRunnerFailureReport, read_handshake_byte,
+    SandboxLauncherMountKind, SandboxRootOverlay, SandboxRunnerFailureReport, read_handshake_byte,
     relative_launcher_target, validate_launcher_config,
 };
 use crate::runner::{RunnerOutcome, run_config_path};
@@ -301,29 +301,63 @@ fn tmpfs_mount(mount: &SandboxLauncherMount, target: &Path) -> io::Result<()> {
     .map_err(|error| context_error(format!("mount tmpfs '{}'", mount.target.display()), error))
 }
 
-/// Establishes the sandbox root as an overlay when `config.root_overlay` is
-/// set, mounting it at `config.root` before the interior mounts. The upper and
-/// work dirs must already exist on a filesystem that supports the required
-/// xattrs; this runs unprivileged inside the sandbox user namespace. A no-op
-/// when no root overlay is configured.
-fn mount_root_overlay(config: &SandboxLauncherConfig) -> io::Result<()> {
-    let Some(overlay) = &config.root_overlay else {
-        return Ok(());
-    };
-    let data = format!(
-        "lowerdir={},upperdir={},workdir={}",
+/// The overlay `data` string, with or without the `redirect_dir` option.
+///
+/// Both named options keep the upper layer self-contained, which is what lets
+/// it be captured as a layer on its own:
+///
+/// - `redirect_dir=off` stops a renamed directory from becoming a pointer at
+///   lower content under its old name;
+/// - `metacopy=off` stops a copied-up file from being metadata with its data
+///   left below.
+///
+/// Either would make the captured upper mean "plus whatever is beneath me",
+/// which an fs-tree manifest cannot express and a materialized tree would not
+/// reproduce.
+fn overlay_mount_data(overlay: &SandboxRootOverlay, redirect_dir: bool) -> String {
+    let mut data = format!(
+        "lowerdir={},upperdir={},workdir={},metacopy=off",
         overlay.lower.display(),
         overlay.upper.display(),
         overlay.work.display()
     );
-    do_mount(
-        Some(Path::new("overlay")),
-        &config.root,
-        Some("overlay"),
-        MsFlags::empty(),
-        Some(&data),
-    )
-    .map_err(|error| {
+    if redirect_dir {
+        data.push_str(",redirect_dir=off");
+    }
+    data
+}
+
+/// Establishes the sandbox root as an overlay when `config.root_overlay` is
+/// set, mounting it at `config.root` before the interior mounts. The upper and
+/// work dirs must already exist on a filesystem that supports the required
+/// xattrs. A no-op when no root overlay is configured.
+///
+/// Whether this runs privileged depends on the caller: the namespace runtime
+/// wraps it in a user namespace, while a `bobr` running as root reaches here in
+/// the initial one. That matters for `redirect_dir`, which an unprivileged
+/// overlay refuses to be told about at all -- in any value, `off` included,
+/// because the kernel has already settled the question and will not have it
+/// restated. So ask for it, and read a refusal as the kernel having answered.
+fn mount_root_overlay(config: &SandboxLauncherConfig) -> io::Result<()> {
+    let Some(overlay) = &config.root_overlay else {
+        return Ok(());
+    };
+    let mount = |data: &str| {
+        do_mount(
+            Some(Path::new("overlay")),
+            &config.root,
+            Some("overlay"),
+            MsFlags::empty(),
+            Some(data),
+        )
+    };
+    let result = match mount(&overlay_mount_data(overlay, true)) {
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            mount(&overlay_mount_data(overlay, false))
+        }
+        other => other,
+    };
+    result.map_err(|error| {
         context_error(
             format!("mount root overlay at '{}'", config.root.display()),
             error,
@@ -523,6 +557,27 @@ fn write_launcher_report(file: &File, report: &SandboxRunnerFailureReport) {
 mod tests {
     use super::*;
     use crate::protocol::SandboxRootOverlay;
+    use std::path::PathBuf;
+
+    #[test]
+    fn overlay_mount_data_pins_the_options_that_keep_the_upper_self_contained() {
+        let overlay = SandboxRootOverlay {
+            lower: PathBuf::from("/l"),
+            upper: PathBuf::from("/u"),
+            work: PathBuf::from("/w"),
+        };
+        // metacopy is asked for either way: an unprivileged overlay accepts it.
+        assert_eq!(
+            overlay_mount_data(&overlay, false),
+            "lowerdir=/l,upperdir=/u,workdir=/w,metacopy=off"
+        );
+        // redirect_dir only where the kernel will hear it; the caller drops back
+        // to the form above when it will not.
+        assert_eq!(
+            overlay_mount_data(&overlay, true),
+            "lowerdir=/l,upperdir=/u,workdir=/w,metacopy=off,redirect_dir=off"
+        );
+    }
 
     #[test]
     fn kept_capabilities_include_kill() {
