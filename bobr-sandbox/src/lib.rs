@@ -1159,9 +1159,10 @@ fn chown_tree_to_root(path: &Path) -> Result<(), SandboxError> {
 
 /// Verifies that the overlay upper layer holds only additions relative to the
 /// lower rootfs. Any non-additive change fails the build: overlay whiteouts
-/// (deletions), opaque directories (a replaced directory), and files, symlinks,
-/// or directories that already exist in the lower rootfs (a modification).
-/// Scaffolding must already have been stripped from `upper`.
+/// (deletions), and files, symlinks or directories that already exist in the
+/// lower rootfs (a modification) -- including a directory marked opaque over
+/// one that exists below, which hides it. Scaffolding must already have been
+/// stripped from `upper`.
 fn validate_additive_layer(upper: &Path, lower: &Path) -> Result<(), RuntimeError> {
     validate_additive_dir(upper, upper, lower)
 }
@@ -1192,12 +1193,19 @@ fn validate_additive_dir(dir: &Path, upper_root: &Path, lower: &Path) -> Result<
         }
 
         if file_type.is_dir() {
-            if is_opaque_dir(&path)? {
-                return Err(RuntimeError::new(format!(
-                    "SandboxInstall build replaced directory '{shown}'; the builder only allows additions"
-                )));
-            }
             if let Some(lower_meta) = &lower_meta {
+                // Opaque means "hide whatever the lower rootfs has here", so it
+                // is a replacement -- but only where there is something to
+                // hide. The kernel also marks a directory opaque merely because
+                // it arrived by rename, and whether a rename is even possible
+                // varies between kernels; judging by the marker alone made the
+                // same build pass on one machine and fail on another, over a
+                // path the lower rootfs did not have at all.
+                if is_opaque_dir(&path)? {
+                    return Err(RuntimeError::new(format!(
+                        "SandboxInstall build replaced directory '{shown}'; the builder only allows additions"
+                    )));
+                }
                 // A directory shared with the lower rootfs is a legitimate
                 // passthrough parent of an addition only when it is unchanged.
                 if !lower_meta.is_dir()
@@ -1564,20 +1572,50 @@ mod tests {
     }
 
     #[test]
-    fn additive_layer_rejects_opaque_directory() {
+    fn additive_layer_rejects_opaque_directory_over_an_existing_one() {
+        // Opaque where the lower rootfs has a directory: the build hid it, and
+        // the layer no longer describes an addition.
         let temp = tempdir().unwrap();
         let lower = temp.path().join("lower");
         let upper = temp.path().join("upper");
-        fs::create_dir_all(&lower).unwrap();
+        fs::create_dir_all(lower.join("etc")).unwrap();
         fs::create_dir_all(upper.join("etc")).unwrap();
+        // Same mode, so the metadata check below is not what fires.
+        let mode = fs::metadata(lower.join("etc")).unwrap().permissions();
+        fs::set_permissions(upper.join("etc"), mode).unwrap();
         if !try_set_xattr(&upper.join("etc"), "user.overlay.opaque", b"y") {
-            eprintln!("additive_layer_rejects_opaque_directory: skipped (no xattr support)");
+            eprintln!(
+                "additive_layer_rejects_opaque_directory_over_an_existing_one: skipped (no xattr support)"
+            );
             return;
         }
 
         let error = validate_additive_layer(&upper, &lower).unwrap_err();
         assert!(error.to_string().contains("replaced directory"));
         assert!(error.to_string().contains("/etc"));
+    }
+
+    #[test]
+    fn additive_layer_accepts_opaque_directory_over_nothing() {
+        // The kernel marks a directory opaque when it arrives by rename, whether
+        // or not anything lies beneath it -- and whether a rename is possible at
+        // all differs between kernels. Judging by the marker made the same build
+        // pass on one machine and fail on another; judging by what it hides is
+        // what makes the verdict the same everywhere.
+        let temp = tempdir().unwrap();
+        let lower = temp.path().join("lower");
+        let upper = temp.path().join("upper");
+        fs::create_dir_all(&lower).unwrap();
+        fs::create_dir_all(upper.join("etc").join("nested")).unwrap();
+        fs::write(upper.join("etc").join("nested").join("added"), b"x").unwrap();
+        if !try_set_xattr(&upper.join("etc"), "user.overlay.opaque", b"y") {
+            eprintln!(
+                "additive_layer_accepts_opaque_directory_over_nothing: skipped (no xattr support)"
+            );
+            return;
+        }
+
+        validate_additive_layer(&upper, &lower).unwrap();
     }
 
     #[test]
@@ -1670,6 +1708,117 @@ mod tests {
     /// no user-namespace id-mapping (e.g. AppArmor restricts it), or no
     /// unprivileged overlayfs mount. Only a whiteout that was created but not
     /// rejected counts as a failure.
+    #[test]
+    fn additive_layer_and_a_real_overlay_agree_about_renamed_directories() {
+        // The regression this guards: a build that only adds, but adds by
+        // renaming a directory it just created. The kernel marks the result
+        // opaque -- for how it was made, not for anything it hides -- and
+        // judging by the marker alone failed the build on one machine while
+        // passing it on another whose kernel cannot rename a directory at all.
+        //
+        // Both cases run against an overlay the kernel really mounted, so the
+        // markers are the ones it really sets rather than ones the test wrote.
+        let temp = tempdir().unwrap();
+        let base = temp.path();
+        let lower = base.join("lower");
+        let upper = base.join("upper");
+        let work = base.join("work");
+        let mnt = base.join("mnt");
+        for dir in [&lower, &upper, &work, &mnt] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        // Something below, at a path the build will replace outright.
+        fs::create_dir_all(lower.join("shared")).unwrap();
+        fs::write(lower.join("shared").join("kept.txt"), b"below\n").unwrap();
+
+        let uid = unsafe { libc::getuid() };
+        let gid = unsafe { libc::getgid() };
+        let data = CString::new(format!(
+            "lowerdir={},upperdir={},workdir={}",
+            lower.display(),
+            upper.display(),
+            work.display()
+        ))
+        .unwrap();
+        let mnt_c = CString::new(mnt.as_os_str().as_bytes()).unwrap();
+        let overlay = CString::new("overlay").unwrap();
+
+        // SAFETY: as in the whiteout test above -- the child only makes
+        // syscalls and exits without returning into the harness.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            let code = (|| -> i32 {
+                if unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) } != 0 {
+                    return 42;
+                }
+                if fs::write("/proc/self/setgroups", "deny").is_err()
+                    || fs::write("/proc/self/uid_map", format!("0 {uid} 1\n")).is_err()
+                    || fs::write("/proc/self/gid_map", format!("0 {gid} 1\n")).is_err()
+                {
+                    return 46;
+                }
+                if unsafe {
+                    libc::mount(
+                        overlay.as_ptr(),
+                        mnt_c.as_ptr(),
+                        overlay.as_ptr(),
+                        0,
+                        data.as_ptr() as *const libc::c_void,
+                    )
+                } != 0
+                {
+                    return 43;
+                }
+
+                // Addition by rename, over a path the lower rootfs lacks.
+                if fs::create_dir(mnt.join("fresh")).is_err()
+                    || fs::write(mnt.join("fresh").join("f"), b"x").is_err()
+                    || fs::rename(mnt.join("fresh"), mnt.join("renamed")).is_err()
+                {
+                    // A kernel that refuses the rename leaves nothing to check:
+                    // its `mv` copies instead, which is an addition either way.
+                    return 47;
+                }
+                if validate_additive_layer(&upper, &lower).is_err() {
+                    return 48;
+                }
+
+                // Replacement of a directory the lower rootfs does have: still
+                // refused, so the guarantee did not go with the false positive.
+                if fs::remove_file(mnt.join("shared").join("kept.txt")).is_err()
+                    || fs::remove_dir(mnt.join("shared")).is_err()
+                    || fs::create_dir(mnt.join("shared")).is_err()
+                {
+                    return 49;
+                }
+                if validate_additive_layer(&upper, &lower).is_ok() {
+                    return 50;
+                }
+                0
+            })();
+            std::process::exit(code);
+        }
+
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        let code = if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else {
+            -1
+        };
+        match code {
+            0 => {}
+            42 | 43 | 46 | 47 => eprintln!(
+                "additive_layer_and_a_real_overlay_agree_about_renamed_directories: \
+                 skipped (code {code}: the environment cannot build the scenario)"
+            ),
+            48 => panic!("a directory added by rename was refused, though it hides nothing"),
+            50 => panic!("a directory replacing one from the lower rootfs was accepted"),
+            other => panic!("real-overlay child failed with code {other}"),
+        }
+    }
+
     #[test]
     fn additive_layer_rejects_whiteout_from_real_overlay() {
         let temp = tempdir().unwrap();
