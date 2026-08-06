@@ -409,26 +409,94 @@ fn download_first_success(
         })?;
     }
 
-    let mut failures = Vec::new();
-    for url in urls {
-        match download_with_retries(cx, client, url, &download_path, policy) {
+    // Two passes over the list, because retries and mirrors answer different
+    // questions. The first pass gives every URL one attempt: a host that is
+    // down should cost a moment before the next mirror is tried, not the whole
+    // retry budget -- and a mirror list is exactly what covers a host being
+    // down. Only if every URL has failed does the second pass spend the
+    // remaining attempts, which is where a CDN that merely hiccuped gets its
+    // second chance.
+    //
+    // The cost is not hypothetical: a run that met a host refusing to serve
+    // spent 131 seconds per source getting to a mirror that answered in one.
+    let mut state: Vec<UrlAttemptState> = urls.iter().map(|_| UrlAttemptState::default()).collect();
+    for (index, url) in urls.iter().enumerate() {
+        check_not_cancelled(cx)?;
+        match download_with_retries(cx, client, url, &download_path, policy, 1, 0) {
             Ok(()) => return Ok(download_path),
             Err((error, attempts)) => {
-                let attempted = if attempts == 1 {
-                    String::new()
-                } else {
-                    format!(" (after {attempts} attempts)")
-                };
-                failures.push(format!("{url}{attempted}: {error}"));
+                state[index].record(&error, attempts);
                 let _ = fs::remove_file(&download_path);
             }
         }
     }
+    let remaining = policy.attempts.saturating_sub(1);
+    if remaining > 0 {
+        for (index, url) in urls.iter().enumerate() {
+            if !state[index].worth_retrying {
+                continue;
+            }
+            check_not_cancelled(cx)?;
+            let spent = state[index].attempts;
+            match download_with_retries(cx, client, url, &download_path, policy, remaining, spent) {
+                Ok(()) => return Ok(download_path),
+                Err((error, attempts)) => {
+                    state[index].record(&error, attempts);
+                    let _ = fs::remove_file(&download_path);
+                }
+            }
+        }
+    }
 
+    let failures: Vec<String> = urls
+        .iter()
+        .zip(&state)
+        .map(|(url, state)| state.describe(url))
+        .collect();
     Err(HttpOriginError::fatal_network(format!(
         "all download URLs failed:\n  - {}",
         failures.join("\n  - ")
     )))
+}
+
+/// What one URL has cost so far, across both passes.
+#[derive(Default)]
+struct UrlAttemptState {
+    attempts: u32,
+    last_error: Option<String>,
+    /// Whether the latest failure was of a kind another attempt could survive.
+    worth_retrying: bool,
+}
+
+impl UrlAttemptState {
+    fn record(&mut self, error: &HttpOriginError, attempts: u32) {
+        self.attempts += attempts;
+        self.worth_retrying = matches!(error.retry(), Retry::After(_));
+        self.last_error = Some(error.to_string());
+    }
+
+    fn describe(&self, url: &str) -> String {
+        let attempted = if self.attempts <= 1 {
+            String::new()
+        } else {
+            format!(" (after {} attempts)", self.attempts)
+        };
+        match &self.last_error {
+            Some(error) => format!("{url}{attempted}: {error}"),
+            None => format!("{url}: not attempted"),
+        }
+    }
+}
+
+/// Stops the walk over the URL list when the run is cancelled, rather than
+/// letting it read as one more mirror that did not work out.
+fn check_not_cancelled(cx: &OriginContext<'_>) -> HResult<()> {
+    if cx.is_cancelled() {
+        return Err(HttpOriginError::fatal_network(
+            "download cancelled before trying the next URL",
+        ));
+    }
+    Ok(())
 }
 
 /// Downloads one URL, retrying while the failure looks transient.
@@ -442,8 +510,14 @@ fn download_with_retries(
     url: &str,
     destination: &Path,
     policy: HttpRetryPolicy,
+    attempts_here: u32,
+    spent_before: u32,
 ) -> Result<(), (HttpOriginError, u32)> {
-    for attempt in 1..=policy.attempts {
+    for attempt in 1..=attempts_here {
+        // Where this attempt falls in the URL's whole budget, so that what the
+        // caller reads and how long it waits both follow the same count across
+        // the two passes.
+        let overall = spent_before + attempt;
         let error = match download_to_file(cx, client, url, destination) {
             Ok(()) => return Ok(()),
             Err(error) => error,
@@ -451,12 +525,12 @@ fn download_with_retries(
         let Retry::After(retry_after) = error.retry() else {
             return Err((error, attempt));
         };
-        if attempt == policy.attempts {
+        if attempt == attempts_here {
             return Err((error, attempt));
         }
         // A partial download must not be mistaken for the next attempt's.
         let _ = fs::remove_file(destination);
-        let delay = policy.delay_before(attempt + 1, retry_after, url);
+        let delay = policy.delay_before(overall + 1, retry_after, url);
         // The host travels as a field, not only inside the sentence: the run
         // summary counts retries per host, and counting should not mean parsing
         // a message written for a human.
@@ -465,12 +539,12 @@ fn download_with_retries(
             "retry_host".to_string(),
             Value::String(url_host(url).to_string()),
         );
-        details.insert("attempt".to_string(), Value::Number((attempt + 1).into()));
+        details.insert("attempt".to_string(), Value::Number((overall + 1).into()));
         cx.milestone_with_details(
             format!(
                 "retrying {url} in {:.1}s (attempt {} of {}): {error}",
                 delay.as_secs_f64(),
-                attempt + 1,
+                overall + 1,
                 policy.attempts
             ),
             details,
@@ -1214,6 +1288,83 @@ mod tests {
 
         assert_eq!(fs::read(staged.unwrap()).unwrap(), payload);
         assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    /// Fetches from a list of URLs, so the interaction between retries and
+    /// mirrors can be observed.
+    fn fetch_urls_with_policy(
+        temp: &Path,
+        urls: &[String],
+        policy: HttpRetryPolicy,
+    ) -> (TestOrigin, HResult<PathBuf>) {
+        let origin = HttpOrigin {
+            urls: urls.to_vec(),
+            unpack: false,
+            archive_format: None,
+        };
+        let test_origin = TestOrigin::new();
+        let result = materialize_http_origin_with_timeouts(
+            &test_origin.cx(temp),
+            &origin,
+            HttpTimeouts::production(),
+            policy,
+        );
+        (test_origin, result)
+    }
+
+    #[test]
+    fn a_mirror_is_tried_before_the_retry_budget_is_spent() {
+        // What this ordering is for: a host that answers every request with a
+        // failure must not be asked four times while a mirror holding the file
+        // waits its turn. One attempt each, then the mirror answers.
+        let temp = tempdir().unwrap();
+        let payload = b"from the mirror\n".to_vec();
+        let (bad_url, bad_requests, bad_handle) =
+            match spawn_flaky_server(usize::MAX, "HTTP/1.1 503 Service Unavailable", Vec::new()) {
+                Ok(server) => server,
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+                Err(error) => panic!("failed to start test HTTP server: {error}"),
+            };
+        let (good_url, _good_requests, good_handle) =
+            match spawn_flaky_server(0, "HTTP/1.1 200 OK", payload.clone()) {
+                Ok(server) => server,
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+                Err(error) => panic!("failed to start test HTTP server: {error}"),
+            };
+
+        let (_origin, staged) =
+            fetch_urls_with_policy(temp.path(), &[bad_url, good_url], test_retry_policy());
+
+        assert_eq!(fs::read(staged.unwrap()).unwrap(), payload);
+        assert_eq!(
+            bad_requests.load(Ordering::SeqCst),
+            1,
+            "the failing host was asked more than once before the mirror was tried"
+        );
+        drop(bad_handle);
+        good_handle.join().unwrap();
+    }
+
+    #[test]
+    fn the_retry_budget_still_applies_once_every_url_has_failed() {
+        // The second pass: with no mirror left to try, a URL that failed in a
+        // way another request could survive gets the rest of its attempts.
+        let temp = tempdir().unwrap();
+        let payload = b"recovered\n".to_vec();
+        let (url, requests, handle) =
+            match spawn_flaky_server(2, "HTTP/1.1 500 Internal Server Error", payload.clone()) {
+                Ok(server) => server,
+                Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+                Err(error) => panic!("failed to start test HTTP server: {error}"),
+            };
+
+        let (_origin, staged) = fetch_urls_with_policy(temp.path(), &[url], test_retry_policy());
+        handle.join().unwrap();
+
+        assert_eq!(fs::read(staged.unwrap()).unwrap(), payload);
+        // Two failures then success: the first pass spent one attempt, the
+        // second pass carried on from there rather than starting over.
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
     }
 
     #[test]
