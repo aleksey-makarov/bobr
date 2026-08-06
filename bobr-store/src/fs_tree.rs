@@ -1134,6 +1134,11 @@ fn scan_entry(
         .map_err(|error| map_io(current_path, "inspect", error))?;
     let file_type = metadata.file_type();
     let rel_path = manifest_relative_path(scan_root, current_path)?;
+    // Stamp on the way in, before this entry either becomes an fs-file (a
+    // hardlink shares the inode, so its timestamp is this one) or travels with
+    // the tree into the materialized cache. Reading a directory's children and
+    // linking a file elsewhere do not touch the timestamps set here.
+    set_canonical_times(current_path)?;
     if file_type.is_dir() {
         entries.push(FsTreeEntry::directory(
             rel_path,
@@ -1522,6 +1527,11 @@ fn publish_installed_temp_file(
     gid: u32,
     mode: u32,
 ) -> Result<FsFileHash, StoreError> {
+    // Before the owner changes, while this file is still indisputably ours:
+    // stamping needs ownership, and chown does not disturb the timestamps. It
+    // is about to *become* the fs-file, so canonicalizing here is what makes
+    // every hardlink to it canonical too.
+    set_canonical_times(temp_path)?;
     chown_if_needed(temp_path, uid, gid)?;
     chmod(temp_path, mode)?;
 
@@ -1653,8 +1663,26 @@ fn materialize_into_existing_root(
             } => {
                 let dst = output_root.join(path);
                 symlink(target, &dst).map_err(|error| map_io(&dst, "create symlink", error))?;
+                set_canonical_times(&dst)?;
                 lchown_if_needed(&dst, *uid, *gid)?;
             }
+        }
+    }
+
+    // Directories last, and deepest first: adding an entry to a directory
+    // updates its mtime, so stamping one before its children are in place would
+    // simply be undone. Files need nothing here -- they are hardlinks, already
+    // carrying the timestamp their fs-file was admitted with. This pass runs
+    // before the one that hands directories their recorded owner, for the same
+    // reason as above: stamping needs ownership.
+    for entry in manifest.entries().iter().rev() {
+        if let FsTreeEntry::Directory { path, .. } = entry {
+            let dst = if path.is_empty() {
+                output_root.to_path_buf()
+            } else {
+                output_root.join(path)
+            };
+            set_canonical_times(&dst)?;
         }
     }
 
@@ -1724,6 +1752,41 @@ fn lchown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), StoreError> {
     }
     lchown(path, uid, gid)
 }
+
+/// Stamps `path` with [`bobr_core::CANONICAL_TIMESTAMP`], without following symlinks.
+///
+/// Nothing about an object depends on when it was made: the manifest records no
+/// mtime, and hashing ignores it. Leaving it to chance costs reproducibility
+/// anyway, because it reaches the outside through builders that read it --
+/// fontconfig writes the mtime of the font directory it scanned into its cache
+/// header, so the same inputs produced different bundles depending on when the
+/// tree happened to be laid down.
+fn set_canonical_times(path: &Path) -> Result<(), StoreError> {
+    let stamp = libc::timespec {
+        tv_sec: bobr_core::CANONICAL_TIMESTAMP as libc::time_t,
+        tv_nsec: 0,
+    };
+    let times = [stamp, stamp];
+    let c_path = path_cstring(path)?;
+    let result = unsafe {
+        libc::utimensat(
+            libc::AT_FDCWD,
+            c_path.as_ptr(),
+            times.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(map_io(
+            path,
+            "set canonical times",
+            io::Error::last_os_error(),
+        ))
+    }
+}
+
 fn chown(path: &Path, uid: u32, gid: u32) -> Result<(), StoreError> {
     let c_path = path_cstring(path)?;
     let result = unsafe { libc::chown(c_path.as_ptr(), uid, gid) };
@@ -2270,6 +2333,111 @@ mod tests {
             FsTreeManifest::from_entries(entries).is_err(),
             "entries were accepted"
         );
+    }
+
+    /// Every timestamp a materialized tree shows, at any depth and of any kind.
+    fn timestamps_under(root: &Path) -> Vec<(PathBuf, i64)> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                let meta = fs::symlink_metadata(&path).unwrap();
+                found.push((path.clone(), meta.mtime()));
+                if meta.file_type().is_dir() {
+                    pending.push(path);
+                }
+            }
+        }
+        found.push((
+            root.to_path_buf(),
+            fs::symlink_metadata(root).unwrap().mtime(),
+        ));
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn materialized_trees_carry_one_fixed_timestamp() {
+        // The store hands builders trees, and some builders read timestamps and
+        // write what they read into their output. Two stores that admitted the
+        // same content at different moments must still produce the same build,
+        // so the tree a builder sees cannot be stamped with when it was made.
+        let temp = tempfile::tempdir().unwrap();
+        let fs_files = temp.path().join("fs-files");
+        let source = temp.path().join("source");
+        fs::create_dir_all(&fs_files).unwrap();
+        fs::create_dir_all(source.join("nested/deeper")).unwrap();
+        fs::write(source.join("nested/deeper/file"), b"payload").unwrap();
+        symlink("deeper/file", source.join("nested/link")).unwrap();
+
+        let manifest = scan_fs_tree_with_root(&source, &fs_files).unwrap();
+        let output = temp.path().join("output");
+        fs::create_dir(&output).unwrap();
+        materialize_fs_tree_with_root(&manifest, &fs_files, &output).unwrap();
+
+        let stamps = timestamps_under(&output);
+        assert!(stamps.len() >= 4, "{stamps:?}");
+        for (path, mtime) in &stamps {
+            assert_eq!(
+                *mtime,
+                bobr_core::CANONICAL_TIMESTAMP,
+                "{} carries {mtime}, not the canonical stamp",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_scanned_tree_is_stamped_before_it_becomes_the_cache() {
+        // intern_tree moves a fully fresh scanned tree into the materialized
+        // cache instead of laying it out again, so that tree is served to
+        // builders as-is -- it has to be canonical too, directories included.
+        let temp = tempfile::tempdir().unwrap();
+        let fs_files = temp.path().join("fs-files");
+        let source = temp.path().join("source");
+        fs::create_dir_all(&fs_files).unwrap();
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("nested/file"), b"payload").unwrap();
+
+        scan_fs_tree_with_root(&source, &fs_files).unwrap();
+
+        for (path, mtime) in timestamps_under(&source) {
+            assert_eq!(
+                mtime,
+                bobr_core::CANONICAL_TIMESTAMP,
+                "scanned {} kept {mtime}",
+                path.display()
+            );
+        }
+        // And the fs-file the scan hardlinked shares that inode, so the store's
+        // own copy is canonical without a second pass over it.
+        let admitted: Vec<_> = walk_files(&fs_files);
+        assert!(!admitted.is_empty());
+        for path in admitted {
+            assert_eq!(
+                fs::symlink_metadata(&path).unwrap().mtime(),
+                bobr_core::CANONICAL_TIMESTAMP,
+                "fs-file {} kept its build-time stamp",
+                path.display()
+            );
+        }
+    }
+
+    fn walk_files(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    found.push(path);
+                }
+            }
+        }
+        found
     }
 
     fn schema_line() -> &'static str {

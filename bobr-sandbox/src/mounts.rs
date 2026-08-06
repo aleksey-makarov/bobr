@@ -473,11 +473,12 @@ fn effective_step_env(
         ("LC_ALL".to_string(), "C".to_string()),
         ("LANG".to_string(), "C".to_string()),
         ("TZ".to_string(), "UTC".to_string()),
-        // 1980-01-01 UTC, not 0: tools like groff's mdate.pl treat
-        // SOURCE_DATE_EPOCH=0 as unset (`$ENV{...} || mtime`; "0" is falsy in
-        // Perl) and fall back to the build-time file mtime; pre-1980 dates also
-        // break DOS-derived tools (zip). Matches nixpkgs.
-        ("SOURCE_DATE_EPOCH".to_string(), "315532800".to_string()),
+        // The same date the store stamps its trees with; see CANONICAL_TIMESTAMP
+        // for why this one.
+        (
+            "SOURCE_DATE_EPOCH".to_string(),
+            bobr_core::CANONICAL_TIMESTAMP.to_string(),
+        ),
         ("PYTHONHASHSEED".to_string(), "0".to_string()),
         // Suppress import-time .pyc writes: CPython stamps them with the source
         // mtime, so any tool that imports a Python module during the build (e.g.
