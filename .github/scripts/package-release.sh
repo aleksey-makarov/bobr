@@ -90,7 +90,7 @@ if [ "${kind}" = "main" ]; then
   root_name="bobr-${release_tag}-${target}"
   root="${staging}/${root_name}"
   mkdir -p "${root}/bin"
-  for binary in bobr fsobj-hash bobr-sandbox-launcher; do
+  for binary in bobr fsobj-hash bobr-sandbox-launcher bobr-fetch; do
     require_file "${target_dir}/${binary}"
     install -m755 "${target_dir}/${binary}" "${root}/bin/${binary}"
     strip "${root}/bin/${binary}"
@@ -101,6 +101,11 @@ if [ "${kind}" = "main" ]; then
   install -m644 "${repo_root}/LICENSE-MIT" "${root}/LICENSE-MIT"
 
   "${root}/bin/fsobj-hash" --help >/dev/null
+  fetch_version="$("${root}/bin/bobr-fetch" --version)"
+  case "${fetch_version}" in
+    "bobr-fetch ${release_tag#v} (request "*) ;;
+    *) die "unexpected bobr-fetch version output: ${fetch_version}" ;;
+  esac
   protocol_info="$("${root}/bin/bobr-sandbox-launcher" --protocol-info)"
   [ "${protocol_info}" = '{"name":"bobr-sandbox-launcher","protocol_version":6}' ] \
     || die "unexpected sandbox launcher protocol info: ${protocol_info}"

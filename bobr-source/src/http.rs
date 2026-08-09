@@ -19,8 +19,8 @@ use tar::Archive;
 use xz2::read::XzDecoder;
 use zip::read::ZipArchive;
 
-const REDIRECT_LIMIT: usize = 10;
-const USER_AGENT: &str = "bobr-source-http/0.1";
+pub(crate) const REDIRECT_LIMIT: usize = 10;
+pub(crate) const USER_AGENT: &str = "bobr-source-http/0.1";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const HTTP_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 /// Attempts per URL, including the first.
@@ -42,7 +42,7 @@ static HTTP_ORIGIN_SPEC: OriginSpec = OriginSpec { tag: "Http" };
 /// 404 and a 502 are both "the download failed", and only one of them is worth
 /// waiting on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Retry {
+pub(crate) enum Retry {
     /// Hopeless: the next attempt would fail the same way.
     Never,
     /// Worth retrying, after the server's own Retry-After when it sent one.
@@ -50,7 +50,7 @@ enum Retry {
 }
 
 #[derive(Debug)]
-enum HttpOriginError {
+pub(crate) enum HttpOriginError {
     InvalidConfig(String),
     NetworkFailed { message: String, retry: Retry },
     ExtractFailed(String),
@@ -59,7 +59,7 @@ enum HttpOriginError {
 
 impl HttpOriginError {
     /// A transport or server failure that another attempt will not fix.
-    fn fatal_network(message: impl Into<String>) -> Self {
+    pub(crate) fn fatal_network(message: impl Into<String>) -> Self {
         Self::NetworkFailed {
             message: message.into(),
             retry: Retry::Never,
@@ -67,14 +67,14 @@ impl HttpOriginError {
     }
 
     /// A transport or server failure worth another attempt.
-    fn transient_network(message: impl Into<String>, after: Option<Duration>) -> Self {
+    pub(crate) fn transient_network(message: impl Into<String>, after: Option<Duration>) -> Self {
         Self::NetworkFailed {
             message: message.into(),
             retry: Retry::After(after),
         }
     }
 
-    fn retry(&self) -> Retry {
+    pub(crate) fn retry(&self) -> Retry {
         match self {
             Self::NetworkFailed { retry, .. } => *retry,
             // A bad recipe, a full disk or an unreadable archive are all as
@@ -102,13 +102,13 @@ impl fmt::Display for HttpOriginError {
 type HResult<T> = Result<T, HttpOriginError>;
 
 #[derive(Debug, Clone, Copy)]
-struct HttpTimeouts {
-    connect: Duration,
-    operation: Duration,
+pub(crate) struct HttpTimeouts {
+    pub(crate) connect: Duration,
+    pub(crate) operation: Duration,
 }
 
 impl HttpTimeouts {
-    fn production() -> Self {
+    pub(crate) fn production() -> Self {
         Self {
             connect: HTTP_CONNECT_TIMEOUT,
             operation: HTTP_OPERATION_TIMEOUT,
@@ -125,8 +125,8 @@ impl HttpTimeouts {
 /// hours, and the whole point is that a build measured in hours should not die
 /// of a single 500.
 #[derive(Debug, Clone, Copy)]
-struct HttpRetryPolicy {
-    attempts: u32,
+pub(crate) struct HttpRetryPolicy {
+    pub(crate) attempts: u32,
     base_delay: Duration,
     max_delay: Duration,
     /// How far past the backoff a wait may be stretched, as a fraction of it.
@@ -135,7 +135,7 @@ struct HttpRetryPolicy {
 }
 
 impl HttpRetryPolicy {
-    fn production() -> Self {
+    pub(crate) fn production() -> Self {
         Self {
             attempts: HTTP_RETRY_ATTEMPTS,
             base_delay: HTTP_RETRY_BASE_DELAY,
@@ -153,7 +153,12 @@ impl HttpRetryPolicy {
     /// pile-up that felled them, since the backoff alone is the same number for
     /// everyone. Spreading them is the whole point; never shortening the wait
     /// keeps a server's own Retry-After from being undercut.
-    fn delay_before(&self, attempt: u32, retry_after: Option<Duration>, url: &str) -> Duration {
+    pub(crate) fn delay_before(
+        &self,
+        attempt: u32,
+        retry_after: Option<Duration>,
+        url: &str,
+    ) -> Duration {
         let backoff = self
             .base_delay
             .saturating_mul(1_u32 << (attempt.saturating_sub(2)).min(16))
@@ -187,7 +192,7 @@ impl HttpRetryPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum ArchiveFormat {
+pub(crate) enum ArchiveFormat {
     TarGz,
     TarXz,
     TarBz2,
@@ -213,10 +218,10 @@ impl UrlField {
 pub(crate) struct HttpOriginHandler;
 
 #[derive(Debug, Clone)]
-struct HttpOrigin {
-    urls: Vec<String>,
-    unpack: bool,
-    archive_format: Option<ArchiveFormat>,
+pub(crate) struct HttpOrigin {
+    pub(crate) urls: Vec<String>,
+    pub(crate) unpack: bool,
+    pub(crate) archive_format: Option<ArchiveFormat>,
 }
 
 impl OriginHandler for HttpOriginHandler {
@@ -226,9 +231,23 @@ impl OriginHandler for HttpOriginHandler {
 
     fn parse(
         &self,
-        mut object: Map<String, Value>,
+        object: Map<String, Value>,
         field_path: &str,
     ) -> Result<Box<dyn ParsedOrigin>, String> {
+        Ok(Box::new(parse_http_origin(object, field_path)?))
+    }
+}
+
+/// Parses the `origin` object of an `Http` source into its typed form.
+///
+/// Split from the [`OriginHandler`] impl so the fetcher can reach the parsed
+/// fields (URL list, unpack, format) instead of a `dyn ParsedOrigin` that only
+/// knows how to materialize synchronously.
+pub(crate) fn parse_http_origin(
+    mut object: Map<String, Value>,
+    field_path: &str,
+) -> Result<HttpOrigin, String> {
+    {
         let kind = take_string(&mut object, field_path, "tag")?;
         debug_assert_eq!(kind, "Http");
         let urls = take_url_field(&mut object, field_path, "url")?.into_list();
@@ -251,11 +270,11 @@ impl OriginHandler for HttpOriginHandler {
                 object.keys().cloned().collect::<Vec<_>>().join(", ")
             ));
         }
-        Ok(Box::new(HttpOrigin {
+        Ok(HttpOrigin {
             urls,
             unpack,
             archive_format,
-        }))
+        })
     }
 }
 
@@ -290,6 +309,17 @@ fn materialize_http_origin_with_timeouts(
 ) -> HResult<PathBuf> {
     let client = http_client(timeouts)?;
     let downloaded_blob = download_first_success(cx, &client, &origin.urls, policy)?;
+    finalize_http_download(cx.temp_root, downloaded_blob, origin)
+}
+
+/// Turns a downloaded blob into the staged artifact: the blob itself, or the
+/// unpacked tree when the origin asks for one. Shared with the fetcher, whose
+/// download path is asynchronous but whose staging is exactly this.
+pub(crate) fn finalize_http_download(
+    temp_root: &Path,
+    downloaded_blob: PathBuf,
+    origin: &HttpOrigin,
+) -> HResult<PathBuf> {
     if !origin.unpack {
         return Ok(downloaded_blob);
     }
@@ -299,7 +329,7 @@ fn materialize_http_origin_with_timeouts(
         &downloaded_blob,
         &origin.urls,
     )?;
-    let staged_dir = cx.temp_root.join("staged");
+    let staged_dir = temp_root.join("staged");
     recreate_empty_dir_force(&staged_dir)?;
     extract_archive(&downloaded_blob, format, &staged_dir)?;
     let _ = normalize_extracted_root(&staged_dir)?;
@@ -311,6 +341,10 @@ fn http_client(timeouts: HttpTimeouts) -> HResult<Client> {
         .redirect(Policy::limited(REDIRECT_LIMIT))
         .user_agent(USER_AGENT)
         .connect_timeout(timeouts.connect)
+        // The whole-request budget, which also caps how large a file can be
+        // fetched at this path's speed. The async fetcher uses a read timeout
+        // instead (blocking reqwest has none); this path is what the fetcher
+        // is replacing, and big sources should arrive through it already.
         .timeout(timeouts.operation)
         .build()
         .map_err(|error| {
@@ -461,21 +495,21 @@ fn download_first_success(
 
 /// What one URL has cost so far, across both passes.
 #[derive(Default)]
-struct UrlAttemptState {
-    attempts: u32,
+pub(crate) struct UrlAttemptState {
+    pub(crate) attempts: u32,
     last_error: Option<String>,
     /// Whether the latest failure was of a kind another attempt could survive.
-    worth_retrying: bool,
+    pub(crate) worth_retrying: bool,
 }
 
 impl UrlAttemptState {
-    fn record(&mut self, error: &HttpOriginError, attempts: u32) {
+    pub(crate) fn record(&mut self, error: &HttpOriginError, attempts: u32) {
         self.attempts += attempts;
         self.worth_retrying = matches!(error.retry(), Retry::After(_));
         self.last_error = Some(error.to_string());
     }
 
-    fn describe(&self, url: &str) -> String {
+    pub(crate) fn describe(&self, url: &str) -> String {
         let attempted = if self.attempts <= 1 {
             String::new()
         } else {
@@ -557,7 +591,7 @@ fn download_with_retries(
 }
 
 /// The host part of a URL, for grouping retries by who was slow.
-fn url_host(url: &str) -> &str {
+pub(crate) fn url_host(url: &str) -> &str {
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
@@ -660,15 +694,18 @@ fn download_to_file(
 
 /// The server's Retry-After, when it sent one in seconds.
 fn retry_after(response: &reqwest::blocking::Response) -> Option<Duration> {
-    response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()
-        .map(Duration::from_secs)
+    parse_retry_after(
+        response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)?
+            .to_str()
+            .ok()?,
+    )
+}
+
+/// Parses a Retry-After header value; only the delta-seconds form is honoured.
+pub(crate) fn parse_retry_after(value: &str) -> Option<Duration> {
+    value.trim().parse::<u64>().ok().map(Duration::from_secs)
 }
 
 /// Classifies a failure to even get a response.

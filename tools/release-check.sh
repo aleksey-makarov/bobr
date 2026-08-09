@@ -69,7 +69,7 @@ cargo test --workspace --locked
 
 step "main archive, ${host_target}"
 cargo build --release --locked --target "${host_target}" \
-  -p bobr-build -p fsobj-hash -p bobr-sandbox-launcher
+  -p bobr-build -p fsobj-hash -p bobr-sandbox-launcher -p bobr-source --bins
 .github/scripts/package-release.sh main "${tag}" "${host_target}" \
   "${source_date_epoch}" "${out}"
 

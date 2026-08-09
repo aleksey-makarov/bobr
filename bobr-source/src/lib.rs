@@ -17,6 +17,7 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 
+pub mod fetch;
 mod http;
 /// OCI registry client: pulls and stages an image's layers by pinned digest.
 ///
