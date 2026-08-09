@@ -318,7 +318,17 @@ async fn process_source_inner(
             workspace.raw_log_dir().to_path_buf(),
         ))
         .map_err(|error| error.to_string())?;
-    log_subject(&subject_logger, BuildStatus::Start, "starting subject");
+    // The intended host travels with `start`: until the first request goes out
+    // the download is queued, and the live log counts what is waiting per host.
+    subject_logger.log_event(BuildLogEvent {
+        level: BuildLogLevel::Info,
+        status: BuildStatus::Start,
+        op: None,
+        message: "starting subject".to_string(),
+        object_hash: None,
+        raw_log_path: None,
+        details: host_details(&intended_host(&origin_value)),
+    });
     log_subject(
         &subject_logger,
         BuildStatus::CacheMiss,
@@ -561,8 +571,16 @@ async fn download_once(
     destination: &Path,
     logger: &Arc<dyn BuildLogger>,
 ) -> Result<(), HttpOriginError> {
-    let _permits = engine.acquire_permits(http::url_host(url)).await?;
-    log_milestone(logger, format!("fetching {url}"));
+    let host = http::url_host(url).to_string();
+    let _permits = engine.acquire_permits(&host).await?;
+    log_download(
+        logger,
+        BuildLogLevel::Info,
+        &host,
+        Some(0),
+        None,
+        format!("fetching {url}"),
+    );
 
     let response = tokio::select! {
         _ = engine.until_cancelled() => return Err(cancelled_error()),
@@ -604,6 +622,7 @@ async fn download_once(
         );
     }
 
+    let total_bytes = response.content_length();
     let mut file = tokio::fs::File::create(destination)
         .await
         .map_err(|error| {
@@ -639,15 +658,14 @@ async fn download_once(
         })?;
         downloaded += bytes.len() as u64;
         if last_tick.elapsed() >= Duration::from_secs(1) {
-            logger.log_event(BuildLogEvent {
-                level: BuildLogLevel::Progress,
-                status: BuildStatus::Running,
-                op: Some("fetch".to_string()),
-                message: format!("downloaded {downloaded} bytes from {url}"),
-                object_hash: None,
-                raw_log_path: None,
-                details: Map::new(),
-            });
+            log_download(
+                logger,
+                BuildLogLevel::Progress,
+                &host,
+                Some(downloaded),
+                total_bytes,
+                format!("downloaded {downloaded} bytes from {url}"),
+            );
             last_tick = Instant::now();
         }
     }
@@ -657,7 +675,14 @@ async fn download_once(
             destination.display()
         ))
     })?;
-    log_milestone(logger, format!("fetched {downloaded} bytes from {url}"));
+    log_download(
+        logger,
+        BuildLogLevel::Info,
+        &host,
+        Some(downloaded),
+        total_bytes,
+        format!("fetched {downloaded} bytes from {url}"),
+    );
     Ok(())
 }
 
@@ -798,6 +823,35 @@ fn run_event(
     }
 }
 
+/// Where a source means to go, from its origin: the first mirror for HTTP, the
+/// registry for OCI. Only ever a hint -- the fetch milestone reports the host
+/// actually reached, which differs once a later mirror is taken.
+fn intended_host(origin: &Value) -> String {
+    match origin.get("tag").and_then(Value::as_str) {
+        Some("Http") => origin
+            .get("url")
+            .and_then(|urls| match urls {
+                Value::Array(list) => list.first().and_then(Value::as_str),
+                other => other.as_str(),
+            })
+            .map(|url| http::url_host(url).to_string())
+            .unwrap_or_else(|| "?".to_string()),
+        Some("OciRegistry") => origin
+            .get("image")
+            .and_then(Value::as_str)
+            .and_then(|image| image.split('/').next())
+            .unwrap_or("oci-registry")
+            .to_string(),
+        _ => "?".to_string(),
+    }
+}
+
+fn host_details(host: &str) -> Map<String, Value> {
+    let mut details = Map::new();
+    details.insert("host".to_string(), Value::String(host.to_string()));
+    details
+}
+
 fn log_subject(logger: &Arc<dyn BuildLogger>, status: BuildStatus, message: &str) {
     logger.log_event(BuildLogEvent {
         level: BuildLogLevel::Info,
@@ -822,20 +876,41 @@ fn log_subject_error(logger: &Arc<dyn BuildLogger>, message: &str) {
     });
 }
 
-fn log_milestone(logger: &Arc<dyn BuildLogger>, message: String) {
+/// A download milestone or tick. The host and the byte counts travel as fields
+/// rather than only inside the sentence: the live log adds them up, and adding
+/// up should not mean parsing prose written for a person.
+fn log_download(
+    logger: &Arc<dyn BuildLogger>,
+    level: BuildLogLevel,
+    host: &str,
+    bytes: Option<u64>,
+    total_bytes: Option<u64>,
+    message: String,
+) {
+    let mut details = host_details(host);
+    if let Some(bytes) = bytes {
+        details.insert("bytes".to_string(), Value::Number(bytes.into()));
+    }
+    if let Some(total) = total_bytes {
+        details.insert("total_bytes".to_string(), Value::Number(total.into()));
+    }
     logger.log_event(BuildLogEvent {
-        level: BuildLogLevel::Info,
+        level,
         status: BuildStatus::Running,
         op: Some("fetch".to_string()),
         message,
         object_hash: None,
         raw_log_path: None,
-        details: Map::new(),
+        details,
     });
 }
 
 fn log_run_started(logger: &Arc<BuildRunLogger>, sources: usize, limits: &ResolvedLimits) {
     let details = json!({
+        // A line per source would be hundreds of lines that scroll past and
+        // take the scrollback with them; ask the live log for the aggregate
+        // shape instead (see FetchProgress in bobr-core).
+        "progress": "aggregate",
         "sources": sources,
         "per_host_default": limits.per_host_default,
         "max_connections": limits.max_connections,

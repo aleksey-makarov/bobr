@@ -9,7 +9,7 @@ use std::io::{BufWriter, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use time::OffsetDateTime;
 use time::macros::format_description;
 
@@ -727,8 +727,23 @@ enum ProgressSink {
     Plain {
         run_log_dir: PathBuf,
         min_level: BuildLogLevel,
+        /// Present once a run asks for the aggregate shape. Off a terminal
+        /// there is no block to redraw, so the same figures go out as a
+        /// heartbeat -- a fetch run of eight hundred sources is two thousand
+        /// lines of "fetching"/"fetched" otherwise, and a CI log or the
+        /// rebuild-world transcript is unreadable for it.
+        aggregate: Mutex<Option<PlainAggregate>>,
     },
 }
+
+/// Aggregate state for the plain path, with the moment it last spoke.
+struct PlainAggregate {
+    progress: FetchProgress,
+    last_printed: Instant,
+}
+
+/// How often the plain path prints the aggregate figures.
+const PLAIN_AGGREGATE_HEARTBEAT: Duration = Duration::from_secs(15);
 
 impl fmt::Debug for ProgressSink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -752,6 +767,7 @@ impl ProgressSink {
             Self::Plain {
                 run_log_dir,
                 min_level: stderr_min_level(quiet),
+                aggregate: Mutex::new(None),
             }
         }
     }
@@ -788,6 +804,453 @@ fn stderr_min_level(quiet: bool) -> BuildLogLevel {
     }
 }
 
+/// Aggregate view of a run made of many small, interchangeable subjects.
+///
+/// A build's subjects are worth watching one by one: each is a long piece of
+/// work with a name you recognize. A fetch run is not like that -- eight
+/// hundred downloads, each uninteresting on its own, all started at once. A
+/// line per subject there is worse than useless: the block grows past the
+/// terminal, the tail is all you see, and redrawing it eats the scrollback, so
+/// there is nothing above to scroll to either.
+///
+/// What is worth knowing instead is the shape of the whole: how much is left,
+/// whether bytes are moving, which host everything is queued behind, and which
+/// few downloads are taking unusually long. That fits in a fixed handful of
+/// lines that never grow.
+#[derive(Debug)]
+struct FetchProgress {
+    total: usize,
+    done: usize,
+    failed: usize,
+    subjects: HashMap<String, SubjectPhase>,
+    /// Bytes from downloads that have already finished; the ones still running
+    /// are added from their live counters at render time.
+    completed_bytes: u64,
+    started: Instant,
+    /// Bytes and the moment they were sampled, for a rate over a recent window
+    /// rather than over the whole run -- an average since the start keeps
+    /// reporting throughput long after a stall.
+    rate_sample: (Instant, u64),
+    rate_bytes_per_second: f64,
+    /// Set once the queue has drained. The hosts line is about what is waiting,
+    /// so it goes away when nothing is -- and stays away, because a retry
+    /// briefly re-queues one download and the line must not blink back.
+    hosts_line_retired: bool,
+}
+
+#[derive(Debug)]
+enum SubjectPhase {
+    /// Accepted, waiting for a connection slot. `host` is where it intends to
+    /// go, known from the origin before the first request is made.
+    Queued {
+        host: String,
+    },
+    Active(ActiveDownload),
+}
+
+#[derive(Debug)]
+struct ActiveDownload {
+    name: String,
+    host: String,
+    bytes: u64,
+    total_bytes: Option<u64>,
+    since: Instant,
+}
+
+/// How many long-running downloads the block names. Three is enough to show a
+/// stall without pushing everything else off a short terminal.
+const FETCH_SLOW_LINES: usize = 3;
+
+impl FetchProgress {
+    fn new(total: usize) -> Self {
+        let now = Instant::now();
+        Self {
+            total,
+            done: 0,
+            failed: 0,
+            subjects: HashMap::new(),
+            completed_bytes: 0,
+            started: now,
+            rate_sample: (now, 0),
+            rate_bytes_per_second: 0.0,
+            hosts_line_retired: false,
+        }
+    }
+
+    fn queued(&self) -> usize {
+        self.subjects
+            .values()
+            .filter(|phase| matches!(phase, SubjectPhase::Queued { .. }))
+            .count()
+    }
+
+    fn active(&self) -> usize {
+        self.subjects
+            .values()
+            .filter(|phase| matches!(phase, SubjectPhase::Active(_)))
+            .count()
+    }
+
+    fn live_bytes(&self) -> u64 {
+        self.completed_bytes
+            + self
+                .subjects
+                .values()
+                .map(|phase| match phase {
+                    SubjectPhase::Active(download) => download.bytes,
+                    SubjectPhase::Queued { .. } => 0,
+                })
+                .sum::<u64>()
+    }
+
+    /// Folds one event into the view. Returns whether the display should be
+    /// redrawn -- everything that changes a number does, so the caller only has
+    /// to decide how often to obey.
+    fn handle(&mut self, record: &EventLogRecord) -> bool {
+        let status = record.status.as_str();
+        if status == BuildStatus::CacheHit.as_str() {
+            self.done += 1;
+            return true;
+        }
+        let Some(subject) = &record.subject else {
+            // The fetcher reports what it skipped as a run-level `done` (a Path
+            // source is nobody's subject), and it counts towards the total the
+            // same way.
+            if status == BuildStatus::Done.as_str() {
+                self.done += 1;
+                return true;
+            }
+            return false;
+        };
+        let key = subject.build_key.as_str();
+
+        if status == BuildStatus::Done.as_str() || status == BuildStatus::Failed.as_str() {
+            if let Some(SubjectPhase::Active(download)) = self.subjects.remove(key) {
+                self.completed_bytes += download.bytes;
+            }
+            if status == BuildStatus::Failed.as_str() {
+                self.failed += 1;
+            } else {
+                self.done += 1;
+            }
+            return true;
+        }
+
+        // A download announces where it is going before it goes: `start` names
+        // the host it intends to use, the first fetch milestone names the one it
+        // actually reached (they differ once a mirror is taken).
+        let host = record.details.get("host").and_then(Value::as_str);
+        if status == BuildStatus::Start.as_str() {
+            if let Some(host) = host {
+                self.subjects.insert(
+                    key.to_string(),
+                    SubjectPhase::Queued {
+                        host: host.to_string(),
+                    },
+                );
+                return true;
+            }
+            return false;
+        }
+
+        let Some(host) = host else {
+            // Some other running event (an import milestone, say): the counters
+            // do not move.
+            return false;
+        };
+        let bytes = record.details.get("bytes").and_then(Value::as_u64);
+        let total_bytes = record.details.get("total_bytes").and_then(Value::as_u64);
+        match self.subjects.get_mut(key) {
+            Some(SubjectPhase::Active(download)) => {
+                download.host = host.to_string();
+                if let Some(bytes) = bytes {
+                    download.bytes = bytes;
+                }
+                if total_bytes.is_some() {
+                    download.total_bytes = total_bytes;
+                }
+            }
+            _ => {
+                self.subjects.insert(
+                    key.to_string(),
+                    SubjectPhase::Active(ActiveDownload {
+                        name: subject.name.clone(),
+                        host: host.to_string(),
+                        bytes: bytes.unwrap_or(0),
+                        total_bytes,
+                        since: Instant::now(),
+                    }),
+                );
+            }
+        }
+        true
+    }
+
+    /// Recomputes the rate from the bytes seen since the last sample, keeping
+    /// the window long enough that a second without a chunk does not read as a
+    /// stall.
+    fn refresh_rate(&mut self, now: Instant) {
+        const WINDOW: Duration = Duration::from_secs(3);
+        let elapsed = now.saturating_duration_since(self.rate_sample.0);
+        if elapsed < WINDOW {
+            return;
+        }
+        let bytes = self.live_bytes();
+        let gained = bytes.saturating_sub(self.rate_sample.1);
+        self.rate_bytes_per_second = gained as f64 / elapsed.as_secs_f64();
+        self.rate_sample = (now, bytes);
+    }
+
+    /// The whole block, one string per line.
+    fn render(&mut self) -> Vec<String> {
+        let width = terminal_width().unwrap_or(FETCH_ASSUMED_WIDTH);
+        let now = Instant::now();
+        self.refresh_rate(now);
+        let queued = self.queued();
+        if queued == 0 && !self.subjects.is_empty() {
+            self.hosts_line_retired = true;
+        }
+
+        let mut lines = vec![
+            format!(
+                "fetch  {}/{} done · {} active · {} queued · {} failed          {}",
+                self.done,
+                self.total,
+                self.active(),
+                queued,
+                self.failed,
+                format_duration(now.saturating_duration_since(self.started)),
+            ),
+            format!(
+                "       {} · {}/s",
+                format_bytes(self.live_bytes()),
+                format_bytes(self.rate_bytes_per_second as u64),
+            ),
+        ];
+        if !self.hosts_line_retired
+            && let Some(hosts) = self.render_hosts(width)
+        {
+            lines.push(hosts);
+        }
+        lines.extend(self.render_slow(now, width));
+        lines
+    }
+
+    /// Hosts, worst backlog first: `ftp.gnu.org 6 (12 queued)` says the host's
+    /// slots are full and twelve downloads are behind it.
+    ///
+    /// The count is spelled out rather than written as a fraction: `6/12`
+    /// promises a part of a whole and these are two independent numbers, so it
+    /// reads as nonsense in either order. A host with nothing waiting shows
+    /// only its running count -- the parenthesis is the news, and it should be
+    /// what catches the eye.
+    fn render_hosts(&self, width: usize) -> Option<String> {
+        let mut counts: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+        for phase in self.subjects.values() {
+            let (host, active) = match phase {
+                SubjectPhase::Queued { host } => (host.as_str(), false),
+                SubjectPhase::Active(download) => (download.host.as_str(), true),
+            };
+            let entry = counts.entry(host).or_insert((0, 0));
+            if active {
+                entry.0 += 1;
+            } else {
+                entry.1 += 1;
+            }
+        }
+        if counts.is_empty() {
+            return None;
+        }
+        // Sorted by what is waiting first: the line exists to name a
+        // bottleneck, so the host holding one belongs at the front.
+        let mut ordered: Vec<_> = counts.into_iter().collect();
+        ordered.sort_by(|left, right| {
+            let (left_host, (left_active, left_queued)) = left;
+            let (right_host, (right_active, right_queued)) = right;
+            right_queued
+                .cmp(left_queued)
+                .then(right_active.cmp(left_active))
+                .then(left_host.cmp(right_host))
+        });
+        // As many as fit, never more than a few: the line is a pointer at the
+        // worst offender, not an inventory. Room for the tail is reserved
+        // before an entry is admitted, so "· 4 more" is never the thing that
+        // gets cut in half.
+        const MOST_SHOWN: usize = 4;
+        let mut text = String::from("hosts  ");
+        let mut shown = 0;
+        for (host, (active, queued)) in ordered.iter().take(MOST_SHOWN) {
+            let mut entry = String::new();
+            if shown > 0 {
+                entry.push_str(" · ");
+            }
+            entry.push_str(host);
+            entry.push_str(&format!(" {active}"));
+            if *queued > 0 {
+                entry.push_str(&format!(" ({queued} queued)"));
+            }
+            let remaining = ordered.len() - shown - 1;
+            let tail = if remaining > 0 {
+                format!(" · {remaining} more").chars().count()
+            } else {
+                0
+            };
+            if shown > 0 && text.chars().count() + entry.chars().count() + tail > width {
+                break;
+            }
+            text.push_str(&entry);
+            shown += 1;
+        }
+        if ordered.len() > shown {
+            // Spelled out, so it cannot be mistaken for another host's queue.
+            text.push_str(&format!(" · {} more", ordered.len() - shown));
+        }
+        Some(text)
+    }
+
+    /// The longest-running downloads, in fixed columns.
+    ///
+    /// Sorted by age rather than by rate: age is monotonic, so a stalled
+    /// download rises to the top and stays there instead of flickering as a
+    /// second-by-second rate does. The byte counter beside it is what
+    /// separates "a big file, arriving" from "stuck".
+    ///
+    /// The columns are constant widths so the eye can read down them. The name
+    /// is truncated because it is the only unbounded field; the host is last
+    /// and takes what is left, so a terminal too narrow for the line loses the
+    /// host rather than the identity of what is slow.
+    fn render_slow(&self, now: Instant, width: usize) -> Vec<String> {
+        let mut active: Vec<&ActiveDownload> = self
+            .subjects
+            .values()
+            .filter_map(|phase| match phase {
+                SubjectPhase::Active(download) => Some(download),
+                SubjectPhase::Queued { .. } => None,
+            })
+            .collect();
+        active.sort_by_key(|download| download.since);
+        active
+            .iter()
+            .take(FETCH_SLOW_LINES)
+            .enumerate()
+            .map(|(index, download)| {
+                let label = if index == 0 { "slow " } else { "     " };
+                let line = format!(
+                    "{label}  {:<name$}  {:>size$}  {:>time$}   ",
+                    truncate(&download.name, FETCH_NAME_WIDTH),
+                    format_progress_size(download.bytes, download.total_bytes),
+                    format_duration(now.saturating_duration_since(download.since)),
+                    name = FETCH_NAME_WIDTH,
+                    size = FETCH_SIZE_WIDTH,
+                    time = FETCH_TIME_WIDTH,
+                );
+                let room = width.saturating_sub(line.chars().count());
+                format!("{line}{}", truncate(&download.host, room))
+            })
+            .collect()
+    }
+}
+
+/// The stderr terminal's width, when stderr is one.
+///
+/// The block's last column is meant to take whatever room is left, and "what
+/// is left" is a question only the terminal can answer. One ioctl per redraw
+/// is nothing, and asking every time is also what keeps the layout right after
+/// the window is resized mid-run.
+fn terminal_width() -> Option<usize> {
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCGWINSZ writes the struct we hand it and nothing else; a
+    // failure (stderr is not a terminal) leaves it untouched and is reported by
+    // the return value.
+    let rc = unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) };
+    if rc == 0 && size.ws_col > 0 {
+        Some(size.ws_col as usize)
+    } else {
+        None
+    }
+}
+
+/// Width to lay the block out for when stderr is not a terminal (tests, and
+/// the plain path's heartbeat).
+const FETCH_ASSUMED_WIDTH: usize = 100;
+
+/// Column widths of the `slow` lines. Size and time are set to their worst
+/// cases -- `1024.0/1024.0 MB` (a value a byte below the next unit still
+/// rounds up to four digits) and `h:mm:ss` -- so those columns never shift.
+const FETCH_NAME_WIDTH: usize = 30;
+const FETCH_SIZE_WIDTH: usize = 16;
+const FETCH_TIME_WIDTH: usize = 7;
+
+/// Shortens `text` to `width`, ending in `..` so a cut is visible as a cut.
+fn truncate(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(width.saturating_sub(2)).collect();
+    format!("{kept}..")
+}
+
+/// How much of a download has arrived: `1.2/1.9 GB` when the server declared a
+/// length, plain bytes when it did not. One unit for both halves -- repeating
+/// it (`1.2 GB/1.9 GB`) is longer and no clearer.
+fn format_progress_size(bytes: u64, total: Option<u64>) -> String {
+    let Some(total) = total else {
+        return format_bytes(bytes);
+    };
+    let (scale, suffix) = byte_scale(total);
+    format!(
+        "{:.1}/{:.1} {suffix}",
+        bytes as f64 / scale,
+        total as f64 / scale
+    )
+}
+
+/// The divisor and suffix of the largest unit that keeps `bytes` above one.
+fn byte_scale(bytes: u64) -> (f64, &'static str) {
+    const UNIT: f64 = 1024.0;
+    let bytes = bytes as f64;
+    for (scale, suffix) in [
+        (UNIT * UNIT * UNIT * UNIT, "TB"),
+        (UNIT * UNIT * UNIT, "GB"),
+        (UNIT * UNIT, "MB"),
+        (UNIT, "KB"),
+    ] {
+        if bytes >= scale {
+            return (scale, suffix);
+        }
+    }
+    (1.0, "B")
+}
+
+/// Bytes in the largest unit that keeps the number readable.
+fn format_bytes(bytes: u64) -> String {
+    let (scale, suffix) = byte_scale(bytes);
+    if suffix == "B" {
+        return format!("{bytes} B");
+    }
+    format!("{:.1} {suffix}", bytes as f64 / scale)
+}
+
+/// `m:ss` up to an hour, `h:mm:ss` past it.
+fn format_duration(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds < 3600 {
+        format!("{}:{:02}", seconds / 60, seconds % 60)
+    } else {
+        format!(
+            "{}:{:02}:{:02}",
+            seconds / 3600,
+            (seconds / 60) % 60,
+            seconds % 60
+        )
+    }
+}
+
 /// One terminal line in the live block: a bar plus whether it currently holds a
 /// running subject. A finished subject leaves its slot in place (marked idle)
 /// for the next subject to reuse, so the block grows to the peak concurrency and
@@ -799,6 +1262,12 @@ struct Slot {
 
 /// Live indicatif state: a fixed set of subject slots (idle ones kept in place)
 /// plus a bottom summary bar.
+///
+/// A run says which of the two shapes suits it in its `run-started` details
+/// (`progress: "aggregate"`), rather than the block guessing from how many
+/// subjects turn up: a build wants its subjects named one by one, a fetch run
+/// wants the aggregate, and switching between them mid-run on a threshold would
+/// only make the display jump.
 struct LiveProgress {
     run_log_dir: PathBuf,
     multi: MultiProgress,
@@ -810,7 +1279,21 @@ struct LiveProgress {
     total: usize,
     done: usize,
     failed: usize,
+    /// Set when the run asks for the aggregate shape; the per-subject slots are
+    /// then never used.
+    aggregate: Option<AggregateBlock>,
 }
+
+/// The aggregate block: a fixed set of bars, redrawn from [`FetchProgress`].
+struct AggregateBlock {
+    progress: FetchProgress,
+    lines: Vec<ProgressBar>,
+    last_drawn: Instant,
+}
+
+/// How often the aggregate block is redrawn. Events arrive by the dozen per
+/// second (one progress tick per running download); the eye needs far fewer.
+const AGGREGATE_REDRAW: Duration = Duration::from_millis(200);
 
 impl LiveProgress {
     fn new(run_log_dir: PathBuf, multi: MultiProgress) -> Self {
@@ -828,6 +1311,49 @@ impl LiveProgress {
             total: 0,
             done: 0,
             failed: 0,
+            aggregate: None,
+        }
+    }
+
+    /// Switches to the aggregate shape, replacing the summary line with a block
+    /// of fixed lines. `{wide_msg}` lets indicatif truncate each to the
+    /// terminal width, so a long host list or source name cannot wrap and
+    /// break the block.
+    fn start_aggregate(&mut self, total: usize) {
+        let style = ProgressStyle::with_template("{wide_msg}").expect("valid template");
+        let lines: Vec<ProgressBar> = (0..2 + 1 + FETCH_SLOW_LINES)
+            .map(|_| {
+                let bar = self
+                    .multi
+                    .insert_before(&self.summary, ProgressBar::new_spinner());
+                bar.set_style(style.clone());
+                bar
+            })
+            .collect();
+        self.summary.set_message(String::new());
+        self.aggregate = Some(AggregateBlock {
+            progress: FetchProgress::new(total),
+            lines,
+            last_drawn: Instant::now() - AGGREGATE_REDRAW,
+        });
+    }
+
+    /// Folds an event into the aggregate view and repaints, at most every
+    /// [`AGGREGATE_REDRAW`]. `force` is for the moments that must be on screen
+    /// whatever the throttle says: the last frame of the run.
+    fn update_aggregate(&mut self, record: &EventLogRecord, force: bool) {
+        let Some(block) = self.aggregate.as_mut() else {
+            return;
+        };
+        let changed = block.progress.handle(record);
+        let now = Instant::now();
+        if !force && (!changed || now.duration_since(block.last_drawn) < AGGREGATE_REDRAW) {
+            return;
+        }
+        block.last_drawn = now;
+        let rendered = block.progress.render();
+        for (index, bar) in block.lines.iter().enumerate() {
+            bar.set_message(rendered.get(index).cloned().unwrap_or_default());
         }
     }
 
@@ -903,6 +1429,11 @@ impl LiveProgress {
             slot.bar.finish_and_clear();
         }
         self.index_of.clear();
+        if let Some(block) = self.aggregate.take() {
+            for bar in block.lines {
+                bar.finish_and_clear();
+            }
+        }
         self.summary.finish_and_clear();
     }
 
@@ -911,7 +1442,23 @@ impl LiveProgress {
 
         if status == BuildStatus::RunStarted.as_str() {
             self.total = detail_u64(record, "subjects") as usize;
+            if record.details.get("progress").and_then(Value::as_str) == Some("aggregate") {
+                self.start_aggregate(detail_u64(record, "sources") as usize);
+                return;
+            }
             self.update_summary();
+            return;
+        }
+        if self.aggregate.is_some() && status != BuildStatus::RunFinished.as_str() {
+            // Warnings and errors still scroll above the block: they are events
+            // worth keeping in the scrollback, which is exactly what the block
+            // itself is not.
+            if record.level >= BuildLogLevel::Warn {
+                let _ = self
+                    .multi
+                    .println(format_progress_line(record, &self.run_log_dir));
+            }
+            self.update_aggregate(record, false);
             return;
         }
         if status == BuildStatus::RunFinished.as_str() {
@@ -988,7 +1535,39 @@ impl EventSink for ProgressSink {
             Self::Plain {
                 run_log_dir,
                 min_level,
+                aggregate,
             } => {
+                let Ok(mut aggregate) = aggregate.lock() else {
+                    return;
+                };
+                let status = record.status.as_str();
+                if status == BuildStatus::RunStarted.as_str()
+                    && record.details.get("progress").and_then(Value::as_str) == Some("aggregate")
+                {
+                    *aggregate = Some(PlainAggregate {
+                        progress: FetchProgress::new(detail_u64(record, "sources") as usize),
+                        last_printed: Instant::now(),
+                    });
+                }
+                if let Some(state) = aggregate.as_mut()
+                    && status != BuildStatus::RunFinished.as_str()
+                {
+                    state.progress.handle(record);
+                    // Routine per-subject chatter is what the heartbeat
+                    // replaces; anything at warning or above still speaks for
+                    // itself, at once.
+                    if record.level >= BuildLogLevel::Warn {
+                        eprintln!("{}", format_progress_line(record, run_log_dir));
+                    } else if Instant::now().duration_since(state.last_printed)
+                        >= PLAIN_AGGREGATE_HEARTBEAT
+                    {
+                        state.last_printed = Instant::now();
+                        for line in state.progress.render().iter().take(2) {
+                            eprintln!("{line}");
+                        }
+                    }
+                    return;
+                }
                 if record.level >= *min_level {
                     eprintln!("{}", format_progress_line(record, run_log_dir));
                 }
@@ -1180,7 +1759,7 @@ fn create_event_log_file(path: &Path) -> Result<File, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
+    use serde_json::{Value, json};
     use std::fs;
     use tempfile::tempdir;
 
@@ -1487,6 +2066,265 @@ mod tests {
             line,
             "[run-finished]: build finished; 12 built · 340 cache-hit · 2 failed"
         );
+    }
+
+    /// One event for the aggregate view, with whatever fields it carries.
+    fn fetch_record(
+        status: BuildStatus,
+        level: BuildLogLevel,
+        subject: Option<(&str, &str)>,
+        details: Value,
+    ) -> EventLogRecord {
+        let Value::Object(details) = details else {
+            panic!("details must be an object")
+        };
+        let event = BuildLogEvent {
+            level,
+            status,
+            op: None,
+            message: String::new(),
+            object_hash: None,
+            raw_log_path: None,
+            details,
+        };
+        let subject = subject.map(|(name, key)| SubjectIdentity::new("Source", name, key));
+        EventLogRecord::assemble(0, None, subject.as_ref(), &event, Path::new("/run"))
+    }
+
+    fn queued(name: &str, host: &str) -> EventLogRecord {
+        fetch_record(
+            BuildStatus::Start,
+            BuildLogLevel::Info,
+            Some((name, name)),
+            json!({ "host": host }),
+        )
+    }
+
+    fn downloading(name: &str, host: &str, bytes: u64) -> EventLogRecord {
+        fetch_record(
+            BuildStatus::Running,
+            BuildLogLevel::Progress,
+            Some((name, name)),
+            json!({ "host": host, "bytes": bytes }),
+        )
+    }
+
+    #[test]
+    fn the_aggregate_view_counts_queued_active_and_done() {
+        // The number the per-subject block never showed is `queued`, and it is
+        // the one that answers "how much is left" when eight hundred downloads
+        // are waiting on a handful of connection slots.
+        let mut progress = FetchProgress::new(3);
+        progress.handle(&queued("a", "example.org"));
+        progress.handle(&queued("b", "example.org"));
+        progress.handle(&queued("c", "mirror.net"));
+        assert_eq!((progress.queued(), progress.active()), (3, 0));
+
+        progress.handle(&downloading("a", "example.org", 1024));
+        assert_eq!((progress.queued(), progress.active()), (2, 1));
+
+        progress.handle(&fetch_record(
+            BuildStatus::Done,
+            BuildLogLevel::Info,
+            Some(("a", "a")),
+            json!({}),
+        ));
+        assert_eq!(
+            (progress.queued(), progress.active(), progress.done),
+            (2, 0, 1)
+        );
+        // The finished download's bytes stay counted after it leaves.
+        assert_eq!(progress.live_bytes(), 1024);
+    }
+
+    #[test]
+    fn the_hosts_line_names_the_bottleneck_and_then_retires() {
+        // `ftp.gnu.org 1 (2 queued)` is the whole diagnosis: the host's slots
+        // are full and the rest are behind it.
+        let mut progress = FetchProgress::new(3);
+        progress.handle(&queued("a", "ftp.gnu.org"));
+        progress.handle(&queued("b", "ftp.gnu.org"));
+        progress.handle(&queued("c", "ftp.gnu.org"));
+        progress.handle(&downloading("a", "ftp.gnu.org", 10));
+        let hosts = progress.render_hosts(FETCH_ASSUMED_WIDTH).unwrap();
+        assert!(hosts.contains("ftp.gnu.org 1 (2 queued)"), "{hosts}");
+
+        // Once nothing is queued the line goes; a retry re-queues a download
+        // for a moment, and the line must not blink back for it.
+        progress.handle(&downloading("b", "ftp.gnu.org", 10));
+        progress.handle(&downloading("c", "ftp.gnu.org", 10));
+        let rendered = progress.render();
+        assert!(
+            !rendered.iter().any(|line| line.starts_with("hosts")),
+            "{rendered:?}"
+        );
+        progress.handle(&queued("d", "ftp.gnu.org"));
+        let rendered = progress.render();
+        assert!(
+            !rendered.iter().any(|line| line.starts_with("hosts")),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_with_nothing_waiting_shows_no_parenthesis() {
+        // The parenthesis is the news; a host that is merely busy should not
+        // wear one, so the eye goes straight to the backlog.
+        let mut progress = FetchProgress::new(3);
+        progress.handle(&queued("a", "quiet.example"));
+        progress.handle(&downloading("a", "quiet.example", 1));
+        progress.handle(&queued("b", "busy.example"));
+        progress.handle(&queued("c", "busy.example"));
+        progress.handle(&downloading("b", "busy.example", 1));
+
+        let hosts = progress.render_hosts(FETCH_ASSUMED_WIDTH).unwrap();
+        // Worst backlog first, whatever the alphabet says.
+        assert!(
+            hosts.starts_with("hosts  busy.example 1 (1 queued)"),
+            "{hosts}"
+        );
+        assert!(hosts.contains("quiet.example 1"), "{hosts}");
+        assert!(!hosts.contains("quiet.example 1 ("), "{hosts}");
+    }
+
+    #[test]
+    fn slow_lines_hold_their_columns() {
+        // Constant widths: the eye reads down the columns, so they must not
+        // move when a name is long or a size grows a digit.
+        let mut progress = FetchProgress::new(2);
+        let long = "evolution-data-server-src-3.56.2-with-a-tail";
+        progress.handle(&queued(long, "a.example"));
+        progress.handle(&fetch_record(
+            BuildStatus::Running,
+            BuildLogLevel::Progress,
+            Some((long, long)),
+            json!({ "host": "a.example", "bytes": 1288490188u64, "total_bytes": 2040109465u64 }),
+        ));
+        progress.handle(&queued("short", "b.example"));
+        progress.handle(&downloading("short", "b.example", 12 * 1024 * 1024));
+
+        let lines = progress.render_slow(Instant::now(), FETCH_ASSUMED_WIDTH);
+        assert_eq!(lines.len(), 2);
+        // Truncated with a visible cut, and both lines break into columns at
+        // the same offsets.
+        assert!(
+            lines[0].contains("evolution-data-server-src-3.."),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("1.2/1.9 GB"), "{lines:?}");
+        let host_column = |line: &str| line.rfind(".example").unwrap();
+        assert_eq!(host_column(&lines[0]), host_column(&lines[1]), "{lines:?}");
+    }
+
+    #[test]
+    fn the_slow_lines_are_the_oldest_downloads_not_the_newest() {
+        // The old block showed whichever subjects happened to fit; this one
+        // shows the ones that have been running longest, which is where a
+        // stall shows up.
+        let mut progress = FetchProgress::new(5);
+        for name in ["first", "second", "third", "fourth"] {
+            progress.handle(&queued(name, "example.org"));
+            progress.handle(&downloading(name, "example.org", 1));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let lines = progress.render_slow(Instant::now(), FETCH_ASSUMED_WIDTH);
+        assert_eq!(lines.len(), FETCH_SLOW_LINES);
+        assert!(lines[0].contains("first"), "{lines:?}");
+        assert!(lines[2].contains("third"), "{lines:?}");
+        assert!(
+            !lines.iter().any(|line| line.contains("fourth")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_level_done_counts_towards_the_total() {
+        // The fetcher reports a skipped Path source as a run-level `done`: it
+        // belongs to no subject, but it is one of the sources the header
+        // counts.
+        let mut progress = FetchProgress::new(2);
+        progress.handle(&fetch_record(
+            BuildStatus::Done,
+            BuildLogLevel::Info,
+            None,
+            json!({}),
+        ));
+        progress.handle(&fetch_record(
+            BuildStatus::CacheHit,
+            BuildLogLevel::Info,
+            None,
+            json!({}),
+        ));
+        assert_eq!(progress.done, 2);
+    }
+
+    #[test]
+    fn a_narrow_terminal_trims_the_host_not_the_columns() {
+        // The last column takes what is left, so a terminal too narrow for the
+        // line loses the host -- never the identity of what is slow, and never
+        // half of the "N more" tail.
+        let mut progress = FetchProgress::new(2);
+        progress.handle(&queued("some-source-1.2.3", "mirrors.kernel.org"));
+        progress.handle(&downloading("some-source-1.2.3", "mirrors.kernel.org", 1));
+
+        let narrow = progress.render_slow(Instant::now(), 72);
+        assert!(narrow[0].chars().count() <= 72, "{narrow:?}");
+        assert!(narrow[0].contains("some-source-1.2.3"), "{narrow:?}");
+        assert!(narrow[0].trim_end().ends_with(".."), "{narrow:?}");
+
+        let wide = progress.render_slow(Instant::now(), 120);
+        assert!(wide[0].contains("mirrors.kernel.org"), "{wide:?}");
+    }
+
+    #[test]
+    fn the_hosts_line_keeps_its_tail_whole() {
+        // Five hosts will not fit a narrow line; what must survive is the
+        // count of what was left out.
+        let mut progress = FetchProgress::new(10);
+        for (index, host) in [
+            "mirrors.kernel.org",
+            "static.crates.io",
+            "gitlab.freedesktop.org",
+            "download.gnome.org",
+            "ftp.gnu.org",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let name = format!("source-{index}");
+            progress.handle(&queued(&name, host));
+            progress.handle(&queued(&format!("{name}-waiting"), host));
+        }
+
+        let narrow = progress.render_hosts(72).unwrap();
+        assert!(narrow.chars().count() <= 72, "{narrow}");
+        assert!(narrow.ends_with(" more"), "{narrow}");
+    }
+
+    #[test]
+    fn byte_and_duration_formats_stay_readable() {
+        // One unit for both halves: "1.2/1.9 GB" rather than "1.2 GB/1.9 GB",
+        // which is longer and no clearer.
+        assert_eq!(
+            format_progress_size(1_288_490_188, Some(2_040_109_465)),
+            "1.2/1.9 GB"
+        );
+        assert_eq!(format_progress_size(12 * 1024 * 1024, None), "12.0 MB");
+        // The widest the column can get: a byte below the next unit still
+        // rounds up to four digits on both halves.
+        assert_eq!(
+            format_progress_size(1_073_741_823, Some(1_073_741_823)),
+            "1024.0/1024.0 MB"
+        );
+        assert!(format_progress_size(1_073_741_823, Some(1_073_741_823)).len() <= FETCH_SIZE_WIDTH);
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("0123456789abc", 10), "01234567..");
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(1_938_859_476), "1.8 GB");
+        assert_eq!(format_duration(Duration::from_secs(9)), "0:09");
+        assert_eq!(format_duration(Duration::from_secs(511)), "8:31");
+        assert_eq!(format_duration(Duration::from_secs(3725)), "1:02:05");
     }
 
     #[test]
