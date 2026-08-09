@@ -866,6 +866,21 @@ fn log_run_finished(logger: &Arc<BuildRunLogger>, summary: &Summary) {
         "fetch finished: {} downloaded · {} already present · {} left to the build",
         summary.downloaded, summary.cache_hit, summary.path_skipped
     );
+    // The logger has been counting retries by host all along (the retry
+    // milestones carry the host as a field); a run that only succeeded on
+    // second tries should not read like one that never stumbled.
+    let retries = logger.download_retries();
+    if !retries.is_empty() {
+        let total: u64 = retries.values().sum();
+        let mut hosts: Vec<_> = retries.iter().collect();
+        hosts.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let by_host = hosts
+            .iter()
+            .map(|(host, count)| format!("{host} x{count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!(" · {total} download retries ({by_host})"));
+    }
     if !summary.failed.is_empty() {
         message.push_str(&format!(" · {} failed:", summary.failed.len()));
         for (name, reason) in &summary.failed {
@@ -906,6 +921,8 @@ fn log_run_finished(logger: &Arc<BuildRunLogger>, summary: &Summary) {
             .map(|m| json!({"name": m.name, "expected": m.declared, "got": m.actual}))
             .collect::<Vec<_>>(),
         "logging_errors": logger.logging_errors(),
+        "download_retries": retries.values().sum::<u64>(),
+        "download_retries_by_host": retries,
     });
     let Value::Object(details) = details else {
         unreachable!()
