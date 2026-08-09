@@ -497,7 +497,41 @@ struct FileSink {
 #[derive(Debug)]
 struct SubjectWriter {
     event_log_path: PathBuf,
-    writer: BufWriter<File>,
+    /// Lines waiting to reach the file. The file itself is never held open:
+    /// a build binds at most `jobs` subjects at a time, but the fetcher binds
+    /// every source of its request at once, and one descriptor per bound
+    /// subject was enough to exhaust the process limit mid-run.
+    buffered: Vec<u8>,
+}
+
+impl SubjectWriter {
+    fn append(&mut self, line: &str) {
+        self.buffered.extend_from_slice(line.as_bytes());
+        self.buffered.push(b'\n');
+    }
+
+    /// Opens the file, appends everything buffered, and closes it again.
+    fn flush(&mut self, sync: bool) -> Result<(), String> {
+        if self.buffered.is_empty() {
+            return Ok(());
+        }
+        let describe = |error: std::io::Error| {
+            format!(
+                "failed to append event log '{}': {error}",
+                self.event_log_path.display()
+            )
+        };
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&self.event_log_path)
+            .map_err(describe)?;
+        file.write_all(&self.buffered).map_err(describe)?;
+        if sync {
+            file.sync_data().map_err(describe)?;
+        }
+        self.buffered.clear();
+        Ok(())
+    }
 }
 
 impl FileSink {
@@ -590,19 +624,8 @@ impl EventSink for FileSink {
         match self.subject_writers.lock() {
             Ok(mut writers) => {
                 if let Some(subject_writer) = writers.get_mut(&subject.build_key) {
-                    if let Err(error) = Self::append(
-                        &mut subject_writer.writer,
-                        &line,
-                        &subject_writer.event_log_path,
-                    ) {
-                        self.note_error(error);
-                    } else if flush_now
-                        && let Err(error) = Self::flush_writer(
-                            &mut subject_writer.writer,
-                            false,
-                            &subject_writer.event_log_path,
-                        )
-                    {
+                    subject_writer.append(&line);
+                    if flush_now && let Err(error) = subject_writer.flush(false) {
                         self.note_error(error);
                     }
                 }
@@ -619,11 +642,7 @@ impl EventSink for FileSink {
         }
         if let Ok(mut writers) = self.subject_writers.lock() {
             for subject_writer in writers.values_mut() {
-                if let Err(error) = Self::flush_writer(
-                    &mut subject_writer.writer,
-                    false,
-                    &subject_writer.event_log_path,
-                ) {
+                if let Err(error) = subject_writer.flush(false) {
                     self.note_error(error);
                 }
             }
@@ -648,7 +667,9 @@ impl EventSink for FileSink {
             )
         })?;
         let event_log_path = subject.log_dir.join("events.jsonl");
-        let file = create_event_log_file(&event_log_path).map_err(|error| {
+        // Created (and truncated) here to claim the path, then closed at once:
+        // appends reopen it. See SubjectWriter for why no handle is kept.
+        create_event_log_file(&event_log_path).map_err(|error| {
             format!(
                 "failed to create subject event log '{}': {error}",
                 event_log_path.display()
@@ -662,7 +683,7 @@ impl EventSink for FileSink {
             subject.identity.build_key.clone(),
             SubjectWriter {
                 event_log_path,
-                writer: BufWriter::new(file),
+                buffered: Vec::new(),
             },
         );
         Ok(())
@@ -683,11 +704,7 @@ impl EventSink for FileSink {
         let Some(mut subject_writer) = removed else {
             return;
         };
-        if let Err(error) = Self::flush_writer(
-            &mut subject_writer.writer,
-            false,
-            &subject_writer.event_log_path,
-        ) {
+        if let Err(error) = subject_writer.flush(false) {
             self.note_error(error);
         }
     }
@@ -899,12 +916,20 @@ impl LiveProgress {
         }
         if status == BuildStatus::RunFinished.as_str() {
             self.clear();
-            let _ = self.multi.println(format!(
-                "done: {} built · {} cache-hit · {} failed",
-                detail_u64(record, "built"),
-                detail_u64(record, "cache_hit"),
-                detail_u64(record, "failed"),
-            ));
+            // A build's totals live in its details; render them as before. Any
+            // other run (the fetcher's, say) composes its own summary message,
+            // and inventing zero "built" counters for it would be a lie.
+            let line = if record.details.contains_key("built") {
+                format!(
+                    "done: {} built · {} cache-hit · {} failed",
+                    detail_u64(record, "built"),
+                    detail_u64(record, "cache_hit"),
+                    detail_u64(record, "failed"),
+                )
+            } else {
+                format!("done: {}", record.message)
+            };
+            let _ = self.multi.println(line);
             return;
         }
         if status == BuildStatus::CacheHit.as_str() {
@@ -1073,7 +1098,7 @@ fn format_progress_line(record: &EventLogRecord, run_log_dir: &Path) -> String {
     // progress block rendered them. Off a terminal -- CI logs, the
     // rebuild-world log, the MCP build server -- that left the run ending on
     // "build finished" with no outcome at all.
-    if record.status == BuildStatus::RunFinished.as_str() {
+    if record.status == BuildStatus::RunFinished.as_str() && record.details.contains_key("built") {
         line.push_str(&format!(
             "; {} built · {} cache-hit · {} failed",
             detail_u64(record, "built"),
@@ -1466,22 +1491,37 @@ mod tests {
 
     #[test]
     fn a_missing_total_reads_as_zero_rather_than_vanishing() {
-        // Details are best-effort: a run that failed early may carry none. The
-        // line must still say what happened rather than lose its tail.
-        let event = BuildLogEvent {
-            level: BuildLogLevel::Info,
-            status: BuildStatus::RunFinished,
-            op: None,
-            message: "build finished".to_string(),
-            object_hash: None,
-            raw_log_path: None,
-            details: Map::new(),
-        };
+        // Details are best-effort within a build's run event: one absent
+        // counter reads as zero. But the suffix as a whole appears only for
+        // events that carry build counters at all -- another program's run
+        // (the fetcher's) composes its own summary message, and stamping
+        // "0 built" onto it would be an invention.
         let run_log_dir = PathBuf::from("/run");
-        let record = EventLogRecord::assemble(0, None, None, &event, &run_log_dir);
+        let assemble = |details: Map<String, Value>, message: &str| {
+            let event = BuildLogEvent {
+                level: BuildLogLevel::Info,
+                status: BuildStatus::RunFinished,
+                op: None,
+                message: message.to_string(),
+                object_hash: None,
+                raw_log_path: None,
+                details,
+            };
+            EventLogRecord::assemble(0, None, None, &event, &run_log_dir)
+        };
+
+        let partial = assemble(
+            Map::from_iter([("built".to_string(), Value::from(3_u64))]),
+            "build finished",
+        );
         assert!(
-            format_progress_line(&record, &run_log_dir)
-                .ends_with("0 built · 0 cache-hit · 0 failed")
+            format_progress_line(&partial, &run_log_dir)
+                .ends_with("3 built · 0 cache-hit · 0 failed")
+        );
+
+        let foreign = assemble(Map::new(), "fetch finished: 5 downloaded");
+        assert!(
+            format_progress_line(&foreign, &run_log_dir).ends_with("fetch finished: 5 downloaded")
         );
     }
 
