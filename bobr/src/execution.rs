@@ -4,13 +4,13 @@ use crate::planned::{
     execute_subject,
 };
 use crate::request::Request;
-use crate::run::Run;
 use bobr_builder::{BuilderError, BuilderPlannedSubject};
 use bobr_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuildStatus,
     CancellationToken, NoopBuildLogger, ObjectHash, RuntimeBackend, RuntimeProvider,
     SubjectIdentity,
 };
+use bobr_core::{Run, RunError};
 use bobr_runtime::runtime_provider::runtime_provider_for_current_process;
 use bobr_store::{Store, StoreError, load_build_handle};
 use std::collections::{HashMap, VecDeque};
@@ -45,6 +45,15 @@ pub enum ExecutionError {
     /// A run-scoped operation failed: allocating a workspace, recording it, or
     /// preparing its scratch directory.
     Run(String),
+}
+
+impl From<RunError> for ExecutionError {
+    fn from(error: RunError) -> Self {
+        match error {
+            RunError::InvalidRequest(message) => Self::InvalidRequest(message),
+            RunError::Failed(message) => Self::Run(message),
+        }
+    }
 }
 
 impl ExecutionError {
@@ -1226,7 +1235,9 @@ mod tests {
         let stale_target = temp.path().join("missing-stale-target");
         symlink(&stale_target, &temp_dir).unwrap();
 
-        let error = run.prepare_scratch(workspace.temp_dir()).unwrap_err();
+        // Through the same conversion the build path uses, so the class the
+        // operator sees is what this asserts.
+        let error = ExecutionError::from(run.prepare_scratch(workspace.temp_dir()).unwrap_err());
 
         assert_eq!(error.class(), "run");
         assert!(

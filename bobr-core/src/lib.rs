@@ -31,6 +31,7 @@ mod cancellation;
 pub mod fsutil;
 mod identity;
 mod logging;
+mod run;
 mod subject_run_context;
 mod workspace;
 
@@ -40,5 +41,6 @@ pub mod oci;
 pub use cancellation::*;
 pub use identity::*;
 pub use logging::*;
+pub use run::*;
 pub use subject_run_context::*;
 pub use workspace::*;

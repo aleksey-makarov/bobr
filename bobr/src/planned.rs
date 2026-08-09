@@ -3,8 +3,8 @@ use crate::execution::{
     map_store_error,
 };
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
-use crate::run::Run;
 use bobr_builder::{BuilderPlanError, BuilderPlannedSubject};
+use bobr_core::Run;
 use bobr_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, BuildSeed, BuildStatus,
     CancellationToken, NoopBuildLogger, ObjectHash, SubjectRunContext,

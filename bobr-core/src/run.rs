@@ -6,18 +6,16 @@
 //! invocation and owns everything named after it — the log directory, the work
 //! directory, the serial numbers of the workspaces handed out, and the run id
 //! stamped into what those workspaces record. Keeping this out of [`Store`] is
-//! deliberate: the store answers questions about objects, not about where one
+//! deliberate: the store (`bobr-store`) answers questions about objects, not about where one
 //! particular build writes its logs and scratch.
 //!
 //! All three come from the request: `bobr` neither picks the name nor creates
 //! the directories. Whoever names a run is the one who can keep two runs from
 //! claiming the same one.
 //!
-//! [`Store`]: bobr_store::Store
 
-use crate::execution::ExecutionError;
-use bobr_core::Workspace;
-use bobr_core::fsutil;
+use crate::Workspace;
+use crate::fsutil;
 use serde_json::{Map, Value, json};
 use std::fs;
 use std::io::Write;
@@ -25,9 +23,34 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Why a run could not be set up or one of its workspaces could not be
+/// allocated.
+///
+/// The two variants keep the caller's distinction: a request that names a bad
+/// run id or a missing directory is the caller's mistake, everything else is an
+/// environment failure met while working.
+#[derive(Debug)]
+pub enum RunError {
+    /// The request described the run incorrectly (bad id, missing directory).
+    InvalidRequest(String),
+    /// A run-scoped operation failed: allocating a workspace, recording it, or
+    /// managing its scratch directory.
+    Failed(String),
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidRequest(message) | Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for RunError {}
+
 /// One build run: where it writes and what it calls itself.
 #[derive(Debug)]
-pub(crate) struct Run {
+pub struct Run {
     run_id: String,
     logs_dir: PathBuf,
     work_dir: PathBuf,
@@ -45,11 +68,7 @@ impl Run {
     /// who creates its directories, and that is where uniqueness is decided.
     /// `bobr` writes into what it is given -- two runs pointed at one directory
     /// will collide when the first workspace is created, not silently merge.
-    pub(crate) fn new(
-        run_id: String,
-        logs_dir: &Path,
-        work_dir: &Path,
-    ) -> Result<Self, ExecutionError> {
+    pub fn new(run_id: String, logs_dir: &Path, work_dir: &Path) -> Result<Self, RunError> {
         validate_run_id(&run_id)?;
         let logs_dir = validate_run_dir(logs_dir, "log")?;
         let work_dir = validate_run_dir(work_dir, "work")?;
@@ -63,18 +82,17 @@ impl Run {
     }
 
     /// Returns the id this run is recorded under.
-    pub(crate) fn run_id(&self) -> &str {
+    pub fn run_id(&self) -> &str {
         &self.run_id
     }
 
     /// Returns the run-level log directory.
-    pub(crate) fn logs_dir(&self) -> &Path {
+    pub fn logs_dir(&self) -> &Path {
         &self.logs_dir
     }
 
     /// Returns the run-level work directory.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn work_dir(&self) -> &Path {
+    pub fn work_dir(&self) -> &Path {
         &self.work_dir
     }
 
@@ -85,12 +103,12 @@ impl Run {
     /// directories another run already used fails here rather than merging into
     /// them. The allocation is also recorded twice: in the subject's own
     /// `meta.json`, and as a line in the run's `index.jsonl`.
-    pub(crate) fn create_workspace(
+    pub fn create_workspace(
         &self,
         tag: impl Into<String>,
         name: impl Into<String>,
         build_key: impl Into<String>,
-    ) -> Result<Workspace, ExecutionError> {
+    ) -> Result<Workspace, RunError> {
         let tag = tag.into();
         let name = name.into();
         let build_key = build_key.into();
@@ -99,20 +117,20 @@ impl Run {
         let log_dir = self.logs_dir.join(&directory_name);
         let temp_dir = self.work_dir.join(&directory_name);
         fs::create_dir(&log_dir).map_err(|error| {
-            ExecutionError::Run(format!(
+            RunError::Failed(format!(
                 "failed to create workspace log directory '{}': {error}",
                 log_dir.display()
             ))
         })?;
         let raw_log_dir = log_dir.join("raw");
         fs::create_dir(&raw_log_dir).map_err(|error| {
-            ExecutionError::Run(format!(
+            RunError::Failed(format!(
                 "failed to create workspace raw log directory '{}': {error}",
                 raw_log_dir.display()
             ))
         })?;
         fs::create_dir(&temp_dir).map_err(|error| {
-            ExecutionError::Run(format!(
+            RunError::Failed(format!(
                 "failed to create workspace work directory '{}': {error}",
                 temp_dir.display()
             ))
@@ -134,10 +152,10 @@ impl Run {
     }
 
     /// Empties a subject's scratch directory before its builder runs.
-    pub(crate) fn prepare_scratch(&self, scratch_dir: &Path) -> Result<(), ExecutionError> {
+    pub fn prepare_scratch(&self, scratch_dir: &Path) -> Result<(), RunError> {
         self.validate_scratch(scratch_dir)?;
         fsutil::recreate_empty_dir_force(scratch_dir).map_err(|error| {
-            ExecutionError::Run(format!(
+            RunError::Failed(format!(
                 "failed to prepare scratch directory '{}': {error}",
                 scratch_dir.display()
             ))
@@ -145,10 +163,10 @@ impl Run {
     }
 
     /// Removes a subject's scratch directory once its builder is done.
-    pub(crate) fn remove_scratch(&self, scratch_dir: &Path) -> Result<(), ExecutionError> {
+    pub fn remove_scratch(&self, scratch_dir: &Path) -> Result<(), RunError> {
         self.validate_scratch(scratch_dir)?;
         fsutil::remove_dir_force(scratch_dir).map_err(|error| {
-            ExecutionError::Run(format!(
+            RunError::Failed(format!(
                 "failed to remove scratch directory '{}': {error}",
                 scratch_dir.display()
             ))
@@ -157,19 +175,19 @@ impl Run {
 
     /// Guards the force-removals above: they may only touch paths inside this
     /// run's work directory.
-    fn validate_scratch(&self, scratch_dir: &Path) -> Result<(), ExecutionError> {
+    fn validate_scratch(&self, scratch_dir: &Path) -> Result<(), RunError> {
         if scratch_dir
             .components()
             .any(|component| matches!(component, Component::ParentDir))
         {
-            return Err(ExecutionError::Run(format!(
+            return Err(RunError::Failed(format!(
                 "scratch directory '{}' must not contain '..' path components",
                 scratch_dir.display()
             )));
         }
 
         if scratch_dir == self.work_dir || !scratch_dir.starts_with(&self.work_dir) {
-            return Err(ExecutionError::Run(format!(
+            return Err(RunError::Failed(format!(
                 "scratch directory '{}' must be under the run work directory '{}'",
                 scratch_dir.display(),
                 self.work_dir.display()
@@ -179,10 +197,7 @@ impl Run {
         Ok(())
     }
 
-    fn write_workspace_metadata(
-        &self,
-        record: &WorkspaceLogRecord<'_>,
-    ) -> Result<(), ExecutionError> {
+    fn write_workspace_metadata(&self, record: &WorkspaceLogRecord<'_>) -> Result<(), RunError> {
         let mut metadata = Map::new();
         metadata.insert(
             "schema".to_string(),
@@ -210,22 +225,19 @@ impl Run {
         );
         let path = record.log_dir.join("meta.json");
         let bytes = serde_json::to_vec_pretty(&Value::Object(metadata)).map_err(|error| {
-            ExecutionError::Run(format!("failed to encode workspace metadata: {error}"))
+            RunError::Failed(format!("failed to encode workspace metadata: {error}"))
         })?;
         fs::write(&path, bytes).map_err(|error| {
-            ExecutionError::Run(format!(
+            RunError::Failed(format!(
                 "failed to write workspace metadata '{}': {error}",
                 path.display()
             ))
         })
     }
 
-    fn append_workspace_index(
-        &self,
-        record: &WorkspaceLogRecord<'_>,
-    ) -> Result<(), ExecutionError> {
+    fn append_workspace_index(&self, record: &WorkspaceLogRecord<'_>) -> Result<(), RunError> {
         let _guard = self.index_lock.lock().map_err(|error| {
-            ExecutionError::Run(format!("failed to lock the workspace index: {error}"))
+            RunError::Failed(format!("failed to lock the workspace index: {error}"))
         })?;
         let path = self.logs_dir.join("index.jsonl");
         let mut file = fs::OpenOptions::new()
@@ -233,7 +245,7 @@ impl Run {
             .append(true)
             .open(&path)
             .map_err(|error| {
-                ExecutionError::Run(format!(
+                RunError::Failed(format!(
                     "failed to open workspace index '{}': {error}",
                     path.display()
                 ))
@@ -246,14 +258,14 @@ impl Run {
             "log_dir": record.log_dir.display().to_string(),
         });
         let line = serde_json::to_string(&record).map_err(|error| {
-            ExecutionError::Run(format!(
+            RunError::Failed(format!(
                 "failed to encode the workspace index record: {error}"
             ))
         })?;
         file.write_all(line.as_bytes())
             .and_then(|_| file.write_all(b"\n"))
             .map_err(|error| {
-                ExecutionError::Run(format!(
+                RunError::Failed(format!(
                     "failed to append to the workspace index '{}': {error}",
                     path.display()
                 ))
@@ -303,7 +315,7 @@ fn safe_log_component(value: &str) -> String {
 /// A run id names the run in the records it leaves behind, and callers
 /// conventionally name the run directories after it. Keep it to something that
 /// reads well in both places, and that cannot be mistaken for a path.
-fn validate_run_id(run_id: &str) -> Result<(), ExecutionError> {
+fn validate_run_id(run_id: &str) -> Result<(), RunError> {
     const MAX_RUN_ID_LEN: usize = 64;
 
     let valid = !run_id.is_empty()
@@ -319,35 +331,35 @@ fn validate_run_id(run_id: &str) -> Result<(), ExecutionError> {
         return Ok(());
     }
 
-    Err(ExecutionError::InvalidRequest(format!(
+    Err(RunError::InvalidRequest(format!(
         "run id '{run_id}' must start with an ASCII letter or digit and may contain \
          only ASCII letters, digits, '.', '_', and '-' (at most {MAX_RUN_ID_LEN} characters)"
     )))
 }
 
 /// Resolves one of the run's directories, which the caller must have created.
-fn validate_run_dir(dir: &Path, label: &str) -> Result<PathBuf, ExecutionError> {
+fn validate_run_dir(dir: &Path, label: &str) -> Result<PathBuf, RunError> {
     if !dir.is_absolute() {
-        return Err(ExecutionError::InvalidRequest(format!(
+        return Err(RunError::InvalidRequest(format!(
             "run {label} directory must be absolute: '{}'",
             dir.display()
         )));
     }
     let canonical = fs::canonicalize(dir).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
-            ExecutionError::InvalidRequest(format!(
+            RunError::InvalidRequest(format!(
                 "run {label} directory must exist: '{}'",
                 dir.display()
             ))
         } else {
-            ExecutionError::Run(format!(
+            RunError::Failed(format!(
                 "failed to resolve run {label} directory '{}': {error}",
                 dir.display()
             ))
         }
     })?;
     if !canonical.is_dir() {
-        return Err(ExecutionError::InvalidRequest(format!(
+        return Err(RunError::InvalidRequest(format!(
             "run {label} directory must be a directory: '{}'",
             dir.display()
         )));
@@ -401,7 +413,7 @@ mod tests {
         let error = Run::new("run".to_string(), &logs_dir, &work_dir).unwrap_err();
         assert!(matches!(
             error,
-            ExecutionError::InvalidRequest(message)
+            RunError::InvalidRequest(message)
                 if message.contains("run work directory must exist")
         ));
 
@@ -409,14 +421,14 @@ mod tests {
         let error = Run::new("run".to_string(), &logs_dir, &work_dir).unwrap_err();
         assert!(matches!(
             error,
-            ExecutionError::InvalidRequest(message)
+            RunError::InvalidRequest(message)
                 if message.contains("run work directory must be a directory")
         ));
 
         let error = Run::new("run".to_string(), Path::new("logs"), &work_dir).unwrap_err();
         assert!(matches!(
             error,
-            ExecutionError::InvalidRequest(message)
+            RunError::InvalidRequest(message)
                 if message.contains("run log directory must be absolute")
         ));
     }
@@ -432,7 +444,7 @@ mod tests {
         for candidate in ["", "-leading", ".hidden", "with/slash", "with space", "имя"] {
             let error = Run::new(candidate.to_string(), &logs_dir, &work_dir).unwrap_err();
             assert!(
-                matches!(&error, ExecutionError::InvalidRequest(message) if message.contains("run id")),
+                matches!(&error, RunError::InvalidRequest(message) if message.contains("run id")),
                 "expected {candidate:?} to be rejected, got {error:?}"
             );
         }
@@ -543,7 +555,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            ExecutionError::Run(message)
+            RunError::Failed(message)
                 if message.contains("failed to create workspace log directory")
         ));
     }
@@ -610,7 +622,7 @@ mod tests {
             let error = run.remove_scratch(path).unwrap_err();
             assert!(matches!(
                 error,
-                ExecutionError::Run(message) if message.contains("must be under the run work directory")
+                RunError::Failed(message) if message.contains("must be under the run work directory")
             ));
         }
         assert!(outside.is_dir());
@@ -619,7 +631,7 @@ mod tests {
         let error = run.prepare_scratch(&escaping).unwrap_err();
         assert!(matches!(
             error,
-            ExecutionError::Run(message) if message.contains("'..' path components")
+            RunError::Failed(message) if message.contains("'..' path components")
         ));
     }
 }
