@@ -145,7 +145,8 @@ pub async fn run_fetch(request: FetchRequest) -> Result<Summary, String> {
             .map_err(|error| error.to_string())?,
     );
     check_same_filesystem(&store, &run)?;
-    let logger = Arc::new(BuildRunLogger::new(run.logs_dir(), run.run_id(), false)?);
+    let quiet = request.quiet.unwrap_or(false);
+    let logger = Arc::new(BuildRunLogger::new(run.logs_dir(), run.run_id(), quiet)?);
 
     let limits = ResolvedLimits::from_request(&request.limits);
     let client = http_client(HttpTimeouts::production())?;
@@ -477,7 +478,36 @@ async fn download_first_success(
             if engine.is_cancelled() {
                 return Err(cancelled_error());
             }
+            // Resuming a URL is a retry like any other: the same pause before
+            // it, and the same line in the log. Without this the second attempt
+            // came instantly and silently -- the pause exists because a host
+            // that just failed is unlikely to be ready a millisecond later, and
+            // that line is the only place a retry is ever counted.
             let spent = state[index].attempts;
+            let delay = policy.delay_before(spent + 1, state[index].retry_after, url);
+            let (message, details) = http::retry_notice(
+                url,
+                delay,
+                spent + 1,
+                policy.attempts,
+                state[index]
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("previous attempt failed"),
+            );
+            logger.log_event(BuildLogEvent {
+                level: BuildLogLevel::Info,
+                status: BuildStatus::Running,
+                op: Some("fetch".to_string()),
+                message,
+                object_hash: None,
+                raw_log_path: None,
+                details,
+            });
+            tokio::select! {
+                _ = engine.until_cancelled() => return Err(cancelled_error()),
+                _ = tokio::time::sleep(delay) => {}
+            }
             match download_with_attempts(
                 engine,
                 url,
@@ -532,24 +562,13 @@ async fn download_with_attempts(
         }
         let _ = fs::remove_file(destination);
         let delay = policy.delay_before(overall + 1, retry_after, url);
-        // The same fields the synchronous path emits: the run summary counts
-        // retries per host from them.
-        let mut details = Map::new();
-        details.insert(
-            "retry_host".to_string(),
-            Value::String(http::url_host(url).to_string()),
-        );
-        details.insert("attempt".to_string(), Value::Number((overall + 1).into()));
+        let (message, details) =
+            http::retry_notice(url, delay, overall + 1, policy.attempts, &error.to_string());
         logger.log_event(BuildLogEvent {
             level: BuildLogLevel::Info,
             status: BuildStatus::Running,
             op: Some("fetch".to_string()),
-            message: format!(
-                "retrying {url} in {:.1}s (attempt {} of {}): {error}",
-                delay.as_secs_f64(),
-                overall + 1,
-                policy.attempts
-            ),
+            message,
             object_hash: None,
             raw_log_path: None,
             details,
@@ -1002,10 +1021,18 @@ fn log_run_finished(logger: &Arc<BuildRunLogger>, summary: &Summary) {
     let Value::Object(details) = details else {
         unreachable!()
     };
-    let level = if result == "ok" {
+    // A run that only got through on second attempts is worth a word even when
+    // it succeeded, and `quiet` -- which keeps warnings and errors -- is exactly
+    // where that word would otherwise be lost: the retries themselves are
+    // routine milestones, and this summary is the only other place they are
+    // counted. Naming the host is the point; that is what the retry counter was
+    // added for.
+    let level = if result != "ok" {
+        BuildLogLevel::Error
+    } else if retries.is_empty() {
         BuildLogLevel::Info
     } else {
-        BuildLogLevel::Error
+        BuildLogLevel::Warn
     };
     logger.log_run_event(BuildLogEvent {
         level,
@@ -1092,6 +1119,7 @@ mod tests {
             work,
             run_id: "260809120000".to_string(),
             limits: Limits::default(),
+            quiet: None,
             sources,
         }
     }
@@ -1173,6 +1201,7 @@ mod tests {
             schema: crate::fetch::request::FETCH_REQUEST_SCHEMA.to_string(),
             store: store_root.clone(),
             limits: Limits::default(),
+            quiet: None,
         };
         assert!(run_fetch(warmup).await.unwrap().is_success());
         handle.join().unwrap();
@@ -1225,6 +1254,62 @@ mod tests {
         );
         handle_a.join().unwrap();
         handle_b.join().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_quiet_run_still_reports_that_it_needed_retries() {
+        // Retries are how a mirror that throttles announces itself, and the
+        // summary is the only place they are counted. A quiet run keeps
+        // warnings, so the summary has to be one when there were retries --
+        // otherwise the very signal the counter exists for is what `quiet`
+        // silences.
+        let payload = b"recovered\n".to_vec();
+        let declared = declared_for(&payload);
+        let (url, _, handle) = spawn_server(1, "HTTP/1.1 503 Service Unavailable", payload.clone());
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut request = request_in(&temp, vec![http_source("flaky", declared, &[&url])]);
+        request.quiet = Some(true);
+        let logs = request.logs.clone();
+        let summary = run_fetch(request).await.unwrap();
+        handle.join().unwrap();
+        assert!(summary.is_success(), "{summary:?}");
+
+        let events = fs::read_to_string(logs.join("events.jsonl")).unwrap();
+        let finished: Value = events
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|event| event["status"] == "run-finished")
+            .expect("the run reported its end");
+        assert_eq!(finished["level"], "warn", "{finished}");
+        assert!(
+            finished["message"]
+                .as_str()
+                .unwrap()
+                .contains("download retries"),
+            "{finished}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_clean_run_says_nothing_worth_a_warning() {
+        let payload = b"first try\n".to_vec();
+        let declared = declared_for(&payload);
+        let (url, _, handle) = spawn_server(0, "", payload.clone());
+
+        let temp = tempfile::tempdir().unwrap();
+        let request = request_in(&temp, vec![http_source("easy", declared, &[&url])]);
+        let logs = request.logs.clone();
+        assert!(run_fetch(request).await.unwrap().is_success());
+        handle.join().unwrap();
+
+        let events = fs::read_to_string(logs.join("events.jsonl")).unwrap();
+        let finished: Value = events
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|event| event["status"] == "run-finished")
+            .unwrap();
+        assert_eq!(finished["level"], "info", "{finished}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -471,7 +471,29 @@ fn download_first_success(
                 continue;
             }
             check_not_cancelled(cx)?;
+            // Resuming a URL is a retry like any other: the same pause before
+            // it, and the same line in the log. Without this the second attempt
+            // came instantly and silently -- the pause exists because a host
+            // that just failed is unlikely to be ready a millisecond later, and
+            // that line is the only place a retry is ever counted.
             let spent = state[index].attempts;
+            let delay = policy.delay_before(spent + 1, state[index].retry_after, url);
+            let (message, details) = retry_notice(
+                url,
+                delay,
+                spent + 1,
+                policy.attempts,
+                state[index]
+                    .last_error
+                    .as_deref()
+                    .unwrap_or("previous attempt failed"),
+            );
+            cx.milestone_with_details(message, details);
+            if sleep_unless_cancelled(cx, delay).is_err() {
+                return Err(HttpOriginError::fatal_network(
+                    "download cancelled while waiting to retry",
+                ));
+            }
             match download_with_retries(cx, client, url, &download_path, policy, remaining, spent) {
                 Ok(()) => return Ok(download_path),
                 Err((error, attempts)) => {
@@ -497,7 +519,10 @@ fn download_first_success(
 #[derive(Default)]
 pub(crate) struct UrlAttemptState {
     pub(crate) attempts: u32,
-    last_error: Option<String>,
+    /// What the server asked for last time, so a pass that resumes this URL
+    /// honours it just as a pass that never left would have.
+    pub(crate) retry_after: Option<Duration>,
+    pub(crate) last_error: Option<String>,
     /// Whether the latest failure was of a kind another attempt could survive.
     pub(crate) worth_retrying: bool,
 }
@@ -506,6 +531,10 @@ impl UrlAttemptState {
     pub(crate) fn record(&mut self, error: &HttpOriginError, attempts: u32) {
         self.attempts += attempts;
         self.worth_retrying = matches!(error.retry(), Retry::After(_));
+        self.retry_after = match error.retry() {
+            Retry::After(after) => after,
+            Retry::Never => None,
+        };
         self.last_error = Some(error.to_string());
     }
 
@@ -565,24 +594,9 @@ fn download_with_retries(
         // A partial download must not be mistaken for the next attempt's.
         let _ = fs::remove_file(destination);
         let delay = policy.delay_before(overall + 1, retry_after, url);
-        // The host travels as a field, not only inside the sentence: the run
-        // summary counts retries per host, and counting should not mean parsing
-        // a message written for a human.
-        let mut details = Map::new();
-        details.insert(
-            "retry_host".to_string(),
-            Value::String(url_host(url).to_string()),
-        );
-        details.insert("attempt".to_string(), Value::Number((overall + 1).into()));
-        cx.milestone_with_details(
-            format!(
-                "retrying {url} in {:.1}s (attempt {} of {}): {error}",
-                delay.as_secs_f64(),
-                overall + 1,
-                policy.attempts
-            ),
-            details,
-        );
+        let (message, details) =
+            retry_notice(url, delay, overall + 1, policy.attempts, &error.to_string());
+        cx.milestone_with_details(message, details);
         if let Err(cancelled) = sleep_unless_cancelled(cx, delay) {
             return Err((cancelled, attempt));
         }
@@ -600,6 +614,32 @@ pub(crate) fn url_host(url: &str) -> &str {
     // Strip userinfo and port, so one host counts as one host.
     let host = host.rsplit('@').next().unwrap_or(host);
     host.split(':').next().unwrap_or(host)
+}
+
+/// The sentence and the fields of a "retrying" milestone.
+///
+/// Shared so the synchronous path and the fetcher say the same thing, and so
+/// the host keeps travelling as a field: the run summary counts retries per
+/// host from it, and counting should not mean parsing prose written for a
+/// person.
+pub(crate) fn retry_notice(
+    url: &str,
+    delay: Duration,
+    attempt: u32,
+    attempts: u32,
+    error: &str,
+) -> (String, Map<String, Value>) {
+    let mut details = Map::new();
+    details.insert(
+        "retry_host".to_string(),
+        Value::String(url_host(url).to_string()),
+    );
+    details.insert("attempt".to_string(), Value::Number(attempt.into()));
+    let message = format!(
+        "retrying {url} in {:.1}s (attempt {attempt} of {attempts}): {error}",
+        delay.as_secs_f64()
+    );
+    (message, details)
 }
 
 /// Waits, giving up early if the run is cancelled.
@@ -1380,6 +1420,66 @@ mod tests {
         );
         drop(bad_handle);
         good_handle.join().unwrap();
+    }
+
+    #[test]
+    fn resuming_a_url_counts_and_announces_itself() {
+        // The second pass picking a URL back up is a retry, and has to look
+        // like one: the pause before it, and the line that records it. Neither
+        // happened when the two passes were introduced -- the first retry came
+        // instantly and silently, so a source that stumbled once and recovered
+        // was indistinguishable from one that never did, and the per-host retry
+        // counter (the thing that named a throttling mirror) read zero.
+        let temp = tempdir().unwrap();
+        let (url, requests, handle) = match spawn_flaky_server(
+            1,
+            "HTTP/1.1 503 Service Unavailable",
+            b"recovered\n".to_vec(),
+        ) {
+            Ok(server) => server,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to start test HTTP server: {error}"),
+        };
+
+        let origin = HttpOrigin {
+            urls: vec![url],
+            unpack: false,
+            archive_format: None,
+        };
+        let logger = CapturingLogger::default();
+        let cancellation = CancellationToken::new();
+        materialize_http_origin_with_timeouts(
+            &OriginContext {
+                temp_root: temp.path(),
+                logger: &logger,
+                cancellation: &cancellation,
+            },
+            &origin,
+            HttpTimeouts::production(),
+            test_retry_policy(),
+        )
+        .unwrap();
+        handle.join().unwrap();
+
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        let events = logger.events.lock().unwrap();
+        let announced: Vec<_> = events
+            .iter()
+            .filter(|event| event.message.contains("retrying"))
+            .collect();
+        assert_eq!(announced.len(), 1, "{announced:?}");
+        assert!(
+            announced[0].message.contains("attempt 2 of"),
+            "{announced:?}"
+        );
+        // And the host travels as a field, which is what the run summary counts.
+        assert_eq!(
+            announced[0]
+                .details
+                .get("retry_host")
+                .and_then(Value::as_str),
+            Some("127.0.0.1")
+        );
     }
 
     #[test]
