@@ -1558,8 +1558,9 @@ impl EventSink for ProgressSink {
                     // itself, at once.
                     if record.level >= BuildLogLevel::Warn {
                         eprintln!("{}", format_progress_line(record, run_log_dir));
-                    } else if Instant::now().duration_since(state.last_printed)
-                        >= PLAIN_AGGREGATE_HEARTBEAT
+                    } else if *min_level <= BuildLogLevel::Info
+                        && Instant::now().duration_since(state.last_printed)
+                            >= PLAIN_AGGREGATE_HEARTBEAT
                     {
                         state.last_printed = Instant::now();
                         for line in state.progress.render().iter().take(2) {
@@ -2256,6 +2257,68 @@ mod tests {
             json!({}),
         ));
         assert_eq!(progress.done, 2);
+    }
+
+    #[test]
+    fn quiet_silences_the_aggregate_heartbeat() {
+        // `quiet` means "only what needs attention". The heartbeat is the
+        // aggregate view's routine chatter off a terminal, so it belongs to the
+        // half that goes silent -- otherwise the flag would look ignored, since
+        // the heartbeat is the only thing such a run prints.
+        let quiet = ProgressSink::Plain {
+            run_log_dir: PathBuf::from("/run"),
+            min_level: stderr_min_level(true),
+            aggregate: Mutex::new(None),
+        };
+        let loud = ProgressSink::Plain {
+            run_log_dir: PathBuf::from("/run"),
+            min_level: stderr_min_level(false),
+            aggregate: Mutex::new(None),
+        };
+        let start = fetch_record(
+            BuildStatus::RunStarted,
+            BuildLogLevel::Info,
+            None,
+            json!({ "progress": "aggregate", "sources": 2 }),
+        );
+        for sink in [&quiet, &loud] {
+            sink.write_event(&start);
+        }
+
+        // Both are following the run; only their willingness to speak differs.
+        let printed = |sink: &ProgressSink| match sink {
+            ProgressSink::Plain { aggregate, .. } => {
+                let mut guard = aggregate.lock().unwrap();
+                let state = guard.as_mut().unwrap();
+                // Force the heartbeat to be due.
+                state.last_printed -= PLAIN_AGGREGATE_HEARTBEAT * 2;
+                state.progress.total
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(printed(&quiet), 2);
+        assert_eq!(printed(&loud), 2);
+
+        let tick = fetch_record(
+            BuildStatus::Running,
+            BuildLogLevel::Progress,
+            Some(("a", "a")),
+            json!({ "host": "example.org", "bytes": 10 }),
+        );
+        quiet.write_event(&tick);
+        loud.write_event(&tick);
+
+        // The loud one spoke and reset its clock; the quiet one left it due.
+        let still_due = |sink: &ProgressSink| match sink {
+            ProgressSink::Plain { aggregate, .. } => {
+                let guard = aggregate.lock().unwrap();
+                let state = guard.as_ref().unwrap();
+                Instant::now().duration_since(state.last_printed) >= PLAIN_AGGREGATE_HEARTBEAT
+            }
+            _ => unreachable!(),
+        };
+        assert!(still_due(&quiet), "quiet printed a heartbeat");
+        assert!(!still_due(&loud), "the ordinary sink stayed silent");
     }
 
     #[test]

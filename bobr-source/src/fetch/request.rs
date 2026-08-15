@@ -42,6 +42,13 @@ pub struct FetchRequest {
     /// Connection limits; every field optional.
     #[serde(default)]
     pub limits: Limits,
+    /// Keep only warnings and errors on screen, as `bobr`'s own `quiet` does:
+    /// the live block is dropped even on a terminal, and the routine chatter
+    /// that replaces it off one goes too. The full record stays in the log
+    /// either way. Carried in the request rather than as a flag because that is
+    /// where `bobr` takes it from, and one profile drives both.
+    #[serde(default)]
+    pub quiet: Option<bool>,
     /// The sources to ensure present.
     pub sources: Vec<SourceEntry>,
 }
@@ -183,6 +190,17 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("jobs"), "{error}");
+    }
+
+    #[test]
+    fn quiet_is_optional_and_defaults_to_speaking() {
+        let request = FetchRequest::parse_json(minimal(FETCH_REQUEST_SCHEMA).as_bytes()).unwrap();
+        assert_eq!(request.quiet, None);
+        let loud = FetchRequest::parse_json(
+            br#"{"schema":"bobr-fetch-request-v1","store":"/s","logs":"/l","work":"/w","run_id":"r","sources":[],"quiet":true}"#,
+        )
+        .unwrap();
+        assert_eq!(loud.quiet, Some(true));
     }
 
     #[test]
