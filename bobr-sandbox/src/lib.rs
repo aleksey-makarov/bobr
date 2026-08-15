@@ -23,13 +23,13 @@ use bobr_store::fs_tree::FsTree;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
-use std::ffi::CString;
+use std::ffi::{CString, OsStr};
 use std::fmt;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Default file creation mask for sandbox steps.
 const DEFAULT_SANDBOX_UMASK: u32 = 0o022;
@@ -1193,6 +1193,24 @@ fn validate_additive_dir(dir: &Path, upper_root: &Path, lower: &Path) -> Result<
         }
 
         if file_type.is_dir() {
+            // Checked outside the "something is below" branch on purpose: a
+            // redirect is created under a *new* name, so nothing is below it
+            // and every other check here would wave it through -- the directory
+            // is genuinely empty, and its contents are what the note points at.
+            if let Some(target) = redirect_target(&path)?
+                && let Some(source) = redirect_source(lower, relative, &target)
+                && fs::symlink_metadata(&source).is_ok()
+            {
+                let shown_target = Path::new("/")
+                    .join(source.strip_prefix(lower).unwrap_or(&source))
+                    .display()
+                    .to_string();
+                return Err(RuntimeError::new(format!(
+                    "SandboxInstall build's directory '{shown}' takes its contents from \
+                     '{shown_target}' in the rootfs it was given; a captured layer cannot \
+                     carry them, so the object would be an empty directory"
+                )));
+            }
             if let Some(lower_meta) = &lower_meta {
                 // Opaque means "hide whatever the lower rootfs has here", so it
                 // is a replacement -- but only where there is something to
@@ -1309,6 +1327,109 @@ fn is_opaque_dir(dir: &Path) -> Result<bool, RuntimeError> {
 /// Reads an extended attribute and compares it to `expected`. A missing
 /// attribute, an oversized value, or a filesystem without xattr support all
 /// read as "not equal".
+/// Reads an extended attribute's whole value, or `None` when it is absent (or
+/// the filesystem has no attributes at all).
+///
+/// Separate from [`xattr_equals`], which compares against a short constant and
+/// can stop at a small buffer: a redirect's value is a path, and a path read
+/// into a fixed buffer would come back "absent" for the long ones -- exactly
+/// the ones worth catching.
+fn xattr_value(path: &Path, name: &str) -> Result<Option<Vec<u8>>, RuntimeError> {
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| RuntimeError::new(format!("path contains NUL byte: '{}'", path.display())))?;
+    let c_name = CString::new(name).expect("xattr name has no interior NUL");
+    let describe = |error: io::Error| {
+        RuntimeError::new(format!(
+            "read xattr '{name}' of '{}': {error}",
+            path.display()
+        ))
+    };
+
+    // Size first, then the value: between the two calls the attribute could in
+    // principle grow, so a short read is retried rather than truncated.
+    for _ in 0..3 {
+        let size =
+            unsafe { libc::lgetxattr(c_path.as_ptr(), c_name.as_ptr(), std::ptr::null_mut(), 0) };
+        if size < 0 {
+            let error = io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::ENODATA) | Some(libc::ENOTSUP) => Ok(None),
+                _ => Err(describe(error)),
+            };
+        }
+        let mut buf = vec![0_u8; size as usize];
+        let len = unsafe {
+            libc::lgetxattr(
+                c_path.as_ptr(),
+                c_name.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+            )
+        };
+        if len >= 0 {
+            buf.truncate(len as usize);
+            return Ok(Some(buf));
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ENODATA) | Some(libc::ENOTSUP) => return Ok(None),
+            // The value grew between the two calls; ask again.
+            Some(libc::ERANGE) => continue,
+            _ => return Err(describe(error)),
+        }
+    }
+    Err(RuntimeError::new(format!(
+        "xattr '{name}' of '{}' kept changing size while being read",
+        path.display()
+    )))
+}
+
+/// Turns a redirect note into the path it names in the lower rootfs.
+///
+/// An absolute note counts from the root of the image; a relative one names a
+/// sibling of the redirected directory. `None` for a note that escapes the
+/// rootfs (`..`) or is empty -- there is nothing to point at, and refusing on a
+/// path we could not resolve would be guessing.
+fn redirect_source(lower: &Path, relative: &Path, target: &Path) -> Option<PathBuf> {
+    if target
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return None;
+    }
+    if target.is_absolute() {
+        let stripped = target.strip_prefix("/").ok()?;
+        if stripped.as_os_str().is_empty() {
+            return None;
+        }
+        return Some(lower.join(stripped));
+    }
+    let parent = relative.parent().unwrap_or(Path::new(""));
+    Some(lower.join(parent).join(target))
+}
+
+/// Where a directory in the upper layer says its contents really live.
+///
+/// When overlayfs is allowed to redirect (`redirect_dir=on`), renaming a
+/// directory that has contents below need not copy them up: the kernel makes
+/// the directory at the new name and leaves a note pointing at the old one.
+/// The merged view then looks complete while the upper layer alone is an empty
+/// directory -- and the upper layer alone is what a SandboxInstall captures.
+///
+/// The note is a path: absolute, from the root of the whole image, or relative,
+/// naming a sibling of the redirected directory.
+fn redirect_target(dir: &Path) -> Result<Option<PathBuf>, RuntimeError> {
+    for name in ["user.overlay.redirect", "trusted.overlay.redirect"] {
+        if let Some(value) = xattr_value(dir, name)? {
+            if value.is_empty() {
+                continue;
+            }
+            return Ok(Some(PathBuf::from(OsStr::from_bytes(&value))));
+        }
+    }
+    Ok(None)
+}
+
 fn xattr_equals(path: &Path, name: &str, expected: &[u8]) -> Result<bool, RuntimeError> {
     let c_path = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| RuntimeError::new(format!("path contains NUL byte: '{}'", path.display())))?;
@@ -1708,6 +1829,139 @@ mod tests {
     /// no user-namespace id-mapping (e.g. AppArmor restricts it), or no
     /// unprivileged overlayfs mount. Only a whiteout that was created but not
     /// rejected counts as a failure.
+    /// A renamed-with-redirect directory as the kernel would leave it: an empty
+    /// directory in the upper layer plus a note naming where its contents stayed.
+    ///
+    /// The note is written by hand, and that is a real weakness rather than a
+    /// convenience: `redirect_dir` is refused outright by an unprivileged mount
+    /// and off by default on every machine we have, so we have never watched a
+    /// kernel produce one. Fabricating a marker is exactly what let the opaque
+    /// bug live -- which is why the refusal below names the two paths instead of
+    /// announcing a marker: the first real case should explain itself.
+    fn redirect_case(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+        let lower = temp.path().join("lower");
+        let upper = temp.path().join("upper");
+        fs::create_dir_all(lower.join("usr/share/doc/foo")).unwrap();
+        fs::write(lower.join("usr/share/doc/foo/README"), b"docs\n").unwrap();
+        // Every parent of the redirected directory exists below unchanged, so
+        // the passthrough checks are happy and only the note is left to catch.
+        for parent in ["usr", "usr/share", "usr/share/doc"] {
+            fs::create_dir_all(upper.join(parent)).unwrap();
+            let mode = fs::metadata(lower.join(parent)).unwrap().permissions();
+            fs::set_permissions(upper.join(parent), mode).unwrap();
+        }
+        fs::create_dir_all(upper.join("usr/share/doc/foo-1.2")).unwrap();
+        (lower, upper)
+    }
+
+    #[test]
+    fn additive_layer_rejects_a_directory_whose_contents_stayed_below() {
+        let temp = tempdir().unwrap();
+        let (lower, upper) = redirect_case(&temp);
+        let redirected = upper.join("usr/share/doc/foo-1.2");
+        if !try_set_xattr(&redirected, "user.overlay.redirect", b"/usr/share/doc/foo") {
+            eprintln!(
+                "additive_layer_rejects_a_directory_whose_contents_stayed_below: \
+                 skipped (no xattr support)"
+            );
+            return;
+        }
+
+        // Nothing else here looks wrong: the directory is a plain addition at a
+        // path the lower rootfs does not have, and it really is empty. Only the
+        // note says its contents are elsewhere -- and a captured layer cannot
+        // carry them.
+        let error = validate_additive_layer(&upper, &lower)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("/usr/share/doc/foo-1.2"), "{error}");
+        assert!(error.contains("/usr/share/doc/foo'"), "{error}");
+    }
+
+    #[test]
+    fn a_relative_note_names_a_sibling() {
+        // The other spelling: a bare name is resolved against the redirected
+        // directory's own parent, not against the root.
+        let temp = tempdir().unwrap();
+        let (lower, upper) = redirect_case(&temp);
+        let redirected = upper.join("usr/share/doc/foo-1.2");
+        if !try_set_xattr(&redirected, "user.overlay.redirect", b"foo") {
+            eprintln!("a_relative_note_names_a_sibling: skipped (no xattr support)");
+            return;
+        }
+
+        let error = validate_additive_layer(&upper, &lower)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("/usr/share/doc/foo'"), "{error}");
+    }
+
+    #[test]
+    fn a_note_pointing_at_nothing_is_not_a_finding() {
+        // Symmetry with opaque, and the lesson behind it: judge what the marker
+        // hides, not that it exists. A note naming a path the lower rootfs does
+        // not have hides nothing, and refusing for it would repeat the mistake
+        // that failed identical builds on one machine and passed them on another.
+        let temp = tempdir().unwrap();
+        let (lower, upper) = redirect_case(&temp);
+        let redirected = upper.join("usr/share/doc/foo-1.2");
+        if !try_set_xattr(
+            &redirected,
+            "user.overlay.redirect",
+            b"/usr/share/doc/absent",
+        ) {
+            eprintln!("a_note_pointing_at_nothing_is_not_a_finding: skipped (no xattr support)");
+            return;
+        }
+
+        validate_additive_layer(&upper, &lower).unwrap();
+    }
+
+    #[test]
+    fn a_note_escaping_the_rootfs_is_ignored() {
+        // `..` cannot be resolved into the lower rootfs at all; treating an
+        // unresolvable note as a finding would be guessing.
+        let temp = tempdir().unwrap();
+        let (lower, upper) = redirect_case(&temp);
+        let redirected = upper.join("usr/share/doc/foo-1.2");
+        if !try_set_xattr(&redirected, "user.overlay.redirect", b"../../../etc") {
+            eprintln!("a_note_escaping_the_rootfs_is_ignored: skipped (no xattr support)");
+            return;
+        }
+
+        validate_additive_layer(&upper, &lower).unwrap();
+    }
+
+    #[test]
+    fn a_long_note_is_read_whole() {
+        // The value is a path, so it outgrows the small buffer the opaque check
+        // uses; read short, it would come back "absent" and the deepest
+        // redirects -- the ones worth catching -- would pass unnoticed.
+        let temp = tempdir().unwrap();
+        let deep: String = std::iter::repeat_n("nested", 20)
+            .collect::<Vec<_>>()
+            .join("/");
+        let lower = temp.path().join("lower");
+        let upper = temp.path().join("upper");
+        fs::create_dir_all(lower.join(&deep)).unwrap();
+        fs::create_dir_all(upper.join("moved")).unwrap();
+        let note = format!("/{deep}");
+        assert!(note.len() > 64, "the note must outgrow a small buffer");
+        if !try_set_xattr(
+            &upper.join("moved"),
+            "user.overlay.redirect",
+            note.as_bytes(),
+        ) {
+            eprintln!("a_long_note_is_read_whole: skipped (no xattr support)");
+            return;
+        }
+
+        let error = validate_additive_layer(&upper, &lower)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&deep), "{error}");
+    }
+
     #[test]
     fn additive_layer_and_a_real_overlay_agree_about_renamed_directories() {
         // The regression this guards: a build that only adds, but adds by
