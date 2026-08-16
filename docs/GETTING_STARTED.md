@@ -24,7 +24,7 @@ main archive and its checksum file, and verify it before unpacking. For example,
 for version 0.1.5:
 
 ```sh
-BOBR_VERSION=0.1.5
+BOBR_VERSION=0.1.8
 BOBR_TARGET=x86_64-unknown-linux-musl
 BOBR_ARCHIVE="bobr-v${BOBR_VERSION}-${BOBR_TARGET}.tar.xz"
 BOBR_RELEASE="https://github.com/aleksey-makarov/bobr/releases/download/v${BOBR_VERSION}"
