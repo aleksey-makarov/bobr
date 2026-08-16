@@ -74,8 +74,8 @@ links, which are denied workspace-wide.
 ## Building recipes
 
 There is no separate build driver for development. With the binaries on `PATH`,
-use `bin/bobr-build.sh` exactly as
-[Getting Started](./GETTING_STARTED.md#building-a-real-target) describes it.
+use `bin/bobr-fetch.sh` and then `bin/bobr-build.sh` exactly as
+[Getting Started](./GETTING_STARTED.md#building-a-real-target) describes them.
 
 One difference matters while editing recipes. Local sources are pinned by a
 `*.fsobj-hash` lock beside them, and `bin/bobr-fetch.sh` **checks** those locks

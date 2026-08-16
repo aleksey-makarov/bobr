@@ -9,7 +9,8 @@ to a **recipe** describing how to build it. There are two kinds of builder:
 
 - The `Source` builder uses no inputs: the object's content is fixed up front, so
   the recipe declares the `ObjectHash` to produce and, optionally, an **origin**
-  saying how to obtain it.
+  saying how to obtain it — which is what `bobr-fetch` reads when it fills the
+  store ahead of a build.
 - Every other builder (`Tree`, `Sandbox`, `Group`, …) builds its object from the
   recipe's **inputs**: the objects of other recipes it depends on.
 
@@ -44,8 +45,8 @@ when both miss does it produce the object, store it, and add both mappings.
 ## Glossary
 
 **builder** — A named component inside `bobr` that produces a recipe's object.
-The `Source` builder fetches it from an **origin**; the others (`Tree`,
-`Sandbox`, `Group`, …) build it from the recipe's inputs.
+The `Source` builder resolves it in the store, where `bobr-fetch` put it; the
+others (`Tree`, `Sandbox`, `Group`, …) build it from the recipe's inputs.
 
 **`BuildKey`** — A recipe's identity. For the `Source` builder it is the
 `ObjectHash`; for any other builder it is computed from the part of the recipe

@@ -80,6 +80,11 @@ A recipe for the `Source` builder may also omit `origin`. Then the object must
 already exist in the store under its `object_hash`, and `bobr` reuses it; if it
 does not, the source fails.
 
+That is the ordinary case in practice: `bobr-recipes` lowers build requests with
+no origins at all, because filling the store is `bobr-fetch`'s job and the build
+only builds. `bobr` still accepts an origin and obtains the object itself, which
+is what the rest of this section describes.
+
 A recipe for any other builder has this shape:
 
 ```json
