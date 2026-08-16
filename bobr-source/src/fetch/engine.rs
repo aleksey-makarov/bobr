@@ -2,15 +2,18 @@
 //!
 //! All sources start at once; what actually runs is governed by two layers of
 //! semaphores -- one per host, one per process -- so a saturated mirror stalls
-//! only its own queue while everyone else proceeds. The mirror walk, retry
-//! classification and backoff are the same ones the synchronous source path
-//! uses; only the transport around them is asynchronous.
+//! only its own queue while everyone else proceeds. Local sources are bounded
+//! by a third, separate one: they contend for a disk rather than for sockets.
+//! The mirror walk, retry classification and backoff are the same ones the
+//! synchronous source path uses; only the transport around them is
+//! asynchronous.
 
 use crate::fetch::oci;
 use crate::fetch::request::{FetchRequest, ResolvedLimits, SourceEntry};
 use crate::http::{
     self, HttpOrigin, HttpOriginError, HttpRetryPolicy, HttpTimeouts, Retry, UrlAttemptState,
 };
+use crate::origin::OriginContext;
 use bobr_core::{
     BuildLogEvent, BuildLogLevel, BuildLogSubject, BuildLogger, BuildRunLogger, BuildStatus,
     CancellationToken, ObjectHash, Run, Workspace,
@@ -34,8 +37,9 @@ pub struct Summary {
     pub downloaded: u64,
     /// Sources already present in the store; no network was touched for them.
     pub cache_hit: u64,
-    /// Sources with a `Path` origin, left to the build to materialize.
-    pub path_skipped: u64,
+    /// Sources materialized from a local path: no network was touched, but
+    /// they were read, hashed and imported like any other.
+    pub local: u64,
     /// Sources whose download produced a different object than the recipe
     /// declares: the placeholder cycle's payload, every real hash in one run.
     pub mismatched: Vec<Mismatch>,
@@ -73,6 +77,11 @@ struct Engine {
     limits: ResolvedLimits,
     global: Arc<Semaphore>,
     hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
+    /// Local materialization is bounded separately from the network: it
+    /// competes for a disk head, not for sockets, and letting a big image
+    /// download hold up a local copy (or the other way round) would be an
+    /// accident of sharing one number.
+    local: Arc<Semaphore>,
     cancellation: CancellationToken,
     cancel_rx: watch::Receiver<bool>,
     /// Held so `cancel_rx.changed()` cannot resolve by sender-drop; cancelling
@@ -129,6 +138,17 @@ impl Engine {
         };
         Ok((host_permit, global_permit))
     }
+
+    /// One permit for reading, hashing and copying a local source. Waiting is
+    /// interruptible, and counts as no attempt: nothing has been read yet.
+    async fn acquire_local_permit(&self) -> Result<OwnedSemaphorePermit, HttpOriginError> {
+        tokio::select! {
+            _ = self.until_cancelled() => Err(cancelled_error()),
+            permit = self.local.clone().acquire_owned() => {
+                Ok(permit.expect("local semaphore closed"))
+            }
+        }
+    }
 }
 
 fn cancelled_error() -> HttpOriginError {
@@ -157,6 +177,7 @@ pub async fn run_fetch(request: FetchRequest) -> Result<Summary, String> {
         logger: logger.clone(),
         client,
         global: Arc::new(Semaphore::new(limits.max_connections as usize)),
+        local: Arc::new(Semaphore::new(limits.max_local_jobs as usize)),
         limits,
         hosts: Mutex::new(HashMap::new()),
         cancellation: CancellationToken::new(),
@@ -197,7 +218,7 @@ pub async fn run_fetch(request: FetchRequest) -> Result<Summary, String> {
         match outcome {
             SourceOutcome::Downloaded => summary.downloaded += 1,
             SourceOutcome::CacheHit => summary.cache_hit += 1,
-            SourceOutcome::PathSkipped => summary.path_skipped += 1,
+            SourceOutcome::Local => summary.local += 1,
             SourceOutcome::Mismatched(mismatch) => summary.mismatched.push(mismatch),
             SourceOutcome::Failed { name, message } => summary.failed.push((name, message)),
         }
@@ -213,7 +234,7 @@ pub async fn run_fetch(request: FetchRequest) -> Result<Summary, String> {
 enum SourceOutcome {
     Downloaded,
     CacheHit,
-    PathSkipped,
+    Local,
     Mismatched(Mismatch),
     Failed { name: String, message: String },
 }
@@ -285,22 +306,6 @@ async fn process_source_inner(
         .ok_or_else(|| format!("source '{}': origin.tag: expected string", entry.name))?
         .to_string();
 
-    if tag == "Path" {
-        // Not handled yet (the build materializes these itself); say so once
-        // per source rather than failing a request the recipes legitimately
-        // produce.
-        engine.logger.log_run_event(run_event(
-            BuildLogLevel::Info,
-            BuildStatus::Done,
-            format!(
-                "source '{}' has a Path origin; left to the build",
-                entry.name
-            ),
-            None,
-        ));
-        return Ok(SourceOutcome::PathSkipped);
-    }
-
     if engine.is_cancelled() {
         return Err("cancelled before starting".to_string());
     }
@@ -347,6 +352,7 @@ async fn process_source_inner(
             fetch_http_source(engine, &origin, &workspace, &subject_logger).await
         }
         "OciRegistry" => fetch_oci_source(engine, &origin_value, &workspace, &subject_logger).await,
+        "Path" => fetch_path_source(engine, &origin_value, &workspace, &subject_logger).await,
         other => Err(format!(
             "source '{}': origin tag '{other}' is not supported by bobr-fetch",
             entry.name
@@ -385,11 +391,22 @@ async fn process_source_inner(
                 raw_log_path: None,
                 details: Map::new(),
             });
-            Ok(SourceOutcome::Downloaded)
+            Ok(if tag == "Path" {
+                SourceOutcome::Local
+            } else {
+                SourceOutcome::Downloaded
+            })
         }
         SourceImportOutcome::Mismatched { actual_hash } => {
+            // Where the content came from, for the origins where that is a
+            // place someone can go and look: a local source that hashes
+            // differently is a file on this disk, and naming it saves the
+            // reader a trip through the recipes to find out which.
+            let from = origin_location(&origin_value)
+                .map(|location| format!(" (from {location})"))
+                .unwrap_or_default();
             let message = format!(
-                "source '{}' materialized unexpected object hash: expected {}, got {}",
+                "source '{}'{from} materialized unexpected object hash: expected {}, got {}",
                 entry.name, declared, actual_hash
             );
             log_subject_error(&subject_logger, &message);
@@ -785,6 +802,51 @@ async fn fetch_oci_source(
 }
 
 // ---------------------------------------------------------------------------
+// Path
+// ---------------------------------------------------------------------------
+
+/// Copies (or unpacks) a local path into the workspace, using the same origin
+/// code the build uses. There is nothing here worth an asynchronous rewrite --
+/// no protocol, no retries, no server to be polite to -- so the work goes to a
+/// blocking thread as it stands.
+///
+/// It is bounded all the same. Fifty-five local sources would otherwise be read
+/// and hashed at once, which on a spindle turns sequential reads into seeks and
+/// finishes slower than doing them in turn; `max_local_jobs` is that bound, and
+/// it is deliberately not the connection limit -- one is a disk, the other a
+/// network, and they contend for nothing in common.
+async fn fetch_path_source(
+    engine: &Arc<Engine>,
+    origin_value: &Value,
+    workspace: &Workspace,
+    logger: &Arc<dyn BuildLogger>,
+) -> Result<PathBuf, String> {
+    let parsed = crate::origins::parse_origin_value(origin_value.clone(), "origin")
+        .map_err(|error| error.to_string())?;
+    let _permit = engine
+        .acquire_local_permit()
+        .await
+        .map_err(|error| error.to_string())?;
+    // Enough to move the subject out of the queue in the live log. No byte
+    // counts: this is a disk, and adding it to a figure read as network
+    // throughput would misreport both.
+    log_subject_host(logger, LOCAL_HOST, "materializing local source");
+
+    let temp_root = workspace.temp_dir().to_path_buf();
+    let engine = engine.clone();
+    let logger = logger.clone();
+    run_blocking(move || {
+        let cx = OriginContext {
+            temp_root: &temp_root,
+            logger: logger.as_ref(),
+            cancellation: &engine.cancellation,
+        };
+        parsed.materialize(&cx)
+    })
+    .await?
+}
+
+// ---------------------------------------------------------------------------
 // plumbing
 // ---------------------------------------------------------------------------
 
@@ -862,7 +924,25 @@ fn intended_host(origin: &Value) -> String {
             .and_then(Value::as_str)
             .map(oci::registry_host)
             .unwrap_or_else(|| "?".to_string()),
+        Some("Path") => LOCAL_HOST.to_string(),
         _ => "?".to_string(),
+    }
+}
+
+/// What a local source is filed under in the live log, where every other
+/// source is filed under the host it came from.
+const LOCAL_HOST: &str = "local";
+
+/// Where a source's content came from, when that is a place worth naming in an
+/// error. A mirror list is not one -- the URL that answered is already in the
+/// log -- so only local paths qualify.
+fn origin_location(origin: &Value) -> Option<String> {
+    match origin.get("tag").and_then(Value::as_str) {
+        Some("Path") => origin
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|path| format!("'{path}'")),
+        _ => None,
     }
 }
 
@@ -881,6 +961,20 @@ fn log_subject(logger: &Arc<dyn BuildLogger>, status: BuildStatus, message: &str
         object_hash: None,
         raw_log_path: None,
         details: Map::new(),
+    });
+}
+
+/// A subject milestone that names where the work is happening, which is what
+/// moves it from queued to active in the live log.
+fn log_subject_host(logger: &Arc<dyn BuildLogger>, host: &str, message: &str) {
+    logger.log_event(BuildLogEvent {
+        level: BuildLogLevel::Info,
+        status: BuildStatus::Running,
+        op: Some("fetch".to_string()),
+        message: message.to_string(),
+        object_hash: None,
+        raw_log_path: None,
+        details: host_details(host),
     });
 }
 
@@ -958,8 +1052,8 @@ fn log_run_finished(logger: &Arc<BuildRunLogger>, summary: &Summary) {
         "failed"
     };
     let mut message = format!(
-        "fetch finished: {} downloaded · {} already present · {} left to the build",
-        summary.downloaded, summary.cache_hit, summary.path_skipped
+        "fetch finished: {} downloaded · {} local · {} already present",
+        summary.downloaded, summary.local, summary.cache_hit
     );
     // The logger has been counting retries by host all along (the retry
     // milestones carry the host as a field); a run that only succeeded on
@@ -1004,7 +1098,7 @@ fn log_run_finished(logger: &Arc<BuildRunLogger>, summary: &Summary) {
         "result": result,
         "downloaded": summary.downloaded,
         "cache_hit": summary.cache_hit,
-        "path_skipped": summary.path_skipped,
+        "local": summary.local,
         "failed": summary
             .failed
             .iter()
@@ -1107,9 +1201,15 @@ mod tests {
 
     /// A store and run directories on one filesystem, plus a request skeleton.
     fn request_in(temp: &TempDir, sources: Vec<SourceEntry>) -> FetchRequest {
+        request_in_run(temp, "run", sources)
+    }
+
+    /// A second run against the same store needs its own directories: a run id
+    /// is claimed by creating them, and claiming one twice is what that is for.
+    fn request_in_run(temp: &TempDir, run: &str, sources: Vec<SourceEntry>) -> FetchRequest {
         let store = temp.path().join("store");
-        let logs = temp.path().join("logs/run");
-        let work = temp.path().join("work/run");
+        let logs = temp.path().join("logs").join(run);
+        let work = temp.path().join("work").join(run);
         fs::create_dir_all(&store).unwrap();
         fs::create_dir_all(&logs).unwrap();
         fs::create_dir_all(&work).unwrap();
@@ -1314,9 +1414,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_path_origin_is_left_to_the_build() {
+    async fn a_local_source_is_copied_in_and_counted_apart_from_downloads() {
         let temp = tempfile::tempdir().unwrap();
-        let declared = declared_for(b"never fetched");
+        let payload = b"#!/bin/sh\nexit 0\n".to_vec();
+        let script = temp.path().join("build.sh");
+        fs::write(&script, &payload).unwrap();
+        let declared = declared_for(&payload);
+
         let request = request_in(
             &temp,
             vec![SourceEntry {
@@ -1324,12 +1428,84 @@ mod tests {
                 // Real lowerings carry a trailing newline here: lock files are
                 // imported as text. The fetcher must trim, as the build does.
                 object_hash: format!("{declared}\n"),
-                origin: Some(json!({ "tag": "Path", "path": "scripts/build.sh" })),
+                origin: Some(json!({ "tag": "Path", "path": script.to_str().unwrap() })),
             }],
         );
+        let store = request.store.clone();
         let summary = run_fetch(request).await.unwrap();
+
         assert!(summary.is_success(), "{summary:?}");
-        assert_eq!(summary.path_skipped, 1);
+        // Read off a disk, not off a network: counted on its own, so that
+        // "downloaded" keeps meaning what it says.
+        assert_eq!(summary.local, 1);
+        assert_eq!(summary.downloaded, 0);
+        assert!(
+            store.join("objects").join(declared.to_string()).exists(),
+            "the local source should be in the store"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_local_source_already_in_the_store_is_not_read_again() {
+        // The declared hash is the identity, and the store either has that
+        // object or it does not; the file on disk is one way of obtaining it,
+        // not the authority on what it should be. So a warm store means the
+        // path is never even opened -- which is also why this run succeeds
+        // with the file deleted.
+        let temp = tempfile::tempdir().unwrap();
+        let payload = b"#!/bin/sh\nexit 0\n".to_vec();
+        let script = temp.path().join("build.sh");
+        fs::write(&script, &payload).unwrap();
+        let declared = declared_for(&payload);
+
+        let source = || SourceEntry {
+            name: "recipe-script".to_string(),
+            object_hash: declared.to_string(),
+            origin: Some(json!({ "tag": "Path", "path": script.to_str().unwrap() })),
+        };
+        assert_eq!(
+            run_fetch(request_in_run(&temp, "first", vec![source()]))
+                .await
+                .unwrap()
+                .local,
+            1
+        );
+
+        fs::remove_file(&script).unwrap();
+        let again = request_in_run(&temp, "second", vec![source()]);
+        let summary = run_fetch(again).await.unwrap();
+        assert!(summary.is_success(), "{summary:?}");
+        assert_eq!(summary.cache_hit, 1);
+        assert_eq!(summary.local, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_local_source_that_hashes_differently_names_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("build.sh");
+        fs::write(&script, b"edited since the lock was written\n").unwrap();
+        let declared = declared_for(b"what the lock says\n");
+
+        let request = request_in(
+            &temp,
+            vec![SourceEntry {
+                name: "recipe-script".to_string(),
+                object_hash: declared.to_string(),
+                origin: Some(json!({ "tag": "Path", "path": script.to_str().unwrap() })),
+            }],
+        );
+        let logs = request.logs.clone();
+        let summary = run_fetch(request).await.unwrap();
+
+        assert!(!summary.is_success(), "{summary:?}");
+        assert_eq!(summary.mismatched.len(), 1);
+        // Which file: the reader should not have to go through the recipes to
+        // find out what was hashed.
+        let events = fs::read_to_string(logs.join("events.jsonl")).unwrap();
+        assert!(
+            events.contains(script.to_str().unwrap()),
+            "the failure should name the path it read: {events}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

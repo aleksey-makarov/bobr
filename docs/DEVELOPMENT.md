@@ -78,17 +78,18 @@ use `bin/bobr-build.sh` exactly as
 [Getting Started](./GETTING_STARTED.md#building-a-real-target) describes it.
 
 One difference matters while editing recipes. Local sources are pinned by a
-`*.fsobj-hash` lock beside them, and the driver **checks** those locks rather
-than rewriting them: a stale lock would otherwise build the old content of a file
-you just edited, silently, since the hash it still declares names an object the
-store already has. So after editing a patch, a build script, or anything else
-under a local `Source`, refresh the locks yourself:
+`*.fsobj-hash` lock beside them, and `bin/bobr-fetch.sh` **checks** those locks
+rather than rewriting them: a stale lock would otherwise build the old content
+of a file you just edited, silently, since the hash it still declares names an
+object the store already has. The check lives with the fetch because that is the
+phase that puts local sources into the store. So after editing a patch, a build
+script, or anything else under a local `Source`, refresh the locks yourself:
 
 ```sh
 bin/bobr-update-fsobj-hashes.sh
 ```
 
-The build tells you when this is needed, and names the tool.
+The fetch tells you when this is needed, and names the tool.
 
 ## Before tagging a release
 
@@ -152,7 +153,7 @@ In order, the script:
 6. repoints the `bobr-store` symlink at the new store — **only if the build
    succeeded**, so a failed rebuild leaves you with the last good one.
 
-The hash locks are left alone: `bin/bobr-build.sh` checks them and refuses on a
+The hash locks are left alone: `bin/bobr-fetch.sh` checks them and refuses on a
 stale one, which is what should happen to a checkout that says one thing and
 contains another.
 

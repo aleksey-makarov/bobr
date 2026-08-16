@@ -24,6 +24,17 @@ pub(crate) const DEFAULT_PER_HOST: u32 = 6;
 /// Ceiling for the derived total-connection limit.
 pub(crate) const MAX_CONNECTIONS_CAP: u32 = 64;
 
+/// How many local sources are read, hashed and copied at once, unless the
+/// request says otherwise.
+///
+/// Unlike the connection limits this one is about a disk, and no default can be
+/// right for every disk: a spindle wants one (concurrent walks turn sequential
+/// reads into seeks and finish slower than doing them in turn), an NVMe wants
+/// many. Four is the compromise -- enough to keep hashing busy while the next
+/// read is in flight on anything solid-state, few enough that a spindle
+/// degrades gracefully rather than thrashing.
+pub(crate) const DEFAULT_MAX_LOCAL_JOBS: u32 = 4;
+
 /// A whole fetch request, as lowered from the recipes.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,6 +75,10 @@ pub struct Limits {
     pub per_host: BTreeMap<String, u32>,
     /// Cap on downloads in flight across all hosts.
     pub max_connections: Option<u32>,
+    /// Cap on local sources being materialized at once. Nothing to do with the
+    /// connection limits -- this one bounds a disk, not a network -- so it gets
+    /// its own number rather than sharing theirs.
+    pub max_local_jobs: Option<u32>,
 }
 
 /// One source to ensure present: its name, the hash the recipe declares, and
@@ -103,6 +118,7 @@ pub(crate) struct ResolvedLimits {
     pub(crate) per_host_default: u32,
     pub(crate) per_host: BTreeMap<String, u32>,
     pub(crate) max_connections: u32,
+    pub(crate) max_local_jobs: u32,
 }
 
 impl ResolvedLimits {
@@ -113,6 +129,10 @@ impl ResolvedLimits {
             max_connections: limits
                 .max_connections
                 .unwrap_or_else(|| default_max_connections(nofile_limit()))
+                .max(1),
+            max_local_jobs: limits
+                .max_local_jobs
+                .unwrap_or(DEFAULT_MAX_LOCAL_JOBS)
                 .max(1),
         }
     }
@@ -209,12 +229,28 @@ mod tests {
             per_host_default: None,
             per_host: BTreeMap::from([("ftp.gnu.org".to_string(), 3)]),
             max_connections: Some(10),
+            max_local_jobs: None,
         };
         let resolved = ResolvedLimits::from_request(&limits);
         assert_eq!(resolved.per_host_default, DEFAULT_PER_HOST);
         assert_eq!(resolved.for_host("ftp.gnu.org"), 3);
         assert_eq!(resolved.for_host("crates.io"), DEFAULT_PER_HOST);
         assert_eq!(resolved.max_connections, 10);
+        assert_eq!(resolved.max_local_jobs, DEFAULT_MAX_LOCAL_JOBS);
+    }
+
+    #[test]
+    fn local_jobs_are_taken_from_the_request_when_it_says() {
+        // Optional, and absent from what the recipes lower today: a request
+        // written before this field existed still parses, and gets the default.
+        let request = FetchRequest::parse_json(
+            br#"{"schema":"bobr-fetch-request-v1","store":"/s","logs":"/l","work":"/w","run_id":"r","sources":[],"limits":{"max_local_jobs":1}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ResolvedLimits::from_request(&request.limits).max_local_jobs,
+            1
+        );
     }
 
     #[test]
