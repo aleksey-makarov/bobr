@@ -1763,7 +1763,11 @@ fn lchown_if_needed(path: &Path, uid: u32, gid: u32) -> Result<(), StoreError> {
 /// tree happened to be laid down.
 fn set_canonical_times(path: &Path) -> Result<(), StoreError> {
     let stamp = libc::timespec {
-        tv_sec: bobr_core::CANONICAL_TIMESTAMP as libc::time_t,
+        // Cast to the field's own type rather than naming `libc::time_t`: that
+        // alias is deprecated on musl, where the type is widening to 64 bits,
+        // and the struct is the authority on what it holds anyway. The stamp
+        // fits in 32 bits either way.
+        tv_sec: bobr_core::CANONICAL_TIMESTAMP as _,
         tv_nsec: 0,
     };
     let times = [stamp, stamp];
