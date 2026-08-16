@@ -7,6 +7,7 @@
 //! request (see [`request::FETCH_REQUEST_SCHEMA`]).
 
 mod engine;
+mod oci;
 mod request;
 
 pub use engine::{Mismatch, Summary, run_fetch};

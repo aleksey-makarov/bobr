@@ -6,11 +6,11 @@
 //! classification and backoff are the same ones the synchronous source path
 //! uses; only the transport around them is asynchronous.
 
+use crate::fetch::oci;
 use crate::fetch::request::{FetchRequest, ResolvedLimits, SourceEntry};
 use crate::http::{
     self, HttpOrigin, HttpOriginError, HttpRetryPolicy, HttpTimeouts, Retry, UrlAttemptState,
 };
-use crate::origin::OriginContext;
 use bobr_core::{
     BuildLogEvent, BuildLogLevel, BuildLogSubject, BuildLogger, BuildRunLogger, BuildStatus,
     CancellationToken, ObjectHash, Run, Workspace,
@@ -709,7 +709,7 @@ async fn download_once(
 /// "error decoding response body", which reads as a payload problem while the
 /// cause underneath is a timeout or a reset -- exactly the part a diagnosis
 /// needs.
-fn error_with_causes(error: &reqwest::Error) -> String {
+pub(super) fn error_with_causes(error: &reqwest::Error) -> String {
     let mut text = error.to_string();
     let mut source = std::error::Error::source(error);
     while let Some(cause) = source {
@@ -744,42 +744,44 @@ fn http_client(timeouts: HttpTimeouts) -> Result<reqwest::Client, String> {
 // OciRegistry
 // ---------------------------------------------------------------------------
 
-/// OCI is fetched by the existing synchronous client on a blocking thread: the
-/// protocol part (bearer tokens, manifest selection, layer walk) is not worth
-/// rewriting for this step. The permits are taken for the registry host and
-/// held for the whole pull -- coarser than per-blob, and accepted as such.
+/// An image is one source, and the permits are taken for the registry host and
+/// held for the whole pull -- coarser than per-blob, which costs nothing while
+/// the blobs are fetched one after another.
+///
+/// Cancelling is dropping the pull: the future stops wherever it is, mid-layer
+/// if that is where it was. That is the whole reason this path is asynchronous
+/// -- a blocking pull could only be waited out.
 async fn fetch_oci_source(
     engine: &Arc<Engine>,
     origin_value: &Value,
     workspace: &Workspace,
     logger: &Arc<dyn BuildLogger>,
 ) -> Result<PathBuf, String> {
-    let image_host = origin_value
-        .get("image")
-        .and_then(Value::as_str)
-        .and_then(|image| image.split('/').next())
-        .unwrap_or("oci-registry")
-        .to_string();
-    let parsed = crate::origins::parse_origin_value(origin_value.clone(), "origin")
-        .map_err(|error| error.to_string())?;
-
+    let origin = oci::parse_oci_origin(origin_value, "origin")?;
     let _permits = engine
-        .acquire_permits(&image_host)
+        .acquire_permits(&origin.host())
         .await
         .map_err(|error| error.to_string())?;
 
-    let temp_root = workspace.temp_dir().to_path_buf();
-    let engine = engine.clone();
-    let logger = logger.clone();
-    run_blocking(move || {
-        let cx = OriginContext {
-            temp_root: &temp_root,
-            logger: logger.as_ref(),
-            cancellation: &engine.cancellation,
-        };
-        parsed.materialize(&cx)
-    })
-    .await?
+    let pull = oci::materialize(
+        &engine.client,
+        logger,
+        HttpRetryPolicy::production(),
+        &origin,
+        workspace.temp_dir(),
+    );
+    let staged = tokio::select! {
+        _ = engine.until_cancelled() => Err("cancelled".to_string()),
+        staged = pull => staged,
+    };
+    if staged.is_err() {
+        // What a dropped pull leaves behind is a partial layer, and a mirror
+        // walk deletes its half-written file for the same reason: a cancelled
+        // run should not leave hundreds of megabytes lying in the work
+        // directory for someone to identify later.
+        oci::discard(workspace.temp_dir());
+    }
+    staged
 }
 
 // ---------------------------------------------------------------------------
@@ -858,9 +860,8 @@ fn intended_host(origin: &Value) -> String {
         Some("OciRegistry") => origin
             .get("image")
             .and_then(Value::as_str)
-            .and_then(|image| image.split('/').next())
-            .unwrap_or("oci-registry")
-            .to_string(),
+            .map(oci::registry_host)
+            .unwrap_or_else(|| "?".to_string()),
         _ => "?".to_string(),
     }
 }

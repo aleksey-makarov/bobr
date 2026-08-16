@@ -144,6 +144,19 @@ impl HttpRetryPolicy {
         }
     }
 
+    /// The production policy with the waiting taken out: the same number of
+    /// attempts, none of the seconds. For tests about what is retried, which
+    /// should not pay for how long the real thing pauses between tries.
+    #[cfg(test)]
+    pub(crate) fn instant() -> Self {
+        Self {
+            base_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            jitter: 0.0,
+            ..Self::production()
+        }
+    }
+
     /// Delay before attempt `attempt` (1-based), doubling from the base and
     /// capped. `retry_after` from the server wins when it asked for longer.
     ///
