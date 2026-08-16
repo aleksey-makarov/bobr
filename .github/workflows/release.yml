@@ -73,6 +73,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends musl-tools
 
+      # Same package list as tools/release-check.sh, which runs this whole path
+      # locally before a tag is pushed. A binary missing here is not caught by
+      # any test -- it surfaces in the packaging step below, after the tag.
       - name: Build static x86_64 release
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
@@ -81,7 +84,8 @@ jobs:
             --target x86_64-unknown-linux-musl \
             -p bobr-build \
             -p fsobj-hash \
-            -p bobr-sandbox-launcher
+            -p bobr-sandbox-launcher \
+            -p bobr-source --bins
 
       - name: Verify and package
         run: |

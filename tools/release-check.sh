@@ -56,6 +56,36 @@ case "${host_target}" in
   *) other_target="x86_64-unknown-linux-musl" ;;
 esac
 
+# The main archive wants four binaries, and two places name the packages that
+# build them: this script and the release workflow. They drifted once -- a
+# package was added here and not there, so this stayed green while a real
+# release failed at packaging, which is after the tag has been pushed. Nothing
+# else compares them, so this does, before spending minutes on the checks.
+main_packages=(bobr-build fsobj-hash bobr-sandbox-launcher bobr-source)
+workflow="${repo}/.github/workflows/release.yml"
+workflow_step="$(
+  awk '
+    /^ +- name: Build static x86_64 release$/ { in_step = 1; next }
+    in_step && /^ +- name: / { exit }
+    in_step { print }
+  ' "${workflow}"
+)"
+# An empty extraction means the step was renamed or restructured, not that it
+# agrees: silently passing is the failure this check exists to remove.
+[ -n "${workflow_step}" ] \
+  || die "cannot find the 'Build static x86_64 release' step in ${workflow}; if it was renamed, update this script"
+workflow_packages="$(
+  grep -oE -- '-p +[A-Za-z0-9_-]+' <<<"${workflow_step}" | awk '{ print $2 }' | sort -u
+)"
+expected_packages="$(printf '%s\n' "${main_packages[@]}" | sort -u)"
+if [ "${workflow_packages}" != "${expected_packages}" ]; then
+  die "$(printf 'the release workflow builds a different package set than this script.\n  workflow (%s): %s\n  here: %s' \
+    "${workflow}" "$(tr '\n' ' ' <<<"${workflow_packages}")" "$(tr '\n' ' ' <<<"${expected_packages}")")"
+fi
+# `-p bobr-source` alone builds the crate as a library; its binaries need this.
+grep -q -- '--bins' <<<"${workflow_step}" \
+  || die "the release workflow's build step has no --bins, so it builds no binaries for packages that are also libraries"
+
 # Reproducible archives: the workflow derives this from the tagged commit, so
 # use the same source here rather than the current time.
 source_date_epoch="$(git -C "${repo}" log -1 --format=%ct)"
@@ -68,8 +98,11 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 
 step "main archive, ${host_target}"
-cargo build --release --locked --target "${host_target}" \
-  -p bobr-build -p fsobj-hash -p bobr-sandbox-launcher -p bobr-source --bins
+package_flags=()
+for package in "${main_packages[@]}"; do
+  package_flags+=(-p "${package}")
+done
+cargo build --release --locked --target "${host_target}" "${package_flags[@]}" --bins
 .github/scripts/package-release.sh main "${tag}" "${host_target}" \
   "${source_date_epoch}" "${out}"
 

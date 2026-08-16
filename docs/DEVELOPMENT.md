@@ -41,7 +41,7 @@ of compiling, and so that a failed build never replaces working binaries:
 5. `cargo clippy --workspace --all-targets`
 6. `cargo test --workspace --all-features`
 7. `cargo doc --workspace --no-deps`
-8. install `bobr`, `fsobj-hash`, and `bobr-sandbox-launcher`
+8. install `bobr`, `bobr-fetch`, `fsobj-hash`, and `bobr-sandbox-launcher`
 
 `--quick` keeps only the build and the install, for when you are iterating and
 will run the checks before committing. `--debug` installs debug binaries; the
