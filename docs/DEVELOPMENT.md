@@ -115,30 +115,49 @@ at all.
 
 ## Rebuilding the world
 
-`tools/dev/bobr-rebuild-world.sh`, in the recipes repository, rebuilds
-everything from scratch, into a store that has never been written to. Use it to
-prove a build works from nothing — a cached store can hide a recipe that no
-longer builds, because the object it would produce is already there.
+`tools/bobr-rebuild-world.sh`, in the recipes repository, rebuilds everything
+from scratch, into a store that has never been written to. Use it to prove a
+build works from nothing — a cached store can hide a recipe that no longer
+builds, because the object it would produce is already there.
 
 ```sh
-tools/dev/bobr-rebuild-world.sh [--no-pull] [--jobs N] [TARGET]
+tools/bobr-rebuild-world.sh [--local]
 ```
 
-`TARGET` defaults to `test_all`. In order, the script:
+The one flag says where the binaries come from. With `--local` they are built
+here from source: the engine is pulled if this workspace has a checkout and
+cloned from `potato:/mnt/git/bobr.git` if it does not, then installed through
+`tools/build-dev.sh --quick`. Without it they come from the latest published
+release, which is what the Hetzner builder does — the tag is resolved to its
+commit, the archive checked against `SHA256SUMS`, and the download skipped
+entirely when that release is already installed. Everything else is the same
+either way, so a store built on one machine is comparable with a store built on
+the other.
 
-1. pulls both repositories (`--no-pull` builds what is checked out instead);
-2. installs the binaries through the engine's `tools/build-dev.sh --quick`;
-3. creates `<workspace>/bobr-store.<YYMMDDhhmmss>` and writes a build profile
-   inside it naming that store and the target;
-4. **seeds source objects** from the previous store by hardlink, so the same
+In order, the script:
+
+1. pulls the recipes, and obtains the binaries as above;
+2. creates `<workspace>/bobr-store.<YYMMDDhhmmss>` and copies
+   `bobr.ncl.example` into it as the build profile, with its store pointed at
+   the new one — a rebuild goes through the same settings a reader of the
+   recipes would get, not through a private file that could drift from them;
+3. **seeds source objects** from the previous store by hardlink, so the same
    tarballs are not downloaded again — sources are content-addressed, so a
    hardlink is as good as a fetch;
-5. refreshes the hash locks, then builds through `bin/bobr-build.sh`;
+4. fetches the remaining sources through `bin/bobr-fetch.sh`, and stops there if
+   that fails: a missing source, or one whose content does not match what the
+   recipes declare, is a question worth answering before it is buried under a
+   build failure somewhere else;
+5. builds through `bin/bobr-build.sh`;
 6. repoints the `bobr-store` symlink at the new store — **only if the build
    succeeded**, so a failed rebuild leaves you with the last good one.
 
+The hash locks are left alone: `bin/bobr-build.sh` checks them and refuses on a
+stale one, which is what should happen to a checkout that says one thing and
+contains another.
+
 Beside the store it records what produced it: `hashes.txt` with both commits,
-`request.json` with the lowered request, `bobr-rebuild-world.log` with the
+`request.json` with the lowered fetch request, `bobr-rebuild-world.log` with the
 per-phase timings, and `host-stats.log` with load and memory samples taken
 around each phase.
 
