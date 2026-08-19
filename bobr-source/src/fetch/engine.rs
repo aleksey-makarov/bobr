@@ -1043,6 +1043,17 @@ fn log_run_started(logger: &Arc<BuildRunLogger>, sources: usize, limits: &Resolv
     });
 }
 
+/// `name xN`, most first, ties by name so a run reads the same twice.
+fn by_count(counts: &std::collections::BTreeMap<String, u64>) -> String {
+    let mut entries: Vec<_> = counts.iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    entries
+        .iter()
+        .map(|(name, count)| format!("{name} x{count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn log_run_finished(logger: &Arc<BuildRunLogger>, summary: &Summary) {
     let result = if summary.cancelled {
         "cancelled"
@@ -1059,16 +1070,20 @@ fn log_run_finished(logger: &Arc<BuildRunLogger>, summary: &Summary) {
     // milestones carry the host as a field); a run that only succeeded on
     // second tries should not read like one that never stumbled.
     let retries = logger.download_retries();
+    let reasons = logger.download_retry_reasons();
     if !retries.is_empty() {
         let total: u64 = retries.values().sum();
-        let mut hosts: Vec<_> = retries.iter().collect();
-        hosts.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-        let by_host = hosts
-            .iter()
-            .map(|(host, count)| format!("{host} x{count}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        message.push_str(&format!(" · {total} download retries ({by_host})"));
+        // Reasons before hosts: the host list is long by nature -- a
+        // from-scratch fetch touches a hundred of them -- and by the time the
+        // reader has walked it the shape of the run is lost. What was wrong is
+        // the shorter and more useful half. A resolver failing on the fetching
+        // machine and one host refusing to serve read alike as a count, and
+        // want opposite fixes.
+        message.push_str(&format!(
+            " · {total} download retries ({}; {})",
+            by_count(&reasons),
+            by_count(&retries)
+        ));
     }
     if !summary.failed.is_empty() {
         message.push_str(&format!(" · {} failed:", summary.failed.len()));
@@ -1112,6 +1127,7 @@ fn log_run_finished(logger: &Arc<BuildRunLogger>, summary: &Summary) {
         "logging_errors": logger.logging_errors(),
         "download_retries": retries.values().sum::<u64>(),
         "download_retries_by_host": retries,
+        "download_retries_by_reason": reasons,
     });
     let Value::Object(details) = details else {
         unreachable!()
@@ -1383,13 +1399,45 @@ mod tests {
             .find(|event| event["status"] == "run-finished")
             .expect("the run reported its end");
         assert_eq!(finished["level"], "warn", "{finished}");
-        assert!(
-            finished["message"]
-                .as_str()
-                .unwrap()
-                .contains("download retries"),
-            "{finished}"
+        let message = finished["message"].as_str().unwrap();
+        assert!(message.contains("download retries"), "{finished}");
+        // What was wrong, not only how often: a 503 is the host refusing, and
+        // that reads differently from a run whose retries were all DNS.
+        assert!(message.contains("http 5xx x1"), "{finished}");
+        assert_eq!(
+            finished["details"]["download_retries_by_reason"]["http 5xx"],
+            1
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retries_of_different_kinds_are_counted_apart() {
+        // A host that refuses and a name that will not resolve are one number
+        // in the old summary and two problems in reality: one is answered by
+        // asking that host for less, the other by fixing the resolver on the
+        // machine doing the fetching.
+        let payload = b"eventually\n".to_vec();
+        let declared = declared_for(&payload);
+        let (url, _, handle) = spawn_server(1, "HTTP/1.1 503 Service Unavailable", payload.clone());
+        // A name that cannot resolve, tried before the mirror that works.
+        let dead = "http://host.invalid.test/src.blob".to_string();
+
+        let temp = tempfile::tempdir().unwrap();
+        let request = request_in(&temp, vec![http_source("mixed", declared, &[&dead, &url])]);
+        let logs = request.logs.clone();
+        let summary = run_fetch(request).await.unwrap();
+        handle.join().unwrap();
+        assert!(summary.is_success(), "{summary:?}");
+
+        let events = fs::read_to_string(logs.join("events.jsonl")).unwrap();
+        let finished: Value = events
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|event| event["status"] == "run-finished")
+            .expect("the run reported its end");
+        let reasons = &finished["details"]["download_retries_by_reason"];
+        assert_eq!(reasons["http 5xx"], 1, "{finished}");
+        assert!(reasons["dns"].as_u64().unwrap_or(0) >= 1, "{finished}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

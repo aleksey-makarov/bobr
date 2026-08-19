@@ -629,11 +629,48 @@ pub(crate) fn url_host(url: &str) -> &str {
     host.split(':').next().unwrap_or(host)
 }
 
+/// What kind of failure a retry is answering, in one word.
+///
+/// Derived from the message because that is where it is: the transport reports
+/// a resolver failure and a reset connection through the same error type, and
+/// the difference is in the cause chain. It matters to whoever reads the
+/// summary -- a run whose retries are all DNS has a resolver problem on the
+/// machine doing the fetching, and one whose retries are 5xx from a single
+/// host is asking that host for more than it will do. Those want opposite
+/// fixes, and a bare count cannot tell them apart.
+pub(crate) fn retry_reason(error: &str) -> &'static str {
+    let text = error.to_ascii_lowercase();
+    // Order matters: a resolver failure arrives wrapped in a connect error, so
+    // it has to be recognized before anything about connecting.
+    if text.contains("dns error") || text.contains("failed to lookup address") {
+        "dns"
+    } else if text.contains("http 429") {
+        "http 429"
+    } else if text.contains("http 5") {
+        "http 5xx"
+    } else if text.contains("timed out") || text.contains("timeout") {
+        "timeout"
+    } else if text.contains("connection reset")
+        || text.contains("connection closed")
+        || text.contains("connection refused")
+        || text.contains("broken pipe")
+    {
+        "connection"
+    } else if text.contains("incomplete message")
+        || text.contains("unexpected end of file")
+        || text.contains("error decoding response body")
+    {
+        "truncated body"
+    } else {
+        "other"
+    }
+}
+
 /// The sentence and the fields of a "retrying" milestone.
 ///
 /// Shared so the synchronous path and the fetcher say the same thing, and so
-/// the host keeps travelling as a field: the run summary counts retries per
-/// host from it, and counting should not mean parsing prose written for a
+/// the host and the reason keep travelling as fields: the run summary counts
+/// retries from them, and counting should not mean parsing prose written for a
 /// person.
 pub(crate) fn retry_notice(
     url: &str,
@@ -646,6 +683,10 @@ pub(crate) fn retry_notice(
     details.insert(
         "retry_host".to_string(),
         Value::String(url_host(url).to_string()),
+    );
+    details.insert(
+        "retry_reason".to_string(),
+        Value::String(retry_reason(error).to_string()),
     );
     details.insert("attempt".to_string(), Value::Number(attempt.into()));
     let message = format!(
@@ -1654,6 +1695,46 @@ mod tests {
             policy.delay_before(2, None, URL),
             policy.delay_before(3, None, URL)
         );
+    }
+
+    #[test]
+    fn retry_reasons_name_what_actually_went_wrong() {
+        // The two strings a real from-scratch fetch produced, verbatim: 43
+        // resolver failures in the first ten seconds, and 26 refusals from one
+        // host that builds its tarballs on demand.
+        assert_eq!(
+            retry_reason(
+                "failed to download 'https://static.crates.io/crates/anes/anes-0.1.6.crate': \
+                 error sending request for url (https://static.crates.io/crates/anes/anes-0.1.6.crate): \
+                 client error (Connect): dns error: failed to lookup address information: Try again"
+            ),
+            "dns",
+            "a resolver failure arrives wrapped in a connect error and must not read as one"
+        );
+        assert_eq!(
+            retry_reason(
+                "failed to download 'https://gitlab.freedesktop.org/mesa/kmscube/-/archive/f60e50e/kmscube.tar.gz': HTTP 502 Bad Gateway"
+            ),
+            "http 5xx"
+        );
+        assert_eq!(
+            retry_reason(
+                "failed to download 'https://example.invalid/x': HTTP 429 Too Many Requests"
+            ),
+            "http 429",
+            "a throttle is not a fault and reads differently from one"
+        );
+        assert_eq!(
+            retry_reason("download timed out while requesting 'https://example.invalid/x'"),
+            "timeout"
+        );
+        assert_eq!(
+            retry_reason(
+                "failed to read HTTP response body from 'https://example.invalid/x': error decoding response body: incomplete message"
+            ),
+            "truncated body"
+        );
+        assert_eq!(retry_reason("something new and unclassified"), "other");
     }
 
     #[test]

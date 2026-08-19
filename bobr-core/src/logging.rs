@@ -202,15 +202,20 @@ pub trait EventSink: fmt::Debug + Send + Sync {
     }
 }
 
-/// Counts download retries by host.
+/// Counts download retries, by host and by what went wrong.
 ///
 /// Retries are reported per subject, as they happen, which says nothing about
 /// whether one host was behind all of them. Counting here -- where every event
 /// already passes -- turns that into a fact the run can report, without a
 /// counter threaded through the source layer or a global to hold it.
+///
+/// The reason is counted alongside because the two answer different questions:
+/// the host says who to ask for less, the reason says whether asking less is
+/// even the fix.
 #[derive(Debug, Default)]
 struct RetrySink {
     hosts: Mutex<BTreeMap<String, u64>>,
+    reasons: Mutex<BTreeMap<String, u64>>,
 }
 
 impl RetrySink {
@@ -220,15 +225,30 @@ impl RetrySink {
             .map(|hosts| hosts.clone())
             .unwrap_or_default()
     }
+
+    fn reason_counts(&self) -> BTreeMap<String, u64> {
+        self.reasons
+            .lock()
+            .map(|reasons| reasons.clone())
+            .unwrap_or_default()
+    }
 }
 
 impl EventSink for RetrySink {
     fn write_event(&self, record: &EventLogRecord) {
+        // The host is what marks an event as a retry; the reason is counted
+        // only for events that carry one, so an older producer that sends no
+        // reason still gets its retries counted by host.
         let Some(Value::String(host)) = record.details.get("retry_host") else {
             return;
         };
         if let Ok(mut hosts) = self.hosts.lock() {
             *hosts.entry(host.clone()).or_insert(0) += 1;
+        }
+        if let Some(Value::String(reason)) = record.details.get("retry_reason")
+            && let Ok(mut reasons) = self.reasons.lock()
+        {
+            *reasons.entry(reason.clone()).or_insert(0) += 1;
         }
     }
 }
@@ -300,6 +320,14 @@ impl BuildRunLogger {
     /// Empty when nothing had to be retried, which is the ordinary case.
     pub fn download_retries(&self) -> BTreeMap<String, u64> {
         self.retries.counts()
+    }
+
+    /// The same retries, by what they were answering -- `dns`, `http 5xx`,
+    /// `timeout` and so on.
+    ///
+    /// Empty when nothing had to be retried.
+    pub fn download_retry_reasons(&self) -> BTreeMap<String, u64> {
+        self.retries.reason_counts()
     }
 
     /// Total number of best-effort logging failures swallowed across sinks.
@@ -2003,6 +2031,56 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn download_retries_are_counted_per_reason_too() {
+        // Same events, second question: which of them is the machine's own
+        // resolver and which is a host refusing. A count without that answers
+        // neither.
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs").join("260603123456");
+        let logger = Arc::new(
+            BuildRunLogger::new(&run_log_dir, "2026-06-03T12:34:56.000000000Z", true).unwrap(),
+        );
+
+        let retry = |host: &str, reason: Option<&str>| {
+            let mut details = Map::new();
+            details.insert("retry_host".to_string(), Value::String(host.to_string()));
+            if let Some(reason) = reason {
+                details.insert(
+                    "retry_reason".to_string(),
+                    Value::String(reason.to_string()),
+                );
+            }
+            BuildLogEvent {
+                level: BuildLogLevel::Info,
+                status: BuildStatus::Running,
+                op: Some("fetch".to_string()),
+                message: "retrying".to_string(),
+                object_hash: None,
+                raw_log_path: None,
+                details,
+            }
+        };
+        logger.log_run_event(retry("a.example", Some("dns")));
+        logger.log_run_event(retry("b.example", Some("dns")));
+        logger.log_run_event(retry("b.example", Some("http 5xx")));
+        // No reason at all: still a retry, still counted by host.
+        logger.log_run_event(retry("c.example", None));
+
+        assert_eq!(
+            logger.download_retries(),
+            BTreeMap::from([
+                ("a.example".to_string(), 1),
+                ("b.example".to_string(), 2),
+                ("c.example".to_string(), 1),
+            ])
+        );
+        assert_eq!(
+            logger.download_retry_reasons(),
+            BTreeMap::from([("dns".to_string(), 2), ("http 5xx".to_string(), 1)])
+        );
     }
 
     #[test]
