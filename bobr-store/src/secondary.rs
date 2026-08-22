@@ -78,8 +78,26 @@ pub trait ContentSource: fmt::Debug + Send + Sync {
     /// Returns the subset of `hashes` whose top-level object payload exists.
     ///
     /// This does not claim that an fs-tree's referenced fs-files are complete;
-    /// closure discovery belongs to the later staging/import operation.
+    /// the resolver discovers that closure through [`Self::object_manifest`]
+    /// and [`Self::locate_fs_files`].
     fn locate_objects(&self, hashes: &[ObjectHash]) -> Result<HashSet<ObjectHash>, StoreError>;
+
+    /// Parses the object as an fs-tree manifest when it carries the canonical
+    /// manifest schema marker.
+    ///
+    /// `None` means the object is absent or is an ordinary file/directory
+    /// object. A marked but malformed manifest is an error.
+    fn object_manifest(&self, hash: ObjectHash) -> Result<Option<FsTreeManifest>, StoreError>;
+
+    /// Returns the subset of fs-file hashes present as regular files.
+    fn locate_fs_files(&self, hashes: &[FsFileHash]) -> Result<HashSet<FsFileHash>, StoreError>;
+
+    /// Imports a batch of fs-files into `working` using this source's transport.
+    ///
+    /// Every requested fs-file must exist and pass metadata, timestamp, and
+    /// hash validation. The operation is idempotent for fs-files already in the
+    /// working store.
+    fn import_fs_files(&self, working: &Store, hashes: &[FsFileHash]) -> Result<(), StoreError>;
 
     /// Ensures one object and, for an fs-tree manifest, its fs-file closure in
     /// `working` using this source's transport.
@@ -218,28 +236,11 @@ impl LocalHardlinkContentSource {
             .entries()
             .iter()
             .filter_map(|entry| match entry {
-                FsTreeEntry::File { hash, .. } if seen.insert(*hash) => Some(hash.to_hex()),
+                FsTreeEntry::File { hash, .. } if seen.insert(*hash) => Some(*hash),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        if hashes.is_empty() {
-            return Ok(());
-        }
-        self.runtime
-            .run(
-                &HardlinkFsFilesFunction,
-                HardlinkFsFilesInput {
-                    source_root: self.store.root().to_path_buf(),
-                    working_root: working.root().to_path_buf(),
-                    hashes,
-                },
-            )
-            .map_err(|error| {
-                StoreError::Io(format!(
-                    "failed to import fs-files from secondary store '{}': {error}",
-                    self.store.root().display()
-                ))
-            })
+        self.import_fs_files(working, &hashes)
     }
 }
 
@@ -268,6 +269,60 @@ impl ContentSource for LocalHardlinkContentSource {
             }
         }
         Ok(available)
+    }
+
+    fn object_manifest(&self, hash: ObjectHash) -> Result<Option<FsTreeManifest>, StoreError> {
+        let path = self.store.object_path_unchecked(hash);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => read_manifest_if_marked(&path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(map_io(&path, "inspect secondary object manifest", error)),
+        }
+    }
+
+    fn locate_fs_files(&self, hashes: &[FsFileHash]) -> Result<HashSet<FsFileHash>, StoreError> {
+        let mut available = HashSet::new();
+        for hash in hashes {
+            let path = self.store.fs_file_path_unchecked(*hash);
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_file() => {
+                    available.insert(*hash);
+                }
+                Ok(_) => {
+                    return Err(StoreError::InvalidData(format!(
+                        "secondary fs-file path '{}' is not a regular file",
+                        path.display()
+                    )));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(map_io(&path, "inspect secondary fs-file", error));
+                }
+            }
+        }
+        Ok(available)
+    }
+
+    fn import_fs_files(&self, working: &Store, hashes: &[FsFileHash]) -> Result<(), StoreError> {
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        self.validate_working_store(working)?;
+        self.runtime
+            .run(
+                &HardlinkFsFilesFunction,
+                HardlinkFsFilesInput {
+                    source_root: self.store.root().to_path_buf(),
+                    working_root: working.root().to_path_buf(),
+                    hashes: hashes.iter().map(FsFileHash::to_hex).collect(),
+                },
+            )
+            .map_err(|error| {
+                StoreError::Io(format!(
+                    "failed to import fs-files from secondary store '{}': {error}",
+                    self.store.root().display()
+                ))
+            })
     }
 
     fn import_object(
@@ -461,7 +516,7 @@ fn require_same_filesystem(
     Ok(())
 }
 
-fn read_manifest_if_marked(path: &Path) -> Result<Option<FsTreeManifest>, StoreError> {
+pub(crate) fn read_manifest_if_marked(path: &Path) -> Result<Option<FsTreeManifest>, StoreError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|error| map_io(path, "inspect possible fs-tree manifest", error))?;
     if !metadata.file_type().is_file() {
