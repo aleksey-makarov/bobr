@@ -83,7 +83,7 @@ pub struct Limits {
 
 /// One source to ensure present: its name, the hash the recipe declares, and
 /// the origin object exactly as the recipes spell it.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceEntry {
     /// The source's name, used for refs and logs.

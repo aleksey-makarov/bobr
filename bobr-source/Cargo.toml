@@ -29,6 +29,7 @@ xz2.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+bobr-runtime.workspace = true
 fsobj-hash.workspace = true
 mockito.workspace = true
 tempfile.workspace = true

@@ -38,8 +38,8 @@ pub use secondary::{
     TrustedKeyIndex, TrustedResolution,
 };
 pub use secondary_resolver::{
-    NamedContentSource, NamedTrustedKeyIndex, ResolvedSecondaryContent, ReuseQuery,
-    SecondaryResolution, SecondaryResolver, TrustedAnswer,
+    KnownObjectResolution, NamedContentSource, NamedTrustedKeyIndex, ResolvedSecondaryContent,
+    ReuseQuery, SecondaryResolution, SecondaryResolver, TrustedAnswer,
 };
 pub use source::{SourceImportOutcome, import_source_object, record_existing_source_object};
 pub use store::{ReadOnlyStore, Store};

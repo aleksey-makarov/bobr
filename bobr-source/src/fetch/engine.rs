@@ -9,6 +9,7 @@
 //! asynchronous.
 
 use crate::fetch::oci;
+use crate::fetch::realizer::SourceRealizer;
 use crate::fetch::request::{FetchRequest, ResolvedLimits, SourceEntry};
 use crate::http::{
     self, HttpOrigin, HttpOriginError, HttpRetryPolicy, HttpTimeouts, Retry, UrlAttemptState,
@@ -18,7 +19,10 @@ use bobr_core::{
     BuildLogEvent, BuildLogLevel, BuildLogSubject, BuildLogger, BuildRunLogger, BuildStatus,
     CancellationToken, ObjectHash, Run, Workspace,
 };
-use bobr_store::{SourceImportOutcome, Store, import_source_object, record_existing_source_object};
+use bobr_store::{
+    NamedContentSource, NamedTrustedKeyIndex, SecondaryResolver, SourceImportOutcome, Store,
+    import_source_object, record_existing_source_object,
+};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::fs;
@@ -28,7 +32,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
-use tokio::task::JoinSet;
 
 /// What one run of the fetcher did, and what is left for the caller to fix.
 #[derive(Debug, Default)]
@@ -40,6 +43,8 @@ pub struct Summary {
     /// Sources materialized from a local path: no network was touched, but
     /// they were read, hashed and imported like any other.
     pub local: u64,
+    /// Sources imported from secondary content sources by their declared hash.
+    pub secondary: u64,
     /// Sources whose download produced a different object than the recipe
     /// declares: the placeholder cycle's payload, every real hash in one run.
     pub mismatched: Vec<Mismatch>,
@@ -69,7 +74,7 @@ impl Summary {
 }
 
 /// Everything one source task needs; cloned into each task.
-struct Engine {
+pub(super) struct Engine {
     store: Store,
     run: Arc<Run>,
     logger: Arc<BuildRunLogger>,
@@ -87,15 +92,16 @@ struct Engine {
     /// Held so `cancel_rx.changed()` cannot resolve by sender-drop; cancelling
     /// goes through [`Engine::cancel`].
     cancel_tx: watch::Sender<bool>,
+    secondary: Arc<SecondaryResolver>,
 }
 
 impl Engine {
-    fn cancel(&self) {
+    pub(super) fn cancel(&self) {
         self.cancellation.cancel();
         let _ = self.cancel_tx.send(true);
     }
 
-    fn is_cancelled(&self) -> bool {
+    pub(super) fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
     }
 
@@ -159,6 +165,14 @@ fn cancelled_error() -> HttpOriginError {
 /// structured form. `Err` is reserved for the run itself being unusable (bad
 /// directories, unusable store) -- per-source failures land in the summary.
 pub async fn run_fetch(request: FetchRequest) -> Result<Summary, String> {
+    run_fetch_with_capabilities(request, Vec::new(), Vec::new()).await
+}
+
+pub(crate) async fn run_fetch_with_capabilities(
+    request: FetchRequest,
+    indexes: Vec<NamedTrustedKeyIndex>,
+    sources: Vec<NamedContentSource>,
+) -> Result<Summary, String> {
     let store = Store::create(&request.store).map_err(|error| error.to_string())?;
     let run = Arc::new(
         Run::new(request.run_id.clone(), &request.logs, &request.work)
@@ -171,6 +185,10 @@ pub async fn run_fetch(request: FetchRequest) -> Result<Summary, String> {
     let limits = ResolvedLimits::from_request(&request.limits);
     let client = http_client(HttpTimeouts::production())?;
     let (cancel_tx, cancel_rx) = watch::channel(false);
+    let secondary = Arc::new(
+        SecondaryResolver::new(store.clone(), indexes, sources)
+            .map_err(|error| error.to_string())?,
+    );
     let engine = Arc::new(Engine {
         store,
         run,
@@ -183,19 +201,11 @@ pub async fn run_fetch(request: FetchRequest) -> Result<Summary, String> {
         cancellation: CancellationToken::new(),
         cancel_rx,
         cancel_tx,
+        secondary,
     });
 
-    // One source per declared hash: the request lowers a graph where several
-    // nodes may share a source, and downloading it twice would race on the
-    // same object for no gain.
-    let mut seen = std::collections::HashSet::new();
-    let sources: Vec<SourceEntry> = request
-        .sources
-        .into_iter()
-        .filter(|entry| seen.insert(entry.object_hash.clone()))
-        .collect();
-
-    log_run_started(&logger, sources.len(), &engine.limits);
+    let realizer = SourceRealizer::new(engine.clone(), request.sources);
+    log_run_started(&logger, realizer.node_count(), &engine.limits);
 
     {
         let engine = engine.clone();
@@ -206,19 +216,13 @@ pub async fn run_fetch(request: FetchRequest) -> Result<Summary, String> {
         });
     }
 
-    let mut tasks = JoinSet::new();
-    for entry in sources {
-        let engine = engine.clone();
-        tasks.spawn(async move { process_source(engine, entry).await });
-    }
-
     let mut summary = Summary::default();
-    while let Some(joined) = tasks.join_next().await {
-        let outcome = joined.map_err(|error| format!("source task panicked: {error}"))?;
+    for outcome in realizer.run().await? {
         match outcome {
             SourceOutcome::Downloaded => summary.downloaded += 1,
             SourceOutcome::CacheHit => summary.cache_hit += 1,
             SourceOutcome::Local => summary.local += 1,
+            SourceOutcome::Secondary => summary.secondary += 1,
             SourceOutcome::Mismatched(mismatch) => summary.mismatched.push(mismatch),
             SourceOutcome::Failed { name, message } => summary.failed.push((name, message)),
         }
@@ -231,15 +235,17 @@ pub async fn run_fetch(request: FetchRequest) -> Result<Summary, String> {
     Ok(summary)
 }
 
-enum SourceOutcome {
+#[derive(Debug)]
+pub(super) enum SourceOutcome {
     Downloaded,
     CacheHit,
     Local,
+    Secondary,
     Mismatched(Mismatch),
     Failed { name: String, message: String },
 }
 
-async fn process_source(engine: Arc<Engine>, entry: SourceEntry) -> SourceOutcome {
+pub(super) async fn process_source(engine: Arc<Engine>, entry: SourceEntry) -> SourceOutcome {
     let name = entry.name.clone();
     match process_source_inner(&engine, entry).await {
         Ok(outcome) => outcome,
@@ -292,6 +298,59 @@ async fn process_source_inner(
             Some(declared),
         ));
         return Ok(SourceOutcome::CacheHit);
+    }
+
+    if engine.secondary.has_content_sources() {
+        let secondary = {
+            let engine = engine.clone();
+            run_blocking(move || {
+                engine
+                    .secondary
+                    .ensure_objects(&[declared])
+                    .map_err(|error| error.to_string())
+            })
+            .await??
+        };
+        let secondary = secondary
+            .into_iter()
+            .next()
+            .expect("one requested secondary object produces one report");
+        if secondary.outcome.is_some() {
+            let recorded = {
+                let engine = engine.clone();
+                let name = entry.name.clone();
+                run_blocking(move || {
+                    record_existing_source_object(
+                        &engine.store,
+                        declared,
+                        &name,
+                        engine.run.run_id(),
+                    )
+                    .map_err(|error| error.to_string())
+                })
+                .await??
+            };
+            if recorded.is_none() {
+                return Err(format!(
+                    "secondary acquisition reported source object '{declared}' ready, but it is absent from the working store"
+                ));
+            }
+            engine.logger.log_run_event(run_event(
+                BuildLogLevel::Info,
+                BuildStatus::CacheHit,
+                format!(
+                    "source '{}' imported from secondary content source(s): {}",
+                    entry.name,
+                    if secondary.content_sources.is_empty() {
+                        "working store".to_string()
+                    } else {
+                        secondary.content_sources.join(", ")
+                    }
+                ),
+                Some(declared),
+            ));
+            return Ok(SourceOutcome::Secondary);
+        }
     }
 
     let Some(origin_value) = entry.origin.clone() else {
@@ -417,6 +476,30 @@ async fn process_source_inner(
             }))
         }
     }
+}
+
+pub(super) async fn record_source_aliases(
+    engine: Arc<Engine>,
+    declared: ObjectHash,
+    aliases: Vec<String>,
+) -> Result<(), String> {
+    if aliases.is_empty() {
+        return Ok(());
+    }
+    run_blocking(move || {
+        for name in aliases {
+            let recorded =
+                record_existing_source_object(&engine.store, declared, &name, engine.run.run_id())
+                    .map_err(|error| error.to_string())?;
+            if recorded.is_none() {
+                return Err(format!(
+                    "source alias '{name}' cannot find realized object '{declared}'"
+                ));
+            }
+        }
+        Ok(())
+    })
+    .await?
 }
 
 /// A cancel mid-download surfaces as an opaque transport error; name it for
@@ -1063,8 +1146,8 @@ fn log_run_finished(logger: &Arc<BuildRunLogger>, summary: &Summary) {
         "failed"
     };
     let mut message = format!(
-        "fetch finished: {} downloaded · {} local · {} already present",
-        summary.downloaded, summary.local, summary.cache_hit
+        "fetch finished: {} downloaded · {} local · {} secondary · {} already present",
+        summary.downloaded, summary.local, summary.secondary, summary.cache_hit
     );
     // The logger has been counting retries by host all along (the retry
     // milestones carry the host as a field); a run that only succeeded on
@@ -1114,6 +1197,7 @@ fn log_run_finished(logger: &Arc<BuildRunLogger>, summary: &Summary) {
         "downloaded": summary.downloaded,
         "cache_hit": summary.cache_hit,
         "local": summary.local,
+        "secondary": summary.secondary,
         "failed": summary
             .failed
             .iter()
@@ -1160,8 +1244,13 @@ fn log_run_finished(logger: &Arc<BuildRunLogger>, summary: &Summary) {
 mod tests {
     use super::*;
     use crate::fetch::request::Limits;
+    use bobr_runtime::runtime_provider::RuntimeProvider;
+    use bobr_store::{
+        LocalHardlinkContentSource, NamedContentSource, ReadOnlyStore, import_source_object,
+    };
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use tempfile::TempDir;
@@ -1327,6 +1416,113 @@ mod tests {
         assert!(summary.is_success(), "{summary:?}");
         assert_eq!(summary.cache_hit, 1);
         assert_eq!(summary.downloaded, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn source_realizer_imports_known_object_from_secondary_content() {
+        let payload = b"secondary source payload\n";
+        let declared = declared_for(payload);
+        let temp = tempfile::tempdir().unwrap();
+        let secondary_root = temp.path().join("secondary");
+        fs::create_dir(&secondary_root).unwrap();
+        let secondary_store = Store::create(&secondary_root).unwrap();
+        let staged = temp.path().join("secondary-staged");
+        fs::write(&staged, payload).unwrap();
+        assert!(matches!(
+            import_source_object(
+                &secondary_store,
+                declared,
+                &staged,
+                "secondary-source",
+                "secondary-run"
+            )
+            .unwrap(),
+            SourceImportOutcome::Matched(hash) if hash == declared
+        ));
+        let request = request_in(
+            &temp,
+            vec![SourceEntry {
+                name: "secondary-source".to_string(),
+                object_hash: declared.to_string(),
+                origin: None,
+            }],
+        );
+        let working_root = request.store.clone();
+        let content = NamedContentSource::new(
+            "secondary",
+            Arc::new(LocalHardlinkContentSource::with_runtime(
+                ReadOnlyStore::open(&secondary_root).unwrap(),
+                RuntimeProvider::host(),
+            )),
+        );
+
+        let summary = run_fetch_with_capabilities(request, Vec::new(), vec![content])
+            .await
+            .unwrap();
+
+        assert!(summary.is_success(), "{summary:?}");
+        assert_eq!(summary.secondary, 1);
+        assert_eq!(summary.downloaded, 0);
+        assert_eq!(
+            fs::metadata(secondary_store.object_path(declared).unwrap().unwrap())
+                .unwrap()
+                .ino(),
+            fs::metadata(working_root.join("objects").join(declared.to_string()))
+                .unwrap()
+                .ino()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn source_realizer_deduplicates_content_but_records_every_alias() {
+        let payload = b"shared secondary source\n";
+        let declared = declared_for(payload);
+        let temp = tempfile::tempdir().unwrap();
+        let secondary_root = temp.path().join("secondary");
+        fs::create_dir(&secondary_root).unwrap();
+        let secondary_store = Store::create(&secondary_root).unwrap();
+        let staged = temp.path().join("secondary-staged");
+        fs::write(&staged, payload).unwrap();
+        import_source_object(
+            &secondary_store,
+            declared,
+            &staged,
+            "secondary-source",
+            "secondary-run",
+        )
+        .unwrap();
+        let request = request_in(
+            &temp,
+            vec![
+                SourceEntry {
+                    name: "first-alias".to_string(),
+                    object_hash: declared.to_string(),
+                    origin: None,
+                },
+                SourceEntry {
+                    name: "second-alias".to_string(),
+                    object_hash: declared.to_string(),
+                    origin: None,
+                },
+            ],
+        );
+        let working_root = request.store.clone();
+        let content = NamedContentSource::new(
+            "secondary",
+            Arc::new(LocalHardlinkContentSource::with_runtime(
+                ReadOnlyStore::open(&secondary_root).unwrap(),
+                RuntimeProvider::host(),
+            )),
+        );
+
+        let summary = run_fetch_with_capabilities(request, Vec::new(), vec![content])
+            .await
+            .unwrap();
+
+        assert!(summary.is_success(), "{summary:?}");
+        assert_eq!(summary.secondary, 1);
+        assert!(working_root.join("object-refs/first-alias").is_symlink());
+        assert!(working_root.join("object-refs/second-alias").is_symlink());
     }
 
     #[tokio::test(flavor = "multi_thread")]

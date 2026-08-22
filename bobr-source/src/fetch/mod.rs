@@ -8,6 +8,7 @@
 
 mod engine;
 mod oci;
+mod realizer;
 mod request;
 
 pub use engine::{Mismatch, Summary, run_fetch};

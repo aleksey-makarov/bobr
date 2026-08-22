@@ -82,6 +82,17 @@ pub struct ResolvedSecondaryContent {
     pub import_outcome: ContentImportOutcome,
 }
 
+/// Content-only resolution of an object whose hash was already known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownObjectResolution {
+    /// Requested object hash.
+    pub object_hash: ObjectHash,
+    /// Content sources used for the top-level object or fs-file closure.
+    pub content_sources: Vec<String>,
+    /// Import result, or `None` when no complete content source set was found.
+    pub outcome: Option<ContentImportOutcome>,
+}
+
 /// Mapping/content resolution report for one queried key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecondaryResolution<K> {
@@ -153,6 +164,64 @@ impl SecondaryResolver {
     /// Returns the working store populated by successful resolutions.
     pub fn working(&self) -> &Store {
         &self.working
+    }
+
+    /// Returns whether any content source can satisfy known-object requests.
+    pub fn has_content_sources(&self) -> bool {
+        !self.sources.is_empty()
+    }
+
+    /// Ensures content for already-known object hashes without consulting or
+    /// publishing trusted key mappings.
+    ///
+    /// Duplicate hashes are reported once in first-input order. Complete
+    /// working-store objects do not query content sources. Remaining hashes are
+    /// located in one batch per source before imports begin.
+    pub fn ensure_objects(
+        &self,
+        hashes: &[ObjectHash],
+    ) -> Result<Vec<KnownObjectResolution>, StoreError> {
+        let hashes = unique_in_order(hashes);
+        let mut need_content = Vec::new();
+        for hash in &hashes {
+            if !working_object_complete(&self.working, *hash)? {
+                need_content.push(*hash);
+            }
+        }
+        let availability = if need_content.is_empty() {
+            vec![HashSet::new(); self.sources.len()]
+        } else {
+            self.sources
+                .iter()
+                .map(|source| source.source.locate_objects(&need_content))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        hashes
+            .into_iter()
+            .map(|hash| {
+                if working_object_complete(&self.working, hash)? {
+                    return Ok(KnownObjectResolution {
+                        object_hash: hash,
+                        content_sources: Vec::new(),
+                        outcome: Some(ContentImportOutcome::AlreadyPresent),
+                    });
+                }
+                let acquired = self.acquire_candidate(hash, &availability)?;
+                Ok(match acquired {
+                    Some((outcome, content_sources)) => KnownObjectResolution {
+                        object_hash: hash,
+                        content_sources,
+                        outcome: Some(outcome),
+                    },
+                    None => KnownObjectResolution {
+                        object_hash: hash,
+                        content_sources: Vec::new(),
+                        outcome: None,
+                    },
+                })
+            })
+            .collect()
     }
 
     /// Resolves exact build mappings and content in input-key order.
