@@ -1,5 +1,5 @@
 use crate::StoreError;
-use crate::fs_tree::FsTree;
+use crate::fs_tree::{FsFileHash, FsTree};
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -144,6 +144,13 @@ impl Store {
         self.object_records_dir()
             .join(format!("{}.json", object_hash.to_hex()))
     }
+
+    /// Returns the canonical working-store path for an fs-file without
+    /// checking that the path exists or contains the declared hash.
+    pub(crate) fn fs_file_path_unchecked(&self, hash: FsFileHash) -> PathBuf {
+        let hex = hash.to_hex();
+        self.root().join(FS_FILES_DIR).join(&hex[..2]).join(hex)
+    }
 }
 
 impl ReadOnlyStore {
@@ -197,6 +204,13 @@ impl ReadOnlyStore {
     pub(crate) fn object_record_path(&self, object_hash: ObjectHash) -> PathBuf {
         self.object_records_dir()
             .join(format!("{}.json", object_hash.to_hex()))
+    }
+
+    /// Returns the canonical read-only-store path for an fs-file without
+    /// checking that the path exists or contains the declared hash.
+    pub(crate) fn fs_file_path_unchecked(&self, hash: FsFileHash) -> PathBuf {
+        let hex = hash.to_hex();
+        self.root().join(FS_FILES_DIR).join(&hex[..2]).join(hex)
     }
 }
 

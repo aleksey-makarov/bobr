@@ -824,7 +824,7 @@ fn fs_file_path(root: &Path, hash: FsFileHash) -> Result<PathBuf, StoreError> {
 /// The file is hashed using the fs-file hash algorithm with the file's current
 /// uid, gid, mode, size, and byte content. Symlinks and non-regular files are
 /// rejected.
-fn hash_fs_file_path(path: &Path) -> Result<FsFileHash, StoreError> {
+pub(crate) fn hash_fs_file_path(path: &Path) -> Result<FsFileHash, StoreError> {
     require_absolute(path, "fs-file path")?;
 
     let metadata =

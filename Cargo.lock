@@ -199,6 +199,7 @@ name = "bobr-store"
 version = "0.1.8"
 dependencies = [
  "bobr-core",
+ "bobr-runtime",
  "fsobj-hash",
  "globset",
  "libc",

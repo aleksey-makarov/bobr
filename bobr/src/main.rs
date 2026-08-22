@@ -90,7 +90,8 @@ fn run_runtime_worker_if_requested() -> Option<ExitCode> {
 }
 
 fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
-    let mut functions = bobr_builder::runtime_functions();
+    let mut functions = bobr_store::runtime_functions();
+    functions.extend(bobr_builder::runtime_functions());
     functions.extend(bobr_sandbox::runtime_functions());
     functions
 }

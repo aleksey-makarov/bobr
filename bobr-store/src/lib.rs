@@ -33,11 +33,18 @@ pub use record::{ObjectRecord, load_object_record};
 pub use ref_name::validate_ref_name;
 pub use refs::{load_build_handle, resolve_build_handle, resolve_reuse_for_build};
 pub use secondary::{
-    ContentSource, LocalHardlinkContentSource, LocalTrustedKeyIndex, TrustedKeyIndex,
-    TrustedResolution,
+    ContentImportOutcome, ContentSource, LocalHardlinkContentSource, LocalTrustedKeyIndex,
+    TrustedKeyIndex, TrustedResolution,
 };
 pub use source::{SourceImportOutcome, import_source_object, record_existing_source_object};
 pub use store::{ReadOnlyStore, Store};
+
+/// Returns namespace runtime functions used by secondary-store imports.
+pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
+    vec![bobr_runtime::runtime_ns::NsFunction::new(
+        secondary::HardlinkFsFilesFunction,
+    )]
+}
 
 #[cfg(test)]
 pub(crate) use object::import_object;
