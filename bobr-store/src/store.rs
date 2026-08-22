@@ -32,6 +32,22 @@ struct StoreInner {
     root: PathBuf,
 }
 
+/// Read-only handle to an existing `bobr` store layout.
+///
+/// Unlike [`Store::create`], opening this handle never creates or repairs
+/// directories. The type exposes no mutation operations; secondary-store
+/// capabilities wrap it to read trusted indexes or locate content without
+/// accidentally treating the secondary as the working store.
+#[derive(Debug, Clone)]
+pub struct ReadOnlyStore {
+    inner: Arc<ReadOnlyStoreInner>,
+}
+
+#[derive(Debug)]
+struct ReadOnlyStoreInner {
+    root: PathBuf,
+}
+
 impl Store {
     /// Creates or initializes a store layout under an existing root directory.
     ///
@@ -130,6 +146,60 @@ impl Store {
     }
 }
 
+impl ReadOnlyStore {
+    /// Opens and validates an existing store without changing it.
+    ///
+    /// `root` follows the same absolute-directory rules as [`Store::create`].
+    /// Every standard store subdirectory must already exist as a real
+    /// directory. Missing or malformed layout entries are reported rather than
+    /// created, making a misspelled or incomplete secondary store fail closed.
+    pub fn open(root: &Path) -> Result<Self, StoreError> {
+        let root = validate_root(root)?;
+        validate_store_layout(&root)?;
+        Ok(Self {
+            inner: Arc::new(ReadOnlyStoreInner { root }),
+        })
+    }
+
+    /// Returns the canonical store root.
+    pub fn root(&self) -> &Path {
+        &self.inner.root
+    }
+
+    pub(crate) fn objects_dir(&self) -> PathBuf {
+        self.root().join(OBJECTS_DIR)
+    }
+
+    pub(crate) fn builds_dir(&self) -> PathBuf {
+        self.root().join(BUILDS_DIR)
+    }
+
+    pub(crate) fn reuses_dir(&self) -> PathBuf {
+        self.root().join(REUSES_DIR)
+    }
+
+    pub(crate) fn object_records_dir(&self) -> PathBuf {
+        self.root().join(OBJECT_RECORDS_DIR)
+    }
+
+    pub(crate) fn object_path_unchecked(&self, object_hash: ObjectHash) -> PathBuf {
+        self.objects_dir().join(object_hash.to_hex())
+    }
+
+    pub(crate) fn build_ref_path(&self, build_key: BuildKey) -> PathBuf {
+        self.builds_dir().join(build_key.to_hex())
+    }
+
+    pub(crate) fn reuse_ref_path(&self, reuse_key: ReuseKey) -> PathBuf {
+        self.reuses_dir().join(reuse_key.to_hex())
+    }
+
+    pub(crate) fn object_record_path(&self, object_hash: ObjectHash) -> PathBuf {
+        self.object_records_dir()
+            .join(format!("{}.json", object_hash.to_hex()))
+    }
+}
+
 fn validate_root(root: &Path) -> Result<PathBuf, StoreError> {
     if !root.is_absolute() {
         return Err(StoreError::InvalidInput(format!(
@@ -196,5 +266,40 @@ fn ensure_store_layout(root: &Path) -> Result<(), StoreError> {
     ensure_store_dir(&root.join(FS_FILES_DIR), "fs-files")?;
     ensure_store_dir(&root.join(FS_TREES_DIR), "fs-trees")?;
     ensure_store_dir(&root.join(FS_TREE_REFS_DIR), "fs-tree-refs")?;
+    Ok(())
+}
+
+fn validate_store_dir(path: &Path, label: &str) -> Result<(), StoreError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            StoreError::InvalidData(format!(
+                "store {label} directory is missing: '{}'",
+                path.display()
+            ))
+        } else {
+            StoreError::Io(format!(
+                "failed to inspect store {label} directory '{}': {error}",
+                path.display()
+            ))
+        }
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(StoreError::InvalidData(format!(
+            "store {label} path '{}' is not a directory",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_store_layout(root: &Path) -> Result<(), StoreError> {
+    validate_store_dir(&root.join(OBJECTS_DIR), "objects")?;
+    validate_store_dir(&root.join(BUILDS_DIR), "builds")?;
+    validate_store_dir(&root.join(REUSES_DIR), "reuses")?;
+    validate_store_dir(&root.join(OBJECT_RECORDS_DIR), "object-records")?;
+    validate_store_dir(&root.join(OBJECT_REFS_DIR), "object-refs")?;
+    validate_store_dir(&root.join(FS_FILES_DIR), "fs-files")?;
+    validate_store_dir(&root.join(FS_TREES_DIR), "fs-trees")?;
+    validate_store_dir(&root.join(FS_TREE_REFS_DIR), "fs-tree-refs")?;
     Ok(())
 }

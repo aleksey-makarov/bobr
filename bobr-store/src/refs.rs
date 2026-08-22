@@ -18,7 +18,7 @@ fn object_ref_target(object_hash: ObjectHash) -> PathBuf {
         .join(object_hash.to_hex())
 }
 
-fn parse_object_record_ref_target(
+pub(crate) fn parse_object_record_ref_target(
     ref_kind: &str,
     ref_path: &Path,
     target: &Path,
