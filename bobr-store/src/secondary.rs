@@ -5,41 +5,33 @@
 //! object hash. Keeping the traits independent permits a small trusted index
 //! to name content served by another, untrusted backend.
 
-use crate::fs_tree::{FsFileHash, FsTreeEntry, FsTreeManifest, hash_fs_file_path};
+use crate::fs_tree::{
+    FsFileHash, FsTreeEntry, FsTreeManifest, hash_fs_file_path, read_manifest_if_marked,
+};
 use crate::object::import_object_with_expected_hash;
-use crate::record::parse_object_record_value;
 use crate::refs::parse_object_record_ref_target;
-use crate::{ObjectRecord, ReadOnlyStore, Store, StoreError};
+use crate::{ReadOnlyStore, Store, StoreError};
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
 use bobr_runtime::runtime_provider::{RuntimeProvider, runtime_provider_for_current_process};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::HashSet;
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const FS_TREE_SCHEMA_LINE: &[u8] = br#"{"schema":"bobr-fs-tree-manifest"}
-"#;
 static NEXT_SECONDARY_STAGING: AtomicU64 = AtomicU64::new(0);
 
-/// Trusted metadata resolving one build or reuse key to an object.
-///
-/// The canonical object record travels with the resolution so a later
-/// promotion can recreate working-store metadata without asking the content
-/// source to make trusted assertions.
+/// Trusted metadata resolving one build or reuse key to an object hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedResolution<K> {
     /// Build or reuse key that was resolved.
     pub key: K,
     /// Object named by the trusted mapping.
     pub object_hash: ObjectHash,
-    /// Canonical record referenced by that mapping.
-    pub record: ObjectRecord,
 }
 
 /// Read-only capability for trusted `BuildKey`/`ReuseKey` mappings.
@@ -51,9 +43,9 @@ pub struct TrustedResolution<K> {
 pub trait TrustedKeyIndex: fmt::Debug + Send + Sync {
     /// Resolves every available build key in one batch.
     ///
-    /// Missing keys are omitted from the returned results. Malformed mappings or
-    /// records fail the whole batch rather than being silently treated as
-    /// misses.
+    /// Missing keys are omitted from the returned results. Malformed mappings
+    /// fail the whole batch rather than being silently treated as misses.
+    /// Object records are not opened.
     fn resolve_builds(
         &self,
         keys: &[BuildKey],
@@ -61,9 +53,9 @@ pub trait TrustedKeyIndex: fmt::Debug + Send + Sync {
 
     /// Resolves every available reuse key in one batch.
     ///
-    /// Missing keys are omitted from the returned results. Malformed mappings or
-    /// records fail the whole batch rather than being silently treated as
-    /// misses.
+    /// Missing keys are omitted from the returned results. Malformed mappings
+    /// fail the whole batch rather than being silently treated as misses.
+    /// Object records are not opened.
     fn resolve_reuses(
         &self,
         keys: &[ReuseKey],
@@ -150,13 +142,12 @@ impl TrustedKeyIndex for LocalTrustedKeyIndex {
         let mut seen = HashSet::new();
         for key in keys {
             if seen.insert(*key)
-                && let Some((object_hash, record)) =
-                    load_resolution("build", &self.store.build_ref_path(*key), &self.store)?
+                && let Some(object_hash) =
+                    load_resolution("build", &self.store.build_ref_path(*key))?
             {
                 found.push(TrustedResolution {
                     key: *key,
                     object_hash,
-                    record,
                 });
             }
         }
@@ -171,13 +162,12 @@ impl TrustedKeyIndex for LocalTrustedKeyIndex {
         let mut seen = HashSet::new();
         for key in keys {
             if seen.insert(*key)
-                && let Some((object_hash, record)) =
-                    load_resolution("reuse", &self.store.reuse_ref_path(*key), &self.store)?
+                && let Some(object_hash) =
+                    load_resolution("reuse", &self.store.reuse_ref_path(*key))?
             {
                 found.push(TrustedResolution {
                     key: *key,
                     object_hash,
-                    record,
                 });
             }
         }
@@ -516,23 +506,6 @@ fn require_same_filesystem(
     Ok(())
 }
 
-pub(crate) fn read_manifest_if_marked(path: &Path) -> Result<Option<FsTreeManifest>, StoreError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| map_io(path, "inspect possible fs-tree manifest", error))?;
-    if !metadata.file_type().is_file() {
-        return Ok(None);
-    }
-    let mut file = fs::File::open(path)
-        .map_err(|error| map_io(path, "open possible fs-tree manifest", error))?;
-    let mut prefix = vec![0_u8; FS_TREE_SCHEMA_LINE.len()];
-    match file.read_exact(&mut prefix) {
-        Ok(()) if prefix == FS_TREE_SCHEMA_LINE => FsTreeManifest::read_canonical(path).map(Some),
-        Ok(()) => Ok(None),
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
-        Err(error) => Err(map_io(path, "read possible fs-tree manifest", error)),
-    }
-}
-
 fn allocate_staging_path(working: &Store) -> Result<PathBuf, StoreError> {
     loop {
         let serial = NEXT_SECONDARY_STAGING.fetch_add(1, Ordering::Relaxed);
@@ -631,11 +604,7 @@ fn map_io(path: &Path, action: &str, error: io::Error) -> StoreError {
     StoreError::Io(format!("failed to {action} '{}': {error}", path.display()))
 }
 
-fn load_resolution(
-    kind: &str,
-    ref_path: &Path,
-    store: &ReadOnlyStore,
-) -> Result<Option<(ObjectHash, ObjectRecord)>, StoreError> {
+fn load_resolution(kind: &str, ref_path: &Path) -> Result<Option<ObjectHash>, StoreError> {
     let metadata = match fs::symlink_metadata(ref_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -660,29 +629,7 @@ fn load_resolution(
         ))
     })?;
     let object_hash = parse_object_record_ref_target(kind, ref_path, &target)?;
-    let record_path = store.object_record_path(object_hash);
-    let bytes = fs::read(&record_path).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            StoreError::InvalidData(format!(
-                "{kind} ref '{}' points to missing object record for object '{}'",
-                ref_path.display(),
-                object_hash
-            ))
-        } else {
-            StoreError::Io(format!(
-                "failed to read secondary object record '{}': {error}",
-                record_path.display()
-            ))
-        }
-    })?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
-        StoreError::InvalidData(format!(
-            "failed to parse secondary object record '{}': {error}",
-            record_path.display()
-        ))
-    })?;
-    let record = parse_object_record_value(object_hash, &value)?;
-    Ok(Some((object_hash, record)))
+    Ok(Some(object_hash))
 }
 
 #[cfg(test)]
@@ -795,13 +742,11 @@ mod tests {
         assert_eq!(builds.len(), 1);
         assert_eq!(builds[0].key, build);
         assert_eq!(builds[0].object_hash, object_hash);
-        assert_eq!(builds[0].record.object_hash, object_hash);
 
         let reuses = index.resolve_reuses(&[reuse, reuse_key('4')]).unwrap();
         assert_eq!(reuses.len(), 1);
         assert_eq!(reuses[0].key, reuse);
         assert_eq!(reuses[0].object_hash, object_hash);
-        assert_eq!(reuses[0].record.object_hash, object_hash);
     }
 
     #[test]
@@ -826,7 +771,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_index_metadata_is_an_error_not_a_miss() {
+    fn index_validates_mapping_target_but_does_not_read_object_record() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("store");
         let (store, build, _reuse, object_hash) = populated_store(&root);
@@ -843,8 +788,11 @@ mod tests {
             Path::new("../object-records").join(format!("{}.json", object_hash.to_hex()));
         symlink(canonical_target, &ref_path).unwrap();
         fs::remove_file(store.object_record_path(object_hash)).unwrap();
-        let error = index.resolve_builds(&[build]).unwrap_err();
-        assert!(error.to_string().contains("missing object record"));
+        let resolved = index.resolve_builds(&[build]).unwrap();
+        assert_eq!(resolved[0].object_hash, object_hash);
+        fs::write(store.object_record_path(object_hash), b"not json\n").unwrap();
+        let resolved = index.resolve_builds(&[build]).unwrap();
+        assert_eq!(resolved[0].object_hash, object_hash);
     }
 
     #[test]
@@ -893,11 +841,7 @@ mod tests {
             source.import_object(&working, object_hash).unwrap(),
             ContentImportOutcome::AlreadyPresent
         );
-        assert!(
-            crate::load_object_record(&working, object_hash)
-                .unwrap()
-                .is_none()
-        );
+        assert!(!working.object_record_path(object_hash).exists());
 
         fs::remove_file(secondary_path).unwrap();
         assert_eq!(fs::read(working_path).unwrap(), b"secondary object\n");

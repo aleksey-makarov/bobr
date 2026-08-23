@@ -186,7 +186,7 @@ pub(crate) async fn run_fetch_with_capabilities(
     let client = http_client(HttpTimeouts::production())?;
     let (cancel_tx, cancel_rx) = watch::channel(false);
     let secondary = Arc::new(
-        SecondaryResolver::new(store.clone(), indexes, sources)
+        SecondaryResolver::new(store.clone(), request.run_id.clone(), indexes, sources)
             .map_err(|error| error.to_string())?,
     );
     let engine = Arc::new(Engine {

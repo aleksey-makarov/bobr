@@ -1,11 +1,11 @@
 #![allow(missing_docs)]
 mod support;
 
-use bobr_store::{Store, load_build_handle, load_object_record};
+use bobr_store::{Store, load_build_handle};
 use std::fs;
 use support::{
-    build_ref_count, execute_request, object_record_count, remove_build_ref, store_root,
-    tree_file_recipe, write_request,
+    build_key_for_object, build_ref_count, execute_request, object_record_count, remove_build_ref,
+    store_root, tree_file_recipe, write_request,
 };
 use tempfile::tempdir;
 
@@ -24,10 +24,7 @@ fn second_run_reuses_existing_root_build_handle() {
 
     assert_eq!(first, second);
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let build_key = load_object_record(&layout, first)
-        .unwrap()
-        .expect("object record")
-        .build_key;
+    let build_key = build_key_for_object(workspace.path(), first);
     assert!(load_build_handle(&layout, build_key).unwrap().is_some());
     assert_eq!(builds_after_first, 1);
     assert_eq!(builds_after_second, 1);
@@ -42,10 +39,7 @@ fn second_run_reuses_canonical_object_when_build_handle_is_missing() {
 
     let first = execute_request(&request_path).unwrap();
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let build_key = load_object_record(&layout, first)
-        .unwrap()
-        .expect("object record")
-        .build_key;
+    let build_key = build_key_for_object(workspace.path(), first);
     let object_records_after_first = object_record_count(workspace.path());
     let objects_after_first = fs::read_dir(store_root(workspace.path()).join("objects"))
         .unwrap()

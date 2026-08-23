@@ -62,44 +62,6 @@ fn source_build_key_uses_object_hash_bytes() {
 }
 
 #[test]
-fn parse_object_record_rejects_old_schema() {
-    let object_hash =
-        parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
-    let value = json!({
-        "schema": "bobr-object-record-v1",
-        "object_hash": object_hash.to_string(),
-        "inputs": [],
-    });
-
-    assert!(matches!(
-        parse_object_record_value(object_hash, &value),
-        Err(StoreError::InvalidData(message))
-            if message == "unsupported object record schema 'bobr-object-record-v1'"
-    ));
-}
-
-#[test]
-fn parse_object_record_rejects_mismatched_path_key() {
-    let object_hash =
-        parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
-    let mismatched_object_hash = "2222222222222222222222222222222222222222222222222222222222222222"
-        .parse::<ObjectHash>()
-        .unwrap();
-    let value = json!({
-        "schema": OBJECT_RECORD_SCHEMA,
-        "build_key": BuildKey::from_object_hash(object_hash),
-        "object_hash": object_hash.to_string(),
-        "inputs": [],
-    });
-
-    assert!(matches!(
-        parse_object_record_value(mismatched_object_hash, &value),
-        Err(StoreError::InvalidData(message))
-            if message.contains("does not match record object hash")
-    ));
-}
-
-#[test]
 fn import_build_reuses_existing_object_record_via_new_build_handle_ref() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
@@ -197,19 +159,6 @@ fn import_build_writes_build_record_and_object_ref() {
             .join(format!("{}.json", published.object_hash.to_hex()))
     );
 
-    let build_json: Value =
-        serde_json::from_slice(&fs::read(&object_record_path).unwrap()).unwrap();
-    assert_eq!(
-        build_json["schema"],
-        Value::String(OBJECT_RECORD_SCHEMA.to_string())
-    );
-    assert_eq!(build_json["run_id"], Value::String(TEST_RUN_ID.to_string()));
-    assert_eq!(
-        build_json["object_hash"],
-        Value::String(published.object_hash.to_string())
-    );
-    assert_eq!(build_json["inputs"], Value::Array(vec![]));
-
     assert_eq!(
         fs::read_link(layout.object_refs_dir().join("script")).unwrap(),
         PathBuf::from("..")
@@ -219,7 +168,7 @@ fn import_build_writes_build_record_and_object_ref() {
 }
 
 #[test]
-fn object_record_ref_loaders_reject_non_canonical_targets() {
+fn mapping_loaders_validate_targets_without_reading_object_records() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -229,6 +178,7 @@ fn object_record_ref_loaders_reject_non_canonical_targets() {
     let reuse_key = reuse_key_for("CasTest", json!({ "kind": "sandbox-script" }), &[]);
     let published =
         materialize_named_test_build(&layout, "script", build_key, reuse_key, &stage, vec![]);
+    let canonical_target = fs::read_link(layout.build_ref_path(build_key)).unwrap();
     let non_canonical_target = PathBuf::from("..")
         .join("not-object-records")
         .join(format!("{}.json", published.object_hash.to_hex()));
@@ -243,77 +193,50 @@ fn object_record_ref_loaders_reject_non_canonical_targets() {
     );
 
     replace_symlink(&non_canonical_target, &layout.reuse_ref_path(reuse_key)).unwrap();
-    let error = load_reuse_object_record(&layout, reuse_key).unwrap_err();
+    let error = load_reuse_object_hash(&layout, reuse_key).unwrap_err();
     assert!(error.to_string().contains("reuse ref"));
     assert!(
         error
             .to_string()
             .contains("non-canonical object record target")
     );
-}
 
-#[test]
-fn object_record_round_trips_inputs() {
-    let temp = tempdir().unwrap();
-    let layout = create_test_store(temp.path());
-
-    let inputs = vec![
-        parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111"),
-        parse_object_hash("2222222222222222222222222222222222222222222222222222222222222222"),
-    ];
-    let reuse_key = reuse_key_for(
-        "CasTest",
-        json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
-        &inputs,
+    replace_symlink(&canonical_target, &layout.build_ref_path(build_key)).unwrap();
+    replace_symlink(&canonical_target, &layout.reuse_ref_path(reuse_key)).unwrap();
+    fs::remove_file(layout.object_record_path(published.object_hash)).unwrap();
+    assert_eq!(
+        load_build_handle(&layout, build_key).unwrap(),
+        Some(published.object_hash)
     );
-
-    let stage = temp.path().join("script.sh");
-    fs::write(&stage, b"echo hi\n").unwrap();
-    let published = materialize_named_test_build(
-        &layout,
-        "script",
-        build_key_for(
-            "CasTest",
-            json!({ "kind": "sandbox-script", "source": "echo hi\n" }),
-            &[],
-        ),
-        reuse_key,
-        &stage,
-        inputs.clone(),
+    assert_eq!(
+        load_reuse_object_hash(&layout, reuse_key).unwrap(),
+        Some(published.object_hash)
     );
-
-    let loaded = load_object_record(&layout, published.object_hash)
-        .unwrap()
-        .expect("expected object record to exist");
-
-    assert_eq!(loaded.inputs, inputs);
-
-    let raw: Value = serde_json::from_slice(
-        &fs::read(layout.object_record_path(published.object_hash)).unwrap(),
+    fs::write(
+        layout.object_record_path(published.object_hash),
+        b"not json\n",
     )
     .unwrap();
     assert_eq!(
-        raw["inputs"],
-        Value::Array(
-            inputs
-                .iter()
-                .map(|object_hash| Value::String(object_hash.to_string()))
-                .collect()
-        )
+        load_build_handle(&layout, build_key).unwrap(),
+        Some(published.object_hash)
+    );
+    assert_eq!(
+        load_reuse_object_hash(&layout, reuse_key).unwrap(),
+        Some(published.object_hash)
     );
 }
 
 #[test]
-fn record_existing_source_object_requires_existing_object() {
+fn neutral_record_requires_existing_object() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
 
-    let error =
-        record::record_existing_source_object(&layout, object_hash, TEST_RUN_ID).unwrap_err();
+    let error = record::record_existing_object(&layout, object_hash, TEST_RUN_ID).unwrap_err();
 
-    assert!(matches!(error, StoreError::Io(message) if message.contains("source object")));
+    assert!(matches!(error, StoreError::Io(message) if message.contains("object")));
     assert!(!layout.object_record_path(object_hash).exists());
 }
 
@@ -343,14 +266,13 @@ fn record_existing_source_object_reuses_canonical_record() {
     let stage = temp.path().join("source.txt");
     fs::write(&stage, b"hello").unwrap();
     let object_hash = import_object(&layout, &stage).unwrap();
-    record::record_existing_source_object(&layout, object_hash, TEST_RUN_ID).unwrap();
+    record::record_existing_object(&layout, object_hash, TEST_RUN_ID).unwrap();
 
     let hit = record_existing_source_object(&layout, object_hash, "source", TEST_RUN_ID)
         .unwrap()
         .expect("expected source hit");
     assert_eq!(hit, object_hash);
-    let record = load_object_record(&layout, object_hash).unwrap().unwrap();
-    assert_eq!(record.run_id.as_deref(), Some(TEST_RUN_ID));
+    assert!(layout.object_record_path(object_hash).is_file());
     let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
         .unwrap()
         .expect("expected source build handle");
@@ -377,9 +299,6 @@ fn record_existing_source_object_records_existing_object_as_source_object() {
         .unwrap()
         .expect("expected source hit");
     assert_eq!(hit, object_hash);
-    let record = load_object_record(&layout, object_hash).unwrap().unwrap();
-    assert_eq!(record.inputs, Vec::new());
-    assert_eq!(record.run_id.as_deref(), Some(TEST_RUN_ID));
     assert!(object_record_path.exists());
     let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
         .unwrap()
@@ -408,8 +327,6 @@ fn import_source_object_on_match_imports_object_and_writes_canonical_record() {
         panic!("expected source import match");
     };
     assert_eq!(matched_hash, object_hash);
-    let record = load_object_record(&layout, object_hash).unwrap().unwrap();
-    assert_eq!(record.run_id.as_deref(), Some(TEST_RUN_ID));
     assert!(layout.object_path_unchecked(object_hash).exists());
     assert!(layout.object_record_path(object_hash).exists());
     let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
@@ -1109,6 +1026,56 @@ fn store_fs_tree_imports_with_install_into_store_fs_files() {
         .expect("payload file entry");
     let hex = hash.to_hex();
     assert!(fs_files_dir(&layout).join(&hex[..2]).join(hex).is_file());
+}
+
+#[test]
+fn working_mappings_require_the_complete_fs_tree_closure_not_a_record() {
+    let temp = tempdir().unwrap();
+    let store_root = temp.path().join("store");
+    fs::create_dir(&store_root).unwrap();
+    let layout = Store::create(&store_root).unwrap();
+    let source = temp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("payload"), b"payload\n").unwrap();
+    let manifest = layout.fs_tree().intern_tree(source).unwrap();
+    let file_hash = manifest
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            FsTreeEntry::File { hash, .. } => Some(*hash),
+            _ => None,
+        })
+        .unwrap();
+    let staged = temp.path().join("manifest.jsonl");
+    manifest.write_canonical(&staged).unwrap();
+    let build_key = parse_build_key(&"8".repeat(64));
+    let reuse_key = ReuseKey::from_str(&"9".repeat(64)).unwrap();
+    let object_hash = import_build(
+        &layout,
+        build_key,
+        reuse_key,
+        Vec::new(),
+        &staged,
+        "fs-tree-object",
+        TEST_RUN_ID,
+    )
+    .unwrap();
+
+    assert!(layout.object_is_complete(object_hash).unwrap());
+    fs::remove_file(layout.fs_file_path_unchecked(file_hash)).unwrap();
+    assert!(!layout.object_is_complete(object_hash).unwrap());
+    assert!(
+        load_build_handle(&layout, build_key)
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete object")
+    );
+    assert!(
+        resolve_reuse_for_build(&layout, build_key, reuse_key, "fs-tree-object")
+            .unwrap_err()
+            .to_string()
+            .contains("incomplete object")
+    );
 }
 
 #[test]

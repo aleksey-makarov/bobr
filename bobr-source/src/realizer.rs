@@ -259,7 +259,7 @@ mod tests {
     }
 
     fn empty_resolver(working: Store) -> Arc<SecondaryResolver> {
-        Arc::new(SecondaryResolver::new(working, Vec::new(), Vec::new()).unwrap())
+        Arc::new(SecondaryResolver::new(working, "test-run", Vec::new(), Vec::new()).unwrap())
     }
 
     #[tokio::test]
@@ -354,6 +354,7 @@ mod tests {
         let resolver = Arc::new(
             SecondaryResolver::new(
                 working.clone(),
+                "test-run",
                 vec![NamedTrustedKeyIndex::new(
                     "secondary",
                     Arc::new(LocalTrustedKeyIndex::new(read_only.clone())),
@@ -418,6 +419,7 @@ mod tests {
         let resolver = Arc::new(
             SecondaryResolver::new(
                 store(&temp.path().join("working")),
+                "test-run",
                 vec![
                     NamedTrustedKeyIndex::new(
                         "first-index",

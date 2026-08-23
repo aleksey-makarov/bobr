@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use bobr::{ExecutionError, Request, execute};
-use bobr_core::{CancellationToken, ObjectHash};
+use bobr_core::{BuildKey, CancellationToken, ObjectHash};
 use bobr_source::oci_registry::{OciPlatform, fetch_image_authenticated};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -226,6 +226,23 @@ fn object_record_file_path(root: &Path, object_hash: ObjectHash) -> PathBuf {
     store_root(root)
         .join("object-records")
         .join(format!("{}.json", object_hash.to_hex()))
+}
+
+pub(crate) fn object_record_exists(root: &Path, object_hash: ObjectHash) -> bool {
+    object_record_file_path(root, object_hash).is_file()
+}
+
+pub(crate) fn build_key_for_object(root: &Path, object_hash: ObjectHash) -> BuildKey {
+    let expected = format!("{}.json", object_hash.to_hex());
+    fs::read_dir(store_root(root).join("builds"))
+        .unwrap()
+        .find_map(|entry| {
+            let entry = entry.unwrap();
+            let target = fs::read_link(entry.path()).unwrap();
+            (target.file_name().and_then(|name| name.to_str()) == Some(expected.as_str()))
+                .then(|| entry.file_name().to_str().unwrap().parse().unwrap())
+        })
+        .unwrap_or_else(|| panic!("no build mapping names object '{object_hash}'"))
 }
 
 pub(crate) fn build_ref_count(root: &Path) -> usize {

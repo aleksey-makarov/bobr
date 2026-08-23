@@ -1,10 +1,8 @@
 //! Mapping-first, content-second resolution across secondary-store capabilities.
 
-use crate::fs_tree::{FsFileHash, FsTreeEntry, FsTreeManifest};
-use crate::secondary::read_manifest_if_marked;
+use crate::fs_tree::{FsFileHash, FsTreeEntry, FsTreeManifest, read_manifest_if_marked};
 use crate::{
-    ContentImportOutcome, ContentSource, ObjectRecord, Store, StoreError, TrustedKeyIndex,
-    TrustedResolution,
+    ContentImportOutcome, ContentSource, Store, StoreError, TrustedKeyIndex, TrustedResolution,
 };
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use std::collections::{HashMap, HashSet};
@@ -132,6 +130,7 @@ pub struct ReuseQuery {
 #[derive(Debug)]
 pub struct SecondaryResolver {
     working: Store,
+    run_id: String,
     indexes: Vec<NamedTrustedKeyIndex>,
     sources: Vec<NamedContentSource>,
 }
@@ -140,9 +139,12 @@ impl SecondaryResolver {
     /// Creates a resolver and validates unique, non-empty capability names.
     ///
     /// The same name may appear once in each list because one configured local
-    /// store normally contributes both independent capabilities.
+    /// store normally contributes both independent capabilities. `run_id` is
+    /// written into neutral local object records after successful acquisition;
+    /// records from trusted indexes are never opened or copied.
     pub fn new(
         working: Store,
+        run_id: impl Into<String>,
         indexes: Vec<NamedTrustedKeyIndex>,
         sources: Vec<NamedContentSource>,
     ) -> Result<Self, StoreError> {
@@ -156,6 +158,7 @@ impl SecondaryResolver {
         )?;
         Ok(Self {
             working,
+            run_id: run_id.into(),
             indexes,
             sources,
         })
@@ -189,7 +192,7 @@ impl SecondaryResolver {
         let hashes = unique_in_order(hashes);
         let mut need_content = Vec::new();
         for hash in &hashes {
-            if !working_object_complete(&self.working, *hash)? {
+            if !self.working.object_is_complete(*hash)? {
                 need_content.push(*hash);
             }
         }
@@ -205,7 +208,8 @@ impl SecondaryResolver {
         hashes
             .into_iter()
             .map(|hash| {
-                if working_object_complete(&self.working, hash)? {
+                if self.working.object_is_complete(hash)? {
+                    crate::record::record_existing_object(&self.working, hash, &self.run_id)?;
                     return Ok(KnownObjectResolution {
                         object_hash: hash,
                         content_sources: Vec::new(),
@@ -213,6 +217,9 @@ impl SecondaryResolver {
                     });
                 }
                 let acquired = self.acquire_candidate(hash, &availability)?;
+                if acquired.is_some() {
+                    crate::record::record_existing_object(&self.working, hash, &self.run_id)?;
+                }
                 Ok(match acquired {
                     Some((outcome, content_sources)) => KnownObjectResolution {
                         object_hash: hash,
@@ -248,7 +255,12 @@ impl SecondaryResolver {
             .into_iter()
             .map(|group| {
                 self.resolve_group(group, &availability, |candidate| {
-                    promote_build(&self.working, candidate.key, &candidate.record)
+                    promote_build(
+                        &self.working,
+                        candidate.key,
+                        candidate.object_hash,
+                        &self.run_id,
+                    )
                 })
             })
             .collect()
@@ -276,7 +288,6 @@ impl SecondaryResolver {
                 if !reuse_keys.contains(&answer.key) {
                     return Err(unrequested_key_error("reuse", &answer.key.to_string()));
                 }
-                validate_resolution_record(answer.object_hash, &answer.record)?;
                 answers_by_key
                     .entry(answer.key)
                     .or_default()
@@ -298,7 +309,6 @@ impl SecondaryResolver {
                             TrustedResolution {
                                 key: query,
                                 object_hash: answer.object_hash,
-                                record: answer.record,
                             },
                         )
                     })
@@ -315,7 +325,8 @@ impl SecondaryResolver {
                         &self.working,
                         candidate.key.build_key,
                         candidate.key.reuse_key,
-                        &candidate.record,
+                        candidate.object_hash,
+                        &self.run_id,
                     )
                 })
             })
@@ -340,7 +351,7 @@ impl SecondaryResolver {
         };
 
         for candidate in &group.candidates {
-            if working_object_complete(&self.working, candidate.object_hash)? {
+            if self.working.object_is_complete(candidate.object_hash)? {
                 promote(candidate)?;
                 report.resolved = Some(ResolvedSecondaryContent {
                     object_hash: candidate.object_hash,
@@ -379,7 +390,7 @@ impl SecondaryResolver {
         for group in groups {
             let mut has_complete_local = false;
             for candidate in &group.candidates {
-                if working_object_complete(&self.working, candidate.object_hash)? {
+                if self.working.object_is_complete(candidate.object_hash)? {
                     has_complete_local = true;
                     break;
                 }
@@ -502,7 +513,6 @@ impl SecondaryResolver {
 struct Candidate<K> {
     key: K,
     object_hash: ObjectHash,
-    record: ObjectRecord,
     index: String,
 }
 
@@ -527,7 +537,6 @@ where
             if !requested.contains(&answer.key) {
                 return Err(unrequested_key_error("build", &answer.key.to_string()));
             }
-            validate_resolution_record(answer.object_hash, &answer.record)?;
             answers_by_key
                 .entry(answer.key)
                 .or_default()
@@ -559,7 +568,6 @@ where
             seen.insert(answer.object_hash).then_some(Candidate {
                 key,
                 object_hash: answer.object_hash,
-                record: answer.record,
                 index,
             })
         })
@@ -569,50 +577,6 @@ where
         answers: public_answers,
         candidates,
     }
-}
-
-fn working_object_complete(working: &Store, hash: ObjectHash) -> Result<bool, StoreError> {
-    let Some(path) = working.object_path(hash)? else {
-        return Ok(false);
-    };
-    let metadata = fs::symlink_metadata(&path).map_err(|error| {
-        StoreError::Io(format!(
-            "failed to inspect working object '{}': {error}",
-            path.display()
-        ))
-    })?;
-    if metadata.file_type().is_dir() {
-        return Ok(true);
-    }
-    if !metadata.file_type().is_file() {
-        return Err(StoreError::InvalidData(format!(
-            "working object path '{}' is neither a regular file nor a directory",
-            path.display()
-        )));
-    }
-    let Some(manifest) = read_manifest_if_marked(&path)? else {
-        return Ok(true);
-    };
-    for file_hash in manifest_fs_files(&manifest) {
-        let fs_file = working.fs_file_path_unchecked(file_hash);
-        match fs::symlink_metadata(&fs_file) {
-            Ok(metadata) if metadata.file_type().is_file() => {}
-            Ok(_) => {
-                return Err(StoreError::InvalidData(format!(
-                    "working fs-file path '{}' is not a regular file",
-                    fs_file.display()
-                )));
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => {
-                return Err(StoreError::Io(format!(
-                    "failed to inspect working fs-file '{}': {error}",
-                    fs_file.display()
-                )));
-            }
-        }
-    }
-    Ok(true)
 }
 
 fn manifest_fs_files(manifest: &FsTreeManifest) -> Vec<FsFileHash> {
@@ -630,44 +594,32 @@ fn manifest_fs_files(manifest: &FsTreeManifest) -> Vec<FsFileHash> {
 fn promote_build(
     working: &Store,
     build_key: BuildKey,
-    record: &ObjectRecord,
+    object_hash: ObjectHash,
+    run_id: &str,
 ) -> Result<(), StoreError> {
-    ensure_promotable(working, record)?;
-    crate::record::store_object_record(working, record)?;
-    crate::refs::store_build_handle_ref(working, build_key, record.object_hash)
+    ensure_promotable(working, object_hash)?;
+    crate::record::record_existing_object(working, object_hash, run_id)?;
+    crate::refs::store_build_handle_ref(working, build_key, object_hash)
 }
 
 fn promote_reuse(
     working: &Store,
     build_key: BuildKey,
     reuse_key: ReuseKey,
-    record: &ObjectRecord,
+    object_hash: ObjectHash,
+    run_id: &str,
 ) -> Result<(), StoreError> {
-    ensure_promotable(working, record)?;
-    crate::record::store_object_record(working, record)?;
-    crate::refs::store_reuse_ref(working, reuse_key, record.object_hash)?;
-    crate::refs::store_build_handle_ref(working, build_key, record.object_hash)
+    ensure_promotable(working, object_hash)?;
+    crate::record::record_existing_object(working, object_hash, run_id)?;
+    crate::refs::store_reuse_ref(working, reuse_key, object_hash)?;
+    crate::refs::store_build_handle_ref(working, build_key, object_hash)
 }
 
-fn ensure_promotable(working: &Store, record: &ObjectRecord) -> Result<(), StoreError> {
-    validate_resolution_record(record.object_hash, record)?;
-    if !working_object_complete(working, record.object_hash)? {
+fn ensure_promotable(working: &Store, object_hash: ObjectHash) -> Result<(), StoreError> {
+    if !working.object_is_complete(object_hash)? {
         return Err(StoreError::InvalidData(format!(
             "cannot promote mapping for incomplete working object '{}'",
-            record.object_hash
-        )));
-    }
-    Ok(())
-}
-
-fn validate_resolution_record(
-    object_hash: ObjectHash,
-    record: &ObjectRecord,
-) -> Result<(), StoreError> {
-    if record.object_hash != object_hash {
-        return Err(StoreError::InvalidData(format!(
-            "trusted resolution names object '{object_hash}' but its record describes '{}'",
-            record.object_hash
+            object_hash
         )));
     }
     Ok(())
@@ -723,9 +675,10 @@ mod tests {
     use crate::fs_tree::FsTreeEntry;
     use crate::{
         LocalHardlinkContentSource, LocalTrustedKeyIndex, ReadOnlyStore, import_build,
-        load_build_handle, load_object_record,
+        load_build_handle,
     };
     use bobr_runtime::runtime_provider::RuntimeProvider;
+    use serde_json::Value;
     use std::os::unix::fs::MetadataExt;
     use std::path::Path;
     use std::str::FromStr;
@@ -788,7 +741,7 @@ mod tests {
         indexes: Vec<NamedTrustedKeyIndex>,
         sources: Vec<NamedContentSource>,
     ) -> SecondaryResolver {
-        SecondaryResolver::new(working, indexes, sources).unwrap()
+        SecondaryResolver::new(working, "test-run", indexes, sources).unwrap()
     }
 
     #[derive(Debug)]
@@ -876,6 +829,49 @@ mod tests {
             load_build_handle(&working, build).unwrap(),
             Some(object_hash)
         );
+        let local_record: Value =
+            serde_json::from_slice(&fs::read(working.object_record_path(object_hash)).unwrap())
+                .unwrap();
+        assert_eq!(
+            local_record["build_key"],
+            BuildKey::from_object_hash(object_hash).to_string()
+        );
+        assert_eq!(local_record["run_id"], "test-run");
+        assert_eq!(local_record["inputs"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn known_secondary_content_gets_a_new_neutral_working_record() {
+        let temp = tempdir().unwrap();
+        let secondary_root = temp.path().join("secondary");
+        let working_root = temp.path().join("working");
+        let secondary = empty_store(&secondary_root);
+        let working = empty_store(&working_root);
+        let object_hash = publish_file(
+            &secondary,
+            build_key('a'),
+            reuse_key('b'),
+            b"known content\n",
+            &temp.path().join("staged"),
+        );
+        let resolver = resolver(
+            working.clone(),
+            Vec::new(),
+            vec![source("secondary", &secondary_root)],
+        );
+
+        let resolution = resolver.ensure_objects(&[object_hash]).unwrap().remove(0);
+
+        assert_eq!(resolution.outcome, Some(ContentImportOutcome::Imported));
+        let local_record: Value =
+            serde_json::from_slice(&fs::read(working.object_record_path(object_hash)).unwrap())
+                .unwrap();
+        assert_eq!(
+            local_record["build_key"],
+            BuildKey::from_object_hash(object_hash).to_string()
+        );
+        assert_eq!(local_record["run_id"], "test-run");
+        assert_eq!(local_record["inputs"], serde_json::json!([]));
     }
 
     #[test]
@@ -1051,7 +1047,7 @@ mod tests {
         assert!(report.resolved.is_none());
         assert_eq!(report.unavailable, [object_hash]);
         assert_eq!(load_build_handle(&working, build).unwrap(), None);
-        assert!(load_object_record(&working, object_hash).unwrap().is_none());
+        assert!(!working.object_record_path(object_hash).exists());
     }
 
     #[test]
@@ -1168,6 +1164,7 @@ mod tests {
         let working = empty_store(&working_root);
         let duplicate = SecondaryResolver::new(
             working.clone(),
+            "test-run",
             vec![index("same", &root), index("same", &root)],
             Vec::new(),
         )
@@ -1179,7 +1176,8 @@ mod tests {
         );
 
         let empty =
-            SecondaryResolver::new(working, Vec::new(), vec![source("", &root)]).unwrap_err();
+            SecondaryResolver::new(working, "test-run", Vec::new(), vec![source("", &root)])
+                .unwrap_err();
         assert!(empty.to_string().contains("name must not be empty"));
     }
 }

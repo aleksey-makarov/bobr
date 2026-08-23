@@ -30,7 +30,6 @@ mod store;
 
 pub use error::StoreError;
 pub use object::import_build;
-pub use record::{ObjectRecord, load_object_record};
 pub use ref_name::validate_ref_name;
 pub use refs::{load_build_handle, resolve_build_handle, resolve_reuse_for_build};
 pub use secondary::{
@@ -54,9 +53,7 @@ pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
 #[cfg(test)]
 pub(crate) use object::import_object;
 #[cfg(test)]
-pub(crate) use record::{OBJECT_RECORD_SCHEMA, parse_object_record_value};
-#[cfg(test)]
-pub(crate) use refs::{load_reuse_object_record, replace_symlink};
+pub(crate) use refs::{load_reuse_object_hash, replace_symlink};
 #[cfg(test)]
 pub(crate) use store::{OBJECT_RECORDS_DIR, OBJECTS_DIR};
 

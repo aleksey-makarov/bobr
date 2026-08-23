@@ -1,5 +1,5 @@
 use crate::StoreError;
-use crate::fs_tree::{FsFileHash, FsTree};
+use crate::fs_tree::{FsFileHash, FsTree, FsTreeEntry, read_manifest_if_marked};
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -116,6 +116,60 @@ impl Store {
         }
     }
 
+    /// Returns whether the complete content-addressed object is present.
+    ///
+    /// Ordinary files and directories are complete when their top-level object
+    /// path exists with the expected file type. An fs-tree manifest is complete
+    /// only when every referenced fs-file is present as a regular file.
+    /// Object records are deliberately not consulted.
+    pub fn object_is_complete(&self, object_hash: ObjectHash) -> Result<bool, StoreError> {
+        let Some(path) = self.object_path(object_hash)? else {
+            return Ok(false);
+        };
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            StoreError::Io(format!(
+                "failed to inspect working object '{}': {error}",
+                path.display()
+            ))
+        })?;
+        if metadata.file_type().is_dir() {
+            return Ok(true);
+        }
+        if !metadata.file_type().is_file() {
+            return Err(StoreError::InvalidData(format!(
+                "working object path '{}' is neither a regular file nor a directory",
+                path.display()
+            )));
+        }
+        let Some(manifest) = read_manifest_if_marked(&path)? else {
+            return Ok(true);
+        };
+        let mut seen = std::collections::HashSet::new();
+        for file_hash in manifest.entries().iter().filter_map(|entry| match entry {
+            FsTreeEntry::File { hash, .. } if seen.insert(*hash) => Some(*hash),
+            _ => None,
+        }) {
+            let fs_file = self.fs_file_path_unchecked(file_hash);
+            match fs::symlink_metadata(&fs_file) {
+                Ok(metadata) if metadata.file_type().is_file() => {}
+                Ok(_) => {
+                    return Err(StoreError::InvalidData(format!(
+                        "working fs-file path '{}' is not a regular file",
+                        fs_file.display()
+                    )));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => {
+                    return Err(StoreError::Io(format!(
+                        "failed to inspect working fs-file '{}': {error}",
+                        fs_file.display()
+                    )));
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// Returns the canonical path of an imported object without checking that it
     /// exists. The path is `<store>/objects/<64-lowercase-object-hash>`.
     pub(crate) fn object_path_unchecked(&self, object_hash: ObjectHash) -> PathBuf {
@@ -185,10 +239,6 @@ impl ReadOnlyStore {
         self.root().join(REUSES_DIR)
     }
 
-    pub(crate) fn object_records_dir(&self) -> PathBuf {
-        self.root().join(OBJECT_RECORDS_DIR)
-    }
-
     pub(crate) fn object_path_unchecked(&self, object_hash: ObjectHash) -> PathBuf {
         self.objects_dir().join(object_hash.to_hex())
     }
@@ -199,11 +249,6 @@ impl ReadOnlyStore {
 
     pub(crate) fn reuse_ref_path(&self, reuse_key: ReuseKey) -> PathBuf {
         self.reuses_dir().join(reuse_key.to_hex())
-    }
-
-    pub(crate) fn object_record_path(&self, object_hash: ObjectHash) -> PathBuf {
-        self.object_records_dir()
-            .join(format!("{}.json", object_hash.to_hex()))
     }
 
     /// Returns the canonical read-only-store path for an fs-file without

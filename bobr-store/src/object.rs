@@ -1,5 +1,5 @@
-use crate::record::ObjectRecordSchemaV4;
-use crate::{ObjectRecord, Store, StoreError};
+use crate::record::{ObjectRecord, ObjectRecordSchemaV4};
+use crate::{Store, StoreError};
 use bobr_core::fsutil as private_fs;
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use fsobj_hash::hash_path;

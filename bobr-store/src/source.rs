@@ -1,5 +1,5 @@
 use crate::object::import_object;
-use crate::record::record_existing_source_object as record_existing_source_object_record;
+use crate::record::record_existing_object;
 use crate::{Store, StoreError};
 use bobr_core::{BuildKey, ObjectHash};
 use std::path::Path;
@@ -32,7 +32,7 @@ pub fn record_existing_source_object(
         return Ok(None);
     }
 
-    record_existing_source_object_record(store, declared_hash, run_id)?;
+    record_existing_object(store, declared_hash, run_id)?;
     record_source_build_handle(store, declared_hash)?;
     crate::refs::update_object_ref(store, object_ref_name, declared_hash)?;
     Ok(Some(declared_hash))
@@ -57,7 +57,7 @@ pub fn import_source_object(
         return Ok(SourceImportOutcome::Mismatched { actual_hash });
     }
 
-    record_existing_source_object_record(store, declared_hash, run_id)?;
+    record_existing_object(store, declared_hash, run_id)?;
     record_source_build_handle(store, declared_hash)?;
     crate::refs::update_object_ref(store, object_ref_name, declared_hash)?;
     Ok(SourceImportOutcome::Matched(declared_hash))

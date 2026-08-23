@@ -30,6 +30,34 @@ const CANONICAL_SCHEMA_LINE: &[u8] = br#"{"schema":"bobr-fs-tree-manifest"}
 "#;
 const FS_FILE_HASH_TAG: &[u8] = b"bobr:fs-file:v1\0";
 
+pub(crate) fn read_manifest_if_marked(path: &Path) -> Result<Option<FsTreeManifest>, StoreError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to inspect possible fs-tree manifest '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Ok(None);
+    }
+    let mut file = fs::File::open(path).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to open possible fs-tree manifest '{}': {error}",
+            path.display()
+        ))
+    })?;
+    let mut prefix = vec![0_u8; CANONICAL_SCHEMA_LINE.len()];
+    match file.read_exact(&mut prefix) {
+        Ok(()) if prefix == CANONICAL_SCHEMA_LINE => FsTreeManifest::read_canonical(path).map(Some),
+        Ok(()) => Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(error) => Err(StoreError::Io(format!(
+            "failed to read possible fs-tree manifest '{}': {error}",
+            path.display()
+        ))),
+    }
+}
+
 /// Store-scoped access to fs-tree operations.
 ///
 /// This value is intentionally opaque: callers can obtain it from

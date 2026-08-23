@@ -1,4 +1,4 @@
-use crate::{ObjectRecord, Store, StoreError, validate_ref_name};
+use crate::{Store, StoreError, validate_ref_name};
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use std::fs;
 use std::os::unix::fs as unix_fs;
@@ -126,8 +126,8 @@ pub(crate) fn store_reuse_ref(
 /// Loads the published build reached by a build key.
 ///
 /// Returns `Ok(None)` when the build ref does not exist. Existing refs must be
-/// canonical symlinks to object records, and the referenced object record must point to
-/// an existing object in the store.
+/// canonical symlinks carrying an object hash, and the complete referenced
+/// object content must exist in the store. Object records are not consulted.
 pub fn load_build_handle(
     store: &Store,
     build_key: BuildKey,
@@ -144,17 +144,9 @@ pub fn load_build_handle(
         ))
     })?;
     let object_hash = parse_object_record_ref_target("build", &build_ref_path, &target)?;
-    // The ref must resolve to a stored object record whose object exists.
-    if crate::record::load_object_record(store, object_hash)?.is_none() {
+    if !store.object_is_complete(object_hash)? {
         return Err(StoreError::InvalidData(format!(
-            "build ref '{}' points to missing object record for object '{}'",
-            build_ref_path.display(),
-            object_hash
-        )));
-    }
-    if store.object_path(object_hash)?.is_none() {
-        return Err(StoreError::InvalidData(format!(
-            "build ref '{}' points to missing object '{}'",
+            "build ref '{}' points to incomplete object '{}'",
             build_ref_path.display(),
             object_hash
         )));
@@ -178,14 +170,14 @@ pub fn resolve_build_handle(
     Ok(Some(object_hash))
 }
 
-/// Loads the reusable object record reached by a reuse key.
+/// Loads the object hash reached by a reuse key.
 ///
 /// Returns `Ok(None)` when the reuse ref does not exist. Existing refs must be
-/// canonical symlinks to object records.
-pub(crate) fn load_reuse_object_record(
+/// canonical symlinks carrying an object hash. Object records are not read.
+pub(crate) fn load_reuse_object_hash(
     store: &Store,
     reuse_key: ReuseKey,
-) -> Result<Option<ObjectRecord>, StoreError> {
+) -> Result<Option<ObjectHash>, StoreError> {
     let reuse_ref_path = store.reuse_ref_path(reuse_key);
     if !reuse_ref_path.exists() && !reuse_ref_path.is_symlink() {
         return Ok(None);
@@ -198,34 +190,25 @@ pub(crate) fn load_reuse_object_record(
         ))
     })?;
     let object_hash = parse_object_record_ref_target("reuse", &reuse_ref_path, &target)?;
-    let object_record =
-        crate::record::load_object_record(store, object_hash)?.ok_or_else(|| {
-            StoreError::InvalidData(format!(
-                "reuse ref '{}' points to missing object record for object '{}'",
-                reuse_ref_path.display(),
-                object_hash
-            ))
-        })?;
-    Ok(Some(object_record))
+    Ok(Some(object_hash))
 }
 
-/// Resolves a reusable object record and repairs the build handle for `build_key`.
+/// Resolves a reusable object hash and repairs the build handle for `build_key`.
 ///
 /// Returns `Ok(None)` when the reuse ref does not exist. Existing reuse refs
-/// must point to an existing object record whose object exists in the store.
+/// must carry an object hash whose complete content exists in the store.
 pub fn resolve_reuse_for_build(
     store: &Store,
     build_key: BuildKey,
     reuse_key: ReuseKey,
     object_ref_name: &str,
 ) -> Result<Option<ObjectHash>, StoreError> {
-    let Some(object_record) = load_reuse_object_record(store, reuse_key)? else {
+    let Some(object_hash) = load_reuse_object_hash(store, reuse_key)? else {
         return Ok(None);
     };
-    let object_hash = object_record.object_hash;
-    if store.object_path(object_hash)?.is_none() {
+    if !store.object_is_complete(object_hash)? {
         return Err(StoreError::InvalidData(format!(
-            "reuse ref points to missing object '{object_hash}'"
+            "reuse ref points to incomplete object '{object_hash}'"
         )));
     }
     store_build_handle_ref(store, build_key, object_hash)?;
