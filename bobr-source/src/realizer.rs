@@ -2,12 +2,17 @@
 //!
 //! This milestone resolves working and trusted-secondary build handles before
 //! traversing inputs. Exact hits therefore prune dependency subtrees. Nodes
-//! that miss are returned as source and builder frontiers; builder execution
-//! and dynamic reuse are added by later Realizer stages.
+//! that miss are returned as source and builder frontiers. Builder misses can
+//! now cross the in-process executor boundary; dynamic reuse is added by the
+//! next Realizer stage.
 
+use crate::build_executor::{
+    BuildExecutorError, BuildExecutorHandle, BuilderJob, PublishedBuilderOutput,
+    publish_builder_output,
+};
 use crate::graph::PlannedGraph;
 use bobr_core::{BuildKey, ObjectHash};
-use bobr_store::{SecondaryResolution, SecondaryResolver, StoreError, load_build_handle};
+use bobr_store::{SecondaryResolution, SecondaryResolver, Store, StoreError, load_build_handle};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
@@ -81,6 +86,25 @@ impl From<StoreError> for LazyExactError {
     fn from(error: StoreError) -> Self {
         Self::new(error.to_string())
     }
+}
+
+/// Executes one already-decided builder miss and publishes its staged output.
+///
+/// Inputs and the deterministic reuse key must already be available in `job`.
+/// Reuse lookup belongs immediately before this function and is added by the
+/// next Realizer stage. The synchronous builder runs under `jobs`; the final
+/// store import runs on Tokio's blocking pool after the builder slot is freed.
+pub async fn execute_builder_miss(
+    executor: &BuildExecutorHandle,
+    job: BuilderJob,
+    working: Store,
+) -> Result<PublishedBuilderOutput, BuildExecutorError> {
+    let staged = executor.submit(job).await?.wait().await?;
+    tokio::task::spawn_blocking(move || publish_builder_output(&working, staged))
+        .await
+        .map_err(|error| {
+            BuildExecutorError::Panic(format!("builder publication task panicked: {error}"))
+        })?
 }
 
 /// Resolves exact build handles lazily from all goals.

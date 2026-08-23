@@ -1,6 +1,5 @@
 use crate::execution::{
-    ExecutionError, TempDirGuard, check_cancelled, log_execution_event, map_builder_error,
-    map_store_error,
+    ExecutionError, TempDirGuard, check_cancelled, log_execution_event, map_store_error,
 };
 use crate::resolved_inputs::{ResolvedDependency, ResolvedInputs};
 use bobr_builder::{BuilderPlanError, BuilderPlannedSubject};
@@ -9,9 +8,12 @@ use bobr_core::{
     BuildKey, BuildLogLevel, BuildLogger, BuildRunLogger, BuildSeed, BuildStatus,
     CancellationToken, NoopBuildLogger, ObjectHash, SubjectRunContext,
 };
+use bobr_source::build_executor::{
+    BuildExecutorError, BuilderExecution, execute_builder_staged, publish_builder_output,
+};
 use bobr_source::{SourceExecutionError, SourcePlannedSubject};
 use bobr_store::{
-    SourceImportOutcome, Store, import_build, import_source_object, record_existing_source_object,
+    SourceImportOutcome, Store, import_source_object, record_existing_source_object,
     resolve_build_handle, resolve_reuse_for_build,
 };
 use std::collections::HashMap;
@@ -34,6 +36,9 @@ pub(crate) enum SubjectOutcome {
     CacheHit,
     /// Built (or materialized) in this run through a bound subject logger.
     Built,
+    /// Built and published through the shared builder completion path, which
+    /// has already emitted the terminal subject event.
+    BuilderPublished,
 }
 
 #[derive(Debug, Clone)]
@@ -93,81 +98,28 @@ fn execute_builder_subject(
         });
     }
     let builder_inputs = inputs.prepare_builder_inputs(cx.store, &cx.runtime_provider)?;
-
-    // Miss: create the workspace and run the builder.
-    let workspace =
-        cx.run
-            .create_workspace(subject.tag(), subject.name(), build_key.to_string())?;
-    let scratch_dir = workspace.temp_dir().to_path_buf();
-    // Owns the temp dir from here on: every return path (bind error below, and
-    // panics) cleans it via Drop.
-    let mut temp_guard = TempDirGuard::for_builder(cx.run.clone(), scratch_dir.clone());
-    let logger = cx
-        .run_logger
-        .bind_subject(subject.log_subject(&workspace))
-        .map_err(ExecutionError::Store)?;
-    temp_guard.set_logger(logger.clone());
-    log_execution_event(
-        logger.as_ref(),
-        BuildLogLevel::Info,
-        BuildStatus::Start,
-        "starting subject",
-    );
-    log_execution_event(
-        logger.as_ref(),
-        BuildLogLevel::Info,
-        BuildStatus::CacheMiss,
-        "executing builder",
-    );
-    check_cancelled(&cx.cancellation)?;
-    cx.run.prepare_scratch(&scratch_dir)?;
-    log_execution_event(
-        logger.as_ref(),
-        BuildLogLevel::Info,
-        BuildStatus::Running,
-        "running builder implementation",
-    );
-    let ctx = SubjectRunContext::new(
-        workspace,
-        logger.clone(),
-        cx.cancellation.clone(),
-        cx.runtime_provider.clone(),
-        BuildSeed::from_reuse_key(&reuse_key),
-    );
-    let staged = subject
-        .execute(&ctx, builder_inputs, cx.store.fs_tree())
-        .map_err(|error| {
-            log_execution_event(
-                logger.as_ref(),
-                BuildLogLevel::Error,
-                BuildStatus::Failed,
-                error.to_string(),
-            );
-            map_builder_error(error)
-        })?;
-    check_cancelled(&cx.cancellation)?;
-    let object_hash = import_build(
-        cx.store,
-        build_key,
-        reuse_key,
-        input_hashes.values().copied().collect(),
-        &staged,
-        subject.name(),
-        cx.run.run_id(),
+    let staged = execute_builder_staged(
+        subject,
+        BuilderExecution::new(
+            builder_inputs,
+            input_hashes,
+            reuse_key,
+            cx.store.clone(),
+            cx.run,
+            cx.run_logger,
+            cx.runtime_provider,
+            cx.cancellation,
+        ),
     )
-    .map_err(|error| {
-        log_execution_event(
-            logger.as_ref(),
-            BuildLogLevel::Error,
-            BuildStatus::Failed,
-            error.to_string(),
-        );
-        map_store_error(error)
-    })?;
+    .map_err(map_build_executor_error)?;
+    let logger = staged.logger().clone();
+    let object_hash = publish_builder_output(cx.store, staged)
+        .map_err(map_build_executor_error)?
+        .object_hash;
     Ok(SubjectExecution {
         object_hash,
         logger,
-        outcome: SubjectOutcome::Built,
+        outcome: SubjectOutcome::BuilderPublished,
     })
 }
 
@@ -345,6 +297,17 @@ fn map_builder_plan_error(error: BuilderPlanError) -> ExecutionError {
         BuilderPlanError::InvalidRequest(_) | BuilderPlanError::Identity(_) => {
             ExecutionError::InvalidRequest(error.to_string())
         }
+    }
+}
+
+fn map_build_executor_error(error: BuildExecutorError) -> ExecutionError {
+    match error {
+        BuildExecutorError::Cancelled(message) => ExecutionError::Cancelled(message),
+        BuildExecutorError::Run(message) => ExecutionError::Run(message),
+        BuildExecutorError::Logging(message) | BuildExecutorError::Publish(message) => {
+            ExecutionError::Store(message)
+        }
+        other => ExecutionError::Build(other.to_string()),
     }
 }
 

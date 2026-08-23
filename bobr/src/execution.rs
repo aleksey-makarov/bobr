@@ -4,7 +4,9 @@ use crate::planned::{
     execute_subject,
 };
 use crate::request::Request;
-use bobr_builder::{BuilderError, BuilderPlannedSubject};
+#[cfg(test)]
+use bobr_builder::BuilderError;
+use bobr_builder::BuilderPlannedSubject;
 use bobr_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuildStatus,
     CancellationToken, NoopBuildLogger, ObjectHash, RuntimeBackend, RuntimeProvider,
@@ -90,13 +92,6 @@ impl fmt::Display for ExecutionError {
 
 impl std::error::Error for ExecutionError {}
 
-pub(crate) fn map_builder_error(error: BuilderError) -> ExecutionError {
-    match error {
-        BuilderError::Cancelled(message) => ExecutionError::Cancelled(message),
-        other => ExecutionError::Build(other.to_string()),
-    }
-}
-
 pub(crate) fn map_store_error(error: StoreError) -> ExecutionError {
     ExecutionError::Store(error.to_string())
 }
@@ -157,14 +152,6 @@ pub(crate) struct TempDirGuard {
 }
 
 impl TempDirGuard {
-    pub(crate) fn for_builder(run: Arc<Run>, scratch_dir: PathBuf) -> Self {
-        Self {
-            run,
-            scratch_dir,
-            logger: Arc::new(NoopBuildLogger),
-        }
-    }
-
     pub(crate) fn for_source(run: Arc<Run>, scratch_dir: PathBuf) -> Self {
         Self {
             run,
@@ -493,6 +480,9 @@ fn execute_graph(
                     raw_log_path: None,
                     details: serde_json::Map::new(),
                 });
+            }
+            SubjectOutcome::BuilderPublished => {
+                counters.built += 1;
             }
         }
         completed.insert(key, executed.object_hash);
@@ -1400,7 +1390,7 @@ mod tests {
 
         {
             // No set_logger call: the node logger was never bound.
-            let _guard = TempDirGuard::for_builder(run.clone(), workspace.temp_dir().to_path_buf());
+            let _guard = TempDirGuard::for_source(run.clone(), workspace.temp_dir().to_path_buf());
         }
 
         assert!(!temp_dir.exists());

@@ -17,6 +17,7 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 
+pub mod build_executor;
 pub mod fetch;
 pub mod graph;
 mod http;
