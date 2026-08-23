@@ -1,140 +1,28 @@
 use crate::execution::ExecutionError;
 use crate::planned::PlannedSubject;
-use bobr_builder::BuilderPlanError;
 use bobr_core::BuildKey;
 #[cfg(test)]
 use bobr_core::{ConfigDigest, compute_build_key};
-use bobr_source::parse_source_subject;
-use bobr_store::validate_ref_name;
-use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use bobr_source::graph::{GraphPlanError, GraphPlanErrorKind, plan_graph};
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 pub(crate) fn collect_graph(
     nodes: &BTreeMap<String, Value>,
     subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
 ) -> Result<BuildKey, ExecutionError> {
-    let mut visited_in_path = BTreeSet::new();
-    let mut node_keys = HashMap::new();
-    collect_graph_inner(
-        nodes,
-        "root",
-        subjects,
-        &mut visited_in_path,
-        &mut node_keys,
-    )
+    let graph = plan_graph(nodes, &["root".to_string()]).map_err(map_plan_error)?;
+    subjects.extend(graph.nodes().iter().map(|(key, node)| (*key, node.clone())));
+    Ok(graph.goals()[0])
 }
 
-fn collect_graph_inner(
-    nodes: &BTreeMap<String, Value>,
-    node_id: &str,
-    subjects: &mut HashMap<BuildKey, Arc<PlannedSubject>>,
-    visited_in_path: &mut BTreeSet<String>,
-    node_keys: &mut HashMap<String, BuildKey>,
-) -> Result<BuildKey, ExecutionError> {
-    if let Some(existing) = node_keys.get(node_id) {
-        return Ok(*existing);
+fn map_plan_error(error: GraphPlanError) -> ExecutionError {
+    match error.kind() {
+        GraphPlanErrorKind::RequestLoad => ExecutionError::RequestLoad(error.to_string()),
+        GraphPlanErrorKind::UnknownBuilder => ExecutionError::UnknownBuilder(error.to_string()),
+        GraphPlanErrorKind::InvalidRequest => ExecutionError::InvalidRequest(error.to_string()),
     }
-
-    if !visited_in_path.insert(node_id.to_string()) {
-        return Err(ExecutionError::InvalidRequest(format!(
-            "request graph contains a cycle through node id '{node_id}'"
-        )));
-    }
-
-    let node_value = nodes.get(node_id).ok_or_else(|| {
-        ExecutionError::InvalidRequest(format!("request references unknown node id '{node_id}'"))
-    })?;
-    let node_path = node_path(node_id);
-    let mut object = node_value.as_object().cloned().ok_or_else(|| {
-        ExecutionError::RequestLoad(format!("{node_path}: expected request object"))
-    })?;
-    let tag = take_string(&mut object, &node_path, "tag")?;
-
-    let (key, subject) = if tag == "Source" {
-        let subject = parse_source_subject(object)
-            .map_err(|error| ExecutionError::RequestLoad(format!("{node_path}: {error}")))?;
-        let key = subject.build_key();
-        (key, Arc::new(PlannedSubject::Source(subject)))
-    } else {
-        let inputs_value = object.remove("inputs").ok_or_else(|| {
-            ExecutionError::RequestLoad(format!("{node_path}: missing required field 'inputs'"))
-        })?;
-
-        let inputs_object = inputs_value.as_object().cloned().ok_or_else(|| {
-            ExecutionError::RequestLoad(format!("{node_path}.inputs: expected object"))
-        })?;
-        let mut inputs = BTreeMap::new();
-        for (input_name, slot_value) in inputs_object {
-            let input_path = format!("{node_path}.inputs.{input_name}");
-            let child_id = parse_input_value(slot_value, &input_path)?;
-            let child =
-                collect_graph_inner(nodes, &child_id, subjects, visited_in_path, node_keys)?;
-            inputs.insert(input_name, child);
-        }
-
-        let builder_subject = crate::builder_registry::parse_subject(&tag, object, inputs)
-            .map_err(|error| map_builder_plan_error(error, &node_path))?;
-        (
-            builder_subject.build_key(),
-            Arc::new(PlannedSubject::Builder(builder_subject)),
-        )
-    };
-
-    // Validate the recipe node name early (it later becomes a store ref name),
-    // so a bad name fails during planning rather than after the node is built.
-    validate_ref_name(subject.name())
-        .map_err(|error| ExecutionError::RequestLoad(format!("{node_path}: {error}")))?;
-
-    visited_in_path.remove(node_id);
-
-    subjects.entry(key).or_insert_with(|| subject.clone());
-    node_keys.insert(node_id.to_string(), key);
-    Ok(key)
-}
-
-fn map_builder_plan_error(error: BuilderPlanError, node_path: &str) -> ExecutionError {
-    let message = format!("{node_path}: {error}");
-    match error {
-        BuilderPlanError::UnknownBuilder { .. } => ExecutionError::UnknownBuilder(message),
-        BuilderPlanError::Recipe(_) => ExecutionError::RequestLoad(message),
-        BuilderPlanError::InvalidRequest(_) | BuilderPlanError::Identity(_) => {
-            ExecutionError::InvalidRequest(message)
-        }
-    }
-}
-
-fn node_path(node_id: &str) -> String {
-    format!("$.nodes.{node_id}")
-}
-
-fn parse_input_value(value: Value, path: &str) -> Result<String, ExecutionError> {
-    match value {
-        Value::String(child_id) => Ok(child_id),
-        Value::Null => Err(ExecutionError::RequestLoad(format!(
-            "{path}: expected node id string, got null"
-        ))),
-        Value::Array(_) => Err(ExecutionError::RequestLoad(format!(
-            "{path}: expected node id string, got array"
-        ))),
-        _ => Err(ExecutionError::RequestLoad(format!(
-            "{path}: expected node id string"
-        ))),
-    }
-}
-
-fn take_string(
-    object: &mut Map<String, Value>,
-    path: &str,
-    field: &str,
-) -> Result<String, ExecutionError> {
-    let value = object.remove(field).ok_or_else(|| {
-        ExecutionError::RequestLoad(format!("{path}: missing required field '{field}'"))
-    })?;
-    value
-        .as_str()
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| ExecutionError::RequestLoad(format!("{path}.{field}: expected string")))
 }
 
 #[cfg(test)]

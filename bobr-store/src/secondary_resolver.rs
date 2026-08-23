@@ -171,6 +171,11 @@ impl SecondaryResolver {
         !self.sources.is_empty()
     }
 
+    /// Returns whether any trusted index can resolve build or reuse keys.
+    pub fn has_trusted_indexes(&self) -> bool {
+        !self.indexes.is_empty()
+    }
+
     /// Ensures content for already-known object hashes without consulting or
     /// publishing trusted key mappings.
     ///

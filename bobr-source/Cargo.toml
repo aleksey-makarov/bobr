@@ -15,7 +15,9 @@ test-support = []
 [dependencies]
 bzip2.workspace = true
 flate2.workspace = true
+bobr-builder.workspace = true
 bobr-core.workspace = true
+bobr-sandbox.workspace = true
 bobr-store.workspace = true
 reqwest.workspace = true
 tokio.workspace = true

@@ -18,6 +18,7 @@
 compile_error!("bobr requires Linux");
 
 pub mod fetch;
+pub mod graph;
 mod http;
 /// OCI registry client: pulls and stages an image's layers by pinned digest.
 ///
@@ -29,6 +30,7 @@ pub mod oci_registry;
 mod oci_registry;
 mod origin;
 mod origins;
+pub mod realizer;
 
 // The origin abstractions are the crate's public API; re-export them at the root
 // rather than exposing the module path.

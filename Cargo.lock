@@ -175,8 +175,10 @@ dependencies = [
 name = "bobr-source"
 version = "0.1.8"
 dependencies = [
+ "bobr-builder",
  "bobr-core",
  "bobr-runtime",
+ "bobr-sandbox",
  "bobr-store",
  "bzip2",
  "flate2",

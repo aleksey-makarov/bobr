@@ -17,26 +17,7 @@ use bobr_store::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub(crate) enum PlannedSubject {
-    Source(SourcePlannedSubject),
-    Builder(BuilderPlannedSubject),
-}
-
-impl PlannedSubject {
-    pub(crate) fn name(&self) -> &str {
-        match self {
-            Self::Source(subject) => subject.name(),
-            Self::Builder(subject) => subject.name(),
-        }
-    }
-
-    pub(crate) fn as_builder(&self) -> Option<&BuilderPlannedSubject> {
-        match self {
-            Self::Source(_) => None,
-            Self::Builder(subject) => Some(subject),
-        }
-    }
-}
+pub(crate) use bobr_source::graph::PlannedNode as PlannedSubject;
 
 pub(crate) struct PlannedExecutionContext<'a> {
     pub(crate) store: &'a Store,

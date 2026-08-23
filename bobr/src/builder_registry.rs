@@ -1,11 +1,13 @@
+#[cfg(test)]
 use bobr_builder::{Builder, BuilderPlanError, BuilderPlannedSubject};
+#[cfg(test)]
 use bobr_core::BuildKey;
+#[cfg(test)]
 use serde_json::{Map, Value};
+#[cfg(test)]
 use std::collections::BTreeMap;
 
-/// Iterates every builder registered in the system (in-tree + sandbox).
-///
-/// This is the single place that knows all builder sources.
+#[cfg(test)]
 fn registered_builders() -> impl Iterator<Item = &'static dyn Builder> {
     bobr_builder::BUILDERS
         .iter()
@@ -14,39 +16,13 @@ fn registered_builders() -> impl Iterator<Item = &'static dyn Builder> {
 }
 
 /// Parses and plans one builder recipe object against the registered builders.
+#[cfg(test)]
 pub(crate) fn parse_subject(
     tag: &str,
-    mut object: Map<String, Value>,
+    object: Map<String, Value>,
     inputs: BTreeMap<String, BuildKey>,
 ) -> Result<BuilderPlannedSubject, BuilderPlanError> {
-    let name = take_string(&mut object, "name")?;
-    let config = object
-        .remove("config")
-        .ok_or_else(|| BuilderPlanError::recipe("missing required field 'config'"))?;
-    if !object.is_empty() {
-        return Err(BuilderPlanError::recipe(format!(
-            "unexpected fields: {}",
-            object.keys().cloned().collect::<Vec<_>>().join(", ")
-        )));
-    }
-
-    let builder = registered_builders()
-        .find(|builder| builder.tag().eq_ignore_ascii_case(tag))
-        .ok_or_else(|| BuilderPlanError::UnknownBuilder {
-            tag: tag.to_string(),
-            supported_tags: registered_builders().map(|builder| builder.tag()).collect(),
-        })?;
-    BuilderPlannedSubject::new(builder, name, config, inputs)
-}
-
-fn take_string(object: &mut Map<String, Value>, field: &str) -> Result<String, BuilderPlanError> {
-    let value = object
-        .remove(field)
-        .ok_or_else(|| BuilderPlanError::recipe(format!("missing required field '{field}'")))?;
-    value
-        .as_str()
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| BuilderPlanError::recipe(format!("{field}: expected string")))
+    bobr_source::graph::parse_builder_subject(tag, object, inputs)
 }
 
 #[cfg(test)]
