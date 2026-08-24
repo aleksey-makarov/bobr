@@ -35,7 +35,7 @@ pub(crate) fn execute_request(request_path: &Path) -> Result<ObjectHash, Executi
 /// fresh name and a fresh pair of directories under the store. Requests that
 /// name no usable store are passed through untouched, so tests about malformed
 /// requests still see what they wrote.
-fn with_fresh_run(request_bytes: &[u8]) -> Vec<u8> {
+pub(crate) fn with_fresh_run(request_bytes: &[u8]) -> Vec<u8> {
     static NEXT_RUN: AtomicU64 = AtomicU64::new(0);
 
     let Ok(Value::Object(mut request)) = serde_json::from_slice::<Value>(request_bytes) else {
