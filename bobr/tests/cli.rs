@@ -6,7 +6,7 @@ use serde_json::json;
 use std::fs;
 use std::process::{Command, Stdio};
 use support::{
-    make_run_dirs, recipe_node, store_root, tree_file_recipe, write_request,
+    TEST_RUN_ID, make_run_dirs, recipe_node, store_root, tree_file_recipe, write_request,
     write_request_with_options,
 };
 use tempfile::tempdir;
@@ -92,6 +92,19 @@ fn cli_accepts_explicit_request_path() {
         stderr.contains("Tree custom-recipe: starting subject"),
         "{stderr}"
     );
+    let events = fs::read_to_string(
+        store_root(workspace.path())
+            .join("logs")
+            .join(TEST_RUN_ID)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    let started = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|event| event["status"] == "run-started")
+        .expect("unified Realizer must record a run-started event");
+    assert_eq!(started["details"]["reachable"], 1);
 }
 
 #[test]

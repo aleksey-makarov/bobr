@@ -1304,7 +1304,7 @@ struct LiveProgress {
     idle_style: ProgressStyle,
     slots: Vec<Slot>,
     index_of: HashMap<String, usize>,
-    total: usize,
+    reachable: usize,
     done: usize,
     failed: usize,
     /// Set when the run asks for the aggregate shape; the per-subject slots are
@@ -1336,7 +1336,7 @@ impl LiveProgress {
             idle_style: ProgressStyle::with_template("  {msg}").expect("valid template"),
             slots: Vec::new(),
             index_of: HashMap::new(),
-            total: 0,
+            reachable: 0,
             done: 0,
             failed: 0,
             aggregate: None,
@@ -1390,12 +1390,11 @@ impl LiveProgress {
     }
 
     fn update_summary(&self) {
-        self.summary.set_message(format!(
-            "{}/{} done · {} running · {} failed",
+        self.summary.set_message(format_build_progress(
             self.done,
-            self.total,
             self.running(),
-            self.failed
+            self.failed,
+            self.reachable,
         ));
     }
 
@@ -1469,7 +1468,12 @@ impl LiveProgress {
         let status = record.status.as_str();
 
         if status == BuildStatus::RunStarted.as_str() {
-            self.total = detail_u64(record, "subjects") as usize;
+            self.reachable = record
+                .details
+                .get("reachable")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| detail_u64(record, "subjects"))
+                as usize;
             if record.details.get("progress").and_then(Value::as_str) == Some("aggregate") {
                 self.start_aggregate(detail_u64(record, "sources") as usize);
                 return;
@@ -1550,6 +1554,10 @@ impl LiveProgress {
         let message = format_progress_line(record, &self.run_log_dir);
         self.start_or_update(&subject.build_key, message);
     }
+}
+
+fn format_build_progress(done: usize, running: usize, failed: usize, reachable: usize) -> String {
+    format!("{done} done · {running} running · {failed} failed · {reachable} reachable")
 }
 
 impl EventSink for ProgressSink {
@@ -2009,6 +2017,14 @@ mod tests {
         assert_eq!(live.running(), 0);
         assert_eq!(live.done, 3, "A + B done, plus one cache-hit");
         assert_eq!(live.failed, 1);
+    }
+
+    #[test]
+    fn build_progress_names_the_reachable_graph_without_a_fraction() {
+        assert_eq!(
+            format_build_progress(24, 19, 0, 1907),
+            "24 done · 19 running · 0 failed · 1907 reachable"
+        );
     }
 
     #[test]

@@ -47,6 +47,7 @@ pub async fn realize(
     } = request;
     let jobs = jobs.unwrap_or_else(default_jobs);
     let graph = Arc::new(plan_graph(&nodes, &goals).map_err(map_graph_error)?);
+    let reachable = graph.nodes().len();
     let store = Store::create(&store_path).map_err(map_store_error)?;
     let run = Arc::new(Run::new(run_id, &logs, &work)?);
     check_same_filesystem(&store, &run)?;
@@ -102,7 +103,7 @@ pub async fn realize(
         )
         .map_err(|error| ExecutionError::Build(error.to_string()))?,
     );
-    log_run_started(&logger, &goals, jobs);
+    log_run_started(&logger, &goals, jobs, reachable);
     let realized = dynamic.realize_goals().await;
     let shutdown = executor
         .shutdown()
@@ -197,15 +198,15 @@ fn map_store_error(error: bobr_store::StoreError) -> ExecutionError {
     ExecutionError::Store(error.to_string())
 }
 
-fn log_run_started(logger: &BuildRunLogger, goals: &[String], jobs: usize) {
+fn log_run_started(logger: &BuildRunLogger, goals: &[String], jobs: usize, reachable: usize) {
     logger.log_run_event(BuildLogEvent {
         level: BuildLogLevel::Info,
-        status: BuildStatus::Start,
+        status: BuildStatus::RunStarted,
         op: Some("realize".to_string()),
         message: format!("realizing {} goal(s)", goals.len()),
         object_hash: None,
         raw_log_path: None,
-        details: json!({ "goals": goals, "jobs": jobs })
+        details: json!({ "goals": goals, "jobs": jobs, "reachable": reachable })
             .as_object()
             .expect("run-start details are an object")
             .clone(),
