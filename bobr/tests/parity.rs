@@ -133,8 +133,8 @@ fn assert_stores_equal(left: &TempDir, right: &TempDir) {
     for hash in snapshot(left.path()).objects {
         let hash: ObjectHash = hash.parse().unwrap();
         assert_eq!(
-            fsobj_hash::hash_path(&left_store.object_path(hash).unwrap().unwrap()).unwrap(),
-            fsobj_hash::hash_path(&right_store.object_path(hash).unwrap().unwrap()).unwrap(),
+            fsobj_hash::hash_path(left_store.object_path(hash).unwrap().unwrap()).unwrap(),
+            fsobj_hash::hash_path(right_store.object_path(hash).unwrap().unwrap()).unwrap(),
         );
     }
 }

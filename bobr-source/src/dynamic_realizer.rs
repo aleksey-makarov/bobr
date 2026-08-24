@@ -389,10 +389,18 @@ impl DynamicRealizer {
 
     async fn build_builder(self: &Arc<Self>, builder: &BuilderPlannedSubject) -> LocalResult {
         self.check_cancelled()?;
-        let mut input_hashes = BTreeMap::new();
-        for (name, key) in builder.inputs() {
-            input_hashes.insert(name.clone(), self.realize_local(*key).await?);
+        let mut tasks = JoinSet::new();
+        for (index, (name, key)) in builder.inputs().iter().enumerate() {
+            let realizer = self.clone();
+            let name = name.clone();
+            let key = *key;
+            tasks.spawn(async move { (index, name, realizer.realize_local(key).await) });
         }
+        let input_hashes =
+            collect_ordered_input_tasks(tasks, builder.inputs().len(), "local realization")
+                .await?
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
         let reuse_key = builder
             .compute_reuse_key(&input_hashes)
             .map_err(|error| DynamicRealizeError::new(error.to_string()))?;
@@ -677,9 +685,18 @@ impl DynamicRealizer {
         self: &Arc<Self>,
         builder: &BuilderPlannedSubject,
     ) -> Result<Vec<(String, Vec<ObjectHash>)>, DynamicRealizeError> {
-        let mut slots = Vec::new();
-        for (name, key) in builder.inputs() {
-            let candidates = self.candidates(*key).await?;
+        let mut tasks = JoinSet::new();
+        for (index, (name, key)) in builder.inputs().iter().enumerate() {
+            let realizer = self.clone();
+            let name = name.clone();
+            let key = *key;
+            tasks.spawn(async move { (index, name, realizer.candidates(key).await) });
+        }
+        let candidates =
+            collect_ordered_input_tasks(tasks, builder.inputs().len(), "candidate resolution")
+                .await?;
+        let mut slots = Vec::with_capacity(candidates.len());
+        for (name, candidates) in candidates {
             if candidates.is_empty() {
                 return Err(DynamicRealizeError::new(format!(
                     "input '{}' of builder '{}' has no object candidates",
@@ -847,6 +864,41 @@ impl DynamicRealizer {
     }
 }
 
+async fn collect_ordered_input_tasks<T: Send + 'static>(
+    mut tasks: JoinSet<(usize, String, Result<T, DynamicRealizeError>)>,
+    count: usize,
+    operation: &str,
+) -> Result<Vec<(String, T)>, DynamicRealizeError> {
+    let mut ordered = std::iter::repeat_with(|| None)
+        .take(count)
+        .collect::<Vec<Option<(String, T)>>>();
+    while let Some(joined) = tasks.join_next().await {
+        let (index, name, result) = match joined {
+            Ok(output) => output,
+            Err(error) => {
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                return Err(DynamicRealizeError::new(format!(
+                    "input {operation} task panicked: {error}"
+                )));
+            }
+        };
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => {
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                return Err(error);
+            }
+        };
+        ordered[index] = Some((name, value));
+    }
+    Ok(ordered
+        .into_iter()
+        .map(|result| result.expect("every input task produces one result"))
+        .collect())
+}
+
 struct CandidateProduct<'a> {
     slots: &'a [(String, Vec<ObjectHash>)],
     indices: Vec<usize>,
@@ -957,7 +1009,11 @@ mod tests {
     };
     use serde_json::{Value, json};
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
     use std::str::FromStr;
+    use std::thread;
+    use std::time::{Duration, Instant};
     use tempfile::{TempDir, tempdir};
 
     struct TestEnvironment {
@@ -1012,6 +1068,19 @@ mod tests {
         })
     }
 
+    fn http_source(name: &str, hash: ObjectHash, url: &str) -> Value {
+        json!({
+            "name": name,
+            "tag": "Source",
+            "object_hash": hash,
+            "origin": {
+                "tag": "Http",
+                "url": url,
+                "unpack": false,
+            }
+        })
+    }
+
     fn group(name: &str, input: &str) -> Value {
         json!({
             "name": name,
@@ -1019,6 +1088,79 @@ mod tests {
             "config": {},
             "inputs": { "input": input },
         })
+    }
+
+    fn group_with_inputs(name: &str, inputs: &[(&str, &str)]) -> Value {
+        json!({
+            "name": name,
+            "tag": "Group",
+            "config": {},
+            "inputs": inputs.iter().copied().collect::<BTreeMap<_, _>>(),
+        })
+    }
+
+    fn spawn_source_barrier(
+        left: Vec<u8>,
+        right: Vec<u8>,
+    ) -> std::io::Result<(String, String, thread::JoinHandle<usize>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let address = listener.local_addr()?;
+        let left_url = format!("http://{address}/left");
+        let right_url = format!("http://{address}/right");
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut requests = Vec::new();
+            while requests.len() < 2 && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_http_request(&mut stream);
+                        requests.push((stream, request));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("failed to accept barrier request: {error}"),
+                }
+            }
+            let concurrent = requests.len();
+            for (mut stream, request) in requests {
+                let body = if request.starts_with("GET /left ") {
+                    Some(left.as_slice())
+                } else if request.starts_with("GET /right ") {
+                    Some(right.as_slice())
+                } else {
+                    None
+                };
+                let (status, body) = match (concurrent, body) {
+                    (2, Some(body)) => ("HTTP/1.1 200 OK", body),
+                    (2, None) => ("HTTP/1.1 404 Not Found", &[][..]),
+                    _ => ("HTTP/1.1 503 Service Unavailable", &[][..]),
+                };
+                let response = format!(
+                    "{status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.write_all(body).unwrap();
+                stream.flush().unwrap();
+            }
+            concurrent
+        });
+        Ok((left_url, right_url, handle))
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream.read(&mut buffer).unwrap();
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..count]);
+        }
+        String::from_utf8(request).unwrap()
     }
 
     fn tree(name: &str, text: &str) -> Value {
@@ -1470,5 +1612,70 @@ mod tests {
             .count();
         assert_eq!(workspace_count, 1);
         executor.shutdown().await.unwrap();
+    }
+
+    async fn assert_single_goal_reaches_two_sources_concurrently(nested: bool) {
+        let environment = environment(if nested {
+            "parallel-candidates"
+        } else {
+            "parallel-local"
+        });
+        let left = b"left source\n".to_vec();
+        let right = b"right source\n".to_vec();
+        let left_hash = fsobj_hash::hash_file_bytes(false, &left);
+        let right_hash = fsobj_hash::hash_file_bytes(false, &right);
+        let (left_url, right_url, barrier) = match spawn_source_barrier(left, right) {
+            Ok(barrier) => barrier,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("failed to start source barrier: {error}"),
+        };
+        let mut nodes = BTreeMap::from([
+            (
+                "left".to_string(),
+                http_source("left-source", left_hash, &left_url),
+            ),
+            (
+                "right".to_string(),
+                http_source("right-source", right_hash, &right_url),
+            ),
+        ]);
+        if nested {
+            nodes.insert("left-child".to_string(), group("left-child", "left"));
+            nodes.insert("right-child".to_string(), group("right-child", "right"));
+            nodes.insert(
+                "root".to_string(),
+                group_with_inputs("root", &[("left", "left-child"), ("right", "right-child")]),
+            );
+        } else {
+            nodes.insert(
+                "root".to_string(),
+                group_with_inputs("root", &[("left", "left"), ("right", "right")]),
+            );
+        }
+        let graph = Arc::new(plan_graph(&nodes, &["root".to_string()]).unwrap());
+        let (realizer, executor) = dynamic(&environment, graph, Vec::new(), Vec::new());
+
+        let outcome =
+            tokio::time::timeout(Duration::from_secs(5), realizer.clone().realize_goals()).await;
+        if outcome.is_err() {
+            realizer.cancellation.cancel();
+        }
+        let concurrent = barrier.join().unwrap();
+        executor.shutdown().await.unwrap();
+        let realized = outcome
+            .expect("independent Source inputs were serialized")
+            .expect("single-goal realization failed");
+        assert_eq!(realized.len(), 1);
+        assert_eq!(concurrent, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_goal_realizes_independent_inputs_concurrently() {
+        assert_single_goal_reaches_two_sources_concurrently(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_goal_resolves_independent_builder_candidates_concurrently() {
+        assert_single_goal_reaches_two_sources_concurrently(true).await;
     }
 }
