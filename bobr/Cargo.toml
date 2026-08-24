@@ -29,6 +29,7 @@ bobr-builder.workspace = true
 bobr-source.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 bobr-source = { workspace = true, features = ["test-support"] }

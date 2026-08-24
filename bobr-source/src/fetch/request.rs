@@ -65,7 +65,7 @@ pub struct FetchRequest {
 }
 
 /// Connection limits as the request states them; all optional.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     /// Downloads one host serves at once, where `per_host` is silent.
@@ -79,6 +79,12 @@ pub struct Limits {
     /// connection limits -- this one bounds a disk, not a network -- so it gets
     /// its own number rather than sharing theirs.
     pub max_local_jobs: Option<u32>,
+}
+
+impl Limits {
+    pub(crate) fn resolved_max_local_jobs(&self) -> usize {
+        self.max_local_jobs.unwrap_or(DEFAULT_MAX_LOCAL_JOBS).max(1) as usize
+    }
 }
 
 /// One source to ensure present: its name, the hash the recipe declares, and

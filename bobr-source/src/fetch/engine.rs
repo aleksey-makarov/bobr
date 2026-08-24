@@ -101,12 +101,9 @@ pub(crate) fn engine_for_dynamic_realizer(
     logger: Arc<BuildRunLogger>,
     cancellation: CancellationToken,
     secondary: Arc<SecondaryResolver>,
-    max_local_jobs: usize,
+    limits: crate::fetch::Limits,
 ) -> Result<Arc<Engine>, String> {
-    let limits = ResolvedLimits::from_request(&crate::fetch::request::Limits {
-        max_local_jobs: Some(max_local_jobs.try_into().unwrap_or(u32::MAX)),
-        ..Default::default()
-    });
+    let limits = ResolvedLimits::from_request(&limits);
     let client = http_client(HttpTimeouts::production())?;
     let (cancel_tx, cancel_rx) = watch::channel(false);
     Ok(Arc::new(Engine {

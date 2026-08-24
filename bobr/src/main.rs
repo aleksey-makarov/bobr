@@ -1,6 +1,4 @@
-//! Command-line entry point for `bobr`: reads a build request (from a path
-//! argument or stdin), executes it, and prints the realized root object hash to
-//! stdout.
+//! Command-line entry point for unified acquisition and build realization.
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
@@ -12,7 +10,7 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use bobr::{Request, execute};
+use bobr::{Request, realize};
 use bobr_core::CancellationToken;
 
 type MResult<T> = Result<T, BobrError>;
@@ -111,8 +109,25 @@ fn build(cancellation: CancellationToken) -> MResult<()> {
     let request_bytes = read_request_bytes(request_file.as_ref())?;
     let request = Request::parse_json(&request_bytes).map_err(map_execution_error)?;
 
-    let object_hash = execute(request, cancellation).map_err(map_execution_error)?;
-    println!("{object_hash}");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            BobrError::BuildFailed(format!("failed to start Tokio runtime: {error}"))
+        })?;
+    let goals = runtime
+        .block_on(realize(request, cancellation))
+        .map_err(map_execution_error)?;
+    if goals.len() == 1 {
+        println!("{}", goals[0].object_hash);
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string(&goals).map_err(|error| {
+                BobrError::BuildFailed(format!("failed to encode goal results: {error}"))
+            })?
+        );
+    }
     Ok(())
 }
 

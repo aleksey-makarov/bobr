@@ -109,7 +109,7 @@ pub(crate) fn write_request_with_options(request_path: &Path, recipe: &Value, op
     let mut request = options.as_object().cloned().unwrap_or_default();
     request.insert(
         "schema".to_string(),
-        Value::String("bobr-request-v2".to_string()),
+        Value::String("bobr-request-v3".to_string()),
     );
     request.insert(
         "store".to_string(),
@@ -124,6 +124,7 @@ pub(crate) fn write_request_with_options(request_path: &Path, recipe: &Value, op
         Value::String(work.to_string_lossy().into_owned()),
     );
     request.insert("run_id".to_string(), Value::String(TEST_RUN_ID.to_string()));
+    request.insert("goals".to_string(), json!(["root"]));
     request.insert("nodes".to_string(), nodes);
     fs::write(
         request_path,

@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 mod support;
 
-use bobr_core::ObjectHash;
+use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use serde_json::json;
 use std::fs;
 use std::process::{Command, Stdio};
@@ -95,6 +95,202 @@ fn cli_accepts_explicit_request_path() {
 }
 
 #[test]
+fn cli_outputs_multi_goal_results_in_request_order() {
+    let workspace = tempdir().unwrap();
+    let (logs, work) = make_run_dirs(workspace.path());
+    let store = store_root(workspace.path());
+    fs::create_dir_all(&store).unwrap();
+    let request_path = workspace.path().join("multi-goal.json");
+    fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema": "bobr-request-v3",
+            "store": store,
+            "logs": logs,
+            "work": work,
+            "run_id": "multi-goal",
+            "goals": ["second", "first"],
+            "nodes": {
+                "first": tree_file_recipe("first", "first.txt", "same", false),
+                "second": tree_file_recipe("second", "second.txt", "same", false),
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
+        .arg(&request_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let results: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["node"], "second");
+    assert_eq!(results[1]["node"], "first");
+    assert_eq!(results[0]["object_hash"], results[1]["object_hash"]);
+    for result in results {
+        let _: ObjectHash = result["object_hash"].as_str().unwrap().parse().unwrap();
+    }
+}
+
+#[test]
+fn cli_materializes_source_origin_without_a_fetch_phase() {
+    let workspace = tempdir().unwrap();
+    let source_path = workspace.path().join("source.txt");
+    fs::write(&source_path, b"unified source\n").unwrap();
+    let object_hash = fsobj_hash::hash_path(&source_path).unwrap();
+    let (logs, work) = make_run_dirs(workspace.path());
+    let store = store_root(workspace.path());
+    fs::create_dir_all(&store).unwrap();
+    let request_path = workspace.path().join("source.json");
+    fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema": "bobr-request-v3",
+            "store": store,
+            "logs": logs,
+            "work": work,
+            "run_id": "source-origin",
+            "goals": ["source"],
+            "nodes": {
+                "source": {
+                    "name": "source",
+                    "tag": "Source",
+                    "object_hash": object_hash,
+                    "origin": {
+                        "tag": "Path",
+                        "path": source_path,
+                        "unpack": false,
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
+        .arg(&request_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        object_hash.to_string()
+    );
+    let layout = bobr_store::Store::create(&store_root(workspace.path())).unwrap();
+    assert!(layout.object_is_complete(object_hash).unwrap());
+}
+
+#[test]
+fn cli_uses_independent_local_secondary_capabilities() {
+    let workspace = tempdir().unwrap();
+    let secondary_root = workspace.path().join("secondary");
+    let working_root = store_root(workspace.path());
+    fs::create_dir(&secondary_root).unwrap();
+    fs::create_dir_all(&working_root).unwrap();
+    let secondary = bobr_store::Store::create(&secondary_root).unwrap();
+    let staged = workspace.path().join("secondary-source");
+    fs::write(&staged, b"secondary source\n").unwrap();
+    let object_hash = fsobj_hash::hash_path(&staged).unwrap();
+    bobr_store::import_build(
+        &secondary,
+        BuildKey::from_object_hash(object_hash),
+        "1".repeat(64).parse::<ReuseKey>().unwrap(),
+        Vec::new(),
+        &staged,
+        "secondary-source",
+        "secondary-run",
+    )
+    .unwrap();
+    let (logs, work) = make_run_dirs(workspace.path());
+    let request_path = workspace.path().join("secondary.json");
+    fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema": "bobr-request-v3",
+            "store": working_root,
+            "logs": logs,
+            "work": work,
+            "run_id": "secondary",
+            "goals": ["source"],
+            "secondaries": {
+                "trusted_indexes": [{ "name": "old", "store": secondary_root }],
+                "content_sources": [{ "name": "old", "store": secondary_root }]
+            },
+            "nodes": {
+                "source": {
+                    "name": "source",
+                    "tag": "Source",
+                    "object_hash": object_hash
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
+        .arg(&request_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        object_hash.to_string()
+    );
+    let working = bobr_store::Store::create(&store_root(workspace.path())).unwrap();
+    assert!(working.object_is_complete(object_hash).unwrap());
+}
+
+#[test]
+fn ordinary_goal_failure_is_not_reported_as_cancellation() {
+    let workspace = tempdir().unwrap();
+    let (logs, work) = make_run_dirs(workspace.path());
+    let store = store_root(workspace.path());
+    fs::create_dir_all(&store).unwrap();
+    let request_path = workspace.path().join("missing-source.json");
+    fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema": "bobr-request-v3",
+            "store": store,
+            "logs": logs,
+            "work": work,
+            "run_id": "missing-source",
+            "goals": ["source"],
+            "nodes": {
+                "source": {
+                    "name": "source",
+                    "tag": "Source",
+                    "object_hash": "1".repeat(64)
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
+        .arg(&request_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("error[build-failed]"), "{stderr}");
+    assert!(!stderr.contains("error[cancelled]"), "{stderr}");
+}
+
+#[test]
 fn cli_rejects_more_than_one_request_argument() {
     let workspace = tempdir().unwrap();
     let request_path = workspace.path().join("one.json");
@@ -128,7 +324,8 @@ fn cli_reports_missing_store_option() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v2",
+            "schema": "bobr-request-v3",
+            "goals": ["root"],
             "nodes": {
                 "root": tree_file_recipe("missing-store-option", "missing.txt", "hello", false)
             }
@@ -231,11 +428,12 @@ fn cli_reports_invalid_generic_input_shape() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v2",
+            "schema": "bobr-request-v3",
             "store": store.to_string_lossy(),
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),
             "run_id": "test-run",
+            "goals": ["root"],
             "nodes": {
                 "root": {
                     "name": "sandbox",
@@ -271,11 +469,12 @@ fn cli_reports_relative_store_path() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v2",
+            "schema": "bobr-request-v3",
             "store": "relative/store",
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),
             "run_id": "test-run",
+            "goals": ["root"],
             "nodes": {
                 "root": {
                     "name": "tree",
@@ -320,11 +519,12 @@ fn cli_reports_unexpected_local_path() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v2",
+            "schema": "bobr-request-v3",
             "store": store.to_string_lossy(),
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),
             "run_id": "test-run",
+            "goals": ["root"],
             "local": "relative/local",
             "nodes": {
                 "root": {
@@ -363,11 +563,12 @@ fn cli_reports_relative_source_path() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v2",
+            "schema": "bobr-request-v3",
             "store": store.to_string_lossy(),
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),
             "run_id": "test-run",
+            "goals": ["root"],
             "nodes": {
                 "root": {
                     "name": "source",
@@ -408,11 +609,12 @@ fn cli_reports_missing_store_directory() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v2",
+            "schema": "bobr-request-v3",
             "store": missing_store.to_string_lossy(),
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),
             "run_id": "test-run",
+            "goals": ["root"],
             "nodes": {
                 "root": {
                     "name": "tree",

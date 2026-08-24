@@ -67,13 +67,32 @@ impl ObjectCandidates {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DynamicRealizeError {
     message: String,
+    cancelled: bool,
 }
 
 impl DynamicRealizeError {
     fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            cancelled: false,
         }
+    }
+
+    fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            cancelled: true,
+        }
+    }
+
+    fn into_cancelled(mut self) -> Self {
+        self.cancelled = true;
+        self
+    }
+
+    /// Returns whether external or propagated cancellation caused this error.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled
     }
 }
 
@@ -146,8 +165,9 @@ impl DynamicRealizer {
         cancellation: CancellationToken,
         secondary: Arc<SecondaryResolver>,
         build_executor: BuildExecutorHandle,
-        max_local_jobs: usize,
+        limits: crate::fetch::Limits,
     ) -> Result<Self, DynamicRealizeError> {
+        let max_local_jobs = limits.resolved_max_local_jobs();
         if max_local_jobs == 0 {
             return Err(DynamicRealizeError::new(
                 "DynamicRealizer max_local_jobs must be greater than zero",
@@ -166,7 +186,7 @@ impl DynamicRealizer {
             logger.clone(),
             cancellation.clone(),
             secondary.clone(),
-            max_local_jobs,
+            limits,
         )
         .map_err(DynamicRealizeError::new)?;
         Ok(Self {
@@ -215,12 +235,17 @@ impl DynamicRealizer {
             match result {
                 Ok(hash) => results[index] = Some((key, hash)),
                 Err(error) => {
+                    let cancelled = self.cancellation.is_cancelled() || error.is_cancelled();
                     self.cancellation.cancel();
                     self.source_engine.cancel();
                     tasks.abort_all();
                     while tasks.join_next().await.is_some() {}
                     cancellation_monitor.abort();
-                    return Err(error);
+                    return Err(if cancelled {
+                        error.into_cancelled()
+                    } else {
+                        error
+                    });
                 }
             }
         }
@@ -781,7 +806,7 @@ impl DynamicRealizer {
 
     fn check_cancelled(&self) -> Result<(), DynamicRealizeError> {
         if self.cancellation.is_cancelled() {
-            Err(DynamicRealizeError::new("build cancelled by signal"))
+            Err(DynamicRealizeError::cancelled("build cancelled by signal"))
         } else {
             Ok(())
         }
@@ -1083,7 +1108,10 @@ mod tests {
                 CancellationToken::new(),
                 secondary,
                 executor.handle(),
-                2,
+                crate::fetch::Limits {
+                    max_local_jobs: Some(2),
+                    ..Default::default()
+                },
             )
             .unwrap(),
         );

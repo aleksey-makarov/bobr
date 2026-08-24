@@ -59,7 +59,7 @@ impl From<RunError> for ExecutionError {
 }
 
 impl ExecutionError {
-    fn class(&self) -> &'static str {
+    pub(crate) fn class(&self) -> &'static str {
         match self {
             Self::InvalidRequest(_) => "invalid-request",
             Self::UnknownBuilder(_) => "unknown-builder",

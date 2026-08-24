@@ -1,7 +1,7 @@
 use crate::execution::ExecutionError;
 use serde::{Deserialize, Deserializer, de::Error as _};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 /// The request format this build of `bobr` accepts.
@@ -10,18 +10,18 @@ use std::path::PathBuf;
 /// a recipe layer emitting a different schema is talking to the wrong version.
 /// `bobr --version` reports it, so a caller can compare before building rather
 /// than discovering the mismatch in the parse error.
-pub const REQUEST_SCHEMA: &str = "bobr-request-v2";
+pub const REQUEST_SCHEMA: &str = "bobr-request-v3";
 
 /// Schema marker for the request format. It deserializes only from the exact
 /// schema string, so the format version is enforced declaratively at parse
 /// time and never needs to live as data on `Request`.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RequestSchemaV2;
+pub(crate) struct RequestSchemaV3;
 
-impl<'de> Deserialize<'de> for RequestSchemaV2 {
+impl<'de> Deserialize<'de> for RequestSchemaV3 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match String::deserialize(deserializer)?.as_str() {
-            REQUEST_SCHEMA => Ok(RequestSchemaV2),
+            REQUEST_SCHEMA => Ok(RequestSchemaV3),
             other => Err(D::Error::custom(format!(
                 "unsupported request schema '{other}'"
             ))),
@@ -29,51 +29,152 @@ impl<'de> Deserialize<'de> for RequestSchemaV2 {
     }
 }
 
-/// A parsed, validated build request: where to build (the store, and this run's
-/// log and work directories), what to call the run, and the table of recipe
-/// nodes to build (see the crate docs for the request shape). Construct it with
-/// [`Request::parse_json`].
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LocalSecondary {
+    pub(crate) name: String,
+    pub(crate) store: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Secondaries {
+    #[serde(default)]
+    pub(crate) trusted_indexes: Vec<LocalSecondary>,
+    #[serde(default)]
+    pub(crate) content_sources: Vec<LocalSecondary>,
+}
+
+/// A parsed unified Realizer request.
+///
+/// The request names the working store and run, an ordered non-empty goal set,
+/// the complete recipe-node graph, acquisition limits, and optional local
+/// secondary capabilities. Construct it with [`Request::parse_json`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    // Validated at deserialization via RequestSchemaV2; never read afterwards.
+    // Validated at deserialization via RequestSchemaV3; never read afterwards.
     #[allow(dead_code)]
-    pub(crate) schema: RequestSchemaV2,
+    pub(crate) schema: RequestSchemaV3,
     pub(crate) store: PathBuf,
     pub(crate) logs: PathBuf,
     pub(crate) work: PathBuf,
     pub(crate) run_id: String,
     pub(crate) quiet: Option<bool>,
     pub(crate) jobs: Option<usize>,
+    #[serde(default)]
+    pub(crate) limits: bobr_source::fetch::Limits,
+    #[serde(default)]
+    pub(crate) secondaries: Secondaries,
+    pub(crate) goals: Vec<String>,
     pub(crate) nodes: BTreeMap<String, Value>,
 }
 
 impl Request {
     /// Parses and validates a request from its JSON encoding: enforces the
-    /// request schema and that a `root` node exists. Returns
+    /// request schema, ordered goals, local capabilities, and node shapes.
+    /// Returns
     /// [`ExecutionError::RequestLoad`] on malformed input.
     pub fn parse_json(bytes: &[u8]) -> Result<Self, ExecutionError> {
         let request: Request = serde_json::from_slice(bytes).map_err(|error| {
             ExecutionError::RequestLoad(format!("failed to decode request JSON value: {error}"))
         })?;
         validate_nodes(&request.nodes, "$.nodes")?;
+        validate_goals(&request.goals, &request.nodes)?;
+        validate_limits(request.jobs, &request.limits)?;
+        validate_secondaries(&request.secondaries)?;
         Ok(request)
     }
 }
 
-/// Validates a parsed node map: a `root` node must exist and every node must be
-/// an object. Per-node fields are interpreted later, during graph collection.
+/// Validates that every node is an object. Per-node fields are interpreted
+/// later, during graph planning.
 fn validate_nodes(nodes: &BTreeMap<String, Value>, path: &str) -> Result<(), ExecutionError> {
-    if !nodes.contains_key("root") {
-        return Err(ExecutionError::RequestLoad(
-            "missing required top-level node 'root'".to_string(),
-        ));
-    }
     for (node_id, node_value) in nodes {
         if !node_value.is_object() {
             return Err(ExecutionError::RequestLoad(format!(
                 "{path}.{node_id}: expected request object"
             )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_goals(goals: &[String], nodes: &BTreeMap<String, Value>) -> Result<(), ExecutionError> {
+    if goals.is_empty() {
+        return Err(ExecutionError::InvalidRequest(
+            "request requires at least one goal".to_string(),
+        ));
+    }
+    let mut seen = HashSet::new();
+    for goal in goals {
+        if !seen.insert(goal) {
+            return Err(ExecutionError::InvalidRequest(format!(
+                "request contains duplicate goal node id '{goal}'"
+            )));
+        }
+        if !nodes.contains_key(goal) {
+            return Err(ExecutionError::InvalidRequest(format!(
+                "request goal references unknown node id '{goal}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_limits(
+    jobs: Option<usize>,
+    limits: &bobr_source::fetch::Limits,
+) -> Result<(), ExecutionError> {
+    if jobs == Some(0) {
+        return Err(ExecutionError::InvalidRequest(
+            "request 'jobs' must be greater than zero".to_string(),
+        ));
+    }
+    for (name, value) in [
+        ("limits.per_host_default", limits.per_host_default),
+        ("limits.max_connections", limits.max_connections),
+        ("limits.max_local_jobs", limits.max_local_jobs),
+    ] {
+        if value == Some(0) {
+            return Err(ExecutionError::InvalidRequest(format!(
+                "request '{name}' must be greater than zero"
+            )));
+        }
+    }
+    if let Some((host, _)) = limits.per_host.iter().find(|(_, value)| **value == 0) {
+        return Err(ExecutionError::InvalidRequest(format!(
+            "request 'limits.per_host.{host}' must be greater than zero"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_secondaries(secondaries: &Secondaries) -> Result<(), ExecutionError> {
+    for (kind, entries) in [
+        ("trusted index", &secondaries.trusted_indexes),
+        ("content source", &secondaries.content_sources),
+    ] {
+        let mut names = HashSet::new();
+        for entry in entries {
+            if entry.name.is_empty() {
+                return Err(ExecutionError::InvalidRequest(format!(
+                    "secondary {kind} name must not be empty"
+                )));
+            }
+            if !names.insert(&entry.name) {
+                return Err(ExecutionError::InvalidRequest(format!(
+                    "duplicate secondary {kind} name '{}'",
+                    entry.name
+                )));
+            }
+            if !entry.store.is_absolute() {
+                return Err(ExecutionError::InvalidRequest(format!(
+                    "secondary {kind} '{}' store path must be absolute: '{}'",
+                    entry.name,
+                    entry.store.display()
+                )));
+            }
         }
     }
     Ok(())
@@ -103,11 +204,12 @@ mod tests {
     fn request_names_the_run_and_its_directories() {
         let request = Request::parse_json(
             json!({
-                "schema": "bobr-request-v2",
+                "schema": "bobr-request-v3",
                 "store": "/store",
                 "logs": "/logs/run",
                 "work": "/work/run",
                 "run_id": "260803120000",
+                "goals": ["root"],
                 "nodes": { "root": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
             })
             .to_string()
@@ -125,8 +227,9 @@ mod tests {
     fn request_without_a_run_is_rejected() {
         let error = Request::parse_json(
             json!({
-                "schema": "bobr-request-v2",
+                "schema": "bobr-request-v3",
                 "store": "/store",
+                "goals": ["root"],
                 "nodes": { "root": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
             })
             .to_string()
@@ -144,7 +247,7 @@ mod tests {
     fn the_previous_request_schema_is_rejected() {
         let error = Request::parse_json(
             json!({
-                "schema": "bobr-request-v1",
+                "schema": "bobr-request-v2",
                 "store": "/store",
                 "nodes": { "root": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
             })
@@ -156,19 +259,81 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported request schema 'bobr-request-v1'"),
+                .contains("unsupported request schema 'bobr-request-v2'"),
             "{error}"
         );
     }
 
     #[test]
-    fn request_requires_top_level_root_node() {
-        let error = parse_request_nodes(json!({"kind":"Legacy"}), "$").unwrap_err();
+    fn request_requires_nonempty_known_unique_goals() {
+        let base = json!({
+            "schema": "bobr-request-v3",
+            "store": "/store",
+            "logs": "/logs/run",
+            "work": "/work/run",
+            "run_id": "run",
+            "nodes": { "node": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
+        });
+        let mut empty = base.clone();
+        empty["goals"] = json!([]);
+        assert!(Request::parse_json(&serde_json::to_vec(&empty).unwrap()).is_err());
+        let mut unknown = base.clone();
+        unknown["goals"] = json!(["missing"]);
+        assert!(Request::parse_json(&serde_json::to_vec(&unknown).unwrap()).is_err());
+        let mut duplicate = base;
+        duplicate["goals"] = json!(["node", "node"]);
+        assert!(Request::parse_json(&serde_json::to_vec(&duplicate).unwrap()).is_err());
+    }
+
+    #[test]
+    fn request_validates_limits_and_local_secondary_capabilities() {
+        let request = json!({
+            "schema": "bobr-request-v3",
+            "store": "/store",
+            "logs": "/logs/run",
+            "work": "/work/run",
+            "run_id": "run",
+            "goals": ["node"],
+            "limits": {
+                "per_host_default": 2,
+                "per_host": { "example.test": 1 },
+                "max_connections": 8,
+                "max_local_jobs": 3
+            },
+            "secondaries": {
+                "trusted_indexes": [{ "name": "old", "store": "/old" }],
+                "content_sources": [{ "name": "old", "store": "/old" }]
+            },
+            "nodes": { "node": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
+        });
+        Request::parse_json(&serde_json::to_vec(&request).unwrap()).unwrap();
+
+        let mut zero = request.clone();
+        zero["limits"]["max_local_jobs"] = json!(0);
         assert!(
-            error
+            Request::parse_json(&serde_json::to_vec(&zero).unwrap())
+                .unwrap_err()
                 .to_string()
-                .contains("missing required top-level node 'root'"),
-            "{error}"
+                .contains("max_local_jobs")
+        );
+        let mut relative = request.clone();
+        relative["secondaries"]["content_sources"][0]["store"] = json!("relative");
+        assert!(
+            Request::parse_json(&serde_json::to_vec(&relative).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("must be absolute")
+        );
+        let mut duplicate = request;
+        duplicate["secondaries"]["trusted_indexes"] = json!([
+            { "name": "old", "store": "/one" },
+            { "name": "old", "store": "/two" }
+        ]);
+        assert!(
+            Request::parse_json(&serde_json::to_vec(&duplicate).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate secondary trusted index")
         );
     }
 
