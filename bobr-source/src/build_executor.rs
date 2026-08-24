@@ -190,8 +190,8 @@ pub struct StagedBuilderOutput {
     input_hashes: BTreeMap<String, ObjectHash>,
     staged_path: PathBuf,
     run_id: String,
-    logger: Arc<dyn BuildLogger>,
     started_at: Instant,
+    terminal: BuilderTerminalGuard,
     _scratch: BuilderScratchGuard,
 }
 
@@ -208,7 +208,92 @@ impl StagedBuilderOutput {
 
     /// Returns the logger bound to the builder subject.
     pub fn logger(&self) -> &Arc<dyn BuildLogger> {
+        self.terminal.logger()
+    }
+}
+
+struct BuilderTerminalGuard {
+    logger: Arc<dyn BuildLogger>,
+    cancellation: CancellationToken,
+    terminal: bool,
+    unfinished_message: &'static str,
+}
+
+impl fmt::Debug for BuilderTerminalGuard {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BuilderTerminalGuard")
+            .field("cancellation", &self.cancellation)
+            .field("terminal", &self.terminal)
+            .field("unfinished_message", &self.unfinished_message)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BuilderTerminalGuard {
+    fn new(logger: Arc<dyn BuildLogger>, cancellation: CancellationToken) -> Self {
+        Self {
+            logger,
+            cancellation,
+            terminal: false,
+            unfinished_message: "builder stopped without a terminal outcome",
+        }
+    }
+
+    fn logger(&self) -> &Arc<dyn BuildLogger> {
         &self.logger
+    }
+
+    fn awaiting_publication(&mut self) {
+        self.unfinished_message = "staged builder output was discarded before publication";
+    }
+
+    fn finish(
+        &mut self,
+        level: BuildLogLevel,
+        status: BuildStatus,
+        op: Option<&str>,
+        message: impl Into<String>,
+        object_hash: Option<ObjectHash>,
+    ) {
+        if self.terminal {
+            return;
+        }
+        self.logger.log_event(BuildLogEvent {
+            level,
+            status,
+            op: op.map(ToOwned::to_owned),
+            message: message.into(),
+            object_hash,
+            raw_log_path: None,
+            details: serde_json::Map::new(),
+        });
+        self.terminal = true;
+    }
+}
+
+impl Drop for BuilderTerminalGuard {
+    fn drop(&mut self) {
+        if self.terminal {
+            return;
+        }
+        if self.cancellation.is_cancelled() {
+            self.finish(
+                BuildLogLevel::Info,
+                BuildStatus::Cancelled,
+                None,
+                "subject cancelled; staged output discarded",
+                None,
+            );
+        } else {
+            self.finish(
+                BuildLogLevel::Error,
+                BuildStatus::Failed,
+                None,
+                self.unfinished_message,
+                None,
+            );
+        }
     }
 }
 
@@ -227,8 +312,18 @@ pub struct PublishedBuilderOutput {
 /// it from its local-I/O path and marks the DAG node ready only after success.
 pub fn publish_builder_output(
     store: &Store,
-    output: StagedBuilderOutput,
+    mut output: StagedBuilderOutput,
 ) -> Result<PublishedBuilderOutput, BuildExecutorError> {
+    if let Err(error) = check_cancelled(&output.terminal.cancellation) {
+        output.terminal.finish(
+            BuildLogLevel::Info,
+            BuildStatus::Cancelled,
+            Some("publish"),
+            error.to_string(),
+            None,
+        );
+        return Err(error);
+    }
     let result = import_build(
         store,
         output.build_key,
@@ -240,30 +335,28 @@ pub fn publish_builder_output(
     );
     match result {
         Ok(object_hash) => {
-            output.logger.log_event(BuildLogEvent {
-                level: BuildLogLevel::Info,
-                status: BuildStatus::Done,
-                op: Some("publish".to_string()),
-                message: format!(
+            output.terminal.finish(
+                BuildLogLevel::Info,
+                BuildStatus::Done,
+                Some("publish"),
+                format!(
                     "subject completed in {:.1}s",
                     output.started_at.elapsed().as_secs_f64()
                 ),
-                object_hash: Some(object_hash),
-                raw_log_path: None,
-                details: serde_json::Map::new(),
-            });
+                Some(object_hash),
+            );
             Ok(PublishedBuilderOutput {
                 build_key: output.build_key,
                 object_hash,
             })
         }
         Err(error) => {
-            log_builder_event(
-                output.logger.as_ref(),
+            output.terminal.finish(
                 BuildLogLevel::Error,
                 BuildStatus::Failed,
                 Some("publish"),
                 format!("failed to publish builder output: {error}"),
+                None,
             );
             Err(BuildExecutorError::Publish(error.to_string()))
         }
@@ -296,6 +389,7 @@ pub fn execute_builder_staged(
         .bind_subject(subject.log_subject(&workspace))
         .map_err(BuildExecutorError::Logging)?;
     scratch.set_logger(logger.clone());
+    let mut terminal = BuilderTerminalGuard::new(logger.clone(), execution.cancellation.clone());
     log_builder_event(
         logger.as_ref(),
         BuildLogLevel::Info,
@@ -310,11 +404,27 @@ pub fn execute_builder_staged(
         None,
         "executing builder",
     );
-    execution
-        .run
-        .prepare_scratch(workspace.temp_dir())
-        .map_err(|error| BuildExecutorError::Run(error.to_string()))?;
-    check_cancelled(&execution.cancellation)?;
+    if let Err(error) = execution.run.prepare_scratch(workspace.temp_dir()) {
+        let error = BuildExecutorError::Run(error.to_string());
+        terminal.finish(
+            BuildLogLevel::Error,
+            BuildStatus::Failed,
+            None,
+            error.to_string(),
+            None,
+        );
+        return Err(error);
+    }
+    if let Err(error) = check_cancelled(&execution.cancellation) {
+        terminal.finish(
+            BuildLogLevel::Info,
+            BuildStatus::Cancelled,
+            None,
+            error.to_string(),
+            None,
+        );
+        return Err(error);
+    }
     log_builder_event(
         logger.as_ref(),
         BuildLogLevel::Info,
@@ -329,25 +439,35 @@ pub fn execute_builder_staged(
         execution.runtime_provider,
         BuildSeed::from_reuse_key(&execution.reuse_key),
     );
-    let staged_path = subject
-        .execute(&context, execution.inputs, execution.store.fs_tree())
-        .map_err(|error| {
+    let staged_path = match subject.execute(&context, execution.inputs, execution.store.fs_tree()) {
+        Ok(path) => path,
+        Err(error) => {
             let mapped = match error {
                 bobr_builder::BuilderError::Cancelled(message) => {
                     BuildExecutorError::Cancelled(message)
                 }
                 other => BuildExecutorError::Build(other.to_string()),
             };
-            log_builder_event(
-                logger.as_ref(),
-                BuildLogLevel::Error,
-                BuildStatus::Failed,
-                None,
-                mapped.to_string(),
-            );
-            mapped
-        })?;
-    check_cancelled(&execution.cancellation)?;
+            let (level, status) = if matches!(mapped, BuildExecutorError::Cancelled(_)) {
+                (BuildLogLevel::Info, BuildStatus::Cancelled)
+            } else {
+                (BuildLogLevel::Error, BuildStatus::Failed)
+            };
+            terminal.finish(level, status, None, mapped.to_string(), None);
+            return Err(mapped);
+        }
+    };
+    if let Err(error) = check_cancelled(&execution.cancellation) {
+        terminal.finish(
+            BuildLogLevel::Info,
+            BuildStatus::Cancelled,
+            None,
+            error.to_string(),
+            None,
+        );
+        return Err(error);
+    }
+    terminal.awaiting_publication();
     Ok(StagedBuilderOutput {
         build_key: subject.build_key(),
         name: subject.name().to_string(),
@@ -355,8 +475,8 @@ pub fn execute_builder_staged(
         input_hashes: execution.input_hashes,
         staged_path,
         run_id: execution.run.run_id().to_string(),
-        logger,
         started_at,
+        terminal,
         _scratch: scratch,
     })
 }
@@ -751,7 +871,7 @@ mod tests {
     use bobr_builder::{BuildContext, BuilderError, InputSpec, TypedBuilder};
     use bobr_store::load_build_handle;
     use serde::{Deserialize, Serialize};
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::fs;
     use std::sync::LazyLock;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -896,6 +1016,22 @@ mod tests {
         label: &str,
         should_panic: bool,
     ) -> (BuildKey, BuilderJob) {
+        job_with_cancellation(
+            environment,
+            group,
+            label,
+            should_panic,
+            CancellationToken::new(),
+        )
+    }
+
+    fn job_with_cancellation(
+        environment: &TestEnvironment,
+        group: &str,
+        label: &str,
+        should_panic: bool,
+        cancellation: CancellationToken,
+    ) -> (BuildKey, BuilderJob) {
         let subject = BuilderPlannedSubject::new(
             &PROBE_BUILDER,
             format!("probe-{label}"),
@@ -913,12 +1049,23 @@ mod tests {
             environment.run.clone(),
             environment.logger.clone(),
             RuntimeProvider::host(),
-            CancellationToken::new(),
+            cancellation,
         );
         (
             build_key,
             BuilderJob::new(Arc::new(PlannedNode::Builder(subject)), execution).unwrap(),
         )
+    }
+
+    fn subject_statuses(environment: &TestEnvironment, label: &str) -> Vec<String> {
+        environment.logger.flush();
+        fs::read_to_string(environment.run.logs_dir().join("events.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|event| event["subject"]["name"] == format!("probe-{label}"))
+            .map(|event| event["status"].as_str().unwrap().to_string())
+            .collect()
     }
 
     async fn wait_for(predicate: impl Fn() -> bool) {
@@ -1093,6 +1240,101 @@ mod tests {
         assert_eq!(
             *probe.order.lock().expect("probe order poisoned"),
             ["active"]
+        );
+        assert_eq!(
+            subject_statuses(&environment, "active")
+                .last()
+                .map(String::as_str),
+            Some("cancelled")
+        );
+        assert!(
+            fs::read_dir(environment.run.work_dir())
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_waiter_still_gets_one_terminal_cancelled_event() {
+        let environment = environment("dropped-waiter");
+        let probe = register_probe("dropped-waiter", false);
+        let executor = BuildExecutor::new(1, 2).unwrap();
+        let handle = executor.handle();
+        let (build_key, builder_job) = job(&environment, "dropped-waiter", "dropped-waiter", false);
+        let completion = handle.submit(builder_job).await.unwrap();
+        wait_for(|| probe.active.load(Ordering::SeqCst) == 1).await;
+
+        handle.cancel(completion.id()).await.unwrap();
+        drop(completion);
+        executor.shutdown().await.unwrap();
+
+        let statuses = subject_statuses(&environment, "dropped-waiter");
+        assert_eq!(
+            statuses
+                .iter()
+                .filter(|status| status.as_str() == "cancelled")
+                .count(),
+            1
+        );
+        assert!(!statuses.iter().any(|status| status == "done"));
+        assert!(!statuses.iter().any(|status| status == "failed"));
+        assert_eq!(
+            load_build_handle(&environment.store, build_key).unwrap(),
+            None
+        );
+        assert!(
+            fs::read_dir(environment.run.work_dir())
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_between_staging_and_publication_discards_the_mapping() {
+        let environment = environment("cancel-staged");
+        register_probe("cancel-staged", true);
+        let cancellation = CancellationToken::new();
+        let executor = BuildExecutor::new(1, 2).unwrap();
+        let (build_key, builder_job) = job_with_cancellation(
+            &environment,
+            "cancel-staged",
+            "cancel-staged",
+            false,
+            cancellation.clone(),
+        );
+        let staged = executor
+            .handle()
+            .submit(builder_job)
+            .await
+            .unwrap()
+            .wait()
+            .await
+            .unwrap();
+
+        cancellation.cancel();
+        assert!(matches!(
+            publish_builder_output(&environment.store, staged),
+            Err(BuildExecutorError::Cancelled(_))
+        ));
+        executor.shutdown().await.unwrap();
+
+        assert_eq!(
+            subject_statuses(&environment, "cancel-staged")
+                .last()
+                .map(String::as_str),
+            Some("cancelled")
+        );
+        assert_eq!(
+            load_build_handle(&environment.store, build_key).unwrap(),
+            None
+        );
+        assert!(
+            fs::read_dir(environment.run.work_dir())
+                .unwrap()
+                .next()
+                .is_none()
         );
     }
 

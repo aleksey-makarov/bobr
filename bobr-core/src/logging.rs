@@ -952,13 +952,16 @@ impl FetchProgress {
         };
         let key = subject.build_key.as_str();
 
-        if status == BuildStatus::Done.as_str() || status == BuildStatus::Failed.as_str() {
+        if status == BuildStatus::Done.as_str()
+            || status == BuildStatus::Failed.as_str()
+            || status == BuildStatus::Cancelled.as_str()
+        {
             if let Some(SubjectPhase::Active(download)) = self.subjects.remove(key) {
                 self.completed_bytes += download.bytes;
             }
             if status == BuildStatus::Failed.as_str() {
                 self.failed += 1;
-            } else {
+            } else if status == BuildStatus::Done.as_str() {
                 self.done += 1;
             }
             return true;
@@ -1435,6 +1438,21 @@ impl LiveProgress {
     /// Marks a finished subject's slot idle: the line stays in place (the block
     /// does not shrink) and becomes available for the next subject.
     fn finish_subject(&mut self, build_key: &str, failed: bool) {
+        self.release_subject_slot(build_key);
+        if failed {
+            self.failed += 1;
+        } else {
+            self.done += 1;
+        }
+        self.update_summary();
+    }
+
+    fn cancel_subject(&mut self, build_key: &str) {
+        self.release_subject_slot(build_key);
+        self.update_summary();
+    }
+
+    fn release_subject_slot(&mut self, build_key: &str) {
         if let Some(index) = self.index_of.remove(build_key) {
             let style = self.idle_style.clone();
             let slot = &mut self.slots[index];
@@ -1443,12 +1461,6 @@ impl LiveProgress {
             slot.bar.set_style(style);
             slot.bar.set_message("—");
         }
-        if failed {
-            self.failed += 1;
-        } else {
-            self.done += 1;
-        }
-        self.update_summary();
     }
 
     fn clear(&mut self) {
@@ -1538,6 +1550,10 @@ impl LiveProgress {
                 .multi
                 .println(format_progress_line(record, &self.run_log_dir));
             self.finish_subject(&subject.build_key, true);
+            return;
+        }
+        if status == BuildStatus::Cancelled.as_str() {
+            self.cancel_subject(&subject.build_key);
             return;
         }
         if record.level >= BuildLogLevel::Warn {
@@ -2017,6 +2033,17 @@ mod tests {
         assert_eq!(live.running(), 0);
         assert_eq!(live.done, 3, "A + B done, plus one cache-hit");
         assert_eq!(live.failed, 1);
+        drop(live);
+
+        running(BuildLogLevel::Info, BuildStatus::Start, &bk('f'));
+        running(BuildLogLevel::Info, BuildStatus::Cancelled, &bk('f'));
+        let ProgressSink::Live(state) = &sink else {
+            panic!("expected live sink");
+        };
+        let live = state.lock().unwrap();
+        assert_eq!(live.running(), 0, "cancelled subject releases its slot");
+        assert_eq!(live.done, 3, "cancellation is not successful work");
+        assert_eq!(live.failed, 1, "cancellation is not a build failure");
     }
 
     #[test]
