@@ -64,6 +64,24 @@ pub struct TrustedAnswer {
     pub object_hash: ObjectHash,
 }
 
+/// Ordered, hash-only answers for one trusted build or reuse lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MappingCandidates<K> {
+    /// Queried build or reuse key.
+    pub key: K,
+    /// Every trusted answer in index priority order, including agreements.
+    pub answers: Vec<TrustedAnswer>,
+    /// Distinct object hashes in first-answer order.
+    pub object_hashes: Vec<ObjectHash>,
+}
+
+impl<K> MappingCandidates<K> {
+    /// Returns true when trusted indexes named more than one distinct hash.
+    pub fn has_conflict(&self) -> bool {
+        self.object_hashes.len() > 1
+    }
+}
+
 /// Successfully selected and imported secondary result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSecondaryContent {
@@ -236,6 +254,34 @@ impl SecondaryResolver {
             .collect()
     }
 
+    /// Resolves trusted build mappings without locating or importing content.
+    pub fn lookup_builds(
+        &self,
+        keys: &[BuildKey],
+    ) -> Result<Vec<MappingCandidates<BuildKey>>, StoreError> {
+        Ok(self
+            .lookup_build_groups(keys)?
+            .into_iter()
+            .map(mapping_candidates)
+            .collect())
+    }
+
+    /// Resolves trusted reuse mappings without locating or importing content.
+    pub fn lookup_reuses(
+        &self,
+        keys: &[ReuseKey],
+    ) -> Result<Vec<MappingCandidates<ReuseKey>>, StoreError> {
+        let keys = unique_in_order(keys);
+        let mut per_index = Vec::with_capacity(self.indexes.len());
+        for entry in &self.indexes {
+            per_index.push((entry.name.clone(), entry.index.resolve_reuses(&keys)?));
+        }
+        Ok(combine_index_results("reuse", &keys, per_index)?
+            .into_iter()
+            .map(mapping_candidates)
+            .collect())
+    }
+
     /// Resolves exact build mappings and content in input-key order.
     ///
     /// Duplicate input keys are queried and reported once, at their first
@@ -244,12 +290,7 @@ impl SecondaryResolver {
         &self,
         keys: &[BuildKey],
     ) -> Result<Vec<SecondaryResolution<BuildKey>>, StoreError> {
-        let keys = unique_in_order(keys);
-        let mut per_index = Vec::with_capacity(self.indexes.len());
-        for entry in &self.indexes {
-            per_index.push((entry.name.clone(), entry.index.resolve_builds(&keys)?));
-        }
-        let groups = combine_index_results(&keys, per_index)?;
+        let groups = self.lookup_build_groups(keys)?;
         let availability = self.locate_candidate_objects(&groups)?;
         groups
             .into_iter()
@@ -264,6 +305,18 @@ impl SecondaryResolver {
                 })
             })
             .collect()
+    }
+
+    fn lookup_build_groups(
+        &self,
+        keys: &[BuildKey],
+    ) -> Result<Vec<CandidateGroup<BuildKey>>, StoreError> {
+        let keys = unique_in_order(keys);
+        let mut per_index = Vec::with_capacity(self.indexes.len());
+        for entry in &self.indexes {
+            per_index.push((entry.name.clone(), entry.index.resolve_builds(&keys)?));
+        }
+        combine_index_results("build", &keys, per_index)
     }
 
     /// Resolves reuse mappings and content in input-query order.
@@ -524,6 +577,7 @@ struct CandidateGroup<K> {
 }
 
 fn combine_index_results<K>(
+    kind: &str,
     keys: &[K],
     per_index: Vec<(String, Vec<TrustedResolution<K>>)>,
 ) -> Result<Vec<CandidateGroup<K>>, StoreError>
@@ -535,7 +589,7 @@ where
     for (index, answers) in per_index {
         for answer in answers {
             if !requested.contains(&answer.key) {
-                return Err(unrequested_key_error("build", &answer.key.to_string()));
+                return Err(unrequested_key_error(kind, &answer.key.to_string()));
             }
             answers_by_key
                 .entry(answer.key)
@@ -548,6 +602,18 @@ where
         .copied()
         .map(|key| group_answers(key, answers_by_key.remove(&key).unwrap_or_default()))
         .collect())
+}
+
+fn mapping_candidates<K>(group: CandidateGroup<K>) -> MappingCandidates<K> {
+    MappingCandidates {
+        key: group.key,
+        object_hashes: group
+            .candidates
+            .iter()
+            .map(|candidate| candidate.object_hash)
+            .collect(),
+        answers: group.answers,
+    }
 }
 
 fn group_answers<K>(key: K, answers: Vec<(String, TrustedResolution<K>)>) -> CandidateGroup<K>

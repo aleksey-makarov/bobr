@@ -31,14 +31,17 @@ mod store;
 pub use error::StoreError;
 pub use object::import_build;
 pub use ref_name::validate_ref_name;
-pub use refs::{load_build_handle, resolve_build_handle, resolve_reuse_for_build};
+pub use refs::{
+    load_build_handle, load_reuse_handle, publish_existing_build, resolve_build_handle,
+    resolve_reuse_for_build,
+};
 pub use secondary::{
     ContentImportOutcome, ContentSource, LocalHardlinkContentSource, LocalTrustedKeyIndex,
     TrustedKeyIndex, TrustedResolution,
 };
 pub use secondary_resolver::{
-    KnownObjectResolution, NamedContentSource, NamedTrustedKeyIndex, ResolvedSecondaryContent,
-    ReuseQuery, SecondaryResolution, SecondaryResolver, TrustedAnswer,
+    KnownObjectResolution, MappingCandidates, NamedContentSource, NamedTrustedKeyIndex,
+    ResolvedSecondaryContent, ReuseQuery, SecondaryResolution, SecondaryResolver, TrustedAnswer,
 };
 pub use source::{SourceImportOutcome, import_source_object, record_existing_source_object};
 pub use store::{ReadOnlyStore, Store};

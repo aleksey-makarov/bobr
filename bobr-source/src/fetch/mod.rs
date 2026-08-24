@@ -6,7 +6,7 @@
 //! store, run directories, limits, the sources themselves -- arrives in the
 //! request (see [`request::FETCH_REQUEST_SCHEMA`]).
 
-mod engine;
+pub(crate) mod engine;
 mod oci;
 mod realizer;
 mod request;

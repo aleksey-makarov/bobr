@@ -18,6 +18,7 @@
 compile_error!("bobr requires Linux");
 
 pub mod build_executor;
+pub mod dynamic_realizer;
 pub mod fetch;
 pub mod graph;
 mod http;
@@ -106,6 +107,7 @@ pub struct SourcePlannedSubject {
     build_key: BuildKey,
     declared_object_hash: ObjectHash,
     origin: Option<Box<dyn ParsedOrigin>>,
+    origin_value: Option<Value>,
 }
 
 impl SourcePlannedSubject {
@@ -122,7 +124,13 @@ impl SourcePlannedSubject {
             build_key: BuildKey::from_object_hash(declared_object_hash),
             declared_object_hash,
             origin,
+            origin_value: None,
         }
+    }
+
+    fn with_origin_value(mut self, origin_value: Option<Value>) -> Self {
+        self.origin_value = origin_value;
+        self
     }
 
     /// Returns the source recipe name.
@@ -153,6 +161,12 @@ impl SourcePlannedSubject {
     /// Returns the parsed origin, when one was declared.
     pub fn origin(&self) -> Option<&dyn ParsedOrigin> {
         self.origin.as_deref()
+    }
+
+    /// Returns the raw origin object retained for the asynchronous fetch
+    /// engine, when this subject came from a recipe.
+    pub fn origin_value(&self) -> Option<&Value> {
+        self.origin_value.as_ref()
     }
 
     /// Builds the per-run log subject from the runtime-allocated workspace.
@@ -238,7 +252,8 @@ pub fn parse_source_subject(
         .map_err(|error| {
             SourceRecipeError::new(format!("object_hash: invalid object hash: {error}"))
         })?;
-    let origin = match object.remove("origin") {
+    let origin_value = object.remove("origin");
+    let origin = match origin_value.clone() {
         Some(value) => Some(origins::parse_origin_value(value, "origin")?),
         None => None,
     };
@@ -249,11 +264,10 @@ pub fn parse_source_subject(
         )));
     }
 
-    Ok(SourcePlannedSubject::new(
-        name,
-        declared_object_hash,
-        origin,
-    ))
+    Ok(
+        SourcePlannedSubject::new(name, declared_object_hash, origin)
+            .with_origin_value(origin_value),
+    )
 }
 
 fn take_string(object: &mut Map<String, Value>, field: &str) -> Result<String, SourceRecipeError> {

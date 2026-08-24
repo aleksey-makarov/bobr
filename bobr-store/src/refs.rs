@@ -193,6 +193,25 @@ pub(crate) fn load_reuse_object_hash(
     Ok(Some(object_hash))
 }
 
+/// Loads a complete working-store object reached by a reuse key.
+///
+/// This is a pure lookup: it neither repairs a build mapping nor updates an
+/// object ref. Existing malformed or incomplete mappings are errors.
+pub fn load_reuse_handle(
+    store: &Store,
+    reuse_key: ReuseKey,
+) -> Result<Option<ObjectHash>, StoreError> {
+    let Some(object_hash) = load_reuse_object_hash(store, reuse_key)? else {
+        return Ok(None);
+    };
+    if !store.object_is_complete(object_hash)? {
+        return Err(StoreError::InvalidData(format!(
+            "reuse ref points to incomplete object '{object_hash}'"
+        )));
+    }
+    Ok(Some(object_hash))
+}
+
 /// Resolves a reusable object hash and repairs the build handle for `build_key`.
 ///
 /// Returns `Ok(None)` when the reuse ref does not exist. Existing reuse refs
@@ -203,17 +222,43 @@ pub fn resolve_reuse_for_build(
     reuse_key: ReuseKey,
     object_ref_name: &str,
 ) -> Result<Option<ObjectHash>, StoreError> {
-    let Some(object_hash) = load_reuse_object_hash(store, reuse_key)? else {
+    let Some(object_hash) = load_reuse_handle(store, reuse_key)? else {
         return Ok(None);
     };
-    if !store.object_is_complete(object_hash)? {
-        return Err(StoreError::InvalidData(format!(
-            "reuse ref points to incomplete object '{object_hash}'"
-        )));
-    }
     store_build_handle_ref(store, build_key, object_hash)?;
     update_object_ref(store, object_ref_name, object_hash)?;
     Ok(Some(object_hash))
+}
+
+/// Publishes complete existing content under the current build identity.
+///
+/// A neutral local object record is written first, followed by every supplied
+/// reuse mapping, the build mapping, and the user-facing object ref. Callers
+/// may pass every reuse key that resolved to `object_hash`; duplicates are
+/// harmless and removed in first-input order.
+pub fn publish_existing_build(
+    store: &Store,
+    build_key: BuildKey,
+    reuse_keys: &[ReuseKey],
+    object_hash: ObjectHash,
+    object_ref_name: &str,
+    run_id: &str,
+) -> Result<(), StoreError> {
+    validate_ref_name(object_ref_name)?;
+    if !store.object_is_complete(object_hash)? {
+        return Err(StoreError::InvalidData(format!(
+            "cannot publish incomplete object '{object_hash}'"
+        )));
+    }
+    crate::record::record_existing_object(store, object_hash, run_id)?;
+    let mut seen = std::collections::HashSet::new();
+    for reuse_key in reuse_keys {
+        if seen.insert(*reuse_key) {
+            store_reuse_ref(store, *reuse_key, object_hash)?;
+        }
+    }
+    store_build_handle_ref(store, build_key, object_hash)?;
+    update_object_ref(store, object_ref_name, object_hash)
 }
 
 /// Updates the current object ref for `object_ref_name`.

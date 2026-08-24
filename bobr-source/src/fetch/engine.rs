@@ -74,7 +74,7 @@ impl Summary {
 }
 
 /// Everything one source task needs; cloned into each task.
-pub(super) struct Engine {
+pub(crate) struct Engine {
     store: Store,
     run: Arc<Run>,
     logger: Arc<BuildRunLogger>,
@@ -95,8 +95,38 @@ pub(super) struct Engine {
     secondary: Arc<SecondaryResolver>,
 }
 
+pub(crate) fn engine_for_dynamic_realizer(
+    store: Store,
+    run: Arc<Run>,
+    logger: Arc<BuildRunLogger>,
+    cancellation: CancellationToken,
+    secondary: Arc<SecondaryResolver>,
+    max_local_jobs: usize,
+) -> Result<Arc<Engine>, String> {
+    let limits = ResolvedLimits::from_request(&crate::fetch::request::Limits {
+        max_local_jobs: Some(max_local_jobs.try_into().unwrap_or(u32::MAX)),
+        ..Default::default()
+    });
+    let client = http_client(HttpTimeouts::production())?;
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    Ok(Arc::new(Engine {
+        store,
+        run,
+        logger,
+        client,
+        global: Arc::new(Semaphore::new(limits.max_connections as usize)),
+        local: Arc::new(Semaphore::new(limits.max_local_jobs as usize)),
+        limits,
+        hosts: Mutex::new(HashMap::new()),
+        cancellation,
+        cancel_rx,
+        cancel_tx,
+        secondary,
+    }))
+}
+
 impl Engine {
-    pub(super) fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         self.cancellation.cancel();
         let _ = self.cancel_tx.send(true);
     }
@@ -236,7 +266,7 @@ pub(crate) async fn run_fetch_with_capabilities(
 }
 
 #[derive(Debug)]
-pub(super) enum SourceOutcome {
+pub(crate) enum SourceOutcome {
     Downloaded,
     CacheHit,
     Local,
@@ -245,7 +275,7 @@ pub(super) enum SourceOutcome {
     Failed { name: String, message: String },
 }
 
-pub(super) async fn process_source(engine: Arc<Engine>, entry: SourceEntry) -> SourceOutcome {
+pub(crate) async fn process_source(engine: Arc<Engine>, entry: SourceEntry) -> SourceOutcome {
     let name = entry.name.clone();
     match process_source_inner(&engine, entry).await {
         Ok(outcome) => outcome,
