@@ -1,6 +1,6 @@
 use crate::ObjectHash;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -15,6 +15,73 @@ use time::macros::format_description;
 
 /// Schema tag stamped on every on-disk event record.
 pub const BUILD_EVENT_SCHEMA: &str = "bobr-build-event-v1";
+
+/// Minimum total height accepted for a fixed live progress block.
+pub const MIN_FIXED_PROGRESS_LINES: usize = 4;
+
+/// Presentation policy carried by a unified realization request.
+///
+/// This controls only terminal rendering. It never participates in build or
+/// reuse identity, and non-terminal output remains plain for every variant.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProgressPolicy {
+    /// Derive a line budget from the current terminal height.
+    #[default]
+    Auto,
+    /// Keep only the global summary and a compact transfer summary.
+    Summary,
+    /// Cap the complete live block at `max_lines` terminal rows.
+    Fixed {
+        /// Maximum rows occupied by builder, transfer, overflow, and summary
+        /// lines together.
+        max_lines: usize,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ProgressModeWire {
+    Auto,
+    Summary,
+    Fixed,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressPolicyWire {
+    mode: ProgressModeWire,
+    max_lines: Option<usize>,
+}
+
+impl<'de> Deserialize<'de> for ProgressPolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ProgressPolicyWire::deserialize(deserializer)?;
+        match (wire.mode, wire.max_lines) {
+            (ProgressModeWire::Auto, None) => Ok(Self::Auto),
+            (ProgressModeWire::Summary, None) => Ok(Self::Summary),
+            (ProgressModeWire::Fixed, Some(max_lines)) => Ok(Self::Fixed { max_lines }),
+            (ProgressModeWire::Fixed, None) => Err(serde::de::Error::missing_field("max_lines")),
+            (ProgressModeWire::Auto | ProgressModeWire::Summary, Some(_)) => Err(
+                serde::de::Error::custom("progress max_lines is allowed only in fixed mode"),
+            ),
+        }
+    }
+}
+
+impl ProgressPolicy {
+    /// Rejects fixed budgets too small to hold a useful live block.
+    pub fn validate(self) -> Result<(), String> {
+        if let Self::Fixed { max_lines } = self
+            && max_lines < MIN_FIXED_PROGRESS_LINES
+        {
+            return Err(format!(
+                "progress fixed max_lines must be at least {MIN_FIXED_PROGRESS_LINES}"
+            ));
+        }
+        Ok(())
+    }
+}
 
 /// Severity of an event. Ordered `Progress < Info < Warn < Error`; the stderr
 /// progress sink compares each event's level against its threshold.

@@ -117,7 +117,7 @@ fn cli_outputs_multi_goal_results_in_request_order() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v3",
+            "schema": "bobr-request-v4",
             "store": store,
             "logs": logs,
             "work": work,
@@ -162,7 +162,7 @@ fn cli_materializes_source_origin_without_a_fetch_phase() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v3",
+            "schema": "bobr-request-v4",
             "store": store,
             "logs": logs,
             "work": work,
@@ -226,7 +226,7 @@ fn cli_uses_independent_local_secondary_capabilities() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v3",
+            "schema": "bobr-request-v4",
             "store": working_root,
             "logs": logs,
             "work": work,
@@ -273,7 +273,7 @@ fn ordinary_goal_failure_is_not_reported_as_cancellation() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v3",
+            "schema": "bobr-request-v4",
             "store": store,
             "logs": logs,
             "work": work,
@@ -337,7 +337,7 @@ fn cli_reports_missing_store_option() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v3",
+            "schema": "bobr-request-v4",
             "goals": ["root"],
             "nodes": {
                 "root": tree_file_recipe("missing-store-option", "missing.txt", "hello", false)
@@ -441,7 +441,7 @@ fn cli_reports_invalid_generic_input_shape() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v3",
+            "schema": "bobr-request-v4",
             "store": store.to_string_lossy(),
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),
@@ -482,7 +482,7 @@ fn cli_reports_relative_store_path() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v3",
+            "schema": "bobr-request-v4",
             "store": "relative/store",
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),
@@ -532,7 +532,7 @@ fn cli_reports_unexpected_local_path() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v3",
+            "schema": "bobr-request-v4",
             "store": store.to_string_lossy(),
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),
@@ -576,7 +576,7 @@ fn cli_reports_relative_source_path() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v3",
+            "schema": "bobr-request-v4",
             "store": store.to_string_lossy(),
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),
@@ -622,7 +622,7 @@ fn cli_reports_missing_store_directory() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v3",
+            "schema": "bobr-request-v4",
             "store": missing_store.to_string_lossy(),
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),

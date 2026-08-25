@@ -1,4 +1,5 @@
 use crate::execution::ExecutionError;
+use bobr_core::ProgressPolicy;
 use serde::{Deserialize, Deserializer, de::Error as _};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -10,18 +11,18 @@ use std::path::PathBuf;
 /// a recipe layer emitting a different schema is talking to the wrong version.
 /// `bobr --version` reports it, so a caller can compare before building rather
 /// than discovering the mismatch in the parse error.
-pub const REQUEST_SCHEMA: &str = "bobr-request-v3";
+pub const REQUEST_SCHEMA: &str = "bobr-request-v4";
 
 /// Schema marker for the request format. It deserializes only from the exact
 /// schema string, so the format version is enforced declaratively at parse
 /// time and never needs to live as data on `Request`.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RequestSchemaV3;
+pub(crate) struct RequestSchemaV4;
 
-impl<'de> Deserialize<'de> for RequestSchemaV3 {
+impl<'de> Deserialize<'de> for RequestSchemaV4 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match String::deserialize(deserializer)?.as_str() {
-            REQUEST_SCHEMA => Ok(RequestSchemaV3),
+            REQUEST_SCHEMA => Ok(RequestSchemaV4),
             other => Err(D::Error::custom(format!(
                 "unsupported request schema '{other}'"
             ))),
@@ -53,15 +54,17 @@ pub(crate) struct Secondaries {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    // Validated at deserialization via RequestSchemaV3; never read afterwards.
+    // Validated at deserialization via RequestSchemaV4; never read afterwards.
     #[allow(dead_code)]
-    pub(crate) schema: RequestSchemaV3,
+    pub(crate) schema: RequestSchemaV4,
     pub(crate) store: PathBuf,
     pub(crate) logs: PathBuf,
     pub(crate) work: PathBuf,
     pub(crate) run_id: String,
     pub(crate) quiet: Option<bool>,
     pub(crate) jobs: Option<usize>,
+    #[serde(default)]
+    pub(crate) progress: ProgressPolicy,
     #[serde(default)]
     pub(crate) limits: bobr_source::fetch::Limits,
     #[serde(default)]
@@ -82,6 +85,10 @@ impl Request {
         validate_nodes(&request.nodes, "$.nodes")?;
         validate_goals(&request.goals, &request.nodes)?;
         validate_limits(request.jobs, &request.limits)?;
+        request
+            .progress
+            .validate()
+            .map_err(ExecutionError::InvalidRequest)?;
         validate_secondaries(&request.secondaries)?;
         Ok(request)
     }
@@ -204,7 +211,7 @@ mod tests {
     fn request_names_the_run_and_its_directories() {
         let request = Request::parse_json(
             json!({
-                "schema": "bobr-request-v3",
+                "schema": "bobr-request-v4",
                 "store": "/store",
                 "logs": "/logs/run",
                 "work": "/work/run",
@@ -227,7 +234,7 @@ mod tests {
     fn request_without_a_run_is_rejected() {
         let error = Request::parse_json(
             json!({
-                "schema": "bobr-request-v3",
+                "schema": "bobr-request-v4",
                 "store": "/store",
                 "goals": ["root"],
                 "nodes": { "root": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
@@ -247,7 +254,7 @@ mod tests {
     fn the_previous_request_schema_is_rejected() {
         let error = Request::parse_json(
             json!({
-                "schema": "bobr-request-v2",
+                "schema": "bobr-request-v3",
                 "store": "/store",
                 "nodes": { "root": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
             })
@@ -259,15 +266,65 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported request schema 'bobr-request-v2'"),
+                .contains("unsupported request schema 'bobr-request-v3'"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn progress_policy_is_typed_defaulted_and_validated() {
+        let base = json!({
+            "schema": "bobr-request-v4",
+            "store": "/store",
+            "logs": "/logs/run",
+            "work": "/work/run",
+            "run_id": "run",
+            "goals": ["root"],
+            "nodes": { "root": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
+        });
+        let automatic = Request::parse_json(&serde_json::to_vec(&base).unwrap()).unwrap();
+        assert_eq!(automatic.progress, ProgressPolicy::Auto);
+
+        let mut summary = base.clone();
+        summary["progress"] = json!({ "mode": "summary" });
+        assert_eq!(
+            Request::parse_json(&serde_json::to_vec(&summary).unwrap())
+                .unwrap()
+                .progress,
+            ProgressPolicy::Summary
+        );
+
+        let mut fixed = base.clone();
+        fixed["progress"] = json!({ "mode": "fixed", "max_lines": 8 });
+        assert_eq!(
+            Request::parse_json(&serde_json::to_vec(&fixed).unwrap())
+                .unwrap()
+                .progress,
+            ProgressPolicy::Fixed { max_lines: 8 }
+        );
+
+        fixed["progress"]["max_lines"] = json!(3);
+        assert!(
+            Request::parse_json(&serde_json::to_vec(&fixed).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("at least 4")
+        );
+
+        let mut misspelled = base;
+        misspelled["progress"] = json!({ "mode": "auto", "max_lines": 8 });
+        assert!(
+            Request::parse_json(&serde_json::to_vec(&misspelled).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("only in fixed mode")
         );
     }
 
     #[test]
     fn request_requires_nonempty_known_unique_goals() {
         let base = json!({
-            "schema": "bobr-request-v3",
+            "schema": "bobr-request-v4",
             "store": "/store",
             "logs": "/logs/run",
             "work": "/work/run",
@@ -288,7 +345,7 @@ mod tests {
     #[test]
     fn request_validates_limits_and_local_secondary_capabilities() {
         let request = json!({
-            "schema": "bobr-request-v3",
+            "schema": "bobr-request-v4",
             "store": "/store",
             "logs": "/logs/run",
             "work": "/work/run",

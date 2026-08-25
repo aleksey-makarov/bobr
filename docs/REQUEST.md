@@ -10,22 +10,33 @@ The request is a single JSON object:
 
 ```json
 {
-  "schema": "bobr-request-v2",
+  "schema": "bobr-request-v4",
   "store": "/abs/path/to/store",
   "logs": "/abs/path/to/logs/260803120000",
   "work": "/abs/path/to/work/260803120000",
   "run_id": "260803120000",
   "quiet": false,
   "jobs": 8,
+  "progress": { "mode": "auto" },
+  "limits": {
+    "per_host_default": 6,
+    "max_connections": 64,
+    "max_local_jobs": 4
+  },
+  "secondaries": {
+    "trusted_indexes": [],
+    "content_sources": []
+  },
+  "goals": ["root"],
   "nodes": {
     "root": { "...": "..." }
   }
 }
 ```
 
-- `schema` — format version; must be `"bobr-request-v2"`. `bobr --version`
-  reports the schema this build accepts (`bobr 0.1.5 (request
-  bobr-request-v2)`), so a recipe layer can check compatibility before building
+- `schema` — format version; must be `"bobr-request-v4"`. `bobr --version`
+  reports the schema this build accepts (`bobr 0.1.8 (request
+  bobr-request-v4)`), so a recipe layer can check compatibility before building
   rather than finding out from the parse error
 - `store` — the store root for this request: an absolute path to an existing
   directory (see [Store](./STORE.md))
@@ -39,6 +50,14 @@ The request is a single JSON object:
   may contain only ASCII letters, digits, `.`, `_`, and `-`, up to 64 characters
 - `quiet` — optional bool; suppress the live progress log
 - `jobs` — optional integer; limit on parallel builder execution
+- `progress` — optional terminal presentation policy; defaults to
+  `{ "mode": "auto" }`. `summary` hides individual builder rows; `fixed`
+  requires `max_lines >= 4` and caps the complete live block. This field never
+  affects build identity and is ignored for non-TTY output
+- `limits` — optional HTTP/OCI and local Source acquisition limits
+- `secondaries` — optional ordered local trusted-index and content-source
+  capabilities
+- `goals` — ordered, non-empty array of node ids to realize
 - `nodes` — the recipe DAG
 
 `bobr` neither names the run nor creates its two directories: the caller does
@@ -53,8 +72,9 @@ stage their output there, and the store publishes it by renaming it into
 filesystem boundary. `bobr` checks this before building rather than failing on
 the first import. The log directory has no such constraint.
 
-The recipe DAG is a JSON object: each member's value is a recipe. The required
-key `root` holds the recipe to build; the others hold the recipes it depends on.
+The recipe DAG is a JSON object: each member's value is a recipe. Inputs refer
+to other members by node id. Only nodes reachable from `goals` are planned;
+duplicate build identities are shared.
 
 A recipe for the `Source` builder has this shape:
 
@@ -80,10 +100,10 @@ A recipe for the `Source` builder may also omit `origin`. Then the object must
 already exist in the store under its `object_hash`, and `bobr` reuses it; if it
 does not, the source fails.
 
-That is the ordinary case in practice: `bobr-recipes` lowers build requests with
-no origins at all, because filling the store is `bobr-fetch`'s job and the build
-only builds. `bobr` still accepts an origin and obtains the object itself, which
-is what the rest of this section describes.
+An origin is the ordinary case in current `bobr-recipes`: unified `bobr`
+acquires missing Source content lazily while realizing the same DAG. Omitting
+it is useful for explicitly offline requests and requires the object to be
+available from the working or configured local stores.
 
 A recipe for any other builder has this shape:
 
