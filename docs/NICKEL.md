@@ -92,6 +92,10 @@ already-overlaid package set, so overlays always patch the high-level recipe and
 expansion sees the result; `to_request` then assigns node ids and emits the JSON
 `nodes` map.
 
+`HostBundle` is different: it is a real bobr builder, used directly from a
+Nickel recipe rather than expanded by the synthetic registry. Its inputs and
+typed configuration are documented in [HostBundle](./HOST_BUNDLE.md).
+
 ## Build and runtime dependencies
 
 A dependency-aware synthetic recipe carries `deps = { build = [...], runtime =
@@ -206,16 +210,19 @@ inputs = {
 **Config.** A recipe's `config` fields reach the build script through
 `script_config` (materialized at `@{config}`): `configure_args`, `make_args`,
 `setup_args`, and `perl_args` become the arguments of the matching command;
-`env` entries are exported into every step; `source_subdir` builds a
-subdirectory of the source; and `in-tree` (Autotools) builds in the source tree
-instead of a separate build directory.
+`env` entries are loaded by each synthetic build-script phase; `source_subdir`
+builds a subdirectory of the source; and `in-tree` (Autotools) builds in the
+source tree instead of a separate build directory. Hooks are independent
+`Sandbox` steps, so a hook that needs environment variables must declare its
+own `env`.
 
 **Hooks.** `pre_configure` / `pre_build` / `post_install` are extra `Sandbox`
 steps injected into the pipeline — a single step or an array. Each is a normal
 step (`name`, `run_as`, `argv`, optional `env`, and `cwd`, which defaults to the
-source directory for pre-hooks and the output or build directory for
-`post_install`), so a recipe can run arbitrary commands before configuring or
-after installing without leaving the synthetic builder.
+source directory for pre-hooks and the install root for `post_install`: `/` for
+ordinary installs or `/stage` for staging variants), so a recipe can run
+arbitrary commands before configuring or after installing without leaving the
+synthetic builder.
 
 ### `Autotools`
 
@@ -248,7 +255,7 @@ after installing without leaving the synthetic builder.
 - **Steps:** in-source `cmake -S . -B .` (Unix Makefiles generator;
   `-DCMAKE_INSTALL_PREFIX=/usr` and `-DCMAKE_BUILD_TYPE=Release` baked in) with
   `<cmake_args>` → `make -j` → `make install`.
-- **Config** (all optional): `cmake_args`, `env`, `source_subdir`,
+- **Config** (all optional): `cmake_args`, `make_args`, `env`, `source_subdir`,
   `pre_configure`, `post_install`.
 - **Default build tools:** the common native toolchain plus `cmake`.
 
@@ -270,12 +277,14 @@ after installing without leaving the synthetic builder.
 
 ### `Cargo`
 
-- **Steps:** vendor the crate dependencies offline (below), `cargo build`, then
-  `cargo install --path <source>` the crate's `[[bin]]` targets into the overlay
-  root.
-- **Config:** required `cargo_lock` — the upstream `Cargo.lock` imported as data
-  (`import "Cargo.lock" as 'Toml`); optional `env`, `source_subdir`,
-  `pre_configure`, `post_install`.
+- **Steps:** vendor the crate dependencies offline (below), then run
+  `cargo install --path <source> --offline --locked` to build and install the
+  selected crate `[[bin]]` targets into the overlay root.
+- **Recipe field:** required `cargo_lock` — the upstream `Cargo.lock` imported
+  as data (`import "Cargo.lock" as 'Toml`). It is a recipe field beside
+  `config`, not a `config` member.
+- **Config** (all optional): `features`, `bins`, `no_default_features`, `env`,
+  `source_subdir`, `post_install`.
 - **Default build tools:** the common native toolchain plus `rust_bin`.
 
 **Vendoring.** The sandbox has no network, so a Rust build cannot pull crates

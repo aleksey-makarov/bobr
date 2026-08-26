@@ -22,9 +22,10 @@ There are three non-overlapping output channels:
   CI or a pipe, or `quiet`) it falls back to **plain per-line** output.
   Transient `progress` ticks appear only in the live block — the plain path
   omits them. How much it shows is a threshold (see [Verbosity](#verbosity)).
-- **stdout** carries the machine-readable result (the realized object JSON).
-  Moving the result into a store file is a related, separate concern and is not
-  part of the logging contract.
+- **stdout** carries the machine-readable result: a single goal prints its
+  `ObjectHash`, while multiple goals print their ordered JSON results. Moving
+  the result into a store file is a related, separate concern and is not part
+  of the logging contract.
 
 ## Live viewport
 
@@ -147,9 +148,9 @@ filtering by lifecycle is reliable while builders stay free to name their work.
 | value          | meaning                                                        |
 |----------------|----------------------------------------------------------------|
 | `run-started`  | run-level: realization started (goals, jobs, reachable counts, progress policy) |
-| `run-finished` | run-level: build finished (`details.result` = ok/failed/cancelled, counters) |
+| `run-finished` | run-level: realization finished (goals or error class, counters) |
 | `start`        | subject execution started                                      |
-| `cache-miss`   | subject not cached; will be built                              |
+| `cache-miss`   | no reusable result at this point; acquisition or execution follows |
 | `running`      | subject's builder/source implementation is running             |
 | `cache-hit`    | subject served from cache (no workspace; run-level)            |
 | `done`         | subject completed; carries `object_hash`                       |
@@ -157,11 +158,10 @@ filtering by lifecycle is reliable while builders stay free to name their work.
 | `cancelled`    | cancelled                                                      |
 | `cleanup`      | post-execution cleanup (e.g. temp-dir removal warning)         |
 
-Builder operations ride inside `running` and name themselves with `op`. Current
-values: `stage`, `merge`, `move`, `subset`, `extract`, `sandbox`,
-`sandbox-result`, and `fetch` (source download), plus the meta operations
-`log-warning` and `oci-extract-warnings`. `op` is intentionally open; tooling
-must not assume a closed set.
+Builder and Source operations ride inside `running` and name themselves with
+`op`; publication and other lifecycle events may also carry it. Examples include
+`sandbox`, `fetch`, `publish`, and `compose`. `op` is intentionally open;
+tooling must not assume a closed set.
 
 ## Run-level events
 
@@ -170,9 +170,10 @@ subject events. Beyond the fanned-out subject events it carries:
 
 - `run-started`: ordered goals, `jobs`, total reachable nodes, reachable
   builders and Sources, and the selected progress policy;
-- `cache-hit`: one per cached subject resolved while planning (carries the
-  subject identity and `object_hash`); a fully cached run records only the
-  resolved boundary, not pruned interior subtrees;
+- `cache-hit`: one per subject served from a reusable object during realization
+  (carries the subject identity and `object_hash`), including reuse discovered
+  within the current run. A fully exact-cached run records only the resolved
+  boundary, not pruned interior subtrees;
 - `run-finished`: realized goals or `details.error_class`, plus exact terminal
   counters: `built`, `cache_hit`, `failed`, `cancelled`, `downloaded`, `local`,
   `secondary`, and `already_present`. Retry totals and logging failures are

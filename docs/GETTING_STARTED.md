@@ -21,10 +21,10 @@ target from the Nickel recipes. For the ideas behind it all, see
 Choose a release from the
 [bobr releases](https://github.com/aleksey-makarov/bobr/releases), download the
 main archive and its checksum file, and verify it before unpacking. For example,
-for version 0.1.5:
+for version 0.1.9:
 
 ```sh
-BOBR_VERSION=0.1.8
+BOBR_VERSION=0.1.9
 BOBR_TARGET=x86_64-unknown-linux-musl
 BOBR_ARCHIVE="bobr-v${BOBR_VERSION}-${BOBR_TARGET}.tar.xz"
 BOBR_RELEASE="https://github.com/aleksey-makarov/bobr/releases/download/v${BOBR_VERSION}"
@@ -43,8 +43,9 @@ chapter; `bobr` finds the sandbox launcher next to its own executable.
 ## Your first build
 
 `bobr` reads a JSON [request](./REQUEST.md) — a DAG of recipes — from standard
-input (or a file named on the command line), builds the `root` recipe, and
-prints its [`ObjectHash`](./CONCEPTS.md) to standard output.
+input (or a file named on the command line), realizes its ordered goals, and
+prints their [`ObjectHash`](./CONCEPTS.md) values to standard output. This
+first request has one goal, named `root`.
 
 Create the directories the request names — the store, plus a log and a work
 directory for this run — and write a tiny request that stages one text file with
@@ -275,15 +276,16 @@ has to be installed on the host — not even QEMU. Build it like any other recip
 target:
 
 ```sh
-bin/bobr-build.sh --target host_bundle_qemu
+bobr-recipes/bin/bobr-build.sh --target host_bundle_qemu
 ```
 
-The result is an ordinary directory rather than an fs-tree manifest. Add its
-public `bin/` to `PATH` before leaving the recipes checkout, then run from a
-writable working directory:
+The result is an ordinary directory rather than an fs-tree manifest. Resolve
+its path while still in the directory containing your profile, add its public
+`bin/` to `PATH`, then run from a writable working directory:
 
 ```sh
-export PATH="$(readlink -f ../bobr-store/object-refs/host-bundle-qemu)/bin:${PATH}"
+bundle="$(readlink -f bobr-store/object-refs/host-bundle-qemu)"
+export PATH="${bundle}/bin:${PATH}"
 mkdir -p /tmp/bobr-qemu-run
 cd /tmp/bobr-qemu-run
 bobr-run-qemu

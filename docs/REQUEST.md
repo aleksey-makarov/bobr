@@ -1,10 +1,11 @@
 # Request
 
 `bobr` reads a JSON document (described below) from standard input or from a
-file named on the command line. The document is a **request**: it describes how
-to build an object. `bobr` builds that object and prints its `ObjectHash` to
-standard output. For the model behind requests — objects, recipes, keys — see
-[Concepts](./CONCEPTS.md).
+file named on the command line. The document is a **request**: it describes a
+recipe DAG and its goals. `bobr` realizes every goal and prints the result: one
+goal prints its `ObjectHash`; several goals print an ordered JSON array of
+`{ "node", "object_hash" }` records. For the model behind requests — objects,
+recipes, keys — see [Concepts](./CONCEPTS.md).
 
 The request is a single JSON object:
 
@@ -35,7 +36,7 @@ The request is a single JSON object:
 ```
 
 - `schema` — format version; must be `"bobr-request-v4"`. `bobr --version`
-  reports the schema this build accepts (`bobr 0.1.8 (request
+  reports the schema this build accepts (`bobr 0.1.9 (request
   bobr-request-v4)`), so a recipe layer can check compatibility before building
   rather than finding out from the parse error
 - `store` — the store root for this request: an absolute path to an existing
@@ -49,16 +50,18 @@ The request is a single JSON object:
   in each subject's `meta.json`. It must start with an ASCII letter or digit and
   may contain only ASCII letters, digits, `.`, `_`, and `-`, up to 64 characters
 - `quiet` — optional bool; suppress the live progress log
-- `jobs` — optional integer; limit on parallel builder execution
+- `jobs` — optional positive integer; limit on parallel builder execution
 - `progress` — optional terminal presentation policy; defaults to
   `{ "mode": "auto" }`. The live block always has fetch statistics, build
   statistics, and a run summary; `summary` hides only its individual activity
   rows. `fixed` requires `max_lines >= 4` and caps the complete live block.
   This field never affects build identity and is ignored for non-TTY output
-- `limits` — optional HTTP/OCI and local Source acquisition limits
+- `limits` — optional HTTP/OCI and local Source acquisition limits, described
+  below
 - `secondaries` — optional ordered local trusted-index and content-source
-  capabilities
-- `goals` — ordered, non-empty array of node ids to realize
+  capabilities, described below
+- `goals` — ordered, non-empty array of distinct, existing node ids to realize;
+  its order determines the order of multi-goal results, not execution order
 - `nodes` — the recipe DAG
 
 `bobr` neither names the run nor creates its two directories: the caller does
@@ -76,6 +79,56 @@ the first import. The log directory has no such constraint.
 The recipe DAG is a JSON object: each member's value is a recipe. Inputs refer
 to other members by node id. Only nodes reachable from `goals` are planned;
 duplicate build identities are shared.
+
+### Acquisition limits
+
+All `limits` fields are optional; every numeric limit, including each
+`per_host` value, must be positive. Omitted fields use bobr's defaults:
+
+```json
+{
+  "per_host_default": 6,
+  "per_host": { "gitlab.freedesktop.org": 2 },
+  "max_connections": 64,
+  "max_local_jobs": 4
+}
+```
+
+- `per_host_default` — maximum simultaneous HTTP/OCI downloads from one host
+  when `per_host` has no entry for it
+- `per_host` — per-host overrides of that limit
+- `max_connections` — total maximum simultaneous HTTP/OCI downloads
+- `max_local_jobs` — maximum simultaneous local `Path` source materializations;
+  it limits disk work independently of network connections
+
+### Secondary stores
+
+`secondaries` has two independently ordered capability lists. Each member has a
+non-empty name, unique within its list, and an absolute `store` path:
+
+```json
+{
+  "trusted_indexes": [
+    { "name": "previous", "store": "/mnt/bobr/previous-store" }
+  ],
+  "content_sources": [
+    { "name": "previous", "store": "/mnt/bobr/previous-store" }
+  ]
+}
+```
+
+- `trusted_indexes` answer exact `BuildKey` and `ReuseKey` lookups with an
+  `ObjectHash`. They provide identity only and may be on any local filesystem.
+- `content_sources` provide an object's actual content by `ObjectHash`. Current
+  imports are hardlink-only, so each content source must share a filesystem with
+  the working store and cannot be that store itself.
+
+The same store may appear in both lists. A mapping answer and its content are
+deliberately separate capabilities: bobr first learns candidate hashes from
+trusted indexes, then looks for their content in the working store and the
+configured content sources. Entries are tried in their declared order; differing
+trusted answers are retained for diagnostics while the first obtainable object
+is selected.
 
 A recipe for the `Source` builder has this shape:
 
@@ -97,9 +150,9 @@ A recipe for the `Source` builder has this shape:
 - `object_hash` — the `ObjectHash` this source must produce
 - `origin` — how to obtain the object this recipe describes; defined below
 
-A recipe for the `Source` builder may also omit `origin`. Then the object must
-already exist in the store under its `object_hash`, and `bobr` reuses it; if it
-does not, the source fails.
+A recipe for the `Source` builder may also omit `origin`. Then its object must
+already be available from the working store or a configured content source under
+its `object_hash`; if it is not, the source fails.
 
 An origin is the ordinary case in current `bobr-recipes`: unified `bobr`
 acquires missing Source content lazily while realizing the same DAG. Omitting
@@ -602,7 +655,8 @@ it.
 
 ### `Group`
 
-Aggregates several otherwise unrelated targets under one `root`.
+Aggregates several otherwise unrelated targets under one completion-marker
+target.
 
 **Inputs:** one or more extra inputs (arbitrary).
 
