@@ -787,15 +787,6 @@ impl DynamicRealizer {
             .await
             .clone();
         if matches!(result, Ok(false)) {
-            self.logger.log_run_event(BuildLogEvent {
-                level: BuildLogLevel::Warn,
-                status: BuildStatus::CacheMiss,
-                op: Some("content-unavailable".to_string()),
-                message: format!("object '{hash}' is unavailable from configured content sources"),
-                object_hash: Some(hash),
-                raw_log_path: None,
-                details: serde_json::Map::new(),
-            });
             let mut cells = self.content_cells.lock().await;
             if cells
                 .get(&hash)
@@ -1634,6 +1625,34 @@ mod tests {
             load_reuse_handle(&environment.store, actual_reuse).unwrap(),
             Some(cached)
         );
+        environment.logger.flush();
+        let events = fs::read_to_string(environment.run.logs_dir().join("events.jsonl")).unwrap();
+        assert!(!events.contains("content-unavailable"));
+        executor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cold_source_content_miss_is_silent_before_materialization() {
+        let environment = environment("cold-source");
+        let source_path = environment._temp.path().join("source.txt");
+        fs::write(&source_path, b"cold-source\n").unwrap();
+        let hash = fsobj_hash::hash_path(&source_path).unwrap();
+        let graph = Arc::new(
+            plan_graph(
+                &BTreeMap::from([("root".to_string(), path_source("root", hash, &source_path))]),
+                &["root".to_string()],
+            )
+            .unwrap(),
+        );
+        let (realizer, executor) = dynamic(&environment, graph.clone(), Vec::new(), Vec::new());
+
+        let realized = realizer.clone().realize_goals().await.unwrap();
+
+        assert_eq!(realized, [(graph.goals()[0], hash)]);
+        assert!(environment.store.object_path(hash).unwrap().is_some());
+        environment.logger.flush();
+        let events = fs::read_to_string(environment.run.logs_dir().join("events.jsonl")).unwrap();
+        assert!(!events.contains("content-unavailable"));
         executor.shutdown().await.unwrap();
     }
 
