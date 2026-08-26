@@ -1945,6 +1945,17 @@ impl LiveProgress {
                 .subjects
                 .contains_key(&subject.build_key)
         });
+        // A network Source `start` announces its intended host before it has a
+        // connection permit. It belongs in fetch statistics as `waiting`, not
+        // in an activity row. The first `running` network milestone is the
+        // point at which the row becomes a useful description of real work.
+        let source_transfer_started = network && status == BuildStatus::Running.as_str();
+        let source_retry = record.details.contains_key("retry_host");
+        let source_was_visible = record.subject.as_ref().is_some_and(|subject| {
+            self.viewport
+                .active
+                .contains_key(&ActivityKey::Source(subject.build_key.clone()))
+        });
         if network || tracked_source || source_terminal {
             if record.level >= BuildLogLevel::Warn {
                 let _ = self
@@ -1959,7 +1970,9 @@ impl LiveProgress {
                         .fail(&key, format_progress_line(record, &self.run_log_dir));
                 } else if source_terminal {
                     self.finish_activity(&key);
-                } else if network || tracked_source {
+                } else if source_transfer_started
+                    || (source_retry && self.viewport.active.contains_key(&key))
+                {
                     self.start_or_update_activity(
                         key,
                         format_progress_line(record, &self.run_log_dir),
@@ -1967,8 +1980,10 @@ impl LiveProgress {
                 }
             }
             let now = Instant::now();
-            let redraw = record.level != BuildLogLevel::Progress
-                || (changed && now.duration_since(self.last_drawn) >= LIVE_REDRAW);
+            let redraw = changed
+                && (record.level != BuildLogLevel::Progress
+                    || (source_transfer_started && !source_was_visible)
+                    || now.duration_since(self.last_drawn) >= LIVE_REDRAW);
             if redraw {
                 self.last_drawn = now;
                 self.reflow(self.current_rows());
@@ -3034,7 +3049,7 @@ mod tests {
             BuildStatus::Running,
             BuildLogLevel::Progress,
             Some((name, name)),
-            json!({ "host": host, "bytes": bytes }),
+            json!({ "host": host, "bytes": bytes, "transfer": "network" }),
         )
     }
 
@@ -3103,12 +3118,30 @@ mod tests {
             Some(("source", "source")),
             json!({ "host": "example.org", "transfer": "network" }),
         ));
+        sink.write_event(&fetch_record(
+            BuildStatus::CacheMiss,
+            BuildLogLevel::Info,
+            Some(("source", "source")),
+            json!({}),
+        ));
 
         {
             let live = state.lock().unwrap();
             assert_eq!(live.running(), 1, "Source is not a builder row");
             assert_eq!(live.slots.len(), 15);
             assert_eq!(live.fetch_progress.queued(), 1);
+            assert!(live.slots[1].activity.is_none());
+        }
+
+        sink.write_event(&fetch_record(
+            BuildStatus::Running,
+            BuildLogLevel::Info,
+            Some(("source", "source")),
+            json!({ "host": "example.org", "bytes": 1, "transfer": "network" }),
+        ));
+        {
+            let live = state.lock().unwrap();
+            assert_eq!(live.fetch_progress.active(), 1);
             assert_eq!(
                 live.slots[1].activity,
                 Some(ActivityKey::Source("source".to_string()))
@@ -3158,6 +3191,33 @@ mod tests {
     }
 
     #[test]
+    fn retry_before_any_transfer_updates_statistics_without_taking_a_row() {
+        let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
+        sink.write_event(&live_run_record(
+            BuildStatus::RunStarted,
+            json!({ "reachable": 1, "reachable_sources": 1, "jobs": 1 }),
+        ));
+        sink.write_event(&fetch_record(
+            BuildStatus::Start,
+            BuildLogLevel::Info,
+            Some(("source", "source")),
+            json!({ "host": "example.org", "transfer": "network" }),
+        ));
+        sink.write_event(&fetch_record(
+            BuildStatus::Running,
+            BuildLogLevel::Info,
+            Some(("source", "source")),
+            json!({ "retry_host": "example.org" }),
+        ));
+        let ProgressSink::Live(state) = &sink else {
+            panic!("expected live sink");
+        };
+        let live = state.lock().unwrap();
+        assert_eq!(live.fetch_progress.retrying(), 1);
+        assert!(live.slots.iter().all(|slot| slot.activity.is_none()));
+    }
+
+    #[test]
     fn source_progress_ticks_update_counters_without_redrawing_every_tick() {
         let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
         sink.write_event(&live_run_record(
@@ -3169,6 +3229,12 @@ mod tests {
             BuildLogLevel::Info,
             Some(("source", "source")),
             json!({ "host": "example.org", "transfer": "network" }),
+        ));
+        sink.write_event(&fetch_record(
+            BuildStatus::Running,
+            BuildLogLevel::Info,
+            Some(("source", "source")),
+            json!({ "host": "example.org", "bytes": 0, "transfer": "network" }),
         ));
         {
             let ProgressSink::Live(state) = &sink else {
@@ -3208,7 +3274,7 @@ mod tests {
         ));
         let event = BuildLogEvent {
             level: BuildLogLevel::Info,
-            status: BuildStatus::Start,
+            status: BuildStatus::Running,
             op: Some("content".to_string()),
             message: "fetching object from potato".to_string(),
             object_hash: None,
@@ -3235,7 +3301,7 @@ mod tests {
             panic!("expected live sink");
         };
         let live = state.lock().unwrap();
-        assert_eq!(live.fetch_progress.queued(), 1);
+        assert_eq!(live.fetch_progress.active(), 1);
         assert_eq!(
             live.slots.first().and_then(|slot| slot.activity.clone()),
             Some(ActivityKey::Source("object-key".to_string()))
