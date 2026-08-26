@@ -2,7 +2,7 @@ use crate::ObjectHash;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufWriter, IsTerminal, Write};
@@ -1513,6 +1513,10 @@ struct BuilderViewport {
     visible: Vec<Option<String>>,
     hidden: VecDeque<String>,
     capacity: usize,
+    /// High-water number of builder rows allocated during this run. A
+    /// temporary capacity reduction may hide rows, but growing the viewport
+    /// restores them as idle `—` slots instead of shortening the live block.
+    allocated_slots: usize,
     next_order: u64,
 }
 
@@ -1539,6 +1543,7 @@ impl BuilderViewport {
         } else {
             self.hidden.push_back(build_key.to_string());
         }
+        self.allocated_slots = self.allocated_slots.max(self.visible.len());
     }
 
     fn finish(&mut self, build_key: &str) {
@@ -1559,39 +1564,24 @@ impl BuilderViewport {
             return;
         }
         self.capacity = capacity;
-        let mut visible = self
-            .visible
-            .iter()
-            .filter_map(|slot| slot.as_ref())
-            .filter(|key| self.active.contains_key(*key))
-            .cloned()
-            .collect::<Vec<_>>();
-        visible.sort_by_key(|key| self.active[key].order);
-        let keep = visible.len().min(capacity);
-        let kept = visible[..keep].iter().cloned().collect::<HashSet<_>>();
-        self.visible = visible[..keep].iter().cloned().map(Some).collect();
-        let mut hidden = self
+        let mut ordered = self
             .active
             .iter()
-            .filter(|(key, _)| !kept.contains(*key))
             .map(|(key, subject)| (subject.order, key.clone()))
             .collect::<Vec<_>>();
-        hidden.sort_by_key(|(order, _)| *order);
-        self.hidden = hidden.into_iter().map(|(_, key)| key).collect();
-        self.promote_hidden();
-    }
-
-    fn promote_hidden(&mut self) {
-        while self.visible.iter().flatten().count() < self.capacity {
-            let Some(key) = self.pop_hidden() else {
-                break;
-            };
-            if let Some(slot) = self.visible.iter_mut().find(|slot| slot.is_none()) {
-                *slot = Some(key);
-            } else {
-                self.visible.push(Some(key));
-            }
-        }
+        ordered.sort_by_key(|(order, _)| *order);
+        let visible_active = ordered.len().min(capacity);
+        self.visible = ordered[..visible_active]
+            .iter()
+            .map(|(_, key)| Some(key.clone()))
+            .collect();
+        let visible_rows = self.allocated_slots.max(visible_active).min(capacity);
+        self.visible.resize(visible_rows, None);
+        self.hidden = ordered[visible_active..]
+            .iter()
+            .map(|(_, key)| key.clone())
+            .collect();
+        self.allocated_slots = self.allocated_slots.max(self.visible.len());
     }
 
     fn pop_hidden(&mut self) -> Option<String> {
@@ -1914,6 +1904,11 @@ impl LiveProgress {
             if record.details.get("progress").and_then(Value::as_str) == Some("aggregate") {
                 self.reachable_sources = detail_u64(record, "sources") as usize;
                 self.ensure_transfer(self.reachable_sources, true);
+            } else {
+                // Reserve the compact fetch row from the start. Otherwise the
+                // whole live block jumps when the first lazily discovered
+                // network Source or remote content acquisition appears.
+                self.ensure_transfer(self.reachable_sources, false);
             }
             self.reflow(self.current_rows());
             return;
@@ -1943,7 +1938,17 @@ impl LiveProgress {
             .is_some_and(|(subject, block)| {
                 block.progress.subjects.contains_key(&subject.build_key)
             });
-        if self.aggregate_only || network || tracked {
+        let source_terminal = record.subject.as_ref().is_some_and(|subject| {
+            subject.tag == "Source"
+                && matches!(
+                    status,
+                    value if value == BuildStatus::CacheHit.as_str()
+                        || value == BuildStatus::Done.as_str()
+                        || value == BuildStatus::Failed.as_str()
+                        || value == BuildStatus::Cancelled.as_str()
+                )
+        });
+        if self.aggregate_only || network || tracked || source_terminal {
             if record.level >= BuildLogLevel::Warn {
                 let _ = self
                     .multi
@@ -2536,6 +2541,17 @@ mod tests {
             [Some("b".into()), Some("c".into()), Some("d".into())]
         );
         assert!(viewport.hidden.is_empty());
+
+        viewport.finish("d");
+        assert_eq!(viewport.visible, [Some("b".into()), Some("c".into()), None]);
+        viewport.set_capacity(1);
+        assert_eq!(viewport.visible, [Some("b".into())]);
+        viewport.set_capacity(3);
+        assert_eq!(
+            viewport.visible,
+            [Some("b".into()), Some("c".into()), None],
+            "a temporary shrink must restore the trailing idle row"
+        );
     }
 
     #[test]
@@ -2873,6 +2889,11 @@ mod tests {
             BuildStatus::RunStarted,
             json!({ "reachable": 1907, "reachable_sources": 991, "jobs": 20 }),
         ));
+        {
+            let live = state.lock().unwrap();
+            assert_eq!(live.transfer.as_ref().unwrap().lines.len(), 1);
+            assert_eq!(live.transfer.as_ref().unwrap().progress.total, 991);
+        }
         sink.write_event(&live_subject_record(
             BuildLogLevel::Info,
             BuildStatus::Start,
@@ -2904,7 +2925,7 @@ mod tests {
     }
 
     #[test]
-    fn local_source_does_not_create_a_transfer_or_builder_row() {
+    fn local_source_keeps_the_idle_transfer_row_without_activating_it() {
         let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
         sink.write_event(&live_run_record(
             BuildStatus::RunStarted,
@@ -2916,11 +2937,21 @@ mod tests {
             Some(("local", "local")),
             json!({ "host": "local", "transfer": "local" }),
         ));
+        sink.write_event(&fetch_record(
+            BuildStatus::Done,
+            BuildLogLevel::Info,
+            Some(("local", "local")),
+            json!({ "source_outcome": "local" }),
+        ));
         let ProgressSink::Live(state) = &sink else {
             panic!("expected live sink");
         };
         let live = state.lock().unwrap();
-        assert!(live.transfer.is_none());
+        let transfer = live.transfer.as_ref().unwrap();
+        assert_eq!(transfer.lines.len(), 1);
+        assert_eq!(transfer.progress.done, 1);
+        assert_eq!(transfer.progress.active(), 0);
+        assert_eq!(transfer.progress.queued(), 0);
         assert_eq!(live.running(), 0);
         assert!(live.slots.is_empty());
     }
@@ -2932,6 +2963,13 @@ mod tests {
             BuildStatus::RunStarted,
             json!({ "reachable": 1, "reachable_sources": 0, "jobs": 1 }),
         ));
+        {
+            let ProgressSink::Live(state) = &sink else {
+                panic!("expected live sink");
+            };
+            let live = state.lock().unwrap();
+            assert_eq!(live.transfer.as_ref().unwrap().lines.len(), 1);
+        }
         let event = BuildLogEvent {
             level: BuildLogLevel::Info,
             status: BuildStatus::Start,

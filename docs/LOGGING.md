@@ -38,20 +38,23 @@ The renderer keeps every active subject in its model even when only part of the
 set fits on screen. Visible rows remain stable. New overflow subjects are
 hidden in start order; when a visible subject finishes, the oldest hidden one
 takes its row. Shrinking the terminal hides the newest visible subjects and
-growing it restores the oldest hidden subjects. A compact overflow row, or the
-bottom summary when no row fits, reports how many are hidden.
+growing it restores the oldest hidden subjects. Rows allocated earlier in the
+run remain as `—` when idle, including trailing rows; a temporary resize or
+transfer-block expansion does not forget their high-water count. A compact
+overflow row, or the bottom summary when no row fits, reports how many are
+hidden.
 
 The number of visible rows never limits builder execution. A Tokio task listens
 for `SIGWINCH` and immediately asks the logger to reflow the viewport; build
 events update its content independently. Non-TTY and `quiet` output never emit
 terminal control sequences.
 
-Network content acquisition has a second aggregate block above the builder
-viewport. It is created lazily by the first event carrying
-`details.transfer = "network"`, so a run satisfied by the working store, local
-Path origins, or hardlink secondaries reserves no rows for it. HTTP and OCI
-emit the same structured host/byte events; future remote content sources use
-that vocabulary as well. Local transfer events never create the block.
+Source acquisition has a second aggregate block above the builder viewport.
+Every run reserves its compact one-line form at startup, even with no active or
+reachable Source. The first event carrying `details.transfer = "network"`
+expands it to the active network view. HTTP and OCI emit the same structured
+host/byte events; future remote content sources use that vocabulary as well.
+Local transfer events update completion without expanding the block.
 
 While transfers are queued or active the block may show totals, throughput,
 host queues, and the oldest slow transfers, subject to the same line budget as
