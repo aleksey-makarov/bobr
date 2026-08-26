@@ -49,7 +49,9 @@ minus three, so normal activity events do not change the block's height.
 Each activity row belongs to one concrete builder or network Source acquisition
 until its terminal event. Empty rows display `—`. Local Path Sources, working
 store hits, and local secondary imports update fetch statistics but do not take
-an activity row.
+an activity row. A network Source waiting for a connection slot also updates
+only fetch statistics; it takes an activity row at its first `running` network
+milestone, when a row can describe actual transfer work rather than queueing.
 
 The renderer keeps every activity in its model even when only part fits on
 screen. There are separate FIFO queues for hidden builders and hidden Source
