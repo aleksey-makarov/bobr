@@ -41,7 +41,7 @@ of compiling, and so that a failed build never replaces working binaries:
 5. `cargo clippy --workspace --all-targets`
 6. `cargo test --workspace --all-features`
 7. `cargo doc --workspace --no-deps`
-8. install `bobr`, `bobr-fetch`, `fsobj-hash`, and `bobr-sandbox-launcher`
+8. install `bobr`, `fsobj-hash`, and `bobr-sandbox-launcher`
 
 `--quick` keeps only the build and the install, for when you are iterating and
 will run the checks before committing. `--debug` installs debug binaries; the
@@ -74,22 +74,21 @@ links, which are denied workspace-wide.
 ## Building recipes
 
 There is no separate build driver for development. With the binaries on `PATH`,
-use `bin/bobr-fetch.sh` and then `bin/bobr-build.sh` exactly as
-[Getting Started](./GETTING_STARTED.md#building-a-real-target) describes them.
+use `bin/bobr-build.sh` exactly as
+[Getting Started](./GETTING_STARTED.md#building-a-real-target) describes it.
 
 One difference matters while editing recipes. Local sources are pinned by a
-`*.fsobj-hash` lock beside them, and `bin/bobr-fetch.sh` **checks** those locks
-rather than rewriting them: a stale lock would otherwise build the old content
-of a file you just edited, silently, since the hash it still declares names an
-object the store already has. The check lives with the fetch because that is the
-phase that puts local sources into the store. So after editing a patch, a build
-script, or anything else under a local `Source`, refresh the locks yourself:
+`*.fsobj-hash` lock beside them, and `bin/bobr-build.sh` **checks** those locks
+rather than rewriting them: a stale lock would otherwise reuse the old content
+of a file you just edited, since the hash it still declares names an object the
+store may already have. After editing a patch, a build script, or anything else
+under a local `Source`, refresh the locks yourself:
 
 ```sh
 bin/bobr-update-fsobj-hashes.sh
 ```
 
-The fetch tells you when this is needed, and names the tool.
+The build tells you when this is needed, and names the tool.
 
 ## Before tagging a release
 
@@ -145,20 +144,17 @@ In order, the script:
 3. **seeds source objects** from the previous store by hardlink, so the same
    tarballs are not downloaded again — sources are content-addressed, so a
    hardlink is as good as a fetch;
-4. fetches the remaining sources through `bin/bobr-fetch.sh`, and stops there if
-   that fails: a missing source, or one whose content does not match what the
-   recipes declare, is a question worth answering before it is buried under a
-   build failure somewhere else;
-5. builds through `bin/bobr-build.sh`;
-6. repoints the `bobr-store` symlink at the new store — **only if the build
+4. realizes the complete graph through `bin/bobr-build.sh`; Source acquisition
+   and builder execution share one scheduler and one request;
+5. repoints the `bobr-store` symlink at the new store — **only if the build
    succeeded**, so a failed rebuild leaves you with the last good one.
 
-The hash locks are left alone: `bin/bobr-fetch.sh` checks them and refuses on a
+The hash locks are left alone: `bin/bobr-build.sh` checks them and refuses on a
 stale one, which is what should happen to a checkout that says one thing and
 contains another.
 
 Beside the store it records what produced it: `hashes.txt` with both commits,
-`request.json` with the lowered fetch request, `bobr-rebuild-world.log` with the
+`request.json` with the lowered unified request, `bobr-rebuild-world.log` with the
 per-phase timings, and `host-stats.log` with load and memory samples taken
 around each phase.
 

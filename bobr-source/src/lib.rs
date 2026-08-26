@@ -17,9 +17,9 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 
+pub mod acquisition;
 pub mod build_executor;
 pub mod dynamic_realizer;
-pub mod fetch;
 pub mod graph;
 mod http;
 /// OCI registry client: pulls and stages an image's layers by pinned digest.
@@ -38,10 +38,9 @@ pub mod realizer;
 // rather than exposing the module path.
 pub use origin::{OriginContext, OriginHandler, OriginSpec, ParsedOrigin};
 
-use bobr_core::{BuildKey, BuildLogSubject, ObjectHash, SubjectRunContext, Workspace};
+use bobr_core::{BuildKey, BuildLogSubject, ObjectHash, Workspace};
 use serde_json::{Map, Value};
 use std::fmt;
-use std::path::{Path, PathBuf};
 
 /// Error reported while parsing a source recipe node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,66 +70,28 @@ impl fmt::Display for SourceRecipeError {
 
 impl std::error::Error for SourceRecipeError {}
 
-/// Error reported while executing a planned source subject.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SourceExecutionError {
-    /// The run was cancelled before source materialization started.
-    Cancelled(String),
-    /// Source materialization failed.
-    Build(String),
-}
-
-impl SourceExecutionError {
-    fn cancelled() -> Self {
-        Self::Cancelled("build cancelled by signal".to_string())
-    }
-
-    fn build(message: impl Into<String>) -> Self {
-        Self::Build(message.into())
-    }
-}
-
-impl fmt::Display for SourceExecutionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Cancelled(message) | Self::Build(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for SourceExecutionError {}
-
-/// Parsed source node prepared for graph planning and source execution.
+/// Parsed Source node prepared for graph planning and async acquisition.
 #[derive(Debug, Clone)]
 pub struct SourcePlannedSubject {
     name: String,
     build_key: BuildKey,
     declared_object_hash: ObjectHash,
-    origin: Option<Box<dyn ParsedOrigin>>,
     origin_value: Option<Value>,
 }
 
 impl SourcePlannedSubject {
-    /// Creates a parsed source subject from its recipe name, declared object
-    /// hash, and optional materialization origin. The source build key is
-    /// derived from the declared object hash.
-    pub fn new(
+    /// Creates a planned Source after request parsing validated its origin.
+    pub(crate) fn new(
         name: String,
         declared_object_hash: ObjectHash,
-        origin: Option<Box<dyn ParsedOrigin>>,
+        origin: Option<Value>,
     ) -> Self {
         Self {
             name,
             build_key: BuildKey::from_object_hash(declared_object_hash),
             declared_object_hash,
-            origin,
-            origin_value: None,
+            origin_value: origin,
         }
-    }
-
-    fn with_origin_value(mut self, origin_value: Option<Value>) -> Self {
-        self.origin_value = origin_value;
-        self
     }
 
     /// Returns the source recipe name.
@@ -153,18 +114,7 @@ impl SourcePlannedSubject {
         self.declared_object_hash
     }
 
-    /// Clones the parsed origin when one was declared.
-    pub fn clone_origin(&self) -> Option<Box<dyn ParsedOrigin>> {
-        self.origin.clone()
-    }
-
-    /// Returns the parsed origin, when one was declared.
-    pub fn origin(&self) -> Option<&dyn ParsedOrigin> {
-        self.origin.as_deref()
-    }
-
-    /// Returns the raw origin object retained for the asynchronous fetch
-    /// engine, when this subject came from a recipe.
+    /// Returns the validated raw origin object for async acquisition.
     pub fn origin_value(&self) -> Option<&Value> {
         self.origin_value.as_ref()
     }
@@ -179,66 +129,6 @@ impl SourcePlannedSubject {
             workspace.raw_log_dir().to_path_buf(),
         )
     }
-
-    /// Materializes the source into the run's temp directory and returns the
-    /// staged path.
-    ///
-    /// This does not touch the object store: the caller looks up reuse before
-    /// calling this, and imports the returned staged path afterwards.
-    pub fn execute(&self, ctx: &SubjectRunContext) -> Result<PathBuf, SourceExecutionError> {
-        let Some(origin) = self.origin() else {
-            return Err(SourceExecutionError::build(format!(
-                "source '{}' has no origin and object '{}' is not present in store",
-                self.name(),
-                self.declared_object_hash()
-            )));
-        };
-        if ctx.cancellation().is_cancelled() {
-            return Err(SourceExecutionError::cancelled());
-        }
-        let temp_root = ctx.temp_dir();
-        let origin_cx = OriginContext {
-            temp_root,
-            logger: ctx.logger().as_ref(),
-            cancellation: ctx.cancellation(),
-        };
-        let staged_path = match origin.materialize(&origin_cx) {
-            Ok(path) => path,
-            // A mid-fetch abort surfaces as an opaque error; if the run was
-            // cancelled, report it as cancellation rather than a build failure.
-            Err(error) if ctx.cancellation().is_cancelled() => {
-                let _ = error;
-                return Err(SourceExecutionError::cancelled());
-            }
-            Err(error) => return Err(SourceExecutionError::build(error)),
-        };
-        validate_origin_staged_path(&staged_path, temp_root)
-            .map_err(SourceExecutionError::build)?;
-        Ok(staged_path)
-    }
-}
-
-fn validate_origin_staged_path(staged_path: &Path, temp_root: &Path) -> Result<(), String> {
-    let canonical_temp_root = temp_root.canonicalize().map_err(|error| {
-        format!(
-            "failed to canonicalize source temp root '{}': {error}",
-            temp_root.display()
-        )
-    })?;
-    let canonical_staged_path = staged_path.canonicalize().map_err(|error| {
-        format!(
-            "failed to canonicalize source staged path '{}': {error}",
-            staged_path.display()
-        )
-    })?;
-    if !canonical_staged_path.starts_with(&canonical_temp_root) {
-        return Err(format!(
-            "source origin returned staged path '{}' outside temp root '{}'",
-            staged_path.display(),
-            temp_root.display()
-        ));
-    }
-    Ok(())
 }
 
 /// Parses a source recipe object whose tag was already removed by the caller.
@@ -253,10 +143,9 @@ pub fn parse_source_subject(
             SourceRecipeError::new(format!("object_hash: invalid object hash: {error}"))
         })?;
     let origin_value = object.remove("origin");
-    let origin = match origin_value.clone() {
-        Some(value) => Some(origins::parse_origin_value(value, "origin")?),
-        None => None,
-    };
+    if let Some(value) = origin_value.clone() {
+        let _ = origins::parse_origin_value(value, "origin")?;
+    }
     if !object.is_empty() {
         return Err(SourceRecipeError::new(format!(
             "unexpected fields: {}",
@@ -264,10 +153,11 @@ pub fn parse_source_subject(
         )));
     }
 
-    Ok(
-        SourcePlannedSubject::new(name, declared_object_hash, origin)
-            .with_origin_value(origin_value),
-    )
+    Ok(SourcePlannedSubject::new(
+        name,
+        declared_object_hash,
+        origin_value,
+    ))
 }
 
 fn take_string(object: &mut Map<String, Value>, field: &str) -> Result<String, SourceRecipeError> {
@@ -283,14 +173,7 @@ fn take_string(object: &mut Map<String, Value>, field: &str) -> Result<String, S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::origin::OriginSpec;
-    use bobr_core::{CancellationToken, NoopBuildLogger, RuntimeProvider};
     use serde_json::json;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-    use tempfile::tempdir;
 
     fn source_object(origin: Option<Value>) -> Map<String, Value> {
         let mut object = json!({
@@ -320,7 +203,7 @@ mod tests {
             subject.build_key().to_string(),
             "1111111111111111111111111111111111111111111111111111111111111111"
         );
-        assert!(subject.clone_origin().is_none());
+        assert!(subject.origin_value().is_none());
     }
 
     #[test]
@@ -332,7 +215,7 @@ mod tests {
         }))))
         .unwrap();
 
-        assert_eq!(subject.clone_origin().unwrap().spec().tag, "Path");
+        assert_eq!(subject.origin_value().unwrap()["tag"], "Path");
     }
 
     #[test]
@@ -356,7 +239,7 @@ mod tests {
         }))))
         .unwrap();
 
-        assert_eq!(subject.clone_origin().unwrap().spec().tag, "Http");
+        assert_eq!(subject.origin_value().unwrap()["tag"], "Http");
     }
 
     #[test]
@@ -372,7 +255,7 @@ mod tests {
         }))))
         .unwrap();
 
-        assert_eq!(subject.clone_origin().unwrap().spec().tag, "OciRegistry");
+        assert_eq!(subject.origin_value().unwrap()["tag"], "OciRegistry");
     }
 
     #[test]
@@ -391,135 +274,5 @@ mod tests {
             subject.declared_object_hash().to_string(),
             "1111111111111111111111111111111111111111111111111111111111111111"
         );
-    }
-
-    #[derive(Debug, Clone)]
-    struct StagingOrigin {
-        target: PathBuf,
-    }
-
-    #[derive(Debug, Clone)]
-    struct RecordingOrigin {
-        called: Arc<AtomicBool>,
-    }
-
-    impl ParsedOrigin for StagingOrigin {
-        fn spec(&self) -> &'static OriginSpec {
-            static SPEC: OriginSpec = OriginSpec { tag: "Stub" };
-            &SPEC
-        }
-        fn materialize(&self, _cx: &OriginContext<'_>) -> Result<PathBuf, String> {
-            if let Some(parent) = self.target.parent() {
-                std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-            }
-            std::fs::write(&self.target, b"payload").map_err(|error| error.to_string())?;
-            Ok(self.target.clone())
-        }
-        fn clone_box(&self) -> Box<dyn ParsedOrigin> {
-            Box::new(self.clone())
-        }
-    }
-
-    impl ParsedOrigin for RecordingOrigin {
-        fn spec(&self) -> &'static OriginSpec {
-            static SPEC: OriginSpec = OriginSpec { tag: "Recording" };
-            &SPEC
-        }
-        fn materialize(&self, cx: &OriginContext<'_>) -> Result<PathBuf, String> {
-            self.called.store(true, Ordering::SeqCst);
-            Ok(cx.temp_root.join("staged"))
-        }
-        fn clone_box(&self) -> Box<dyn ParsedOrigin> {
-            Box::new(self.clone())
-        }
-    }
-
-    fn sample_hash() -> ObjectHash {
-        "1111111111111111111111111111111111111111111111111111111111111111"
-            .parse()
-            .unwrap()
-    }
-
-    fn run_ctx(temp_root: &Path) -> SubjectRunContext {
-        run_ctx_with_cancellation(temp_root, CancellationToken::new())
-    }
-
-    fn run_ctx_with_cancellation(
-        temp_root: &Path,
-        cancellation: CancellationToken,
-    ) -> SubjectRunContext {
-        let workspace = Workspace::new(
-            temp_root.join("log"),
-            temp_root.join("log/raw"),
-            temp_root.to_path_buf(),
-        );
-        SubjectRunContext::new(
-            workspace,
-            Arc::new(NoopBuildLogger),
-            cancellation,
-            RuntimeProvider::host(),
-            bobr_core::BuildSeed::ZERO,
-        )
-    }
-
-    #[test]
-    fn execute_without_origin_is_an_error() {
-        let subject = SourcePlannedSubject::new("src".to_string(), sample_hash(), None);
-        let temp = tempdir().unwrap();
-        let error = subject.execute(&run_ctx(temp.path())).unwrap_err();
-        assert!(error.to_string().contains("has no origin"), "{error}");
-    }
-
-    #[test]
-    fn execute_stages_under_temp_root() {
-        let temp = tempdir().unwrap();
-        let target = temp.path().join("staged");
-        let subject = SourcePlannedSubject::new(
-            "src".to_string(),
-            sample_hash(),
-            Some(Box::new(StagingOrigin {
-                target: target.clone(),
-            })),
-        );
-        let staged = subject.execute(&run_ctx(temp.path())).unwrap();
-        assert_eq!(staged, target);
-        assert!(staged.is_file());
-    }
-
-    #[test]
-    fn execute_does_not_materialize_when_cancelled() {
-        let temp = tempdir().unwrap();
-        let cancellation = CancellationToken::new();
-        cancellation.cancel();
-        let called = Arc::new(AtomicBool::new(false));
-        let subject = SourcePlannedSubject::new(
-            "src".to_string(),
-            sample_hash(),
-            Some(Box::new(RecordingOrigin {
-                called: called.clone(),
-            })),
-        );
-
-        let error = subject
-            .execute(&run_ctx_with_cancellation(temp.path(), cancellation))
-            .unwrap_err();
-
-        assert!(matches!(error, SourceExecutionError::Cancelled(_)));
-        assert!(!called.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn execute_rejects_staged_path_outside_temp_root() {
-        let temp = tempdir().unwrap();
-        let outside = tempdir().unwrap();
-        let subject = SourcePlannedSubject::new(
-            "src".to_string(),
-            sample_hash(),
-            Some(Box::new(StagingOrigin {
-                target: outside.path().join("escaped"),
-            })),
-        );
-        let error = subject.execute(&run_ctx(temp.path())).unwrap_err();
-        assert!(error.to_string().contains("outside temp root"), "{error}");
     }
 }

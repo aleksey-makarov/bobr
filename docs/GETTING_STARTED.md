@@ -36,9 +36,9 @@ tar -xf "${BOBR_ARCHIVE}"
 export PATH="${PWD}/bobr-v${BOBR_VERSION}-${BOBR_TARGET}/bin:${PATH}"
 ```
 
-The archive contains static `bobr`, `bobr-fetch`, `fsobj-hash`, and
-`bobr-sandbox-launcher` binaries. Keep its `bin/` on `PATH` for the rest of
-this chapter; `bobr` finds the sandbox launcher next to its own executable.
+The archive contains static `bobr`, `fsobj-hash`, and
+`bobr-sandbox-launcher` binaries. Keep its `bin/` on `PATH` for the rest of this
+chapter; `bobr` finds the sandbox launcher next to its own executable.
 
 ## Your first build
 
@@ -60,11 +60,12 @@ mkdir -p /tmp/bobr-store /tmp/bobr-store/logs/first /tmp/bobr-store/work/first
 
 ```json
 {
-  "schema": "bobr-request-v2",
+  "schema": "bobr-request-v4",
   "store": "/tmp/bobr-store",
   "logs": "/tmp/bobr-store/logs/first",
   "work": "/tmp/bobr-store/work/first",
   "run_id": "first",
+  "goals": ["root"],
   "nodes": {
     "root": {
       "name": "hello",
@@ -134,17 +135,13 @@ working directory; start from the shipped example and read what is in it:
 ```sh
 cp bobr-recipes/bobr.ncl.example bobr.ncl
 mkdir bobr-store
-bobr-recipes/bin/bobr-fetch.sh
 bobr-recipes/bin/bobr-build.sh
 ```
 
-Two commands, and the order matters. The first fills the store with every source
-the target needs -- tarballs from their mirrors, container images from their
-registries, scripts and patches from the recipes themselves -- and the second
-builds from what is there. The build downloads nothing: a source it cannot find
-in the store stops it by name rather than being quietly fetched, which is what
-keeps "what the store holds" an answerable question. Both read the same profile,
-so they agree on what to obtain and what to build.
+One command realizes the complete target. `bobr` checks the working and
+configured secondary stores, acquires missing Source content from local paths,
+HTTP mirrors, or OCI registries, and runs builders only where cache resolution
+misses.
 
 That builds the profile's `target`, which the example sets to `test_all` — every
 shipped artifact plus the checks over them. Expect it to run for hours: nothing
@@ -153,7 +150,6 @@ up. To try something smaller first, list what there is and name it:
 
 ```sh
 bobr-recipes/bin/bobr-list-pkgs.sh          # attribute, recipe name, tag
-bobr-recipes/bin/bobr-fetch.sh --target gzip
 bobr-recipes/bin/bobr-build.sh --target gzip
 ```
 
@@ -169,10 +165,10 @@ few things that belong to one invocation stay on the command line:
 - `--dry-run` — print the resolved profile and the JSON request, build nothing;
 - a positional argument names a different profile (`bobr-build.sh ../ci/bobr.ncl`).
 
-`bobr`, `bobr-fetch` and `fsobj-hash` are taken from `PATH` — the ones from the
-release archive you unpacked earlier. Nothing is guessed, so what gets used is what `bobr
---version` reports; the driver checks that its request format matches these
-recipes before it starts, and says so plainly when it does not.
+`bobr` and `fsobj-hash` are taken from `PATH` — the ones from the release
+archive you unpacked earlier. Nothing is guessed, so what gets used is what
+`bobr --version` reports; the driver checks that its request format matches
+these recipes before it starts, and says so plainly when it does not.
 
 Later builds reuse cached objects and rebuild only what a change actually
 reaches, so that cost is paid once rather than on every build.
@@ -279,7 +275,6 @@ has to be installed on the host — not even QEMU. Build it like any other recip
 target:
 
 ```sh
-bin/bobr-fetch.sh --target host_bundle_qemu
 bin/bobr-build.sh --target host_bundle_qemu
 ```
 

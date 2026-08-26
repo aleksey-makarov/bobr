@@ -1,4 +1,4 @@
-//! Downloads every source of a fetch request into the store.
+//! Acquires pinned Source objects for the unified Realizer.
 //!
 //! All sources start at once; what actually runs is governed by two layers of
 //! semaphores -- one per host, one per process -- so a saturated mirror stalls
@@ -8,9 +8,7 @@
 //! synchronous source path uses; only the transport around them is
 //! asynchronous.
 
-use crate::fetch::oci;
-use crate::fetch::realizer::SourceRealizer;
-use crate::fetch::request::{FetchRequest, ResolvedLimits, SourceEntry};
+use super::{ResolvedLimits, oci};
 use crate::http::{
     self, HttpOrigin, HttpOriginError, HttpRetryPolicy, HttpTimeouts, Retry, UrlAttemptState,
 };
@@ -20,10 +18,12 @@ use bobr_core::{
     CancellationToken, ObjectHash, Run, Workspace,
 };
 use bobr_store::{
-    NamedContentSource, NamedTrustedKeyIndex, SecondaryResolver, SourceImportOutcome, Store,
-    import_source_object, record_existing_source_object,
+    SecondaryResolver, SourceImportOutcome, Store, import_source_object,
+    record_existing_source_object,
 };
-use serde_json::{Map, Value, json};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,30 +33,9 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 
-/// What one run of the fetcher did, and what is left for the caller to fix.
-#[derive(Debug, Default)]
-pub struct Summary {
-    /// Sources downloaded and imported this run.
-    pub downloaded: u64,
-    /// Sources already present in the store; no network was touched for them.
-    pub cache_hit: u64,
-    /// Sources materialized from a local path: no network was touched, but
-    /// they were read, hashed and imported like any other.
-    pub local: u64,
-    /// Sources imported from secondary content sources by their declared hash.
-    pub secondary: u64,
-    /// Sources whose download produced a different object than the recipe
-    /// declares: the placeholder cycle's payload, every real hash in one run.
-    pub mismatched: Vec<Mismatch>,
-    /// Sources that could not be fetched, with the reason for each.
-    pub failed: Vec<(String, String)>,
-    /// Whether the run was cancelled before finishing.
-    pub cancelled: bool,
-}
-
 /// One source whose downloaded content hashes differently than declared.
 #[derive(Debug)]
-pub struct Mismatch {
+pub(crate) struct Mismatch {
     /// The source's name, as the recipes call it.
     pub name: String,
     /// The hash the recipe declares.
@@ -66,11 +45,12 @@ pub struct Mismatch {
     pub actual: String,
 }
 
-impl Summary {
-    /// Whether the run finished with nothing left for the caller to fix.
-    pub fn is_success(&self) -> bool {
-        !self.cancelled && self.mismatched.is_empty() && self.failed.is_empty()
-    }
+/// One Source acquisition requested by the DynamicRealizer.
+#[derive(Debug, Clone)]
+pub(crate) struct SourceEntry {
+    pub(crate) name: String,
+    pub(crate) object_hash: String,
+    pub(crate) origin: Option<Value>,
 }
 
 /// Everything one source task needs; cloned into each task.
@@ -101,7 +81,7 @@ pub(crate) fn engine_for_dynamic_realizer(
     logger: Arc<BuildRunLogger>,
     cancellation: CancellationToken,
     secondary: Arc<SecondaryResolver>,
-    limits: crate::fetch::Limits,
+    limits: crate::acquisition::Limits,
 ) -> Result<Arc<Engine>, String> {
     let limits = ResolvedLimits::from_request(&limits);
     let client = http_client(HttpTimeouts::production())?;
@@ -188,80 +168,6 @@ fn cancelled_error() -> HttpOriginError {
     HttpOriginError::fatal_network("download cancelled")
 }
 
-/// Runs a whole fetch request; the returned [`Summary`] is the exit status in
-/// structured form. `Err` is reserved for the run itself being unusable (bad
-/// directories, unusable store) -- per-source failures land in the summary.
-pub async fn run_fetch(request: FetchRequest) -> Result<Summary, String> {
-    run_fetch_with_capabilities(request, Vec::new(), Vec::new()).await
-}
-
-pub(crate) async fn run_fetch_with_capabilities(
-    request: FetchRequest,
-    indexes: Vec<NamedTrustedKeyIndex>,
-    sources: Vec<NamedContentSource>,
-) -> Result<Summary, String> {
-    let store = Store::create(&request.store).map_err(|error| error.to_string())?;
-    let run = Arc::new(
-        Run::new(request.run_id.clone(), &request.logs, &request.work)
-            .map_err(|error| error.to_string())?,
-    );
-    check_same_filesystem(&store, &run)?;
-    let quiet = request.quiet.unwrap_or(false);
-    let logger = Arc::new(BuildRunLogger::new(run.logs_dir(), run.run_id(), quiet)?);
-
-    let limits = ResolvedLimits::from_request(&request.limits);
-    let client = http_client(HttpTimeouts::production())?;
-    let (cancel_tx, cancel_rx) = watch::channel(false);
-    let secondary = Arc::new(
-        SecondaryResolver::new(store.clone(), request.run_id.clone(), indexes, sources)
-            .map_err(|error| error.to_string())?,
-    );
-    let engine = Arc::new(Engine {
-        store,
-        run,
-        logger: logger.clone(),
-        client,
-        global: Arc::new(Semaphore::new(limits.max_connections as usize)),
-        local: Arc::new(Semaphore::new(limits.max_local_jobs as usize)),
-        limits,
-        hosts: Mutex::new(HashMap::new()),
-        cancellation: CancellationToken::new(),
-        cancel_rx,
-        cancel_tx,
-        secondary,
-    });
-
-    let realizer = SourceRealizer::new(engine.clone(), request.sources);
-    log_run_started(&logger, realizer.node_count(), &engine.limits);
-
-    {
-        let engine = engine.clone();
-        tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                engine.cancel();
-            }
-        });
-    }
-
-    let mut summary = Summary::default();
-    for outcome in realizer.run().await? {
-        match outcome {
-            SourceOutcome::Downloaded => summary.downloaded += 1,
-            SourceOutcome::CacheHit => summary.cache_hit += 1,
-            SourceOutcome::Local => summary.local += 1,
-            SourceOutcome::Secondary => summary.secondary += 1,
-            SourceOutcome::Mismatched(mismatch) => summary.mismatched.push(mismatch),
-            SourceOutcome::Failed { name, message } => summary.failed.push((name, message)),
-        }
-    }
-    summary.cancelled = engine.is_cancelled();
-    summary.mismatched.sort_by(|a, b| a.name.cmp(&b.name));
-    summary.failed.sort();
-
-    log_run_finished(&logger, &summary);
-    Ok(summary)
-}
-
 #[derive(Debug)]
 pub(crate) enum SourceOutcome {
     Downloaded,
@@ -305,9 +211,8 @@ async fn process_source_inner(
         )
     })?;
 
-    // Already in the store: record the ref and move on, exactly what the build
-    // does on its own cache hit. This is also why a fetcher pointed at a warm
-    // store causes no network traffic at all.
+    // Already in the store: record the ref and move on. A warm working store
+    // therefore causes no network traffic at all.
     let hit = {
         let engine = engine.clone();
         let name = entry.name.clone();
@@ -440,7 +345,7 @@ async fn process_source_inner(
         "OciRegistry" => fetch_oci_source(engine, &origin_value, &workspace, &subject_logger).await,
         "Path" => fetch_path_source(engine, &origin_value, &workspace, &subject_logger).await,
         other => Err(format!(
-            "source '{}': origin tag '{other}' is not supported by bobr-fetch",
+            "source '{}': origin tag '{other}' is not supported by bobr",
             entry.name
         )),
     };
@@ -507,30 +412,6 @@ async fn process_source_inner(
             }))
         }
     }
-}
-
-pub(super) async fn record_source_aliases(
-    engine: Arc<Engine>,
-    declared: ObjectHash,
-    aliases: Vec<String>,
-) -> Result<(), String> {
-    if aliases.is_empty() {
-        return Ok(());
-    }
-    run_blocking(move || {
-        for name in aliases {
-            let recorded =
-                record_existing_source_object(&engine.store, declared, &name, engine.run.run_id())
-                    .map_err(|error| error.to_string())?;
-            if recorded.is_none() {
-                return Err(format!(
-                    "source alias '{name}' cannot find realized object '{declared}'"
-                ));
-            }
-        }
-        Ok(())
-    })
-    .await?
 }
 
 /// A cancel mid-download surfaces as an opaque transport error; name it for
@@ -964,35 +845,6 @@ async fn fetch_path_source(
 // plumbing
 // ---------------------------------------------------------------------------
 
-/// The store publishes staged files by renaming and hardlinking; neither
-/// crosses a filesystem boundary, and the failure would otherwise land
-/// mid-fetch on the first import rather than here.
-fn check_same_filesystem(store: &Store, run: &Run) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
-    let device_of = |path: &Path, label: &str| -> Result<u64, String> {
-        fs::metadata(path)
-            .map(|metadata| metadata.dev())
-            .map_err(|error| {
-                format!(
-                    "failed to inspect the {label} '{}': {error}",
-                    path.display()
-                )
-            })
-    };
-    let store_device = device_of(store.root(), "store")?;
-    let work_device = device_of(run.work_dir(), "run work directory")?;
-    if store_device == work_device {
-        return Ok(());
-    }
-    Err(format!(
-        "run work directory '{}' is on a different filesystem than the store '{}'; \
-         downloads stage there and the store publishes them by renaming and hardlinking, \
-         which cannot cross a filesystem boundary",
-        run.work_dir().display(),
-        store.root().display()
-    ))
-}
-
 async fn run_blocking<T, F>(function: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -1156,148 +1008,10 @@ fn log_download(
     });
 }
 
-fn log_run_started(logger: &Arc<BuildRunLogger>, sources: usize, limits: &ResolvedLimits) {
-    let details = json!({
-        // A line per source would be hundreds of lines that scroll past and
-        // take the scrollback with them; ask the live log for the aggregate
-        // shape instead (see FetchProgress in bobr-core).
-        "progress": "aggregate",
-        "sources": sources,
-        "per_host_default": limits.per_host_default,
-        "max_connections": limits.max_connections,
-    });
-    let Value::Object(details) = details else {
-        unreachable!()
-    };
-    logger.log_run_event(BuildLogEvent {
-        level: BuildLogLevel::Info,
-        status: BuildStatus::RunStarted,
-        op: None,
-        message: format!("fetching {sources} source(s)"),
-        object_hash: None,
-        raw_log_path: None,
-        details,
-    });
-}
-
-/// `name xN`, most first, ties by name so a run reads the same twice.
-fn by_count(counts: &std::collections::BTreeMap<String, u64>) -> String {
-    let mut entries: Vec<_> = counts.iter().collect();
-    entries.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-    entries
-        .iter()
-        .map(|(name, count)| format!("{name} x{count}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn log_run_finished(logger: &Arc<BuildRunLogger>, summary: &Summary) {
-    let result = if summary.cancelled {
-        "cancelled"
-    } else if summary.is_success() {
-        "ok"
-    } else {
-        "failed"
-    };
-    let mut message = format!(
-        "fetch finished: {} downloaded · {} local · {} secondary · {} already present",
-        summary.downloaded, summary.local, summary.secondary, summary.cache_hit
-    );
-    // The logger has been counting retries by host all along (the retry
-    // milestones carry the host as a field); a run that only succeeded on
-    // second tries should not read like one that never stumbled.
-    let retries = logger.download_retries();
-    let reasons = logger.download_retry_reasons();
-    if !retries.is_empty() {
-        let total: u64 = retries.values().sum();
-        // Reasons before hosts: the host list is long by nature -- a
-        // from-scratch fetch touches a hundred of them -- and by the time the
-        // reader has walked it the shape of the run is lost. What was wrong is
-        // the shorter and more useful half. A resolver failing on the fetching
-        // machine and one host refusing to serve read alike as a count, and
-        // want opposite fixes.
-        message.push_str(&format!(
-            " · {total} download retries ({}; {})",
-            by_count(&reasons),
-            by_count(&retries)
-        ));
-    }
-    if !summary.failed.is_empty() {
-        message.push_str(&format!(" · {} failed:", summary.failed.len()));
-        for (name, reason) in &summary.failed {
-            let first_line = reason.lines().next().unwrap_or(reason);
-            message.push_str(&format!(
-                "
-  {name}: {first_line}"
-            ));
-        }
-    }
-    // The batch of real hashes is the point of running the fetcher against a
-    // recipe still carrying placeholders: every correction in one place.
-    if !summary.mismatched.is_empty() {
-        message.push_str(&format!(
-            "\n{} source(s) materialized unexpected object hashes:",
-            summary.mismatched.len()
-        ));
-        for mismatch in &summary.mismatched {
-            message.push_str(&format!(
-                "\n  {}: expected {}, got {}",
-                mismatch.name, mismatch.declared, mismatch.actual
-            ));
-        }
-    }
-    let details = json!({
-        "result": result,
-        "downloaded": summary.downloaded,
-        "cache_hit": summary.cache_hit,
-        "local": summary.local,
-        "secondary": summary.secondary,
-        "failed": summary
-            .failed
-            .iter()
-            .map(|(name, _)| Value::String(name.clone()))
-            .collect::<Vec<_>>(),
-        "mismatched": summary
-            .mismatched
-            .iter()
-            .map(|m| json!({"name": m.name, "expected": m.declared, "got": m.actual}))
-            .collect::<Vec<_>>(),
-        "logging_errors": logger.logging_errors(),
-        "download_retries": retries.values().sum::<u64>(),
-        "download_retries_by_host": retries,
-        "download_retries_by_reason": reasons,
-    });
-    let Value::Object(details) = details else {
-        unreachable!()
-    };
-    // A run that only got through on second attempts is worth a word even when
-    // it succeeded, and `quiet` -- which keeps warnings and errors -- is exactly
-    // where that word would otherwise be lost: the retries themselves are
-    // routine milestones, and this summary is the only other place they are
-    // counted. Naming the host is the point; that is what the retry counter was
-    // added for.
-    let level = if result != "ok" {
-        BuildLogLevel::Error
-    } else if retries.is_empty() {
-        BuildLogLevel::Info
-    } else {
-        BuildLogLevel::Warn
-    };
-    logger.log_run_event(BuildLogEvent {
-        level,
-        status: BuildStatus::RunFinished,
-        op: None,
-        message,
-        object_hash: None,
-        raw_log_path: None,
-        details,
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fetch::request::Limits;
+    use crate::acquisition::Limits;
     use bobr_runtime::runtime_provider::RuntimeProvider;
     use bobr_store::{
         LocalHardlinkContentSource, NamedContentSource, ReadOnlyStore, import_source_object,
@@ -1308,6 +1022,36 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use tempfile::TempDir;
+    use tokio::task::JoinSet;
+
+    #[derive(Debug, Default)]
+    struct TestSummary {
+        downloaded: u64,
+        cache_hit: u64,
+        local: u64,
+        secondary: u64,
+        mismatched: Vec<Mismatch>,
+        failed: Vec<(String, String)>,
+        retries: std::collections::BTreeMap<String, u64>,
+        retry_reasons: std::collections::BTreeMap<String, u64>,
+    }
+
+    impl TestSummary {
+        fn is_success(&self) -> bool {
+            self.mismatched.is_empty() && self.failed.is_empty()
+        }
+    }
+
+    #[derive(Debug)]
+    struct TestRequest {
+        store: PathBuf,
+        logs: PathBuf,
+        work: PathBuf,
+        run_id: String,
+        limits: Limits,
+        quiet: Option<bool>,
+        sources: Vec<SourceEntry>,
+    }
 
     /// A one-endpoint HTTP server: fails the first `failures` requests with
     /// `status_line`, then serves `body`. Serves until dropped.
@@ -1358,22 +1102,21 @@ mod tests {
         }
     }
 
-    /// A store and run directories on one filesystem, plus a request skeleton.
-    fn request_in(temp: &TempDir, sources: Vec<SourceEntry>) -> FetchRequest {
+    /// A store and run directories on one filesystem, plus a test acquisition.
+    fn request_in(temp: &TempDir, sources: Vec<SourceEntry>) -> TestRequest {
         request_in_run(temp, "run", sources)
     }
 
     /// A second run against the same store needs its own directories: a run id
     /// is claimed by creating them, and claiming one twice is what that is for.
-    fn request_in_run(temp: &TempDir, run: &str, sources: Vec<SourceEntry>) -> FetchRequest {
+    fn request_in_run(temp: &TempDir, run: &str, sources: Vec<SourceEntry>) -> TestRequest {
         let store = temp.path().join("store");
         let logs = temp.path().join("logs").join(run);
         let work = temp.path().join("work").join(run);
         fs::create_dir_all(&store).unwrap();
         fs::create_dir_all(&logs).unwrap();
         fs::create_dir_all(&work).unwrap();
-        FetchRequest {
-            schema: crate::fetch::request::FETCH_REQUEST_SCHEMA.to_string(),
+        TestRequest {
             store,
             logs,
             work,
@@ -1382,6 +1125,58 @@ mod tests {
             quiet: None,
             sources,
         }
+    }
+
+    async fn run_test(request: TestRequest) -> Result<TestSummary, String> {
+        run_test_with_content(request, Vec::new()).await
+    }
+
+    async fn run_test_with_content(
+        request: TestRequest,
+        content_sources: Vec<NamedContentSource>,
+    ) -> Result<TestSummary, String> {
+        let store = Store::create(&request.store).map_err(|error| error.to_string())?;
+        let run = Arc::new(
+            Run::new(request.run_id, &request.logs, &request.work)
+                .map_err(|error| error.to_string())?,
+        );
+        let logger = Arc::new(BuildRunLogger::new(
+            run.logs_dir(),
+            run.run_id(),
+            request.quiet.unwrap_or(false),
+        )?);
+        let secondary = Arc::new(
+            SecondaryResolver::new(store.clone(), run.run_id(), Vec::new(), content_sources)
+                .map_err(|error| error.to_string())?,
+        );
+        let engine = engine_for_dynamic_realizer(
+            store,
+            run,
+            logger.clone(),
+            CancellationToken::new(),
+            secondary,
+            request.limits,
+        )?;
+        let mut tasks = JoinSet::new();
+        for source in request.sources {
+            let engine = engine.clone();
+            tasks.spawn(async move { process_source(engine, source).await });
+        }
+        let mut summary = TestSummary::default();
+        while let Some(outcome) = tasks.join_next().await {
+            match outcome.map_err(|error| format!("acquisition task panicked: {error}"))? {
+                SourceOutcome::Downloaded => summary.downloaded += 1,
+                SourceOutcome::CacheHit => summary.cache_hit += 1,
+                SourceOutcome::Local => summary.local += 1,
+                SourceOutcome::Secondary => summary.secondary += 1,
+                SourceOutcome::Mismatched(mismatch) => summary.mismatched.push(mismatch),
+                SourceOutcome::Failed { name, message } => summary.failed.push((name, message)),
+            }
+        }
+        summary.retries = logger.download_retries();
+        summary.retry_reasons = logger.download_retry_reasons();
+        logger.flush();
+        Ok(summary)
     }
 
     fn http_source(name: &str, hash: ObjectHash, urls: &[&str]) -> SourceEntry {
@@ -1412,7 +1207,7 @@ mod tests {
             vec![http_source("demo-src", declared, &[&bad_url, &good_url])],
         );
         let store_root = request.store.clone();
-        let summary = run_fetch(request).await.unwrap();
+        let summary = run_test(request).await.unwrap();
 
         assert!(summary.is_success(), "{summary:?}");
         assert_eq!(summary.downloaded, 1);
@@ -1445,7 +1240,7 @@ mod tests {
 
         // Warm the store by fetching once from a real server.
         let (url, _, handle) = spawn_server(0, "", payload.clone());
-        let warmup = FetchRequest {
+        let warmup = TestRequest {
             sources: vec![http_source("warm-src", declared, &[&url])],
             run_id: "260809120001".to_string(),
             logs: {
@@ -1458,22 +1253,21 @@ mod tests {
                 fs::create_dir_all(&dir).unwrap();
                 dir
             },
-            schema: crate::fetch::request::FETCH_REQUEST_SCHEMA.to_string(),
             store: store_root.clone(),
             limits: Limits::default(),
             quiet: None,
         };
-        assert!(run_fetch(warmup).await.unwrap().is_success());
+        assert!(run_test(warmup).await.unwrap().is_success());
         handle.join().unwrap();
 
-        let summary = run_fetch(request).await.unwrap();
+        let summary = run_test(request).await.unwrap();
         assert!(summary.is_success(), "{summary:?}");
         assert_eq!(summary.cache_hit, 1);
         assert_eq!(summary.downloaded, 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn source_realizer_imports_known_object_from_secondary_content() {
+    async fn acquisition_imports_known_object_from_secondary_content() {
         let payload = b"secondary source payload\n";
         let declared = declared_for(payload);
         let temp = tempfile::tempdir().unwrap();
@@ -1510,9 +1304,7 @@ mod tests {
             )),
         );
 
-        let summary = run_fetch_with_capabilities(request, Vec::new(), vec![content])
-            .await
-            .unwrap();
+        let summary = run_test_with_content(request, vec![content]).await.unwrap();
 
         assert!(summary.is_success(), "{summary:?}");
         assert_eq!(summary.secondary, 1);
@@ -1525,58 +1317,6 @@ mod tests {
                 .unwrap()
                 .ino()
         );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn source_realizer_deduplicates_content_but_records_every_alias() {
-        let payload = b"shared secondary source\n";
-        let declared = declared_for(payload);
-        let temp = tempfile::tempdir().unwrap();
-        let secondary_root = temp.path().join("secondary");
-        fs::create_dir(&secondary_root).unwrap();
-        let secondary_store = Store::create(&secondary_root).unwrap();
-        let staged = temp.path().join("secondary-staged");
-        fs::write(&staged, payload).unwrap();
-        import_source_object(
-            &secondary_store,
-            declared,
-            &staged,
-            "secondary-source",
-            "secondary-run",
-        )
-        .unwrap();
-        let request = request_in(
-            &temp,
-            vec![
-                SourceEntry {
-                    name: "first-alias".to_string(),
-                    object_hash: declared.to_string(),
-                    origin: None,
-                },
-                SourceEntry {
-                    name: "second-alias".to_string(),
-                    object_hash: declared.to_string(),
-                    origin: None,
-                },
-            ],
-        );
-        let working_root = request.store.clone();
-        let content = NamedContentSource::new(
-            "secondary",
-            Arc::new(LocalHardlinkContentSource::with_runtime(
-                ReadOnlyStore::open(&secondary_root).unwrap(),
-                RuntimeProvider::host(),
-            )),
-        );
-
-        let summary = run_fetch_with_capabilities(request, Vec::new(), vec![content])
-            .await
-            .unwrap();
-
-        assert!(summary.is_success(), "{summary:?}");
-        assert_eq!(summary.secondary, 1);
-        assert!(working_root.join("object-refs/first-alias").is_symlink());
-        assert!(working_root.join("object-refs/second-alias").is_symlink());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1602,7 +1342,7 @@ mod tests {
             ],
         );
         let store_root = request.store.clone();
-        let summary = run_fetch(request).await.unwrap();
+        let summary = run_test(request).await.unwrap();
 
         // The healthy neighbour finished, the mismatch is one entry with the
         // real hash -- the batch the placeholder cycle runs on.
@@ -1624,12 +1364,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_quiet_run_still_reports_that_it_needed_retries() {
-        // Retries are how a mirror that throttles announces itself, and the
-        // summary is the only place they are counted. A quiet run keeps
-        // warnings, so the summary has to be one when there were retries --
-        // otherwise the very signal the counter exists for is what `quiet`
-        // silences.
+    async fn retry_reason_is_recorded_even_for_a_quiet_run() {
         let payload = b"recovered\n".to_vec();
         let declared = declared_for(&payload);
         let (url, _, handle) = spawn_server(1, "HTTP/1.1 503 Service Unavailable", payload.clone());
@@ -1637,27 +1372,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut request = request_in(&temp, vec![http_source("flaky", declared, &[&url])]);
         request.quiet = Some(true);
-        let logs = request.logs.clone();
-        let summary = run_fetch(request).await.unwrap();
+        let summary = run_test(request).await.unwrap();
         handle.join().unwrap();
         assert!(summary.is_success(), "{summary:?}");
-
-        let events = fs::read_to_string(logs.join("events.jsonl")).unwrap();
-        let finished: Value = events
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .find(|event| event["status"] == "run-finished")
-            .expect("the run reported its end");
-        assert_eq!(finished["level"], "warn", "{finished}");
-        let message = finished["message"].as_str().unwrap();
-        assert!(message.contains("download retries"), "{finished}");
-        // What was wrong, not only how often: a 503 is the host refusing, and
-        // that reads differently from a run whose retries were all DNS.
-        assert!(message.contains("http 5xx x1"), "{finished}");
-        assert_eq!(
-            finished["details"]["download_retries_by_reason"]["http 5xx"],
-            1
-        );
+        assert_eq!(summary.retry_reasons.get("http 5xx"), Some(&1));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1674,41 +1392,26 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let request = request_in(&temp, vec![http_source("mixed", declared, &[&dead, &url])]);
-        let logs = request.logs.clone();
-        let summary = run_fetch(request).await.unwrap();
+        let summary = run_test(request).await.unwrap();
         handle.join().unwrap();
         assert!(summary.is_success(), "{summary:?}");
-
-        let events = fs::read_to_string(logs.join("events.jsonl")).unwrap();
-        let finished: Value = events
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .find(|event| event["status"] == "run-finished")
-            .expect("the run reported its end");
-        let reasons = &finished["details"]["download_retries_by_reason"];
-        assert_eq!(reasons["http 5xx"], 1, "{finished}");
-        assert!(reasons["dns"].as_u64().unwrap_or(0) >= 1, "{finished}");
+        assert_eq!(summary.retry_reasons.get("http 5xx"), Some(&1));
+        assert!(summary.retry_reasons.get("dns").copied().unwrap_or(0) >= 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_clean_run_says_nothing_worth_a_warning() {
+    async fn a_clean_run_records_no_retries() {
         let payload = b"first try\n".to_vec();
         let declared = declared_for(&payload);
         let (url, _, handle) = spawn_server(0, "", payload.clone());
 
         let temp = tempfile::tempdir().unwrap();
         let request = request_in(&temp, vec![http_source("easy", declared, &[&url])]);
-        let logs = request.logs.clone();
-        assert!(run_fetch(request).await.unwrap().is_success());
+        let summary = run_test(request).await.unwrap();
         handle.join().unwrap();
-
-        let events = fs::read_to_string(logs.join("events.jsonl")).unwrap();
-        let finished: Value = events
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .find(|event| event["status"] == "run-finished")
-            .unwrap();
-        assert_eq!(finished["level"], "info", "{finished}");
+        assert!(summary.is_success());
+        assert!(summary.retries.is_empty());
+        assert!(summary.retry_reasons.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1724,13 +1427,13 @@ mod tests {
             vec![SourceEntry {
                 name: "recipe-script".to_string(),
                 // Real lowerings carry a trailing newline here: lock files are
-                // imported as text. The fetcher must trim, as the build does.
+                // imported as text. Acquisition trims it before parsing.
                 object_hash: format!("{declared}\n"),
                 origin: Some(json!({ "tag": "Path", "path": script.to_str().unwrap() })),
             }],
         );
         let store = request.store.clone();
-        let summary = run_fetch(request).await.unwrap();
+        let summary = run_test(request).await.unwrap();
 
         assert!(summary.is_success(), "{summary:?}");
         // Read off a disk, not off a network: counted on its own, so that
@@ -1762,7 +1465,7 @@ mod tests {
             origin: Some(json!({ "tag": "Path", "path": script.to_str().unwrap() })),
         };
         assert_eq!(
-            run_fetch(request_in_run(&temp, "first", vec![source()]))
+            run_test(request_in_run(&temp, "first", vec![source()]))
                 .await
                 .unwrap()
                 .local,
@@ -1771,7 +1474,7 @@ mod tests {
 
         fs::remove_file(&script).unwrap();
         let again = request_in_run(&temp, "second", vec![source()]);
-        let summary = run_fetch(again).await.unwrap();
+        let summary = run_test(again).await.unwrap();
         assert!(summary.is_success(), "{summary:?}");
         assert_eq!(summary.cache_hit, 1);
         assert_eq!(summary.local, 0);
@@ -1793,7 +1496,7 @@ mod tests {
             }],
         );
         let logs = request.logs.clone();
-        let summary = run_fetch(request).await.unwrap();
+        let summary = run_test(request).await.unwrap();
 
         assert!(!summary.is_success(), "{summary:?}");
         assert_eq!(summary.mismatched.len(), 1);
@@ -1818,29 +1521,9 @@ mod tests {
                 origin: None,
             }],
         );
-        let summary = run_fetch(request).await.unwrap();
+        let summary = run_test(request).await.unwrap();
         assert!(!summary.is_success());
         assert_eq!(summary.failed.len(), 1);
         assert!(summary.failed[0].1.contains("has no origin"), "{summary:?}");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn shared_hashes_are_fetched_once() {
-        let payload = b"shared by two nodes\n".to_vec();
-        let declared = declared_for(&payload);
-        let (url, requests, handle) = spawn_server(0, "", payload.clone());
-        let temp = tempfile::tempdir().unwrap();
-        let request = request_in(
-            &temp,
-            vec![
-                http_source("shared-a", declared, &[&url]),
-                http_source("shared-b", declared, &[&url]),
-            ],
-        );
-        let summary = run_fetch(request).await.unwrap();
-        assert!(summary.is_success(), "{summary:?}");
-        assert_eq!(summary.downloaded, 1);
-        assert_eq!(requests.load(Ordering::SeqCst), 1);
-        handle.join().unwrap();
     }
 }

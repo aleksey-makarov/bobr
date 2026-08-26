@@ -84,8 +84,7 @@ jobs:
             --target x86_64-unknown-linux-musl \
             -p bobr-build \
             -p fsobj-hash \
-            -p bobr-sandbox-launcher \
-            -p bobr-source --bins
+            -p bobr-sandbox-launcher
 
       - name: Verify and package
         run: |

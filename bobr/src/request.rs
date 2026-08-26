@@ -1,4 +1,4 @@
-use crate::execution::ExecutionError;
+use crate::error::ExecutionError;
 use bobr_core::ProgressPolicy;
 use serde::{Deserialize, Deserializer, de::Error as _};
 use serde_json::Value;
@@ -66,7 +66,7 @@ pub struct Request {
     #[serde(default)]
     pub(crate) progress: ProgressPolicy,
     #[serde(default)]
-    pub(crate) limits: bobr_source::fetch::Limits,
+    pub(crate) limits: bobr_source::acquisition::Limits,
     #[serde(default)]
     pub(crate) secondaries: Secondaries,
     pub(crate) goals: Vec<String>,
@@ -131,7 +131,7 @@ fn validate_goals(goals: &[String], nodes: &BTreeMap<String, Value>) -> Result<(
 
 fn validate_limits(
     jobs: Option<usize>,
-    limits: &bobr_source::fetch::Limits,
+    limits: &bobr_source::acquisition::Limits,
 ) -> Result<(), ExecutionError> {
     if jobs == Some(0) {
         return Err(ExecutionError::InvalidRequest(
@@ -185,21 +185,6 @@ fn validate_secondaries(secondaries: &Secondaries) -> Result<(), ExecutionError>
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-pub(crate) fn parse_request_nodes(
-    value: Value,
-    path: &str,
-) -> Result<BTreeMap<String, Value>, ExecutionError> {
-    let object = value.as_object().cloned().ok_or_else(|| {
-        ExecutionError::RequestLoad(format!(
-            "{path}: expected top-level object of node definitions"
-        ))
-    })?;
-    let nodes: BTreeMap<String, Value> = object.into_iter().collect();
-    validate_nodes(&nodes, path)?;
-    Ok(nodes)
 }
 
 #[cfg(test)]

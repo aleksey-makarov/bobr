@@ -5,31 +5,27 @@
 //! reuse keys without entering the working store. Content is acquired only for
 //! goals and for inputs of a builder that reached a complete reuse miss.
 
+use crate::acquisition::engine::{
+    Engine as SourceEngine, SourceEntry, SourceOutcome, engine_for_dynamic_realizer, process_source,
+};
 use crate::build_executor::{
     BuildExecutorError, BuildExecutorHandle, BuilderExecution, BuilderJob,
-};
-use crate::fetch::SourceEntry;
-use crate::fetch::engine::{
-    Engine as SourceEngine, SourceOutcome, engine_for_dynamic_realizer, process_source,
 };
 use crate::graph::{PlannedGraph, PlannedNode};
 use crate::realizer::execute_builder_miss;
 use bobr_builder::{BuilderInputs, BuilderPlannedSubject, materialize_fs_tree_root};
 use bobr_core::{
-    BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuildSeed, BuildStatus,
-    CancellationToken, ObjectHash, ReuseKey, Run, RuntimeProvider, SubjectIdentity,
-    SubjectRunContext,
+    BuildKey, BuildLogEvent, BuildLogLevel, BuildRunLogger, BuildStatus, CancellationToken,
+    ObjectHash, ReuseKey, Run, RuntimeProvider, SubjectIdentity,
 };
 use bobr_store::{
-    MappingCandidates, SecondaryResolver, SourceImportOutcome, Store, StoreError,
-    import_source_object, load_build_handle, load_reuse_handle, publish_existing_build,
-    record_existing_source_object,
+    MappingCandidates, SecondaryResolver, Store, StoreError, load_build_handle, load_reuse_handle,
+    publish_existing_build, record_existing_source_object,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{Mutex, OnceCell, Semaphore};
@@ -167,7 +163,7 @@ impl DynamicRealizer {
         cancellation: CancellationToken,
         secondary: Arc<SecondaryResolver>,
         build_executor: BuildExecutorHandle,
-        limits: crate::fetch::Limits,
+        limits: crate::acquisition::Limits,
     ) -> Result<Self, DynamicRealizeError> {
         let max_local_jobs = limits.resolved_max_local_jobs();
         if max_local_jobs == 0 {
@@ -529,75 +525,11 @@ impl DynamicRealizer {
                 ))),
             };
         }
-        if source.origin().is_none() {
-            return Err(DynamicRealizeError::new(format!(
-                "source '{}' has no origin and object '{}' is unavailable",
-                source.name(),
-                source.declared_object_hash()
-            )));
-        }
-        let permit = self
-            .local_io
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| DynamicRealizeError::new("local-I/O semaphore closed"))?;
-        let store = self.store.clone();
-        let run = self.run.clone();
-        let run_logger = self.logger.clone();
-        let runtime = self.runtime_provider.clone();
-        let cancellation = self.cancellation.clone();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            if cancellation.is_cancelled() {
-                return Err(DynamicRealizeError::new("build cancelled by signal"));
-            }
-            let workspace = run
-                .create_workspace("Source", source.name(), source.build_key().to_string())
-                .map_err(|error| DynamicRealizeError::new(error.to_string()))?;
-            let mut scratch =
-                SourceScratchGuard::new(run.clone(), workspace.temp_dir().to_path_buf());
-            let logger = run_logger
-                .bind_subject(source.log_subject(&workspace))
-                .map_err(DynamicRealizeError::new)?;
-            scratch.set_logger(logger.clone());
-            run.prepare_scratch(workspace.temp_dir())
-                .map_err(|error| DynamicRealizeError::new(error.to_string()))?;
-            let context = SubjectRunContext::new(
-                workspace,
-                logger,
-                cancellation.clone(),
-                runtime,
-                BuildSeed::ZERO,
-            );
-            let staged = source
-                .execute(&context)
-                .map_err(|error| DynamicRealizeError::new(error.to_string()))?;
-            if cancellation.is_cancelled() {
-                return Err(DynamicRealizeError::new("build cancelled by signal"));
-            }
-            match import_source_object(
-                &store,
-                source.declared_object_hash(),
-                &staged,
-                source.name(),
-                run.run_id(),
-            )? {
-                SourceImportOutcome::Matched(hash) => Ok(hash),
-                SourceImportOutcome::Mismatched { actual_hash } => {
-                    Err(DynamicRealizeError::new(format!(
-                        "source '{}' declared object '{}' but materialized '{}'",
-                        source.name(),
-                        source.declared_object_hash(),
-                        actual_hash
-                    )))
-                }
-            }
-        })
-        .await
-        .map_err(|error| {
-            DynamicRealizeError::new(format!("source materialization task panicked: {error}"))
-        })?
+        Err(DynamicRealizeError::new(format!(
+            "source '{}' has no origin and object '{}' is unavailable",
+            source.name(),
+            source.declared_object_hash()
+        )))
     }
 
     async fn publish_cached(
@@ -999,47 +931,6 @@ fn dedup_reuse_keys(keys: Vec<ReuseKey>) -> Vec<ReuseKey> {
     keys.into_iter().filter(|key| seen.insert(*key)).collect()
 }
 
-struct SourceScratchGuard {
-    run: Arc<Run>,
-    path: PathBuf,
-    logger: Option<Arc<dyn BuildLogger>>,
-}
-
-impl SourceScratchGuard {
-    fn new(run: Arc<Run>, path: PathBuf) -> Self {
-        Self {
-            run,
-            path,
-            logger: None,
-        }
-    }
-
-    fn set_logger(&mut self, logger: Arc<dyn BuildLogger>) {
-        self.logger = Some(logger);
-    }
-}
-
-impl Drop for SourceScratchGuard {
-    fn drop(&mut self) {
-        if let Err(error) = self.run.remove_scratch(&self.path)
-            && let Some(logger) = &self.logger
-        {
-            logger.log_event(BuildLogEvent {
-                level: BuildLogLevel::Warn,
-                status: BuildStatus::Cleanup,
-                op: Some("cleanup".to_string()),
-                message: format!(
-                    "failed to remove temp dir '{}': {error}",
-                    self.path.display()
-                ),
-                object_hash: None,
-                raw_log_path: None,
-                details: serde_json::Map::new(),
-            });
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1292,7 +1183,7 @@ mod tests {
                 CancellationToken::new(),
                 secondary,
                 executor.handle(),
-                crate::fetch::Limits {
+                crate::acquisition::Limits {
                     max_local_jobs: Some(2),
                     ..Default::default()
                 },

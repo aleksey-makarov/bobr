@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 #![allow(dead_code)]
 
-use bobr::{ExecutionError, Request, execute};
+use bobr::{ExecutionError, Request, realize};
 use bobr_core::{BuildKey, CancellationToken, ObjectHash};
 use bobr_source::oci_registry::{OciPlatform, fetch_image_authenticated};
 use serde_json::{Value, json};
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Reads, parses, and executes a request file through the public API
-/// (`Request::parse_json` + `execute`) — what the `bobr` CLI does for a request
+/// (`Request::parse_json` + `realize`) — what the `bobr` CLI does for a request
 /// path. Lives here, not in the crate's public API, since only tests need it.
 pub(crate) fn execute_request(request_path: &Path) -> Result<ObjectHash, ExecutionError> {
     if !request_path.exists() {
@@ -28,7 +28,18 @@ pub(crate) fn execute_request(request_path: &Path) -> Result<ObjectHash, Executi
         ))
     })?;
     let request = Request::parse_json(&with_fresh_run(&request_bytes))?;
-    execute(request, CancellationToken::new())
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| ExecutionError::Build(format!("failed to start Tokio runtime: {error}")))?
+        .block_on(realize(request, CancellationToken::new()))
+        .map(|goals| {
+            goals
+                .into_iter()
+                .next()
+                .expect("test requests have one goal")
+                .object_hash
+        })
 }
 
 /// Gives the request its own run, as a caller invoking `bobr` again would: a

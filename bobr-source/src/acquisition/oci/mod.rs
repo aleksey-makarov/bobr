@@ -1,13 +1,9 @@
-//! `OciRegistry` sources: an image pulled from a registry into an OCI layout,
+//! `OciRegistry` sources: images pulled from registries into OCI layouts,
 //! which the store then imports like any other source tree.
 //!
-//! Deliberately a second implementation rather than a shared one. The build
-//! still materializes these origins through the synchronous client in
-//! [`crate::oci_registry`], and that client is not worth rewriting on its way
-//! out: when the build stops depending on this crate, it goes, and this stays.
-//! Nothing is shared between the two but `bobr-core`'s layout writer, so the
-//! fetcher is free to be asynchronous, cancellable and counted without moving
-//! anything under the build's feet.
+//! This is the runtime acquisition implementation: asynchronous, cancellable,
+//! retry-aware, and integrated with the unified progress log. The older
+//! synchronous OCI module remains only as parsing/test support.
 
 mod registry;
 
@@ -51,12 +47,10 @@ pub(super) fn registry_host(image: &str) -> String {
     }
 }
 
-/// Parses an `OciRegistry` origin out of the request.
+/// Parses an `OciRegistry` origin out of a Source node.
 ///
-/// Strict in the same way the build's parser is -- an unknown field is a typo
-/// that would otherwise be silently ignored -- because a fetch request and a
-/// build request are lowered from the same recipes and must read the same
-/// origin the same way.
+/// Unknown fields are rejected because an ignored field would silently change
+/// the meaning of pinned content acquisition.
 pub(super) fn parse_oci_origin(origin: &Value, field_path: &str) -> Result<OciOrigin, String> {
     let Value::Object(mut object) = origin.clone() else {
         return Err(format!("{field_path}: expected object"));

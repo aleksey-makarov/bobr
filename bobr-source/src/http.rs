@@ -253,7 +253,7 @@ impl OriginHandler for HttpOriginHandler {
 
 /// Parses the `origin` object of an `Http` source into its typed form.
 ///
-/// Split from the [`OriginHandler`] impl so the fetcher can reach the parsed
+/// Split from the [`OriginHandler`] impl so async acquisition can reach parsed
 /// fields (URL list, unpack, format) instead of a `dyn ParsedOrigin` that only
 /// knows how to materialize synchronously.
 pub(crate) fn parse_http_origin(
@@ -326,8 +326,8 @@ fn materialize_http_origin_with_timeouts(
 }
 
 /// Turns a downloaded blob into the staged artifact: the blob itself, or the
-/// unpacked tree when the origin asks for one. Shared with the fetcher, whose
-/// download path is asynchronous but whose staging is exactly this.
+/// unpacked tree when the origin asks for one. Async acquisition has a separate
+/// download path but uses exactly this staging implementation.
 pub(crate) fn finalize_http_download(
     temp_root: &Path,
     downloaded_blob: PathBuf,
@@ -355,9 +355,8 @@ fn http_client(timeouts: HttpTimeouts) -> HResult<Client> {
         .user_agent(USER_AGENT)
         .connect_timeout(timeouts.connect)
         // The whole-request budget, which also caps how large a file can be
-        // fetched at this path's speed. The async fetcher uses a read timeout
-        // instead (blocking reqwest has none); this path is what the fetcher
-        // is replacing, and big sources should arrive through it already.
+        // fetched at this path's speed. Async acquisition uses a read timeout
+        // instead (blocking reqwest has none).
         .timeout(timeouts.operation)
         .build()
         .map_err(|error| {
@@ -668,7 +667,7 @@ pub(crate) fn retry_reason(error: &str) -> &'static str {
 
 /// The sentence and the fields of a "retrying" milestone.
 ///
-/// Shared so the synchronous path and the fetcher say the same thing, and so
+/// Shared so the synchronous tests and async acquisition say the same thing,
 /// the host and the reason keep travelling as fields: the run summary counts
 /// retries from them, and counting should not mean parsing prose written for a
 /// person.

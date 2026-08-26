@@ -90,7 +90,7 @@ if [ "${kind}" = "main" ]; then
   root_name="bobr-${release_tag}-${target}"
   root="${staging}/${root_name}"
   mkdir -p "${root}/bin"
-  for binary in bobr fsobj-hash bobr-sandbox-launcher bobr-fetch; do
+  for binary in bobr fsobj-hash bobr-sandbox-launcher; do
     require_file "${target_dir}/${binary}"
     install -m755 "${target_dir}/${binary}" "${root}/bin/${binary}"
     strip "${root}/bin/${binary}"
@@ -101,10 +101,10 @@ if [ "${kind}" = "main" ]; then
   install -m644 "${repo_root}/LICENSE-MIT" "${root}/LICENSE-MIT"
 
   "${root}/bin/fsobj-hash" --help >/dev/null
-  fetch_version="$("${root}/bin/bobr-fetch" --version)"
-  case "${fetch_version}" in
-    "bobr-fetch ${release_tag#v} (request "*) ;;
-    *) die "unexpected bobr-fetch version output: ${fetch_version}" ;;
+  bobr_version="$("${root}/bin/bobr" --version)"
+  case "${bobr_version}" in
+    "bobr ${release_tag#v} (request bobr-request-v4)") ;;
+    *) die "unexpected bobr version output: ${bobr_version}" ;;
   esac
   protocol_info="$("${root}/bin/bobr-sandbox-launcher" --protocol-info)"
   [ "${protocol_info}" = '{"name":"bobr-sandbox-launcher","protocol_version":6}' ] \
@@ -117,11 +117,12 @@ if [ "${kind}" = "main" ]; then
     "${smoke}/store/work/release-smoke"
   cat >"${smoke}/request.json" <<EOF
 {
-  "schema": "bobr-request-v2",
+  "schema": "bobr-request-v4",
   "store": "${smoke}/store",
   "logs": "${smoke}/store/logs/release-smoke",
   "work": "${smoke}/store/work/release-smoke",
   "run_id": "release-smoke",
+  "goals": ["root"],
   "nodes": {
     "root": {
       "name": "release-smoke",

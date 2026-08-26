@@ -1,4 +1,4 @@
-use crate::execution::ExecutionError;
+use crate::error::ExecutionError;
 use crate::request::Request;
 use bobr_core::{
     BuildLogEvent, BuildLogLevel, BuildRunLogger, BuildStatus, CancellationToken, ObjectHash, Run,

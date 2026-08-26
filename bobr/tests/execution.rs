@@ -460,7 +460,7 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
 }
 
 #[test]
-fn second_run_reuses_root_without_republishing_refs() {
+fn second_run_republishes_the_cached_goal_without_visiting_its_source() {
     let workspace = tempdir().unwrap();
     let source_tar = {
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -504,10 +504,9 @@ fn second_run_reuses_root_without_republishing_refs() {
     let second = execute_request(&request_path).unwrap();
 
     assert_eq!(first, second);
-    // The reused root is resolved by build handle and its subtree is pruned, so
-    // neither the root nor its dependencies are revisited or republished: the
-    // refs removed above stay removed.
-    assert!(!object_ref_path(workspace.path(), "final-group").is_symlink());
+    // The goal itself is published as the result of this request, while its
+    // dependency subtree remains pruned and the Source alias stays absent.
+    assert!(object_ref_path(workspace.path(), "final-group").is_symlink());
     assert!(!object_ref_path(workspace.path(), "source").is_symlink());
 }
 
@@ -655,7 +654,9 @@ fn cached_run_records_run_level_audit_trail() {
         .iter()
         .find(|event| event["status"] == "run-finished")
         .unwrap();
-    assert_eq!(finished["details"]["result"], "ok");
+    assert!(finished["details"]["goals"].is_array());
+    assert!(finished["details"].get("error_class").is_none());
+    assert_eq!(finished["details"]["built"], 0);
     assert!(finished["details"]["cache_hit"].as_u64().unwrap() >= 1);
 }
 

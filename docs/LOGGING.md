@@ -56,8 +56,7 @@ that vocabulary as well. Local transfer events never create the block.
 While transfers are queued or active the block may show totals, throughput,
 host queues, and the oldest slow transfers, subject to the same line budget as
 builders. Once the queue drains it collapses to one cumulative line and expands
-again if lazy realization later opens more network work. The legacy standalone
-`bobr-fetch` selects the same component in aggregate-only mode.
+again if lazy realization later opens more network work.
 
 ## On-disk layout
 

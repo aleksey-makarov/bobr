@@ -1,12 +1,10 @@
-//! Talking to an OCI registry, asynchronously.
+//! Talks to an OCI registry asynchronously.
 //!
 //! The protocol is the registry v2 one: fetch a manifest (an index, usually,
 //! from which the platform's manifest is selected), then the config blob and
-//! every layer, verifying each against the digest that named it. What differs
-//! from the synchronous client in `crate::oci_registry` is everything around
-//! that protocol, and the differences are the reason this exists:
+//! every layer, verifying each against the digest that named it:
 //!
-//! - a pull is a future, so the fetcher cancels one by dropping it, rather than
+//! - a pull is a future, so the Realizer cancels one by dropping it, rather than
 //!   waiting for a blocking thread that cannot be interrupted;
 //! - failures are classified and retried with the same policy the mirror walk
 //!   uses, instead of failing the whole image on one 503;
@@ -19,7 +17,7 @@
 //! The bearer token is fetched on the first 401 and then reused for the rest of
 //! the pull: one image is one repository, so one token covers it.
 
-use crate::fetch::engine::error_with_causes;
+use crate::acquisition::engine::error_with_causes;
 use crate::http::{self, HttpRetryPolicy, Retry};
 use bobr_core::oci::{self, MEDIA_TYPE_OCI_MANIFEST, OciDescriptor, OciManifest, OciPlatform};
 use bobr_core::{BuildLogEvent, BuildLogLevel, BuildLogger, BuildStatus};
@@ -455,7 +453,7 @@ pub(super) async fn pull_image(
     let manifest: OciManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| RegistryError::fatal(format!("failed to parse manifest: {error}")))?;
 
-    // The one download in the fetcher whose size is known before it starts:
+    // The one acquisition whose size is known before it starts:
     // every blob states its own, so the total is arithmetic rather than a
     // Content-Length the server may not send.
     let blob_bytes: u64 =
