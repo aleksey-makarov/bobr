@@ -19,27 +19,34 @@ part of the recipe that says how to build the object from its inputs, together
 with the `BuildKey`s of those inputs — that is, from everything in the recipe
 that determines its result.
 
-The recipe to build, together with the recipes it depends on, forms a DAG. `bobr`
-takes a JSON document — the **request** — that describes this graph, builds the
-recipe, stores its object in the **store**, and prints that object's
-`ObjectHash`.
+The recipes to build, together with the recipes they depend on, form a DAG.
+`bobr` takes a JSON document — the **request** — that describes this graph,
+realizes its goals, stores their objects in the **working store**, and
+prints their `ObjectHash` values.
 
-To build the recipe, the `Source` builder first checks whether the declared
-object is already in the store; if so, there is nothing to fetch. Otherwise it
-fetches the content — from a local path, an HTTP URL, or an OCI registry —
-computes its `ObjectHash`, and stores it. It then checks that hash against the
-one the recipe declared. If they match, the source is built; if not, the fetched
-object still stays in the store (under its real `ObjectHash`), but the source
-fails — it did not produce the object it promised.
+To realize a `Source`, bobr first checks whether its declared object is already
+available from the working store or a configured local content source; if so,
+there is nothing to fetch. Otherwise it fetches the content — from a local path,
+an HTTP URL, or an OCI registry — computes its `ObjectHash`, and stores it. It
+then checks that hash against the one the recipe declared. If they match, the
+source is realized; if not, the fetched object still stays in the store (under
+its real `ObjectHash`), but the source fails — it did not produce the object it
+promised.
 
 Builder reuse runs on two store mappings: `BuildKey` → `ObjectHash` and
-`ReuseKey` → `ObjectHash`. To build the recipe, any other builder first looks up
-its `BuildKey` — a hit means that exact recipe was already built, so it reuses
-the stored object and skips everything below. Otherwise it builds the inputs
-first (each is itself a recipe), computes a **`ReuseKey`** from the same build
-instructions plus the `ObjectHash`es of those inputs, and looks that up — a hit,
-even from a different graph that reached the same inputs, is reused too. Only
-when both miss does it produce the object, store it, and add both mappings.
+`ReuseKey` → `ObjectHash`. For any other builder, bobr first looks up its
+`BuildKey` in the working store and configured trusted secondary indexes. A hit
+means that exact recipe was already built, so its complete object is reused and
+everything below it is skipped.
+
+On an exact miss, bobr resolves the possible object identities of the inputs and
+computes the corresponding **`ReuseKey`** values from the same build
+instructions plus those `ObjectHash`es. An input identity may come from a
+mapping without its content having been copied into the working store yet. A
+reuse hit — even from a different graph that reached the same input objects — is
+then imported when necessary and reused. Only when exact and reuse resolution
+both miss does bobr realize complete inputs locally, run the builder, store its
+output, and add the mappings.
 
 ## Glossary
 
@@ -67,8 +74,8 @@ obtain its object: `Path`, `Http`, or `OciRegistry`.
 **recipe** — A description of how to build one object, naming the **builder**
 that builds it.
 
-**request** — The JSON document `bobr` takes as input; it describes the recipe DAG
-to build. See [Request](./REQUEST.md).
+**request** — The JSON document `bobr` takes as input; it describes a recipe DAG
+and its goals. See [Request](./REQUEST.md).
 
 **`ReuseKey`** — A content-based identity, used when a recipe has inputs: like
 its `BuildKey`, but computed from the `ObjectHash`es of those inputs instead of
@@ -76,5 +83,6 @@ their `BuildKey`s. It lets builds that reach the same input objects share one
 stored object, even across different graphs.
 
 **store** — The content-addressed store where `bobr` keeps objects, along with
-the mappings `BuildKey` → `ObjectHash` and `ReuseKey` → `ObjectHash`. See
-[Store](./STORE.md).
+the mappings `BuildKey` → `ObjectHash` and `ReuseKey` → `ObjectHash`. The
+working store receives every result; configured local secondary stores may
+provide trusted mappings and object content. See [Store](./STORE.md).

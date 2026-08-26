@@ -2,7 +2,7 @@
 
 ## Summary
 
-The store contains immutable payloads, canonical object records, per-run
+The store contains immutable payloads, user-facing object metadata, per-run
 operational logs, the `BuildKey` → `ObjectHash` and `ReuseKey` → `ObjectHash`
 reuse mappings, and mutable refs from a name to its object. It is a
 content-addressed store (CAS): payload identity is derived from normalized
@@ -18,9 +18,8 @@ identity model, reuse rules, and on-disk layout.
 
 ## Identity Model
 
-[Concepts](./CONCEPTS.md#keys-build-identity) introduces the three identities
-(`object_hash`, `build_key`, `reuse_key`); this section is their normative
-definition.
+[Concepts](./CONCEPTS.md) introduces the three identities (`object_hash`,
+`build_key`, `reuse_key`); this section is their normative definition.
 
 Every recipe has a `build_key`.
 
@@ -61,9 +60,10 @@ match.
 Executing a builder or materializing a source produces one payload object. The
 payload is addressed by `object_hash`.
 
-The same `object_hash` also keys the canonical object record for that payload.
-Different builder recipes can share one object record when they intentionally
-stage the same payload.
+The same `object_hash` also keys a user-facing object metadata record for that
+payload. Different builder recipes can share one record when they intentionally
+stage the same payload. The record is not part of object identity or cache
+resolution.
 
 Recipe names do not participate in object identity, `build_key`, or
 `reuse_key`. The language-level realized object is `RealizedObject`; it carries
@@ -71,31 +71,48 @@ the `build_key` that resolved to the object when that key is known.
 
 ## Reuse Model
 
-For a builder recipe, builder reuse lookup uses this order:
+For a builder recipe, the working-store lookup starts with an exact
+`build_key` hit in `builds/`. A complete exact hit skips everything below it.
+On an exact miss, bobr resolves possible `object_hash` identities of the direct
+inputs and computes the corresponding `reuse_key` values. It then checks those
+keys in `reuses/`. This identity resolution may happen before input content has
+been copied into the working store. Only when exact and reuse lookup both miss
+does bobr realize complete direct inputs and execute the builder.
 
-1. a hit on `build_key` (`builds/`)
-2. a hit on `reuse_key` (`reuses/`)
-3. actual builder execution
-
-If a `reuse_key` hit finds an object but its `build_key` mapping is missing, the
-`build_key` mapping is recreated and the object is reused.
+If a reuse hit provides an object but the current `build_key` mapping is
+missing, bobr publishes that mapping and reuses the object. A builder can also
+publish every reuse key in the current candidate set that resolves to the chosen
+object.
 
 For `Source`, there is a `build_key` but no `reuse_key`.
 
-Source reuse lookup uses this order:
-
-1. canonical object-record hit on `object_hash`
-2. existing object hit on `object_hash`
-3. actual source materialization
-
-On a source hit or successful materialization, the store creates or repairs the
-source's `builds/<object_hash>` mapping.
+Source realization asks whether its declared `object_hash` is complete in the
+working store, then whether configured content sources can provide it. If not,
+the Source origin is materialized. Object records are not read during this
+lookup. On a source hit or successful materialization, bobr writes user-facing
+metadata and creates or repairs the source's `builds/<object_hash>` mapping.
 
 If source materialization produces a different object than the declared
-`object_hash`, the actual object is still imported into `objects/`, but the
-canonical `object-records/<object_hash>.json` record and the
-`builds/<object_hash>` mapping are not written, and the source import fails with
-the actual hash.
+`object_hash`, the actual object is still imported into `objects/`, but no
+object metadata or source `builds/<object_hash>` mapping is written, and the
+source import fails with the actual hash.
+
+### Secondary capabilities
+
+A request can additionally name local secondary stores (see
+[Request](./REQUEST.md#secondary-stores)). They are separate capabilities:
+
+- a **trusted index** answers `BuildKey` and `ReuseKey` queries with candidate
+  `ObjectHash` values; it supplies identity, not object bytes;
+- a **content source** supplies an object's bytes by `ObjectHash`. The current
+  implementation imports them only by hardlinking, including every referenced
+  fs-file of an fs-tree, so it must share a filesystem with the working store.
+
+The Realizer consults working-store mappings before secondary mappings, and
+checks working-store content before secondary content. A secondary mapping can
+therefore be useful before its object is copied locally. The same read-only
+store may provide one or both capabilities. Remote capabilities and copy-based
+content import are not implemented yet.
 
 ## Store Layout
 
@@ -141,7 +158,8 @@ published out of it by renaming and hardlinking. Their contents are:
 ```
 
 - `objects/` holds payloads addressed by `object_hash`.
-- `object-records/` holds canonical object records addressed by `object_hash`.
+- `object-records/` holds user-facing metadata records addressed by
+  `object_hash`.
 - `reuses/` maps a `reuse_key` to its object (builder recipes only).
 - `builds/` maps a `build_key` to its object.
 - `object-refs/` holds human-facing refs from recipe name to the latest
@@ -174,17 +192,26 @@ Generic CAS objects may contain non-UTF-8 filesystem names. Such objects can
 still be imported and addressed by `object_hash`. Fs-tree objects are
 UTF-8-only because their manifest paths and symlink targets are JSON strings.
 
-`object-records/<object_hash>.json` stores one canonical object record,
-containing:
+`object-records/<object_hash>.json` is a write-only metadata record for people
+and store-inspection tools. Its current schema is `bobr-object-record-v4`; it
+contains:
 
-- `object_hash` — the object this record describes
-- `build_key` — the build key that first materialized it
-- `inputs` — the `object_hash` of each direct input (for reuse accounting)
+- `object_hash` — the object the record describes
+- `build_key` and `inputs` — producer information supplied by the first
+  successful writer of this record
 - `run_id` — optional; the store run that recorded it
 
-`builds/<build_key>` and `reuses/<reuse_key>` are symlinks to the canonical
-object record; they provide the `BuildKey` → `ObjectHash` and `ReuseKey` →
-`ObjectHash` mappings used by reuse lookup.
+The record is idempotent: an existing record is retained rather than rewritten.
+Consequently its producer fields can be neutral metadata written while recording
+an already-present or imported object; they are not authoritative provenance for
+every mapping that later reaches this object.
+
+`builds/<build_key>` and `reuses/<reuse_key>` are canonical symlinks whose
+targets encode an `object_hash` as `../object-records/<object_hash>.json`.
+Lookup validates and reads that hash from the symlink target, then checks the
+object content. It deliberately does not read or parse the JSON record. The
+records remain useful for inspection, just as `object-refs/` and
+`fs-tree-refs/` are useful human-facing views rather than lookup inputs.
 
 `<logs>/<serial>-<tag>[-<name>]/raw/` stores raw per-subject log files such as
 captured tool output. `<work>/<serial>-<tag>[-<name>]/` is the matching
@@ -206,9 +233,10 @@ is updated:
 This `object-refs/` rule is the same for every object kind. Filesystem tree
 builder results store the manifest itself as the object payload. The
 object ref never points directly at `fs-files/` or at a materialized
-`fs-trees/` cache directory. Object records remain available by adding
-`.json` to the referenced object hash and reading
-`object-records/<object_hash>.json`.
+`fs-trees/` cache directory. When an object has been successfully published,
+its user-facing metadata is normally available as
+`object-records/<object_hash>.json`; object-ref lookup does not depend on that
+metadata.
 
 Unlike `object-refs/`, `fs-tree-refs/` are inspection aids only, created when a
 filesystem root is materialized for a named input.
