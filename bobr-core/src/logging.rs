@@ -1967,10 +1967,12 @@ impl LiveProgress {
                 }
             }
             let now = Instant::now();
-            if changed && now.duration_since(self.last_drawn) >= LIVE_REDRAW {
+            let redraw = record.level != BuildLogLevel::Progress
+                || (changed && now.duration_since(self.last_drawn) >= LIVE_REDRAW);
+            if redraw {
                 self.last_drawn = now;
+                self.reflow(self.current_rows());
             }
-            self.reflow(self.current_rows());
             return;
         }
         if status == BuildStatus::CacheHit.as_str() {
@@ -3153,6 +3155,48 @@ mod tests {
         assert_eq!(live.fetch_progress.queued(), 0);
         assert_eq!(live.running(), 0);
         assert!(live.slots.iter().all(|slot| slot.activity.is_none()));
+    }
+
+    #[test]
+    fn source_progress_ticks_update_counters_without_redrawing_every_tick() {
+        let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
+        sink.write_event(&live_run_record(
+            BuildStatus::RunStarted,
+            json!({ "reachable": 1, "reachable_sources": 1, "jobs": 1 }),
+        ));
+        sink.write_event(&fetch_record(
+            BuildStatus::Start,
+            BuildLogLevel::Info,
+            Some(("source", "source")),
+            json!({ "host": "example.org", "transfer": "network" }),
+        ));
+        {
+            let ProgressSink::Live(state) = &sink else {
+                panic!("expected live sink");
+            };
+            state.lock().unwrap().last_drawn = Instant::now();
+        }
+        let mut first = downloading("source", "example.org", 1);
+        first.message = "first byte".to_string();
+        sink.write_event(&first);
+        let ProgressSink::Live(state) = &sink else {
+            panic!("expected live sink");
+        };
+        {
+            let live = state.lock().unwrap();
+            assert_eq!(live.fetch_progress.live_bytes(), 1);
+            assert!(
+                !live.slots[0].bar.message().contains("first byte"),
+                "a fresh progress tick must not redraw the row"
+            );
+        }
+        state.lock().unwrap().last_drawn -= LIVE_REDRAW * 2;
+        let mut second = downloading("source", "example.org", 2);
+        second.message = "second byte".to_string();
+        sink.write_event(&second);
+        let live = state.lock().unwrap();
+        assert_eq!(live.fetch_progress.live_bytes(), 2);
+        assert!(live.slots[0].bar.message().contains("second byte"));
     }
 
     #[test]
