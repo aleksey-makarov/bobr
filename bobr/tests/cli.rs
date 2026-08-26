@@ -105,6 +105,7 @@ fn cli_accepts_explicit_request_path() {
         .find(|event| event["status"] == "run-started")
         .expect("unified Realizer must record a run-started event");
     assert_eq!(started["details"]["reachable"], 1);
+    assert_eq!(started["details"]["progress_policy"]["mode"], "auto");
 }
 
 #[test]

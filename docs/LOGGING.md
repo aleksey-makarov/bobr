@@ -16,14 +16,35 @@ There are three non-overlapping output channels:
 - **stderr** is the live UI only: build progress plus warnings and errors, as a
   projection of the run logs onto the screen. The progress renderer is the
   only writer of stderr. In an interactive terminal (and not `quiet`) it draws a
-  **live block** (one updating line per active subject, a bottom summary line,
-  with warnings/errors printed above) via `indicatif`; otherwise (non-TTY, e.g.
+  **live block** (a bounded viewport over active subjects, a bottom summary
+  line, with warnings/errors printed above) via `indicatif`; otherwise (non-TTY, e.g.
   CI or a pipe, or `quiet`) it falls back to **plain per-line** output.
   Transient `progress` ticks appear only in the live block — the plain path
   omits them. How much it shows is a threshold (see [Verbosity](#verbosity)).
 - **stdout** carries the machine-readable result (the realized object JSON).
   Moving the result into a store file is a related, separate concern and is not
   part of the logging contract.
+
+## Live viewport
+
+The request's `progress` policy controls only an interactive TTY:
+
+- `auto` uses at most three quarters of the terminal height while leaving at
+  least two rows outside the live block;
+- `fixed` caps the complete block at `max_lines` rows;
+- `summary` hides individual subject rows.
+
+The renderer keeps every active subject in its model even when only part of the
+set fits on screen. Visible rows remain stable. New overflow subjects are
+hidden in start order; when a visible subject finishes, the oldest hidden one
+takes its row. Shrinking the terminal hides the newest visible subjects and
+growing it restores the oldest hidden subjects. A compact overflow row, or the
+bottom summary when no row fits, reports how many are hidden.
+
+The number of visible rows never limits builder execution. A Tokio task listens
+for `SIGWINCH` and immediately asks the logger to reflow the viewport; build
+events update its content independently. Non-TTY and `quiet` output never emit
+terminal control sequences.
 
 ## On-disk layout
 

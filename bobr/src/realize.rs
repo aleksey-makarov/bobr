@@ -39,6 +39,7 @@ pub async fn realize(
         run_id,
         quiet,
         jobs,
+        progress,
         limits,
         secondaries,
         goals,
@@ -52,9 +53,15 @@ pub async fn realize(
     let run = Arc::new(Run::new(run_id, &logs, &work)?);
     check_same_filesystem(&store, &run)?;
     let logger = Arc::new(
-        BuildRunLogger::new(run.logs_dir(), run.run_id(), quiet.unwrap_or(false))
-            .map_err(ExecutionError::Store)?,
+        BuildRunLogger::new_with_progress(
+            run.logs_dir(),
+            run.run_id(),
+            quiet.unwrap_or(false),
+            progress,
+        )
+        .map_err(ExecutionError::Store)?,
     );
+    let _resize_monitor = ResizeMonitor::spawn(&logger);
     let runtime_provider = runtime_provider_for_current_process();
     let indexes = secondaries
         .trusted_indexes
@@ -103,7 +110,7 @@ pub async fn realize(
         )
         .map_err(|error| ExecutionError::Build(error.to_string()))?,
     );
-    log_run_started(&logger, &goals, jobs, reachable);
+    log_run_started(&logger, &goals, jobs, reachable, progress);
     let realized = dynamic.realize_goals().await;
     let shutdown = executor
         .shutdown()
@@ -135,6 +142,33 @@ pub async fn realize(
     log_run_finished(&logger, Ok(&results));
     logger.flush();
     Ok(results)
+}
+
+struct ResizeMonitor(tokio::task::JoinHandle<()>);
+
+impl ResizeMonitor {
+    fn spawn(logger: &Arc<BuildRunLogger>) -> Self {
+        let logger = Arc::downgrade(logger);
+        Self(tokio::spawn(async move {
+            let Ok(mut signal) = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::from_raw(libc::SIGWINCH),
+            ) else {
+                return;
+            };
+            while signal.recv().await.is_some() {
+                let Some(logger) = logger.upgrade() else {
+                    return;
+                };
+                logger.refresh_progress_layout();
+            }
+        }))
+    }
+}
+
+impl Drop for ResizeMonitor {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 fn default_jobs() -> usize {
@@ -198,7 +232,13 @@ fn map_store_error(error: bobr_store::StoreError) -> ExecutionError {
     ExecutionError::Store(error.to_string())
 }
 
-fn log_run_started(logger: &BuildRunLogger, goals: &[String], jobs: usize, reachable: usize) {
+fn log_run_started(
+    logger: &BuildRunLogger,
+    goals: &[String],
+    jobs: usize,
+    reachable: usize,
+    progress: bobr_core::ProgressPolicy,
+) {
     logger.log_run_event(BuildLogEvent {
         level: BuildLogLevel::Info,
         status: BuildStatus::RunStarted,
@@ -206,10 +246,15 @@ fn log_run_started(logger: &BuildRunLogger, goals: &[String], jobs: usize, reach
         message: format!("realizing {} goal(s)", goals.len()),
         object_hash: None,
         raw_log_path: None,
-        details: json!({ "goals": goals, "jobs": jobs, "reachable": reachable })
-            .as_object()
-            .expect("run-start details are an object")
-            .clone(),
+        details: json!({
+            "goals": goals,
+            "jobs": jobs,
+            "reachable": reachable,
+            "progress_policy": progress,
+        })
+        .as_object()
+        .expect("run-start details are an object")
+        .clone(),
     });
 }
 

@@ -186,6 +186,7 @@ pub fn execute(
         run_id,
         quiet,
         jobs,
+        progress,
         nodes,
         ..
     } = request;
@@ -205,7 +206,7 @@ pub fn execute(
     let run = Arc::new(Run::new(run_id, &logs, &work)?);
     check_same_filesystem(&store, &run)?;
     let logger: Arc<BuildRunLogger> =
-        Arc::new(build_run_logger(&run, quiet).map_err(ExecutionError::Store)?);
+        Arc::new(build_run_logger(&run, quiet, progress).map_err(ExecutionError::Store)?);
     let runtime_provider = runtime_provider_for_current_process();
 
     execute_graph(
@@ -750,8 +751,12 @@ fn check_same_filesystem(store: &Store, run: &Run) -> Result<(), ExecutionError>
     )))
 }
 
-fn build_run_logger(run: &Run, quiet: bool) -> Result<BuildRunLogger, String> {
-    BuildRunLogger::new(run.logs_dir(), run.run_id(), quiet)
+fn build_run_logger(
+    run: &Run,
+    quiet: bool,
+    progress: bobr_core::ProgressPolicy,
+) -> Result<BuildRunLogger, String> {
+    BuildRunLogger::new_with_progress(run.logs_dir(), run.run_id(), quiet, progress)
 }
 
 #[cfg(test)]
@@ -786,7 +791,7 @@ mod tests {
     }
 
     fn create_test_logger(run: &Run) -> Arc<BuildRunLogger> {
-        Arc::new(build_run_logger(run, true).unwrap())
+        Arc::new(build_run_logger(run, true, bobr_core::ProgressPolicy::Auto).unwrap())
     }
 
     fn create_test_run(

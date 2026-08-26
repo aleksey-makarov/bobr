@@ -2,7 +2,7 @@ use crate::ObjectHash;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufWriter, IsTerminal, Write};
@@ -331,6 +331,7 @@ pub struct BuildRunLogger {
     run_id: String,
     seq: AtomicU64,
     sinks: Vec<Arc<dyn EventSink>>,
+    progress: Arc<ProgressSink>,
     retries: Arc<RetrySink>,
 }
 
@@ -339,6 +340,16 @@ impl BuildRunLogger {
     /// `quiet` raises the stderr threshold (warnings/errors only). Sets up the
     /// file and progress sinks.
     pub fn new(run_log_dir: &Path, run_id: &str, quiet: bool) -> Result<Self, String> {
+        Self::new_with_progress(run_log_dir, run_id, quiet, ProgressPolicy::Auto)
+    }
+
+    /// Creates a run logger with an explicit terminal presentation policy.
+    pub fn new_with_progress(
+        run_log_dir: &Path,
+        run_id: &str,
+        quiet: bool,
+        progress_policy: ProgressPolicy,
+    ) -> Result<Self, String> {
         fs::create_dir_all(run_log_dir).map_err(|error| {
             format!(
                 "failed to create run log directory '{}': {error}",
@@ -347,7 +358,11 @@ impl BuildRunLogger {
         })?;
 
         let file_sink = Arc::new(FileSink::new(run_log_dir)?);
-        let progress_sink = Arc::new(ProgressSink::new(run_log_dir.to_path_buf(), quiet));
+        let progress_sink = Arc::new(ProgressSink::new(
+            run_log_dir.to_path_buf(),
+            quiet,
+            progress_policy,
+        ));
         let retries = Arc::new(RetrySink::default());
 
         Ok(Self {
@@ -356,11 +371,17 @@ impl BuildRunLogger {
             seq: AtomicU64::new(0),
             sinks: vec![
                 file_sink,
-                progress_sink,
+                Arc::clone(&progress_sink) as Arc<dyn EventSink>,
                 Arc::clone(&retries) as Arc<dyn EventSink>,
             ],
+            progress: progress_sink,
             retries,
         })
+    }
+
+    /// Recomputes the live viewport after a terminal resize.
+    pub fn refresh_progress_layout(&self) {
+        self.progress.refresh_layout();
     }
 
     /// The run's identifier.
@@ -852,11 +873,12 @@ impl fmt::Debug for ProgressSink {
 }
 
 impl ProgressSink {
-    fn new(run_log_dir: PathBuf, quiet: bool) -> Self {
+    fn new(run_log_dir: PathBuf, quiet: bool, policy: ProgressPolicy) -> Self {
         if !quiet && std::io::stderr().is_terminal() {
             Self::Live(Box::new(Mutex::new(LiveProgress::new(
                 run_log_dir,
                 MultiProgress::new(),
+                policy,
             ))))
         } else {
             Self::Plain {
@@ -871,8 +893,25 @@ impl ProgressSink {
     /// without touching a terminal.
     #[cfg(test)]
     fn live_hidden(run_log_dir: PathBuf) -> Self {
+        Self::live_hidden_with_policy(run_log_dir, ProgressPolicy::Auto)
+    }
+
+    #[cfg(test)]
+    fn live_hidden_with_policy(run_log_dir: PathBuf, policy: ProgressPolicy) -> Self {
         let multi = MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden());
-        Self::Live(Box::new(Mutex::new(LiveProgress::new(run_log_dir, multi))))
+        Self::Live(Box::new(Mutex::new(LiveProgress::new(
+            run_log_dir,
+            multi,
+            policy,
+        ))))
+    }
+
+    fn refresh_layout(&self) {
+        if let Self::Live(state) = self
+            && let Ok(mut live) = state.lock()
+        {
+            live.refresh_layout();
+        }
     }
 }
 
@@ -1255,7 +1294,7 @@ impl FetchProgress {
 /// is left" is a question only the terminal can answer. One ioctl per redraw
 /// is nothing, and asking every time is also what keeps the layout right after
 /// the window is resized mid-run.
-fn terminal_width() -> Option<usize> {
+fn terminal_size() -> Option<(usize, usize)> {
     let mut size = libc::winsize {
         ws_row: 0,
         ws_col: 0,
@@ -1266,10 +1305,30 @@ fn terminal_width() -> Option<usize> {
     // failure (stderr is not a terminal) leaves it untouched and is reported by
     // the return value.
     let rc = unsafe { libc::ioctl(libc::STDERR_FILENO, libc::TIOCGWINSZ, &mut size) };
-    if rc == 0 && size.ws_col > 0 {
-        Some(size.ws_col as usize)
+    if rc == 0 && size.ws_row > 0 && size.ws_col > 0 {
+        Some((size.ws_row as usize, size.ws_col as usize))
     } else {
         None
+    }
+}
+
+fn terminal_width() -> Option<usize> {
+    terminal_size().map(|(_, columns)| columns)
+}
+
+fn terminal_height() -> Option<usize> {
+    terminal_size().map(|(rows, _)| rows)
+}
+
+fn progress_line_budget(policy: ProgressPolicy, rows: usize) -> usize {
+    match policy {
+        ProgressPolicy::Summary => 1,
+        ProgressPolicy::Fixed { max_lines } => max_lines.min(rows.saturating_sub(2).max(1)),
+        ProgressPolicy::Auto => {
+            let screen = rows.saturating_sub(2).max(1);
+            let fraction = rows.saturating_mul(3) / 4;
+            fraction.max(MIN_FIXED_PROGRESS_LINES).min(screen)
+        }
     }
 }
 
@@ -1349,13 +1408,123 @@ fn format_duration(elapsed: Duration) -> String {
     }
 }
 
-/// One terminal line in the live block: a bar plus whether it currently holds a
-/// running subject. A finished subject leaves its slot in place (marked idle)
-/// for the next subject to reuse, so the block grows to the peak concurrency and
-/// never shrinks mid-run.
+#[derive(Debug)]
+struct ActiveBuilder {
+    message: String,
+    started_at: Instant,
+    order: u64,
+}
+
+#[derive(Debug, Default)]
+struct BuilderViewport {
+    active: HashMap<String, ActiveBuilder>,
+    visible: Vec<Option<String>>,
+    hidden: VecDeque<String>,
+    capacity: usize,
+    next_order: u64,
+}
+
+impl BuilderViewport {
+    fn start_or_update(&mut self, build_key: &str, message: String) {
+        if let Some(subject) = self.active.get_mut(build_key) {
+            subject.message = message;
+            return;
+        }
+        let order = self.next_order;
+        self.next_order += 1;
+        self.active.insert(
+            build_key.to_string(),
+            ActiveBuilder {
+                message,
+                started_at: Instant::now(),
+                order,
+            },
+        );
+        if let Some(slot) = self.visible.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(build_key.to_string());
+        } else if self.visible.len() < self.capacity {
+            self.visible.push(Some(build_key.to_string()));
+        } else {
+            self.hidden.push_back(build_key.to_string());
+        }
+    }
+
+    fn finish(&mut self, build_key: &str) {
+        self.active.remove(build_key);
+        if let Some(index) = self
+            .visible
+            .iter()
+            .position(|slot| slot.as_deref() == Some(build_key))
+        {
+            self.visible[index] = self.pop_hidden();
+        } else {
+            self.hidden.retain(|key| key != build_key);
+        }
+    }
+
+    fn set_capacity(&mut self, capacity: usize) {
+        if self.capacity == capacity {
+            return;
+        }
+        self.capacity = capacity;
+        let mut visible = self
+            .visible
+            .iter()
+            .filter_map(|slot| slot.as_ref())
+            .filter(|key| self.active.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        visible.sort_by_key(|key| self.active[key].order);
+        let keep = visible.len().min(capacity);
+        let kept = visible[..keep].iter().cloned().collect::<HashSet<_>>();
+        self.visible = visible[..keep].iter().cloned().map(Some).collect();
+        let mut hidden = self
+            .active
+            .iter()
+            .filter(|(key, _)| !kept.contains(*key))
+            .map(|(key, subject)| (subject.order, key.clone()))
+            .collect::<Vec<_>>();
+        hidden.sort_by_key(|(order, _)| *order);
+        self.hidden = hidden.into_iter().map(|(_, key)| key).collect();
+        self.promote_hidden();
+    }
+
+    fn promote_hidden(&mut self) {
+        while self.visible.iter().flatten().count() < self.capacity {
+            let Some(key) = self.pop_hidden() else {
+                break;
+            };
+            if let Some(slot) = self.visible.iter_mut().find(|slot| slot.is_none()) {
+                *slot = Some(key);
+            } else {
+                self.visible.push(Some(key));
+            }
+        }
+    }
+
+    fn pop_hidden(&mut self) -> Option<String> {
+        while let Some(key) = self.hidden.pop_front() {
+            if self.active.contains_key(&key) {
+                return Some(key);
+            }
+        }
+        None
+    }
+
+    fn running(&self) -> usize {
+        self.active.len()
+    }
+
+    fn hidden(&self) -> usize {
+        self.hidden.len()
+    }
+}
+
+/// One terminal line in the live block. Bars are merely a viewport over the
+/// full active-subject model and can be rebound after overflow or resize.
 struct Slot {
     bar: ProgressBar,
-    occupied: bool,
+    subject: Option<String>,
 }
 
 /// Live indicatif state: a fixed set of subject slots (idle ones kept in place)
@@ -1373,7 +1542,10 @@ struct LiveProgress {
     active_style: ProgressStyle,
     idle_style: ProgressStyle,
     slots: Vec<Slot>,
-    index_of: HashMap<String, usize>,
+    overflow: Option<ProgressBar>,
+    viewport: BuilderViewport,
+    policy: ProgressPolicy,
+    rows_override: Option<usize>,
     reachable: usize,
     done: usize,
     failed: usize,
@@ -1394,7 +1566,7 @@ struct AggregateBlock {
 const AGGREGATE_REDRAW: Duration = Duration::from_millis(200);
 
 impl LiveProgress {
-    fn new(run_log_dir: PathBuf, multi: MultiProgress) -> Self {
+    fn new(run_log_dir: PathBuf, multi: MultiProgress, policy: ProgressPolicy) -> Self {
         let summary = multi.add(ProgressBar::new_spinner());
         summary.set_style(ProgressStyle::with_template("{msg}").expect("valid template"));
         Self {
@@ -1405,7 +1577,10 @@ impl LiveProgress {
                 .expect("valid template"),
             idle_style: ProgressStyle::with_template("  {msg}").expect("valid template"),
             slots: Vec::new(),
-            index_of: HashMap::new(),
+            overflow: None,
+            viewport: BuilderViewport::default(),
+            policy,
+            rows_override: None,
             reachable: 0,
             done: 0,
             failed: 0,
@@ -1456,91 +1631,150 @@ impl LiveProgress {
     }
 
     fn running(&self) -> usize {
-        self.index_of.len()
+        self.viewport.running()
     }
 
     fn update_summary(&self) {
+        let hidden = (self.viewport.hidden() > 0 && self.overflow.is_none())
+            .then_some(self.viewport.hidden());
         self.summary.set_message(format_build_progress(
             self.done,
             self.running(),
             self.failed,
             self.reachable,
+            hidden,
         ));
     }
 
-    /// Routes a subject to its existing slot, an idle slot, or a new bottom slot
-    /// and sets the line text. Idle slots are reused in place, so the block does
-    /// not grow past the peak number of concurrent subjects.
     fn start_or_update(&mut self, build_key: &str, message: String) {
-        if let Some(&index) = self.index_of.get(build_key) {
-            self.slots[index].bar.set_message(message);
-            return;
-        }
-        let index = match self.slots.iter().position(|slot| !slot.occupied) {
-            Some(index) => index,
-            None => {
-                let bar = self
-                    .multi
-                    .insert_before(&self.summary, ProgressBar::new_spinner());
-                self.slots.push(Slot {
-                    bar,
-                    occupied: false,
-                });
-                self.slots.len() - 1
-            }
-        };
-        let style = self.active_style.clone();
-        let slot = &mut self.slots[index];
-        slot.occupied = true;
-        slot.bar.set_style(style);
-        // Count `{elapsed}` from this subject's assignment, not from a previous
-        // occupant of a reused slot.
-        slot.bar.reset_elapsed();
-        slot.bar.enable_steady_tick(Duration::from_millis(120));
-        slot.bar.set_message(message);
-        self.index_of.insert(build_key.to_string(), index);
-        self.update_summary();
+        self.viewport.start_or_update(build_key, message);
+        self.reflow(self.current_rows());
     }
 
     /// Marks a finished subject's slot idle: the line stays in place (the block
     /// does not shrink) and becomes available for the next subject.
     fn finish_subject(&mut self, build_key: &str, failed: bool) {
-        self.release_subject_slot(build_key);
+        self.viewport.finish(build_key);
         if failed {
             self.failed += 1;
         } else {
             self.done += 1;
         }
-        self.update_summary();
+        self.reflow(self.current_rows());
     }
 
     fn cancel_subject(&mut self, build_key: &str) {
-        self.release_subject_slot(build_key);
-        self.update_summary();
-    }
-
-    fn release_subject_slot(&mut self, build_key: &str) {
-        if let Some(index) = self.index_of.remove(build_key) {
-            let style = self.idle_style.clone();
-            let slot = &mut self.slots[index];
-            slot.occupied = false;
-            slot.bar.disable_steady_tick();
-            slot.bar.set_style(style);
-            slot.bar.set_message("—");
-        }
+        self.viewport.finish(build_key);
+        self.reflow(self.current_rows());
     }
 
     fn clear(&mut self) {
         for slot in self.slots.drain(..) {
             slot.bar.finish_and_clear();
         }
-        self.index_of.clear();
+        self.viewport = BuilderViewport::default();
+        if let Some(bar) = self.overflow.take() {
+            bar.finish_and_clear();
+        }
         if let Some(block) = self.aggregate.take() {
             for bar in block.lines {
                 bar.finish_and_clear();
             }
         }
         self.summary.finish_and_clear();
+    }
+
+    fn current_rows(&self) -> usize {
+        self.rows_override.or_else(terminal_height).unwrap_or(24)
+    }
+
+    fn refresh_layout(&mut self) {
+        self.reflow(self.current_rows());
+    }
+
+    #[cfg(test)]
+    fn reflow_for_test(&mut self, rows: usize) {
+        self.rows_override = Some(rows);
+        self.reflow(rows);
+    }
+
+    fn reflow(&mut self, rows: usize) {
+        if self.aggregate.is_some() {
+            return;
+        }
+        let budget = progress_line_budget(self.policy, rows);
+        let running = self.viewport.running();
+        let available = budget.saturating_sub(1);
+        let tentative = if matches!(self.policy, ProgressPolicy::Summary) {
+            0
+        } else {
+            available
+        };
+        let show_overflow = running > tentative && available >= 2;
+        let capacity = if show_overflow {
+            available.saturating_sub(1)
+        } else {
+            tentative
+        };
+        self.viewport.set_capacity(capacity);
+        self.sync_builder_bars();
+        self.sync_overflow(show_overflow && self.viewport.hidden() > 0);
+        self.update_summary();
+    }
+
+    fn sync_builder_bars(&mut self) {
+        while self.slots.len() < self.viewport.visible.len() {
+            let bar = self
+                .multi
+                .insert_before(&self.summary, ProgressBar::new_spinner());
+            self.slots.push(Slot { bar, subject: None });
+        }
+        while self.slots.len() > self.viewport.visible.len() {
+            self.slots
+                .pop()
+                .expect("slot count was checked")
+                .bar
+                .finish_and_clear();
+        }
+        for (index, key) in self.viewport.visible.iter().enumerate() {
+            let slot = &mut self.slots[index];
+            match key {
+                Some(key) => {
+                    let subject = &self.viewport.active[key];
+                    if slot.subject.as_deref() != Some(key) {
+                        slot.bar.set_style(self.active_style.clone());
+                        slot.bar.set_elapsed(subject.started_at.elapsed());
+                        slot.bar.enable_steady_tick(Duration::from_millis(120));
+                        slot.subject = Some(key.clone());
+                    }
+                    slot.bar.set_message(subject.message.clone());
+                }
+                None => {
+                    slot.bar.disable_steady_tick();
+                    slot.bar.set_style(self.idle_style.clone());
+                    slot.bar.set_message("—");
+                    slot.subject = None;
+                }
+            }
+        }
+    }
+
+    fn sync_overflow(&mut self, show: bool) {
+        if show {
+            let bar = self.overflow.get_or_insert_with(|| {
+                let bar = self
+                    .multi
+                    .insert_before(&self.summary, ProgressBar::new_spinner());
+                bar.set_style(ProgressStyle::with_template("{wide_msg}").expect("valid template"));
+                bar
+            });
+            bar.set_message(format!(
+                "… {} more builders running",
+                self.viewport.hidden()
+            ));
+        } else if let Some(bar) = self.overflow.take() {
+            bar.finish_and_clear();
+        }
     }
 
     fn handle(&mut self, record: &EventLogRecord) {
@@ -1557,7 +1791,7 @@ impl LiveProgress {
                 self.start_aggregate(detail_u64(record, "sources") as usize);
                 return;
             }
-            self.update_summary();
+            self.reflow(self.current_rows());
             return;
         }
         if self.aggregate.is_some() && status != BuildStatus::RunFinished.as_str() {
@@ -1592,7 +1826,7 @@ impl LiveProgress {
         }
         if status == BuildStatus::CacheHit.as_str() {
             self.done += 1;
-            self.update_summary();
+            self.reflow(self.current_rows());
             return;
         }
 
@@ -1639,8 +1873,19 @@ impl LiveProgress {
     }
 }
 
-fn format_build_progress(done: usize, running: usize, failed: usize, reachable: usize) -> String {
-    format!("{done} done · {running} running · {failed} failed · {reachable} reachable")
+fn format_build_progress(
+    done: usize,
+    running: usize,
+    failed: usize,
+    reachable: usize,
+    hidden: Option<usize>,
+) -> String {
+    let mut line =
+        format!("{done} done · {running} running · {failed} failed · {reachable} reachable");
+    if let Some(hidden) = hidden {
+        line.push_str(&format!(" · {hidden} hidden"));
+    }
+    line
 }
 
 impl EventSink for ProgressSink {
@@ -2114,9 +2359,100 @@ mod tests {
     }
 
     #[test]
+    fn viewport_promotes_oldest_hidden_and_resize_keeps_oldest_visible() {
+        let mut viewport = BuilderViewport::default();
+        viewport.set_capacity(2);
+        for key in ["a", "b", "c", "d"] {
+            viewport.start_or_update(key, key.to_string());
+        }
+        assert_eq!(viewport.visible, [Some("a".into()), Some("b".into())]);
+        assert_eq!(viewport.hidden, ["c", "d"]);
+
+        viewport.finish("a");
+        assert_eq!(viewport.visible, [Some("c".into()), Some("b".into())]);
+        assert_eq!(viewport.hidden, ["d"]);
+
+        viewport.set_capacity(1);
+        assert_eq!(viewport.visible, [Some("b".into())]);
+        assert_eq!(viewport.hidden, ["c", "d"]);
+
+        viewport.set_capacity(3);
+        assert_eq!(
+            viewport.visible,
+            [Some("b".into()), Some("c".into()), Some("d".into())]
+        );
+        assert!(viewport.hidden.is_empty());
+    }
+
+    #[test]
+    fn progress_policy_caps_the_complete_builder_block() {
+        let fixed_sink = ProgressSink::live_hidden_with_policy(
+            PathBuf::from("/run"),
+            ProgressPolicy::Fixed { max_lines: 8 },
+        );
+        let ProgressSink::Live(fixed) = &fixed_sink else {
+            panic!("expected live sink");
+        };
+        {
+            let mut live = fixed.lock().unwrap();
+            live.reflow_for_test(24);
+            for index in 0..10 {
+                live.start_or_update(&format!("fixed-{index}"), format!("fixed {index}"));
+            }
+            assert_eq!(live.slots.len(), 6);
+            assert_eq!(live.viewport.hidden(), 4);
+            assert!(live.overflow.is_some());
+        }
+
+        let summary_sink =
+            ProgressSink::live_hidden_with_policy(PathBuf::from("/run"), ProgressPolicy::Summary);
+        let ProgressSink::Live(summary) = &summary_sink else {
+            panic!("expected live sink");
+        };
+        {
+            let mut live = summary.lock().unwrap();
+            live.reflow_for_test(24);
+            for index in 0..3 {
+                live.start_or_update(&format!("summary-{index}"), format!("summary {index}"));
+            }
+            assert!(live.slots.is_empty());
+            assert_eq!(live.viewport.hidden(), 3);
+            assert!(live.overflow.is_none());
+        }
+    }
+
+    #[test]
+    fn auto_layout_shrinks_and_grows_without_losing_active_state() {
+        let sink =
+            ProgressSink::live_hidden_with_policy(PathBuf::from("/run"), ProgressPolicy::Auto);
+        let ProgressSink::Live(state) = &sink else {
+            panic!("expected live sink");
+        };
+        let mut live = state.lock().unwrap();
+        live.reflow_for_test(24);
+        for index in 0..20 {
+            live.start_or_update(&format!("job-{index}"), format!("job {index}"));
+        }
+        assert_eq!(live.running(), 20);
+        assert_eq!(live.slots.len(), 16);
+        assert_eq!(live.viewport.hidden(), 4);
+
+        live.reflow_for_test(10);
+        assert_eq!(live.running(), 20);
+        assert_eq!(live.slots.len(), 5);
+        assert_eq!(live.viewport.hidden(), 15);
+
+        live.reflow_for_test(40);
+        assert_eq!(live.running(), 20);
+        assert_eq!(live.slots.len(), 20);
+        assert_eq!(live.viewport.hidden(), 0);
+        assert!(live.overflow.is_none());
+    }
+
+    #[test]
     fn build_progress_names_the_reachable_graph_without_a_fraction() {
         assert_eq!(
-            format_build_progress(24, 19, 0, 1907),
+            format_build_progress(24, 19, 0, 1907, None),
             "24 done · 19 running · 0 failed · 1907 reachable"
         );
     }
@@ -2128,14 +2464,14 @@ mod tests {
             return;
         }
         assert!(matches!(
-            ProgressSink::new(PathBuf::from("/run"), false),
+            ProgressSink::new(PathBuf::from("/run"), false, ProgressPolicy::Auto),
             ProgressSink::Plain {
                 min_level: BuildLogLevel::Info,
                 ..
             }
         ));
         assert!(matches!(
-            ProgressSink::new(PathBuf::from("/run"), true),
+            ProgressSink::new(PathBuf::from("/run"), true, ProgressPolicy::Auto),
             ProgressSink::Plain {
                 min_level: BuildLogLevel::Warn,
                 ..
