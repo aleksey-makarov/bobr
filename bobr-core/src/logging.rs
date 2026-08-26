@@ -1072,6 +1072,12 @@ enum SubjectPhase {
         host: String,
     },
     Active(ActiveDownload),
+    /// A transient request failure is sleeping before its next attempt. This
+    /// is neither network-slot waiting nor downloading, and deserves its own
+    /// statistics counter so a stalled mirror is visible immediately.
+    Retrying {
+        host: String,
+    },
 }
 
 #[derive(Debug)]
@@ -1117,6 +1123,13 @@ impl FetchProgress {
             .count()
     }
 
+    fn retrying(&self) -> usize {
+        self.subjects
+            .values()
+            .filter(|phase| matches!(phase, SubjectPhase::Retrying { .. }))
+            .count()
+    }
+
     fn live_bytes(&self) -> u64 {
         self.completed_bytes
             + self
@@ -1124,7 +1137,7 @@ impl FetchProgress {
                 .values()
                 .map(|phase| match phase {
                     SubjectPhase::Active(download) => download.bytes,
-                    SubjectPhase::Queued { .. } => 0,
+                    SubjectPhase::Queued { .. } | SubjectPhase::Retrying { .. } => 0,
                 })
                 .sum::<u64>()
     }
@@ -1149,6 +1162,19 @@ impl FetchProgress {
             return false;
         };
         let key = subject.build_key.as_str();
+
+        if let Some(host) = record.details.get("retry_host").and_then(Value::as_str) {
+            if let Some(SubjectPhase::Active(download)) = self.subjects.remove(key) {
+                self.completed_bytes += download.bytes;
+            }
+            self.subjects.insert(
+                key.to_string(),
+                SubjectPhase::Retrying {
+                    host: host.to_string(),
+                },
+            );
+            return true;
+        }
 
         if status == BuildStatus::Done.as_str()
             || status == BuildStatus::Failed.as_str()
@@ -1279,6 +1305,7 @@ impl FetchProgress {
             let (host, active) = match phase {
                 SubjectPhase::Queued { host } => (host.as_str(), false),
                 SubjectPhase::Active(download) => (download.host.as_str(), true),
+                SubjectPhase::Retrying { host } => (host.as_str(), false),
             };
             let entry = counts.entry(host).or_insert((0, 0));
             if active {
@@ -1354,7 +1381,7 @@ impl FetchProgress {
             .values()
             .filter_map(|phase| match phase {
                 SubjectPhase::Active(download) => Some(download),
-                SubjectPhase::Queued { .. } => None,
+                SubjectPhase::Queued { .. } | SubjectPhase::Retrying { .. } => None,
             })
             .collect();
         active.sort_by_key(|download| download.since);
@@ -1414,10 +1441,13 @@ fn terminal_height() -> Option<usize> {
 
 fn progress_line_budget(policy: ProgressPolicy, rows: usize) -> usize {
     match policy {
-        ProgressPolicy::Summary => rows.saturating_sub(2).clamp(1, 2),
-        ProgressPolicy::Fixed { max_lines } => max_lines.min(rows.saturating_sub(2).max(1)),
+        // The live block always owns fetch statistics, builder statistics, and
+        // the run status. Summary simply gives the activity viewport zero
+        // rows; it is not a different, dynamically shaped block.
+        ProgressPolicy::Summary => 3,
+        ProgressPolicy::Fixed { max_lines } => max_lines.min(rows.saturating_sub(2).max(3)),
         ProgressPolicy::Auto => {
-            let screen = rows.saturating_sub(2).max(1);
+            let screen = rows.saturating_sub(2).max(3);
             let fraction = rows.saturating_mul(3) / 4;
             fraction.max(MIN_FIXED_PROGRESS_LINES).min(screen)
         }
@@ -1500,62 +1530,86 @@ fn format_duration(elapsed: Duration) -> String {
     }
 }
 
+/// Identity of one concrete activity shown in the terminal viewport.
+///
+/// A Source and a builder may theoretically have the same build key. Keeping
+/// their kinds in the key prevents that coincidence from merging two unrelated
+/// rows or letting a terminal event free the wrong row.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ActivityKey {
+    Builder(String),
+    Source(String),
+}
+
+impl ActivityKey {
+    fn is_builder(&self) -> bool {
+        matches!(self, Self::Builder(_))
+    }
+}
+
 #[derive(Debug)]
-struct ActiveBuilder {
+struct ActiveActivity {
     message: String,
     started_at: Instant,
-    order: u64,
+    failed: bool,
 }
 
 #[derive(Debug, Default)]
-struct BuilderViewport {
-    active: HashMap<String, ActiveBuilder>,
-    visible: Vec<Option<String>>,
-    hidden: VecDeque<String>,
+struct ActivityViewport {
+    active: HashMap<ActivityKey, ActiveActivity>,
+    visible: Vec<Option<ActivityKey>>,
+    hidden_builders: VecDeque<ActivityKey>,
+    hidden_sources: VecDeque<ActivityKey>,
     capacity: usize,
-    /// High-water number of builder rows allocated during this run. A
-    /// temporary capacity reduction may hide rows, but growing the viewport
-    /// restores them as idle `—` slots instead of shortening the live block.
-    allocated_slots: usize,
-    next_order: u64,
 }
 
-impl BuilderViewport {
-    fn start_or_update(&mut self, build_key: &str, message: String) {
-        if let Some(subject) = self.active.get_mut(build_key) {
-            subject.message = message;
+impl ActivityViewport {
+    fn start_or_update(&mut self, key: ActivityKey, message: String) {
+        if let Some(activity) = self.active.get_mut(&key) {
+            activity.message = message;
             return;
         }
-        let order = self.next_order;
-        self.next_order += 1;
         self.active.insert(
-            build_key.to_string(),
-            ActiveBuilder {
+            key.clone(),
+            ActiveActivity {
                 message,
                 started_at: Instant::now(),
-                order,
+                failed: false,
             },
         );
         if let Some(slot) = self.visible.iter_mut().find(|slot| slot.is_none()) {
-            *slot = Some(build_key.to_string());
-        } else if self.visible.len() < self.capacity {
-            self.visible.push(Some(build_key.to_string()));
+            *slot = Some(key);
         } else {
-            self.hidden.push_back(build_key.to_string());
+            self.push_hidden(key);
         }
-        self.allocated_slots = self.allocated_slots.max(self.visible.len());
     }
 
-    fn finish(&mut self, build_key: &str) {
-        self.active.remove(build_key);
+    fn finish(&mut self, key: &ActivityKey) {
+        self.active.remove(key);
         if let Some(index) = self
             .visible
             .iter()
-            .position(|slot| slot.as_deref() == Some(build_key))
+            .position(|slot| slot.as_ref() == Some(key))
         {
             self.visible[index] = self.pop_hidden();
         } else {
-            self.hidden.retain(|key| key != build_key);
+            self.hidden_builders.retain(|candidate| candidate != key);
+            self.hidden_sources.retain(|candidate| candidate != key);
+        }
+    }
+
+    /// Keeps a visible failure in place until the run ends. A failure that was
+    /// already hidden has no row to preserve, so it simply leaves the model.
+    fn fail(&mut self, key: &ActivityKey, message: String) {
+        let Some(activity) = self.active.get_mut(key) else {
+            return;
+        };
+        activity.message = message;
+        activity.failed = true;
+        if !self.visible.iter().any(|slot| slot.as_ref() == Some(key)) {
+            self.active.remove(key);
+            self.hidden_builders.retain(|candidate| candidate != key);
+            self.hidden_sources.retain(|candidate| candidate != key);
         }
     }
 
@@ -1563,42 +1617,72 @@ impl BuilderViewport {
         if self.capacity == capacity {
             return;
         }
+        if capacity < self.visible.len() {
+            let displaced = self.visible.split_off(capacity);
+            // `push_front` in reverse preserves the visible order ahead of
+            // activities that had already overflowed before the resize.
+            for key in displaced.into_iter().flatten().rev() {
+                self.push_hidden_front(key);
+            }
+        } else {
+            self.visible.resize(capacity, None);
+        }
         self.capacity = capacity;
-        let mut ordered = self
-            .active
-            .iter()
-            .map(|(key, subject)| (subject.order, key.clone()))
-            .collect::<Vec<_>>();
-        ordered.sort_by_key(|(order, _)| *order);
-        let visible_active = ordered.len().min(capacity);
-        self.visible = ordered[..visible_active]
-            .iter()
-            .map(|(_, key)| Some(key.clone()))
-            .collect();
-        let visible_rows = self.allocated_slots.max(visible_active).min(capacity);
-        self.visible.resize(visible_rows, None);
-        self.hidden = ordered[visible_active..]
-            .iter()
-            .map(|(_, key)| key.clone())
-            .collect();
-        self.allocated_slots = self.allocated_slots.max(self.visible.len());
+        self.fill_idle_rows();
     }
 
-    fn pop_hidden(&mut self) -> Option<String> {
-        while let Some(key) = self.hidden.pop_front() {
-            if self.active.contains_key(&key) {
-                return Some(key);
+    fn push_hidden(&mut self, key: ActivityKey) {
+        if key.is_builder() {
+            self.hidden_builders.push_back(key);
+        } else {
+            self.hidden_sources.push_back(key);
+        }
+    }
+
+    fn push_hidden_front(&mut self, key: ActivityKey) {
+        if key.is_builder() {
+            self.hidden_builders.push_front(key);
+        } else {
+            self.hidden_sources.push_front(key);
+        }
+    }
+
+    fn pop_hidden(&mut self) -> Option<ActivityKey> {
+        for queue in [&mut self.hidden_builders, &mut self.hidden_sources] {
+            while let Some(key) = queue.pop_front() {
+                if self
+                    .active
+                    .get(&key)
+                    .is_some_and(|activity| !activity.failed)
+                {
+                    return Some(key);
+                }
             }
         }
         None
     }
 
-    fn running(&self) -> usize {
-        self.active.len()
+    fn fill_idle_rows(&mut self) {
+        for index in 0..self.visible.len() {
+            if self.visible[index].is_none() {
+                self.visible[index] = self.pop_hidden();
+            }
+        }
     }
 
-    fn hidden(&self) -> usize {
-        self.hidden.len()
+    fn running_builders(&self) -> usize {
+        self.active
+            .iter()
+            .filter(|(key, activity)| key.is_builder() && !activity.failed)
+            .count()
+    }
+
+    fn hidden_builders(&self) -> usize {
+        self.hidden_builders.len()
+    }
+
+    fn hidden_sources(&self) -> usize {
+        self.hidden_sources.len()
     }
 }
 
@@ -1606,151 +1690,118 @@ impl BuilderViewport {
 /// full active-subject model and can be rebound after overflow or resize.
 struct Slot {
     bar: ProgressBar,
-    subject: Option<String>,
+    activity: Option<ActivityKey>,
 }
 
-/// Live indicatif state: a fixed set of subject slots (idle ones kept in place)
-/// plus a bottom summary bar.
-///
-/// A run says which of the two shapes suits it in its `run-started` details
-/// (`progress: "aggregate"`), rather than the block guessing from how many
-/// subjects turn up: a build wants its subjects named one by one, a fetch run
-/// wants the aggregate, and switching between them mid-run on a threshold would
-/// only make the display jump.
+/// Live indicatif state with two fixed statistics rows, a fixed viewport of
+/// concrete activities, and a fixed bottom run summary.
 struct LiveProgress {
     run_log_dir: PathBuf,
     multi: MultiProgress,
+    fetch: ProgressBar,
+    build: ProgressBar,
     summary: ProgressBar,
     active_style: ProgressStyle,
+    failed_style: ProgressStyle,
     idle_style: ProgressStyle,
     slots: Vec<Slot>,
-    overflow: Option<ProgressBar>,
-    viewport: BuilderViewport,
+    viewport: ActivityViewport,
     policy: ProgressPolicy,
     rows_override: Option<usize>,
     reachable: usize,
     reachable_sources: usize,
-    done: usize,
-    failed: usize,
-    transfer: Option<AggregateBlock>,
-    aggregate_only: bool,
-}
-
-/// The aggregate block: a fixed set of bars, redrawn from [`FetchProgress`].
-struct AggregateBlock {
-    progress: FetchProgress,
-    lines: Vec<ProgressBar>,
+    builder_done: usize,
+    builder_cache_hits: usize,
+    builder_failed: usize,
+    fetch_progress: FetchProgress,
     last_drawn: Instant,
 }
 
-/// How often the aggregate block is redrawn. Events arrive by the dozen per
-/// second (one progress tick per running download); the eye needs far fewer.
-const AGGREGATE_REDRAW: Duration = Duration::from_millis(200);
+/// Source progress ticks can arrive by the dozen per second. The activity row
+/// and statistics do not need a redraw for every byte counter update.
+const LIVE_REDRAW: Duration = Duration::from_millis(200);
 
 impl LiveProgress {
     fn new(run_log_dir: PathBuf, multi: MultiProgress, policy: ProgressPolicy) -> Self {
+        let fetch = multi.add(ProgressBar::new_spinner());
+        fetch.set_style(ProgressStyle::with_template("{msg}").expect("valid template"));
+        let build = multi.add(ProgressBar::new_spinner());
+        build.set_style(ProgressStyle::with_template("{msg}").expect("valid template"));
         let summary = multi.add(ProgressBar::new_spinner());
         summary.set_style(ProgressStyle::with_template("{msg}").expect("valid template"));
+        let now = Instant::now();
         Self {
             run_log_dir,
             multi,
+            fetch,
+            build,
             summary,
             active_style: ProgressStyle::with_template("{spinner} {msg} ({elapsed})")
                 .expect("valid template"),
+            failed_style: ProgressStyle::with_template("  {msg}").expect("valid template"),
             idle_style: ProgressStyle::with_template("  {msg}").expect("valid template"),
             slots: Vec::new(),
-            overflow: None,
-            viewport: BuilderViewport::default(),
+            viewport: ActivityViewport::default(),
             policy,
             rows_override: None,
             reachable: 0,
             reachable_sources: 0,
-            done: 0,
-            failed: 0,
-            transfer: None,
-            aggregate_only: false,
+            builder_done: 0,
+            builder_cache_hits: 0,
+            builder_failed: 0,
+            fetch_progress: FetchProgress::new(0),
+            last_drawn: now - LIVE_REDRAW,
         }
-    }
-
-    fn ensure_transfer(&mut self, total: usize, aggregate_only: bool) {
-        self.aggregate_only |= aggregate_only;
-        if self.transfer.is_some() {
-            return;
-        }
-        self.transfer = Some(AggregateBlock {
-            progress: FetchProgress::new(total),
-            lines: Vec::new(),
-            last_drawn: Instant::now() - AGGREGATE_REDRAW,
-        });
-    }
-
-    /// Folds an event into the aggregate view and repaints, at most every
-    /// [`AGGREGATE_REDRAW`]. `force` is for the moments that must be on screen
-    /// whatever the throttle says: the last frame of the run.
-    fn update_transfer(&mut self, record: &EventLogRecord, force: bool) {
-        let Some(block) = self.transfer.as_mut() else {
-            return;
-        };
-        let changed = block.progress.handle(record);
-        let now = Instant::now();
-        if !force && (!changed || now.duration_since(block.last_drawn) < AGGREGATE_REDRAW) {
-            return;
-        }
-        block.last_drawn = now;
-        self.render_transfer();
     }
 
     fn running(&self) -> usize {
-        self.viewport.running()
+        self.viewport.running_builders()
     }
 
-    fn update_summary(&self) {
-        let hidden = (self.viewport.hidden() > 0 && self.overflow.is_none())
-            .then_some(self.viewport.hidden());
-        self.summary.set_message(format_build_progress(
-            self.done,
-            self.running(),
-            self.failed,
-            self.reachable,
-            hidden,
+    fn update_headers(&mut self) {
+        self.fetch_progress.refresh_rate(Instant::now());
+        self.fetch.set_message(format!(
+            "fetch: {} downloading · {} waiting · {} complete · {} retrying · {} failed",
+            self.fetch_progress.active(),
+            self.fetch_progress.queued(),
+            self.fetch_progress.done,
+            self.fetch_progress.retrying(),
+            self.fetch_progress.failed,
         ));
+        self.build.set_message(format!(
+            "build: {} running · {} hidden · {} complete · {} failed",
+            self.running(),
+            self.viewport.hidden_builders(),
+            self.builder_done + self.builder_cache_hits,
+            self.builder_failed,
+        ));
+        self.summary.set_message(format_run_progress(&RunProgress {
+            built: self.builder_done,
+            cache_hits: self.builder_cache_hits,
+            build_failed: self.builder_failed,
+            fetched: self.fetch_progress.done,
+            fetch_failed: self.fetch_progress.failed,
+            reachable: self.reachable,
+            hidden_builders: self.viewport.hidden_builders(),
+            hidden_sources: self.viewport.hidden_sources(),
+        }));
     }
 
-    fn start_or_update(&mut self, build_key: &str, message: String) {
-        self.viewport.start_or_update(build_key, message);
-        self.reflow(self.current_rows());
+    fn start_or_update_activity(&mut self, key: ActivityKey, message: String) {
+        self.viewport.start_or_update(key, message);
     }
 
-    /// Marks a finished subject's slot idle: the line stays in place (the block
-    /// does not shrink) and becomes available for the next subject.
-    fn finish_subject(&mut self, build_key: &str, failed: bool) {
-        self.viewport.finish(build_key);
-        if failed {
-            self.failed += 1;
-        } else {
-            self.done += 1;
-        }
-        self.reflow(self.current_rows());
-    }
-
-    fn cancel_subject(&mut self, build_key: &str) {
-        self.viewport.finish(build_key);
-        self.reflow(self.current_rows());
+    fn finish_activity(&mut self, key: &ActivityKey) {
+        self.viewport.finish(key);
     }
 
     fn clear(&mut self) {
         for slot in self.slots.drain(..) {
             slot.bar.finish_and_clear();
         }
-        self.viewport = BuilderViewport::default();
-        if let Some(bar) = self.overflow.take() {
-            bar.finish_and_clear();
-        }
-        if let Some(block) = self.transfer.take() {
-            for bar in block.lines {
-                bar.finish_and_clear();
-            }
-        }
+        self.viewport = ActivityViewport::default();
+        self.fetch.finish_and_clear();
+        self.build.finish_and_clear();
         self.summary.finish_and_clear();
     }
 
@@ -1770,77 +1821,25 @@ impl LiveProgress {
 
     fn reflow(&mut self, rows: usize) {
         let budget = progress_line_budget(self.policy, rows);
-        let running = self.viewport.running();
-        let mut available = budget.saturating_sub(1);
-        let transfer_rows = self.transfer.as_ref().map_or(0, |block| {
-            let full = block.progress.active() + block.progress.queued() > 0;
-            let desired = if matches!(self.policy, ProgressPolicy::Summary) || !full {
-                1
-            } else {
-                3 + FETCH_SLOW_LINES
-            };
-            desired.min(available)
-        });
-        available = available.saturating_sub(transfer_rows);
-        let tentative = if matches!(self.policy, ProgressPolicy::Summary) || self.aggregate_only {
+        let capacity = if matches!(self.policy, ProgressPolicy::Summary) {
             0
         } else {
-            available
-        };
-        let show_overflow = running > tentative && available >= 2;
-        let capacity = if show_overflow {
-            available.saturating_sub(1)
-        } else {
-            tentative
+            budget.saturating_sub(3)
         };
         self.viewport.set_capacity(capacity);
-        self.sync_transfer_bars(transfer_rows);
-        self.sync_builder_bars();
-        self.sync_overflow(show_overflow && self.viewport.hidden() > 0);
-        if self.aggregate_only {
-            self.summary.set_message(String::new());
-        } else {
-            self.update_summary();
-        }
+        self.sync_activity_bars();
+        self.update_headers();
     }
 
-    fn sync_transfer_bars(&mut self, rows: usize) {
-        let Some(block) = self.transfer.as_mut() else {
-            return;
-        };
-        let style = ProgressStyle::with_template("{wide_msg}").expect("valid template");
-        while block.lines.len() < rows {
-            let index = block.lines.len();
-            let bar = self.multi.insert(index, ProgressBar::new_spinner());
-            bar.set_style(style.clone());
-            block.lines.push(bar);
-        }
-        while block.lines.len() > rows {
-            block
-                .lines
-                .pop()
-                .expect("transfer line count was checked")
-                .finish_and_clear();
-        }
-        self.render_transfer();
-    }
-
-    fn render_transfer(&mut self) {
-        let Some(block) = self.transfer.as_mut() else {
-            return;
-        };
-        let rendered = block.progress.render();
-        for (index, bar) in block.lines.iter().enumerate() {
-            bar.set_message(rendered.get(index).cloned().unwrap_or_default());
-        }
-    }
-
-    fn sync_builder_bars(&mut self) {
+    fn sync_activity_bars(&mut self) {
         while self.slots.len() < self.viewport.visible.len() {
             let bar = self
                 .multi
                 .insert_before(&self.summary, ProgressBar::new_spinner());
-            self.slots.push(Slot { bar, subject: None });
+            self.slots.push(Slot {
+                bar,
+                activity: None,
+            });
         }
         while self.slots.len() > self.viewport.visible.len() {
             self.slots
@@ -1853,40 +1852,25 @@ impl LiveProgress {
             let slot = &mut self.slots[index];
             match key {
                 Some(key) => {
-                    let subject = &self.viewport.active[key];
-                    if slot.subject.as_deref() != Some(key) {
+                    let activity = &self.viewport.active[key];
+                    if activity.failed {
+                        slot.bar.disable_steady_tick();
+                        slot.bar.set_style(self.failed_style.clone());
+                    } else if slot.activity.as_ref() != Some(key) {
                         slot.bar.set_style(self.active_style.clone());
-                        slot.bar.set_elapsed(subject.started_at.elapsed());
+                        slot.bar.set_elapsed(activity.started_at.elapsed());
                         slot.bar.enable_steady_tick(Duration::from_millis(120));
-                        slot.subject = Some(key.clone());
                     }
-                    slot.bar.set_message(subject.message.clone());
+                    slot.activity = Some(key.clone());
+                    slot.bar.set_message(activity.message.clone());
                 }
                 None => {
                     slot.bar.disable_steady_tick();
                     slot.bar.set_style(self.idle_style.clone());
                     slot.bar.set_message("—");
-                    slot.subject = None;
+                    slot.activity = None;
                 }
             }
-        }
-    }
-
-    fn sync_overflow(&mut self, show: bool) {
-        if show {
-            let bar = self.overflow.get_or_insert_with(|| {
-                let bar = self
-                    .multi
-                    .insert_before(&self.summary, ProgressBar::new_spinner());
-                bar.set_style(ProgressStyle::with_template("{wide_msg}").expect("valid template"));
-                bar
-            });
-            bar.set_message(format!(
-                "… {} more builders running",
-                self.viewport.hidden()
-            ));
-        } else if let Some(bar) = self.overflow.take() {
-            bar.finish_and_clear();
         }
     }
 
@@ -1901,15 +1885,7 @@ impl LiveProgress {
                 .unwrap_or_else(|| detail_u64(record, "subjects"))
                 as usize;
             self.reachable_sources = detail_u64(record, "reachable_sources") as usize;
-            if record.details.get("progress").and_then(Value::as_str) == Some("aggregate") {
-                self.reachable_sources = detail_u64(record, "sources") as usize;
-                self.ensure_transfer(self.reachable_sources, true);
-            } else {
-                // Reserve the compact fetch row from the start. Otherwise the
-                // whole live block jumps when the first lazily discovered
-                // network Source or remote content acquisition appears.
-                self.ensure_transfer(self.reachable_sources, false);
-            }
+            self.fetch_progress = FetchProgress::new(self.reachable_sources);
             self.reflow(self.current_rows());
             return;
         }
@@ -1928,18 +1904,8 @@ impl LiveProgress {
         }
 
         let network = record.details.get("transfer").and_then(Value::as_str) == Some("network");
-        if network {
-            self.ensure_transfer(self.reachable_sources, false);
-        }
-        let tracked = record
-            .subject
-            .as_ref()
-            .zip(self.transfer.as_ref())
-            .is_some_and(|(subject, block)| {
-                block.progress.subjects.contains_key(&subject.build_key)
-            });
         let source_terminal = record.subject.as_ref().is_some_and(|subject| {
-            subject.tag == "Source"
+            (subject.tag == "Source" || subject.tag == "SecondaryContent")
                 && matches!(
                     status,
                     value if value == BuildStatus::CacheHit.as_str()
@@ -1948,18 +1914,41 @@ impl LiveProgress {
                         || value == BuildStatus::Cancelled.as_str()
                 )
         });
-        if self.aggregate_only || network || tracked || source_terminal {
+        let tracked_source = record.subject.as_ref().is_some_and(|subject| {
+            self.fetch_progress
+                .subjects
+                .contains_key(&subject.build_key)
+        });
+        if network || tracked_source || source_terminal {
             if record.level >= BuildLogLevel::Warn {
                 let _ = self
                     .multi
                     .println(format_progress_line(record, &self.run_log_dir));
             }
-            self.update_transfer(record, false);
+            let changed = self.fetch_progress.handle(record);
+            if let Some(subject) = &record.subject {
+                let key = ActivityKey::Source(subject.build_key.clone());
+                if status == BuildStatus::Failed.as_str() {
+                    self.viewport
+                        .fail(&key, format_progress_line(record, &self.run_log_dir));
+                } else if source_terminal {
+                    self.finish_activity(&key);
+                } else if network || tracked_source {
+                    self.start_or_update_activity(
+                        key,
+                        format_progress_line(record, &self.run_log_dir),
+                    );
+                }
+            }
+            let now = Instant::now();
+            if changed && now.duration_since(self.last_drawn) >= LIVE_REDRAW {
+                self.last_drawn = now;
+            }
             self.reflow(self.current_rows());
             return;
         }
         if status == BuildStatus::CacheHit.as_str() {
-            self.done += 1;
+            self.builder_cache_hits += 1;
             self.reflow(self.current_rows());
             return;
         }
@@ -1975,7 +1964,7 @@ impl LiveProgress {
             return;
         };
 
-        if subject.tag == "Source" {
+        if subject.tag == "Source" || subject.tag == "SecondaryContent" {
             if record.level >= BuildLogLevel::Warn {
                 let _ = self
                     .multi
@@ -1985,19 +1974,28 @@ impl LiveProgress {
         }
 
         if status == BuildStatus::Done.as_str() {
-            self.finish_subject(&subject.build_key, false);
+            self.finish_activity(&ActivityKey::Builder(subject.build_key.clone()));
+            self.builder_done += 1;
+            self.reflow(self.current_rows());
             return;
         }
         if status == BuildStatus::Failed.as_str() {
-            // Leave a visible record of the failure above the block.
+            // The warning is durable above the block, while a visible activity
+            // row remains pinned until run-finished for immediate context.
             let _ = self
                 .multi
                 .println(format_progress_line(record, &self.run_log_dir));
-            self.finish_subject(&subject.build_key, true);
+            self.viewport.fail(
+                &ActivityKey::Builder(subject.build_key.clone()),
+                format_progress_line(record, &self.run_log_dir),
+            );
+            self.builder_failed += 1;
+            self.reflow(self.current_rows());
             return;
         }
         if status == BuildStatus::Cancelled.as_str() {
-            self.cancel_subject(&subject.build_key);
+            self.finish_activity(&ActivityKey::Builder(subject.build_key.clone()));
+            self.reflow(self.current_rows());
             return;
         }
         if record.level >= BuildLogLevel::Warn {
@@ -2012,21 +2010,36 @@ impl LiveProgress {
         // start / running / progress: route to the subject's (possibly reused)
         // slot and update its line in place.
         let message = format_progress_line(record, &self.run_log_dir);
-        self.start_or_update(&subject.build_key, message);
+        self.start_or_update_activity(ActivityKey::Builder(subject.build_key.clone()), message);
+        self.reflow(self.current_rows());
     }
 }
 
-fn format_build_progress(
-    done: usize,
-    running: usize,
-    failed: usize,
+struct RunProgress {
+    built: usize,
+    cache_hits: usize,
+    build_failed: usize,
+    fetched: usize,
+    fetch_failed: usize,
     reachable: usize,
-    hidden: Option<usize>,
-) -> String {
-    let mut line =
-        format!("{done} done · {running} running · {failed} failed · {reachable} reachable");
-    if let Some(hidden) = hidden {
-        line.push_str(&format!(" · {hidden} hidden"));
+    hidden_builders: usize,
+    hidden_sources: usize,
+}
+
+fn format_run_progress(progress: &RunProgress) -> String {
+    let mut line = format!(
+        "{} built · {} cache-hit · {} fetched · {} failed · {} reachable",
+        progress.built,
+        progress.cache_hits,
+        progress.fetched,
+        progress.build_failed + progress.fetch_failed,
+        progress.reachable,
+    );
+    if progress.hidden_builders > 0 {
+        line.push_str(&format!(" · {} builders hidden", progress.hidden_builders));
+    }
+    if progress.hidden_sources > 0 {
+        line.push_str(&format!(" · {} downloads hidden", progress.hidden_sources));
     }
     line
 }
@@ -2453,7 +2466,10 @@ mod tests {
 
     #[test]
     fn live_progress_keeps_idle_slots_and_reuses_them() {
-        let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
+        let sink = ProgressSink::live_hidden_with_policy(
+            PathBuf::from("/run"),
+            ProgressPolicy::Fixed { max_lines: 5 },
+        );
         let bk = |c: char| std::iter::repeat_n(c, 64).collect::<String>();
         let running = |level, status, key: &str| {
             sink.write_event(&live_subject_record(level, status, key));
@@ -2477,7 +2493,7 @@ mod tests {
             let live = state.lock().unwrap();
             assert_eq!(live.slots.len(), 2, "block does not shrink");
             assert_eq!(live.running(), 1);
-            assert_eq!(live.done, 1);
+            assert_eq!(live.builder_done, 1);
         }
 
         // A new subject reuses A's idle slot instead of growing the block.
@@ -2502,8 +2518,12 @@ mod tests {
         let live = state.lock().unwrap();
         assert_eq!(live.slots.len(), 2, "two lines remain, now both idle");
         assert_eq!(live.running(), 0);
-        assert_eq!(live.done, 3, "A + B done, plus one cache-hit");
-        assert_eq!(live.failed, 1);
+        assert_eq!(
+            live.builder_done + live.builder_cache_hits,
+            3,
+            "A + B done, plus one cache-hit"
+        );
+        assert_eq!(live.builder_failed, 1);
         drop(live);
 
         running(BuildLogLevel::Info, BuildStatus::Start, &bk('f'));
@@ -2513,45 +2533,112 @@ mod tests {
         };
         let live = state.lock().unwrap();
         assert_eq!(live.running(), 0, "cancelled subject releases its slot");
-        assert_eq!(live.done, 3, "cancellation is not successful work");
-        assert_eq!(live.failed, 1, "cancellation is not a build failure");
+        assert_eq!(
+            live.builder_done + live.builder_cache_hits,
+            3,
+            "cancellation is not successful work"
+        );
+        assert_eq!(
+            live.builder_failed, 1,
+            "cancellation is not a build failure"
+        );
     }
 
     #[test]
     fn viewport_promotes_oldest_hidden_and_resize_keeps_oldest_visible() {
-        let mut viewport = BuilderViewport::default();
+        let mut viewport = ActivityViewport::default();
         viewport.set_capacity(2);
         for key in ["a", "b", "c", "d"] {
-            viewport.start_or_update(key, key.to_string());
+            viewport.start_or_update(ActivityKey::Builder(key.into()), key.to_string());
         }
-        assert_eq!(viewport.visible, [Some("a".into()), Some("b".into())]);
-        assert_eq!(viewport.hidden, ["c", "d"]);
-
-        viewport.finish("a");
-        assert_eq!(viewport.visible, [Some("c".into()), Some("b".into())]);
-        assert_eq!(viewport.hidden, ["d"]);
-
-        viewport.set_capacity(1);
-        assert_eq!(viewport.visible, [Some("b".into())]);
-        assert_eq!(viewport.hidden, ["c", "d"]);
-
-        viewport.set_capacity(3);
         assert_eq!(
             viewport.visible,
-            [Some("b".into()), Some("c".into()), Some("d".into())]
+            [
+                Some(ActivityKey::Builder("a".into())),
+                Some(ActivityKey::Builder("b".into()))
+            ]
         );
-        assert!(viewport.hidden.is_empty());
+        assert_eq!(viewport.hidden_builders(), 2);
 
-        viewport.finish("d");
-        assert_eq!(viewport.visible, [Some("b".into()), Some("c".into()), None]);
+        viewport.finish(&ActivityKey::Builder("a".into()));
+        assert_eq!(
+            viewport.visible,
+            [
+                Some(ActivityKey::Builder("c".into())),
+                Some(ActivityKey::Builder("b".into()))
+            ]
+        );
+        assert_eq!(viewport.hidden_builders(), 1);
+
         viewport.set_capacity(1);
-        assert_eq!(viewport.visible, [Some("b".into())]);
+        assert_eq!(viewport.visible, [Some(ActivityKey::Builder("c".into()))]);
+        assert_eq!(viewport.hidden_builders(), 2);
+
         viewport.set_capacity(3);
         assert_eq!(
             viewport.visible,
-            [Some("b".into()), Some("c".into()), None],
+            [
+                Some(ActivityKey::Builder("c".into())),
+                Some(ActivityKey::Builder("b".into())),
+                Some(ActivityKey::Builder("d".into()))
+            ]
+        );
+        assert_eq!(viewport.hidden_builders(), 0);
+
+        viewport.finish(&ActivityKey::Builder("d".into()));
+        assert_eq!(
+            viewport.visible,
+            [
+                Some(ActivityKey::Builder("c".into())),
+                Some(ActivityKey::Builder("b".into())),
+                None
+            ]
+        );
+        viewport.set_capacity(1);
+        assert_eq!(viewport.visible, [Some(ActivityKey::Builder("c".into()))]);
+        viewport.set_capacity(3);
+        assert_eq!(
+            viewport.visible,
+            [
+                Some(ActivityKey::Builder("c".into())),
+                Some(ActivityKey::Builder("b".into())),
+                None
+            ],
             "a temporary shrink must restore the trailing idle row"
         );
+    }
+
+    #[test]
+    fn viewport_promotes_hidden_builders_before_hidden_sources() {
+        let mut viewport = ActivityViewport::default();
+        viewport.set_capacity(1);
+        let builder_one = ActivityKey::Builder("builder-one".into());
+        let source = ActivityKey::Source("source".into());
+        let builder_two = ActivityKey::Builder("builder-two".into());
+        viewport.start_or_update(builder_one.clone(), "builder one".into());
+        viewport.start_or_update(source.clone(), "source".into());
+        viewport.start_or_update(builder_two.clone(), "builder two".into());
+
+        assert_eq!(viewport.hidden_builders(), 1);
+        assert_eq!(viewport.hidden_sources(), 1);
+        viewport.finish(&builder_one);
+        assert_eq!(viewport.visible, [Some(builder_two.clone())]);
+        viewport.finish(&builder_two);
+        assert_eq!(viewport.visible, [Some(source)]);
+    }
+
+    #[test]
+    fn visible_failure_stays_pinned_until_the_run_ends() {
+        let mut viewport = ActivityViewport::default();
+        viewport.set_capacity(1);
+        let failed = ActivityKey::Builder("failed".into());
+        viewport.start_or_update(failed.clone(), "compiling".into());
+        viewport.fail(&failed, "compile failed".into());
+        viewport.start_or_update(ActivityKey::Builder("next".into()), "next".into());
+
+        assert_eq!(viewport.running_builders(), 1);
+        assert_eq!(viewport.hidden_builders(), 1);
+        assert_eq!(viewport.visible, [Some(failed)]);
     }
 
     #[test]
@@ -2567,11 +2654,14 @@ mod tests {
             let mut live = fixed.lock().unwrap();
             live.reflow_for_test(24);
             for index in 0..10 {
-                live.start_or_update(&format!("fixed-{index}"), format!("fixed {index}"));
+                live.start_or_update_activity(
+                    ActivityKey::Builder(format!("fixed-{index}")),
+                    format!("fixed {index}"),
+                );
             }
-            assert_eq!(live.slots.len(), 6);
-            assert_eq!(live.viewport.hidden(), 4);
-            assert!(live.overflow.is_some());
+            live.reflow_for_test(24);
+            assert_eq!(live.slots.len(), 5);
+            assert_eq!(live.viewport.hidden_builders(), 5);
         }
 
         let summary_sink =
@@ -2583,11 +2673,13 @@ mod tests {
             let mut live = summary.lock().unwrap();
             live.reflow_for_test(24);
             for index in 0..3 {
-                live.start_or_update(&format!("summary-{index}"), format!("summary {index}"));
+                live.start_or_update_activity(
+                    ActivityKey::Builder(format!("summary-{index}")),
+                    format!("summary {index}"),
+                );
             }
             assert!(live.slots.is_empty());
-            assert_eq!(live.viewport.hidden(), 3);
-            assert!(live.overflow.is_none());
+            assert_eq!(live.viewport.hidden_builders(), 3);
         }
     }
 
@@ -2601,29 +2693,40 @@ mod tests {
         let mut live = state.lock().unwrap();
         live.reflow_for_test(24);
         for index in 0..20 {
-            live.start_or_update(&format!("job-{index}"), format!("job {index}"));
+            live.start_or_update_activity(
+                ActivityKey::Builder(format!("job-{index}")),
+                format!("job {index}"),
+            );
         }
         assert_eq!(live.running(), 20);
-        assert_eq!(live.slots.len(), 16);
-        assert_eq!(live.viewport.hidden(), 4);
+        assert_eq!(live.slots.len(), 15);
+        assert_eq!(live.viewport.hidden_builders(), 5);
 
         live.reflow_for_test(10);
         assert_eq!(live.running(), 20);
-        assert_eq!(live.slots.len(), 5);
-        assert_eq!(live.viewport.hidden(), 15);
+        assert_eq!(live.slots.len(), 4);
+        assert_eq!(live.viewport.hidden_builders(), 16);
 
         live.reflow_for_test(40);
         assert_eq!(live.running(), 20);
-        assert_eq!(live.slots.len(), 20);
-        assert_eq!(live.viewport.hidden(), 0);
-        assert!(live.overflow.is_none());
+        assert_eq!(live.slots.len(), 27);
+        assert_eq!(live.viewport.hidden_builders(), 0);
     }
 
     #[test]
     fn build_progress_names_the_reachable_graph_without_a_fraction() {
         assert_eq!(
-            format_build_progress(24, 19, 0, 1907, None),
-            "24 done · 19 running · 0 failed · 1907 reachable"
+            format_run_progress(&RunProgress {
+                built: 24,
+                cache_hits: 19,
+                build_failed: 0,
+                fetched: 712,
+                fetch_failed: 0,
+                reachable: 1907,
+                hidden_builders: 3,
+                hidden_sources: 2,
+            }),
+            "24 built · 19 cache-hit · 712 fetched · 0 failed · 1907 reachable · 3 builders hidden · 2 downloads hidden"
         );
     }
 
@@ -2878,7 +2981,7 @@ mod tests {
     }
 
     #[test]
-    fn live_build_shows_transfer_and_builder_blocks_together() {
+    fn live_build_uses_one_fixed_viewport_for_builder_and_source_activity() {
         let sink =
             ProgressSink::live_hidden_with_policy(PathBuf::from("/run"), ProgressPolicy::Auto);
         let ProgressSink::Live(state) = &sink else {
@@ -2891,8 +2994,17 @@ mod tests {
         ));
         {
             let live = state.lock().unwrap();
-            assert_eq!(live.transfer.as_ref().unwrap().lines.len(), 1);
-            assert_eq!(live.transfer.as_ref().unwrap().progress.total, 991);
+            assert_eq!(live.fetch_progress.total, 991);
+            assert_eq!(live.slots.len(), 15, "two headers, 15 rows, one run line");
+            assert!(live.slots.iter().all(|slot| slot.activity.is_none()));
+            assert_eq!(
+                live.fetch.message(),
+                "fetch: 0 downloading · 0 waiting · 0 complete · 0 retrying · 0 failed"
+            );
+            assert_eq!(
+                live.build.message(),
+                "build: 0 running · 0 hidden · 0 complete · 0 failed"
+            );
         }
         sink.write_event(&live_subject_record(
             BuildLogLevel::Info,
@@ -2909,8 +3021,12 @@ mod tests {
         {
             let live = state.lock().unwrap();
             assert_eq!(live.running(), 1, "Source is not a builder row");
-            assert_eq!(live.slots.len(), 1);
-            assert_eq!(live.transfer.as_ref().unwrap().lines.len(), 6);
+            assert_eq!(live.slots.len(), 15);
+            assert_eq!(live.fetch_progress.queued(), 1);
+            assert_eq!(
+                live.slots[1].activity,
+                Some(ActivityKey::Source("source".to_string()))
+            );
         }
 
         sink.write_event(&fetch_record(
@@ -2920,12 +3036,13 @@ mod tests {
             json!({}),
         ));
         let live = state.lock().unwrap();
-        assert_eq!(live.transfer.as_ref().unwrap().lines.len(), 1);
+        assert_eq!(live.fetch_progress.done, 1);
+        assert!(live.slots[1].activity.is_none());
         assert_eq!(live.running(), 1);
     }
 
     #[test]
-    fn local_source_keeps_the_idle_transfer_row_without_activating_it() {
+    fn local_source_updates_fetch_statistics_without_taking_an_activity_row() {
         let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
         sink.write_event(&live_run_record(
             BuildStatus::RunStarted,
@@ -2947,29 +3064,20 @@ mod tests {
             panic!("expected live sink");
         };
         let live = state.lock().unwrap();
-        let transfer = live.transfer.as_ref().unwrap();
-        assert_eq!(transfer.lines.len(), 1);
-        assert_eq!(transfer.progress.done, 1);
-        assert_eq!(transfer.progress.active(), 0);
-        assert_eq!(transfer.progress.queued(), 0);
+        assert_eq!(live.fetch_progress.done, 1);
+        assert_eq!(live.fetch_progress.active(), 0);
+        assert_eq!(live.fetch_progress.queued(), 0);
         assert_eq!(live.running(), 0);
-        assert!(live.slots.is_empty());
+        assert!(live.slots.iter().all(|slot| slot.activity.is_none()));
     }
 
     #[test]
-    fn remote_secondary_event_uses_the_common_transfer_block() {
+    fn remote_secondary_event_uses_a_source_activity_row() {
         let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
         sink.write_event(&live_run_record(
             BuildStatus::RunStarted,
             json!({ "reachable": 1, "reachable_sources": 0, "jobs": 1 }),
         ));
-        {
-            let ProgressSink::Live(state) = &sink else {
-                panic!("expected live sink");
-            };
-            let live = state.lock().unwrap();
-            assert_eq!(live.transfer.as_ref().unwrap().lines.len(), 1);
-        }
         let event = BuildLogEvent {
             level: BuildLogLevel::Info,
             status: BuildStatus::Start,
@@ -2999,7 +3107,11 @@ mod tests {
             panic!("expected live sink");
         };
         let live = state.lock().unwrap();
-        assert_eq!(live.transfer.as_ref().unwrap().progress.queued(), 1);
+        assert_eq!(live.fetch_progress.queued(), 1);
+        assert_eq!(
+            live.slots.first().and_then(|slot| slot.activity.clone()),
+            Some(ActivityKey::Source("object-key".to_string()))
+        );
         assert_eq!(live.running(), 0);
     }
 
