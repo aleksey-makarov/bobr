@@ -419,7 +419,7 @@ async fn process_source_inner(
         message: "starting subject".to_string(),
         object_hash: None,
         raw_log_path: None,
-        details: host_details(&intended_host(&origin_value)),
+        details: source_start_details(&origin_value),
     });
     log_subject(
         &subject_logger,
@@ -1062,6 +1062,16 @@ fn host_details(host: &str) -> Map<String, Value> {
     details
 }
 
+fn source_start_details(origin: &Value) -> Map<String, Value> {
+    let mut details = host_details(&intended_host(origin));
+    let transfer = match origin.get("tag").and_then(Value::as_str) {
+        Some("Http" | "OciRegistry") => "network",
+        _ => "local",
+    };
+    details.insert("transfer".to_string(), Value::String(transfer.to_string()));
+    details
+}
+
 fn log_subject(logger: &Arc<dyn BuildLogger>, status: BuildStatus, message: &str) {
     logger.log_event(BuildLogEvent {
         level: BuildLogLevel::Info,
@@ -1077,6 +1087,18 @@ fn log_subject(logger: &Arc<dyn BuildLogger>, status: BuildStatus, message: &str
 /// A subject milestone that names where the work is happening, which is what
 /// moves it from queued to active in the live log.
 fn log_subject_host(logger: &Arc<dyn BuildLogger>, host: &str, message: &str) {
+    let mut details = host_details(host);
+    details.insert(
+        "transfer".to_string(),
+        Value::String(
+            if host == LOCAL_HOST {
+                "local"
+            } else {
+                "network"
+            }
+            .to_string(),
+        ),
+    );
     logger.log_event(BuildLogEvent {
         level: BuildLogLevel::Info,
         status: BuildStatus::Running,
@@ -1084,7 +1106,7 @@ fn log_subject_host(logger: &Arc<dyn BuildLogger>, host: &str, message: &str) {
         message: message.to_string(),
         object_hash: None,
         raw_log_path: None,
-        details: host_details(host),
+        details,
     });
 }
 
@@ -1112,6 +1134,7 @@ fn log_download(
     message: String,
 ) {
     let mut details = host_details(host);
+    details.insert("transfer".to_string(), Value::String("network".to_string()));
     if let Some(bytes) = bytes {
         details.insert("bytes".to_string(), Value::Number(bytes.into()));
     }

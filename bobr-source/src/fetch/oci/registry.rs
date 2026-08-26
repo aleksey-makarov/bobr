@@ -179,6 +179,7 @@ impl<'a> Session<'a> {
         };
         let mut details = Map::new();
         details.insert("host".to_string(), Value::String(self.host.clone()));
+        details.insert("transfer".to_string(), Value::String("network".to_string()));
         details.insert("bytes".to_string(), Value::Number(received.into()));
         if let Some(total) = total {
             details.insert("total_bytes".to_string(), Value::Number(total.into()));

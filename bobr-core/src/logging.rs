@@ -1322,7 +1322,7 @@ fn terminal_height() -> Option<usize> {
 
 fn progress_line_budget(policy: ProgressPolicy, rows: usize) -> usize {
     match policy {
-        ProgressPolicy::Summary => 1,
+        ProgressPolicy::Summary => rows.saturating_sub(2).clamp(1, 2),
         ProgressPolicy::Fixed { max_lines } => max_lines.min(rows.saturating_sub(2).max(1)),
         ProgressPolicy::Auto => {
             let screen = rows.saturating_sub(2).max(1);
@@ -1547,11 +1547,11 @@ struct LiveProgress {
     policy: ProgressPolicy,
     rows_override: Option<usize>,
     reachable: usize,
+    reachable_sources: usize,
     done: usize,
     failed: usize,
-    /// Set when the run asks for the aggregate shape; the per-subject slots are
-    /// then never used.
-    aggregate: Option<AggregateBlock>,
+    transfer: Option<AggregateBlock>,
+    aggregate_only: bool,
 }
 
 /// The aggregate block: a fixed set of bars, redrawn from [`FetchProgress`].
@@ -1582,31 +1582,22 @@ impl LiveProgress {
             policy,
             rows_override: None,
             reachable: 0,
+            reachable_sources: 0,
             done: 0,
             failed: 0,
-            aggregate: None,
+            transfer: None,
+            aggregate_only: false,
         }
     }
 
-    /// Switches to the aggregate shape, replacing the summary line with a block
-    /// of fixed lines. `{wide_msg}` lets indicatif truncate each to the
-    /// terminal width, so a long host list or source name cannot wrap and
-    /// break the block.
-    fn start_aggregate(&mut self, total: usize) {
-        let style = ProgressStyle::with_template("{wide_msg}").expect("valid template");
-        let lines: Vec<ProgressBar> = (0..2 + 1 + FETCH_SLOW_LINES)
-            .map(|_| {
-                let bar = self
-                    .multi
-                    .insert_before(&self.summary, ProgressBar::new_spinner());
-                bar.set_style(style.clone());
-                bar
-            })
-            .collect();
-        self.summary.set_message(String::new());
-        self.aggregate = Some(AggregateBlock {
+    fn ensure_transfer(&mut self, total: usize, aggregate_only: bool) {
+        self.aggregate_only |= aggregate_only;
+        if self.transfer.is_some() {
+            return;
+        }
+        self.transfer = Some(AggregateBlock {
             progress: FetchProgress::new(total),
-            lines,
+            lines: Vec::new(),
             last_drawn: Instant::now() - AGGREGATE_REDRAW,
         });
     }
@@ -1614,8 +1605,8 @@ impl LiveProgress {
     /// Folds an event into the aggregate view and repaints, at most every
     /// [`AGGREGATE_REDRAW`]. `force` is for the moments that must be on screen
     /// whatever the throttle says: the last frame of the run.
-    fn update_aggregate(&mut self, record: &EventLogRecord, force: bool) {
-        let Some(block) = self.aggregate.as_mut() else {
+    fn update_transfer(&mut self, record: &EventLogRecord, force: bool) {
+        let Some(block) = self.transfer.as_mut() else {
             return;
         };
         let changed = block.progress.handle(record);
@@ -1624,10 +1615,7 @@ impl LiveProgress {
             return;
         }
         block.last_drawn = now;
-        let rendered = block.progress.render();
-        for (index, bar) in block.lines.iter().enumerate() {
-            bar.set_message(rendered.get(index).cloned().unwrap_or_default());
-        }
+        self.render_transfer();
     }
 
     fn running(&self) -> usize {
@@ -1676,7 +1664,7 @@ impl LiveProgress {
         if let Some(bar) = self.overflow.take() {
             bar.finish_and_clear();
         }
-        if let Some(block) = self.aggregate.take() {
+        if let Some(block) = self.transfer.take() {
             for bar in block.lines {
                 bar.finish_and_clear();
             }
@@ -1699,13 +1687,20 @@ impl LiveProgress {
     }
 
     fn reflow(&mut self, rows: usize) {
-        if self.aggregate.is_some() {
-            return;
-        }
         let budget = progress_line_budget(self.policy, rows);
         let running = self.viewport.running();
-        let available = budget.saturating_sub(1);
-        let tentative = if matches!(self.policy, ProgressPolicy::Summary) {
+        let mut available = budget.saturating_sub(1);
+        let transfer_rows = self.transfer.as_ref().map_or(0, |block| {
+            let full = block.progress.active() + block.progress.queued() > 0;
+            let desired = if matches!(self.policy, ProgressPolicy::Summary) || !full {
+                1
+            } else {
+                3 + FETCH_SLOW_LINES
+            };
+            desired.min(available)
+        });
+        available = available.saturating_sub(transfer_rows);
+        let tentative = if matches!(self.policy, ProgressPolicy::Summary) || self.aggregate_only {
             0
         } else {
             available
@@ -1717,9 +1712,45 @@ impl LiveProgress {
             tentative
         };
         self.viewport.set_capacity(capacity);
+        self.sync_transfer_bars(transfer_rows);
         self.sync_builder_bars();
         self.sync_overflow(show_overflow && self.viewport.hidden() > 0);
-        self.update_summary();
+        if self.aggregate_only {
+            self.summary.set_message(String::new());
+        } else {
+            self.update_summary();
+        }
+    }
+
+    fn sync_transfer_bars(&mut self, rows: usize) {
+        let Some(block) = self.transfer.as_mut() else {
+            return;
+        };
+        let style = ProgressStyle::with_template("{wide_msg}").expect("valid template");
+        while block.lines.len() < rows {
+            let index = block.lines.len();
+            let bar = self.multi.insert(index, ProgressBar::new_spinner());
+            bar.set_style(style.clone());
+            block.lines.push(bar);
+        }
+        while block.lines.len() > rows {
+            block
+                .lines
+                .pop()
+                .expect("transfer line count was checked")
+                .finish_and_clear();
+        }
+        self.render_transfer();
+    }
+
+    fn render_transfer(&mut self) {
+        let Some(block) = self.transfer.as_mut() else {
+            return;
+        };
+        let rendered = block.progress.render();
+        for (index, bar) in block.lines.iter().enumerate() {
+            bar.set_message(rendered.get(index).cloned().unwrap_or_default());
+        }
     }
 
     fn sync_builder_bars(&mut self) {
@@ -1787,23 +1818,12 @@ impl LiveProgress {
                 .and_then(Value::as_u64)
                 .unwrap_or_else(|| detail_u64(record, "subjects"))
                 as usize;
+            self.reachable_sources = detail_u64(record, "reachable_sources") as usize;
             if record.details.get("progress").and_then(Value::as_str) == Some("aggregate") {
-                self.start_aggregate(detail_u64(record, "sources") as usize);
-                return;
+                self.reachable_sources = detail_u64(record, "sources") as usize;
+                self.ensure_transfer(self.reachable_sources, true);
             }
             self.reflow(self.current_rows());
-            return;
-        }
-        if self.aggregate.is_some() && status != BuildStatus::RunFinished.as_str() {
-            // Warnings and errors still scroll above the block: they are events
-            // worth keeping in the scrollback, which is exactly what the block
-            // itself is not.
-            if record.level >= BuildLogLevel::Warn {
-                let _ = self
-                    .multi
-                    .println(format_progress_line(record, &self.run_log_dir));
-            }
-            self.update_aggregate(record, false);
             return;
         }
         if status == BuildStatus::RunFinished.as_str() {
@@ -1824,6 +1844,28 @@ impl LiveProgress {
             let _ = self.multi.println(line);
             return;
         }
+
+        let network = record.details.get("transfer").and_then(Value::as_str) == Some("network");
+        if network {
+            self.ensure_transfer(self.reachable_sources, false);
+        }
+        let tracked = record
+            .subject
+            .as_ref()
+            .zip(self.transfer.as_ref())
+            .is_some_and(|(subject, block)| {
+                block.progress.subjects.contains_key(&subject.build_key)
+            });
+        if self.aggregate_only || network || tracked {
+            if record.level >= BuildLogLevel::Warn {
+                let _ = self
+                    .multi
+                    .println(format_progress_line(record, &self.run_log_dir));
+            }
+            self.update_transfer(record, false);
+            self.reflow(self.current_rows());
+            return;
+        }
         if status == BuildStatus::CacheHit.as_str() {
             self.done += 1;
             self.reflow(self.current_rows());
@@ -1840,6 +1882,15 @@ impl LiveProgress {
             }
             return;
         };
+
+        if subject.tag == "Source" {
+            if record.level >= BuildLogLevel::Warn {
+                let _ = self
+                    .multi
+                    .println(format_progress_line(record, &self.run_log_dir));
+            }
+            return;
+        }
 
         if status == BuildStatus::Done.as_str() {
             self.finish_subject(&subject.build_key, false);
@@ -2660,6 +2711,110 @@ mod tests {
         );
         // The finished download's bytes stay counted after it leaves.
         assert_eq!(progress.live_bytes(), 1024);
+    }
+
+    #[test]
+    fn live_build_shows_transfer_and_builder_blocks_together() {
+        let sink =
+            ProgressSink::live_hidden_with_policy(PathBuf::from("/run"), ProgressPolicy::Auto);
+        let ProgressSink::Live(state) = &sink else {
+            panic!("expected live sink");
+        };
+        state.lock().unwrap().reflow_for_test(24);
+        sink.write_event(&live_run_record(
+            BuildStatus::RunStarted,
+            json!({ "reachable": 1907, "reachable_sources": 991, "jobs": 20 }),
+        ));
+        sink.write_event(&live_subject_record(
+            BuildLogLevel::Info,
+            BuildStatus::Start,
+            &"b".repeat(64),
+        ));
+        sink.write_event(&fetch_record(
+            BuildStatus::Start,
+            BuildLogLevel::Info,
+            Some(("source", "source")),
+            json!({ "host": "example.org", "transfer": "network" }),
+        ));
+
+        {
+            let live = state.lock().unwrap();
+            assert_eq!(live.running(), 1, "Source is not a builder row");
+            assert_eq!(live.slots.len(), 1);
+            assert_eq!(live.transfer.as_ref().unwrap().lines.len(), 6);
+        }
+
+        sink.write_event(&fetch_record(
+            BuildStatus::Done,
+            BuildLogLevel::Info,
+            Some(("source", "source")),
+            json!({}),
+        ));
+        let live = state.lock().unwrap();
+        assert_eq!(live.transfer.as_ref().unwrap().lines.len(), 1);
+        assert_eq!(live.running(), 1);
+    }
+
+    #[test]
+    fn local_source_does_not_create_a_transfer_or_builder_row() {
+        let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
+        sink.write_event(&live_run_record(
+            BuildStatus::RunStarted,
+            json!({ "reachable": 2, "reachable_sources": 1, "jobs": 1 }),
+        ));
+        sink.write_event(&fetch_record(
+            BuildStatus::Start,
+            BuildLogLevel::Info,
+            Some(("local", "local")),
+            json!({ "host": "local", "transfer": "local" }),
+        ));
+        let ProgressSink::Live(state) = &sink else {
+            panic!("expected live sink");
+        };
+        let live = state.lock().unwrap();
+        assert!(live.transfer.is_none());
+        assert_eq!(live.running(), 0);
+        assert!(live.slots.is_empty());
+    }
+
+    #[test]
+    fn remote_secondary_event_uses_the_common_transfer_block() {
+        let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
+        sink.write_event(&live_run_record(
+            BuildStatus::RunStarted,
+            json!({ "reachable": 1, "reachable_sources": 0, "jobs": 1 }),
+        ));
+        let event = BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status: BuildStatus::Start,
+            op: Some("content".to_string()),
+            message: "fetching object from potato".to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details: json!({
+                "host": "potato",
+                "transfer": "network",
+                "content_source": "potato",
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        };
+        let subject = SubjectIdentity::new("SecondaryContent", "object", "object-key");
+        sink.write_event(&EventLogRecord::assemble(
+            0,
+            None,
+            Some(&subject),
+            &event,
+            Path::new("/run"),
+        ));
+
+        let ProgressSink::Live(state) = &sink else {
+            panic!("expected live sink");
+        };
+        let live = state.lock().unwrap();
+        assert_eq!(live.transfer.as_ref().unwrap().progress.queued(), 1);
+        assert_eq!(live.running(), 0);
     }
 
     #[test]

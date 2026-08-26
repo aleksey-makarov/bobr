@@ -49,6 +49,12 @@ pub async fn realize(
     let jobs = jobs.unwrap_or_else(default_jobs);
     let graph = Arc::new(plan_graph(&nodes, &goals).map_err(map_graph_error)?);
     let reachable = graph.nodes().len();
+    let reachable_sources = graph
+        .nodes()
+        .values()
+        .filter(|node| node.as_source().is_some())
+        .count();
+    let reachable_builders = reachable - reachable_sources;
     let store = Store::create(&store_path).map_err(map_store_error)?;
     let run = Arc::new(Run::new(run_id, &logs, &work)?);
     check_same_filesystem(&store, &run)?;
@@ -110,7 +116,15 @@ pub async fn realize(
         )
         .map_err(|error| ExecutionError::Build(error.to_string()))?,
     );
-    log_run_started(&logger, &goals, jobs, reachable, progress);
+    log_run_started(
+        &logger,
+        &goals,
+        jobs,
+        reachable,
+        reachable_builders,
+        reachable_sources,
+        progress,
+    );
     let realized = dynamic.realize_goals().await;
     let shutdown = executor
         .shutdown()
@@ -237,6 +251,8 @@ fn log_run_started(
     goals: &[String],
     jobs: usize,
     reachable: usize,
+    reachable_builders: usize,
+    reachable_sources: usize,
     progress: bobr_core::ProgressPolicy,
 ) {
     logger.log_run_event(BuildLogEvent {
@@ -250,6 +266,8 @@ fn log_run_started(
             "goals": goals,
             "jobs": jobs,
             "reachable": reachable,
+            "reachable_builders": reachable_builders,
+            "reachable_sources": reachable_sources,
             "progress_policy": progress,
         })
         .as_object()

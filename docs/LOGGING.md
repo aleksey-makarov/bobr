@@ -46,6 +46,19 @@ for `SIGWINCH` and immediately asks the logger to reflow the viewport; build
 events update its content independently. Non-TTY and `quiet` output never emit
 terminal control sequences.
 
+Network content acquisition has a second aggregate block above the builder
+viewport. It is created lazily by the first event carrying
+`details.transfer = "network"`, so a run satisfied by the working store, local
+Path origins, or hardlink secondaries reserves no rows for it. HTTP and OCI
+emit the same structured host/byte events; future remote content sources use
+that vocabulary as well. Local transfer events never create the block.
+
+While transfers are queued or active the block may show totals, throughput,
+host queues, and the oldest slow transfers, subject to the same line budget as
+builders. Once the queue drains it collapses to one cumulative line and expands
+again if lazy realization later opens more network work. The legacy standalone
+`bobr-fetch` selects the same component in aggregate-only mode.
+
 ## On-disk layout
 
 ```text
