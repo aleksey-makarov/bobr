@@ -51,9 +51,10 @@ The request is a single JSON object:
 - `quiet` — optional bool; suppress the live progress log
 - `jobs` — optional integer; limit on parallel builder execution
 - `progress` — optional terminal presentation policy; defaults to
-  `{ "mode": "auto" }`. `summary` hides individual builder rows; `fixed`
-  requires `max_lines >= 4` and caps the complete live block. This field never
-  affects build identity and is ignored for non-TTY output
+  `{ "mode": "auto" }`. The live block always has fetch statistics, build
+  statistics, and a run summary; `summary` hides only its individual activity
+  rows. `fixed` requires `max_lines >= 4` and caps the complete live block.
+  This field never affects build identity and is ignored for non-TTY output
 - `limits` — optional HTTP/OCI and local Source acquisition limits
 - `secondaries` — optional ordered local trusted-index and content-source
   capabilities

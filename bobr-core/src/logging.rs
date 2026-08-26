@@ -29,12 +29,12 @@ pub enum ProgressPolicy {
     /// Derive a line budget from the current terminal height.
     #[default]
     Auto,
-    /// Keep only the global summary and a compact transfer summary.
+    /// Keep fetch/build statistics and the run summary, but no activity rows.
     Summary,
     /// Cap the complete live block at `max_lines` terminal rows.
     Fixed {
-        /// Maximum rows occupied by builder, transfer, overflow, and summary
-        /// lines together.
+        /// Maximum rows occupied by both statistics, activity rows, and the
+        /// run summary together.
         max_lines: usize,
     },
 }

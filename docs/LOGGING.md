@@ -16,8 +16,9 @@ There are three non-overlapping output channels:
 - **stderr** is the live UI only: build progress plus warnings and errors, as a
   projection of the run logs onto the screen. The progress renderer is the
   only writer of stderr. In an interactive terminal (and not `quiet`) it draws a
-  **live block** (a bounded viewport over active subjects, a bottom summary
-  line, with warnings/errors printed above) via `indicatif`; otherwise (non-TTY, e.g.
+  **live block** (two statistics rows, a bounded activity viewport, and a
+  bottom run summary, with warnings/errors printed above) via `indicatif`;
+  otherwise (non-TTY, e.g.
   CI or a pipe, or `quiet`) it falls back to **plain per-line** output.
   Transient `progress` ticks appear only in the live block — the plain path
   omits them. How much it shows is a threshold (see [Verbosity](#verbosity)).
@@ -27,39 +28,48 @@ There are three non-overlapping output channels:
 
 ## Live viewport
 
-The request's `progress` policy controls only an interactive TTY:
+The request's `progress` policy controls only an interactive TTY. Every live
+block has this fixed order:
+
+```text
+fetch  <Source acquisition statistics>
+build  <builder statistics>
+<N activity rows>
+run    <whole-run summary>
+```
+
+The two statistics rows and the run row always exist. `N` is the line budget
+minus three, so normal activity events do not change the block's height.
 
 - `auto` uses at most three quarters of the terminal height while leaving at
   least two rows outside the live block;
 - `fixed` caps the complete block at `max_lines` rows;
-- `summary` hides individual subject rows.
+- `summary` keeps the three fixed rows and hides individual activity rows.
 
-The renderer keeps every active subject in its model even when only part of the
-set fits on screen. Visible rows remain stable. New overflow subjects are
-hidden in start order; when a visible subject finishes, the oldest hidden one
-takes its row. Shrinking the terminal hides the newest visible subjects and
-growing it restores the oldest hidden subjects. Rows allocated earlier in the
-run remain as `—` when idle, including trailing rows; a temporary resize or
-transfer-block expansion does not forget their high-water count. A compact
-overflow row, or the bottom summary when no row fits, reports how many are
-hidden.
+Each activity row belongs to one concrete builder or network Source acquisition
+until its terminal event. Empty rows display `—`. Local Path Sources, working
+store hits, and local secondary imports update fetch statistics but do not take
+an activity row.
+
+The renderer keeps every activity in its model even when only part fits on
+screen. There are separate FIFO queues for hidden builders and hidden Source
+acquisitions. When a row becomes free, the oldest hidden builder takes it; if
+there is none, the oldest hidden Source does. The policy affects display only,
+never execution. A visible failed activity stays in its row until the run
+finishes, so the immediate failure context does not disappear.
+
+The `fetch` row reports current `downloading`, connection-slot `waiting`,
+`complete`, transient `retrying`, and `failed` counts. The `build` row reports
+workers `running`, jobs `waiting` in the bounded BuildExecutor FIFO,
+`complete`, and `failed`. The `run` row reports whole-run outcomes plus the
+number of builders and downloads hidden only by the viewport.
 
 The number of visible rows never limits builder execution. A Tokio task listens
 for `SIGWINCH` and immediately asks the logger to reflow the viewport; build
-events update its content independently. Non-TTY and `quiet` output never emit
-terminal control sequences.
-
-Source acquisition has a second aggregate block above the builder viewport.
-Every run reserves its compact one-line form at startup, even with no active or
-reachable Source. The first event carrying `details.transfer = "network"`
-expands it to the active network view. HTTP and OCI emit the same structured
-host/byte events; future remote content sources use that vocabulary as well.
-Local transfer events update completion without expanding the block.
-
-While transfers are queued or active the block may show totals, throughput,
-host queues, and the oldest slow transfers, subject to the same line budget as
-builders. Once the queue drains it collapses to one cumulative line and expands
-again if lazy realization later opens more network work.
+events update its content independently. On resize, visible activities keep
+their order as far as possible; removed rows return to their kind's FIFO and
+new rows are filled with the same builder-first rule. Non-TTY and `quiet`
+output never emit terminal control sequences.
 
 ## On-disk layout
 
