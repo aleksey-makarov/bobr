@@ -2,7 +2,7 @@ use crate::ObjectHash;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{BufWriter, IsTerminal, Write};
@@ -1713,6 +1713,7 @@ struct LiveProgress {
     builder_done: usize,
     builder_cache_hits: usize,
     builder_failed: usize,
+    queued_builders: HashSet<String>,
     fetch_progress: FetchProgress,
     last_drawn: Instant,
 }
@@ -1749,6 +1750,7 @@ impl LiveProgress {
             builder_done: 0,
             builder_cache_hits: 0,
             builder_failed: 0,
+            queued_builders: HashSet::new(),
             fetch_progress: FetchProgress::new(0),
             last_drawn: now - LIVE_REDRAW,
         }
@@ -1769,9 +1771,9 @@ impl LiveProgress {
             self.fetch_progress.failed,
         ));
         self.build.set_message(format!(
-            "build: {} running · {} hidden · {} complete · {} failed",
+            "build: {} running · {} waiting · {} complete · {} failed",
             self.running(),
-            self.viewport.hidden_builders(),
+            self.queued_builders.len(),
             self.builder_done + self.builder_cache_hits,
             self.builder_failed,
         ));
@@ -1886,6 +1888,7 @@ impl LiveProgress {
                 as usize;
             self.reachable_sources = detail_u64(record, "reachable_sources") as usize;
             self.fetch_progress = FetchProgress::new(self.reachable_sources);
+            self.queued_builders.clear();
             self.reflow(self.current_rows());
             return;
         }
@@ -1904,6 +1907,29 @@ impl LiveProgress {
         }
 
         let network = record.details.get("transfer").and_then(Value::as_str) == Some("network");
+        let builder_queue_event = record.subject.as_ref().is_some_and(|subject| {
+            subject.tag != "Source"
+                && subject.tag != "SecondaryContent"
+                && status == BuildStatus::CacheMiss.as_str()
+                && record
+                    .details
+                    .get("queued_for_builder")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+        });
+        if builder_queue_event {
+            let subject = record.subject.as_ref().expect("queue event has a subject");
+            self.queued_builders.insert(subject.build_key.clone());
+            self.reflow(self.current_rows());
+            return;
+        }
+        if status == BuildStatus::Start.as_str()
+            && let Some(subject) = &record.subject
+            && subject.tag != "Source"
+            && subject.tag != "SecondaryContent"
+        {
+            self.queued_builders.remove(&subject.build_key);
+        }
         let source_terminal = record.subject.as_ref().is_some_and(|subject| {
             (subject.tag == "Source" || subject.tag == "SecondaryContent")
                 && matches!(
@@ -1948,6 +1974,9 @@ impl LiveProgress {
             return;
         }
         if status == BuildStatus::CacheHit.as_str() {
+            if let Some(subject) = &record.subject {
+                self.queued_builders.remove(&subject.build_key);
+            }
             self.builder_cache_hits += 1;
             self.reflow(self.current_rows());
             return;
@@ -1974,12 +2003,14 @@ impl LiveProgress {
         }
 
         if status == BuildStatus::Done.as_str() {
+            self.queued_builders.remove(&subject.build_key);
             self.finish_activity(&ActivityKey::Builder(subject.build_key.clone()));
             self.builder_done += 1;
             self.reflow(self.current_rows());
             return;
         }
         if status == BuildStatus::Failed.as_str() {
+            self.queued_builders.remove(&subject.build_key);
             // The warning is durable above the block, while a visible activity
             // row remains pinned until run-finished for immediate context.
             let _ = self
@@ -1994,6 +2025,7 @@ impl LiveProgress {
             return;
         }
         if status == BuildStatus::Cancelled.as_str() {
+            self.queued_builders.remove(&subject.build_key);
             self.finish_activity(&ActivityKey::Builder(subject.build_key.clone()));
             self.reflow(self.current_rows());
             return;
@@ -2464,6 +2496,28 @@ mod tests {
         )
     }
 
+    fn queued_builder_record(build_key: &str) -> EventLogRecord {
+        let identity = SubjectIdentity::new("Tree", "pkg", build_key);
+        EventLogRecord::assemble(
+            0,
+            None,
+            Some(&identity),
+            &BuildLogEvent {
+                level: BuildLogLevel::Progress,
+                status: BuildStatus::CacheMiss,
+                op: Some("queued".to_string()),
+                message: "waiting for builder slot".to_string(),
+                object_hash: None,
+                raw_log_path: None,
+                details: json!({ "queued_for_builder": true })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            },
+            Path::new("/run"),
+        )
+    }
+
     #[test]
     fn live_progress_keeps_idle_slots_and_reuses_them() {
         let sink = ProgressSink::live_hidden_with_policy(
@@ -2542,6 +2596,36 @@ mod tests {
             live.builder_failed, 1,
             "cancellation is not a build failure"
         );
+    }
+
+    #[test]
+    fn queued_builder_counts_as_waiting_until_its_worker_starts() {
+        let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
+        let key = "q".repeat(64);
+        sink.write_event(&live_run_record(
+            BuildStatus::RunStarted,
+            json!({ "reachable": 1, "reachable_sources": 0, "jobs": 1 }),
+        ));
+        sink.write_event(&queued_builder_record(&key));
+        let ProgressSink::Live(state) = &sink else {
+            panic!("expected live sink");
+        };
+        {
+            let live = state.lock().unwrap();
+            assert_eq!(live.queued_builders.len(), 1);
+            assert_eq!(
+                live.build.message(),
+                "build: 0 running · 1 waiting · 0 complete · 0 failed"
+            );
+        }
+        sink.write_event(&live_subject_record(
+            BuildLogLevel::Info,
+            BuildStatus::Start,
+            &key,
+        ));
+        let live = state.lock().unwrap();
+        assert!(live.queued_builders.is_empty());
+        assert_eq!(live.running(), 1);
     }
 
     #[test]
@@ -3003,7 +3087,7 @@ mod tests {
             );
             assert_eq!(
                 live.build.message(),
-                "build: 0 running · 0 hidden · 0 complete · 0 failed"
+                "build: 0 running · 0 waiting · 0 complete · 0 failed"
             );
         }
         sink.write_event(&live_subject_record(

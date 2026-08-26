@@ -10,7 +10,7 @@ use bobr_builder::{BuilderInputs, BuilderPlannedSubject};
 use bobr_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuildSeed, BuildStatus,
     CancellationToken, NoopBuildLogger, ObjectHash, ReuseKey, Run, RuntimeProvider,
-    SubjectRunContext,
+    SubjectIdentity, SubjectRunContext,
 };
 use bobr_store::{Store, import_build};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -175,6 +175,39 @@ impl BuilderJob {
 
     fn cancellation(&self) -> CancellationToken {
         self.execution.cancellation.clone()
+    }
+
+    /// Announces acceptance into the executor FIFO before a worker can start.
+    ///
+    /// This is deliberately a transient run-level subject event: no workspace
+    /// exists yet, so there cannot be a subject log file. The live renderer
+    /// uses it to distinguish workers truly running from builders waiting for
+    /// a bounded executor slot.
+    fn log_queued(&self) {
+        let builder = self
+            .subject
+            .as_builder()
+            .expect("BuilderJob was validated before submission");
+        let identity = SubjectIdentity::new(
+            builder.tag(),
+            builder.name(),
+            builder.build_key().to_string(),
+        );
+        self.execution.run_logger.log_subject_event(
+            &identity,
+            BuildLogEvent {
+                level: BuildLogLevel::Progress,
+                status: BuildStatus::CacheMiss,
+                op: Some("queued".to_string()),
+                message: "waiting for builder slot".to_string(),
+                object_hash: None,
+                raw_log_path: None,
+                details: serde_json::Map::from_iter([(
+                    "queued_for_builder".to_string(),
+                    serde_json::Value::Bool(true),
+                )]),
+            },
+        );
     }
 }
 
@@ -659,7 +692,10 @@ fn dispatch(
 
     while let Some(command) = receiver.blocking_recv() {
         match command {
-            Command::Submit(pending) if !shutting_down => queue.push_back(pending),
+            Command::Submit(pending) if !shutting_down => {
+                pending.job.log_queued();
+                queue.push_back(pending);
+            }
             Command::Submit(pending) => {
                 pending.job.cancellation().cancel();
                 send_pending_result(
