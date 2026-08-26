@@ -285,6 +285,89 @@ struct RetrySink {
     reasons: Mutex<BTreeMap<String, u64>>,
 }
 
+/// Exact terminal outcomes observed by the run logger.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct RunOutcomeStats {
+    /// Builders whose staged output was published.
+    pub built: u64,
+    /// Subjects accepted from exact/reuse/cache content.
+    pub cache_hit: u64,
+    /// Subjects that terminated with failure.
+    pub failed: u64,
+    /// Subjects cancelled before publication.
+    pub cancelled: u64,
+    /// Source objects downloaded over HTTP or OCI.
+    pub downloaded: u64,
+    /// Source objects materialized from a local Path origin.
+    pub local: u64,
+    /// Source objects acquired from secondary content.
+    pub secondary: u64,
+    /// Source objects already complete in the working store.
+    pub already_present: u64,
+}
+
+#[derive(Debug, Default)]
+struct OutcomeSink {
+    built: AtomicU64,
+    cache_hit: AtomicU64,
+    failed: AtomicU64,
+    cancelled: AtomicU64,
+    downloaded: AtomicU64,
+    local: AtomicU64,
+    secondary: AtomicU64,
+    already_present: AtomicU64,
+}
+
+impl OutcomeSink {
+    fn snapshot(&self) -> RunOutcomeStats {
+        let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
+        RunOutcomeStats {
+            built: load(&self.built),
+            cache_hit: load(&self.cache_hit),
+            failed: load(&self.failed),
+            cancelled: load(&self.cancelled),
+            downloaded: load(&self.downloaded),
+            local: load(&self.local),
+            secondary: load(&self.secondary),
+            already_present: load(&self.already_present),
+        }
+    }
+}
+
+impl EventSink for OutcomeSink {
+    fn write_event(&self, record: &EventLogRecord) {
+        let Some(subject) = &record.subject else {
+            return;
+        };
+        match record.status.as_str() {
+            "done" if subject.tag != "Source" && subject.tag != "SecondaryContent" => {
+                self.built.fetch_add(1, Ordering::Relaxed);
+            }
+            "cache-hit" => {
+                self.cache_hit.fetch_add(1, Ordering::Relaxed);
+            }
+            "failed" => {
+                self.failed.fetch_add(1, Ordering::Relaxed);
+            }
+            "cancelled" => {
+                self.cancelled.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+        let Some(outcome) = record.details.get("source_outcome").and_then(Value::as_str) else {
+            return;
+        };
+        let counter = match outcome {
+            "downloaded" => &self.downloaded,
+            "local" => &self.local,
+            "secondary" => &self.secondary,
+            "already_present" => &self.already_present,
+            _ => return,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 impl RetrySink {
     fn counts(&self) -> BTreeMap<String, u64> {
         self.hosts
@@ -333,6 +416,7 @@ pub struct BuildRunLogger {
     sinks: Vec<Arc<dyn EventSink>>,
     progress: Arc<ProgressSink>,
     retries: Arc<RetrySink>,
+    outcomes: Arc<OutcomeSink>,
 }
 
 impl BuildRunLogger {
@@ -364,6 +448,7 @@ impl BuildRunLogger {
             progress_policy,
         ));
         let retries = Arc::new(RetrySink::default());
+        let outcomes = Arc::new(OutcomeSink::default());
 
         Ok(Self {
             run_log_dir: run_log_dir.to_path_buf(),
@@ -373,9 +458,11 @@ impl BuildRunLogger {
                 file_sink,
                 Arc::clone(&progress_sink) as Arc<dyn EventSink>,
                 Arc::clone(&retries) as Arc<dyn EventSink>,
+                Arc::clone(&outcomes) as Arc<dyn EventSink>,
             ],
             progress: progress_sink,
             retries,
+            outcomes,
         })
     }
 
@@ -416,6 +503,11 @@ impl BuildRunLogger {
     /// Empty when nothing had to be retried.
     pub fn download_retry_reasons(&self) -> BTreeMap<String, u64> {
         self.retries.reason_counts()
+    }
+
+    /// Returns terminal run outcomes accumulated from structured events.
+    pub fn outcome_stats(&self) -> RunOutcomeStats {
+        self.outcomes.snapshot()
     }
 
     /// Total number of best-effort logging failures swallowed across sinks.
@@ -1832,12 +1924,7 @@ impl LiveProgress {
             // other run (the fetcher's, say) composes its own summary message,
             // and inventing zero "built" counters for it would be a lie.
             let line = if record.details.contains_key("built") {
-                format!(
-                    "done: {} built · {} cache-hit · {} failed",
-                    detail_u64(record, "built"),
-                    detail_u64(record, "cache_hit"),
-                    detail_u64(record, "failed"),
-                )
+                format!("done: {}", format_outcome_details(record))
             } else {
                 format!("done: {}", record.message)
             };
@@ -2094,12 +2181,7 @@ fn format_progress_line(record: &EventLogRecord, run_log_dir: &Path) -> String {
     // rebuild-world log, the MCP build server -- that left the run ending on
     // "build finished" with no outcome at all.
     if record.status == BuildStatus::RunFinished.as_str() && record.details.contains_key("built") {
-        line.push_str(&format!(
-            "; {} built · {} cache-hit · {} failed",
-            detail_u64(record, "built"),
-            detail_u64(record, "cache_hit"),
-            detail_u64(record, "failed"),
-        ));
+        line.push_str(&format!("; {}", format_outcome_details(record)));
     }
 
     if let Some(raw_log) = &record.raw_log {
@@ -2109,6 +2191,27 @@ fn format_progress_line(record: &EventLogRecord, run_log_dir: &Path) -> String {
     }
 
     line
+}
+
+fn format_outcome_details(record: &EventLogRecord) -> String {
+    let mut parts = vec![
+        format!("{} built", detail_u64(record, "built")),
+        format!("{} cache-hit", detail_u64(record, "cache_hit")),
+    ];
+    if record.details.contains_key("downloaded") {
+        parts.extend([
+            format!("{} downloaded", detail_u64(record, "downloaded")),
+            format!("{} local", detail_u64(record, "local")),
+            format!("{} secondary", detail_u64(record, "secondary")),
+            format!("{} already-present", detail_u64(record, "already_present")),
+        ]);
+    }
+    parts.push(format!("{} failed", detail_u64(record, "failed")));
+    let cancelled = detail_u64(record, "cancelled");
+    if cancelled > 0 {
+        parts.push(format!("{cancelled} cancelled"));
+    }
+    parts.join(" · ")
 }
 
 fn relativize_raw_log(path: &Path, run_log_dir: &Path) -> String {
@@ -2641,6 +2744,51 @@ mod tests {
         assert_eq!(
             line,
             "[run-finished]: build finished; 12 built · 340 cache-hit · 2 failed"
+        );
+    }
+
+    #[test]
+    fn outcome_sink_counts_builder_and_source_categories_once() {
+        let sink = OutcomeSink::default();
+        sink.write_event(&live_subject_record(
+            BuildLogLevel::Info,
+            BuildStatus::Done,
+            &"b".repeat(64),
+        ));
+        sink.write_event(&fetch_record(
+            BuildStatus::Done,
+            BuildLogLevel::Info,
+            Some(("download", "download")),
+            json!({ "source_outcome": "downloaded" }),
+        ));
+        sink.write_event(&fetch_record(
+            BuildStatus::CacheHit,
+            BuildLogLevel::Info,
+            Some(("present", "present")),
+            json!({ "source_outcome": "already_present" }),
+        ));
+        sink.write_event(&live_subject_record(
+            BuildLogLevel::Error,
+            BuildStatus::Failed,
+            &"f".repeat(64),
+        ));
+        sink.write_event(&live_subject_record(
+            BuildLogLevel::Info,
+            BuildStatus::Cancelled,
+            &"c".repeat(64),
+        ));
+
+        assert_eq!(
+            sink.snapshot(),
+            RunOutcomeStats {
+                built: 1,
+                cache_hit: 1,
+                failed: 1,
+                cancelled: 1,
+                downloaded: 1,
+                already_present: 1,
+                ..RunOutcomeStats::default()
+            }
         );
     }
 

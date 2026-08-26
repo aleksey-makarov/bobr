@@ -99,15 +99,86 @@ fn cli_accepts_explicit_request_path() {
             .join("events.jsonl"),
     )
     .unwrap();
-    let started = events
+    let parsed = events
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let started = parsed
+        .iter()
         .find(|event| event["status"] == "run-started")
         .expect("unified Realizer must record a run-started event");
     assert_eq!(started["details"]["reachable"], 1);
     assert_eq!(started["details"]["reachable_builders"], 1);
     assert_eq!(started["details"]["reachable_sources"], 0);
     assert_eq!(started["details"]["progress_policy"]["mode"], "auto");
+    let finished = parsed
+        .iter()
+        .find(|event| event["status"] == "run-finished")
+        .expect("unified Realizer must record a run-finished event");
+    assert_eq!(finished["details"]["built"], 1);
+    assert_eq!(finished["details"]["cache_hit"], 0);
+    assert_eq!(finished["details"]["downloaded"], 0);
+    assert_eq!(finished["details"]["failed"], 0);
+}
+
+#[test]
+fn warm_unified_run_reports_one_cache_hit_without_rebuilding() {
+    let workspace = tempdir().unwrap();
+    let store = store_root(workspace.path());
+    fs::create_dir_all(&store).unwrap();
+    let recipe = tree_file_recipe("warm", "warm.txt", "warm", false);
+    let mut hashes = Vec::new();
+    for run_id in ["cold", "warm"] {
+        let logs = workspace.path().join("logs").join(run_id);
+        let work = workspace.path().join("work").join(run_id);
+        fs::create_dir_all(&logs).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        let request = workspace.path().join(format!("{run_id}.json"));
+        fs::write(
+            &request,
+            serde_json::to_vec_pretty(&json!({
+                "schema": "bobr-request-v4",
+                "store": &store,
+                "logs": logs,
+                "work": work,
+                "run_id": run_id,
+                "goals": ["root"],
+                "nodes": { "root": recipe.clone() },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
+            .arg(request)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        hashes.push(String::from_utf8(output.stdout).unwrap());
+    }
+    assert_eq!(hashes[0], hashes[1]);
+
+    let events = fs::read_to_string(
+        workspace
+            .path()
+            .join("logs")
+            .join("warm")
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    let finished = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|event| event["status"] == "run-finished")
+        .unwrap();
+    assert_eq!(finished["details"]["built"], 0);
+    assert_eq!(finished["details"]["cache_hit"], 1);
+    assert_eq!(finished["details"]["failed"], 0);
+    assert!(
+        fs::read_dir(workspace.path().join("work").join("warm"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
 }
 
 #[test]

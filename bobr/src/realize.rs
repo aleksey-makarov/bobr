@@ -277,7 +277,8 @@ fn log_run_started(
 }
 
 fn log_run_finished(logger: &BuildRunLogger, result: Result<&[GoalResult], &ExecutionError>) {
-    let (level, status, message, details) = match result {
+    let stats = logger.outcome_stats();
+    let (level, status, message, mut details) = match result {
         Ok(goals) => (
             BuildLogLevel::Info,
             BuildStatus::RunFinished,
@@ -291,6 +292,21 @@ fn log_run_finished(logger: &BuildRunLogger, result: Result<&[GoalResult], &Exec
             json!({ "error_class": error.class() }),
         ),
     };
+    details["built"] = json!(stats.built);
+    details["cache_hit"] = json!(stats.cache_hit);
+    details["failed"] = json!(stats.failed);
+    details["cancelled"] = json!(stats.cancelled);
+    details["downloaded"] = json!(stats.downloaded);
+    details["local"] = json!(stats.local);
+    details["secondary"] = json!(stats.secondary);
+    details["already_present"] = json!(stats.already_present);
+    details["logging_errors"] = json!(logger.logging_errors());
+    let retries = logger.download_retries();
+    if !retries.is_empty() {
+        details["download_retries"] = json!(retries.values().sum::<u64>());
+        details["download_retries_by_host"] = json!(retries);
+        details["download_retry_reasons"] = json!(logger.download_retry_reasons());
+    }
     logger.log_run_event(BuildLogEvent {
         level,
         status,

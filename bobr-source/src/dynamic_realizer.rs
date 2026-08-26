@@ -17,7 +17,8 @@ use crate::realizer::execute_builder_miss;
 use bobr_builder::{BuilderInputs, BuilderPlannedSubject, materialize_fs_tree_root};
 use bobr_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildLogger, BuildRunLogger, BuildSeed, BuildStatus,
-    CancellationToken, ObjectHash, ReuseKey, Run, RuntimeProvider, SubjectRunContext,
+    CancellationToken, ObjectHash, ReuseKey, Run, RuntimeProvider, SubjectIdentity,
+    SubjectRunContext,
 };
 use bobr_store::{
     MappingCandidates, SecondaryResolver, SourceImportOutcome, Store, StoreError,
@@ -138,6 +139,7 @@ pub struct DynamicRealizer {
     candidate_cells: Mutex<HashMap<BuildKey, CandidateCell>>,
     local_cells: Mutex<HashMap<BuildKey, LocalCell>>,
     content_cells: Mutex<HashMap<ObjectHash, ContentCell>>,
+    built_keys: Mutex<HashSet<BuildKey>>,
 }
 
 impl fmt::Debug for DynamicRealizer {
@@ -203,6 +205,7 @@ impl DynamicRealizer {
             candidate_cells: Mutex::new(HashMap::new()),
             local_cells: Mutex::new(HashMap::new()),
             content_cells: Mutex::new(HashMap::new()),
+            built_keys: Mutex::new(HashSet::new()),
         })
     }
 
@@ -435,11 +438,9 @@ impl DynamicRealizer {
             self.cancellation.clone(),
         );
         let job = BuilderJob::new(node, execution)?;
-        Ok(
-            execute_builder_miss(&self.build_executor, job, self.store.clone())
-                .await?
-                .object_hash,
-        )
+        let output = execute_builder_miss(&self.build_executor, job, self.store.clone()).await?;
+        self.built_keys.lock().await.insert(builder.build_key());
+        Ok(output.object_hash)
     }
 
     async fn prepare_builder_inputs(
@@ -504,10 +505,21 @@ impl DynamicRealizer {
             )
             .await;
             return match outcome {
-                SourceOutcome::Downloaded
-                | SourceOutcome::CacheHit
-                | SourceOutcome::Local
-                | SourceOutcome::Secondary => Ok(source.declared_object_hash()),
+                SourceOutcome::Downloaded | SourceOutcome::Local => {
+                    Ok(source.declared_object_hash())
+                }
+                SourceOutcome::CacheHit => {
+                    self.log_source_cache_hit(
+                        &source,
+                        source.declared_object_hash(),
+                        "already_present",
+                    );
+                    Ok(source.declared_object_hash())
+                }
+                SourceOutcome::Secondary => {
+                    self.log_source_cache_hit(&source, source.declared_object_hash(), "secondary");
+                    Ok(source.declared_object_hash())
+                }
                 SourceOutcome::Mismatched(mismatch) => Err(DynamicRealizeError::new(format!(
                     "source '{}' declared object '{}' but materialized '{}'",
                     mismatch.name, mismatch.declared, mismatch.actual
@@ -605,10 +617,49 @@ impl DynamicRealizer {
                 .map_err(|error| {
                     DynamicRealizeError::new(format!("source publication task panicked: {error}"))
                 })??;
-                Ok(())
+                self.log_source_cache_hit(source, hash, "already_present");
             }
-            PlannedNode::Builder(builder) => self.publish_cached_builder(builder, hash).await,
+            PlannedNode::Builder(builder) => {
+                self.publish_cached_builder(builder, hash).await?;
+                if !self.built_keys.lock().await.contains(&builder.build_key()) {
+                    self.log_cache_hit(node, hash, None);
+                }
+            }
         }
+        Ok(())
+    }
+
+    fn log_source_cache_hit(
+        &self,
+        source: &crate::SourcePlannedSubject,
+        hash: ObjectHash,
+        outcome: &str,
+    ) {
+        let node = PlannedNode::Source(source.clone());
+        self.log_cache_hit(&node, hash, Some(outcome));
+    }
+
+    fn log_cache_hit(&self, node: &PlannedNode, hash: ObjectHash, source_outcome: Option<&str>) {
+        let identity = SubjectIdentity::new(node.tag(), node.name(), node.build_key().to_string());
+        let mut details = serde_json::Map::new();
+        if let Some(outcome) = source_outcome {
+            details.insert(
+                "source_outcome".to_string(),
+                serde_json::Value::String(outcome.to_string()),
+            );
+        }
+        self.logger.log_subject_event(
+            &identity,
+            BuildLogEvent {
+                level: BuildLogLevel::Info,
+                status: BuildStatus::CacheHit,
+                op: None,
+                message: "served from cache".to_string(),
+                object_hash: Some(hash),
+                raw_log_path: None,
+                details,
+            },
+        );
     }
 
     async fn publish_cached_builder(
@@ -1611,6 +1662,8 @@ mod tests {
             .filter(|entry| entry.path().is_dir())
             .count();
         assert_eq!(workspace_count, 1);
+        assert_eq!(environment.logger.outcome_stats().built, 1);
+        assert_eq!(environment.logger.outcome_stats().cache_hit, 0);
         executor.shutdown().await.unwrap();
     }
 
@@ -1667,6 +1720,7 @@ mod tests {
             .expect("single-goal realization failed");
         assert_eq!(realized.len(), 1);
         assert_eq!(concurrent, 2);
+        assert_eq!(environment.logger.outcome_stats().downloaded, 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]

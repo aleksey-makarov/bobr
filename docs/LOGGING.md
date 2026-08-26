@@ -132,7 +132,7 @@ filtering by lifecycle is reliable while builders stay free to name their work.
 
 | value          | meaning                                                        |
 |----------------|----------------------------------------------------------------|
-| `run-started`  | run-level: build started (root, jobs, subject count, backend)  |
+| `run-started`  | run-level: realization started (goals, jobs, reachable counts, progress policy) |
 | `run-finished` | run-level: build finished (`details.result` = ok/failed/cancelled, counters) |
 | `start`        | subject execution started                                      |
 | `cache-miss`   | subject not cached; will be built                              |
@@ -154,13 +154,20 @@ must not assume a closed set.
 The run-level `events.jsonl` is a full audit log, not just an aggregate of
 subject events. Beyond the fanned-out subject events it carries:
 
-- `run-started`: root key/name/tag, `jobs`, subject count, runtime backend
-  (`host`/`namespace`);
+- `run-started`: ordered goals, `jobs`, total reachable nodes, reachable
+  builders and Sources, and the selected progress policy;
 - `cache-hit`: one per cached subject resolved while planning (carries the
   subject identity and `object_hash`); a fully cached run records only the
   resolved boundary, not pruned interior subtrees;
-- `run-finished`: `details.result` (`ok`/`failed`/`cancelled`) and the
-  `built`/`cache_hit`/`failed` counters.
+- `run-finished`: realized goals or `details.error_class`, plus exact terminal
+  counters: `built`, `cache_hit`, `failed`, `cancelled`, `downloaded`, `local`,
+  `secondary`, and `already_present`. Retry totals and logging failures are
+  included when present.
+
+Source terminal/cache events carry `details.source_outcome` with one of
+`downloaded`, `local`, `secondary`, or `already_present`. Network milestones
+carry `details.transfer = "network"`, `host`, and optional byte counters; local
+materialization uses `transfer = "local"`.
 
 ## Levels and verbosity
 

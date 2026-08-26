@@ -468,6 +468,7 @@ async fn process_source_inner(
     match outcome {
         SourceImportOutcome::Matched(object_hash) => {
             let _ = engine.run.remove_scratch(workspace.temp_dir());
+            let source_outcome = if tag == "Path" { "local" } else { "downloaded" };
             subject_logger.log_event(BuildLogEvent {
                 level: BuildLogLevel::Info,
                 status: BuildStatus::Done,
@@ -475,7 +476,10 @@ async fn process_source_inner(
                 message: "source fetched and imported".to_string(),
                 object_hash: Some(object_hash),
                 raw_log_path: None,
-                details: Map::new(),
+                details: Map::from_iter([(
+                    "source_outcome".to_string(),
+                    Value::String(source_outcome.to_string()),
+                )]),
             });
             Ok(if tag == "Path" {
                 SourceOutcome::Local
