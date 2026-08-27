@@ -13,3 +13,4 @@
 - [Filesystem Object Hashing](FSOBJ_HASH.md)
 - [fs-tree Manifest](FS_TREE_MANIFEST.md)
 - [Development](DEVELOPMENT.md)
+- [Scheduler](SCHEDULER.md)

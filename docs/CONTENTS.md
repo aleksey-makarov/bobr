@@ -44,3 +44,7 @@
 11. [Development](./DEVELOPMENT.md)
    Working on bobr rather than with it: building from a source checkout, and
    rebuilding the world into a fresh store.
+
+12. [Scheduler](./SCHEDULER.md)
+    Demand-driven DAG realization, exact and reuse resolution, Source
+    acquisition, builder execution, concurrency limits, and cancellation.
