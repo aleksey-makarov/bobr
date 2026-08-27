@@ -19,7 +19,7 @@ pub enum SourceImportOutcome {
 /// Records an already-imported source object when it is present in the store.
 ///
 /// If the object is missing, this returns `Ok(None)`. If it exists, this
-/// idempotently writes the canonical object record and the source build handle
+/// idempotently writes the canonical object record and source build mapping
 /// `builds/<object_hash>`.
 pub fn record_existing_source_object(
     store: &Store,
@@ -33,7 +33,7 @@ pub fn record_existing_source_object(
     }
 
     record_existing_object(store, declared_hash, run_id)?;
-    record_source_build_handle(store, declared_hash)?;
+    record_source_build_mapping(store, declared_hash)?;
     crate::refs::update_object_ref(store, object_ref_name, declared_hash)?;
     Ok(Some(declared_hash))
 }
@@ -42,7 +42,7 @@ pub fn record_existing_source_object(
 ///
 /// The staged object is always imported into the store before the hash is
 /// compared. On mismatch the imported actual object remains in the store, but
-/// the canonical object record and source build handle for the declared hash
+/// the canonical object record and source build mapping for the declared hash
 /// are not written.
 pub fn import_source_object(
     store: &Store,
@@ -58,13 +58,13 @@ pub fn import_source_object(
     }
 
     record_existing_object(store, declared_hash, run_id)?;
-    record_source_build_handle(store, declared_hash)?;
+    record_source_build_mapping(store, declared_hash)?;
     crate::refs::update_object_ref(store, object_ref_name, declared_hash)?;
     Ok(SourceImportOutcome::Matched(declared_hash))
 }
 
-fn record_source_build_handle(store: &Store, declared_hash: ObjectHash) -> Result<(), StoreError> {
-    crate::refs::store_build_handle_ref(
+fn record_source_build_mapping(store: &Store, declared_hash: ObjectHash) -> Result<(), StoreError> {
+    crate::refs::store_build_ref(
         store,
         BuildKey::from_object_hash(declared_hash),
         declared_hash,

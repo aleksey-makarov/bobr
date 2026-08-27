@@ -6,61 +6,13 @@ use std::path::{Path, PathBuf};
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
-fn object_record_ref_target(object_hash: ObjectHash) -> PathBuf {
-    PathBuf::from("..")
-        .join(crate::store::OBJECT_RECORDS_DIR)
-        .join(format!("{}.json", object_hash.to_hex()))
-}
-
-fn object_ref_target(object_hash: ObjectHash) -> PathBuf {
+fn object_target(object_hash: ObjectHash) -> PathBuf {
     PathBuf::from("..")
         .join(crate::store::OBJECTS_DIR)
         .join(object_hash.to_hex())
 }
 
-pub(crate) fn parse_object_record_ref_target(
-    ref_kind: &str,
-    ref_path: &Path,
-    target: &Path,
-) -> Result<ObjectHash, StoreError> {
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            StoreError::InvalidData(format!(
-                "{ref_kind} ref '{}' points to invalid object record target '{}'",
-                ref_path.display(),
-                target.display()
-            ))
-        })?;
-    let object_hash_str = file_name.strip_suffix(".json").ok_or_else(|| {
-        StoreError::InvalidData(format!(
-            "{ref_kind} ref '{}' points to non-JSON object record target '{}'",
-            ref_path.display(),
-            target.display()
-        ))
-    })?;
-    let object_hash = object_hash_str.parse::<ObjectHash>().map_err(|error| {
-        StoreError::InvalidData(format!(
-            "{ref_kind} ref '{}' points to invalid object hash '{}' in target '{}': {error}",
-            ref_path.display(),
-            object_hash_str,
-            target.display()
-        ))
-    })?;
-    let expected = object_record_ref_target(object_hash);
-    if target != expected {
-        return Err(StoreError::InvalidData(format!(
-            "{ref_kind} ref '{}' points to non-canonical object record target '{}'; expected '{}'",
-            ref_path.display(),
-            target.display(),
-            expected.display()
-        )));
-    }
-    Ok(object_hash)
-}
-
-fn parse_object_ref_target(
+pub(crate) fn parse_object_target(
     ref_kind: &str,
     ref_path: &Path,
     target: &Path,
@@ -83,7 +35,7 @@ fn parse_object_ref_target(
             target.display()
         ))
     })?;
-    let expected = object_ref_target(object_hash);
+    let expected = object_target(object_hash);
     if target != expected {
         return Err(StoreError::InvalidData(format!(
             "{ref_kind} ref '{}' points to non-canonical object target '{}'; expected '{}'",
@@ -97,21 +49,21 @@ fn parse_object_ref_target(
 
 /// Stores or replaces the build reference for `build_key`.
 ///
-/// Build refs are symlinks pointing to object records through canonical
+/// Build refs are symlinks pointing to objects through canonical
 /// relative targets. The replacement is performed through a temporary symlink
 /// and rename.
-pub(crate) fn store_build_handle_ref(
+pub(crate) fn store_build_ref(
     store: &Store,
     build_key: BuildKey,
     object_hash: ObjectHash,
 ) -> Result<(), StoreError> {
-    let target = object_record_ref_target(object_hash);
+    let target = object_target(object_hash);
     replace_symlink(&target, &store.build_ref_path(build_key))
 }
 
 /// Stores or replaces the reuse reference for `reuse_key`.
 ///
-/// Reuse refs are symlinks pointing to object records through canonical
+/// Reuse refs are symlinks pointing to objects through canonical
 /// relative targets. The replacement is performed through a temporary symlink
 /// and rename.
 pub(crate) fn store_reuse_ref(
@@ -119,115 +71,58 @@ pub(crate) fn store_reuse_ref(
     reuse_key: ReuseKey,
     object_hash: ObjectHash,
 ) -> Result<(), StoreError> {
-    let target = object_record_ref_target(object_hash);
+    let target = object_target(object_hash);
     replace_symlink(&target, &store.reuse_ref_path(reuse_key))
 }
 
-/// Loads the published build reached by a build key.
+/// Loads the object hash named by a build key.
 ///
-/// Returns `Ok(None)` when the build ref does not exist. Existing refs must be
-/// canonical symlinks carrying an object hash, and the complete referenced
-/// object content must exist in the store. Object records are not consulted.
-pub fn load_build_handle(
+/// Returns `Ok(None)` only when the build ref does not exist. An existing entry
+/// must be a canonical symlink to `../objects/<object-hash>`. The target is not
+/// followed and object content is not inspected.
+pub fn load_build_object_hash(
     store: &Store,
     build_key: BuildKey,
 ) -> Result<Option<ObjectHash>, StoreError> {
-    let build_ref_path = store.build_ref_path(build_key);
-    if !build_ref_path.exists() && !build_ref_path.is_symlink() {
-        return Ok(None);
-    }
-
-    let target = fs::read_link(&build_ref_path).map_err(|error| {
-        StoreError::Io(format!(
-            "failed to read build ref '{}': {error}",
-            build_ref_path.display()
-        ))
-    })?;
-    let object_hash = parse_object_record_ref_target("build", &build_ref_path, &target)?;
-    if !store.object_is_complete(object_hash)? {
-        return Err(StoreError::InvalidData(format!(
-            "build ref '{}' points to incomplete object '{}'",
-            build_ref_path.display(),
-            object_hash
-        )));
-    }
-    Ok(Some(object_hash))
-}
-
-/// Resolves the build reached by a build key and updates its object ref.
-///
-/// This is the normal runtime-facing build-handle resolver. A successful hit
-/// also updates `object-refs/<name>` to point at the resolved object.
-pub fn resolve_build_handle(
-    store: &Store,
-    build_key: BuildKey,
-    object_ref_name: &str,
-) -> Result<Option<ObjectHash>, StoreError> {
-    let Some(object_hash) = load_build_handle(store, build_key)? else {
-        return Ok(None);
-    };
-    update_object_ref(store, object_ref_name, object_hash)?;
-    Ok(Some(object_hash))
+    load_mapping_object_hash("build", &store.build_ref_path(build_key))
 }
 
 /// Loads the object hash reached by a reuse key.
 ///
-/// Returns `Ok(None)` when the reuse ref does not exist. Existing refs must be
-/// canonical symlinks carrying an object hash. Object records are not read.
-pub(crate) fn load_reuse_object_hash(
+/// Returns `Ok(None)` only when the reuse ref does not exist. An existing entry
+/// must be a canonical symlink to `../objects/<object-hash>`. The target is not
+/// followed and object content is not inspected.
+pub fn load_reuse_object_hash(
     store: &Store,
     reuse_key: ReuseKey,
 ) -> Result<Option<ObjectHash>, StoreError> {
-    let reuse_ref_path = store.reuse_ref_path(reuse_key);
-    if !reuse_ref_path.exists() && !reuse_ref_path.is_symlink() {
-        return Ok(None);
-    }
-
-    let target = fs::read_link(&reuse_ref_path).map_err(|error| {
-        StoreError::Io(format!(
-            "failed to read reuse ref '{}': {error}",
-            reuse_ref_path.display()
-        ))
-    })?;
-    let object_hash = parse_object_record_ref_target("reuse", &reuse_ref_path, &target)?;
-    Ok(Some(object_hash))
+    load_mapping_object_hash("reuse", &store.reuse_ref_path(reuse_key))
 }
 
-/// Loads a complete working-store object reached by a reuse key.
-///
-/// This is a pure lookup: it neither repairs a build mapping nor updates an
-/// object ref. Existing malformed or incomplete mappings are errors.
-pub fn load_reuse_handle(
-    store: &Store,
-    reuse_key: ReuseKey,
-) -> Result<Option<ObjectHash>, StoreError> {
-    let Some(object_hash) = load_reuse_object_hash(store, reuse_key)? else {
-        return Ok(None);
+fn load_mapping_object_hash(kind: &str, ref_path: &Path) -> Result<Option<ObjectHash>, StoreError> {
+    let metadata = match fs::symlink_metadata(ref_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(StoreError::Io(format!(
+                "failed to inspect {kind} ref '{}': {error}",
+                ref_path.display()
+            )));
+        }
     };
-    if !store.object_is_complete(object_hash)? {
+    if !metadata.file_type().is_symlink() {
         return Err(StoreError::InvalidData(format!(
-            "reuse ref points to incomplete object '{object_hash}'"
+            "{kind} ref '{}' is not a symlink",
+            ref_path.display()
         )));
     }
-    Ok(Some(object_hash))
-}
-
-/// Resolves a reusable object hash and repairs the build handle for `build_key`.
-///
-/// Returns `Ok(None)` when the reuse ref does not exist. Existing reuse refs
-/// must carry an object hash whose complete content exists in the store.
-pub fn resolve_reuse_for_build(
-    store: &Store,
-    build_key: BuildKey,
-    reuse_key: ReuseKey,
-    object_ref_name: &str,
-) -> Result<Option<ObjectHash>, StoreError> {
-    let Some(object_hash) = load_reuse_handle(store, reuse_key)? else {
-        return Ok(None);
-    };
-    store_build_handle_ref(store, build_key, object_hash)?;
-    update_object_ref(store, object_ref_name, object_hash)?;
-    Ok(Some(object_hash))
+    let target = fs::read_link(ref_path).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to read {kind} ref '{}': {error}",
+            ref_path.display()
+        ))
+    })?;
+    parse_object_target(kind, ref_path, &target).map(Some)
 }
 
 /// Publishes complete existing content under the current build identity.
@@ -257,7 +152,7 @@ pub fn publish_existing_build(
             store_reuse_ref(store, *reuse_key, object_hash)?;
         }
     }
-    store_build_handle_ref(store, build_key, object_hash)?;
+    store_build_ref(store, build_key, object_hash)?;
     update_object_ref(store, object_ref_name, object_hash)
 }
 
@@ -274,7 +169,7 @@ pub(crate) fn update_object_ref(
     validate_ref_name(object_ref_name)?;
 
     let current_object_ref_path = store.object_refs_dir().join(object_ref_name);
-    let new_target = object_ref_target(object_hash);
+    let new_target = object_target(object_hash);
 
     match fs::symlink_metadata(&current_object_ref_path) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -284,11 +179,8 @@ pub(crate) fn update_object_ref(
                     current_object_ref_path.display()
                 ))
             })?;
-            let current_hash = parse_object_ref_target(
-                "current object",
-                &current_object_ref_path,
-                &current_target,
-            )?;
+            let current_hash =
+                parse_object_target("current object", &current_object_ref_path, &current_target)?;
             if current_hash == object_hash {
                 return Ok(());
             }

@@ -665,7 +665,7 @@ fn promote_build(
 ) -> Result<(), StoreError> {
     ensure_promotable(working, object_hash)?;
     crate::record::record_existing_object(working, object_hash, run_id)?;
-    crate::refs::store_build_handle_ref(working, build_key, object_hash)
+    crate::refs::store_build_ref(working, build_key, object_hash)
 }
 
 fn promote_reuse(
@@ -678,7 +678,7 @@ fn promote_reuse(
     ensure_promotable(working, object_hash)?;
     crate::record::record_existing_object(working, object_hash, run_id)?;
     crate::refs::store_reuse_ref(working, reuse_key, object_hash)?;
-    crate::refs::store_build_handle_ref(working, build_key, object_hash)
+    crate::refs::store_build_ref(working, build_key, object_hash)
 }
 
 fn ensure_promotable(working: &Store, object_hash: ObjectHash) -> Result<(), StoreError> {
@@ -741,7 +741,7 @@ mod tests {
     use crate::fs_tree::FsTreeEntry;
     use crate::{
         LocalHardlinkContentSource, LocalTrustedKeyIndex, ReadOnlyStore, import_build,
-        load_build_handle,
+        load_build_object_hash,
     };
     use bobr_runtime::runtime_provider::RuntimeProvider;
     use serde_json::Value;
@@ -892,7 +892,7 @@ mod tests {
         assert_eq!(resolved.content_sources, ["content-mirror"]);
         assert_eq!(resolved.import_outcome, ContentImportOutcome::Imported);
         assert_eq!(
-            load_build_handle(&working, build).unwrap(),
+            load_build_object_hash(&working, build).unwrap(),
             Some(object_hash)
         );
         let local_record: Value =
@@ -993,7 +993,7 @@ mod tests {
             ContentImportOutcome::AlreadyPresent
         );
         assert!(working.object_path(x).unwrap().is_none());
-        assert_eq!(load_build_handle(&working, build).unwrap(), Some(y));
+        assert_eq!(load_build_object_hash(&working, build).unwrap(), Some(y));
     }
 
     #[test]
@@ -1083,7 +1083,7 @@ mod tests {
 
         assert_eq!(report.unavailable, [x]);
         assert_eq!(report.resolved.unwrap().object_hash, y);
-        assert_eq!(load_build_handle(&working, build).unwrap(), Some(y));
+        assert_eq!(load_build_object_hash(&working, build).unwrap(), Some(y));
     }
 
     #[test]
@@ -1112,7 +1112,7 @@ mod tests {
 
         assert!(report.resolved.is_none());
         assert_eq!(report.unavailable, [object_hash]);
-        assert_eq!(load_build_handle(&working, build).unwrap(), None);
+        assert_eq!(load_build_object_hash(&working, build).unwrap(), None);
         assert!(!working.object_record_path(object_hash).exists());
     }
 
@@ -1149,7 +1149,7 @@ mod tests {
 
         assert_eq!(report.resolved.unwrap().object_hash, object_hash);
         assert_eq!(
-            load_build_handle(&working, current_build).unwrap(),
+            load_build_object_hash(&working, current_build).unwrap(),
             Some(object_hash)
         );
         assert!(working.reuse_ref_path(reuse).is_symlink());

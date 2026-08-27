@@ -123,9 +123,9 @@ The filesystem layout mirrors the identity model:
   objects/
     <object_hash>
   reuses/
-    <reuse_key> -> ../object-records/<object_hash>.json
+    <reuse_key> -> ../objects/<object_hash>
   builds/
-    <build_key> -> ../object-records/<object_hash>.json
+    <build_key> -> ../objects/<object_hash>
   object-records/
     <object_hash>.json
   object-refs/
@@ -192,8 +192,8 @@ Generic CAS objects may contain non-UTF-8 filesystem names. Such objects can
 still be imported and addressed by `object_hash`. Fs-tree objects are
 UTF-8-only because their manifest paths and symlink targets are JSON strings.
 
-`object-records/<object_hash>.json` is a write-only metadata record for people
-and store-inspection tools. Its current schema is `bobr-object-record-v4`; it
+`object-records/<object_hash>.json` is user-facing metadata for people and
+store-inspection tools. Its current schema is `bobr-object-record-v4`; it
 contains:
 
 - `object_hash` — the object the record describes
@@ -207,11 +207,13 @@ an already-present or imported object; they are not authoritative provenance for
 every mapping that later reaches this object.
 
 `builds/<build_key>` and `reuses/<reuse_key>` are canonical symlinks whose
-targets encode an `object_hash` as `../object-records/<object_hash>.json`.
-Lookup validates and reads that hash from the symlink target, then checks the
-object content. It deliberately does not read or parse the JSON record. The
-records remain useful for inspection, just as `object-refs/` and
-`fs-tree-refs/` are useful human-facing views rather than lookup inputs.
+targets encode an `object_hash` as `../objects/<object_hash>`. Mapping lookup
+validates and reads the hash from the symlink text without following its target
+or inspecting object content; content is checked separately when realization
+needs it. Publication creates these mappings only after the target object is
+complete in the store. Object records remain independent inspection metadata,
+just as `object-refs/` and `fs-tree-refs/` are human-facing views rather than
+lookup inputs.
 
 `<logs>/<serial>-<tag>[-<name>]/raw/` stores raw per-subject log files such as
 captured tool output. `<work>/<serial>-<tag>[-<name>]/` is the matching

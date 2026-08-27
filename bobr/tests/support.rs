@@ -245,7 +245,7 @@ pub(crate) fn object_record_exists(root: &Path, object_hash: ObjectHash) -> bool
 }
 
 pub(crate) fn build_key_for_object(root: &Path, object_hash: ObjectHash) -> BuildKey {
-    let expected = format!("{}.json", object_hash.to_hex());
+    let expected = object_hash.to_hex();
     fs::read_dir(store_root(root).join("builds"))
         .unwrap()
         .find_map(|entry| {

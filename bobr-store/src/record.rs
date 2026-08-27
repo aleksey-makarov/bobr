@@ -18,9 +18,8 @@ impl Serialize for ObjectRecordSchemaV4 {
 /// Write-only store record for a realized object.
 ///
 /// Object records are stored as JSON under the store's object record directory
-/// and are keyed by their object hash. Build and reuse lookup deliberately do
-/// not load this metadata; it remains a temporary write-only artifact until
-/// its eventual store-layout redesign.
+/// and are keyed by their object hash. They are permanent user-facing metadata,
+/// while build and reuse lookup deliberately do not load them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ObjectRecord {
     /// Schema marker written into the record.

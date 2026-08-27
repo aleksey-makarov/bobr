@@ -62,7 +62,7 @@ fn source_build_key_uses_object_hash_bytes() {
 }
 
 #[test]
-fn import_build_reuses_existing_object_record_via_new_build_handle_ref() {
+fn import_build_reuses_existing_object_record_via_new_build_mapping() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -104,15 +104,15 @@ fn import_build_reuses_existing_object_record_via_new_build_handle_ref() {
     assert_eq!(
         fs::read_link(layout.build_ref_path(first.build_key)).unwrap(),
         PathBuf::from("..")
-            .join(OBJECT_RECORDS_DIR)
-            .join(format!("{}.json", first.object_hash.to_hex()))
+            .join(OBJECTS_DIR)
+            .join(first.object_hash.to_hex())
     );
     assert!(layout.build_ref_path(second.build_key).exists());
     assert_eq!(
         fs::read_link(layout.build_ref_path(second.build_key)).unwrap(),
         PathBuf::from("..")
-            .join(OBJECT_RECORDS_DIR)
-            .join(format!("{}.json", second.object_hash.to_hex()))
+            .join(OBJECTS_DIR)
+            .join(second.object_hash.to_hex())
     );
     assert_eq!(
         fs::read_link(layout.object_refs_dir().join("hello-copy")).unwrap(),
@@ -155,8 +155,8 @@ fn import_build_writes_build_record_and_object_ref() {
     assert_eq!(
         fs::read_link(&build_ref_path).unwrap(),
         PathBuf::from("..")
-            .join(OBJECT_RECORDS_DIR)
-            .join(format!("{}.json", published.object_hash.to_hex()))
+            .join(OBJECTS_DIR)
+            .join(published.object_hash.to_hex())
     );
 
     assert_eq!(
@@ -168,7 +168,7 @@ fn import_build_writes_build_record_and_object_ref() {
 }
 
 #[test]
-fn mapping_loaders_validate_targets_without_reading_object_records() {
+fn mapping_loaders_validate_object_targets_without_reading_object_records() {
     let temp = tempdir().unwrap();
     let layout = create_test_store(temp.path());
 
@@ -180,32 +180,24 @@ fn mapping_loaders_validate_targets_without_reading_object_records() {
         materialize_named_test_build(&layout, "script", build_key, reuse_key, &stage, vec![]);
     let canonical_target = fs::read_link(layout.build_ref_path(build_key)).unwrap();
     let non_canonical_target = PathBuf::from("..")
-        .join("not-object-records")
-        .join(format!("{}.json", published.object_hash.to_hex()));
+        .join("not-objects")
+        .join(published.object_hash.to_hex());
 
     replace_symlink(&non_canonical_target, &layout.build_ref_path(build_key)).unwrap();
-    let error = load_build_handle(&layout, build_key).unwrap_err();
+    let error = load_build_object_hash(&layout, build_key).unwrap_err();
     assert!(error.to_string().contains("build ref"));
-    assert!(
-        error
-            .to_string()
-            .contains("non-canonical object record target")
-    );
+    assert!(error.to_string().contains("non-canonical object target"));
 
     replace_symlink(&non_canonical_target, &layout.reuse_ref_path(reuse_key)).unwrap();
     let error = load_reuse_object_hash(&layout, reuse_key).unwrap_err();
     assert!(error.to_string().contains("reuse ref"));
-    assert!(
-        error
-            .to_string()
-            .contains("non-canonical object record target")
-    );
+    assert!(error.to_string().contains("non-canonical object target"));
 
     replace_symlink(&canonical_target, &layout.build_ref_path(build_key)).unwrap();
     replace_symlink(&canonical_target, &layout.reuse_ref_path(reuse_key)).unwrap();
     fs::remove_file(layout.object_record_path(published.object_hash)).unwrap();
     assert_eq!(
-        load_build_handle(&layout, build_key).unwrap(),
+        load_build_object_hash(&layout, build_key).unwrap(),
         Some(published.object_hash)
     );
     assert_eq!(
@@ -218,13 +210,44 @@ fn mapping_loaders_validate_targets_without_reading_object_records() {
     )
     .unwrap();
     assert_eq!(
-        load_build_handle(&layout, build_key).unwrap(),
+        load_build_object_hash(&layout, build_key).unwrap(),
         Some(published.object_hash)
     );
     assert_eq!(
         load_reuse_object_hash(&layout, reuse_key).unwrap(),
         Some(published.object_hash)
     );
+
+    fs::remove_file(layout.object_path(published.object_hash).unwrap().unwrap()).unwrap();
+    assert_eq!(
+        load_build_object_hash(&layout, build_key).unwrap(),
+        Some(published.object_hash)
+    );
+    assert_eq!(
+        load_reuse_object_hash(&layout, reuse_key).unwrap(),
+        Some(published.object_hash)
+    );
+}
+
+#[test]
+fn mapping_loaders_distinguish_missing_entries_from_non_symlinks() {
+    let temp = tempdir().unwrap();
+    let layout = create_test_store(temp.path());
+    let build_key = build_key_for("CasTest", json!({ "kind": "missing" }), &[]);
+    let reuse_key = reuse_key_for("CasTest", json!({ "kind": "missing" }), &[]);
+
+    assert_eq!(load_build_object_hash(&layout, build_key).unwrap(), None);
+    assert_eq!(load_reuse_object_hash(&layout, reuse_key).unwrap(), None);
+
+    fs::write(layout.build_ref_path(build_key), b"not a symlink\n").unwrap();
+    fs::create_dir(layout.reuse_ref_path(reuse_key)).unwrap();
+
+    let build_error = load_build_object_hash(&layout, build_key).unwrap_err();
+    assert!(build_error.to_string().contains("build ref"));
+    assert!(build_error.to_string().contains("is not a symlink"));
+    let reuse_error = load_reuse_object_hash(&layout, reuse_key).unwrap_err();
+    assert!(reuse_error.to_string().contains("reuse ref"));
+    assert!(reuse_error.to_string().contains("is not a symlink"));
 }
 
 #[test]
@@ -253,7 +276,7 @@ fn record_existing_source_object_returns_none_when_object_absent() {
     assert!(recorded.is_none());
     assert!(!layout.object_record_path(object_hash).exists());
     assert!(
-        load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
+        load_build_object_hash(&layout, BuildKey::from_object_hash(object_hash))
             .unwrap()
             .is_none()
     );
@@ -273,9 +296,9 @@ fn record_existing_source_object_reuses_canonical_record() {
         .expect("expected source hit");
     assert_eq!(hit, object_hash);
     assert!(layout.object_record_path(object_hash).is_file());
-    let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
+    let resolved = load_build_object_hash(&layout, BuildKey::from_object_hash(object_hash))
         .unwrap()
-        .expect("expected source build handle");
+        .expect("expected source build mapping");
     assert_eq!(resolved, object_hash);
     assert_eq!(
         fs::read_link(layout.object_refs_dir().join("source")).unwrap(),
@@ -300,9 +323,9 @@ fn record_existing_source_object_records_existing_object_as_source_object() {
         .expect("expected source hit");
     assert_eq!(hit, object_hash);
     assert!(object_record_path.exists());
-    let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
+    let resolved = load_build_object_hash(&layout, BuildKey::from_object_hash(object_hash))
         .unwrap()
-        .expect("expected source build handle");
+        .expect("expected source build mapping");
     assert_eq!(resolved, object_hash);
     assert_eq!(
         fs::read_link(layout.object_refs_dir().join("source")).unwrap(),
@@ -329,9 +352,9 @@ fn import_source_object_on_match_imports_object_and_writes_canonical_record() {
     assert_eq!(matched_hash, object_hash);
     assert!(layout.object_path_unchecked(object_hash).exists());
     assert!(layout.object_record_path(object_hash).exists());
-    let resolved = load_build_handle(&layout, BuildKey::from_object_hash(object_hash))
+    let resolved = load_build_object_hash(&layout, BuildKey::from_object_hash(object_hash))
         .unwrap()
-        .expect("expected source build handle");
+        .expect("expected source build mapping");
     assert_eq!(resolved, object_hash);
     assert_eq!(
         fs::read_link(layout.object_refs_dir().join("source")).unwrap(),
@@ -367,7 +390,7 @@ fn import_source_object_on_mismatch_imports_actual_object_without_declared_recor
     assert!(!layout.object_record_path(declared_hash).exists());
     assert!(!layout.object_record_path(actual_hash).exists());
     assert!(
-        load_build_handle(&layout, BuildKey::from_object_hash(declared_hash))
+        load_build_object_hash(&layout, BuildKey::from_object_hash(declared_hash))
             .unwrap()
             .is_none()
     );
@@ -1029,7 +1052,7 @@ fn store_fs_tree_imports_with_install_into_store_fs_files() {
 }
 
 #[test]
-fn working_mappings_require_the_complete_fs_tree_closure_not_a_record() {
+fn mapping_lookup_does_not_require_complete_fs_tree_content() {
     let temp = tempdir().unwrap();
     let store_root = temp.path().join("store");
     fs::create_dir(&store_root).unwrap();
@@ -1064,17 +1087,13 @@ fn working_mappings_require_the_complete_fs_tree_closure_not_a_record() {
     assert!(layout.object_is_complete(object_hash).unwrap());
     fs::remove_file(layout.fs_file_path_unchecked(file_hash)).unwrap();
     assert!(!layout.object_is_complete(object_hash).unwrap());
-    assert!(
-        load_build_handle(&layout, build_key)
-            .unwrap_err()
-            .to_string()
-            .contains("incomplete object")
+    assert_eq!(
+        load_build_object_hash(&layout, build_key).unwrap(),
+        Some(object_hash)
     );
-    assert!(
-        resolve_reuse_for_build(&layout, build_key, reuse_key, "fs-tree-object")
-            .unwrap_err()
-            .to_string()
-            .contains("incomplete object")
+    assert_eq!(
+        load_reuse_object_hash(&layout, reuse_key).unwrap(),
+        Some(object_hash)
     );
 }
 

@@ -9,7 +9,7 @@ use crate::fs_tree::{
     FsFileHash, FsTreeEntry, FsTreeManifest, hash_fs_file_path, read_manifest_if_marked,
 };
 use crate::object::import_object_with_expected_hash;
-use crate::refs::parse_object_record_ref_target;
+use crate::refs::parse_object_target;
 use crate::{ReadOnlyStore, Store, StoreError};
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
@@ -628,7 +628,7 @@ fn load_resolution(kind: &str, ref_path: &Path) -> Result<Option<ObjectHash>, St
             ref_path.display()
         ))
     })?;
-    let object_hash = parse_object_record_ref_target(kind, ref_path, &target)?;
+    let object_hash = parse_object_target(kind, ref_path, &target)?;
     Ok(Some(object_hash))
 }
 
@@ -781,11 +781,10 @@ mod tests {
         let index = LocalTrustedKeyIndex::new(ReadOnlyStore::open(&root).unwrap());
 
         let error = index.resolve_builds(&[build]).unwrap_err();
-        assert!(error.to_string().contains("non-JSON object record target"));
+        assert!(error.to_string().contains("invalid object hash"));
 
         fs::remove_file(&ref_path).unwrap();
-        let canonical_target =
-            Path::new("../object-records").join(format!("{}.json", object_hash.to_hex()));
+        let canonical_target = Path::new("../objects").join(object_hash.to_hex());
         symlink(canonical_target, &ref_path).unwrap();
         fs::remove_file(store.object_record_path(object_hash)).unwrap();
         let resolved = index.resolve_builds(&[build]).unwrap();

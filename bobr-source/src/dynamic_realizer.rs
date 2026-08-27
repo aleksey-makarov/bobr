@@ -19,8 +19,8 @@ use bobr_core::{
     ObjectHash, ReuseKey, Run, RuntimeProvider, SubjectIdentity,
 };
 use bobr_store::{
-    MappingCandidates, SecondaryResolver, Store, StoreError, load_build_handle, load_reuse_handle,
-    publish_existing_build, record_existing_source_object,
+    MappingCandidates, SecondaryResolver, Store, StoreError, load_build_object_hash,
+    load_reuse_object_hash, publish_existing_build, record_existing_source_object,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -740,7 +740,7 @@ impl DynamicRealizer {
         key: BuildKey,
     ) -> Result<Option<ObjectHash>, DynamicRealizeError> {
         let store = self.store.clone();
-        tokio::task::spawn_blocking(move || load_build_handle(&store, key))
+        tokio::task::spawn_blocking(move || load_build_object_hash(&store, key))
             .await
             .map_err(|error| {
                 DynamicRealizeError::new(format!("working build lookup panicked: {error}"))
@@ -753,7 +753,7 @@ impl DynamicRealizer {
         key: ReuseKey,
     ) -> Result<Option<ObjectHash>, DynamicRealizeError> {
         let store = self.store.clone();
-        tokio::task::spawn_blocking(move || load_reuse_handle(&store, key))
+        tokio::task::spawn_blocking(move || load_reuse_object_hash(&store, key))
             .await
             .map_err(|error| {
                 DynamicRealizeError::new(format!("working reuse lookup panicked: {error}"))
@@ -1438,10 +1438,16 @@ mod tests {
         assert!(environment.store.object_path(p).unwrap().is_some());
         assert!(environment.store.object_path(x).unwrap().is_none());
         assert!(environment.store.object_path(y).unwrap().is_none());
-        assert_eq!(load_reuse_handle(&environment.store, rx).unwrap(), Some(p));
-        assert_eq!(load_reuse_handle(&environment.store, ry).unwrap(), Some(p));
         assert_eq!(
-            load_build_handle(&environment.store, graph.goals()[0]).unwrap(),
+            load_reuse_object_hash(&environment.store, rx).unwrap(),
+            Some(p)
+        );
+        assert_eq!(
+            load_reuse_object_hash(&environment.store, ry).unwrap(),
+            Some(p)
+        );
+        assert_eq!(
+            load_build_object_hash(&environment.store, graph.goals()[0]).unwrap(),
             Some(p)
         );
         executor.shutdown().await.unwrap();
@@ -1513,7 +1519,7 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            load_reuse_handle(&environment.store, actual_reuse).unwrap(),
+            load_reuse_object_hash(&environment.store, actual_reuse).unwrap(),
             Some(cached)
         );
         environment.logger.flush();

@@ -4,7 +4,7 @@ mod support;
 use bobr_core::{BuildKey, ObjectHash};
 #[cfg(feature = "integration-tests")]
 use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest};
-use bobr_store::{Store, load_build_handle};
+use bobr_store::{Store, load_build_object_hash};
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{Cursor, Read, Write};
@@ -396,9 +396,10 @@ fn request_executes_source_and_group_graph() {
     handle.join().unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let object_hash = load_build_handle(&layout, build_key_for_object(workspace.path(), build))
-        .unwrap()
-        .expect("expected final Build to exist in store");
+    let object_hash =
+        load_build_object_hash(&layout, build_key_for_object(workspace.path(), build))
+            .unwrap()
+            .expect("expected final Build to exist in store");
 
     assert!(layout.object_path(object_hash).unwrap().unwrap().is_file());
 
@@ -450,7 +451,7 @@ fn repeated_build_keys_are_built_once_with_one_publish_name() {
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(
-        load_build_handle(&layout, build_key_for_object(workspace.path(), build))
+        load_build_object_hash(&layout, build_key_for_object(workspace.path(), build))
             .unwrap()
             .is_some()
     );
@@ -492,7 +493,7 @@ fn second_run_republishes_the_cached_goal_without_visiting_its_source() {
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     assert!(
-        load_build_handle(&layout, build_key_for_object(workspace.path(), first))
+        load_build_object_hash(&layout, build_key_for_object(workspace.path(), first))
             .unwrap()
             .is_some()
     );
@@ -730,9 +731,10 @@ fn identical_fetch_sources_are_deduped_by_object_hash() {
     handle.join().unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let object_hash = load_build_handle(&layout, build_key_for_object(workspace.path(), build))
-        .unwrap()
-        .expect("expected Group Build to exist in store");
+    let object_hash =
+        load_build_object_hash(&layout, build_key_for_object(workspace.path(), build))
+            .unwrap()
+            .expect("expected Group Build to exist in store");
     assert!(layout.object_path(object_hash).unwrap().unwrap().is_file());
 }
 
@@ -748,9 +750,10 @@ fn tree_file_recipe_builds_successfully_via_execution() {
     let build = execute_request(&request_path).unwrap();
 
     let layout = Store::create(&store_root(workspace.path())).unwrap();
-    let object_hash = load_build_handle(&layout, build_key_for_object(workspace.path(), build))
-        .unwrap()
-        .expect("expected Tree Build to exist in store");
+    let object_hash =
+        load_build_object_hash(&layout, build_key_for_object(workspace.path(), build))
+            .unwrap()
+            .expect("expected Tree Build to exist in store");
     let object_path = layout.object_path(object_hash).unwrap().unwrap();
     assert!(object_path.is_file());
     assert_eq!(fs::read_to_string(&object_path).unwrap(), "hello tree\n");
@@ -831,7 +834,7 @@ fn tree_symlink_recipe_builds_successfully_via_execution() {
 }
 
 #[test]
-fn source_path_file_materializes_known_object_with_source_build_handle() {
+fn source_path_file_materializes_known_object_with_source_build_mapping() {
     let workspace = tempdir().unwrap();
     let source_path = workspace.path().join("payload.txt");
     fs::write(&source_path, b"hello source\n").unwrap();
@@ -854,16 +857,16 @@ fn source_path_file_materializes_known_object_with_source_build_handle() {
     assert_eq!(build_key_for_object(workspace.path(), realized), build_key);
     assert_eq!(realized, object_hash);
     assert!(object_path_exists(&layout, object_hash));
-    let resolved = load_build_handle(&layout, build_key)
+    let resolved = load_build_object_hash(&layout, build_key)
         .unwrap()
-        .expect("expected source build handle");
+        .expect("expected source build mapping");
     assert_eq!(resolved, object_hash);
     assert!(object_record_exists(workspace.path(), realized));
     assert_eq!(build_ref_count(workspace.path()), 1);
 }
 
 #[test]
-fn source_path_tar_materializes_unpacked_tree_with_source_build_handle() {
+fn source_path_tar_materializes_unpacked_tree_with_source_build_mapping() {
     let workspace = tempdir().unwrap();
     let tar_path = workspace.path().join("payload.tar");
     {
@@ -899,9 +902,9 @@ fn source_path_tar_materializes_unpacked_tree_with_source_build_handle() {
     assert_eq!(build_key_for_object(workspace.path(), realized), build_key);
     assert_eq!(realized, object_hash);
     assert_eq!(ref_hash, object_hash);
-    let resolved = load_build_handle(&layout, build_key)
+    let resolved = load_build_object_hash(&layout, build_key)
         .unwrap()
-        .expect("expected source build handle");
+        .expect("expected source build mapping");
     assert_eq!(resolved, object_hash);
     assert!(object_path.is_dir());
     assert_eq!(

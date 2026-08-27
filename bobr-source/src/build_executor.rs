@@ -905,7 +905,7 @@ impl Drop for BuilderScratchGuard {
 mod tests {
     use super::*;
     use bobr_builder::{BuildContext, BuilderError, InputSpec, TypedBuilder};
-    use bobr_store::load_build_handle;
+    use bobr_store::load_build_object_hash;
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
     use std::fs;
@@ -1316,7 +1316,7 @@ mod tests {
         assert!(!statuses.iter().any(|status| status == "done"));
         assert!(!statuses.iter().any(|status| status == "failed"));
         assert_eq!(
-            load_build_handle(&environment.store, build_key).unwrap(),
+            load_build_object_hash(&environment.store, build_key).unwrap(),
             None
         );
         assert!(
@@ -1363,7 +1363,7 @@ mod tests {
             Some("cancelled")
         );
         assert_eq!(
-            load_build_handle(&environment.store, build_key).unwrap(),
+            load_build_object_hash(&environment.store, build_key).unwrap(),
             None
         );
         assert!(
@@ -1436,13 +1436,13 @@ mod tests {
 
         assert!(staged_path.is_file());
         assert_eq!(
-            load_build_handle(&environment.store, build_key).unwrap(),
+            load_build_object_hash(&environment.store, build_key).unwrap(),
             None
         );
         let published = publish_builder_output(&environment.store, staged).unwrap();
         assert_eq!(published.build_key, build_key);
         assert_eq!(
-            load_build_handle(&environment.store, build_key).unwrap(),
+            load_build_object_hash(&environment.store, build_key).unwrap(),
             Some(published.object_hash)
         );
         assert!(!staged_path.exists());
@@ -1467,7 +1467,7 @@ mod tests {
 
         assert_eq!(published.build_key, build_key);
         assert_eq!(
-            load_build_handle(&environment.store, build_key).unwrap(),
+            load_build_object_hash(&environment.store, build_key).unwrap(),
             Some(published.object_hash)
         );
         executor.shutdown().await.unwrap();
@@ -1496,7 +1496,7 @@ mod tests {
             Err(BuildExecutorError::Publish(_))
         ));
         assert_eq!(
-            load_build_handle(&environment.store, build_key).unwrap(),
+            load_build_object_hash(&environment.store, build_key).unwrap(),
             None
         );
         assert!(!staged_path.exists());

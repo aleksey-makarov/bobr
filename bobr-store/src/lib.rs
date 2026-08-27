@@ -31,10 +31,7 @@ mod store;
 pub use error::StoreError;
 pub use object::import_build;
 pub use ref_name::validate_ref_name;
-pub use refs::{
-    load_build_handle, load_reuse_handle, publish_existing_build, resolve_build_handle,
-    resolve_reuse_for_build,
-};
+pub use refs::{load_build_object_hash, load_reuse_object_hash, publish_existing_build};
 pub use secondary::{
     ContentImportOutcome, ContentSource, LocalHardlinkContentSource, LocalTrustedKeyIndex,
     TrustedKeyIndex, TrustedResolution,
@@ -56,9 +53,9 @@ pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
 #[cfg(test)]
 pub(crate) use object::import_object;
 #[cfg(test)]
-pub(crate) use refs::{load_reuse_object_hash, replace_symlink};
+pub(crate) use refs::replace_symlink;
 #[cfg(test)]
-pub(crate) use store::{OBJECT_RECORDS_DIR, OBJECTS_DIR};
+pub(crate) use store::OBJECTS_DIR;
 
 #[cfg(test)]
 mod tests;

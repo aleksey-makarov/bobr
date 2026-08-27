@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 mod support;
 
-use bobr_store::{Store, load_build_handle};
+use bobr_store::{Store, load_build_object_hash};
 use std::fs;
 use support::{
     build_key_for_object, build_ref_count, execute_request, object_record_count, remove_build_ref,
@@ -10,7 +10,7 @@ use support::{
 use tempfile::tempdir;
 
 #[test]
-fn second_run_reuses_existing_root_build_handle() {
+fn second_run_reuses_existing_root_build_mapping() {
     let workspace = tempdir().unwrap();
     let request_path = workspace.path().join("recipe.json");
     let recipe = tree_file_recipe("hello", "hello.txt", "hi\n", false);
@@ -25,13 +25,17 @@ fn second_run_reuses_existing_root_build_handle() {
     assert_eq!(first, second);
     let layout = Store::create(&store_root(workspace.path())).unwrap();
     let build_key = build_key_for_object(workspace.path(), first);
-    assert!(load_build_handle(&layout, build_key).unwrap().is_some());
+    assert!(
+        load_build_object_hash(&layout, build_key)
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(builds_after_first, 1);
     assert_eq!(builds_after_second, 1);
 }
 
 #[test]
-fn second_run_reuses_canonical_object_when_build_handle_is_missing() {
+fn second_run_reuses_canonical_object_when_build_mapping_is_missing() {
     let workspace = tempdir().unwrap();
     let request_path = workspace.path().join("recipe.json");
     let recipe = tree_file_recipe("hello", "hello.txt", "hi\n", false);
@@ -60,5 +64,9 @@ fn second_run_reuses_canonical_object_when_build_handle_is_missing() {
     assert_eq!(objects_after_first, 1);
     assert_eq!(objects_after_second, 1);
     assert_eq!(builds_after_second, 1);
-    assert!(load_build_handle(&layout, build_key).unwrap().is_some());
+    assert!(
+        load_build_object_hash(&layout, build_key)
+            .unwrap()
+            .is_some()
+    );
 }

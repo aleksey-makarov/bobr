@@ -3,7 +3,7 @@ mod support;
 
 use bobr::{ExecutionError, Request, realize};
 use bobr_core::{CancellationToken, ObjectHash};
-use bobr_store::{Store, load_build_handle};
+use bobr_store::{Store, load_build_object_hash};
 use serde_json::json;
 use std::fs;
 use std::io::{Read, Write};
@@ -205,7 +205,10 @@ fn reuse_mapping_restores_a_missing_build_mapping() {
     let store = Store::create(&store_root(environment.path())).unwrap();
 
     assert_eq!(second, first);
-    assert_eq!(load_build_handle(&store, build_key).unwrap(), Some(first));
+    assert_eq!(
+        load_build_object_hash(&store, build_key).unwrap(),
+        Some(first)
+    );
 }
 
 #[test]

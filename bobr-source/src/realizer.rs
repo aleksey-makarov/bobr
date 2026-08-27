@@ -1,6 +1,6 @@
 //! Lazy exact resolution of a planned multi-goal DAG.
 //!
-//! This milestone resolves working and trusted-secondary build handles before
+//! This milestone resolves working and trusted-secondary build mappings before
 //! traversing inputs. Exact hits therefore prune dependency subtrees. Nodes
 //! that miss are returned as source and builder frontiers. Builder misses can
 //! now cross the in-process executor boundary; dynamic reuse is added by the
@@ -12,7 +12,9 @@ use crate::build_executor::{
 };
 use crate::graph::PlannedGraph;
 use bobr_core::{BuildKey, ObjectHash};
-use bobr_store::{SecondaryResolution, SecondaryResolver, Store, StoreError, load_build_handle};
+use bobr_store::{
+    SecondaryResolution, SecondaryResolver, Store, StoreError, load_build_object_hash,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
@@ -107,7 +109,7 @@ pub async fn execute_builder_miss(
         })?
 }
 
-/// Resolves exact build handles lazily from all goals.
+/// Resolves exact build mappings lazily from all goals.
 ///
 /// Each round checks working mappings first, then queries trusted secondary
 /// indexes for the remaining batch. Only complete exact misses have their
@@ -140,7 +142,7 @@ pub async fn resolve_lazy_exact(
         let working_results = tokio::task::spawn_blocking(move || {
             lookup_keys
                 .into_iter()
-                .map(|key| load_build_handle(&working, key).map(|result| (key, result)))
+                .map(|key| load_build_object_hash(&working, key).map(|result| (key, result)))
                 .collect::<Result<Vec<_>, _>>()
         })
         .await
@@ -374,7 +376,7 @@ mod tests {
 
         assert_eq!(plan.resolved().get(&graph.goals()[0]), Some(&object_hash));
         assert_eq!(
-            load_build_handle(&working, graph.goals()[0]).unwrap(),
+            load_build_object_hash(&working, graph.goals()[0]).unwrap(),
             Some(object_hash)
         );
         assert!(plan.source_frontier().is_empty());

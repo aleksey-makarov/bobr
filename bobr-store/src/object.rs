@@ -221,7 +221,7 @@ fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
 /// Imports a staged object and records it as a newly materialized build.
 ///
 /// The operation imports `staged_path`, stores the object record, writes the
-/// reuse ref, writes the build handle ref, and updates `object-refs/<name>`
+/// reuse and build mappings, and updates `object-refs/<name>`
 /// for the materialized object.
 pub fn import_build(
     store: &Store,
@@ -243,7 +243,7 @@ pub fn import_build(
     };
     crate::record::store_object_record(store, &object_record)?;
     crate::refs::store_reuse_ref(store, reuse_key, object_hash)?;
-    crate::refs::store_build_handle_ref(store, build_key, object_hash)?;
+    crate::refs::store_build_ref(store, build_key, object_hash)?;
     crate::refs::update_object_ref(store, object_ref_name, object_hash)?;
     Ok(object_hash)
 }
