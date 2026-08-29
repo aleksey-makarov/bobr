@@ -107,7 +107,9 @@ read-only backend from which bobr derives separate capabilities:
   `ObjectHash` values; it supplies identity, not object bytes;
 - a **content source** supplies an object's bytes by `ObjectHash`. The current
   implementation imports them only by hardlinking, including every referenced
-  fs-file of an fs-tree, so it must share a filesystem with the working store.
+  fs-file of an fs-tree. The repository and working-store `objects/` directories
+  must therefore share a filesystem, as must their `fs-files/` directories;
+  bobr validates the two pairs independently.
 
 Every repository provides the content-source capability. A repository with
 `trusted = true` additionally provides the trusted-index capability; with

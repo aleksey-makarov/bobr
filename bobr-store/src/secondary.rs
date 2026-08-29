@@ -136,6 +136,26 @@ impl LocalRepository {
     pub fn store(&self) -> &ReadOnlyStore {
         &self.store
     }
+
+    /// Validates that both CAS areas can be hardlinked into `working`.
+    ///
+    /// The object and fs-file directories are checked independently because
+    /// either may be a separate mount point below the store root. Equality of
+    /// the roots' device numbers is therefore insufficient.
+    pub fn validate_hardlink_compatible_with(&self, working: &Store) -> Result<(), StoreError> {
+        if self.store.root() == working.root() {
+            return Err(StoreError::InvalidInput(format!(
+                "local repository '{}' is the working store",
+                self.store.root().display()
+            )));
+        }
+        require_same_filesystem("objects", &self.store.objects_dir(), &working.objects_dir())?;
+        require_same_filesystem(
+            "fs-files",
+            &self.store.root().join(crate::store::FS_FILES_DIR),
+            &working.root().join(crate::store::FS_FILES_DIR),
+        )
+    }
 }
 
 impl From<ReadOnlyStore> for LocalRepository {
@@ -251,17 +271,7 @@ impl LocalHardlinkContentSource {
     }
 
     fn validate_working_store(&self, working: &Store) -> Result<(), StoreError> {
-        if self.store().root() == working.root() {
-            return Err(StoreError::InvalidInput(format!(
-                "secondary store '{}' is the working store",
-                self.store().root().display()
-            )));
-        }
-        require_same_filesystem(
-            "objects",
-            &self.store().objects_dir(),
-            &working.objects_dir(),
-        )
+        self.repository.validate_hardlink_compatible_with(working)
     }
 
     fn ensure_fs_files(
@@ -1083,8 +1093,31 @@ mod tests {
         let (store, _build, _reuse, object_hash) = populated_store(&root);
         let source = host_content_source(&root);
 
+        let validation_error = source
+            .repository()
+            .validate_hardlink_compatible_with(&store)
+            .unwrap_err();
+        assert!(
+            validation_error
+                .to_string()
+                .contains("is the working store")
+        );
         let error = source.import_object(&store, object_hash).unwrap_err();
         assert!(error.to_string().contains("is the working store"));
+    }
+
+    #[test]
+    fn hardlink_compatibility_checks_complete_same_filesystem_store_layouts() {
+        let temp = tempdir().unwrap();
+        let repository_root = temp.path().join("repository");
+        let working_root = temp.path().join("working");
+        empty_store(&repository_root);
+        let working = empty_store(&working_root);
+        let repository = LocalRepository::new(ReadOnlyStore::open(&repository_root).unwrap());
+
+        repository
+            .validate_hardlink_compatible_with(&working)
+            .unwrap();
     }
 
     #[test]

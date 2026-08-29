@@ -46,6 +46,15 @@ pub(crate) enum LocalTransferPolicy {
     Copy,
 }
 
+impl LocalTransferPolicy {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Hardlink => "hardlink",
+            Self::Copy => "copy",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Secondaries {

@@ -147,7 +147,7 @@ filtering by lifecycle is reliable while builders stay free to name their work.
 
 | value          | meaning                                                        |
 |----------------|----------------------------------------------------------------|
-| `run-started`  | run-level: realization started (goals, jobs, reachable counts, progress policy) |
+| `run-started`  | run-level: realization started (goals, jobs, reachable counts, progress and repository policies) |
 | `run-finished` | run-level: realization finished (goals or error class, counters) |
 | `start`        | subject execution started                                      |
 | `cache-miss`   | no reusable result at this point; acquisition or execution follows |
@@ -169,7 +169,8 @@ The run-level `events.jsonl` is a full audit log, not just an aggregate of
 subject events. Beyond the fanned-out subject events it carries:
 
 - `run-started`: ordered goals, `jobs`, total reachable nodes, reachable
-  builders and Sources, and the selected progress policy;
+  builders and Sources, the selected progress policy, and configured local
+  repositories with their canonical paths, trust flags, and transfer modes;
 - `cache-hit`: one per subject served from a reusable object during realization
   (carries the subject identity and `object_hash`), including reuse discovered
   within the current run. A fully exact-cached run records only the resolved

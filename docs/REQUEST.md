@@ -134,8 +134,10 @@ order.
 
 Repository roots must exist and contain a complete bobr store layout. Paths are
 canonicalized when opened: a repository cannot alias the working store, and the
-same canonical repository root cannot be listed twice. `hardlink` currently
-requires the repository and working store roots to be on the same filesystem.
+same canonical repository root cannot be listed twice. `hardlink` requires the
+repository and working store `objects/` directories to share a filesystem, and
+likewise requires their `fs-files/` directories to share a filesystem. These
+pairs are checked separately because either directory may be a mount point.
 Both `trusted` and `transfer` are mandatory in the low-level JSON request.
 
 A recipe for the `Source` builder has this shape:

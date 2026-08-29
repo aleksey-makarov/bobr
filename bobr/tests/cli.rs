@@ -303,14 +303,14 @@ fn cli_uses_a_trusted_hardlink_local_repository() {
         serde_json::to_vec_pretty(&json!({
             "schema": "bobr-request-v5",
             "store": working_root,
-            "logs": logs,
+            "logs": &logs,
             "work": work,
             "run_id": "secondary",
             "goals": ["source"],
             "secondaries": {
                 "local_repositories": [{
                     "name": "old",
-                    "store": secondary_root,
+                    "store": &secondary_root,
                     "trusted": true,
                     "transfer": "hardlink"
                 }]
@@ -340,6 +340,21 @@ fn cli_uses_a_trusted_hardlink_local_repository() {
     );
     let working = bobr_store::Store::create(&store_root(workspace.path())).unwrap();
     assert!(working.object_is_complete(object_hash).unwrap());
+    let started = fs::read_to_string(logs.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|event| event["status"] == "run-started")
+        .unwrap();
+    assert_eq!(
+        started["details"]["local_repositories"],
+        json!([{
+            "name": "old",
+            "store": fs::canonicalize(secondary_root).unwrap(),
+            "trusted": true,
+            "transfer": "hardlink"
+        }])
+    );
 }
 
 #[test]

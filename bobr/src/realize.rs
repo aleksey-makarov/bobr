@@ -71,7 +71,8 @@ pub async fn realize(
     );
     let _resize_monitor = ResizeMonitor::spawn(&logger);
     let runtime_provider = runtime_provider_for_current_process();
-    let (indexes, sources) = repository_capabilities(repositories, runtime_provider.clone());
+    let repository_log = repository_log_details(&repositories);
+    let (indexes, sources) = repository_capabilities(repositories, runtime_provider.clone())?;
     let secondary = Arc::new(
         SecondaryResolver::new(store.clone(), run.run_id(), indexes, sources)
             .map_err(map_store_error)?,
@@ -101,6 +102,7 @@ pub async fn realize(
         reachable_builders,
         reachable_sources,
         progress,
+        &repository_log,
     );
     let realized = dynamic.realize_goals().await;
     let shutdown = executor
@@ -188,6 +190,7 @@ fn check_same_filesystem(store: &Store, run: &Run) -> Result<(), ExecutionError>
 struct OpenedLocalRepository {
     name: String,
     trusted: bool,
+    transfer: LocalTransferPolicy,
     repository: LocalRepository,
 }
 
@@ -215,21 +218,22 @@ fn open_local_repositories(
                 store.root().display()
             )));
         }
-        match repository.transfer {
-            LocalTransferPolicy::Hardlink => {
-                check_hardlink_repository_filesystem(working, &store, &repository.name)?;
-            }
-            LocalTransferPolicy::Copy => {
-                return Err(ExecutionError::InvalidRequest(format!(
-                    "local repository '{}' requests transfer mode 'copy', which is not implemented yet",
-                    repository.name
-                )));
-            }
+        let backend = LocalRepository::new(store);
+        if repository.transfer == LocalTransferPolicy::Hardlink {
+            backend
+                .validate_hardlink_compatible_with(working)
+                .map_err(|error| {
+                    ExecutionError::InvalidRequest(format!(
+                        "local repository '{}' cannot use transfer mode 'hardlink': {error}",
+                        repository.name
+                    ))
+                })?;
         }
         opened.push(OpenedLocalRepository {
             name: repository.name,
             trusted: repository.trusted,
-            repository: LocalRepository::new(store),
+            transfer: repository.transfer,
+            repository: backend,
         });
     }
     Ok(opened)
@@ -238,7 +242,7 @@ fn open_local_repositories(
 fn repository_capabilities(
     repositories: Vec<OpenedLocalRepository>,
     runtime_provider: RuntimeProvider,
-) -> (Vec<NamedTrustedKeyIndex>, Vec<NamedContentSource>) {
+) -> Result<(Vec<NamedTrustedKeyIndex>, Vec<NamedContentSource>), ExecutionError> {
     let mut indexes = Vec::new();
     let mut sources = Vec::with_capacity(repositories.len());
     for repository in repositories {
@@ -248,36 +252,35 @@ fn repository_capabilities(
                 Arc::new(LocalTrustedKeyIndex::new(repository.repository.clone())),
             ));
         }
-        sources.push(NamedContentSource::new(
-            repository.name,
-            Arc::new(LocalHardlinkContentSource::with_runtime(
+        let source = match repository.transfer {
+            LocalTransferPolicy::Hardlink => Arc::new(LocalHardlinkContentSource::with_runtime(
                 repository.repository,
                 runtime_provider.clone(),
-            )),
-        ));
+            )) as Arc<dyn bobr_store::ContentSource>,
+            LocalTransferPolicy::Copy => {
+                return Err(ExecutionError::InvalidRequest(format!(
+                    "local repository '{}' requests transfer mode 'copy', which is not implemented yet",
+                    repository.name
+                )));
+            }
+        };
+        sources.push(NamedContentSource::new(repository.name, source));
     }
-    (indexes, sources)
+    Ok((indexes, sources))
 }
 
-fn check_hardlink_repository_filesystem(
-    working: &Store,
-    source: &ReadOnlyStore,
-    name: &str,
-) -> Result<(), ExecutionError> {
-    let working_dev = fs::metadata(working.root())
-        .map_err(|error| ExecutionError::Store(error.to_string()))?
-        .dev();
-    let source_dev = fs::metadata(source.root())
-        .map_err(|error| ExecutionError::Store(error.to_string()))?
-        .dev();
-    if working_dev != source_dev {
-        return Err(ExecutionError::InvalidRequest(format!(
-            "local repository '{name}' store '{}' is on a different filesystem from working store '{}'; transfer mode 'hardlink' requires one filesystem",
-            source.root().display(),
-            working.root().display()
-        )));
-    }
-    Ok(())
+fn repository_log_details(repositories: &[OpenedLocalRepository]) -> Vec<serde_json::Value> {
+    repositories
+        .iter()
+        .map(|repository| {
+            json!({
+                "name": repository.name,
+                "store": repository.repository.store().root(),
+                "trusted": repository.trusted,
+                "transfer": repository.transfer.as_str(),
+            })
+        })
+        .collect()
 }
 
 fn map_graph_error(error: GraphPlanError) -> ExecutionError {
@@ -300,6 +303,7 @@ fn log_run_started(
     reachable_builders: usize,
     reachable_sources: usize,
     progress: bobr_core::ProgressPolicy,
+    local_repositories: &[serde_json::Value],
 ) {
     logger.log_run_event(BuildLogEvent {
         level: BuildLogLevel::Info,
@@ -315,6 +319,7 @@ fn log_run_started(
             "reachable_builders": reachable_builders,
             "reachable_sources": reachable_sources,
             "progress_policy": progress,
+            "local_repositories": local_repositories,
         })
         .as_object()
         .expect("run-start details are an object")
@@ -395,10 +400,12 @@ mod tests {
             vec![OpenedLocalRepository {
                 name: "untrusted".to_string(),
                 trusted: false,
+                transfer: LocalTransferPolicy::Hardlink,
                 repository: repository.clone(),
             }],
             RuntimeProvider::host(),
-        );
+        )
+        .unwrap();
         let resolver =
             SecondaryResolver::new(working.clone(), "untrusted-run", indexes, sources).unwrap();
         assert!(!resolver.has_trusted_indexes());
@@ -411,10 +418,12 @@ mod tests {
             vec![OpenedLocalRepository {
                 name: "trusted".to_string(),
                 trusted: true,
+                transfer: LocalTransferPolicy::Hardlink,
                 repository,
             }],
             RuntimeProvider::host(),
-        );
+        )
+        .unwrap();
         let resolver = SecondaryResolver::new(working, "trusted-run", indexes, sources).unwrap();
         let error = resolver.resolve_builds(&[build_key]).unwrap_err();
         assert!(error.to_string().contains("is not a symlink"), "{error}");
