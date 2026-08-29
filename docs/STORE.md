@@ -106,10 +106,12 @@ read-only backend from which bobr derives separate capabilities:
 - a **trusted index** answers `BuildKey` and `ReuseKey` queries with candidate
   `ObjectHash` values; it supplies identity, not object bytes;
 - a **content source** supplies an object's bytes by `ObjectHash`. The current
-  implementation imports them only by hardlinking, including every referenced
-  fs-file of an fs-tree. The repository and working-store `objects/` directories
-  must therefore share a filesystem, as must their `fs-files/` directories;
-  bobr validates the two pairs independently.
+  implementation can hardlink objects and every referenced fs-file, or copy
+  ordinary file and directory objects into independent working-store inodes.
+  Hardlink repositories require the repository and working-store `objects/`
+  directories to share a filesystem, as must their `fs-files/` directories;
+  bobr validates the two pairs independently. Copying fs-tree closures is not
+  implemented yet.
 
 Every repository provides the content-source capability. A repository with
 `trusted = true` additionally provides the trusted-index capability; with
@@ -120,8 +122,8 @@ checks working-store content before secondary content. A secondary mapping can
 therefore be useful before its object is imported locally. Both adapters retain
 the same `LocalRepository` backend and its shared validated read-only content
 reader; they cannot be constructed directly from unrelated store handles.
-Mapping lookup never opens object records. Remote capabilities and copy-based
-content import are not implemented yet.
+Mapping lookup never opens object records. Remote capabilities are not
+implemented yet.
 
 ## Store Layout
 

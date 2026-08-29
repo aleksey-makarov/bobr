@@ -4,7 +4,7 @@ mod support;
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use serde_json::json;
 use std::fs;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{MetadataExt, symlink};
 use std::process::{Command, Stdio};
 use support::{
     TEST_RUN_ID, make_run_dirs, recipe_node, store_root, tree_file_recipe, write_request,
@@ -355,6 +355,78 @@ fn cli_uses_a_trusted_hardlink_local_repository() {
             "transfer": "hardlink"
         }])
     );
+}
+
+#[test]
+fn cli_copies_an_ordinary_object_from_a_local_repository() {
+    let workspace = tempdir().unwrap();
+    let repository_root = workspace.path().join("repository");
+    let working_root = store_root(workspace.path());
+    fs::create_dir(&repository_root).unwrap();
+    fs::create_dir_all(&working_root).unwrap();
+    let repository = bobr_store::Store::create(&repository_root).unwrap();
+    let staged = workspace.path().join("repository-source");
+    fs::write(&staged, b"copied repository source\n").unwrap();
+    let object_hash = fsobj_hash::hash_path(&staged).unwrap();
+    bobr_store::import_build(
+        &repository,
+        BuildKey::from_object_hash(object_hash),
+        "2".repeat(64).parse::<ReuseKey>().unwrap(),
+        Vec::new(),
+        &staged,
+        "repository-source",
+        "repository-run",
+    )
+    .unwrap();
+    let source_path = repository.object_path(object_hash).unwrap().unwrap();
+    let (logs, work) = make_run_dirs(workspace.path());
+    let request_path = workspace.path().join("copy-repository.json");
+    fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema": "bobr-request-v5",
+            "store": working_root,
+            "logs": logs,
+            "work": work,
+            "run_id": "copy-repository",
+            "goals": ["source"],
+            "secondaries": {
+                "local_repositories": [{
+                    "name": "isolated",
+                    "store": repository_root,
+                    "trusted": true,
+                    "transfer": "copy"
+                }]
+            },
+            "nodes": {
+                "source": {
+                    "name": "source",
+                    "tag": "Source",
+                    "object_hash": object_hash
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
+        .arg(&request_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        object_hash.to_string()
+    );
+    let working = bobr_store::Store::create(&store_root(workspace.path())).unwrap();
+    let destination = working.object_path(object_hash).unwrap().unwrap();
+    let source_metadata = fs::metadata(source_path).unwrap();
+    let destination_metadata = fs::metadata(destination).unwrap();
+    assert_eq!(source_metadata.dev(), destination_metadata.dev());
+    assert_ne!(source_metadata.ino(), destination_metadata.ino());
 }
 
 #[test]

@@ -6,6 +6,9 @@ use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_REPOSITORY_STAGING: AtomicU64 = AtomicU64::new(0);
 
 /// Validated read-only access to content in a local store.
 ///
@@ -122,6 +125,50 @@ impl LocalStoreContentReader {
             ))),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(map_io(&path, "inspect local repository fs-file", error)),
+        }
+    }
+}
+
+/// Allocates a private, nonexistent staging path on the working CAS filesystem.
+pub(crate) fn allocate_repository_staging_path(
+    working: &crate::Store,
+) -> Result<PathBuf, StoreError> {
+    loop {
+        let serial = NEXT_REPOSITORY_STAGING.fetch_add(1, Ordering::Relaxed);
+        let path = working.objects_dir().join(format!(
+            ".bobr-repository-import-{}-{serial}",
+            std::process::id()
+        ));
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(path),
+            Ok(_) => {}
+            Err(error) => {
+                return Err(map_io(&path, "inspect repository staging path", error));
+            }
+        }
+    }
+}
+
+/// Removes an incomplete repository import unless it has been published.
+pub(crate) struct RepositoryStagingGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl RepositoryStagingGuard {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for RepositoryStagingGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = bobr_core::fsutil::remove_path_force(&self.path);
         }
     }
 }

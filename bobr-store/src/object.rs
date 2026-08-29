@@ -42,7 +42,7 @@ pub(crate) fn import_object(store: &Store, staged_path: &Path) -> Result<ObjectH
 /// Publishes a staged object only when it has the caller's expected hash.
 ///
 /// Unlike [`import_object`], this never admits mismatched content under its
-/// actual hash. Secondary-store imports know the identity before transfer, so
+/// actual hash. Repository imports know the identity before transfer, so
 /// a mismatch is corruption rather than a useful newly discovered object.
 pub(crate) fn import_object_with_expected_hash(
     store: &Store,
@@ -51,13 +51,13 @@ pub(crate) fn import_object_with_expected_hash(
 ) -> Result<(), StoreError> {
     let actual_hash = hash_path(staged_path).map_err(|error| {
         StoreError::Hashing(format!(
-            "failed to hash staged secondary object '{}': {error}",
+            "failed to hash staged repository object '{}': {error}",
             staged_path.display()
         ))
     })?;
     if actual_hash != expected_hash {
         return Err(StoreError::InvalidData(format!(
-            "secondary object hash mismatch: expected '{expected_hash}', got '{actual_hash}' from '{}'",
+            "repository object hash mismatch: expected '{expected_hash}', got '{actual_hash}' from '{}'",
             staged_path.display()
         )));
     }

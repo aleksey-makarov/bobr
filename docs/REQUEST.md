@@ -122,9 +122,9 @@ and explicit trust and transfer policies:
   When false, bobr ignores its mappings but may still obtain content for an
   already-known hash from it.
 - `transfer` is either `"hardlink"` or `"copy"` and controls how content is
-  imported into the working store. The current implementation supports
-  `"hardlink"`; `"copy"` is part of the v5 request contract but is rejected
-  with an explicit error until the copy transport is implemented.
+  imported into the working store. `"copy"` currently supports ordinary file
+  and directory objects; copying an fs-tree and its `fs-files/` closure is
+  rejected explicitly until that transport is implemented.
 
 Every repository is a content source. Trusted repositories additionally become
 trusted key indexes; this does not weaken content verification. Mapping and
@@ -138,6 +138,8 @@ same canonical repository root cannot be listed twice. `hardlink` requires the
 repository and working store `objects/` directories to share a filesystem, and
 likewise requires their `fs-files/` directories to share a filesystem. These
 pairs are checked separately because either directory may be a mount point.
+`copy` has no shared-filesystem requirement and always creates independent
+regular-file inodes; it never silently optimizes the transfer into hardlinks.
 Both `trusted` and `transfer` are mandatory in the low-level JSON request.
 
 A recipe for the `Source` builder has this shape:

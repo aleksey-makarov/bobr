@@ -8,7 +8,9 @@
 use crate::fs_tree::{
     FsFileHash, FsTreeEntry, FsTreeManifest, hash_fs_file_path, read_manifest_if_marked,
 };
-use crate::local_content::LocalStoreContentReader;
+use crate::local_content::{
+    LocalStoreContentReader, RepositoryStagingGuard, allocate_repository_staging_path,
+};
 use crate::object::import_object_with_expected_hash;
 use crate::refs::parse_object_target;
 use crate::{ReadOnlyStore, Store, StoreError};
@@ -22,9 +24,6 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-static NEXT_SECONDARY_STAGING: AtomicU64 = AtomicU64::new(0);
 
 /// Trusted metadata resolving one build or reuse key to an object hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -371,8 +370,8 @@ impl ContentSource for LocalHardlinkContentSource {
             self.ensure_fs_files(working, &manifest)?;
         }
 
-        let staging_path = allocate_staging_path(working)?;
-        let mut guard = StagingGuard::new(staging_path.clone());
+        let staging_path = allocate_repository_staging_path(working)?;
+        let mut guard = RepositoryStagingGuard::new(staging_path.clone());
         hardlink_object(&source_path, &staging_path)?;
         import_object_with_expected_hash(working, &staging_path, hash)?;
         guard.disarm();
@@ -525,46 +524,6 @@ fn require_same_filesystem(
         )));
     }
     Ok(())
-}
-
-fn allocate_staging_path(working: &Store) -> Result<PathBuf, StoreError> {
-    loop {
-        let serial = NEXT_SECONDARY_STAGING.fetch_add(1, Ordering::Relaxed);
-        let path = working.objects_dir().join(format!(
-            ".bobr-secondary-import-{}-{serial}",
-            std::process::id()
-        ));
-        match fs::symlink_metadata(&path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(path),
-            Ok(_) => {}
-            Err(error) => {
-                return Err(map_io(&path, "inspect secondary staging path", error));
-            }
-        }
-    }
-}
-
-struct StagingGuard {
-    path: PathBuf,
-    armed: bool,
-}
-
-impl StagingGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path, armed: true }
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for StagingGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            let _ = bobr_core::fsutil::remove_path_force(&self.path);
-        }
-    }
 }
 
 fn hardlink_object(source: &Path, destination: &Path) -> Result<(), StoreError> {
@@ -1062,7 +1021,7 @@ mod tests {
                     .unwrap()
                     .file_name()
                     .to_string_lossy()
-                    .starts_with(".bobr-secondary-import-"))
+                    .starts_with(".bobr-repository-import-"))
         );
     }
 

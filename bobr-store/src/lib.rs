@@ -17,6 +17,7 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 
+mod copy_content;
 mod error;
 pub mod fs_tree;
 mod local_content;
@@ -29,6 +30,7 @@ mod secondary_resolver;
 mod source;
 mod store;
 
+pub use copy_content::LocalCopyContentSource;
 pub use error::StoreError;
 pub use object::import_build;
 pub use ref_name::validate_ref_name;

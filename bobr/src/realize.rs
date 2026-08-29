@@ -8,8 +8,8 @@ use bobr_source::build_executor::BuildExecutor;
 use bobr_source::dynamic_realizer::DynamicRealizer;
 use bobr_source::graph::{GraphPlanError, GraphPlanErrorKind, plan_graph};
 use bobr_store::{
-    LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex, NamedContentSource,
-    NamedTrustedKeyIndex, ReadOnlyStore, SecondaryResolver, Store,
+    LocalCopyContentSource, LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex,
+    NamedContentSource, NamedTrustedKeyIndex, ReadOnlyStore, SecondaryResolver, Store,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -72,7 +72,7 @@ pub async fn realize(
     let _resize_monitor = ResizeMonitor::spawn(&logger);
     let runtime_provider = runtime_provider_for_current_process();
     let repository_log = repository_log_details(&repositories);
-    let (indexes, sources) = repository_capabilities(repositories, runtime_provider.clone())?;
+    let (indexes, sources) = repository_capabilities(repositories, runtime_provider.clone());
     let secondary = Arc::new(
         SecondaryResolver::new(store.clone(), run.run_id(), indexes, sources)
             .map_err(map_store_error)?,
@@ -244,7 +244,7 @@ fn open_local_repositories(
 fn repository_capabilities(
     repositories: Vec<OpenedLocalRepository>,
     runtime_provider: RuntimeProvider,
-) -> Result<(Vec<NamedTrustedKeyIndex>, Vec<NamedContentSource>), ExecutionError> {
+) -> (Vec<NamedTrustedKeyIndex>, Vec<NamedContentSource>) {
     let mut indexes = Vec::new();
     let mut sources = Vec::with_capacity(repositories.len());
     for repository in repositories {
@@ -260,15 +260,12 @@ fn repository_capabilities(
                 runtime_provider.clone(),
             )) as Arc<dyn bobr_store::ContentSource>,
             LocalTransferPolicy::Copy => {
-                return Err(ExecutionError::InvalidRequest(format!(
-                    "local repository '{}' requests transfer mode 'copy', which is not implemented yet",
-                    repository.name
-                )));
+                Arc::new(LocalCopyContentSource::new(repository.repository))
             }
         };
         sources.push(NamedContentSource::new(repository.name, source));
     }
-    Ok((indexes, sources))
+    (indexes, sources)
 }
 
 fn repository_log_details(repositories: &[OpenedLocalRepository]) -> Vec<serde_json::Value> {
@@ -407,8 +404,7 @@ mod tests {
                 repository: repository.clone(),
             }],
             RuntimeProvider::host(),
-        )
-        .unwrap();
+        );
         let resolver =
             SecondaryResolver::new(working.clone(), "untrusted-run", indexes, sources).unwrap();
         assert!(!resolver.has_trusted_indexes());
@@ -425,8 +421,7 @@ mod tests {
                 repository,
             }],
             RuntimeProvider::host(),
-        )
-        .unwrap();
+        );
         let resolver = SecondaryResolver::new(working, "trusted-run", indexes, sources).unwrap();
         let error = resolver.resolve_builds(&[build_key]).unwrap_err();
         assert!(error.to_string().contains("is not a symlink"), "{error}");
