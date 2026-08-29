@@ -96,13 +96,15 @@ pub async fn realize(
     );
     log_run_started(
         &logger,
-        &goals,
-        jobs,
-        reachable,
-        reachable_builders,
-        reachable_sources,
-        progress,
-        &repository_log,
+        RunStartedDetails {
+            goals: &goals,
+            jobs,
+            reachable,
+            reachable_builders,
+            reachable_sources,
+            progress,
+            local_repositories: &repository_log,
+        },
     );
     let realized = dynamic.realize_goals().await;
     let shutdown = executor
@@ -295,31 +297,32 @@ fn map_store_error(error: bobr_store::StoreError) -> ExecutionError {
     ExecutionError::Store(error.to_string())
 }
 
-fn log_run_started(
-    logger: &BuildRunLogger,
-    goals: &[String],
+struct RunStartedDetails<'a> {
+    goals: &'a [String],
     jobs: usize,
     reachable: usize,
     reachable_builders: usize,
     reachable_sources: usize,
     progress: bobr_core::ProgressPolicy,
-    local_repositories: &[serde_json::Value],
-) {
+    local_repositories: &'a [serde_json::Value],
+}
+
+fn log_run_started(logger: &BuildRunLogger, details: RunStartedDetails<'_>) {
     logger.log_run_event(BuildLogEvent {
         level: BuildLogLevel::Info,
         status: BuildStatus::RunStarted,
         op: Some("realize".to_string()),
-        message: format!("realizing {} goal(s)", goals.len()),
+        message: format!("realizing {} goal(s)", details.goals.len()),
         object_hash: None,
         raw_log_path: None,
         details: json!({
-            "goals": goals,
-            "jobs": jobs,
-            "reachable": reachable,
-            "reachable_builders": reachable_builders,
-            "reachable_sources": reachable_sources,
-            "progress_policy": progress,
-            "local_repositories": local_repositories,
+            "goals": details.goals,
+            "jobs": details.jobs,
+            "reachable": details.reachable,
+            "reachable_builders": details.reachable_builders,
+            "reachable_sources": details.reachable_sources,
+            "progress_policy": details.progress,
+            "local_repositories": details.local_repositories,
         })
         .as_object()
         .expect("run-start details are an object")
