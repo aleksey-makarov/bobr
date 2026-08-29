@@ -97,10 +97,11 @@ If source materialization produces a different object than the declared
 object metadata or source `builds/<object_hash>` mapping is written, and the
 source import fails with the actual hash.
 
-### Secondary capabilities
+### Local repository capabilities
 
-A request can additionally name local secondary stores (see
-[Request](./REQUEST.md#secondary-stores)). They are separate capabilities:
+A request can additionally name local repositories (see
+[Request](./REQUEST.md#local-repositories)). Each repository is one concrete
+read-only backend from which bobr derives separate capabilities:
 
 - a **trusted index** answers `BuildKey` and `ReuseKey` queries with candidate
   `ObjectHash` values; it supplies identity, not object bytes;
@@ -108,11 +109,16 @@ A request can additionally name local secondary stores (see
   implementation imports them only by hardlinking, including every referenced
   fs-file of an fs-tree, so it must share a filesystem with the working store.
 
-The Realizer consults working-store mappings before secondary mappings, and
+Every repository provides the content-source capability. A repository with
+`trusted = true` additionally provides the trusted-index capability; with
+`trusted = false`, its mappings are not exposed to the resolver at all.
+
+The Realizer consults working-store mappings before repository mappings, and
 checks working-store content before secondary content. A secondary mapping can
-therefore be useful before its object is copied locally. The same read-only
-store may provide one or both capabilities. Remote capabilities and copy-based
-content import are not implemented yet.
+therefore be useful before its object is imported locally. Both adapters retain
+the same shared `ReadOnlyStore` handle, and mapping lookup never opens object
+records. Remote capabilities and copy-based content import are not implemented
+yet.
 
 ## Store Layout
 

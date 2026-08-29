@@ -115,14 +115,19 @@ pub enum ContentImportOutcome {
     Imported,
 }
 
-/// Trusted build/reuse index backed by a local read-only store.
+/// One validated local read-only bobr repository.
+///
+/// This is the shared backend behind the repository's independent trusted-key
+/// and content capabilities. Clones retain the same [`ReadOnlyStore`] handle;
+/// deciding whether to expose a trusted-key adapter remains the caller's trust
+/// policy rather than a property of the repository itself.
 #[derive(Debug, Clone)]
-pub struct LocalTrustedKeyIndex {
+pub struct LocalRepository {
     store: ReadOnlyStore,
 }
 
-impl LocalTrustedKeyIndex {
-    /// Wraps a validated read-only local store as a trusted key index.
+impl LocalRepository {
+    /// Wraps an already opened and validated read-only store.
     pub fn new(store: ReadOnlyStore) -> Self {
         Self { store }
     }
@@ -130,6 +135,37 @@ impl LocalTrustedKeyIndex {
     /// Returns the underlying read-only store.
     pub fn store(&self) -> &ReadOnlyStore {
         &self.store
+    }
+}
+
+impl From<ReadOnlyStore> for LocalRepository {
+    fn from(store: ReadOnlyStore) -> Self {
+        Self::new(store)
+    }
+}
+
+/// Trusted build/reuse index backed by a local read-only store.
+#[derive(Debug, Clone)]
+pub struct LocalTrustedKeyIndex {
+    repository: LocalRepository,
+}
+
+impl LocalTrustedKeyIndex {
+    /// Exposes a local repository's mappings as a trusted key index.
+    pub fn new(repository: impl Into<LocalRepository>) -> Self {
+        Self {
+            repository: repository.into(),
+        }
+    }
+
+    /// Returns the shared local repository backend.
+    pub fn repository(&self) -> &LocalRepository {
+        &self.repository
+    }
+
+    /// Returns the underlying read-only store.
+    pub fn store(&self) -> &ReadOnlyStore {
+        self.repository.store()
     }
 }
 
@@ -143,7 +179,7 @@ impl TrustedKeyIndex for LocalTrustedKeyIndex {
         for key in keys {
             if seen.insert(*key)
                 && let Some(object_hash) =
-                    load_resolution("build", &self.store.build_ref_path(*key))?
+                    load_resolution("build", &self.store().build_ref_path(*key))?
             {
                 found.push(TrustedResolution {
                     key: *key,
@@ -163,7 +199,7 @@ impl TrustedKeyIndex for LocalTrustedKeyIndex {
         for key in keys {
             if seen.insert(*key)
                 && let Some(object_hash) =
-                    load_resolution("reuse", &self.store.reuse_ref_path(*key))?
+                    load_resolution("reuse", &self.store().reuse_ref_path(*key))?
             {
                 found.push(TrustedResolution {
                     key: *key,
@@ -182,14 +218,14 @@ impl TrustedKeyIndex for LocalTrustedKeyIndex {
 /// copying.
 #[derive(Debug, Clone)]
 pub struct LocalHardlinkContentSource {
-    store: ReadOnlyStore,
+    repository: LocalRepository,
     runtime: RuntimeProvider,
 }
 
 impl LocalHardlinkContentSource {
-    /// Wraps a validated read-only local store as a hardlink content source.
-    pub fn new(store: ReadOnlyStore) -> Self {
-        Self::with_runtime(store, runtime_provider_for_current_process())
+    /// Exposes a local repository's content through hardlink import.
+    pub fn new(repository: impl Into<LocalRepository>) -> Self {
+        Self::with_runtime(repository, runtime_provider_for_current_process())
     }
 
     /// Wraps a store with an explicitly selected runtime provider.
@@ -197,23 +233,35 @@ impl LocalHardlinkContentSource {
     /// Production callers normally use [`Self::new`]. Tests and root callers
     /// can select a host provider; unprivileged imports use a namespace provider
     /// so fs-files owned by mapped subordinate IDs can be hardlinked.
-    pub fn with_runtime(store: ReadOnlyStore, runtime: RuntimeProvider) -> Self {
-        Self { store, runtime }
+    pub fn with_runtime(repository: impl Into<LocalRepository>, runtime: RuntimeProvider) -> Self {
+        Self {
+            repository: repository.into(),
+            runtime,
+        }
+    }
+
+    /// Returns the shared local repository backend.
+    pub fn repository(&self) -> &LocalRepository {
+        &self.repository
     }
 
     /// Returns the underlying read-only store.
     pub fn store(&self) -> &ReadOnlyStore {
-        &self.store
+        self.repository.store()
     }
 
     fn validate_working_store(&self, working: &Store) -> Result<(), StoreError> {
-        if self.store.root() == working.root() {
+        if self.store().root() == working.root() {
             return Err(StoreError::InvalidInput(format!(
                 "secondary store '{}' is the working store",
-                self.store.root().display()
+                self.store().root().display()
             )));
         }
-        require_same_filesystem("objects", &self.store.objects_dir(), &working.objects_dir())
+        require_same_filesystem(
+            "objects",
+            &self.store().objects_dir(),
+            &working.objects_dir(),
+        )
     }
 
     fn ensure_fs_files(
@@ -238,7 +286,7 @@ impl ContentSource for LocalHardlinkContentSource {
     fn locate_objects(&self, hashes: &[ObjectHash]) -> Result<HashSet<ObjectHash>, StoreError> {
         let mut available = HashSet::new();
         for hash in hashes {
-            let path = self.store.object_path_unchecked(*hash);
+            let path = self.store().object_path_unchecked(*hash);
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_dir() => {
                     available.insert(*hash);
@@ -262,7 +310,7 @@ impl ContentSource for LocalHardlinkContentSource {
     }
 
     fn object_manifest(&self, hash: ObjectHash) -> Result<Option<FsTreeManifest>, StoreError> {
-        let path = self.store.object_path_unchecked(hash);
+        let path = self.store().object_path_unchecked(hash);
         match fs::symlink_metadata(&path) {
             Ok(_) => read_manifest_if_marked(&path),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -273,7 +321,7 @@ impl ContentSource for LocalHardlinkContentSource {
     fn locate_fs_files(&self, hashes: &[FsFileHash]) -> Result<HashSet<FsFileHash>, StoreError> {
         let mut available = HashSet::new();
         for hash in hashes {
-            let path = self.store.fs_file_path_unchecked(*hash);
+            let path = self.store().fs_file_path_unchecked(*hash);
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_file() => {
                     available.insert(*hash);
@@ -302,7 +350,7 @@ impl ContentSource for LocalHardlinkContentSource {
             .run(
                 &HardlinkFsFilesFunction,
                 HardlinkFsFilesInput {
-                    source_root: self.store.root().to_path_buf(),
+                    source_root: self.store().root().to_path_buf(),
                     working_root: working.root().to_path_buf(),
                     hashes: hashes.iter().map(FsFileHash::to_hex).collect(),
                 },
@@ -310,7 +358,7 @@ impl ContentSource for LocalHardlinkContentSource {
             .map_err(|error| {
                 StoreError::Io(format!(
                     "failed to import fs-files from secondary store '{}': {error}",
-                    self.store.root().display()
+                    self.store().root().display()
                 ))
             })
     }
@@ -329,7 +377,7 @@ impl ContentSource for LocalHardlinkContentSource {
             return Ok(ContentImportOutcome::AlreadyPresent);
         }
 
-        let source_path = self.store.object_path_unchecked(hash);
+        let source_path = self.store().object_path_unchecked(hash);
         let source_metadata = match fs::symlink_metadata(&source_path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {

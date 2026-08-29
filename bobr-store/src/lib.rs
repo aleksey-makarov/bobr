@@ -33,8 +33,8 @@ pub use object::import_build;
 pub use ref_name::validate_ref_name;
 pub use refs::{load_build_object_hash, load_reuse_object_hash, publish_existing_build};
 pub use secondary::{
-    ContentImportOutcome, ContentSource, LocalHardlinkContentSource, LocalTrustedKeyIndex,
-    TrustedKeyIndex, TrustedResolution,
+    ContentImportOutcome, ContentSource, LocalHardlinkContentSource, LocalRepository,
+    LocalTrustedKeyIndex, TrustedKeyIndex, TrustedResolution,
 };
 pub use secondary_resolver::{
     KnownObjectResolution, MappingCandidates, NamedContentSource, NamedTrustedKeyIndex,
