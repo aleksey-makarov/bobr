@@ -351,6 +351,8 @@ fn log_run_finished(logger: &BuildRunLogger, result: Result<&[GoalResult], &Exec
     details["downloaded"] = json!(stats.downloaded);
     details["local"] = json!(stats.local);
     details["secondary"] = json!(stats.secondary);
+    details["hardlinked"] = json!(stats.hardlinked);
+    details["copied"] = json!(stats.copied);
     details["already_present"] = json!(stats.already_present);
     details["logging_errors"] = json!(logger.logging_errors());
     let retries = logger.download_retries();

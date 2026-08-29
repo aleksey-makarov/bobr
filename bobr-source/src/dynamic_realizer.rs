@@ -19,8 +19,9 @@ use bobr_core::{
     ObjectHash, ReuseKey, Run, RuntimeProvider, SubjectIdentity,
 };
 use bobr_store::{
-    MappingCandidates, SecondaryResolver, Store, StoreError, load_build_object_hash,
-    load_reuse_object_hash, publish_existing_build, record_existing_source_object,
+    ContentTransferEvent, ContentTransferReport, KnownObjectResolution, MappingCandidates,
+    SecondaryResolver, Store, StoreError, load_build_object_hash, load_reuse_object_hash,
+    publish_existing_build, record_existing_source_object,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -709,9 +710,35 @@ impl DynamicRealizer {
                 let permit = self.acquire_local_io_permit().await?;
                 self.check_cancelled()?;
                 let secondary = self.secondary.clone();
+                let logger = self.logger.clone();
+                let cancellation = self.cancellation.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
-                    secondary.ensure_objects(&[hash])
+                    let identity = content_identity(hash);
+                    let mut started = false;
+                    let mut transferred_bytes = 0_u64;
+                    let mut completed_transfers = Vec::new();
+                    let result = secondary.ensure_objects_with_progress(&[hash], |event| {
+                        started = true;
+                        log_content_progress(
+                            &logger,
+                            &identity,
+                            event,
+                            &mut transferred_bytes,
+                            &mut completed_transfers,
+                        );
+                    });
+                    if started {
+                        log_content_terminal(
+                            &logger,
+                            &identity,
+                            hash,
+                            &result,
+                            &completed_transfers,
+                            cancellation.is_cancelled(),
+                        );
+                    }
+                    result
                 })
                 .await
                 .map_err(|error| {
@@ -849,8 +876,8 @@ impl DynamicRealizer {
             details: json!({
                 "mapping_kind": kind,
                 "key": key,
-                "answers": report.answers.iter().map(|answer| json!({
-                    "index": answer.index,
+                "mapping_providers": report.answers.iter().map(|answer| json!({
+                    "name": answer.index,
                     "object_hash": answer.object_hash,
                 })).collect::<Vec<_>>(),
             })
@@ -859,6 +886,158 @@ impl DynamicRealizer {
             .clone(),
         });
     }
+}
+
+fn content_identity(hash: ObjectHash) -> SubjectIdentity {
+    let hash = hash.to_string();
+    SubjectIdentity::new("SecondaryContent", format!("object {}", &hash[..12]), hash)
+}
+
+fn log_content_progress(
+    logger: &BuildRunLogger,
+    identity: &SubjectIdentity,
+    event: ContentTransferEvent,
+    transferred_bytes: &mut u64,
+    completed: &mut Vec<ContentTransferReport>,
+) {
+    let (mode, message, details) = match event {
+        ContentTransferEvent::Started {
+            content_source,
+            transfer_mode,
+            ..
+        } => {
+            let mode = transfer_mode.as_str();
+            let message = format!("{mode} from local repository '{content_source}'");
+            let details = json!({
+                "transfer": mode,
+                "host": content_source.clone(),
+                "content_provider": content_source,
+                "transfer_mode": mode,
+                "bytes": *transferred_bytes,
+            });
+            (mode, message, details)
+        }
+        ContentTransferEvent::Finished(report) => {
+            *transferred_bytes = transferred_bytes.saturating_add(report.bytes);
+            let mode = report.transfer_mode.as_str();
+            let provider = report.content_source.clone();
+            let message = format!(
+                "{mode} {} file(s), {} byte(s) from local repository '{}' in {} ms",
+                report.files, report.bytes, provider, report.duration_ms
+            );
+            let details = json!({
+                "transfer": mode,
+                "host": provider,
+                "content_provider": report.content_source,
+                "transfer_mode": mode,
+                "files": report.files,
+                "transfer_bytes": report.bytes,
+                "bytes": *transferred_bytes,
+                "duration_ms": report.duration_ms,
+            });
+            completed.push(report);
+            (mode, message, details)
+        }
+    };
+    logger.log_subject_event(
+        identity,
+        BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status: BuildStatus::Running,
+            op: Some(format!("repository-{mode}")),
+            message,
+            object_hash: None,
+            raw_log_path: None,
+            details: details
+                .as_object()
+                .expect("content progress details are an object")
+                .clone(),
+        },
+    );
+}
+
+fn log_content_terminal(
+    logger: &BuildRunLogger,
+    identity: &SubjectIdentity,
+    hash: ObjectHash,
+    result: &Result<Vec<KnownObjectResolution>, StoreError>,
+    observed_transfers: &[ContentTransferReport],
+    cancelled: bool,
+) {
+    let resolution = result.as_ref().ok().and_then(|reports| reports.first());
+    let completed_object = resolution.is_some_and(|report| report.outcome.is_some());
+    let transfers = resolution
+        .map(|report| report.transfers.as_slice())
+        .unwrap_or(observed_transfers);
+    let mut modes = Vec::new();
+    if completed_object && !cancelled {
+        for transfer in transfers {
+            let mode = transfer.transfer_mode.as_str();
+            if !modes.contains(&mode) {
+                modes.push(mode);
+            }
+        }
+    }
+    let files = transfers.iter().map(|transfer| transfer.files).sum::<u64>();
+    let bytes = transfers.iter().map(|transfer| transfer.bytes).sum::<u64>();
+    let duration_ms = transfers
+        .iter()
+        .map(|transfer| transfer.duration_ms)
+        .sum::<u64>();
+    let providers = transfers
+        .iter()
+        .map(|transfer| {
+            json!({
+                "name": transfer.content_source,
+                "transfer_mode": transfer.transfer_mode.as_str(),
+                "files": transfer.files,
+                "bytes": transfer.bytes,
+                "duration_ms": transfer.duration_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+    let (level, status, message) = if cancelled {
+        (
+            BuildLogLevel::Info,
+            BuildStatus::Cancelled,
+            "content acquisition cancelled".to_string(),
+        )
+    } else {
+        match result {
+            Ok(_) if completed_object => (
+                BuildLogLevel::Info,
+                BuildStatus::Done,
+                format!("acquired {files} file(s), {bytes} byte(s) in {duration_ms} ms"),
+            ),
+            Ok(_) => (
+                BuildLogLevel::Info,
+                BuildStatus::Done,
+                "content remains unavailable after repository lookup".to_string(),
+            ),
+            Err(error) => (BuildLogLevel::Error, BuildStatus::Failed, error.to_string()),
+        }
+    };
+    logger.log_subject_event(
+        identity,
+        BuildLogEvent {
+            level,
+            status,
+            op: Some("repository-content".to_string()),
+            message,
+            object_hash: Some(hash),
+            raw_log_path: None,
+            details: json!({
+                "content_outcomes": modes,
+                "content_providers": providers,
+                "files": files,
+                "bytes": bytes,
+                "duration_ms": duration_ms,
+            })
+            .as_object()
+            .expect("content terminal details are an object")
+            .clone(),
+        },
+    );
 }
 
 async fn collect_ordered_input_tasks<T: Send + 'static>(
@@ -1013,6 +1192,10 @@ mod tests {
     }
 
     impl ContentSource for TrackedCopyContentSource {
+        fn transfer_mode(&self) -> bobr_store::ContentTransferMode {
+            self.inner.transfer_mode()
+        }
+
         fn locate_objects(&self, hashes: &[ObjectHash]) -> Result<HashSet<ObjectHash>, StoreError> {
             self.inner.locate_objects(hashes)
         }
@@ -1457,6 +1640,36 @@ mod tests {
         let working_metadata = fs::metadata(working_file).unwrap();
         assert_eq!(source_metadata.dev(), working_metadata.dev());
         assert_ne!(source_metadata.ino(), working_metadata.ino());
+        assert_eq!(environment.logger.outcome_stats().copied, 1);
+        assert_eq!(environment.logger.outcome_stats().hardlinked, 0);
+        environment.logger.flush();
+        let records = fs::read_to_string(environment.run.logs_dir().join("events.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let mapping = records
+            .iter()
+            .find(|record| record["op"] == "secondary-build")
+            .unwrap();
+        assert_eq!(
+            mapping["details"]["mapping_providers"][0]["name"],
+            "identity"
+        );
+        assert!(mapping["details"].get("content_providers").is_none());
+        let content = records
+            .iter()
+            .find(|record| record["op"] == "repository-content")
+            .unwrap();
+        assert_eq!(content["details"]["content_outcomes"], json!(["copy"]));
+        assert_eq!(content["details"]["content_providers"][0]["name"], "bytes");
+        assert_eq!(
+            content["details"]["content_providers"][0]["transfer_mode"],
+            "copy"
+        );
+        assert_eq!(content["details"]["files"], 2);
+        assert!(content["details"]["bytes"].as_u64().unwrap() > 0);
+        assert!(content["details"].get("mapping_providers").is_none());
         executor.shutdown().await.unwrap();
     }
 
@@ -1951,6 +2164,8 @@ mod tests {
             load_build_object_hash(&environment.store, graph.goals()[0]).unwrap(),
             Some(p)
         );
+        assert_eq!(environment.logger.outcome_stats().hardlinked, 1);
+        assert_eq!(environment.logger.outcome_stats().copied, 0);
         executor.shutdown().await.unwrap();
     }
 

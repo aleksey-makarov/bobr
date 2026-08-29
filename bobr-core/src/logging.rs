@@ -302,6 +302,10 @@ pub struct RunOutcomeStats {
     pub local: u64,
     /// Source objects acquired from secondary content.
     pub secondary: u64,
+    /// Known objects completed through at least one hardlink repository transfer.
+    pub hardlinked: u64,
+    /// Known objects completed through at least one copy repository transfer.
+    pub copied: u64,
     /// Source objects already complete in the working store.
     pub already_present: u64,
 }
@@ -315,6 +319,8 @@ struct OutcomeSink {
     downloaded: AtomicU64,
     local: AtomicU64,
     secondary: AtomicU64,
+    hardlinked: AtomicU64,
+    copied: AtomicU64,
     already_present: AtomicU64,
 }
 
@@ -329,6 +335,8 @@ impl OutcomeSink {
             downloaded: load(&self.downloaded),
             local: load(&self.local),
             secondary: load(&self.secondary),
+            hardlinked: load(&self.hardlinked),
+            copied: load(&self.copied),
             already_present: load(&self.already_present),
         }
     }
@@ -354,17 +362,34 @@ impl EventSink for OutcomeSink {
             }
             _ => {}
         }
-        let Some(outcome) = record.details.get("source_outcome").and_then(Value::as_str) else {
-            return;
-        };
-        let counter = match outcome {
-            "downloaded" => &self.downloaded,
-            "local" => &self.local,
-            "secondary" => &self.secondary,
-            "already_present" => &self.already_present,
-            _ => return,
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
+        if let Some(counter) = record
+            .details
+            .get("source_outcome")
+            .and_then(Value::as_str)
+            .and_then(|outcome| match outcome {
+                "downloaded" => Some(&self.downloaded),
+                "local" => Some(&self.local),
+                "secondary" => Some(&self.secondary),
+                "already_present" => Some(&self.already_present),
+                _ => None,
+            })
+        {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+
+        if let Some(outcomes) = record
+            .details
+            .get("content_outcomes")
+            .and_then(Value::as_array)
+        {
+            for outcome in outcomes.iter().filter_map(Value::as_str) {
+                match outcome {
+                    "hardlink" => self.hardlinked.fetch_add(1, Ordering::Relaxed),
+                    "copy" => self.copied.fetch_add(1, Ordering::Relaxed),
+                    _ => continue,
+                };
+            }
+        }
     }
 }
 
@@ -940,7 +965,7 @@ enum ProgressSink {
         /// heartbeat -- a fetch run of eight hundred sources is two thousand
         /// lines of "fetching"/"fetched" otherwise, and a CI log or the
         /// rebuild-world transcript is unreadable for it.
-        aggregate: Mutex<Option<PlainAggregate>>,
+        aggregate: Box<Mutex<Option<PlainAggregate>>>,
     },
 }
 
@@ -976,7 +1001,7 @@ impl ProgressSink {
             Self::Plain {
                 run_log_dir,
                 min_level: stderr_min_level(quiet),
-                aggregate: Mutex::new(None),
+                aggregate: Box::new(Mutex::new(None)),
             }
         }
     }
@@ -1046,6 +1071,7 @@ fn stderr_min_level(quiet: bool) -> BuildLogLevel {
 #[derive(Debug)]
 struct FetchProgress {
     total: usize,
+    dynamic_content: HashSet<String>,
     done: usize,
     failed: usize,
     subjects: HashMap<String, SubjectPhase>,
@@ -1098,6 +1124,7 @@ impl FetchProgress {
         let now = Instant::now();
         Self {
             total,
+            dynamic_content: HashSet::new(),
             done: 0,
             failed: 0,
             subjects: HashMap::new(),
@@ -1162,6 +1189,9 @@ impl FetchProgress {
             return false;
         };
         let key = subject.build_key.as_str();
+        if subject.tag == "SecondaryContent" && self.dynamic_content.insert(key.to_string()) {
+            self.total += 1;
+        }
 
         if let Some(host) = record.details.get("retry_host").and_then(Value::as_str) {
             if let Some(SubjectPhase::Active(download)) = self.subjects.remove(key) {
@@ -1763,7 +1793,7 @@ impl LiveProgress {
     fn update_headers(&mut self) {
         self.fetch_progress.refresh_rate(Instant::now());
         self.fetch.set_message(format!(
-            "fetch: {} downloading · {} waiting · {} complete · {} retrying · {} failed",
+            "fetch: {} transferring · {} waiting · {} complete · {} retrying · {} failed",
             self.fetch_progress.active(),
             self.fetch_progress.queued(),
             self.fetch_progress.done,
@@ -1906,7 +1936,9 @@ impl LiveProgress {
             return;
         }
 
-        let network = record.details.get("transfer").and_then(Value::as_str) == Some("network");
+        let transfer = record.details.get("transfer").and_then(Value::as_str);
+        let network = transfer == Some("network");
+        let activity_transfer = network || transfer == Some("copy");
         let builder_queue_event = record.subject.as_ref().is_some_and(|subject| {
             subject.tag != "Source"
                 && subject.tag != "SecondaryContent"
@@ -1949,14 +1981,14 @@ impl LiveProgress {
         // connection permit. It belongs in fetch statistics as `waiting`, not
         // in an activity row. The first `running` network milestone is the
         // point at which the row becomes a useful description of real work.
-        let source_transfer_started = network && status == BuildStatus::Running.as_str();
+        let source_transfer_started = activity_transfer && status == BuildStatus::Running.as_str();
         let source_retry = record.details.contains_key("retry_host");
         let source_was_visible = record.subject.as_ref().is_some_and(|subject| {
             self.viewport
                 .active
                 .contains_key(&ActivityKey::Source(subject.build_key.clone()))
         });
-        if network || tracked_source || source_terminal {
+        if activity_transfer || tracked_source || source_terminal {
             if record.level >= BuildLogLevel::Warn {
                 let _ = self
                     .multi
@@ -2088,7 +2120,10 @@ fn format_run_progress(progress: &RunProgress) -> String {
         line.push_str(&format!(" · {} builders hidden", progress.hidden_builders));
     }
     if progress.hidden_sources > 0 {
-        line.push_str(&format!(" · {} downloads hidden", progress.hidden_sources));
+        line.push_str(&format!(
+            " · {} acquisitions hidden",
+            progress.hidden_sources
+        ));
     }
     line
 }
@@ -2270,6 +2305,8 @@ fn format_outcome_details(record: &EventLogRecord) -> String {
             format!("{} downloaded", detail_u64(record, "downloaded")),
             format!("{} local", detail_u64(record, "local")),
             format!("{} secondary", detail_u64(record, "secondary")),
+            format!("{} hardlinked", detail_u64(record, "hardlinked")),
+            format!("{} copied", detail_u64(record, "copied")),
             format!("{} already-present", detail_u64(record, "already_present")),
         ]);
     }
@@ -2827,7 +2864,7 @@ mod tests {
                 hidden_builders: 3,
                 hidden_sources: 2,
             }),
-            "24 built · 19 cache-hit · 712 fetched · 0 failed · 1907 reachable · 3 builders hidden · 2 downloads hidden"
+            "24 built · 19 cache-hit · 712 fetched · 0 failed · 1907 reachable · 3 builders hidden · 2 acquisitions hidden"
         );
     }
 
@@ -2997,6 +3034,10 @@ mod tests {
             BuildStatus::Cancelled,
             &"c".repeat(64),
         ));
+        sink.write_event(&content_record(
+            BuildStatus::Done,
+            json!({ "content_outcomes": ["hardlink", "copy"] }),
+        ));
 
         assert_eq!(
             sink.snapshot(),
@@ -3006,6 +3047,8 @@ mod tests {
                 failed: 1,
                 cancelled: 1,
                 downloaded: 1,
+                hardlinked: 1,
+                copied: 1,
                 already_present: 1,
                 ..RunOutcomeStats::default()
             }
@@ -3033,6 +3076,23 @@ mod tests {
         };
         let subject = subject.map(|(name, key)| SubjectIdentity::new("Source", name, key));
         EventLogRecord::assemble(0, None, subject.as_ref(), &event, Path::new("/run"))
+    }
+
+    fn content_record(status: BuildStatus, details: Value) -> EventLogRecord {
+        let Value::Object(details) = details else {
+            panic!("details must be an object")
+        };
+        let event = BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status,
+            op: Some("repository-copy".to_string()),
+            message: "copying repository content".to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details,
+        };
+        let subject = SubjectIdentity::new("SecondaryContent", "object", "content-key");
+        EventLogRecord::assemble(0, None, Some(&subject), &event, Path::new("/run"))
     }
 
     fn queued(name: &str, host: &str) -> EventLogRecord {
@@ -3100,7 +3160,7 @@ mod tests {
             assert!(live.slots.iter().all(|slot| slot.activity.is_none()));
             assert_eq!(
                 live.fetch.message(),
-                "fetch: 0 downloading · 0 waiting · 0 complete · 0 retrying · 0 failed"
+                "fetch: 0 transferring · 0 waiting · 0 complete · 0 retrying · 0 failed"
             );
             assert_eq!(
                 live.build.message(),
@@ -3142,6 +3202,7 @@ mod tests {
         {
             let live = state.lock().unwrap();
             assert_eq!(live.fetch_progress.active(), 1);
+            assert_eq!(live.fetch_progress.total, 991);
             assert_eq!(
                 live.slots[1].activity,
                 Some(ActivityKey::Source("source".to_string()))
@@ -3310,6 +3371,54 @@ mod tests {
     }
 
     #[test]
+    fn local_repository_copy_uses_an_acquisition_activity_row() {
+        let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
+        sink.write_event(&live_run_record(
+            BuildStatus::RunStarted,
+            json!({ "reachable": 1, "reachable_sources": 0, "jobs": 1 }),
+        ));
+        sink.write_event(&content_record(
+            BuildStatus::Running,
+            json!({
+                "host": "archive",
+                "transfer": "copy",
+                "content_provider": "archive",
+                "transfer_mode": "copy",
+                "bytes": 4096,
+            }),
+        ));
+        {
+            let ProgressSink::Live(state) = &sink else {
+                panic!("expected live sink");
+            };
+            let live = state.lock().unwrap();
+            assert_eq!(live.fetch_progress.active(), 1);
+            assert_eq!(
+                live.slots.first().and_then(|slot| slot.activity.clone()),
+                Some(ActivityKey::Source("content-key".to_string()))
+            );
+            assert_eq!(live.fetch_progress.live_bytes(), 4096);
+        }
+
+        sink.write_event(&content_record(
+            BuildStatus::Done,
+            json!({
+                "content_outcomes": ["copy"],
+                "files": 2,
+                "bytes": 4096,
+                "duration_ms": 25,
+            }),
+        ));
+        let ProgressSink::Live(state) = &sink else {
+            panic!("expected live sink");
+        };
+        let live = state.lock().unwrap();
+        assert_eq!(live.fetch_progress.active(), 0);
+        assert_eq!(live.fetch_progress.done, 1);
+        assert!(live.slots.iter().all(|slot| slot.activity.is_none()));
+    }
+
+    #[test]
     fn the_hosts_line_names_the_bottleneck_and_then_retires() {
         // `ftp.gnu.org 1 (2 queued)` is the whole diagnosis: the host's slots
         // are full and the rest are behind it.
@@ -3439,12 +3548,12 @@ mod tests {
         let quiet = ProgressSink::Plain {
             run_log_dir: PathBuf::from("/run"),
             min_level: stderr_min_level(true),
-            aggregate: Mutex::new(None),
+            aggregate: Box::new(Mutex::new(None)),
         };
         let loud = ProgressSink::Plain {
             run_log_dir: PathBuf::from("/run"),
             min_level: stderr_min_level(false),
-            aggregate: Mutex::new(None),
+            aggregate: Box::new(Mutex::new(None)),
         };
         let start = fetch_record(
             BuildStatus::RunStarted,

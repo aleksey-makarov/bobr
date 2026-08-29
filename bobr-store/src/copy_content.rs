@@ -6,7 +6,7 @@ use crate::local_content::{
     verify_fs_file,
 };
 use crate::object::import_object_with_expected_hash;
-use crate::secondary::{ContentImportOutcome, ContentSource, LocalRepository};
+use crate::secondary::{ContentImportOutcome, ContentSource, ContentTransferMode, LocalRepository};
 use crate::{ReadOnlyStore, Store, StoreError};
 use bobr_core::ObjectHash;
 use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
@@ -72,6 +72,10 @@ impl LocalCopyContentSource {
 }
 
 impl ContentSource for LocalCopyContentSource {
+    fn transfer_mode(&self) -> ContentTransferMode {
+        ContentTransferMode::Copy
+    }
+
     fn locate_objects(&self, hashes: &[ObjectHash]) -> Result<HashSet<ObjectHash>, StoreError> {
         self.repository.content().locate_objects(hashes)
     }

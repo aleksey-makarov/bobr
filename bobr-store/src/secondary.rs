@@ -66,6 +66,9 @@ pub trait TrustedKeyIndex: fmt::Debug + Send + Sync {
 /// Implementations perform batched availability discovery and verified import
 /// into a working store without gaining access to trusted key mappings.
 pub trait ContentSource: fmt::Debug + Send + Sync {
+    /// Transport used when this source imports local content.
+    fn transfer_mode(&self) -> ContentTransferMode;
+
     /// Returns the subset of `hashes` whose top-level object payload exists.
     ///
     /// This does not claim that an fs-tree's referenced fs-files are complete;
@@ -112,6 +115,25 @@ pub enum ContentImportOutcome {
     AlreadyPresent,
     /// The object was imported and published in the working store.
     Imported,
+}
+
+/// Physical transport used to bring content into the working store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentTransferMode {
+    /// Reuse source inodes through hardlinks.
+    Hardlink,
+    /// Copy content into independent working-store inodes.
+    Copy,
+}
+
+impl ContentTransferMode {
+    /// Stable lowercase spelling used by logs and diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hardlink => "hardlink",
+            Self::Copy => "copy",
+        }
+    }
 }
 
 /// One validated local read-only bobr repository.
@@ -291,6 +313,10 @@ impl LocalHardlinkContentSource {
 }
 
 impl ContentSource for LocalHardlinkContentSource {
+    fn transfer_mode(&self) -> ContentTransferMode {
+        ContentTransferMode::Hardlink
+    }
+
     fn locate_objects(&self, hashes: &[ObjectHash]) -> Result<HashSet<ObjectHash>, StoreError> {
         self.repository.content().locate_objects(hashes)
     }

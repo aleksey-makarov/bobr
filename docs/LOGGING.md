@@ -47,12 +47,13 @@ minus three, so normal activity events do not change the block's height.
 - `fixed` caps the complete block at `max_lines` rows;
 - `summary` keeps the three fixed rows and hides individual activity rows.
 
-Each activity row belongs to one concrete builder or network Source acquisition
-until its terminal event. Empty rows display `—`. Local Path Sources, working
-store hits, and local secondary imports update fetch statistics but do not take
-an activity row. A network Source waiting for a connection slot also updates
-only fetch statistics; it takes an activity row at its first `running` network
-milestone, when a row can describe actual transfer work rather than queueing.
+Each activity row belongs to one concrete builder, network Source acquisition,
+or repository copy until its terminal event. Empty rows display `—`. Local Path
+Sources, working-store hits, and repository hardlinks update fetch statistics
+but do not take an activity row. A network Source waiting for a connection slot
+also updates only fetch statistics; it takes an activity row at its first
+`running` network milestone. A repository copy takes a row when its selected
+content provider starts copying, so a large local transfer remains visible.
 
 The renderer keeps every activity in its model even when only part fits on
 screen. There are separate FIFO queues for hidden builders and hidden Source
@@ -61,11 +62,16 @@ there is none, the oldest hidden Source does. The policy affects display only,
 never execution. A visible failed activity stays in its row until the run
 finishes, so the immediate failure context does not disappear.
 
-The `fetch` row reports current `downloading`, connection-slot `waiting`,
+The `fetch` row reports current `transferring`, connection-slot `waiting`,
 `complete`, transient `retrying`, and `failed` counts. The `build` row reports
 workers `running`, jobs `waiting` in the bounded BuildExecutor FIFO,
 `complete`, and `failed`. The `run` row reports whole-run outcomes plus the
-number of builders and downloads hidden only by the viewport.
+number of builders and acquisitions hidden only by the viewport.
+
+The initial acquisition total is the number of reachable Source nodes. A
+selected `SecondaryContent` object extends that total when its first event is
+seen, because lazy exact/reuse resolution cannot know all repository content
+work at run start.
 
 The number of visible rows never limits builder execution. A Tokio task listens
 for `SIGWINCH` and immediately asks the logger to reflow the viewport; build
@@ -177,13 +183,26 @@ subject events. Beyond the fanned-out subject events it carries:
   boundary, not pruned interior subtrees;
 - `run-finished`: realized goals or `details.error_class`, plus exact terminal
   counters: `built`, `cache_hit`, `failed`, `cancelled`, `downloaded`, `local`,
-  `secondary`, and `already_present`. Retry totals and logging failures are
-  included when present.
+  `secondary`, `hardlinked`, `copied`, and `already_present`. `hardlinked` and
+  `copied` count completed known-object acquisitions that used each repository
+  transport; a mixed fs-tree closure contributes to both. Retry totals and
+  logging failures are included when present.
 
 Source terminal/cache events carry `details.source_outcome` with one of
 `downloaded`, `local`, `secondary`, or `already_present`. Network milestones
 carry `details.transfer = "network"`, `host`, and optional byte counters; local
 materialization uses `transfer = "local"`.
+
+Trusted mapping and content provenance use separate events and fields. A
+`secondary-build` or `secondary-reuse` run event carries
+`details.mapping_providers`, each with the configured index name and asserted
+`object_hash`; it never claims that the same repository supplied bytes.
+Physical repository acquisition uses a synthetic `SecondaryContent` subject.
+Its `running` milestones carry `content_provider`, `transfer_mode`, and byte,
+file, and duration measurements. The terminal `repository-content` event
+carries the aggregate `content_providers`, `content_outcomes`, `files`, `bytes`,
+and `duration_ms`. This records split closures accurately when the manifest and
+its fs-files come from different repositories or use different transports.
 
 ## Levels and verbosity
 

@@ -36,12 +36,13 @@ pub use object::import_build;
 pub use ref_name::validate_ref_name;
 pub use refs::{load_build_object_hash, load_reuse_object_hash, publish_existing_build};
 pub use secondary::{
-    ContentImportOutcome, ContentSource, LocalHardlinkContentSource, LocalRepository,
-    LocalTrustedKeyIndex, TrustedKeyIndex, TrustedResolution,
+    ContentImportOutcome, ContentSource, ContentTransferMode, LocalHardlinkContentSource,
+    LocalRepository, LocalTrustedKeyIndex, TrustedKeyIndex, TrustedResolution,
 };
 pub use secondary_resolver::{
-    KnownObjectResolution, MappingCandidates, NamedContentSource, NamedTrustedKeyIndex,
-    ResolvedSecondaryContent, ReuseQuery, SecondaryResolution, SecondaryResolver, TrustedAnswer,
+    ContentTransferEvent, ContentTransferReport, KnownObjectResolution, MappingCandidates,
+    NamedContentSource, NamedTrustedKeyIndex, ResolvedSecondaryContent, ReuseQuery,
+    SecondaryResolution, SecondaryResolver, TrustedAnswer,
 };
 pub use source::{SourceImportOutcome, import_source_object, record_existing_source_object};
 pub use store::{ReadOnlyStore, Store};

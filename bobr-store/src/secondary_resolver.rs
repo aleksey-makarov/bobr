@@ -2,14 +2,17 @@
 
 use crate::fs_tree::{FsFileHash, FsTreeEntry, FsTreeManifest, read_manifest_if_marked};
 use crate::{
-    ContentImportOutcome, ContentSource, Store, StoreError, TrustedKeyIndex, TrustedResolution,
+    ContentImportOutcome, ContentSource, ContentTransferMode, Store, StoreError, TrustedKeyIndex,
+    TrustedResolution,
 };
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::Hash;
 use std::io;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// One named trusted key-index capability in configured priority order.
 #[derive(Debug, Clone)]
@@ -94,6 +97,8 @@ pub struct ResolvedSecondaryContent {
     /// This is empty when the complete candidate was already in the working
     /// store.
     pub content_sources: Vec<String>,
+    /// Physical content transfers performed while completing the object.
+    pub transfers: Vec<ContentTransferReport>,
     /// Whether the top-level object was already present or newly imported.
     pub import_outcome: ContentImportOutcome,
 }
@@ -105,8 +110,43 @@ pub struct KnownObjectResolution {
     pub object_hash: ObjectHash,
     /// Content sources used for the top-level object or fs-file closure.
     pub content_sources: Vec<String>,
+    /// Physical content transfers performed while completing the object.
+    pub transfers: Vec<ContentTransferReport>,
     /// Import result, or `None` when no complete content source set was found.
     pub outcome: Option<ContentImportOutcome>,
+}
+
+/// One completed physical transfer from a named content source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentTransferReport {
+    /// Object whose payload or fs-tree closure required the transfer.
+    pub object_hash: ObjectHash,
+    /// Configured content-source name.
+    pub content_source: String,
+    /// Physical import transport.
+    pub transfer_mode: ContentTransferMode,
+    /// Number of regular payload files transferred.
+    pub files: u64,
+    /// Sum of transferred regular-file lengths.
+    pub bytes: u64,
+    /// Wall-clock duration of the synchronous transfer call.
+    pub duration_ms: u64,
+}
+
+/// Lifecycle event for an actual content-source transfer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentTransferEvent {
+    /// A selected provider is about to import content.
+    Started {
+        /// Object whose payload or closure is being completed.
+        object_hash: ObjectHash,
+        /// Configured content-source name.
+        content_source: String,
+        /// Physical import transport.
+        transfer_mode: ContentTransferMode,
+    },
+    /// The selected provider completed an actual transfer.
+    Finished(ContentTransferReport),
 }
 
 /// Mapping/content resolution report for one queried key.
@@ -151,6 +191,17 @@ pub struct SecondaryResolver {
     run_id: String,
     indexes: Vec<NamedTrustedKeyIndex>,
     sources: Vec<NamedContentSource>,
+}
+
+struct AcquiredContent {
+    outcome: ContentImportOutcome,
+    sources: Vec<String>,
+    transfers: Vec<ContentTransferReport>,
+}
+
+struct AcquiredClosure {
+    sources: Vec<String>,
+    transfers: Vec<ContentTransferReport>,
 }
 
 impl SecondaryResolver {
@@ -207,6 +258,16 @@ impl SecondaryResolver {
         &self,
         hashes: &[ObjectHash],
     ) -> Result<Vec<KnownObjectResolution>, StoreError> {
+        self.ensure_objects_with_progress(hashes, |_| {})
+    }
+
+    /// Ensures known objects while reporting transfers selected after content
+    /// discovery. Mapping lookup is deliberately not part of this callback.
+    pub fn ensure_objects_with_progress(
+        &self,
+        hashes: &[ObjectHash],
+        mut progress: impl FnMut(ContentTransferEvent),
+    ) -> Result<Vec<KnownObjectResolution>, StoreError> {
         let hashes = unique_in_order(hashes);
         let mut need_content = Vec::new();
         for hash in &hashes {
@@ -223,35 +284,38 @@ impl SecondaryResolver {
                 .collect::<Result<Vec<_>, _>>()?
         };
 
-        hashes
-            .into_iter()
-            .map(|hash| {
-                if self.working.object_is_complete(hash)? {
-                    crate::record::record_existing_object(&self.working, hash, &self.run_id)?;
-                    return Ok(KnownObjectResolution {
-                        object_hash: hash,
-                        content_sources: Vec::new(),
-                        outcome: Some(ContentImportOutcome::AlreadyPresent),
-                    });
-                }
-                let acquired = self.acquire_candidate(hash, &availability)?;
-                if acquired.is_some() {
-                    crate::record::record_existing_object(&self.working, hash, &self.run_id)?;
-                }
-                Ok(match acquired {
-                    Some((outcome, content_sources)) => KnownObjectResolution {
-                        object_hash: hash,
-                        content_sources,
-                        outcome: Some(outcome),
-                    },
-                    None => KnownObjectResolution {
-                        object_hash: hash,
-                        content_sources: Vec::new(),
-                        outcome: None,
-                    },
-                })
-            })
-            .collect()
+        let mut reports = Vec::with_capacity(hashes.len());
+        for hash in hashes {
+            if self.working.object_is_complete(hash)? {
+                crate::record::record_existing_object(&self.working, hash, &self.run_id)?;
+                reports.push(KnownObjectResolution {
+                    object_hash: hash,
+                    content_sources: Vec::new(),
+                    transfers: Vec::new(),
+                    outcome: Some(ContentImportOutcome::AlreadyPresent),
+                });
+                continue;
+            }
+            let acquired = self.acquire_candidate(hash, &availability, &mut progress)?;
+            if acquired.is_some() {
+                crate::record::record_existing_object(&self.working, hash, &self.run_id)?;
+            }
+            reports.push(match acquired {
+                Some(acquired) => KnownObjectResolution {
+                    object_hash: hash,
+                    content_sources: acquired.sources,
+                    transfers: acquired.transfers,
+                    outcome: Some(acquired.outcome),
+                },
+                None => KnownObjectResolution {
+                    object_hash: hash,
+                    content_sources: Vec::new(),
+                    transfers: Vec::new(),
+                    outcome: None,
+                },
+            });
+        }
+        Ok(reports)
     }
 
     /// Resolves trusted build mappings without locating or importing content.
@@ -410,22 +474,25 @@ impl SecondaryResolver {
                     object_hash: candidate.object_hash,
                     mapping_index: candidate.index.clone(),
                     content_sources: Vec::new(),
+                    transfers: Vec::new(),
                     import_outcome: ContentImportOutcome::AlreadyPresent,
                 });
                 return Ok(report);
             }
         }
 
+        let mut ignore_progress = |_: ContentTransferEvent| {};
         for candidate in &group.candidates {
-            if let Some((outcome, used_sources)) =
-                self.acquire_candidate(candidate.object_hash, availability)?
+            if let Some(acquired) =
+                self.acquire_candidate(candidate.object_hash, availability, &mut ignore_progress)?
             {
                 promote(candidate)?;
                 report.resolved = Some(ResolvedSecondaryContent {
                     object_hash: candidate.object_hash,
                     mapping_index: candidate.index.clone(),
-                    content_sources: used_sources,
-                    import_outcome: outcome,
+                    content_sources: acquired.sources,
+                    transfers: acquired.transfers,
+                    import_outcome: acquired.outcome,
                 });
                 return Ok(report);
             }
@@ -470,34 +537,76 @@ impl SecondaryResolver {
         &self,
         hash: ObjectHash,
         availability: &[HashSet<ObjectHash>],
-    ) -> Result<Option<(ContentImportOutcome, Vec<String>)>, StoreError> {
+        progress: &mut dyn FnMut(ContentTransferEvent),
+    ) -> Result<Option<AcquiredContent>, StoreError> {
         if let Some(working_path) = self.working.object_path(hash)? {
             let Some(manifest) = read_manifest_if_marked(&working_path)? else {
-                return Ok(Some((ContentImportOutcome::AlreadyPresent, Vec::new())));
+                return Ok(Some(AcquiredContent {
+                    outcome: ContentImportOutcome::AlreadyPresent,
+                    sources: Vec::new(),
+                    transfers: Vec::new(),
+                }));
             };
-            let Some(used_sources) = self.ensure_manifest_closure(&manifest)? else {
+            let Some(closure) = self.ensure_manifest_closure(hash, &manifest, progress)? else {
                 return Ok(None);
             };
-            return Ok(Some((ContentImportOutcome::AlreadyPresent, used_sources)));
+            return Ok(Some(AcquiredContent {
+                outcome: ContentImportOutcome::AlreadyPresent,
+                sources: closure.sources,
+                transfers: closure.transfers,
+            }));
         }
 
+        let mut used_sources = Vec::new();
+        let mut transfers = Vec::new();
         for (index, source) in self.sources.iter().enumerate() {
             if !availability[index].contains(&hash) {
                 continue;
             }
             let manifest = source.source.object_manifest(hash)?;
-            let mut used_sources = Vec::new();
             if let Some(manifest) = &manifest {
-                let Some(closure_sources) = self.ensure_manifest_closure(manifest)? else {
+                let Some(closure) = self.ensure_manifest_closure(hash, manifest, progress)? else {
                     return Ok(None);
                 };
-                used_sources.extend(closure_sources);
+                for name in closure.sources {
+                    insert_name_once(&mut used_sources, &name);
+                }
+                transfers.extend(closure.transfers);
             }
+            progress(ContentTransferEvent::Started {
+                object_hash: hash,
+                content_source: source.name.clone(),
+                transfer_mode: source.source.transfer_mode(),
+            });
+            let started = Instant::now();
             match source.source.import_object(&self.working, hash)? {
                 ContentImportOutcome::NotFound => continue,
                 outcome => {
                     insert_name_once(&mut used_sources, &source.name);
-                    return Ok(Some((outcome, used_sources)));
+                    if outcome == ContentImportOutcome::Imported {
+                        let path = self.working.object_path(hash)?.ok_or_else(|| {
+                            StoreError::InvalidData(format!(
+                                "content source '{}' reported object '{}' imported, but it is absent",
+                                source.name, hash
+                            ))
+                        })?;
+                        let (files, bytes) = transferred_path_stats(&path)?;
+                        let report = ContentTransferReport {
+                            object_hash: hash,
+                            content_source: source.name.clone(),
+                            transfer_mode: source.source.transfer_mode(),
+                            files,
+                            bytes,
+                            duration_ms: duration_ms(started),
+                        };
+                        progress(ContentTransferEvent::Finished(report.clone()));
+                        merge_transfer(&mut transfers, report);
+                    }
+                    return Ok(Some(AcquiredContent {
+                        outcome,
+                        sources: used_sources,
+                        transfers,
+                    }));
                 }
             }
         }
@@ -506,8 +615,10 @@ impl SecondaryResolver {
 
     fn ensure_manifest_closure(
         &self,
+        object_hash: ObjectHash,
         manifest: &FsTreeManifest,
-    ) -> Result<Option<Vec<String>>, StoreError> {
+        progress: &mut dyn FnMut(ContentTransferEvent),
+    ) -> Result<Option<AcquiredClosure>, StoreError> {
         let hashes = manifest_fs_files(manifest);
         let mut missing = Vec::new();
         for hash in hashes {
@@ -530,7 +641,10 @@ impl SecondaryResolver {
             }
         }
         if missing.is_empty() {
-            return Ok(Some(Vec::new()));
+            return Ok(Some(AcquiredClosure {
+                sources: Vec::new(),
+                transfers: Vec::new(),
+            }));
         }
 
         let mut by_source = vec![Vec::new(); self.sources.len()];
@@ -549,16 +663,47 @@ impl SecondaryResolver {
         }
 
         let mut used_sources = Vec::new();
+        let mut transfers = Vec::new();
         for (index, hashes) in by_source.iter().enumerate() {
             if hashes.is_empty() {
                 continue;
             }
-            self.sources[index]
-                .source
-                .import_fs_files(&self.working, hashes)?;
-            used_sources.push(self.sources[index].name.clone());
+            let source = &self.sources[index];
+            progress(ContentTransferEvent::Started {
+                object_hash,
+                content_source: source.name.clone(),
+                transfer_mode: source.source.transfer_mode(),
+            });
+            let started = Instant::now();
+            source.source.import_fs_files(&self.working, hashes)?;
+            let bytes = hashes.iter().try_fold(0_u64, |total, hash| {
+                let path = self.working.fs_file_path_unchecked(*hash);
+                let length = fs::symlink_metadata(&path)
+                    .map_err(|error| {
+                        StoreError::Io(format!(
+                            "failed to inspect imported fs-file '{}': {error}",
+                            path.display()
+                        ))
+                    })?
+                    .len();
+                Ok::<_, StoreError>(total.saturating_add(length))
+            })?;
+            let report = ContentTransferReport {
+                object_hash,
+                content_source: source.name.clone(),
+                transfer_mode: source.source.transfer_mode(),
+                files: hashes.len() as u64,
+                bytes,
+                duration_ms: duration_ms(started),
+            };
+            progress(ContentTransferEvent::Finished(report.clone()));
+            merge_transfer(&mut transfers, report);
+            used_sources.push(source.name.clone());
         }
-        Ok(Some(used_sources))
+        Ok(Some(AcquiredClosure {
+            sources: used_sources,
+            transfers,
+        }))
     }
 }
 
@@ -655,6 +800,64 @@ fn manifest_fs_files(manifest: &FsTreeManifest) -> Vec<FsFileHash> {
             _ => None,
         })
         .collect()
+}
+
+fn duration_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn merge_transfer(transfers: &mut Vec<ContentTransferReport>, report: ContentTransferReport) {
+    if let Some(existing) = transfers.iter_mut().find(|existing| {
+        existing.content_source == report.content_source
+            && existing.transfer_mode == report.transfer_mode
+    }) {
+        existing.files = existing.files.saturating_add(report.files);
+        existing.bytes = existing.bytes.saturating_add(report.bytes);
+        existing.duration_ms = existing.duration_ms.saturating_add(report.duration_ms);
+    } else {
+        transfers.push(report);
+    }
+}
+
+fn transferred_path_stats(path: &Path) -> Result<(u64, u64), StoreError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to inspect transferred object '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_file() {
+        return Ok((1, metadata.len()));
+    }
+    if metadata.file_type().is_symlink() {
+        return Ok((0, 0));
+    }
+    if !metadata.file_type().is_dir() {
+        return Err(StoreError::InvalidData(format!(
+            "transferred object entry '{}' has unsupported file type",
+            path.display()
+        )));
+    }
+
+    let mut files = 0_u64;
+    let mut bytes = 0_u64;
+    for entry in fs::read_dir(path).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to read transferred object directory '{}': {error}",
+            path.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            StoreError::Io(format!(
+                "failed to read transferred object entry in '{}': {error}",
+                path.display()
+            ))
+        })?;
+        let (entry_files, entry_bytes) = transferred_path_stats(&entry.path())?;
+        files = files.saturating_add(entry_files);
+        bytes = bytes.saturating_add(entry_bytes);
+    }
+    Ok((files, bytes))
 }
 
 fn promote_build(
@@ -826,6 +1029,10 @@ mod tests {
     struct UnexpectedContentSource;
 
     impl ContentSource for UnexpectedContentSource {
+        fn transfer_mode(&self) -> ContentTransferMode {
+            ContentTransferMode::Hardlink
+        }
+
         fn locate_objects(
             &self,
             _hashes: &[ObjectHash],
@@ -903,6 +1110,17 @@ mod tests {
         assert_eq!(resolved.mapping_index, "trusted-index");
         assert_eq!(resolved.content_sources, ["content-mirror"]);
         assert_eq!(resolved.import_outcome, ContentImportOutcome::Imported);
+        assert_eq!(resolved.transfers.len(), 1);
+        assert_eq!(resolved.transfers[0].content_source, "content-mirror");
+        assert_eq!(
+            resolved.transfers[0].transfer_mode,
+            ContentTransferMode::Hardlink
+        );
+        assert_eq!(resolved.transfers[0].files, 1);
+        assert_eq!(
+            resolved.transfers[0].bytes,
+            b"shared content\n".len() as u64
+        );
         assert_eq!(
             load_build_object_hash(&working, build).unwrap(),
             Some(object_hash)
@@ -1223,6 +1441,19 @@ mod tests {
             resolved.content_sources,
             ["file-content", "manifest-content"]
         );
+        assert_eq!(resolved.transfers.len(), 2);
+        assert_eq!(resolved.transfers[0].content_source, "file-content");
+        assert_eq!(
+            resolved.transfers[0].transfer_mode,
+            ContentTransferMode::Copy
+        );
+        assert_eq!(resolved.transfers[0].files, 1);
+        assert_eq!(resolved.transfers[1].content_source, "manifest-content");
+        assert_eq!(
+            resolved.transfers[1].transfer_mode,
+            ContentTransferMode::Hardlink
+        );
+        assert_eq!(resolved.transfers[1].files, 1);
         let source_metadata =
             fs::metadata(file_store.fs_file_path_unchecked(fs_file_hash)).unwrap();
         let working_metadata = fs::metadata(working.fs_file_path_unchecked(fs_file_hash)).unwrap();
