@@ -43,6 +43,15 @@ operations. A trusted mapping can provide an `ObjectHash` without providing
 the bytes of that object, and the hash can participate in a parent `ReuseKey`
 before its content is present in the working store.
 
+Before scheduling the graph, bobr opens every configured local repository,
+canonicalizes and deduplicates its root, and derives its requested capabilities.
+Hardlink repositories are rejected at this boundary unless both their
+`objects/` and `fs-files/` directories are on the corresponding working-store
+filesystems. Copy repositories have no same-filesystem requirement. An
+explicitly configured repository is therefore not an optional cache hint: an
+absent or malformed store is a request error even when the goal is already
+complete locally.
+
 ## Graph planning
 
 The request is validated and converted to a planned graph before realization
@@ -182,6 +191,11 @@ For one known hash, content resolution does the following:
 
 Trusted mapping lookup is not repeated during this content pass. The secondary
 resolver's trusted-index and content-source capabilities are independent.
+Content sources retain request order. For an fs-tree, different sources may
+provide disjoint missing fs-files and the manifest object, but the working
+manifest is not published until its full closure is complete. Every actual
+hardlink or copy is verified and atomically published under the working-store
+name; no result remains dependent on a repository directory entry.
 
 After a candidate becomes local, the realizer publishes the current build
 mapping and user-facing ref. It also records every reuse key known to resolve

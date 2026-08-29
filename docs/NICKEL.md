@@ -52,6 +52,26 @@ it to a full [request](./REQUEST.md). Callers rarely invoke it directly —
 **build profile** (`bobr.ncl`, shaped by `build-profile.ncl`; copy
 `bobr.ncl.example` to start one).
 
+A build profile can attach ordered local stores to the Realizer:
+
+```nickel
+secondaries.local_repositories = [
+  {
+    name = "previous",
+    store = "../bobr-store.previous",
+    trusted = true,
+    transfer = "hardlink",
+  },
+]
+```
+
+Repository paths are resolved relative to the profile. `trusted` allows
+`BuildKey` and `ReuseKey` answers; every repository can still supply content
+for an already-known hash. `hardlink` requires the relevant store directories
+to share filesystems, while `copy` deliberately creates independent inodes and
+works across filesystems. See [Request](./REQUEST.md#local-repositories) for the
+complete low-level contract.
+
 ## Overlays
 
 An **overlay** is a function `fun final => fun prev => patch`, where `prev` is

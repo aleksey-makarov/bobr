@@ -124,9 +124,11 @@ and explicit trust and transfer policies:
   When false, bobr ignores its mappings but may still obtain content for an
   already-known hash from it.
 - `transfer` is either `"hardlink"` or `"copy"` and controls how content is
-  imported into the working store. `"copy"` gives ordinary objects and every
-  fs-file in an fs-tree closure independent working-store inodes while
-  preserving the metadata that participates in their identities.
+  imported into the working store. `"hardlink"` shares regular-file inodes;
+  directory structure and symlinks are reproduced without changing their
+  logical contents. `"copy"` gives ordinary objects and every fs-file in an
+  fs-tree closure independent working-store inodes while preserving the
+  metadata that participates in their identities.
 
 Every repository is a content source. Trusted repositories additionally become
 trusted key indexes; this does not weaken content verification. Mapping and
@@ -139,10 +141,21 @@ canonicalized when opened: a repository cannot alias the working store, and the
 same canonical repository root cannot be listed twice. `hardlink` requires the
 repository and working store `objects/` directories to share a filesystem, and
 likewise requires their `fs-files/` directories to share a filesystem. These
-pairs are checked separately because either directory may be a mount point.
+pairs are checked separately before realization starts because either directory
+may be a mount point. There is no copy fallback after a hardlink-policy error.
 `copy` has no shared-filesystem requirement and always creates independent
-regular-file inodes; it never silently optimizes the transfer into hardlinks.
-Both `trusted` and `transfer` are mandatory in the low-level JSON request.
+regular-file inodes, even on the same filesystem; it never silently optimizes
+the transfer into hardlinks. Both modes verify content identity and publish
+only a complete ordinary object or fs-tree closure. Both `trusted` and
+`transfer` are mandatory in the low-level JSON request.
+
+Repository configuration is required only while it is used. After successful
+import, complete content belongs to the working store; any mappings, records,
+and refs published for the selected result are working-store entries as well. A
+later offline request can omit the repository and reuse that content; removing
+the repository's directory entries does not invalidate either copied files or
+hardlinked working-store names. Conversely, a repository that remains
+explicitly configured must still exist and validate when the request starts.
 
 A recipe for the `Source` builder has this shape:
 

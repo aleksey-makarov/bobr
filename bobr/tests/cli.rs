@@ -5,12 +5,73 @@ use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use serde_json::json;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, symlink};
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
 use support::{
     TEST_RUN_ID, make_run_dirs, recipe_node, store_root, tree_file_recipe, write_request,
     write_request_with_options,
 };
-use tempfile::tempdir;
+use tempfile::{Builder, TempDir, tempdir};
+
+fn run_source_request(
+    workspace: &Path,
+    working_store: &Path,
+    run_id: &str,
+    object_hash: ObjectHash,
+    repositories: Vec<serde_json::Value>,
+) -> Output {
+    let run_root = workspace.join(run_id);
+    let (logs, work) = make_run_dirs(&run_root);
+    let request_path = run_root.join("request.json");
+    fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema": "bobr-request-v5",
+            "store": working_store,
+            "logs": logs,
+            "work": work,
+            "run_id": run_id,
+            "goals": ["source"],
+            "secondaries": { "local_repositories": repositories },
+            "nodes": {
+                "source": {
+                    "name": "source",
+                    "tag": "Source",
+                    "object_hash": object_hash
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    Command::new(env!("CARGO_BIN_EXE_bobr"))
+        .arg(request_path)
+        .current_dir(workspace)
+        .output()
+        .unwrap()
+}
+
+fn cross_filesystem_tempdir(reference: &Path) -> Option<TempDir> {
+    let reference_device = fs::metadata(reference).ok()?.dev();
+    for parent in [Path::new("/dev/shm"), Path::new("/run/shm")] {
+        let Ok(parent_metadata) = fs::metadata(parent) else {
+            continue;
+        };
+        if parent_metadata.dev() == reference_device {
+            continue;
+        }
+        let Ok(directory) = Builder::new()
+            .prefix("bobr-cross-filesystem-")
+            .tempdir_in(parent)
+        else {
+            continue;
+        };
+        if fs::metadata(directory.path()).ok()?.dev() != reference_device {
+            return Some(directory);
+        }
+    }
+    None
+}
 
 #[test]
 fn cli_reports_its_version_and_request_schema() {
@@ -296,6 +357,7 @@ fn cli_uses_a_trusted_hardlink_local_repository() {
         "secondary-run",
     )
     .unwrap();
+    let source_path = secondary.object_path(object_hash).unwrap().unwrap();
     let (logs, work) = make_run_dirs(workspace.path());
     let request_path = workspace.path().join("secondary.json");
     fs::write(
@@ -340,6 +402,11 @@ fn cli_uses_a_trusted_hardlink_local_repository() {
     );
     let working = bobr_store::Store::create(&store_root(workspace.path())).unwrap();
     assert!(working.object_is_complete(object_hash).unwrap());
+    let destination = working.object_path(object_hash).unwrap().unwrap();
+    let source_metadata = fs::metadata(&source_path).unwrap();
+    let destination_metadata = fs::metadata(&destination).unwrap();
+    assert_eq!(source_metadata.dev(), destination_metadata.dev());
+    assert_eq!(source_metadata.ino(), destination_metadata.ino());
     let started = fs::read_to_string(logs.join("events.jsonl"))
         .unwrap()
         .lines()
@@ -350,15 +417,37 @@ fn cli_uses_a_trusted_hardlink_local_repository() {
         started["details"]["local_repositories"],
         json!([{
             "name": "old",
-            "store": fs::canonicalize(secondary_root).unwrap(),
+            "store": fs::canonicalize(&secondary_root).unwrap(),
             "trusted": true,
             "transfer": "hardlink"
         }])
     );
+    let mapping = fs::read_to_string(logs.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|event| event["op"] == "secondary-build")
+        .unwrap();
+    assert_eq!(mapping["details"]["mapping_providers"][0]["name"], "old");
+
+    bobr_core::fsutil::remove_path_force(&secondary_root).unwrap();
+    let warm = run_source_request(
+        workspace.path(),
+        &working_root,
+        "hardlink-warm-offline",
+        object_hash,
+        Vec::new(),
+    );
+    assert!(warm.status.success(), "{warm:?}");
+    assert_eq!(
+        String::from_utf8(warm.stdout).unwrap().trim(),
+        object_hash.to_string()
+    );
+    assert_eq!(fs::read(destination).unwrap(), b"secondary source\n");
 }
 
 #[test]
-fn cli_copies_an_ordinary_object_from_a_local_repository() {
+fn cli_uses_an_untrusted_copy_repository_as_content_only() {
     let workspace = tempdir().unwrap();
     let repository_root = workspace.path().join("repository");
     let working_root = store_root(workspace.path());
@@ -394,7 +483,7 @@ fn cli_copies_an_ordinary_object_from_a_local_repository() {
                 "local_repositories": [{
                     "name": "isolated",
                     "store": repository_root,
-                    "trusted": true,
+                    "trusted": false,
                     "transfer": "copy"
                 }]
             },
@@ -424,9 +513,116 @@ fn cli_copies_an_ordinary_object_from_a_local_repository() {
     let working = bobr_store::Store::create(&store_root(workspace.path())).unwrap();
     let destination = working.object_path(object_hash).unwrap().unwrap();
     let source_metadata = fs::metadata(source_path).unwrap();
-    let destination_metadata = fs::metadata(destination).unwrap();
+    let destination_metadata = fs::metadata(&destination).unwrap();
     assert_eq!(source_metadata.dev(), destination_metadata.dev());
     assert_ne!(source_metadata.ino(), destination_metadata.ino());
+    let events = fs::read_to_string(logs.join("events.jsonl")).unwrap();
+    let events = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(events.iter().all(|event| event["op"] != "secondary-build"));
+    let content = events
+        .iter()
+        .find(|event| event["op"] == "repository-content")
+        .unwrap();
+    assert_eq!(
+        content["details"]["content_providers"][0]["name"],
+        "isolated"
+    );
+
+    bobr_core::fsutil::remove_path_force(&repository_root).unwrap();
+    let warm = run_source_request(
+        workspace.path(),
+        &working_root,
+        "copy-warm-offline",
+        object_hash,
+        Vec::new(),
+    );
+    assert!(warm.status.success(), "{warm:?}");
+    assert_eq!(
+        String::from_utf8(warm.stdout).unwrap().trim(),
+        object_hash.to_string()
+    );
+    assert_eq!(
+        fs::read(working.object_path(object_hash).unwrap().unwrap()).unwrap(),
+        b"copied repository source\n"
+    );
+}
+
+#[test]
+fn cli_rejects_cross_filesystem_hardlink_and_accepts_copy() {
+    let workspace = tempdir().unwrap();
+    let working_root = store_root(workspace.path());
+    fs::create_dir_all(&working_root).unwrap();
+    let Some(repository_temp) = cross_filesystem_tempdir(&working_root) else {
+        eprintln!("cross-filesystem acceptance skipped: no writable second filesystem");
+        return;
+    };
+    let repository_root = repository_temp.path().join("repository");
+    fs::create_dir(&repository_root).unwrap();
+    let repository = bobr_store::Store::create(&repository_root).unwrap();
+    let staged = repository_temp.path().join("source");
+    fs::write(&staged, b"cross-filesystem content\n").unwrap();
+    let object_hash = fsobj_hash::hash_path(&staged).unwrap();
+    bobr_store::import_build(
+        &repository,
+        BuildKey::from_object_hash(object_hash),
+        "3".repeat(64).parse::<ReuseKey>().unwrap(),
+        Vec::new(),
+        &staged,
+        "cross-filesystem-source",
+        "repository-run",
+    )
+    .unwrap();
+    let source_path = repository.object_path(object_hash).unwrap().unwrap();
+    assert_ne!(
+        fs::metadata(&source_path).unwrap().dev(),
+        fs::metadata(&working_root).unwrap().dev()
+    );
+
+    let hardlink = run_source_request(
+        workspace.path(),
+        &working_root,
+        "cross-filesystem-hardlink",
+        object_hash,
+        vec![json!({
+            "name": "cross-filesystem",
+            "store": &repository_root,
+            "trusted": true,
+            "transfer": "hardlink"
+        })],
+    );
+    assert!(!hardlink.status.success(), "{hardlink:?}");
+    let stderr = String::from_utf8(hardlink.stderr).unwrap();
+    assert!(
+        stderr.contains("cannot use transfer mode 'hardlink'")
+            && stderr.contains("different filesystems"),
+        "{stderr}"
+    );
+
+    let copied = run_source_request(
+        workspace.path(),
+        &working_root,
+        "cross-filesystem-copy",
+        object_hash,
+        vec![json!({
+            "name": "cross-filesystem",
+            "store": &repository_root,
+            "trusted": true,
+            "transfer": "copy"
+        })],
+    );
+    assert!(copied.status.success(), "{copied:?}");
+    let working = bobr_store::Store::create(&working_root).unwrap();
+    let destination = working.object_path(object_hash).unwrap().unwrap();
+    let source_metadata = fs::metadata(source_path).unwrap();
+    let destination_metadata = fs::metadata(&destination).unwrap();
+    assert_ne!(source_metadata.dev(), destination_metadata.dev());
+    assert_eq!(
+        fs::read(destination).unwrap(),
+        b"cross-filesystem content\n"
+    );
 }
 
 #[test]

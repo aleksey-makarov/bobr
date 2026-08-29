@@ -108,11 +108,15 @@ read-only backend from which bobr derives separate capabilities:
 - a **content source** supplies an object's bytes by `ObjectHash`. The current
   implementation can hardlink objects and every referenced fs-file, or copy
   both ordinary objects and complete fs-tree closures into independent
-  working-store inodes. Fs-file copy preserves and verifies logical ownership,
-  mode, timestamp, and content identity before atomic publication. Hardlink
-  repositories require the repository and working-store `objects/` directories
-  to share a filesystem, as must their `fs-files/` directories; bobr validates
-  the two pairs independently.
+  working-store inodes. A hardlink import shares regular-file inodes while
+  recreating directory containers and symlinks; a copy import shares no regular
+  inode, even when both stores are on one filesystem. Both transports verify
+  the expected object or fs-file identity and preserve the logical metadata
+  that participates in it before atomic publication. Hardlink repositories
+  require the repository and working-store `objects/` directories to share a
+  filesystem, as must their `fs-files/` directories; bobr validates the two
+  pairs independently before scheduling realization and never falls back to
+  copy.
 
 Every repository provides the content-source capability. A repository with
 `trusted = true` additionally provides the trusted-index capability; with
@@ -125,6 +129,14 @@ the same `LocalRepository` backend and its shared validated read-only content
 reader; they cannot be constructed directly from unrelated store handles.
 Mapping lookup never opens object records. Remote capabilities are not
 implemented yet.
+
+An imported result is complete working-store content, not a borrowed path into
+the repository. With copy transport this follows from independent inodes. With
+hardlink transport the repository and working store have independent directory
+entries naming shared immutable inodes, so unlinking the repository names does
+not remove the working names. A subsequent offline request may omit the
+repository entirely. If it still names a repository, that store is validated
+at startup even when every requested result is already local.
 
 ## Store Layout
 
