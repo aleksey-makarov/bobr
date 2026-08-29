@@ -259,9 +259,10 @@ fn repository_capabilities(
                 repository.repository,
                 runtime_provider.clone(),
             )) as Arc<dyn bobr_store::ContentSource>,
-            LocalTransferPolicy::Copy => {
-                Arc::new(LocalCopyContentSource::new(repository.repository))
-            }
+            LocalTransferPolicy::Copy => Arc::new(LocalCopyContentSource::with_runtime(
+                repository.repository,
+                runtime_provider.clone(),
+            )),
         };
         sources.push(NamedContentSource::new(repository.name, source));
     }

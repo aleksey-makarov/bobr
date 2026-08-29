@@ -1,14 +1,16 @@
 use crate::StoreError;
-use crate::fs_tree::{FsFileHash, FsTreeManifest, read_manifest_if_marked};
+use crate::fs_tree::{FsFileHash, FsTreeManifest, hash_fs_file_path, read_manifest_if_marked};
 use crate::store::ReadOnlyStore;
 use bobr_core::ObjectHash;
 use std::collections::HashSet;
 use std::fs;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_REPOSITORY_STAGING: AtomicU64 = AtomicU64::new(0);
+static NEXT_REPOSITORY_FS_FILE_STAGING: AtomicU64 = AtomicU64::new(0);
 
 /// Validated read-only access to content in a local store.
 ///
@@ -147,6 +149,66 @@ pub(crate) fn allocate_repository_staging_path(
             }
         }
     }
+}
+
+/// Creates a private fs-file staging file on the working CAS filesystem.
+pub(crate) fn create_repository_fs_file_staging(
+    working: &crate::Store,
+) -> Result<(PathBuf, fs::File), StoreError> {
+    loop {
+        let serial = NEXT_REPOSITORY_FS_FILE_STAGING.fetch_add(1, Ordering::Relaxed);
+        let path = working
+            .root()
+            .join(crate::store::FS_FILES_DIR)
+            .join(format!(
+                ".bobr-repository-fs-file-import-{}-{serial}",
+                std::process::id()
+            ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(map_io(
+                    &path,
+                    "create repository fs-file staging file",
+                    error,
+                ));
+            }
+        }
+    }
+}
+
+/// Verifies one canonical fs-file entry against its content identity.
+pub(crate) fn verify_fs_file(path: &Path, expected: FsFileHash) -> Result<(), StoreError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| map_io(path, "inspect fs-file", error))?;
+    if !metadata.file_type().is_file() {
+        return Err(StoreError::InvalidData(format!(
+            "fs-file path '{}' is not a regular file",
+            path.display()
+        )));
+    }
+    if metadata.mtime() != bobr_core::CANONICAL_TIMESTAMP || metadata.mtime_nsec() != 0 {
+        return Err(StoreError::InvalidData(format!(
+            "fs-file '{}' has noncanonical mtime {}.{:09}; expected {}.000000000",
+            path.display(),
+            metadata.mtime(),
+            metadata.mtime_nsec(),
+            bobr_core::CANONICAL_TIMESTAMP
+        )));
+    }
+    let actual = hash_fs_file_path(path)?;
+    if actual != expected {
+        return Err(StoreError::InvalidData(format!(
+            "fs-file hash mismatch for '{}': expected '{expected}', got '{actual}'",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Removes an incomplete repository import unless it has been published.

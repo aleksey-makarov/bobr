@@ -740,8 +740,8 @@ mod tests {
     use super::*;
     use crate::fs_tree::FsTreeEntry;
     use crate::{
-        LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex, ReadOnlyStore,
-        import_build, load_build_object_hash,
+        LocalCopyContentSource, LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex,
+        ReadOnlyStore, import_build, load_build_object_hash,
     };
     use bobr_runtime::runtime_provider::RuntimeProvider;
     use serde_json::Value;
@@ -798,6 +798,16 @@ mod tests {
         NamedContentSource::new(
             name,
             Arc::new(LocalHardlinkContentSource::with_runtime(
+                local_repository(root),
+                RuntimeProvider::host(),
+            )),
+        )
+    }
+
+    fn copy_source(name: &str, root: &Path) -> NamedContentSource {
+        NamedContentSource::new(
+            name,
+            Arc::new(LocalCopyContentSource::with_runtime(
                 local_repository(root),
                 RuntimeProvider::host(),
             )),
@@ -1202,7 +1212,7 @@ mod tests {
             vec![index("manifest-index", &manifest_root)],
             vec![
                 source("manifest-content", &manifest_root),
-                source("file-content", &file_root),
+                copy_source("file-content", &file_root),
             ],
         );
         let report = resolver.resolve_builds(&[build]).unwrap().remove(0);
@@ -1213,14 +1223,11 @@ mod tests {
             resolved.content_sources,
             ["file-content", "manifest-content"]
         );
-        assert_eq!(
-            fs::metadata(file_store.fs_file_path_unchecked(fs_file_hash))
-                .unwrap()
-                .ino(),
-            fs::metadata(working.fs_file_path_unchecked(fs_file_hash))
-                .unwrap()
-                .ino()
-        );
+        let source_metadata =
+            fs::metadata(file_store.fs_file_path_unchecked(fs_file_hash)).unwrap();
+        let working_metadata = fs::metadata(working.fs_file_path_unchecked(fs_file_hash)).unwrap();
+        assert_eq!(source_metadata.dev(), working_metadata.dev());
+        assert_ne!(source_metadata.ino(), working_metadata.ino());
     }
 
     #[test]

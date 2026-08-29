@@ -122,9 +122,9 @@ and explicit trust and transfer policies:
   When false, bobr ignores its mappings but may still obtain content for an
   already-known hash from it.
 - `transfer` is either `"hardlink"` or `"copy"` and controls how content is
-  imported into the working store. `"copy"` currently supports ordinary file
-  and directory objects; copying an fs-tree and its `fs-files/` closure is
-  rejected explicitly until that transport is implemented.
+  imported into the working store. `"copy"` gives ordinary objects and every
+  fs-file in an fs-tree closure independent working-store inodes while
+  preserving the metadata that participates in their identities.
 
 Every repository is a content source. Trusted repositories additionally become
 trusted key indexes; this does not weaken content verification. Mapping and

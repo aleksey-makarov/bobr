@@ -1555,26 +1555,10 @@ fn publish_installed_temp_file(
     gid: u32,
     mode: u32,
 ) -> Result<FsFileHash, StoreError> {
-    // Before the owner changes, while this file is still indisputably ours:
-    // stamping needs ownership, and chown does not disturb the timestamps. It
-    // is about to *become* the fs-file, so canonicalizing here is what makes
-    // every hardlink to it canonical too.
-    set_canonical_times(temp_path)?;
-    chown_if_needed(temp_path, uid, gid)?;
-    chmod(temp_path, mode)?;
+    normalize_fs_file_metadata(temp_path, uid, gid, mode)?;
 
     let metadata =
         fs::symlink_metadata(temp_path).map_err(|error| map_io(temp_path, "inspect", error))?;
-    let actual_mode = metadata.permissions().mode() & 0o7777;
-    if metadata.uid() != uid || metadata.gid() != gid || actual_mode != mode {
-        return Err(StoreError::Io(format!(
-            "temporary fs-file '{}' metadata mismatch after install: expected uid={uid} gid={gid} mode={mode:o}, got uid={} gid={} mode={actual_mode:o}",
-            temp_path.display(),
-            metadata.uid(),
-            metadata.gid()
-        )));
-    }
-
     let content_sha256 = sha256_file(temp_path)?;
     let hash = hash_fs_file_parts(uid, gid, mode, metadata.size(), content_sha256)?;
     let object_path = fs_file_path(fs_files_root, hash)?;
@@ -1597,6 +1581,37 @@ fn publish_installed_temp_file(
         Err(error) => return Err(map_io(&object_path, "inspect fs-file object", error)),
     }
     Ok(hash)
+}
+
+/// Applies the metadata that participates in fs-file identity.
+///
+/// This operation is intended to run through the namespace runtime when the
+/// requested logical owner is not the host user running bobr.
+pub(crate) fn normalize_fs_file_metadata(
+    path: &Path,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+) -> Result<(), StoreError> {
+    // Before the owner changes, while this file is still indisputably ours:
+    // stamping needs ownership, and chown does not disturb the timestamps. It
+    // is about to *become* the fs-file, so canonicalizing here gives every
+    // published copy or hardlink the same timestamp.
+    set_canonical_times(path)?;
+    chown_if_needed(path, uid, gid)?;
+    chmod(path, mode)?;
+
+    let metadata = fs::symlink_metadata(path).map_err(|error| map_io(path, "inspect", error))?;
+    let actual_mode = metadata.permissions().mode() & 0o7777;
+    if metadata.uid() != uid || metadata.gid() != gid || actual_mode != mode {
+        return Err(StoreError::Io(format!(
+            "temporary fs-file '{}' metadata mismatch after install: expected uid={uid} gid={gid} mode={mode:o}, got uid={} gid={} mode={actual_mode:o}",
+            path.display(),
+            metadata.uid(),
+            metadata.gid()
+        )));
+    }
+    Ok(())
 }
 
 fn copy_source_file_to_fs_files_temp(

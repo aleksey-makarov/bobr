@@ -48,9 +48,10 @@ pub use store::{ReadOnlyStore, Store};
 
 /// Returns namespace runtime functions used by secondary-store imports.
 pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
-    vec![bobr_runtime::runtime_ns::NsFunction::new(
-        secondary::HardlinkFsFilesFunction,
-    )]
+    vec![
+        bobr_runtime::runtime_ns::NsFunction::new(secondary::HardlinkFsFilesFunction),
+        bobr_runtime::runtime_ns::NsFunction::new(copy_content::CopyFsFilesFunction),
+    ]
 }
 
 #[cfg(test)]

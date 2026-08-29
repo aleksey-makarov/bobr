@@ -107,11 +107,12 @@ read-only backend from which bobr derives separate capabilities:
   `ObjectHash` values; it supplies identity, not object bytes;
 - a **content source** supplies an object's bytes by `ObjectHash`. The current
   implementation can hardlink objects and every referenced fs-file, or copy
-  ordinary file and directory objects into independent working-store inodes.
-  Hardlink repositories require the repository and working-store `objects/`
-  directories to share a filesystem, as must their `fs-files/` directories;
-  bobr validates the two pairs independently. Copying fs-tree closures is not
-  implemented yet.
+  both ordinary objects and complete fs-tree closures into independent
+  working-store inodes. Fs-file copy preserves and verifies logical ownership,
+  mode, timestamp, and content identity before atomic publication. Hardlink
+  repositories require the repository and working-store `objects/` directories
+  to share a filesystem, as must their `fs-files/` directories; bobr validates
+  the two pairs independently.
 
 Every repository provides the content-source capability. A repository with
 `trusted = true` additionally provides the trusted-index capability; with

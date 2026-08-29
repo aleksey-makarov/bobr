@@ -5,11 +5,10 @@
 //! object hash. Keeping the traits independent permits a small trusted index
 //! to name content served by another, untrusted backend.
 
-use crate::fs_tree::{
-    FsFileHash, FsTreeEntry, FsTreeManifest, hash_fs_file_path, read_manifest_if_marked,
-};
+use crate::fs_tree::{FsFileHash, FsTreeEntry, FsTreeManifest, read_manifest_if_marked};
 use crate::local_content::{
     LocalStoreContentReader, RepositoryStagingGuard, allocate_repository_staging_path,
+    verify_fs_file,
 };
 use crate::object::import_object_with_expected_hash;
 use crate::refs::parse_object_target;
@@ -465,34 +464,6 @@ fn hardlink_fs_files(input: HardlinkFsFilesInput) -> Result<(), StoreError> {
             }
             return Err(error);
         }
-    }
-    Ok(())
-}
-
-fn verify_fs_file(path: &Path, expected: FsFileHash) -> Result<(), StoreError> {
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| map_io(path, "inspect fs-file", error))?;
-    if !metadata.file_type().is_file() {
-        return Err(StoreError::InvalidData(format!(
-            "fs-file path '{}' is not a regular file",
-            path.display()
-        )));
-    }
-    if metadata.mtime() != bobr_core::CANONICAL_TIMESTAMP || metadata.mtime_nsec() != 0 {
-        return Err(StoreError::InvalidData(format!(
-            "fs-file '{}' has noncanonical mtime {}.{:09}; expected {}.000000000",
-            path.display(),
-            metadata.mtime(),
-            metadata.mtime_nsec(),
-            bobr_core::CANONICAL_TIMESTAMP
-        )));
-    }
-    let actual = hash_fs_file_path(path)?;
-    if actual != expected {
-        return Err(StoreError::InvalidData(format!(
-            "fs-file hash mismatch for '{}': expected '{expected}', got '{actual}'",
-            path.display()
-        )));
     }
     Ok(())
 }
@@ -1087,9 +1058,10 @@ mod tests {
     }
 
     #[test]
-    fn secondary_runtime_registry_contains_fs_file_hardlink_function() {
+    fn secondary_runtime_registry_contains_fs_file_transfer_functions() {
         let functions = crate::runtime_functions();
-        assert_eq!(functions.len(), 1);
+        assert_eq!(functions.len(), 2);
         assert_eq!(functions[0].name(), "secondary-hardlink-fs-files");
+        assert_eq!(functions[1].name(), "repository-copy-fs-files");
     }
 }
