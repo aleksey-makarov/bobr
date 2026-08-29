@@ -11,7 +11,7 @@ The request is a single JSON object:
 
 ```json
 {
-  "schema": "bobr-request-v4",
+  "schema": "bobr-request-v5",
   "store": "/abs/path/to/store",
   "logs": "/abs/path/to/logs/260803120000",
   "work": "/abs/path/to/work/260803120000",
@@ -25,8 +25,7 @@ The request is a single JSON object:
     "max_local_jobs": 4
   },
   "secondaries": {
-    "trusted_indexes": [],
-    "content_sources": []
+    "local_repositories": []
   },
   "goals": ["root"],
   "nodes": {
@@ -35,9 +34,9 @@ The request is a single JSON object:
 }
 ```
 
-- `schema` — format version; must be `"bobr-request-v4"`. `bobr --version`
+- `schema` — format version; must be `"bobr-request-v5"`. `bobr --version`
   reports the schema this build accepts (`bobr 0.1.9 (request
-  bobr-request-v4)`), so a recipe layer can check compatibility before building
+  bobr-request-v5)`), so a recipe layer can check compatibility before building
   rather than finding out from the parse error
 - `store` — the store root for this request: an absolute path to an existing
   directory (see [Store](./STORE.md))
@@ -58,8 +57,7 @@ The request is a single JSON object:
   This field never affects build identity and is ignored for non-TTY output
 - `limits` — optional HTTP/OCI and local Source acquisition limits, described
   below
-- `secondaries` — optional ordered local trusted-index and content-source
-  capabilities, described below
+- `secondaries` — optional ordered local repositories, described below
 - `goals` — ordered, non-empty array of distinct, existing node ids to realize;
   its order determines the order of multi-goal results, not execution order
 - `nodes` — the recipe DAG
@@ -101,34 +99,44 @@ All `limits` fields are optional; every numeric limit, including each
 - `max_local_jobs` — maximum simultaneous local `Path` source materializations;
   it limits disk work independently of network connections
 
-### Secondary stores
+### Local repositories
 
-`secondaries` has two independently ordered capability lists. Each member has a
-non-empty name, unique within its list, and an absolute `store` path:
+`secondaries.local_repositories` is an ordered list of local read-only bobr
+stores. Each repository has a non-empty unique name, an absolute store path,
+and explicit trust and transfer policies:
 
 ```json
 {
-  "trusted_indexes": [
-    { "name": "previous", "store": "/mnt/bobr/previous-store" }
-  ],
-  "content_sources": [
-    { "name": "previous", "store": "/mnt/bobr/previous-store" }
+  "local_repositories": [
+    {
+      "name": "previous",
+      "store": "/mnt/bobr/previous-store",
+      "trusted": true,
+      "transfer": "hardlink"
+    }
   ]
 }
 ```
 
-- `trusted_indexes` answer exact `BuildKey` and `ReuseKey` lookups with an
-  `ObjectHash`. They provide identity only and may be on any local filesystem.
-- `content_sources` provide an object's actual content by `ObjectHash`. Current
-  imports are hardlink-only, so each content source must share a filesystem with
-  the working store and cannot be that store itself.
+- `trusted` permits the repository to answer `BuildKey` and `ReuseKey` lookups.
+  When false, bobr ignores its mappings but may still obtain content for an
+  already-known hash from it.
+- `transfer` is either `"hardlink"` or `"copy"` and controls how content is
+  imported into the working store. The current implementation supports
+  `"hardlink"`; `"copy"` is part of the v5 request contract but is rejected
+  with an explicit error until the copy transport is implemented.
 
-The same store may appear in both lists. A mapping answer and its content are
-deliberately separate capabilities: bobr first learns candidate hashes from
-trusted indexes, then looks for their content in the working store and the
-configured content sources. Entries are tried in their declared order; differing
-trusted answers are retained for diagnostics while the first obtainable object
-is selected.
+Every repository is a content source. Trusted repositories additionally become
+trusted key indexes; this does not weaken content verification. Mapping and
+content lookup remain separate: bobr may learn a candidate hash from one trusted
+repository and obtain its bytes from another. Repositories are tried in declared
+order.
+
+Repository roots must exist and contain a complete bobr store layout. Paths are
+canonicalized when opened: a repository cannot alias the working store, and the
+same canonical repository root cannot be listed twice. `hardlink` currently
+requires the repository and working store roots to be on the same filesystem.
+Both `trusted` and `transfer` are mandatory in the low-level JSON request.
 
 A recipe for the `Source` builder has this shape:
 
@@ -151,8 +159,8 @@ A recipe for the `Source` builder has this shape:
 - `origin` — how to obtain the object this recipe describes; defined below
 
 A recipe for the `Source` builder may also omit `origin`. Then its object must
-already be available from the working store or a configured content source under
-its `object_hash`; if it is not, the source fails.
+already be available from the working store or a configured local repository
+under its `object_hash`; if it is not, the source fails.
 
 An origin is the ordinary case in current `bobr-recipes`: unified `bobr`
 acquires missing Source content lazily while realizing the same DAG. Omitting

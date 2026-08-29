@@ -120,7 +120,7 @@ pub(crate) fn write_request_with_options(request_path: &Path, recipe: &Value, op
     let mut request = options.as_object().cloned().unwrap_or_default();
     request.insert(
         "schema".to_string(),
-        Value::String("bobr-request-v4".to_string()),
+        Value::String("bobr-request-v5".to_string()),
     );
     request.insert(
         "store".to_string(),

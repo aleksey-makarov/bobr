@@ -1,5 +1,5 @@
 use crate::error::ExecutionError;
-use crate::request::Request;
+use crate::request::{LocalRepositoryConfig, LocalTransferPolicy, Request};
 use bobr_core::{
     BuildLogEvent, BuildLogLevel, BuildRunLogger, BuildStatus, CancellationToken, ObjectHash, Run,
 };
@@ -13,6 +13,7 @@ use bobr_store::{
 };
 use serde::Serialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
@@ -56,6 +57,7 @@ pub async fn realize(
         .count();
     let reachable_builders = reachable - reachable_sources;
     let store = Store::create(&store_path).map_err(map_store_error)?;
+    let repositories = open_local_repositories(&store, secondaries.local_repositories)?;
     let run = Arc::new(Run::new(run_id, &logs, &work)?);
     check_same_filesystem(&store, &run)?;
     let logger = Arc::new(
@@ -69,32 +71,23 @@ pub async fn realize(
     );
     let _resize_monitor = ResizeMonitor::spawn(&logger);
     let runtime_provider = runtime_provider_for_current_process();
-    let indexes = secondaries
-        .trusted_indexes
-        .into_iter()
-        .map(|entry| {
-            let read_only = ReadOnlyStore::open(&entry.store).map_err(map_store_error)?;
-            Ok(NamedTrustedKeyIndex::new(
-                entry.name,
-                Arc::new(LocalTrustedKeyIndex::new(read_only)),
-            ))
-        })
-        .collect::<Result<Vec<_>, ExecutionError>>()?;
-    let sources = secondaries
-        .content_sources
-        .into_iter()
-        .map(|entry| {
-            let read_only = ReadOnlyStore::open(&entry.store).map_err(map_store_error)?;
-            check_content_source_filesystem(&store, &read_only, &entry.name)?;
-            Ok(NamedContentSource::new(
-                entry.name,
-                Arc::new(LocalHardlinkContentSource::with_runtime(
-                    read_only,
-                    runtime_provider.clone(),
-                )),
-            ))
-        })
-        .collect::<Result<Vec<_>, ExecutionError>>()?;
+    let mut indexes = Vec::new();
+    let mut sources = Vec::with_capacity(repositories.len());
+    for repository in repositories {
+        if repository.trusted {
+            indexes.push(NamedTrustedKeyIndex::new(
+                repository.name.clone(),
+                Arc::new(LocalTrustedKeyIndex::new(repository.store.clone())),
+            ));
+        }
+        sources.push(NamedContentSource::new(
+            repository.name,
+            Arc::new(LocalHardlinkContentSource::with_runtime(
+                repository.store,
+                runtime_provider.clone(),
+            )),
+        ));
+    }
     let secondary = Arc::new(
         SecondaryResolver::new(store.clone(), run.run_id(), indexes, sources)
             .map_err(map_store_error)?,
@@ -208,16 +201,61 @@ fn check_same_filesystem(store: &Store, run: &Run) -> Result<(), ExecutionError>
     Ok(())
 }
 
-fn check_content_source_filesystem(
+struct OpenedLocalRepository {
+    name: String,
+    trusted: bool,
+    store: ReadOnlyStore,
+}
+
+fn open_local_repositories(
+    working: &Store,
+    repositories: Vec<LocalRepositoryConfig>,
+) -> Result<Vec<OpenedLocalRepository>, ExecutionError> {
+    let mut canonical_roots = HashMap::new();
+    let mut opened = Vec::with_capacity(repositories.len());
+    for repository in repositories {
+        let store = ReadOnlyStore::open(&repository.store).map_err(map_store_error)?;
+        if store.root() == working.root() {
+            return Err(ExecutionError::InvalidRequest(format!(
+                "local repository '{}' is a canonical alias of the working store '{}'",
+                repository.name,
+                working.root().display()
+            )));
+        }
+        if let Some(previous_name) =
+            canonical_roots.insert(store.root().to_path_buf(), repository.name.clone())
+        {
+            return Err(ExecutionError::InvalidRequest(format!(
+                "local repositories '{previous_name}' and '{}' resolve to the same store root '{}'",
+                repository.name,
+                store.root().display()
+            )));
+        }
+        match repository.transfer {
+            LocalTransferPolicy::Hardlink => {
+                check_hardlink_repository_filesystem(working, &store, &repository.name)?;
+            }
+            LocalTransferPolicy::Copy => {
+                return Err(ExecutionError::InvalidRequest(format!(
+                    "local repository '{}' requests transfer mode 'copy', which is not implemented yet",
+                    repository.name
+                )));
+            }
+        }
+        opened.push(OpenedLocalRepository {
+            name: repository.name,
+            trusted: repository.trusted,
+            store,
+        });
+    }
+    Ok(opened)
+}
+
+fn check_hardlink_repository_filesystem(
     working: &Store,
     source: &ReadOnlyStore,
     name: &str,
 ) -> Result<(), ExecutionError> {
-    if working.root() == source.root() {
-        return Err(ExecutionError::InvalidRequest(format!(
-            "secondary content source '{name}' is the working store itself"
-        )));
-    }
     let working_dev = fs::metadata(working.root())
         .map_err(|error| ExecutionError::Store(error.to_string()))?
         .dev();
@@ -226,7 +264,7 @@ fn check_content_source_filesystem(
         .dev();
     if working_dev != source_dev {
         return Err(ExecutionError::InvalidRequest(format!(
-            "secondary content source '{name}' store '{}' is on a different filesystem from working store '{}'; hardlink-only content sources require one filesystem",
+            "local repository '{name}' store '{}' is on a different filesystem from working store '{}'; transfer mode 'hardlink' requires one filesystem",
             source.root().display(),
             working.root().display()
         )));

@@ -3,7 +3,7 @@ use bobr_core::ProgressPolicy;
 use serde::{Deserialize, Deserializer, de::Error as _};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The request format this build of `bobr` accepts.
 ///
@@ -11,18 +11,18 @@ use std::path::PathBuf;
 /// a recipe layer emitting a different schema is talking to the wrong version.
 /// `bobr --version` reports it, so a caller can compare before building rather
 /// than discovering the mismatch in the parse error.
-pub const REQUEST_SCHEMA: &str = "bobr-request-v4";
+pub const REQUEST_SCHEMA: &str = "bobr-request-v5";
 
 /// Schema marker for the request format. It deserializes only from the exact
 /// schema string, so the format version is enforced declaratively at parse
 /// time and never needs to live as data on `Request`.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RequestSchemaV4;
+pub(crate) struct RequestSchemaV5;
 
-impl<'de> Deserialize<'de> for RequestSchemaV4 {
+impl<'de> Deserialize<'de> for RequestSchemaV5 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match String::deserialize(deserializer)?.as_str() {
-            REQUEST_SCHEMA => Ok(RequestSchemaV4),
+            REQUEST_SCHEMA => Ok(RequestSchemaV5),
             other => Err(D::Error::custom(format!(
                 "unsupported request schema '{other}'"
             ))),
@@ -32,31 +32,38 @@ impl<'de> Deserialize<'de> for RequestSchemaV4 {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct LocalSecondary {
+pub(crate) struct LocalRepositoryConfig {
     pub(crate) name: String,
     pub(crate) store: PathBuf,
+    pub(crate) trusted: bool,
+    pub(crate) transfer: LocalTransferPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LocalTransferPolicy {
+    Hardlink,
+    Copy,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Secondaries {
     #[serde(default)]
-    pub(crate) trusted_indexes: Vec<LocalSecondary>,
-    #[serde(default)]
-    pub(crate) content_sources: Vec<LocalSecondary>,
+    pub(crate) local_repositories: Vec<LocalRepositoryConfig>,
 }
 
 /// A parsed unified Realizer request.
 ///
 /// The request names the working store and run, an ordered non-empty goal set,
 /// the complete recipe-node graph, acquisition limits, and optional local
-/// secondary capabilities. Construct it with [`Request::parse_json`].
+/// repositories. Construct it with [`Request::parse_json`].
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    // Validated at deserialization via RequestSchemaV4; never read afterwards.
+    // Validated at deserialization via RequestSchemaV5; never read afterwards.
     #[allow(dead_code)]
-    pub(crate) schema: RequestSchemaV4,
+    pub(crate) schema: RequestSchemaV5,
     pub(crate) store: PathBuf,
     pub(crate) logs: PathBuf,
     pub(crate) work: PathBuf,
@@ -89,7 +96,7 @@ impl Request {
             .progress
             .validate()
             .map_err(ExecutionError::InvalidRequest)?;
-        validate_secondaries(&request.secondaries)?;
+        validate_secondaries(&request.store, &request.secondaries)?;
         Ok(request)
     }
 }
@@ -157,31 +164,40 @@ fn validate_limits(
     Ok(())
 }
 
-fn validate_secondaries(secondaries: &Secondaries) -> Result<(), ExecutionError> {
-    for (kind, entries) in [
-        ("trusted index", &secondaries.trusted_indexes),
-        ("content source", &secondaries.content_sources),
-    ] {
-        let mut names = HashSet::new();
-        for entry in entries {
-            if entry.name.is_empty() {
-                return Err(ExecutionError::InvalidRequest(format!(
-                    "secondary {kind} name must not be empty"
-                )));
-            }
-            if !names.insert(&entry.name) {
-                return Err(ExecutionError::InvalidRequest(format!(
-                    "duplicate secondary {kind} name '{}'",
-                    entry.name
-                )));
-            }
-            if !entry.store.is_absolute() {
-                return Err(ExecutionError::InvalidRequest(format!(
-                    "secondary {kind} '{}' store path must be absolute: '{}'",
-                    entry.name,
-                    entry.store.display()
-                )));
-            }
+fn validate_secondaries(store: &Path, secondaries: &Secondaries) -> Result<(), ExecutionError> {
+    let mut names = HashSet::new();
+    let mut roots = HashSet::new();
+    for entry in &secondaries.local_repositories {
+        if entry.name.is_empty() {
+            return Err(ExecutionError::InvalidRequest(
+                "local repository name must not be empty".to_string(),
+            ));
+        }
+        if !names.insert(&entry.name) {
+            return Err(ExecutionError::InvalidRequest(format!(
+                "duplicate local repository name '{}'",
+                entry.name
+            )));
+        }
+        if !entry.store.is_absolute() {
+            return Err(ExecutionError::InvalidRequest(format!(
+                "local repository '{}' store path must be absolute: '{}'",
+                entry.name,
+                entry.store.display()
+            )));
+        }
+        if entry.store == *store {
+            return Err(ExecutionError::InvalidRequest(format!(
+                "local repository '{}' is the working store itself",
+                entry.name
+            )));
+        }
+        if !roots.insert(&entry.store) {
+            return Err(ExecutionError::InvalidRequest(format!(
+                "local repository '{}' repeats store path '{}'",
+                entry.name,
+                entry.store.display()
+            )));
         }
     }
     Ok(())
@@ -196,7 +212,7 @@ mod tests {
     fn request_names_the_run_and_its_directories() {
         let request = Request::parse_json(
             json!({
-                "schema": "bobr-request-v4",
+                "schema": "bobr-request-v5",
                 "store": "/store",
                 "logs": "/logs/run",
                 "work": "/work/run",
@@ -219,7 +235,7 @@ mod tests {
     fn request_without_a_run_is_rejected() {
         let error = Request::parse_json(
             json!({
-                "schema": "bobr-request-v4",
+                "schema": "bobr-request-v5",
                 "store": "/store",
                 "goals": ["root"],
                 "nodes": { "root": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
@@ -239,7 +255,7 @@ mod tests {
     fn the_previous_request_schema_is_rejected() {
         let error = Request::parse_json(
             json!({
-                "schema": "bobr-request-v3",
+                "schema": "bobr-request-v4",
                 "store": "/store",
                 "nodes": { "root": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
             })
@@ -251,7 +267,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported request schema 'bobr-request-v3'"),
+                .contains("unsupported request schema 'bobr-request-v4'"),
             "{error}"
         );
     }
@@ -259,7 +275,7 @@ mod tests {
     #[test]
     fn progress_policy_is_typed_defaulted_and_validated() {
         let base = json!({
-            "schema": "bobr-request-v4",
+            "schema": "bobr-request-v5",
             "store": "/store",
             "logs": "/logs/run",
             "work": "/work/run",
@@ -309,7 +325,7 @@ mod tests {
     #[test]
     fn request_requires_nonempty_known_unique_goals() {
         let base = json!({
-            "schema": "bobr-request-v4",
+            "schema": "bobr-request-v5",
             "store": "/store",
             "logs": "/logs/run",
             "work": "/work/run",
@@ -328,9 +344,9 @@ mod tests {
     }
 
     #[test]
-    fn request_validates_limits_and_local_secondary_capabilities() {
+    fn request_validates_limits_and_local_repositories() {
         let request = json!({
-            "schema": "bobr-request-v4",
+            "schema": "bobr-request-v5",
             "store": "/store",
             "logs": "/logs/run",
             "work": "/work/run",
@@ -343,12 +359,20 @@ mod tests {
                 "max_local_jobs": 3
             },
             "secondaries": {
-                "trusted_indexes": [{ "name": "old", "store": "/old" }],
-                "content_sources": [{ "name": "old", "store": "/old" }]
+                "local_repositories": [{
+                    "name": "old",
+                    "store": "/old",
+                    "trusted": true,
+                    "transfer": "hardlink"
+                }]
             },
             "nodes": { "node": { "name": "hello", "tag": "Group", "config": {}, "inputs": {} } }
         });
         Request::parse_json(&serde_json::to_vec(&request).unwrap()).unwrap();
+
+        let mut copy = request.clone();
+        copy["secondaries"]["local_repositories"][0]["transfer"] = json!("copy");
+        Request::parse_json(&serde_json::to_vec(&copy).unwrap()).unwrap();
 
         let mut zero = request.clone();
         zero["limits"]["max_local_jobs"] = json!(0);
@@ -359,23 +383,86 @@ mod tests {
                 .contains("max_local_jobs")
         );
         let mut relative = request.clone();
-        relative["secondaries"]["content_sources"][0]["store"] = json!("relative");
+        relative["secondaries"]["local_repositories"][0]["store"] = json!("relative");
         assert!(
             Request::parse_json(&serde_json::to_vec(&relative).unwrap())
                 .unwrap_err()
                 .to_string()
                 .contains("must be absolute")
         );
-        let mut duplicate = request;
-        duplicate["secondaries"]["trusted_indexes"] = json!([
-            { "name": "old", "store": "/one" },
-            { "name": "old", "store": "/two" }
+        let mut duplicate_name = request.clone();
+        duplicate_name["secondaries"]["local_repositories"] = json!([
+            { "name": "old", "store": "/one", "trusted": true, "transfer": "hardlink" },
+            { "name": "old", "store": "/two", "trusted": false, "transfer": "copy" }
         ]);
         assert!(
-            Request::parse_json(&serde_json::to_vec(&duplicate).unwrap())
+            Request::parse_json(&serde_json::to_vec(&duplicate_name).unwrap())
                 .unwrap_err()
                 .to_string()
-                .contains("duplicate secondary trusted index")
+                .contains("duplicate local repository name")
+        );
+
+        let mut duplicate_root = request.clone();
+        duplicate_root["secondaries"]["local_repositories"] = json!([
+            { "name": "one", "store": "/old", "trusted": true, "transfer": "hardlink" },
+            { "name": "two", "store": "/old", "trusted": false, "transfer": "copy" }
+        ]);
+        assert!(
+            Request::parse_json(&serde_json::to_vec(&duplicate_root).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("repeats store path")
+        );
+
+        let mut working_alias = request.clone();
+        working_alias["secondaries"]["local_repositories"][0]["store"] = json!("/store");
+        assert!(
+            Request::parse_json(&serde_json::to_vec(&working_alias).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("working store itself")
+        );
+
+        let mut unknown_transfer = request.clone();
+        unknown_transfer["secondaries"]["local_repositories"][0]["transfer"] = json!("auto");
+        assert!(
+            Request::parse_json(&serde_json::to_vec(&unknown_transfer).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("unknown variant `auto`")
+        );
+
+        let mut unknown_field = request.clone();
+        unknown_field["secondaries"]["local_repositories"][0]["priority"] = json!(1);
+        assert!(
+            Request::parse_json(&serde_json::to_vec(&unknown_field).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("unknown field `priority`")
+        );
+
+        let mut missing_trusted = request.clone();
+        missing_trusted["secondaries"]["local_repositories"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("trusted");
+        assert!(
+            Request::parse_json(&serde_json::to_vec(&missing_trusted).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("missing field `trusted`")
+        );
+
+        let mut missing_transfer = request;
+        missing_transfer["secondaries"]["local_repositories"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("transfer");
+        assert!(
+            Request::parse_json(&serde_json::to_vec(&missing_transfer).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("missing field `transfer`")
         );
     }
 

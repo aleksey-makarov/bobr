@@ -61,7 +61,7 @@ mkdir -p /tmp/bobr-store /tmp/bobr-store/logs/first /tmp/bobr-store/work/first
 
 ```json
 {
-  "schema": "bobr-request-v4",
+  "schema": "bobr-request-v5",
   "store": "/tmp/bobr-store",
   "logs": "/tmp/bobr-store/logs/first",
   "work": "/tmp/bobr-store/work/first",
