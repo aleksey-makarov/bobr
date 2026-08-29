@@ -8,6 +8,7 @@
 use crate::fs_tree::{
     FsFileHash, FsTreeEntry, FsTreeManifest, hash_fs_file_path, read_manifest_if_marked,
 };
+use crate::local_content::LocalStoreContentReader;
 use crate::object::import_object_with_expected_hash;
 use crate::refs::parse_object_target;
 use crate::{ReadOnlyStore, Store, StoreError};
@@ -124,17 +125,24 @@ pub enum ContentImportOutcome {
 #[derive(Debug, Clone)]
 pub struct LocalRepository {
     store: ReadOnlyStore,
+    content: LocalStoreContentReader,
 }
 
 impl LocalRepository {
     /// Wraps an already opened and validated read-only store.
     pub fn new(store: ReadOnlyStore) -> Self {
-        Self { store }
+        let content = LocalStoreContentReader::new(store.clone());
+        Self { store, content }
     }
 
     /// Returns the underlying read-only store.
     pub fn store(&self) -> &ReadOnlyStore {
         &self.store
+    }
+
+    /// Returns the shared validated local-content reader.
+    pub(crate) fn content(&self) -> &LocalStoreContentReader {
+        &self.content
     }
 
     /// Validates that both CAS areas can be hardlinked into `working`.
@@ -294,61 +302,15 @@ impl LocalHardlinkContentSource {
 
 impl ContentSource for LocalHardlinkContentSource {
     fn locate_objects(&self, hashes: &[ObjectHash]) -> Result<HashSet<ObjectHash>, StoreError> {
-        let mut available = HashSet::new();
-        for hash in hashes {
-            let path = self.store().object_path_unchecked(*hash);
-            match fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.file_type().is_file() || metadata.file_type().is_dir() => {
-                    available.insert(*hash);
-                }
-                Ok(_) => {
-                    return Err(StoreError::InvalidData(format!(
-                        "secondary object path '{}' is neither a regular file nor a directory",
-                        path.display()
-                    )));
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(StoreError::Io(format!(
-                        "failed to inspect secondary object '{}': {error}",
-                        path.display()
-                    )));
-                }
-            }
-        }
-        Ok(available)
+        self.repository.content().locate_objects(hashes)
     }
 
     fn object_manifest(&self, hash: ObjectHash) -> Result<Option<FsTreeManifest>, StoreError> {
-        let path = self.store().object_path_unchecked(hash);
-        match fs::symlink_metadata(&path) {
-            Ok(_) => read_manifest_if_marked(&path),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(map_io(&path, "inspect secondary object manifest", error)),
-        }
+        self.repository.content().object_manifest(hash)
     }
 
     fn locate_fs_files(&self, hashes: &[FsFileHash]) -> Result<HashSet<FsFileHash>, StoreError> {
-        let mut available = HashSet::new();
-        for hash in hashes {
-            let path = self.store().fs_file_path_unchecked(*hash);
-            match fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.file_type().is_file() => {
-                    available.insert(*hash);
-                }
-                Ok(_) => {
-                    return Err(StoreError::InvalidData(format!(
-                        "secondary fs-file path '{}' is not a regular file",
-                        path.display()
-                    )));
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(map_io(&path, "inspect secondary fs-file", error));
-                }
-            }
-        }
-        Ok(available)
+        self.repository.content().locate_fs_files(hashes)
     }
 
     fn import_fs_files(&self, working: &Store, hashes: &[FsFileHash]) -> Result<(), StoreError> {
@@ -356,6 +318,28 @@ impl ContentSource for LocalHardlinkContentSource {
             return Ok(());
         }
         self.validate_working_store(working)?;
+        let mut seen = HashSet::new();
+        for hash in hashes {
+            if !seen.insert(*hash) {
+                continue;
+            }
+            let working_path = working.fs_file_path_unchecked(*hash);
+            match fs::symlink_metadata(&working_path) {
+                Ok(_) => {
+                    verify_fs_file(&working_path, *hash)?;
+                    continue;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(map_io(&working_path, "inspect working fs-file", error));
+                }
+            }
+            if self.repository.content().fs_file_path(*hash)?.is_none() {
+                return Err(StoreError::InvalidData(format!(
+                    "local repository fs-file '{hash}' is absent"
+                )));
+            }
+        }
         self.runtime
             .run(
                 &HardlinkFsFilesFunction,
@@ -387,24 +371,11 @@ impl ContentSource for LocalHardlinkContentSource {
             return Ok(ContentImportOutcome::AlreadyPresent);
         }
 
-        let source_path = self.store().object_path_unchecked(hash);
-        let source_metadata = match fs::symlink_metadata(&source_path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Ok(ContentImportOutcome::NotFound);
-            }
-            Err(error) => {
-                return Err(map_io(&source_path, "inspect secondary object", error));
-            }
+        let Some(source_path) = self.repository.content().object_path(hash)? else {
+            return Ok(ContentImportOutcome::NotFound);
         };
-        if !(source_metadata.file_type().is_file() || source_metadata.file_type().is_dir()) {
-            return Err(StoreError::InvalidData(format!(
-                "secondary object path '{}' is neither a regular file nor a directory",
-                source_path.display()
-            )));
-        }
 
-        if let Some(manifest) = read_manifest_if_marked(&source_path)? {
+        if let Some(manifest) = self.repository.content().object_manifest(hash)? {
             self.ensure_fs_files(working, &manifest)?;
         }
 
@@ -1031,7 +1002,10 @@ mod tests {
         let source = host_content_source(&secondary_root);
 
         let error = source.import_object(&working, object_hash).unwrap_err();
-        assert!(error.to_string().contains("inspect fs-file"), "{error}");
+        assert!(
+            error.to_string().contains("fs-file") && error.to_string().contains("is absent"),
+            "{error}"
+        );
         assert!(working.object_path(object_hash).unwrap().is_none());
     }
 

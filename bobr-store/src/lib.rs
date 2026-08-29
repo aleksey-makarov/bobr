@@ -19,6 +19,7 @@ compile_error!("bobr requires Linux");
 
 mod error;
 pub mod fs_tree;
+mod local_content;
 mod object;
 mod record;
 mod ref_name;
