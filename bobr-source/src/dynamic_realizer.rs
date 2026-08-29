@@ -936,14 +936,16 @@ mod tests {
     use super::*;
     use crate::graph::plan_graph;
     use bobr_runtime::runtime_provider::RuntimeProvider;
+    use bobr_store::fs_tree::{FsFileHash, FsTreeEntry};
     use bobr_store::{
-        LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex, NamedContentSource,
-        NamedTrustedKeyIndex, ReadOnlyStore, import_build,
+        LocalCopyContentSource, LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex,
+        NamedContentSource, NamedTrustedKeyIndex, ReadOnlyStore, import_build,
     };
     use serde_json::{Value, json};
     use std::fs;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
+    use std::os::unix::fs::MetadataExt;
     use std::str::FromStr;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -1147,7 +1149,7 @@ mod tests {
         )
     }
 
-    fn content(name: &str, root: &std::path::Path) -> NamedContentSource {
+    fn hardlink_content(name: &str, root: &std::path::Path) -> NamedContentSource {
         NamedContentSource::new(
             name,
             Arc::new(LocalHardlinkContentSource::with_runtime(
@@ -1155,6 +1157,63 @@ mod tests {
                 RuntimeProvider::host(),
             )),
         )
+    }
+
+    fn copy_content(name: &str, root: &std::path::Path) -> NamedContentSource {
+        NamedContentSource::new(
+            name,
+            Arc::new(LocalCopyContentSource::with_runtime(
+                LocalRepository::new(ReadOnlyStore::open(root).unwrap()),
+                RuntimeProvider::host(),
+            )),
+        )
+    }
+
+    fn fs_file_path(store: &Store, hash: FsFileHash) -> std::path::PathBuf {
+        let hex = hash.to_hex();
+        store.root().join("fs-files").join(&hex[..2]).join(hex)
+    }
+
+    fn publish_fs_tree(
+        store: &Store,
+        build_key: BuildKey,
+        reuse_key: ReuseKey,
+        tree: &std::path::Path,
+        staged: &std::path::Path,
+        name: &str,
+    ) -> (ObjectHash, Vec<FsFileHash>) {
+        let manifest = store.fs_tree().intern_tree(tree.to_path_buf()).unwrap();
+        let hashes = manifest
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                FsTreeEntry::File { hash, .. } => Some(*hash),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        manifest.write_canonical(staged).unwrap();
+        let object_hash = import_build(
+            store,
+            build_key,
+            reuse_key,
+            Vec::new(),
+            staged,
+            name,
+            "secondary-run",
+        )
+        .unwrap();
+        (object_hash, hashes)
+    }
+
+    fn object_record_path(store: &Store, hash: ObjectHash) -> std::path::PathBuf {
+        store
+            .root()
+            .join("object-records")
+            .join(format!("{}.json", hash.to_hex()))
+    }
+
+    fn object_ref_path(store: &Store, name: &str) -> std::path::PathBuf {
+        store.root().join("object-refs").join(name)
     }
 
     fn dynamic(
@@ -1208,6 +1267,317 @@ mod tests {
 
     fn root_builder(graph: &PlannedGraph) -> &BuilderPlannedSubject {
         graph.node(graph.goals()[0]).unwrap().as_builder().unwrap()
+    }
+
+    #[tokio::test]
+    async fn exact_mapping_and_fs_tree_copy_content_can_come_from_different_repositories() {
+        let environment = environment("copy-exact-split");
+        let declared = ObjectHash::from_str(&"1".repeat(64)).unwrap();
+        let graph = group_graph(declared);
+        let index_root = environment._temp.path().join("index");
+        let content_root = environment._temp.path().join("content");
+        let index_store = store(&index_root);
+        let content_store = store(&content_root);
+        let tree = environment._temp.path().join("exact-tree");
+        fs::create_dir(&tree).unwrap();
+        fs::write(tree.join("payload"), b"exact fs-tree\n").unwrap();
+        let (indexed_hash, indexed_files) = publish_fs_tree(
+            &index_store,
+            graph.goals()[0],
+            reuse('1'),
+            &tree,
+            &environment._temp.path().join("index-manifest"),
+            "indexed-exact",
+        );
+        fs::create_dir(&tree).unwrap();
+        fs::write(tree.join("payload"), b"exact fs-tree\n").unwrap();
+        let (content_hash, content_files) = publish_fs_tree(
+            &content_store,
+            key('a'),
+            reuse('2'),
+            &tree,
+            &environment._temp.path().join("content-manifest"),
+            "content-exact",
+        );
+        assert_eq!(indexed_hash, content_hash);
+        assert_eq!(indexed_files, content_files);
+        fs::remove_file(index_store.object_path(indexed_hash).unwrap().unwrap()).unwrap();
+        let (realizer, executor) = dynamic(
+            &environment,
+            graph.clone(),
+            vec![index("identity", &index_root)],
+            vec![copy_content("bytes", &content_root)],
+        );
+
+        let realized = realizer.clone().realize_goals().await.unwrap();
+
+        assert_eq!(realized, [(graph.goals()[0], content_hash)]);
+        assert!(environment.store.object_is_complete(content_hash).unwrap());
+        assert!(environment.store.object_path(declared).unwrap().is_none());
+        assert_eq!(
+            load_build_object_hash(&environment.store, graph.goals()[0]).unwrap(),
+            Some(content_hash)
+        );
+        assert!(object_record_path(&environment.store, content_hash).is_file());
+        assert!(object_ref_path(&environment.store, "root").is_symlink());
+        let source_file = fs_file_path(&content_store, content_files[0]);
+        let working_file = fs_file_path(&environment.store, content_files[0]);
+        let source_metadata = fs::metadata(source_file).unwrap();
+        let working_metadata = fs::metadata(working_file).unwrap();
+        assert_eq!(source_metadata.dev(), working_metadata.dev());
+        assert_ne!(source_metadata.ino(), working_metadata.ino());
+        executor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dynamic_reuse_skips_an_unavailable_candidate_and_copies_the_next_fs_tree() {
+        let environment = environment("copy-reuse-fallback");
+        let declared = ObjectHash::from_str(&"2".repeat(64)).unwrap();
+        let graph = group_graph(declared);
+        let input_key = BuildKey::from_object_hash(declared);
+        let root = root_builder(&graph);
+        let first_root = environment._temp.path().join("first-index");
+        let second_root = environment._temp.path().join("second-index");
+        let content_root = environment._temp.path().join("reuse-content");
+        let first = store(&first_root);
+        let second = store(&second_root);
+        let content_store = store(&content_root);
+        let x = publish(
+            &first,
+            input_key,
+            reuse('3'),
+            b"candidate-x\n",
+            &environment._temp.path().join("candidate-x"),
+        );
+        let y = publish(
+            &second,
+            input_key,
+            reuse('4'),
+            b"candidate-y\n",
+            &environment._temp.path().join("candidate-y"),
+        );
+        let rx = root
+            .compute_reuse_key(&BTreeMap::from([("input".into(), x)]))
+            .unwrap();
+        let ry = root
+            .compute_reuse_key(&BTreeMap::from([("input".into(), y)]))
+            .unwrap();
+        let unavailable = publish(
+            &first,
+            key('b'),
+            rx,
+            b"unavailable output\n",
+            &environment._temp.path().join("unavailable-output"),
+        );
+        let tree = environment._temp.path().join("reuse-tree");
+        fs::create_dir(&tree).unwrap();
+        fs::write(tree.join("payload"), b"second reuse candidate\n").unwrap();
+        let (selected, _) = publish_fs_tree(
+            &second,
+            key('c'),
+            ry,
+            &tree,
+            &environment._temp.path().join("selected-index-manifest"),
+            "selected-index",
+        );
+        fs::create_dir(&tree).unwrap();
+        fs::write(tree.join("payload"), b"second reuse candidate\n").unwrap();
+        let (content_hash, _) = publish_fs_tree(
+            &content_store,
+            key('d'),
+            reuse('5'),
+            &tree,
+            &environment._temp.path().join("selected-content-manifest"),
+            "selected-content",
+        );
+        assert_eq!(selected, content_hash);
+        for (repository, hash) in [
+            (&first, x),
+            (&first, unavailable),
+            (&second, y),
+            (&second, selected),
+        ] {
+            fs::remove_file(repository.object_path(hash).unwrap().unwrap()).unwrap();
+        }
+        let (realizer, executor) = dynamic(
+            &environment,
+            graph.clone(),
+            vec![index("first", &first_root), index("second", &second_root)],
+            vec![copy_content("content", &content_root)],
+        );
+
+        let realized = realizer.clone().realize_goals().await.unwrap();
+
+        assert_eq!(realized, [(graph.goals()[0], selected)]);
+        assert!(environment.store.object_is_complete(selected).unwrap());
+        assert!(environment.store.object_path(x).unwrap().is_none());
+        assert!(environment.store.object_path(y).unwrap().is_none());
+        assert!(
+            environment
+                .store
+                .object_path(unavailable)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            load_reuse_object_hash(&environment.store, rx).unwrap(),
+            None
+        );
+        assert_eq!(
+            load_reuse_object_hash(&environment.store, ry).unwrap(),
+            Some(selected)
+        );
+        assert_eq!(
+            load_build_object_hash(&environment.store, graph.goals()[0]).unwrap(),
+            Some(selected)
+        );
+        executor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_uses_copy_repository_content_before_its_origin() {
+        let environment = environment("copy-source-before-origin");
+        let content_root = environment._temp.path().join("source-content");
+        let content_store = store(&content_root);
+        let tree = environment._temp.path().join("source-tree");
+        fs::create_dir(&tree).unwrap();
+        fs::write(tree.join("payload"), b"source from repository\n").unwrap();
+        let (object_hash, _) = publish_fs_tree(
+            &content_store,
+            key('e'),
+            reuse('6'),
+            &tree,
+            &environment._temp.path().join("source-manifest"),
+            "source-content",
+        );
+        let missing_origin = environment._temp.path().join("must-not-be-opened");
+        let graph = Arc::new(
+            plan_graph(
+                &BTreeMap::from([(
+                    "source".to_string(),
+                    path_source("source", object_hash, &missing_origin),
+                )]),
+                &["source".to_string()],
+            )
+            .unwrap(),
+        );
+        let (realizer, executor) = dynamic(
+            &environment,
+            graph.clone(),
+            Vec::new(),
+            vec![copy_content("content", &content_root)],
+        );
+
+        let realized = realizer.clone().realize_goals().await.unwrap();
+
+        assert_eq!(realized, [(graph.goals()[0], object_hash)]);
+        assert!(environment.store.object_is_complete(object_hash).unwrap());
+        assert!(object_ref_path(&environment.store, "source").is_symlink());
+        assert!(!missing_origin.exists());
+        executor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unavailable_exact_candidate_falls_back_to_builder_execution() {
+        let environment = environment("copy-build-fallback");
+        let graph = Arc::new(
+            plan_graph(
+                &BTreeMap::from([("root".to_string(), tree("root", "built value"))]),
+                &["root".to_string()],
+            )
+            .unwrap(),
+        );
+        let stale_root = environment._temp.path().join("stale");
+        let stale_store = store(&stale_root);
+        let stale = publish(
+            &stale_store,
+            graph.goals()[0],
+            reuse('7'),
+            b"stale exact\n",
+            &environment._temp.path().join("stale-object"),
+        );
+        fs::remove_file(stale_store.object_path(stale).unwrap().unwrap()).unwrap();
+        let (realizer, executor) = dynamic(
+            &environment,
+            graph.clone(),
+            vec![index("stale", &stale_root)],
+            vec![copy_content("stale", &stale_root)],
+        );
+
+        let realized = realizer.clone().realize_goals().await.unwrap();
+
+        assert_ne!(realized[0].1, stale);
+        assert!(environment.store.object_is_complete(realized[0].1).unwrap());
+        assert_eq!(
+            load_build_object_hash(&environment.store, graph.goals()[0]).unwrap(),
+            Some(realized[0].1)
+        );
+        executor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn incomplete_copy_candidate_publishes_no_mapping_record_or_ref() {
+        let environment = environment("copy-incomplete-publication");
+        let index_root = environment._temp.path().join("incomplete-index");
+        let content_root = environment._temp.path().join("incomplete-content");
+        let index_store = store(&index_root);
+        let content_store = store(&content_root);
+        let tree = environment._temp.path().join("incomplete-tree");
+        fs::create_dir(&tree).unwrap();
+        fs::write(tree.join("payload"), b"missing closure member\n").unwrap();
+        let (object_hash, hashes) = publish_fs_tree(
+            &content_store,
+            key('f'),
+            reuse('9'),
+            &tree,
+            &environment._temp.path().join("incomplete-content-manifest"),
+            "incomplete-content",
+        );
+        fs::create_dir(&tree).unwrap();
+        fs::write(tree.join("payload"), b"missing closure member\n").unwrap();
+        let source_key = BuildKey::from_object_hash(object_hash);
+        let (indexed_hash, _) = publish_fs_tree(
+            &index_store,
+            source_key,
+            reuse('8'),
+            &tree,
+            &environment._temp.path().join("incomplete-index-manifest"),
+            "incomplete-index",
+        );
+        assert_eq!(object_hash, indexed_hash);
+        fs::remove_file(index_store.object_path(object_hash).unwrap().unwrap()).unwrap();
+        fs::remove_file(fs_file_path(&content_store, hashes[0])).unwrap();
+        let graph = Arc::new(
+            plan_graph(
+                &BTreeMap::from([("source".to_string(), source("source", object_hash))]),
+                &["source".to_string()],
+            )
+            .unwrap(),
+        );
+        let (realizer, executor) = dynamic(
+            &environment,
+            graph.clone(),
+            vec![index("identity", &index_root)],
+            vec![copy_content("incomplete", &content_root)],
+        );
+
+        let error = realizer.clone().realize_goals().await.unwrap_err();
+
+        assert!(error.to_string().contains("has no origin"), "{error}");
+        assert!(
+            environment
+                .store
+                .object_path(object_hash)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            load_build_object_hash(&environment.store, source_key).unwrap(),
+            None
+        );
+        assert!(!object_record_path(&environment.store, object_hash).exists());
+        assert!(!object_ref_path(&environment.store, "source").exists());
+        executor.shutdown().await.unwrap();
     }
 
     #[test]
@@ -1429,7 +1799,7 @@ mod tests {
             &environment,
             graph.clone(),
             vec![index("first", &first_root), index("second", &second_root)],
-            vec![content("content", &content_root)],
+            vec![hardlink_content("content", &content_root)],
         );
 
         let realized = realizer.clone().realize_goals().await.unwrap();
@@ -1504,7 +1874,7 @@ mod tests {
             &environment,
             graph.clone(),
             vec![index("index", &index_root)],
-            vec![content("content", &content_root)],
+            vec![copy_content("content", &content_root)],
         );
 
         let realized = realizer.clone().realize_goals().await.unwrap();
