@@ -740,8 +740,8 @@ mod tests {
     use super::*;
     use crate::fs_tree::FsTreeEntry;
     use crate::{
-        LocalHardlinkContentSource, LocalTrustedKeyIndex, ReadOnlyStore, import_build,
-        load_build_object_hash,
+        LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex, ReadOnlyStore,
+        import_build, load_build_object_hash,
     };
     use bobr_runtime::runtime_provider::RuntimeProvider;
     use serde_json::Value;
@@ -761,6 +761,10 @@ mod tests {
     fn empty_store(path: &Path) -> Store {
         fs::create_dir(path).unwrap();
         Store::create(path).unwrap()
+    }
+
+    fn local_repository(path: &Path) -> LocalRepository {
+        LocalRepository::new(ReadOnlyStore::open(path).unwrap())
     }
 
     fn publish_file(
@@ -786,9 +790,7 @@ mod tests {
     fn index(name: &str, root: &Path) -> NamedTrustedKeyIndex {
         NamedTrustedKeyIndex::new(
             name,
-            Arc::new(LocalTrustedKeyIndex::new(
-                ReadOnlyStore::open(root).unwrap(),
-            )),
+            Arc::new(LocalTrustedKeyIndex::new(local_repository(root))),
         )
     }
 
@@ -796,7 +798,7 @@ mod tests {
         NamedContentSource::new(
             name,
             Arc::new(LocalHardlinkContentSource::with_runtime(
-                ReadOnlyStore::open(root).unwrap(),
+                local_repository(root),
                 RuntimeProvider::host(),
             )),
         )
@@ -965,7 +967,7 @@ mod tests {
             &temp.path().join("second-staged"),
         );
         let second_source = LocalHardlinkContentSource::with_runtime(
-            ReadOnlyStore::open(&second_root).unwrap(),
+            local_repository(&second_root),
             RuntimeProvider::host(),
         );
         second_source.import_object(&working, y).unwrap();
@@ -1021,13 +1023,13 @@ mod tests {
             &temp.path().join("second-staged"),
         );
         LocalHardlinkContentSource::with_runtime(
-            ReadOnlyStore::open(&first_root).unwrap(),
+            local_repository(&first_root),
             RuntimeProvider::host(),
         )
         .import_object(&working, x)
         .unwrap();
         LocalHardlinkContentSource::with_runtime(
-            ReadOnlyStore::open(&second_root).unwrap(),
+            local_repository(&second_root),
             RuntimeProvider::host(),
         )
         .import_object(&working, y)

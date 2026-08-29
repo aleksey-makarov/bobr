@@ -1014,7 +1014,8 @@ mod tests {
     use crate::acquisition::Limits;
     use bobr_runtime::runtime_provider::RuntimeProvider;
     use bobr_store::{
-        LocalHardlinkContentSource, NamedContentSource, ReadOnlyStore, import_source_object,
+        LocalHardlinkContentSource, LocalRepository, NamedContentSource, ReadOnlyStore,
+        import_source_object,
     };
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -1299,7 +1300,7 @@ mod tests {
         let content = NamedContentSource::new(
             "secondary",
             Arc::new(LocalHardlinkContentSource::with_runtime(
-                ReadOnlyStore::open(&secondary_root).unwrap(),
+                LocalRepository::new(ReadOnlyStore::open(&secondary_root).unwrap()),
                 RuntimeProvider::host(),
             )),
         );

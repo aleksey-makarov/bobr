@@ -118,9 +118,10 @@ Every repository provides the content-source capability. A repository with
 The Realizer consults working-store mappings before repository mappings, and
 checks working-store content before secondary content. A secondary mapping can
 therefore be useful before its object is imported locally. Both adapters retain
-the same shared `ReadOnlyStore` handle, and mapping lookup never opens object
-records. Remote capabilities and copy-based content import are not implemented
-yet.
+the same `LocalRepository` backend and its shared validated read-only content
+reader; they cannot be constructed directly from unrelated store handles.
+Mapping lookup never opens object records. Remote capabilities and copy-based
+content import are not implemented yet.
 
 ## Store Layout
 

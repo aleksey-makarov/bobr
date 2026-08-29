@@ -214,8 +214,8 @@ mod tests {
     use bobr_core::ReuseKey;
     use bobr_runtime::runtime_provider::RuntimeProvider;
     use bobr_store::{
-        LocalHardlinkContentSource, LocalTrustedKeyIndex, NamedContentSource, NamedTrustedKeyIndex,
-        ReadOnlyStore, Store, import_build,
+        LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex, NamedContentSource,
+        NamedTrustedKeyIndex, ReadOnlyStore, Store, import_build,
     };
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
@@ -352,19 +352,19 @@ mod tests {
             b"secondary exact\n",
         );
         let working = store(&temp.path().join("working"));
-        let read_only = ReadOnlyStore::open(&secondary_root).unwrap();
+        let repository = LocalRepository::new(ReadOnlyStore::open(&secondary_root).unwrap());
         let resolver = Arc::new(
             SecondaryResolver::new(
                 working.clone(),
                 "test-run",
                 vec![NamedTrustedKeyIndex::new(
                     "secondary",
-                    Arc::new(LocalTrustedKeyIndex::new(read_only.clone())),
+                    Arc::new(LocalTrustedKeyIndex::new(repository.clone())),
                 )],
                 vec![NamedContentSource::new(
                     "secondary",
                     Arc::new(LocalHardlinkContentSource::with_runtime(
-                        read_only,
+                        repository,
                         RuntimeProvider::host(),
                     )),
                 )],
@@ -416,8 +416,8 @@ mod tests {
             &temp.path().join("second-object"),
             b"second candidate\n",
         );
-        let first = ReadOnlyStore::open(&first_root).unwrap();
-        let second = ReadOnlyStore::open(&second_root).unwrap();
+        let first = LocalRepository::new(ReadOnlyStore::open(&first_root).unwrap());
+        let second = LocalRepository::new(ReadOnlyStore::open(&second_root).unwrap());
         let resolver = Arc::new(
             SecondaryResolver::new(
                 store(&temp.path().join("working")),

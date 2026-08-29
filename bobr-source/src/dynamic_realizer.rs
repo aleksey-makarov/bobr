@@ -937,8 +937,8 @@ mod tests {
     use crate::graph::plan_graph;
     use bobr_runtime::runtime_provider::RuntimeProvider;
     use bobr_store::{
-        LocalHardlinkContentSource, LocalTrustedKeyIndex, NamedContentSource, NamedTrustedKeyIndex,
-        ReadOnlyStore, import_build,
+        LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex, NamedContentSource,
+        NamedTrustedKeyIndex, ReadOnlyStore, import_build,
     };
     use serde_json::{Value, json};
     use std::fs;
@@ -1141,9 +1141,9 @@ mod tests {
     fn index(name: &str, root: &std::path::Path) -> NamedTrustedKeyIndex {
         NamedTrustedKeyIndex::new(
             name,
-            Arc::new(LocalTrustedKeyIndex::new(
+            Arc::new(LocalTrustedKeyIndex::new(LocalRepository::new(
                 ReadOnlyStore::open(root).unwrap(),
-            )),
+            ))),
         )
     }
 
@@ -1151,7 +1151,7 @@ mod tests {
         NamedContentSource::new(
             name,
             Arc::new(LocalHardlinkContentSource::with_runtime(
-                ReadOnlyStore::open(root).unwrap(),
+                LocalRepository::new(ReadOnlyStore::open(root).unwrap()),
                 RuntimeProvider::host(),
             )),
         )

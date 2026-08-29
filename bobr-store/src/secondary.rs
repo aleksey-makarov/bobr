@@ -166,12 +166,6 @@ impl LocalRepository {
     }
 }
 
-impl From<ReadOnlyStore> for LocalRepository {
-    fn from(store: ReadOnlyStore) -> Self {
-        Self::new(store)
-    }
-}
-
 /// Trusted build/reuse index backed by a local read-only store.
 #[derive(Debug, Clone)]
 pub struct LocalTrustedKeyIndex {
@@ -180,10 +174,8 @@ pub struct LocalTrustedKeyIndex {
 
 impl LocalTrustedKeyIndex {
     /// Exposes a local repository's mappings as a trusted key index.
-    pub fn new(repository: impl Into<LocalRepository>) -> Self {
-        Self {
-            repository: repository.into(),
-        }
+    pub fn new(repository: LocalRepository) -> Self {
+        Self { repository }
     }
 
     /// Returns the shared local repository backend.
@@ -252,7 +244,7 @@ pub struct LocalHardlinkContentSource {
 
 impl LocalHardlinkContentSource {
     /// Exposes a local repository's content through hardlink import.
-    pub fn new(repository: impl Into<LocalRepository>) -> Self {
+    pub fn new(repository: LocalRepository) -> Self {
         Self::with_runtime(repository, runtime_provider_for_current_process())
     }
 
@@ -261,9 +253,9 @@ impl LocalHardlinkContentSource {
     /// Production callers normally use [`Self::new`]. Tests and root callers
     /// can select a host provider; unprivileged imports use a namespace provider
     /// so fs-files owned by mapped subordinate IDs can be hardlinked.
-    pub fn with_runtime(repository: impl Into<LocalRepository>, runtime: RuntimeProvider) -> Self {
+    pub fn with_runtime(repository: LocalRepository, runtime: RuntimeProvider) -> Self {
         Self {
-            repository: repository.into(),
+            repository,
             runtime,
         }
     }
@@ -705,11 +697,18 @@ mod tests {
         Store::create(root).unwrap()
     }
 
+    fn local_repository(root: &Path) -> LocalRepository {
+        LocalRepository::new(ReadOnlyStore::open(root).unwrap())
+    }
+
+    fn assert_same_inode(left: &Path, right: &Path) {
+        let left = fs::metadata(left).unwrap();
+        let right = fs::metadata(right).unwrap();
+        assert_eq!((left.dev(), left.ino()), (right.dev(), right.ino()));
+    }
+
     fn host_content_source(root: &Path) -> LocalHardlinkContentSource {
-        LocalHardlinkContentSource::with_runtime(
-            ReadOnlyStore::open(root).unwrap(),
-            RuntimeProvider::host(),
-        )
+        LocalHardlinkContentSource::with_runtime(local_repository(root), RuntimeProvider::host())
     }
 
     fn fs_tree_object(root: &Path) -> (Store, ObjectHash, FsFileHash) {
@@ -763,7 +762,7 @@ mod tests {
         let temp = tempdir().unwrap();
         let root = temp.path().join("store");
         let (_store, build, reuse, object_hash) = populated_store(&root);
-        let index = LocalTrustedKeyIndex::new(ReadOnlyStore::open(&root).unwrap());
+        let index = LocalTrustedKeyIndex::new(local_repository(&root));
 
         let builds = index
             .resolve_builds(&[build_key('3'), build, build])
@@ -784,9 +783,9 @@ mod tests {
         let root = temp.path().join("store");
         let (store, build, reuse, object_hash) = populated_store(&root);
         fs::remove_file(store.object_path(object_hash).unwrap().unwrap()).unwrap();
-        let read_only = ReadOnlyStore::open(&root).unwrap();
-        let index = LocalTrustedKeyIndex::new(read_only.clone());
-        let content = LocalHardlinkContentSource::new(read_only);
+        let repository = local_repository(&root);
+        let index = LocalTrustedKeyIndex::new(repository.clone());
+        let content = LocalHardlinkContentSource::new(repository);
 
         assert_eq!(
             index.resolve_builds(&[build]).unwrap()[0].object_hash,
@@ -807,7 +806,7 @@ mod tests {
         let ref_path = store.build_ref_path(build);
         fs::remove_file(&ref_path).unwrap();
         symlink("../objects/not-a-record", &ref_path).unwrap();
-        let index = LocalTrustedKeyIndex::new(ReadOnlyStore::open(&root).unwrap());
+        let index = LocalTrustedKeyIndex::new(local_repository(&root));
 
         let error = index.resolve_builds(&[build]).unwrap_err();
         assert!(error.to_string().contains("invalid object hash"));
@@ -829,7 +828,7 @@ mod tests {
         let root = temp.path().join("store");
         let (store, _build, _reuse, object_hash) = populated_store(&root);
         let missing = ObjectHash::from_str(&"5".repeat(64)).unwrap();
-        let source = LocalHardlinkContentSource::new(ReadOnlyStore::open(&root).unwrap());
+        let source = LocalHardlinkContentSource::new(local_repository(&root));
 
         assert_eq!(
             source.locate_objects(&[missing, object_hash]).unwrap(),
@@ -861,10 +860,7 @@ mod tests {
         );
         let secondary_path = secondary.object_path(object_hash).unwrap().unwrap();
         let working_path = working.object_path(object_hash).unwrap().unwrap();
-        assert_eq!(
-            fs::metadata(&secondary_path).unwrap().ino(),
-            fs::metadata(&working_path).unwrap().ino()
-        );
+        assert_same_inode(&secondary_path, &working_path);
         assert_eq!(
             source.import_object(&working, object_hash).unwrap(),
             ContentImportOutcome::AlreadyPresent
@@ -923,11 +919,9 @@ mod tests {
         );
         let secondary_object = secondary.object_path(object_hash).unwrap().unwrap();
         let working_object = working.object_path(object_hash).unwrap().unwrap();
-        assert_eq!(
-            fs::metadata(secondary_object.join("bin/tool"))
-                .unwrap()
-                .ino(),
-            fs::metadata(working_object.join("bin/tool")).unwrap().ino()
+        assert_same_inode(
+            &secondary_object.join("bin/tool"),
+            &working_object.join("bin/tool"),
         );
         assert!(working_object.join("empty").is_dir());
         assert_eq!(
@@ -941,6 +935,16 @@ mod tests {
                 .mode()
                 & 0o777,
             0o755
+        );
+
+        bobr_core::fsutil::remove_path_force(&secondary_object).unwrap();
+        assert_eq!(
+            fs::read(working_object.join("bin/tool")).unwrap(),
+            b"#!/bin/sh\n"
+        );
+        assert_eq!(
+            fs::read_link(working_object.join("tool")).unwrap(),
+            Path::new("bin/tool")
         );
     }
 
@@ -959,12 +963,14 @@ mod tests {
         );
         let secondary_file = secondary.fs_file_path_unchecked(file_hash);
         let working_file = working.fs_file_path_unchecked(file_hash);
-        assert_eq!(
-            fs::metadata(&secondary_file).unwrap().ino(),
-            fs::metadata(&working_file).unwrap().ino()
-        );
-        assert_eq!(fs::read(working_file).unwrap(), b"fs-tree payload\n");
+        assert_same_inode(&secondary_file, &working_file);
+        assert_eq!(fs::read(&working_file).unwrap(), b"fs-tree payload\n");
         assert!(working.object_path(object_hash).unwrap().is_some());
+
+        fs::remove_file(&secondary_file).unwrap();
+        fs::remove_file(secondary.object_path(object_hash).unwrap().unwrap()).unwrap();
+        assert_eq!(fs::read(&working_file).unwrap(), b"fs-tree payload\n");
+        assert!(working.object_is_complete(object_hash).unwrap());
     }
 
     #[test]
@@ -1092,6 +1098,33 @@ mod tests {
         repository
             .validate_hardlink_compatible_with(&working)
             .unwrap();
+    }
+
+    #[test]
+    fn hardlink_transport_does_not_copy_after_link_failure() {
+        let temp = tempdir().unwrap();
+        let destination = temp.path().join("status");
+        let source = Path::new("/proc/self/status");
+        let error = hardlink_object(source, &destination).unwrap_err();
+
+        assert!(error.to_string().contains("failed to hardlink"), "{error}");
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn hardlink_eperm_and_exdev_are_fatal_transport_errors() {
+        for errno in [libc::EPERM, libc::EXDEV] {
+            let error = hardlink_error(
+                Path::new("/source"),
+                Path::new("/destination"),
+                io::Error::from_raw_os_error(errno),
+            );
+            assert!(matches!(error, StoreError::Io(_)), "{error}");
+            assert!(
+                error.to_string().contains("hardlink-only import"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
