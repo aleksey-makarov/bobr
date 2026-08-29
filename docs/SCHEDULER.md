@@ -305,15 +305,12 @@ The request controls several independent resources.
 | `limits.max_connections` | all HTTP and OCI transfers | global network semaphore |
 | `limits.per_host_default` | transfers to one host | per-host semaphore |
 | `limits.per_host.<host>` | transfers to a named host | per-host override semaphore |
-| `limits.max_local_jobs` | local `Path` Source materialization | Source-engine local semaphore |
-| `limits.max_local_jobs` | builder input path preparation | separate realizer local-I/O semaphore |
+| `limits.max_local_jobs` | local Source materialization and import, repository content transfer and verification, and builder input path preparation | one shared local-I/O semaphore |
 
-The two uses of `max_local_jobs` currently have separate semaphore instances.
-They apply the same configured bound independently; they are not one shared
-disk-wide budget.
-
-Secondary mapping and content operations are synchronous store operations run
-through Tokio's blocking pool. They do not consume builder or network permits.
+Local copy and hash work runs through Tokio's blocking pool after acquiring the
+shared local-I/O permit. It therefore neither occupies a Tokio worker nor a
+builder slot. Secondary mapping lookup is small synchronous metadata work and
+does not consume a local-I/O permit; acquiring and verifying content does.
 
 Network permit acquisition always takes the per-host permit before the global
 permit. Every network task uses that order, avoiding a lock-order deadlock.
@@ -379,6 +376,16 @@ cancellation. Failed or cancelled acquisition keeps partial data in per-run
 work only where the relevant origin implementation explicitly permits it;
 partial content is never published as the declared object.
 
+Waiting for the shared local-I/O permit is cancellation-aware. Once a
+synchronous filesystem or namespace-runtime operation has started, it is not
+forcibly interrupted: it runs to its atomic publication boundary and the
+Realizer checks cancellation immediately afterwards. Such a completed
+transaction may leave verified content and its content-level or Source
+metadata as a reusable cache hit, but it does not let the cancelled realization
+continue into dependent work. Repository staging guards remove unpublished
+partial copies on failure; cancellation never exposes a half-copied object or
+fs-file.
+
 Progress reporting observes scheduler events but does not make scheduling
 decisions. Terminal height, visible activity slots, and quiet mode affect only
 presentation. See [Build logging](./LOGGING.md).
@@ -414,8 +421,8 @@ The current scheduler maintains these central invariants:
 - shared nodes and known content acquisition are deduplicated within a run;
 - exact and reuse hits can prune unnecessary dependency content;
 - synchronous builders never block Tokio runtime workers;
-- builders, network transfers, and local Source operations have explicit,
-  independent bounds;
+- builders, network transfers, and the shared class of local-I/O operations
+  have explicit, independent bounds;
 - builder inputs are complete before execution;
 - staged output is published only after successful builder completion;
 - one goal failure or external cancellation terminates the whole run;

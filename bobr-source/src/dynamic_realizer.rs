@@ -28,7 +28,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{Mutex, OnceCell, Semaphore};
+use tokio::sync::{Mutex, OnceCell};
 use tokio::task::JoinSet;
 
 const REUSE_LOOKUP_BATCH: usize = 256;
@@ -131,7 +131,6 @@ pub struct DynamicRealizer {
     secondary: Arc<SecondaryResolver>,
     build_executor: BuildExecutorHandle,
     source_engine: Arc<SourceEngine>,
-    local_io: Arc<Semaphore>,
     candidate_cells: Mutex<HashMap<BuildKey, CandidateCell>>,
     local_cells: Mutex<HashMap<BuildKey, LocalCell>>,
     content_cells: Mutex<HashMap<ObjectHash, ContentCell>>,
@@ -197,7 +196,6 @@ impl DynamicRealizer {
             secondary,
             build_executor,
             source_engine,
-            local_io: Arc::new(Semaphore::new(max_local_jobs)),
             candidate_cells: Mutex::new(HashMap::new()),
             local_cells: Mutex::new(HashMap::new()),
             content_cells: Mutex::new(HashMap::new()),
@@ -444,18 +442,15 @@ impl DynamicRealizer {
         builder: &BuilderPlannedSubject,
         input_hashes: &BTreeMap<String, ObjectHash>,
     ) -> Result<BuilderInputs, DynamicRealizeError> {
-        let permit = self
-            .local_io
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| DynamicRealizeError::new("local-I/O semaphore closed"))?;
+        self.check_cancelled()?;
+        let permit = self.acquire_local_io_permit().await?;
+        self.check_cancelled()?;
         let store = self.store.clone();
         let runtime = self.runtime_provider.clone();
         let planned_inputs = builder.inputs().clone();
         let hashes = input_hashes.clone();
         let graph = self.graph.clone();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let mut slots = BTreeMap::new();
             for (name, key) in planned_inputs {
@@ -483,7 +478,12 @@ impl DynamicRealizer {
         .await
         .map_err(|error| {
             DynamicRealizeError::new(format!("input materialization task panicked: {error}"))
-        })?
+        })?;
+        // Namespace runtime calls are synchronous. Cancellation can prevent
+        // them from starting, but once started they finish atomically before
+        // the Realizer observes the token at this boundary.
+        self.check_cancelled()?;
+        result
     }
 
     async fn materialize_source(
@@ -705,16 +705,24 @@ impl DynamicRealizer {
         };
         let result = cell
             .get_or_init(|| async {
+                self.check_cancelled()?;
+                let permit = self.acquire_local_io_permit().await?;
+                self.check_cancelled()?;
                 let secondary = self.secondary.clone();
-                tokio::task::spawn_blocking(move || secondary.ensure_objects(&[hash]))
-                    .await
-                    .map_err(|error| {
-                        DynamicRealizeError::new(format!(
-                            "content acquisition task panicked: {error}"
-                        ))
-                    })?
-                    .map_err(DynamicRealizeError::from)
-                    .map(|reports| reports[0].outcome.is_some())
+                let result = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    secondary.ensure_objects(&[hash])
+                })
+                .await
+                .map_err(|error| {
+                    DynamicRealizeError::new(format!("content acquisition task panicked: {error}"))
+                })?
+                .map_err(DynamicRealizeError::from)?;
+                // A copy/hash transaction already inside synchronous store or
+                // namespace code is allowed to reach its atomic publication
+                // boundary. Do not publish graph mappings after cancellation.
+                self.check_cancelled()?;
+                Ok(result[0].outcome.is_some())
             })
             .await
             .clone();
@@ -728,6 +736,21 @@ impl DynamicRealizer {
             }
         }
         result
+    }
+
+    async fn acquire_local_io_permit(
+        &self,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, DynamicRealizeError> {
+        self.source_engine
+            .acquire_local_permit()
+            .await
+            .map_err(|error| {
+                if self.cancellation.is_cancelled() {
+                    DynamicRealizeError::cancelled("build cancelled by signal")
+                } else {
+                    DynamicRealizeError::new(error.to_string())
+                }
+            })
     }
 
     async fn known_local(&self, key: BuildKey) -> Option<ObjectHash> {
@@ -936,10 +959,11 @@ mod tests {
     use super::*;
     use crate::graph::plan_graph;
     use bobr_runtime::runtime_provider::RuntimeProvider;
-    use bobr_store::fs_tree::{FsFileHash, FsTreeEntry};
+    use bobr_store::fs_tree::{FsFileHash, FsTreeEntry, FsTreeManifest};
     use bobr_store::{
-        LocalCopyContentSource, LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex,
-        NamedContentSource, NamedTrustedKeyIndex, ReadOnlyStore, import_build,
+        ContentImportOutcome, ContentSource, LocalCopyContentSource, LocalHardlinkContentSource,
+        LocalRepository, LocalTrustedKeyIndex, NamedContentSource, NamedTrustedKeyIndex,
+        ReadOnlyStore, import_build, import_source_object,
     };
     use serde_json::{Value, json};
     use std::fs;
@@ -947,6 +971,7 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::os::unix::fs::MetadataExt;
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
     use tempfile::{TempDir, tempdir};
@@ -956,6 +981,74 @@ mod tests {
         store: Store,
         run: Arc<Run>,
         logger: Arc<BuildRunLogger>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct TrackedCopyContentSource {
+        inner: LocalCopyContentSource,
+        calls: Arc<AtomicUsize>,
+        active: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        delay: Duration,
+    }
+
+    impl TrackedCopyContentSource {
+        fn new(inner: LocalCopyContentSource, delay: Duration) -> Self {
+            Self {
+                inner,
+                calls: Arc::new(AtomicUsize::new(0)),
+                active: Arc::new(AtomicUsize::new(0)),
+                peak: Arc::new(AtomicUsize::new(0)),
+                delay,
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+
+        fn peak(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ContentSource for TrackedCopyContentSource {
+        fn locate_objects(&self, hashes: &[ObjectHash]) -> Result<HashSet<ObjectHash>, StoreError> {
+            self.inner.locate_objects(hashes)
+        }
+
+        fn object_manifest(&self, hash: ObjectHash) -> Result<Option<FsTreeManifest>, StoreError> {
+            self.inner.object_manifest(hash)
+        }
+
+        fn locate_fs_files(
+            &self,
+            hashes: &[FsFileHash],
+        ) -> Result<HashSet<FsFileHash>, StoreError> {
+            self.inner.locate_fs_files(hashes)
+        }
+
+        fn import_fs_files(
+            &self,
+            working: &Store,
+            hashes: &[FsFileHash],
+        ) -> Result<(), StoreError> {
+            self.inner.import_fs_files(working, hashes)
+        }
+
+        fn import_object(
+            &self,
+            working: &Store,
+            hash: ObjectHash,
+        ) -> Result<ContentImportOutcome, StoreError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            thread::sleep(self.delay);
+            let result = self.inner.import_object(working, hash);
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            result
+        }
     }
 
     fn environment(label: &str) -> TestEnvironment {
@@ -1140,6 +1233,10 @@ mod tests {
         ReuseKey::from_str(&digit.to_string().repeat(64)).unwrap()
     }
 
+    fn object_hash(digit: char) -> ObjectHash {
+        ObjectHash::from_str(&digit.to_string().repeat(64)).unwrap()
+    }
+
     fn index(name: &str, root: &std::path::Path) -> NamedTrustedKeyIndex {
         NamedTrustedKeyIndex::new(
             name,
@@ -1205,6 +1302,22 @@ mod tests {
         (object_hash, hashes)
     }
 
+    fn publish_source_object(
+        store: &Store,
+        staged: &std::path::Path,
+        name: &str,
+        bytes: &[u8],
+    ) -> ObjectHash {
+        fs::write(staged, bytes).unwrap();
+        let hash = fsobj_hash::hash_file_bytes(false, bytes);
+        let outcome = import_source_object(store, hash, staged, name, "secondary-run").unwrap();
+        assert!(matches!(
+            outcome,
+            bobr_store::SourceImportOutcome::Matched(_)
+        ));
+        hash
+    }
+
     fn object_record_path(store: &Store, hash: ObjectHash) -> std::path::PathBuf {
         store
             .root()
@@ -1221,6 +1334,24 @@ mod tests {
         graph: Arc<PlannedGraph>,
         indexes: Vec<NamedTrustedKeyIndex>,
         sources: Vec<NamedContentSource>,
+    ) -> (Arc<DynamicRealizer>, crate::build_executor::BuildExecutor) {
+        dynamic_with_local_jobs(
+            environment,
+            graph,
+            indexes,
+            sources,
+            CancellationToken::new(),
+            2,
+        )
+    }
+
+    fn dynamic_with_local_jobs(
+        environment: &TestEnvironment,
+        graph: Arc<PlannedGraph>,
+        indexes: Vec<NamedTrustedKeyIndex>,
+        sources: Vec<NamedContentSource>,
+        cancellation: CancellationToken,
+        max_local_jobs: u32,
     ) -> (Arc<DynamicRealizer>, crate::build_executor::BuildExecutor) {
         let secondary = Arc::new(
             SecondaryResolver::new(
@@ -1239,11 +1370,11 @@ mod tests {
                 environment.run.clone(),
                 environment.logger.clone(),
                 RuntimeProvider::host(),
-                CancellationToken::new(),
+                cancellation,
                 secondary,
                 executor.handle(),
                 crate::acquisition::Limits {
-                    max_local_jobs: Some(2),
+                    max_local_jobs: Some(max_local_jobs),
                     ..Default::default()
                 },
             )
@@ -2007,6 +2138,214 @@ mod tests {
         assert_eq!(realized.len(), 1);
         assert_eq!(concurrent, 2);
         assert_eq!(environment.logger.outcome_stats().downloaded, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repository_imports_share_the_local_io_limit_without_blocking_tokio() {
+        let environment = environment("repository-local-limit");
+        let repository_root = environment._temp.path().join("repository");
+        let repository = store(&repository_root);
+        let mut nodes = BTreeMap::new();
+        let mut goals = Vec::new();
+        for index in 0..4 {
+            let node_name = format!("source-{index}");
+            let staged = environment._temp.path().join(format!("staged-{index}"));
+            let hash = publish_source_object(
+                &repository,
+                &staged,
+                &node_name,
+                format!("repository object {index}\n").as_bytes(),
+            );
+            nodes.insert(node_name.clone(), source(&node_name, hash));
+            goals.push(node_name);
+        }
+        let graph = Arc::new(plan_graph(&nodes, &goals).unwrap());
+        let tracked = TrackedCopyContentSource::new(
+            LocalCopyContentSource::with_runtime(
+                LocalRepository::new(ReadOnlyStore::open(&repository_root).unwrap()),
+                RuntimeProvider::host(),
+            ),
+            Duration::from_millis(75),
+        );
+        let (realizer, executor) = dynamic_with_local_jobs(
+            &environment,
+            graph,
+            Vec::new(),
+            vec![NamedContentSource::new(
+                "tracked",
+                Arc::new(tracked.clone()),
+            )],
+            CancellationToken::new(),
+            2,
+        );
+
+        let task = tokio::spawn(realizer.realize_goals());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !task.is_finished(),
+            "repository imports unexpectedly blocked the Tokio runtime"
+        );
+        let realized = task.await.unwrap().unwrap();
+        executor.shutdown().await.unwrap();
+
+        assert_eq!(realized.len(), 4);
+        assert_eq!(tracked.calls(), 4);
+        assert_eq!(tracked.peak(), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn object_hash_once_cell_deduplicates_repository_import() {
+        let environment = environment("repository-once-cell");
+        let repository_root = environment._temp.path().join("repository");
+        let repository = store(&repository_root);
+        let hash = publish_source_object(
+            &repository,
+            &environment._temp.path().join("staged"),
+            "shared-source",
+            b"shared repository object\n",
+        );
+        let graph = Arc::new(
+            plan_graph(
+                &BTreeMap::from([("source".to_string(), source("source", hash))]),
+                &["source".to_string()],
+            )
+            .unwrap(),
+        );
+        let tracked = TrackedCopyContentSource::new(
+            LocalCopyContentSource::with_runtime(
+                LocalRepository::new(ReadOnlyStore::open(&repository_root).unwrap()),
+                RuntimeProvider::host(),
+            ),
+            Duration::from_millis(50),
+        );
+        let (realizer, executor) = dynamic(
+            &environment,
+            graph,
+            Vec::new(),
+            vec![NamedContentSource::new(
+                "tracked",
+                Arc::new(tracked.clone()),
+            )],
+        );
+
+        let (left, middle, right) = tokio::join!(
+            realizer.ensure_object(hash),
+            realizer.ensure_object(hash),
+            realizer.ensure_object(hash),
+        );
+        executor.shutdown().await.unwrap();
+
+        assert_eq!(
+            (left.unwrap(), middle.unwrap(), right.unwrap()),
+            (true, true, true)
+        );
+        assert_eq!(tracked.calls(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancellation_interrupts_a_repository_import_waiting_for_local_io() {
+        let environment = environment("repository-cancel-wait");
+        let graph = Arc::new(
+            plan_graph(
+                &BTreeMap::from([("source".to_string(), source("source", object_hash('a')))]),
+                &["source".to_string()],
+            )
+            .unwrap(),
+        );
+        let cancellation = CancellationToken::new();
+        let (realizer, executor) = dynamic_with_local_jobs(
+            &environment,
+            graph,
+            Vec::new(),
+            Vec::new(),
+            cancellation.clone(),
+            1,
+        );
+        let permit = realizer.source_engine.acquire_local_permit().await.unwrap();
+        let task = {
+            let realizer = realizer.clone();
+            tokio::spawn(async move { realizer.ensure_object(object_hash('a')).await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        cancellation.cancel();
+        realizer.source_engine.cancel();
+
+        let error = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("cancelled local-I/O wait did not wake")
+            .unwrap()
+            .unwrap_err();
+        drop(permit);
+        executor.shutdown().await.unwrap();
+        assert!(error.is_cancelled());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancellation_after_copy_start_leaves_only_atomic_content() {
+        let environment = environment("repository-cancel-active");
+        let repository_root = environment._temp.path().join("repository");
+        let repository = store(&repository_root);
+        let hash = publish_source_object(
+            &repository,
+            &environment._temp.path().join("staged"),
+            "active-source",
+            b"active repository object\n",
+        );
+        let graph = Arc::new(
+            plan_graph(
+                &BTreeMap::from([("source".to_string(), source("source", hash))]),
+                &["source".to_string()],
+            )
+            .unwrap(),
+        );
+        let tracked = TrackedCopyContentSource::new(
+            LocalCopyContentSource::with_runtime(
+                LocalRepository::new(ReadOnlyStore::open(&repository_root).unwrap()),
+                RuntimeProvider::host(),
+            ),
+            Duration::from_millis(100),
+        );
+        let cancellation = CancellationToken::new();
+        let (realizer, executor) = dynamic_with_local_jobs(
+            &environment,
+            graph,
+            Vec::new(),
+            vec![NamedContentSource::new(
+                "tracked",
+                Arc::new(tracked.clone()),
+            )],
+            cancellation.clone(),
+            1,
+        );
+        let task = {
+            let realizer = realizer.clone();
+            tokio::spawn(async move { realizer.ensure_object(hash).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while tracked.calls() == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("repository import did not start");
+        cancellation.cancel();
+        realizer.source_engine.cancel();
+
+        let error = task.await.unwrap().unwrap_err();
+        executor.shutdown().await.unwrap();
+        assert!(error.is_cancelled());
+        assert!(environment.store.object_is_complete(hash).unwrap());
+        assert!(
+            fs::read_dir(environment.store.root())
+                .unwrap()
+                .all(|entry| {
+                    !entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".bobr-repository-")
+                })
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

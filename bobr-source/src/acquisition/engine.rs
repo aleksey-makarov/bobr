@@ -6,7 +6,8 @@
 //! by a third, separate one: they contend for a disk rather than for sockets.
 //! The mirror walk, retry classification and backoff are the same ones the
 //! synchronous source path uses; only the transport around them is
-//! asynchronous.
+//! asynchronous. The local permit is also shared with repository content
+//! imports and builder-input preparation performed by the Realizer.
 
 use super::{ResolvedLimits, oci};
 use crate::http::{
@@ -62,10 +63,9 @@ pub(crate) struct Engine {
     limits: ResolvedLimits,
     global: Arc<Semaphore>,
     hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
-    /// Local materialization is bounded separately from the network: it
-    /// competes for a disk head, not for sockets, and letting a big image
-    /// download hold up a local copy (or the other way round) would be an
-    /// accident of sharing one number.
+    /// Local filesystem work is bounded separately from the network: it
+    /// competes for a disk head, not for sockets. The Realizer acquires this
+    /// same semaphore for repository imports and builder-input preparation.
     local: Arc<Semaphore>,
     cancellation: CancellationToken,
     cancel_rx: watch::Receiver<bool>,
@@ -152,9 +152,12 @@ impl Engine {
         Ok((host_permit, global_permit))
     }
 
-    /// One permit for reading, hashing and copying a local source. Waiting is
-    /// interruptible, and counts as no attempt: nothing has been read yet.
-    async fn acquire_local_permit(&self) -> Result<OwnedSemaphorePermit, HttpOriginError> {
+    /// One permit for reading, hashing, copying, or materializing local
+    /// content. Waiting is interruptible and counts as no attempt: no local
+    /// operation has started yet.
+    pub(crate) async fn acquire_local_permit(
+        &self,
+    ) -> Result<OwnedSemaphorePermit, HttpOriginError> {
         tokio::select! {
             _ = self.until_cancelled() => Err(cancelled_error()),
             permit = self.local.clone().acquire_owned() => {
@@ -233,9 +236,14 @@ async fn process_source_inner(
     }
 
     if engine.secondary.has_content_sources() {
+        let permit = engine
+            .acquire_local_permit()
+            .await
+            .map_err(|error| error.to_string())?;
         let secondary = {
             let engine = engine.clone();
             run_blocking(move || {
+                let _permit = permit;
                 engine
                     .secondary
                     .ensure_objects(&[declared])
@@ -243,6 +251,9 @@ async fn process_source_inner(
             })
             .await??
         };
+        if engine.is_cancelled() {
+            return Err("cancelled".to_string());
+        }
         let secondary = secondary
             .into_iter()
             .next()
@@ -361,15 +372,23 @@ async fn process_source_inner(
     // Import through the same store code the build uses: canonical timestamps,
     // hashing, refs. A mismatch still imports -- that is the placeholder
     // cycle's contract -- and is reported at the end of the run in one batch.
+    let permit = engine
+        .acquire_local_permit()
+        .await
+        .map_err(|error| error.to_string())?;
     let outcome = {
         let engine = engine.clone();
         let name = entry.name.clone();
         run_blocking(move || {
+            let _permit = permit;
             import_source_object(&engine.store, declared, &staged, &name, engine.run.run_id())
                 .map_err(|error| error.to_string())
         })
         .await??
     };
+    if engine.is_cancelled() {
+        return Err("cancelled".to_string());
+    }
     match outcome {
         SourceImportOutcome::Matched(object_hash) => {
             let _ = engine.run.remove_scratch(workspace.temp_dir());

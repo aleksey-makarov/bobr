@@ -96,8 +96,10 @@ All `limits` fields are optional; every numeric limit, including each
   when `per_host` has no entry for it
 - `per_host` — per-host overrides of that limit
 - `max_connections` — total maximum simultaneous HTTP/OCI downloads
-- `max_local_jobs` — maximum simultaneous local `Path` source materializations;
-  it limits disk work independently of network connections
+- `max_local_jobs` — one shared bound for local `Path` source materialization,
+  Source import and hashing, local-repository content transfer and
+  verification, and builder input path preparation; it limits disk work
+  independently of network connections and builder slots
 
 ### Local repositories
 
