@@ -121,29 +121,36 @@ build works from nothing — a cached store can hide a recipe that no longer
 builds, because the object it would produce is already there.
 
 ```sh
-tools/bobr-rebuild-world.sh [--local]
+tools/bobr-install.sh [--src | --potato]
+tools/bobr-rebuild-world.sh
 ```
 
-The one flag says where the binaries come from. With `--local` they are built
-here from source: the engine is pulled if this workspace has a checkout and
-cloned from `potato:/mnt/git/bobr.git` if it does not, then installed through
-`tools/build-dev.sh --quick`. Without it they come from the latest published
-release, which is what the Hetzner builder does — the tag is resolved to its
-commit, the archive checked against `SHA256SUMS`, and the download skipped
-entirely when that release is already installed. Everything else is the same
-either way, so a store built on one machine is comparable with a store built on
-the other.
+Installation is a separate, short-lived operation. With no option,
+`bobr-install.sh` downloads the latest published release and verifies it against
+`SHA256SUMS`. `--src` builds the public GitHub repository's HEAD locally;
+`--potato` does the same with `potato:/mnt/git/bobr.git`. Both source modes use
+`tools/build-dev.sh --quick` and share the script-owned
+`<workspace>/bobr-bin/src` checkout and its Cargo target directory. They never
+modify the developer's `<workspace>/bobr` checkout. Every mode installs the
+three host tools in `<workspace>/bobr-bin/bin` and records their exact Git
+commit in `<workspace>/bobr-bin/commit.txt`.
+
+`bobr-rebuild-world.sh` does not install or update those tools. It requires the
+complete installed set and its `commit.txt`, adds its `bin/` to `PATH`, and
+records that commit in the new store. Thus installation failure cannot become
+part of a multi-hour rebuild, and stores made from releases and source builds
+retain comparable provenance.
 
 In order, the script:
 
-1. pulls the recipes, and obtains the binaries as above;
+1. pulls the recipes and verifies the already installed host tools;
 2. creates `<workspace>/bobr-store.<YYMMDDhhmmss>` and copies
    `bobr.ncl.example` into it as the build profile, with its store pointed at
    the new one — a rebuild goes through the same settings a reader of the
    recipes would get, not through a private file that could drift from them;
-3. **seeds source objects** from the previous store by hardlink, so the same
-   tarballs are not downloaded again — sources are content-addressed, so a
-   hardlink is as good as a fetch;
+3. adds the last successful store as an untrusted hardlink local repository;
+   known Source content is acquired from it lazily, but its build and reuse
+   mappings are unavailable, so this remains a cold build;
 4. realizes the complete graph through `bin/bobr-build.sh`; Source acquisition
    and builder execution share one scheduler and one request;
 5. repoints the `bobr-store` symlink at the new store — **only if the build
@@ -154,9 +161,8 @@ stale one, which is what should happen to a checkout that says one thing and
 contains another.
 
 Beside the store it records what produced it: `hashes.txt` with both commits,
-`request.json` with the lowered unified request, `bobr-rebuild-world.log` with the
-per-phase timings, and `host-stats.log` with load and memory samples taken
-around each phase.
+`bobr-rebuild-world.log` with the per-phase timings, and `host-stats.log` with
+load and memory samples taken around the build.
 
 Expect hours. Recorded runs took 76 and 106 minutes with the sources already
 present; from an empty workspace the downloads add to that. Old stores are left
