@@ -144,10 +144,12 @@ configured secondary stores, acquires missing Source content from local paths,
 HTTP mirrors, or OCI registries, and runs builders only where cache resolution
 misses.
 
-That builds the profile's `target`, which the example sets to `test_all` — every
-shipped artifact plus the checks over them. Expect it to run for hours: nothing
-arrives pre-built, so the first build starts at the toolchain and works its way
-up. To try something smaller first, list what there is and name it:
+That builds the profile's `target`, which the example sets to `world` — every
+shipped OS image and HostBundle, without the separate acceptance tests. Expect
+it to run for hours: nothing arrives pre-built, so the first build starts at the
+toolchain and works its way up. Run `--target test_all` when you want the rootfs,
+HostBundle, and final-toolchain checks. To try something smaller first, list
+what there is and name it:
 
 ```sh
 bobr-recipes/bin/bobr-list-pkgs.sh          # attribute, recipe name, tag

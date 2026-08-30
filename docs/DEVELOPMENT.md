@@ -115,10 +115,12 @@ at all.
 
 ## Rebuilding the world
 
-`tools/bobr-rebuild-world.sh`, in the recipes repository, rebuilds everything
-from scratch, into a store that has never been written to. Use it to prove a
-build works from nothing — a cached store can hide a recipe that no longer
-builds, because the object it would produce is already there.
+`tools/bobr-rebuild-world.sh`, in the recipes repository, rebuilds the complete
+artifact-only `world` target from scratch, into a store that has never been
+written to. Explicit acceptance tests remain in the separate `test_all` target.
+Use a world rebuild to prove the shipped artifacts build from nothing — a cached
+store can hide a recipe that no longer builds, because the object it would
+produce is already there.
 
 ```sh
 tools/bobr-install.sh [--src | --potato]
@@ -151,8 +153,8 @@ In order, the script:
 3. adds the last successful store as an untrusted hardlink local repository;
    known Source content is acquired from it lazily, but its build and reuse
    mappings are unavailable, so this remains a cold build;
-4. realizes the complete graph through `bin/bobr-build.sh`; Source acquisition
-   and builder execution share one scheduler and one request;
+4. realizes `world` through `bin/bobr-build.sh`; Source acquisition and builder
+   execution share one scheduler and one request;
 5. repoints the `bobr-store` symlink at the new store — **only if the build
    succeeded**, so a failed rebuild leaves you with the last good one.
 
