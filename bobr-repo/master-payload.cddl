@@ -1,0 +1,40 @@
+; Bobr remote repository master payload, repository format version 1.
+;
+; This is the embedded payload of the tagged COSE_Sign1 object described in
+; MASTER.md. It is encoded using deterministic CBOR. Semantic constraints that
+; cannot be expressed in CDDL are specified in MASTER.md.
+
+bobr-repository-master-payload = {
+    "repository_format": 1,
+    "repository_id": repository-id,
+    "revision": revision,
+    "data_base_url": data-base-url,
+    "active_slot": slot-id,
+    "slots": [+ slot],
+    "retention": [* retained-root],
+}
+
+repository-id = bstr .size 16
+revision = uint64
+data-base-url = tstr
+
+slot = {
+    "id": slot-id,
+    "generation": generation,
+    "mappings": sha256,
+    "content": sha256,
+}
+
+retained-root = {
+    "mappings": sha256,
+    "content": sha256,
+    "retain_until": unix-time,
+}
+
+slot-id = uint32
+generation = uint64
+unix-time = uint64
+sha256 = bstr .size 32
+
+uint32 = 0..4294967295
+uint64 = 0..18446744073709551615
