@@ -16,7 +16,8 @@ slot = {
     "serial": uint64,
     "build": sha256,
     "reuse": sha256,
-    "content": sha256,
+    "object_list": sha256,
+    "file_list": sha256,
     "retain_until": nil / unix-time,
 }
 

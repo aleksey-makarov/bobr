@@ -19,8 +19,8 @@ In particular, `/master`:
 - names the HTTPS base URL of immutable repository data;
 - describes the current and temporarily retained slot states without fixing
   the number of current slots;
-- authenticates one build index, one reuse index, and one content list for
-  every slot state by their SHA-256 digests;
+- authenticates one build index, one reuse index, one object list, and one
+  filesystem-file list for every slot state by their SHA-256 digests;
 - carries the retention deadline for each retired slot state;
 - identifies which already-pinned signing key produced the signature.
 
@@ -112,13 +112,90 @@ it:
 ```text
 b/<lowercase BuildIndexHash hex>
 r/<lowercase ReuseIndexHash hex>
-l/<lowercase ContentListHash hex>
+lo/<lowercase ObjectListHash hex>
+lf/<lowercase FsFileListHash hex>
 o/<lowercase ObjectHash hex>
 f/<lowercase FsFileHash hex>
 ```
 
 Digests are represented as raw 32-byte strings inside CBOR and as lowercase
 hexadecimal strings only in URLs.
+
+### Immutable metadata formats
+
+The four immutable metadata formats have no header, magic number, embedded
+version, record count, padding, or delimiter. Their interpretation follows
+from the field that references them in a verified master and from
+`repository_format`. Any incompatible change to one of these formats requires
+a new repository format version.
+
+All hashes and keys in these files use their raw 32-byte representation. Hex
+encoding is used only for repository object names. Ordering is unsigned
+lexicographic ordering of those 32 bytes.
+
+#### Build index
+
+A build index under `b/<BuildIndexHash>` is a sequence of fixed-size 64-byte
+records:
+
+```text
+BuildKey[32] ObjectHash[32]
+BuildKey[32] ObjectHash[32]
+...
+```
+
+Records are strictly ordered by `BuildKey`; duplicate keys are forbidden. The
+file size must be divisible by 64. A zero-length file is the canonical empty
+build index. `BuildIndexHash` is the SHA-256 digest of the exact file bytes.
+
+#### Reuse index
+
+A reuse index under `r/<ReuseIndexHash>` has the same record representation:
+
+```text
+ReuseKey[32] ObjectHash[32]
+ReuseKey[32] ObjectHash[32]
+...
+```
+
+Records are strictly ordered by `ReuseKey`; duplicate keys are forbidden. The
+file size must be divisible by 64. A zero-length file is the canonical empty
+reuse index. `ReuseIndexHash` is the SHA-256 digest of the exact file bytes.
+
+#### Object list
+
+An object list under `lo/<ObjectListHash>` is a sequence of raw object hashes:
+
+```text
+ObjectHash[32]
+ObjectHash[32]
+...
+```
+
+Hashes are strictly ordered and therefore unique. The file size must be
+divisible by 32. A zero-length file is the canonical empty object list.
+`ObjectListHash` is the SHA-256 digest of the exact file bytes.
+
+#### Filesystem-file list
+
+A filesystem-file list under `lf/<FsFileListHash>` is a sequence of raw
+filesystem-file hashes:
+
+```text
+FsFileHash[32]
+FsFileHash[32]
+...
+```
+
+Hashes are strictly ordered and therefore unique. The file size must be
+divisible by 32. A zero-length file is the canonical empty filesystem-file
+list. `FsFileListHash` is the SHA-256 digest of the exact file bytes.
+
+For normal content lookup, a client uses the union of object lists and the
+union of filesystem-file lists referenced by current slots. If an
+`ObjectHash` is absent from the former, or an `FsFileHash` is absent from the
+latter, the repository does not advertise that content and the client need not
+issue a request under `o/` or `f/`.
 
 ### Slots
 
@@ -129,7 +206,8 @@ entry contains:
 - `serial`: an unsigned 64-bit sequence number, unique within the array;
 - `build`: SHA-256 of the immutable build index for this slot;
 - `reuse`: SHA-256 of the immutable reuse index for this slot;
-- `content`: SHA-256 of the immutable content list for this slot;
+- `object_list`: SHA-256 of the immutable object list for this slot;
+- `file_list`: SHA-256 of the immutable filesystem-file list for this slot;
 - `retain_until`: `null` for a current slot, or an absolute Unix timestamp in
   seconds for a retired slot.
 
@@ -139,10 +217,10 @@ other current entries are sealed. An ordinary client uses build and reuse
 indexes from all current entries and ignores retired entries for lookup.
 
 `serial` identifies one immutable slot state, not a reusable physical slot.
-Whenever publication changes the active slot's indexes or content list, the
-publisher marks the previous active entry as retired and appends its replacement
-with `serial = max(slots.serial) + 1` and `retain_until = null`. Thus changing a
-slot never changes the meaning of an existing serial.
+Whenever publication changes the active slot's indexes or lists, the publisher
+marks the previous active entry as retired and appends its replacement with
+`serial = max(slots.serial) + 1` and `retain_until = null`. Thus changing a slot
+never changes the meaning of an existing serial.
 
 At rotation, the publisher retires the current entry with the smallest serial
 and appends a fresh active entry with the next serial. The formerly active
@@ -151,10 +229,11 @@ therefore remains unchanged. Repository initialization chooses that number;
 later publisher runs can recover it by counting entries whose `retain_until` is
 `null`.
 
-An initialized repository uses canonical empty build and reuse indexes and a
-canonical empty content list for slots that have not yet been populated.
-Consequently every current entry always has all three metadata digests;
-optional or partially initialized descriptors are not needed.
+An initialized repository uses canonical empty build and reuse indexes,
+canonical empty object lists, and canonical empty filesystem-file lists for
+slots that have not yet been populated. Consequently every current entry
+always has all four metadata digests; optional or partially initialized
+descriptors are not needed.
 
 ### Retired slot states and retention
 
@@ -164,12 +243,13 @@ publisher may omit that entry from a newly published master. Reaching the
 timestamp does not itself make the entry or its content dead: while the entry
 is still present in the authoritative master, it remains a live root.
 
-Garbage collection treats the build index, reuse index, content list, and every
-payload named by the content list of every entry in `slots` as live, whether
-the entry is current or retired. After a retired entry's deadline, the sole
-publisher may publish a new master without that entry. Only after that
-publication may garbage collection remove immutable metadata and content no
-longer reachable from any remaining entry.
+Garbage collection treats the build index, reuse index, both lists, every
+object named by the object list, and every filesystem file named by the
+filesystem-file list of every entry in `slots` as live, whether the entry is
+current or retired. After a retired entry's deadline, the sole publisher may
+publish a new master without that entry. Only after that publication may
+garbage collection remove immutable metadata and content no longer reachable
+from any remaining entry.
 
 This grace period permits a client that already fetched an older master to
 finish its operation. Ordinary readers parse retired entries but do not fetch
@@ -202,9 +282,9 @@ A client processing `/master` performs these operations in order:
 8. Treat the verified response from the configured master URL as the
    authoritative repository state. A byte-identical cached response may be
    reused after successful HTTP revalidation.
-9. Fetch missing current build indexes and content lists by their digests.
-   Fetch reuse indexes lazily when exact lookup misses and reuse lookup becomes
-   possible.
+9. Fetch missing current build indexes, object lists, and filesystem-file lists
+   by their digests. Fetch reuse indexes lazily when exact lookup misses and
+   reuse lookup becomes possible.
 10. Verify every fetched immutable metadata file before using it. A publisher
     or GC additionally fetches retired indexes and lists when it needs to
     compute the complete live set.
@@ -220,8 +300,8 @@ For one publication the sole publisher:
 2. Computes the replacement active-slot state, any rotation, and the updated
    retention deadlines.
 3. Uploads missing immutable content under `o/` and `f/`.
-4. Uploads the new immutable build index, reuse index, and content list under
-   `b/`, `r/`, and `l/`.
+4. Uploads the new immutable build index, reuse index, object list, and
+   filesystem-file list under `b/`, `r/`, `lo/`, and `lf/`.
 5. Constructs the next payload, using the next serial for every newly created
    slot state and retaining all unexpired retired states.
 6. Encodes the payload and COSE object deterministically and signs it with the
