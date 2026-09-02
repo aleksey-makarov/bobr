@@ -15,14 +15,13 @@ from that state.
 
 In particular, `/master`:
 
-- identifies the repository and its wire-format version;
-- provides a monotonically increasing publication revision;
+- declares its wire-format version;
 - names the HTTPS base URL of immutable repository data;
-- describes the configured cyclic slots without fixing their number;
-- identifies the active slot and the generation of every slot;
-- authenticates one mapping index and one content list for every slot by their
-  SHA-256 digests;
-- carries temporary retired metadata roots needed for safe garbage collection;
+- describes the current and temporarily retained slot states without fixing
+  the number of current slots;
+- authenticates one build index, one reuse index, and one content list for
+  every slot state by their SHA-256 digests;
+- carries the retention deadline for each retired slot state;
 - identifies which already-pinned signing key produced the signature.
 
 The master is the publication commit point. A publisher uploads all new
@@ -92,12 +91,8 @@ The payload has the following logical structure:
 
 ```text
 repository_format = 1
-repository_id
-revision
 data_base_url
-active_slot
 slots = [slot, ...]
-retention = [retired root, ...]
 ```
 
 Unknown fields are rejected in repository format version 1. An incompatible
@@ -109,40 +104,14 @@ schema.
 `repository_format` describes the remote repository wire format, not the Bobr
 implementation version. Its value is exactly `1` for this document.
 
-### Repository identity
-
-`repository_id` is a random 16-byte identifier generated once when the
-repository is initialized. It is never reused for another logical repository.
-
-A trusted client configuration binds the master URL and pinned public keys to
-an expected repository identity. A valid signature from a key used for another
-repository must not silently change that identity.
-
-### Revision
-
-`revision` is an unsigned 64-bit publication counter. The first published
-master uses revision 1. A publisher increments it by exactly one for every
-successful replacement of `/master`.
-
-A client persists the greatest accepted revision for each repository identity:
-
-- a smaller revision is rejected as a rollback;
-- the same revision with different master bytes is rejected as an inconsistent
-  publication;
-- a larger valid revision is accepted, even if the client did not observe all
-  intermediate revisions.
-
-Revision tracking cannot prove that an origin is serving the newest existing
-master to a new client. Version 1 does not define expiration metadata or a
-trusted-time-based freeze-attack policy.
-
 ### Data base URL
 
 `data_base_url` is the root for immutable data. Repository keys are relative to
 it:
 
 ```text
-m/<lowercase MappingIndexHash hex>
+b/<lowercase BuildIndexHash hex>
+r/<lowercase ReuseIndexHash hex>
 l/<lowercase ContentListHash hex>
 o/<lowercase ObjectHash hex>
 f/<lowercase FsFileHash hex>
@@ -153,67 +122,67 @@ hexadecimal strings only in URLs.
 
 ### Slots
 
-`slots` is a non-empty array. Its length is the configured slot count; the
-protocol does not prescribe a particular count. Array order defines cyclic
-rotation order.
+`slots` is a non-empty array of current and temporarily retained slot states.
+The protocol does not prescribe how many current slots a repository has. Every
+entry contains:
 
-Every slot contains:
+- `serial`: an unsigned 64-bit sequence number, unique within the array;
+- `build`: SHA-256 of the immutable build index for this slot;
+- `reuse`: SHA-256 of the immutable reuse index for this slot;
+- `content`: SHA-256 of the immutable content list for this slot;
+- `retain_until`: `null` for a current slot, or an absolute Unix timestamp in
+  seconds for a retired slot.
 
-- `id`: an unsigned 32-bit identifier, unique within the array;
-- `generation`: an unsigned 64-bit counter;
-- `mappings`: SHA-256 of the immutable mapping index for this slot;
-- `content`: SHA-256 of the immutable content list for this slot.
+The array is sorted by strictly increasing `serial`. At least one entry must be
+current. The active slot is the current entry with the greatest `serial`; the
+other current entries are sealed. An ordinary client uses build and reuse
+indexes from all current entries and ignores retired entries for lookup.
 
-`active_slot` must equal the `id` of exactly one slot in the array. All other
-slots are sealed. An ordinary client uses the union of all slots and does not
-otherwise need to distinguish active from sealed slots.
+`serial` identifies one immutable slot state, not a reusable physical slot.
+Whenever publication changes the active slot's indexes or content list, the
+publisher marks the previous active entry as retired and appends its replacement
+with `serial = max(slots.serial) + 1` and `retain_until = null`. Thus changing a
+slot never changes the meaning of an existing serial.
 
-A slot generation is incremented when that slot is cleared and rebuilt during
-rotation. Incremental additions to an already-active slot update its mapping
-index, content list, and master revision without changing the generation.
+At rotation, the publisher retires the current entry with the smallest serial
+and appends a fresh active entry with the next serial. The formerly active
+entry remains current and thereby becomes sealed. The number of current entries
+therefore remains unchanged. Repository initialization chooses that number;
+later publisher runs can recover it by counting entries whose `retain_until` is
+`null`.
 
-Changing the number or order of slots is an explicit repository
-reconfiguration. It is not an incidental option of an ordinary publication.
-Removing a slot can make its exclusively referenced content eligible for
-garbage collection and therefore observes the same retention rules as a normal
-rotation.
+An initialized repository uses canonical empty build and reuse indexes and a
+canonical empty content list for slots that have not yet been populated.
+Consequently every current entry always has all three metadata digests;
+optional or partially initialized descriptors are not needed.
 
-An initialized repository uses the canonical empty mapping index and content
-list for slots that have not yet been populated. Consequently every slot always
-has both metadata digests; optional or partially initialized descriptors are
-not needed.
+### Retired slot states and retention
 
-### Retention roots
+Retirement changes a slot entry's `retain_until` from `null` to the end of the
+garbage-collection grace period. The timestamp is the earliest time at which a
+publisher may omit that entry from a newly published master. Reaching the
+timestamp does not itself make the entry or its content dead: while the entry
+is still present in the authoritative master, it remains a live root.
 
-`retention` is an array of metadata roots whose removal is delayed by the
-garbage collection grace period. Every entry contains:
+Garbage collection treats the build index, reuse index, content list, and every
+payload named by the content list of every entry in `slots` as live, whether
+the entry is current or retired. After a retired entry's deadline, the sole
+publisher may publish a new master without that entry. Only after that
+publication may garbage collection remove immutable metadata and content no
+longer reachable from any remaining entry.
 
-- `mappings`: the SHA-256 digest of a superseded mapping index;
-- `content`: the SHA-256 digest of the matching superseded content list;
-- `retain_until`: an absolute Unix timestamp in seconds.
+This grace period permits a client that already fetched an older master to
+finish its operation. Ordinary readers parse retired entries but do not fetch
+their indexes or lists for normal lookup.
 
-When a publication removes a mapping-index/content-list pair from the current
-slot descriptors, the publisher adds that pair to `retention`. Until
-`retain_until`, garbage collection treats the old mapping index, old content
-list, and every payload named by that content list as live. This permits a
-client that already fetched an older master to finish its operation.
+Retention state is part of the signed master rather than separate mutable
+publisher state. The bucket therefore contains all durable information needed
+to resume publication and safe garbage collection after loss of local state.
 
-Retention roots are part of the signed master payload rather than separate
-objects. The master therefore contains all durable state needed to recover safe
-publisher and garbage-collection operation after loss of local publisher
-state. Ordinary readers parse the entries but do not fetch retained indexes or
-lists for normal lookup.
-
-The array is sorted lexicographically by the raw `mappings` digest and then by
-the raw `content` digest. A pair occurs at most once; when the same pair would
-be retained more than once, the publisher keeps the greatest `retain_until`.
-Expired entries are removed only by publishing a new master that no longer
-contains them.
-
-An empty array means that no superseded roots are currently retained. Its size
-is proportional to the number of publications within one grace period, not to
-the number of payload objects. Implementations impose a master size limit and
-must fail publication rather than silently discard unexpired roots.
+The number of retired entries is proportional to the number of publications
+within one grace period, not to the number of payload objects. Implementations
+impose a master size limit and must fail publication rather than silently
+discard unexpired entries.
 
 ## Verification procedure
 
@@ -230,10 +199,14 @@ A client processing `/master` performs these operations in order:
    decode and re-encode the payload for signature verification.
 7. Decode the payload and validate it against `master-payload.cddl` and the
    semantic constraints in this document.
-8. Check the configured repository identity and the stored revision.
-9. Fetch missing current mapping indexes and content lists by their digests.
+8. Treat the verified response from the configured master URL as the
+   authoritative repository state. A byte-identical cached response may be
+   reused after successful HTTP revalidation.
+9. Fetch missing current build indexes and content lists by their digests.
+   Fetch reuse indexes lazily when exact lookup misses and reuse lookup becomes
+   possible.
 10. Verify every fetched immutable metadata file before using it. A publisher
-    or GC additionally fetches retained indexes and lists when it needs to
+    or GC additionally fetches retired indexes and lists when it needs to
     compute the complete live set.
 
 No mapping from an unverified master may be used, even when the eventual
@@ -244,11 +217,13 @@ content would be checked by `ObjectHash`.
 For one publication the sole publisher:
 
 1. Reads and verifies the current master.
-2. Computes the new slot metadata and the updated array of retention roots.
+2. Computes the replacement active-slot state, any rotation, and the updated
+   retention deadlines.
 3. Uploads missing immutable content under `o/` and `f/`.
-4. Uploads the new immutable mapping index and content list under `m/` and
-   `l/`.
-5. Constructs the next payload with revision `previous + 1`.
+4. Uploads the new immutable build index, reuse index, and content list under
+   `b/`, `r/`, and `l/`.
+5. Constructs the next payload, using the next serial for every newly created
+   slot state and retaining all unexpired retired states.
 6. Encodes the payload and COSE object deterministically and signs it with the
    configured Ed25519 key.
 7. Replaces `/master` last using the object store's atomic single-object
@@ -256,8 +231,8 @@ For one publication the sole publisher:
 
 If the publisher fails before the last step, it may leave unreachable immutable
 objects but cannot expose a partially committed repository state. If it fails
-after the replacement, the signed master contains both current and retained
-roots required to resume operation.
+after the replacement, the signed master contains all current and retired roots
+required to resume operation.
 
 ## Trust boundaries
 
@@ -265,10 +240,17 @@ The signature authenticates the master and, transitively, the digests of its
 immutable metadata. It does not make the HTTPS origin trusted for correctness:
 the origin may still withhold data or serve an older master.
 
-Mapping indexes from the repository may be used as trusted `BuildKey` and
-`ReuseKey` answers only when client configuration grants that capability to the
-repository. Content is independently verified by its logical `ObjectHash` or
-`FsFileHash` after decoding, regardless of mapping trust.
+Repository format version 1 deliberately has no monotonic revision or trusted
+time mechanism. The response obtained from the configured master URL is
+authoritative. Comparing its bytes or digest with a cached response detects a
+change but does not distinguish a legitimate older state from a rollback. The
+signature alone therefore does not prevent replay or freeze attacks by the
+master origin.
+
+Build and reuse indexes from the repository may be used as trusted `BuildKey`
+and `ReuseKey` answers only when client configuration grants that capability to
+the repository. Content is independently verified by its logical `ObjectHash`
+or `FsFileHash` after decoding, regardless of mapping trust.
 
 Private signing keys and S3 credentials are not repository objects. They remain
 outside the public bucket and outside `/master`.
