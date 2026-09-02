@@ -121,6 +121,14 @@ f/<lowercase FsFileHash hex>
 Digests are represented as raw 32-byte strings inside CBOR and as lowercase
 hexadecimal strings only in URLs.
 
+Objects under `o/<ObjectHash>` use the streaming deterministic-CBOR envelope
+specified in [`OBJECT.md`](OBJECT.md) and [`object.cddl`](object.cddl). The key
+is the logical filesystem object hash after decoding, not a digest of the CBOR
+response bytes. Filesystem files under `f/<FsFileHash>` use the corresponding
+streaming envelope specified in [`FS_FILE.md`](FS_FILE.md) and
+[`fs-file.cddl`](fs-file.cddl); their identity additionally includes logical
+uid, gid, and full mode.
+
 ### Immutable metadata formats
 
 The four immutable metadata formats have no header, magic number, embedded

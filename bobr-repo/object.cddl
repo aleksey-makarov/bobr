@@ -1,0 +1,28 @@
+; Bobr remote repository object, repository format version 1.
+;
+; The complete CBOR value stored under o/<ObjectHash>. It uses deterministic
+; CBOR and a definite-length payload byte string. Semantic constraints that
+; cannot be expressed in CDDL are specified in OBJECT.md.
+
+bobr-repository-object = [
+    metadata: file-metadata / directory-metadata,
+    payload: bstr,
+]
+
+file-metadata = {
+    "kind": "file",
+    "executable": bool,
+    "compression": compression,
+    "decoded_size": uint64,
+}
+
+directory-metadata = {
+    "kind": "directory",
+    "archive": "tar",
+    "compression": compression,
+    "decoded_size": uint64,
+}
+
+compression = "identity" / "zstd"
+
+uint64 = 0..18446744073709551615
