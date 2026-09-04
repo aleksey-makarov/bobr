@@ -124,10 +124,11 @@ hexadecimal strings only in URLs.
 Objects under `o/<ObjectHash>` use the streaming deterministic-CBOR envelope
 specified in [`OBJECT.md`](OBJECT.md) and [`object.cddl`](object.cddl). The key
 is the logical filesystem object hash after decoding, not a digest of the CBOR
-response bytes. Filesystem files under `f/<FsFileHash>` use the corresponding
-streaming envelope specified in [`FS_FILE.md`](FS_FILE.md) and
-[`fs-file.cddl`](fs-file.cddl); their identity additionally includes logical
-uid, gid, and full mode.
+response bytes. Directory objects inside that envelope use the restricted
+transport profile specified in [`TAR.md`](TAR.md). Filesystem files under
+`f/<FsFileHash>` use the corresponding streaming envelope specified in
+[`FS_FILE.md`](FS_FILE.md) and [`fs-file.cddl`](fs-file.cddl); their identity
+additionally includes logical uid, gid, and full mode.
 
 ### Immutable metadata formats
 
@@ -136,6 +137,25 @@ version, record count, padding, or delimiter. Their interpretation follows
 from the field that references them in a verified master and from
 `repository_format`. Any incompatible change to one of these formats requires
 a new repository format version.
+
+Every response under `b/`, `r/`, `lo/`, or `lf/` uses:
+
+```text
+Content-Type: application/octet-stream
+Cache-Control: public, max-age=31536000, immutable
+```
+
+The repository may use a longer freshness lifetime. `Content-Encoding` is
+absent: the response body is the exact byte sequence whose SHA-256 digest is
+named by the URL and authenticated by the master. HTTP transfer framing does
+not participate in that digest.
+
+Keys in all four namespaces are write-once. Once a byte sequence exists under
+a digest-derived key, a publisher reuses it and must never replace it. New
+metadata bytes are uploaded under their own digest-derived key and become live
+only when a subsequently published master references them. This makes the URLs
+safe for immutable shared caching and prevents readers of an older master from
+observing changed metadata.
 
 All hashes and keys in these files use their raw 32-byte representation. Hex
 encoding is used only for repository object names. Ordering is unsigned
@@ -152,7 +172,12 @@ BuildKey[32] ObjectHash[32]
 ...
 ```
 
-Records are strictly ordered by `BuildKey`; duplicate keys are forbidden. The
+Records are ordered by nondecreasing `BuildKey`, so all records for one key are
+contiguous. Repeated keys are permitted and associate the key with multiple
+`ObjectHash` candidates. Within one key's group, record order is candidate
+priority order. An identical `(BuildKey, ObjectHash)` pair must occur at most
+once. When a publisher adds a previously unknown candidate to an active slot,
+it places that candidate before the older candidates for the same key. The
 file size must be divisible by 64. A zero-length file is the canonical empty
 build index. `BuildIndexHash` is the SHA-256 digest of the exact file bytes.
 
@@ -166,9 +191,33 @@ ReuseKey[32] ObjectHash[32]
 ...
 ```
 
-Records are strictly ordered by `ReuseKey`; duplicate keys are forbidden. The
+Records are ordered by nondecreasing `ReuseKey`, so all records for one key are
+contiguous. Repeated keys are permitted and associate the key with multiple
+`ObjectHash` candidates. Within one key's group, record order is candidate
+priority order. An identical `(ReuseKey, ObjectHash)` pair must occur at most
+once. When a publisher adds a previously unknown candidate to an active slot,
+it places that candidate before the older candidates for the same key. The
 file size must be divisible by 64. A zero-length file is the canonical empty
 reuse index. `ReuseIndexHash` is the SHA-256 digest of the exact file bytes.
+
+#### Mapping candidates across slots
+
+One index and multiple current slots may each provide several results for the
+same `BuildKey` or `ReuseKey`. A reader processes current slots in decreasing
+`serial` order, preserves candidate order within each index, and forms one
+ordered list of distinct `ObjectHash` candidates for the requested key:
+
+- the candidate from the greatest applicable `serial` comes first;
+- candidates from the same slot retain their order in that slot's index;
+- repeated occurrences of the same `ObjectHash`, whether in one index or
+  several, are deduplicated without changing that order;
+- different `ObjectHash` values remain separate candidates.
+
+Different results for one build or reuse key are valid repository data. They
+normally reveal that the corresponding builder produced nondeterministic
+output, and implementations report that condition as a diagnostic, but it does
+not invalidate the repository or the lookup. A reader must not silently replace
+the candidate set with only the newest result.
 
 #### Object list
 
@@ -202,8 +251,22 @@ list. `FsFileListHash` is the SHA-256 digest of the exact file bytes.
 For normal content lookup, a client uses the union of object lists and the
 union of filesystem-file lists referenced by current slots. If an
 `ObjectHash` is absent from the former, or an `FsFileHash` is absent from the
-latter, the repository does not advertise that content and the client need not
-issue a request under `o/` or `f/`.
+latter, the repository does not provide that content in the state described by
+this master. The absence is a definitive miss for this repository, and the
+client must not issue a speculative request under `o/` or `f/`.
+
+This rule applies even if the corresponding immutable key happens to exist in
+the backing bucket. Such an unlisted key may be an orphan left by an interrupted
+publication or content awaiting a later garbage-collection pass; it is not part
+of the advertised repository state. Content lists are therefore both
+garbage-collection roots and the authoritative content-availability index seen
+by readers.
+
+If a listed key cannot be fetched or does not decode to its expected identity,
+the repository failed to provide advertised content. That is not a content
+miss. A client may continue with another configured content source, but it
+reports the failure of this repository rather than treating the list entry as
+absent.
 
 ### Slots
 
@@ -243,6 +306,28 @@ slots that have not yet been populated. Consequently every current entry
 always has all four metadata digests; optional or partially initialized
 descriptors are not needed.
 
+### Slot closure
+
+Every slot state, whether current or temporarily retained, is independently
+closed over all content reachable from its mappings. The following invariants
+apply to each entry in `slots`:
+
+1. Every `ObjectHash` named by its build or reuse index is present in its own
+   object list.
+2. Every `ObjectHash` in that object list is available under
+   `o/<ObjectHash>`.
+3. If an object in that object list is an fs-tree manifest, every `FsFileHash`
+   referenced by the manifest is present in the same slot state's filesystem-
+   file list.
+4. Every `FsFileHash` in that filesystem-file list is available under
+   `f/<FsFileHash>`.
+
+The lists may contain content not reachable from the slot's mappings, but they
+must not omit reachable content. A slot must not rely on another current or
+retained slot to complete one of its mapped objects. This allows any sealed
+slot to survive rotation of the others and allows every retained state to
+remain usable throughout its grace period.
+
 ### Retired slot states and retention
 
 Retirement changes a slot entry's `retain_until` from `null` to the end of the
@@ -271,6 +356,55 @@ The number of retired entries is proportional to the number of publications
 within one grace period, not to the number of payload objects. Implementations
 impose a master size limit and must fail publication rather than silently
 discard unexpired entries.
+
+### Garbage collection procedure
+
+Garbage collection is a two-phase operation. Removing an expired retired entry
+from the authoritative master makes its roots eligible for collection; the
+pass that deletes immutable keys happens only afterwards.
+
+The sole publisher performs a collection as follows:
+
+1. Construct and publish a new master that omits retired entries whose
+   `retain_until` deadline has passed. Keep every current entry and every
+   retired entry whose deadline has not passed. Publish and sign this master by
+   the normal publication procedure.
+2. Fetch `/master` again from its authoritative URL, apply normal HTTP
+   revalidation, and verify its COSE signature and payload. Require it to be
+   the state intended for collection. Do not compute the deletion set solely
+   from unpublished local state or from the response used before publication.
+3. Fetch and hash-verify all build indexes, reuse indexes, object lists, and
+   filesystem-file lists referenced by every entry in the verified master. If
+   any referenced metadata is unavailable or invalid, abort without deleting
+   anything.
+4. Compute the live sets exclusively from that verified state:
+
+   ```text
+   live b/ metadata = every slots[*].build
+   live r/ metadata = every slots[*].reuse
+   live lo/ metadata = every slots[*].object_list
+   live lf/ metadata = every slots[*].file_list
+   live o/ content = union of all referenced object lists
+   live f/ content = union of all referenced filesystem-file lists
+   ```
+
+5. List the recognized immutable namespaces and delete keys not present in
+   their corresponding live set. Keys outside `b/`, `r/`, `lo/`, `lf/`, `o/`,
+   and `f/` are outside this procedure and are not deleted.
+
+The publisher serializes publication and garbage collection; no other writer
+may upload or publish concurrently with this procedure. An interrupted delete
+pass can only leave unreachable immutable keys and is safe to repeat. Each
+retry starts by fetching and verifying the then-authoritative master and
+recomputes the complete live set.
+
+An entry remains a live root for as long as it occurs in `/master`, even after
+its `retain_until` deadline. Conversely, once an expired entry has been omitted
+by a successfully published master and that state has been reverified, its
+otherwise-unreferenced metadata and content may be deleted. The grace period is
+the guarantee for readers already operating from an older master; a reader
+cannot retain an old master indefinitely and expect its immutable content to
+remain available.
 
 ## Verification procedure
 

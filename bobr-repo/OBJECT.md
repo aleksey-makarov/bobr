@@ -128,9 +128,11 @@ Directory metadata has this logical form:
 ```
 
 After decompression, the payload is one tar stream describing the directory
-contents. The reader applies the tar validation and normalization rules from
-[Filesystem Object Hashing](../docs/FSOBJ_HASH.md), computes the normalized
-tree hash, and requires it to equal the `ObjectHash` in the requested key.
+contents. The stream must satisfy the repository
+[directory tar profile](TAR.md). The reader applies that profile to obtain the
+normalized tree defined by
+[Filesystem Object Hashing](../docs/FSOBJ_HASH.md), computes its hash, and
+requires it to equal the `ObjectHash` in the requested key.
 
 The object identity is independent of tar header layout, entry order, implicit
 parent directories, ownership, timestamps, and ignored mode bits. A publisher
@@ -138,12 +140,13 @@ is not required to produce one canonical sequence of tar bytes. The immutable
 write-once object key selects the first valid wire representation published for
 that logical object.
 
-The tar reader must reject absolute paths, parent traversal, duplicate or
-conflicting entries, hard links, device nodes, FIFOs, sockets, and unsupported
-entry kinds. Extraction must not follow symbolic links created by earlier
-entries. A repository implementation must use the same accepted normalized
-model for hashing and materialization; invoking a general-purpose system
-`tar -xf` is not sufficient.
+Repository format version 1 deliberately accepts only POSIX ustar logical
+entries and the GNU LongName and LongLink extensions needed for long raw byte
+strings. PAX, sparse-file formats, and other extensions are rejected. The full
+entry, path, checksum, padding, termination, and safe-materialization rules are
+specified in [`TAR.md`](TAR.md). A repository implementation must use the same
+accepted normalized model for hashing and materialization; invoking a
+general-purpose system `tar -xf` is not sufficient.
 
 ## Compression
 
@@ -184,12 +187,46 @@ For a root file and every regular file in a directory:
 For every directory, the normalized mode is `0755`. All entries receive the
 uid and gid of the user that owns the working store. Symbolic-link targets are
 preserved literally because they participate in object identity; symbolic-link
-ownership is normalized to the same user and group. Timestamps, ACLs, extended
-attributes, set-id bits, and all other transported metadata are discarded.
+ownership is normalized to the same user and group. ACLs, extended attributes,
+set-id bits, and all other transported metadata are discarded.
+
+The canonical timestamp for ordinary objects is:
+
+```text
+CANONICAL_TIMESTAMP = 315532800.000000000
+                      # 1980-01-01 00:00:00 UTC
+```
+
+Both atime and mtime are set to this value for:
+
+- a root file object;
+- every regular file in a directory object;
+- every directory, including the root directory object;
+- every symbolic link, without following the link.
+
+Ownership and modes are normalized before timestamps. Directory timestamps are
+applied after all descendants have been created, in post-order, so subsequent
+materialization does not change them. Symbolic-link timestamps are applied with
+no-follow semantics. Failure to apply the canonical timestamps rejects the
+import.
+
+ctime, birth time, and any other filesystem-maintained timestamps are not
+controllable portable object metadata and are outside the canonical storage
+representation. A later access may also update atime according to the working
+store filesystem's mount policy; neither such change participates in
+`ObjectHash` or invalidates the object.
 
 Normalization is part of ordinary-object storage semantics, not an optional
 security transformation. Two accepted representations with the same
 `ObjectHash` materialize as the same canonical local object.
+
+The same contract applies when an ordinary object reaches the working store
+through a local content source rather than this remote representation. A copy
+transport normalizes its staging object before publication. A transport that
+reuses the source representation directly may do so only when that
+representation already satisfies this contract; otherwise the transfer is
+rejected. Content-source choice must not determine the resulting stored modes,
+ownership, or initial timestamps.
 
 ## Reader procedure
 
@@ -203,8 +240,9 @@ A reader importing `o/<ObjectHash>`:
 4. Counts decoded bytes and requires the count to equal `decoded_size`.
 5. For a file, hashes the decoded bytes with the declared executable state and
    writes a normalized staging file.
-6. For a directory, validates the tar model, hashes the normalized tree, and
-   safely materializes a normalized staging directory.
+6. For a directory, validates the complete repository tar profile, hashes the
+   normalized tree, and safely materializes a normalized staging directory
+   from the same parsed entries.
 7. Requires the resulting hash to equal the expected `ObjectHash`.
 8. Requires the payload and enclosing CBOR value to end exactly where declared.
 9. Atomically publishes the verified staging object into the working store.
@@ -230,5 +268,6 @@ mode. Its wire representation is specified in
 - CBOR and deterministic encoding: RFC 8949.
 - CDDL: RFC 8610.
 - Zstandard: RFC 8878.
+- Directory transport tar profile: [`TAR.md`](TAR.md).
 - Tar identity and normalization: Bobr
   [Filesystem Object Hashing](../docs/FSOBJ_HASH.md).
