@@ -1,0 +1,26 @@
+[package]
+name = "bobr-repo"
+version.workspace = true
+edition = "2024"
+description = "Remote repository format, client, and publisher for bobr."
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bobr-core.workspace = true
+bobr-store.workspace = true
+coset.workspace = true
+ed25519-dalek.workspace = true
+futures-util.workspace = true
+fsobj-hash.workspace = true
+libc.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+url.workspace = true
+zstd.workspace = true
+
+[lints]
+workspace = true

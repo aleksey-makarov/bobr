@@ -4,6 +4,7 @@ members = [
   "bobr-builder",
   "bobr-bundle-launcher",
   "bobr-core",
+  "bobr-repo",
   "bobr-source",
   "bobr-sandbox-launcher",
   "bobr-store",
@@ -25,6 +26,7 @@ repository = "https://github.com/aleksey-makarov/bobr"
 bobr-builder = { path = "bobr-builder", version = "0.1.9" }
 bobr-bundle-launcher = { path = "bobr-bundle-launcher", version = "0.1.9" }
 bobr-core = { path = "bobr-core", version = "0.1.9" }
+bobr-repo = { path = "bobr-repo", version = "0.1.9" }
 bobr-runtime = { path = "bobr-runtime", version = "0.1.9" }
 bobr-sandbox = { path = "bobr-sandbox", version = "0.1.9" }
 bobr-sandbox-launcher = { path = "bobr-sandbox-launcher", version = "0.1.9" }
@@ -35,7 +37,11 @@ fsobj-hash = { path = "fsobj-hash", version = "0.1.9" }
 # External crates. Versions live here so the whole workspace stays on one
 # version of each; per-crate feature selections stay in the member manifests.
 bzip2 = "0.5"
+async-trait = "0.1"
+coset = "0.3.8"
+ed25519-dalek = "2.1"
 flate2 = "1.0"
+futures-util = "0.3"
 globset = "0.4"
 goblin = "0.10.7"
 indicatif = "0.18.4"
@@ -51,9 +57,11 @@ tar = "0.4"
 tempfile = "3.14"
 time = { version = "0.3" }
 toml = "1.1.3"
+url = "2"
 ureq = { version = "2", features = ["tls"] }
 xz2 = "0.1"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+zstd = "0.13"
 
 [workspace.lints.rust]
 # Hygiene ratchets: the workspace is clean of all of these, so deny keeps it

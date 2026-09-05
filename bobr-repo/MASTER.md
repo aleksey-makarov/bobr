@@ -85,6 +85,30 @@ version 1 implementation rejects indefinite-length items, non-shortest integer
 or length encodings, duplicate map keys, incorrectly ordered map keys, and
 other non-deterministic encodings.
 
+## Format resource limits
+
+Repository format version 1 fixes the following interoperability limits. They
+are part of the format rather than client policy and every reader and publisher
+enforces them:
+
+```text
+encoded master                         4 MiB
+one build/reuse index or content list  1 GiB
+one encoded o/* or f/* value           1 TiB
+one decoded object or fs-file payload  1 TiB
+logical entries in one directory tar   4,194,304
+effective and normalized tar path      65,536 bytes each
+one tar path component                 255 bytes
+symbolic-link target                   4,095 bytes
+directory-tree depth                   1,024 components
+sum of logical path and link bytes     256 MiB
+Zstandard decoder window               128 MiB
+```
+
+Implementations may impose runtime limits on concurrency, time, cache storage,
+or total work, but they must not silently redefine these per-object validity
+limits for repository format version 1.
+
 ## Payload
 
 The payload has the following logical structure:
@@ -410,7 +434,7 @@ remain available.
 
 A client processing `/master` performs these operations in order:
 
-1. Apply an implementation-defined encoded-size limit before parsing.
+1. Apply the repository format encoded-master limit before parsing.
 2. Require CBOR tag 18 and the `COSE_Sign1` structure used by this profile.
 3. Validate deterministic CBOR encoding and reject duplicate or unknown
    headers.

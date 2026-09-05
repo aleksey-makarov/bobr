@@ -27,8 +27,8 @@ impl std::error::Error for ParseHexHashError {}
 ///
 /// The generated type stores a raw `[u8; 32]` digest, implements `Display`,
 /// `Debug`, `FromStr`, `Serialize`, and `Deserialize`, and exposes `as_bytes`
-/// and `to_hex` helpers. The generated `from_bytes` constructor is `pub(crate)`
-/// so only the defining crate can construct values from raw bytes.
+/// and `to_hex` helpers. The generated `from_bytes` constructor accepts the
+/// native representation used by binary protocols.
 #[macro_export]
 macro_rules! define_hex_hash_type {
     (
@@ -36,11 +36,12 @@ macro_rules! define_hex_hash_type {
         pub struct $name:ident;
     ) => {
         $(#[$meta])*
-        #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name([u8; 32]);
 
         impl $name {
-            pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+            /// Constructs a hash from its raw 32-byte representation.
+            pub const fn from_bytes(bytes: [u8; 32]) -> Self {
                 Self(bytes)
             }
 

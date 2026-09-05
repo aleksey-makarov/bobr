@@ -90,8 +90,8 @@ Entry paths and symbolic-link targets are raw Unix byte strings. They are not
 decoded as UTF-8 and undergo no Unicode normalization. NUL cannot occur in
 either value.
 
-After applying any GNU LongName extension, an entry path is normalized using
-the ordinary-object rules:
+An effective path after applying any GNU LongName extension is limited to
+65,536 bytes. It is then normalized using the ordinary-object rules:
 
 - an effective path beginning with `/` is rejected before component
   normalization;
@@ -179,7 +179,8 @@ regular-file contents in memory, but it must retain or externally sort enough
 normalized structural information to compute a directory hash independently
 of archive entry order.
 
-A reader enforces limits on at least:
+A reader enforces the exact version 1 limits listed in
+[`MASTER.md`](MASTER.md) for:
 
 - total decoded size;
 - individual regular-file size;
@@ -189,10 +190,10 @@ A reader enforces limits on at least:
 - in-memory structural metadata.
 
 Limits are checked before allocation where possible and throughout decoding.
-Exceeding an implementation resource limit rejects the object without
-publishing any partial result. Publisher limits intended to guarantee a common
-interoperability envelope remain to be fixed before repository format version
-1 leaves draft status.
+The structural-byte limit is the sum of the normalized effective path length
+and, for symbolic links, literal target length over all logical entries. GNU
+extension headers do not count as additional logical entries. Exceeding any
+format limit rejects the object without publishing a partial result.
 
 ## Reader and materializer invariant
 

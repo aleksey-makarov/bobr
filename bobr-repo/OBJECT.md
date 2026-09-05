@@ -41,6 +41,7 @@ An object response uses:
 ```text
 Content-Type: application/vnd.bobr.repository-object+cbor
 Cache-Control: public, max-age=31536000, immutable
+Content-Encoding: absent
 ```
 
 The repository may use a longer freshness lifetime. A client must still
@@ -232,7 +233,7 @@ ownership, or initial timestamps.
 
 A reader importing `o/<ObjectHash>`:
 
-1. Applies an implementation-defined encoded-size limit before parsing.
+1. Applies the repository format encoded-content limit before parsing.
 2. Parses and validates the deterministic two-element CBOR envelope and its
    metadata without allocating the payload size.
 3. Reads exactly the definite byte-string length through the selected

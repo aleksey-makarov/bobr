@@ -128,11 +128,11 @@ pub enum FsTreeEntryKind {
     Symlink,
 }
 
-/// Opaque future fs-file object hash used by manifest regular file entries.
+/// Content and metadata hash used by manifest regular file entries.
 ///
 /// The type validates and formats exactly 64 lowercase hex digits. The hash
-/// algorithm is deliberately not defined in this crate yet.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+/// algorithm is documented by [`hash_fs_file_parts`].
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FsFileHash([u8; 32]);
 
 /// Install policy used when importing an existing filesystem tree into
@@ -782,6 +782,11 @@ impl FsTreeEntry {
 }
 
 impl FsFileHash {
+    /// Constructs a hash from its raw 32-byte representation.
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// Returns the raw 32-byte hash value.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
@@ -882,7 +887,7 @@ pub(crate) fn hash_fs_file_path(path: &Path) -> Result<FsFileHash, StoreError> {
 ///
 /// `sha256(b"bobr:fs-file:v1\0" || uid:u32be || gid:u32be || mode:u32be ||
 /// size:u64be || sha256(file_bytes))`.
-fn hash_fs_file_parts(
+pub fn hash_fs_file_parts(
     uid: u32,
     gid: u32,
     mode: u32,
