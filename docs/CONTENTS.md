@@ -31,20 +31,31 @@
    Content-addressed store, build identity, canonical object records, reuse
    mappings, and name refs.
 
-8. [Build logging](./LOGGING.md)
+8. [Remote repositories](./REMOTE_REPOSITORY/OVERVIEW.md)
+   Publishing complete stores as authenticated content-addressed caches:
+   signed masters, immutable indexes and content, slot retention, the
+   `bobr-repo` administration workflow, and garbage collection.
+
+   - [`bobr-repo` command-line utility](./REMOTE_REPOSITORY/CLI.md)
+   - [Repository master](./REMOTE_REPOSITORY/MASTER.md)
+   - [Ordinary objects](./REMOTE_REPOSITORY/OBJECT.md)
+   - [Filesystem files](./REMOTE_REPOSITORY/FS_FILE.md)
+   - [Directory tar profile](./REMOTE_REPOSITORY/TAR.md)
+
+9. [Build logging](./LOGGING.md)
    Logging channels, store-log layout, the structured event record, the closed
    `status` vocabulary, and the format guarantees.
 
-9. [Filesystem Object Hashing](./FSOBJ_HASH.md)
+10. [Filesystem Object Hashing](./FSOBJ_HASH.md)
    Structural hashing rules shared by filesystem paths and tar archives.
 
-10. [fs-tree Manifest](./FS_TREE_MANIFEST.md)
+11. [fs-tree Manifest](./FS_TREE_MANIFEST.md)
    Canonical manifest format for manifest-addressed fs-tree artifacts.
 
-11. [Development](./DEVELOPMENT.md)
+12. [Development](./DEVELOPMENT.md)
    Working on bobr rather than with it: building from a source checkout, and
    rebuilding the world into a fresh store.
 
-12. [Scheduler](./SCHEDULER.md)
-    Demand-driven DAG realization, exact and reuse resolution, Source
+13. [Scheduler](./SCHEDULER.md)
+   Demand-driven DAG realization, exact and reuse resolution, Source
     acquisition, builder execution, concurrency limits, and cancellation.
