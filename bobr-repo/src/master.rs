@@ -1,8 +1,8 @@
 //! Authenticated repository master format.
 
 use crate::{
-    BuildIndexHash, Decoder, Encoder, FsFileListHash, MAX_MASTER_BYTES, ObjectListHash,
-    REPOSITORY_FORMAT, RepositoryError, ReuseIndexHash,
+    BuildIndexHash, Decoder, Encoder, FsFileListHash, MAX_MASTER_BYTES, MetadataHash,
+    ObjectListHash, REPOSITORY_FORMAT, RepositoryError, ReuseIndexHash,
 };
 use coset::{Algorithm, CoseSign1, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable, iana};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
@@ -11,6 +11,9 @@ use url::Url;
 
 /// COSE protected-header content type for a repository master.
 pub const MASTER_CONTENT_TYPE: &str = "application/vnd.bobr.repository-master+cbor";
+
+/// SHA-256 digest of the exact tagged COSE representation of a master.
+pub type MasterHash = MetadataHash<Master>;
 
 /// One immutable slot state authenticated by a master.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +35,7 @@ pub struct Slot {
 /// Verified logical payload embedded in `/master`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Master {
+    previous_master_hash: Option<MasterHash>,
     data_base_url: Url,
     slots: Vec<Slot>,
 }
@@ -51,17 +55,29 @@ pub struct VerifiedMaster {
     pub key_id: Vec<u8>,
     /// Exact tagged COSE representation received from the origin.
     pub signed_bytes: Vec<u8>,
+    /// SHA-256 of `signed_bytes`.
+    pub signed_hash: MasterHash,
 }
 
 impl Master {
     /// Constructs and validates a logical master payload.
-    pub fn new(data_base_url: Url, slots: Vec<Slot>) -> Result<Self, RepositoryError> {
+    pub fn new(
+        previous_master_hash: Option<MasterHash>,
+        data_base_url: Url,
+        slots: Vec<Slot>,
+    ) -> Result<Self, RepositoryError> {
         let master = Self {
+            previous_master_hash,
             data_base_url,
             slots,
         };
         master.validate()?;
         Ok(master)
+    }
+
+    /// Returns the digest of the exact preceding signed master, if any.
+    pub fn previous_master_hash(&self) -> Option<MasterHash> {
+        self.previous_master_hash
     }
 
     /// Returns the absolute immutable-data base URL.
@@ -92,7 +108,7 @@ impl Master {
     /// Encodes the deterministic CBOR payload embedded in COSE.
     pub fn encode_payload(&self) -> Vec<u8> {
         let mut encoder = Encoder::new();
-        encoder.map(3);
+        encoder.map(4);
         encoder.text("slots");
         encoder.array(self.slots.len() as u64);
         for slot in &self.slots {
@@ -102,13 +118,18 @@ impl Master {
         encoder.text(self.data_base_url.as_str());
         encoder.text("repository_format");
         encoder.uint(REPOSITORY_FORMAT);
+        encoder.text("previous_master_hash");
+        match self.previous_master_hash {
+            Some(hash) => encoder.bytes(hash.as_bytes()),
+            None => encoder.null(),
+        }
         encoder.finish()
     }
 
     /// Decodes and validates a deterministic CBOR payload.
     pub fn decode_payload(bytes: &[u8]) -> Result<Self, RepositoryError> {
         let mut decoder = Decoder::new(bytes);
-        require_length(decoder.map()?, 3, "master map")?;
+        require_length(decoder.map()?, 4, "master map")?;
         require_text(&mut decoder, "slots")?;
         let slot_count = decoder.array()?;
         let slot_count = usize::try_from(slot_count)
@@ -122,13 +143,19 @@ impl Master {
             .map_err(|error| RepositoryError::new(format!("invalid data_base_url: {error}")))?;
         require_text(&mut decoder, "repository_format")?;
         let repository_format = decoder.uint()?;
-        decoder.finish()?;
         if repository_format != REPOSITORY_FORMAT {
             return Err(RepositoryError::new(format!(
                 "unsupported repository format {repository_format}"
             )));
         }
-        Self::new(data_base_url, slots)
+        require_text(&mut decoder, "previous_master_hash")?;
+        let previous_master_hash = decoder
+            .null_or_bytes()?
+            .map(require_hash)
+            .transpose()?
+            .map(MasterHash::from_bytes);
+        decoder.finish()?;
+        Self::new(previous_master_hash, data_base_url, slots)
     }
 
     /// Signs this payload as a tagged deterministic `COSE_Sign1` object.
@@ -249,6 +276,7 @@ impl TrustedKeys {
             master,
             key_id,
             signed_bytes: bytes.to_vec(),
+            signed_hash: MasterHash::digest(bytes),
         })
     }
 }
@@ -380,6 +408,7 @@ mod tests {
     fn master() -> Master {
         let digest = [7; 32];
         Master::new(
+            Some(MasterHash::from_bytes([6; 32])),
             Url::parse("https://objects.example/repository/").unwrap(),
             vec![Slot {
                 serial: 41,
@@ -398,9 +427,9 @@ mod tests {
         let master = master();
         let bytes = master.encode_payload();
         assert_eq!(Master::decode_payload(&bytes).unwrap(), master);
-        assert_eq!(bytes.first(), Some(&0xa3));
+        assert_eq!(bytes.first(), Some(&0xa4));
 
-        let mut noncanonical = vec![0xb8, 3];
+        let mut noncanonical = vec![0xb8, 4];
         noncanonical.extend_from_slice(&bytes[1..]);
         assert!(Master::decode_payload(&noncanonical).is_err());
     }
@@ -414,6 +443,7 @@ mod tests {
         let verified = keys.verify(&bytes).unwrap();
         assert_eq!(verified.master, master());
         assert_eq!(verified.key_id, b"release-1");
+        assert_eq!(verified.signed_hash, MasterHash::digest(&bytes));
 
         let mut tampered = bytes;
         let last = tampered.len() - 1;
@@ -426,6 +456,7 @@ mod tests {
         let slot = master().slots[0].clone();
         assert!(
             Master::new(
+                None,
                 Url::parse("http://example/repo/").unwrap(),
                 vec![slot.clone()]
             )
@@ -435,6 +466,7 @@ mod tests {
         older.serial = slot.serial + 1;
         assert!(
             Master::new(
+                None,
                 Url::parse("https://example/repo/").unwrap(),
                 vec![older, slot]
             )

@@ -1,8 +1,8 @@
 //! Pure publication state machine shared by repository writer frontends.
 
 use crate::{
-    BuildIndex, BuildIndexHash, FsFileList, FsFileListHash, Master, ObjectList, ObjectListHash,
-    RepositoryError, ReuseIndex, ReuseIndexHash, Slot,
+    BuildIndex, BuildIndexHash, FsFileList, FsFileListHash, Master, MasterHash, ObjectList,
+    ObjectListHash, RepositoryError, ReuseIndex, ReuseIndexHash, Slot,
 };
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use bobr_store::fs_tree::FsFileHash;
@@ -32,6 +32,7 @@ pub struct PublicationSlot {
 /// Complete durable publication state recoverable from a verified repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationState {
+    previous_master_hash: Option<MasterHash>,
     data_base_url: Url,
     slots: Vec<PublicationSlot>,
 }
@@ -44,6 +45,8 @@ pub enum PublicationMode {
         /// Deadline assigned to the replaced active state.
         retain_until: u64,
     },
+    /// Add a fresh active state without retiring another current state.
+    AddSlot,
     /// Retire the oldest current state and start a fresh active state.
     Rotate {
         /// Deadline assigned to the retired oldest current state.
@@ -64,6 +67,23 @@ pub struct PublicationMetadata {
     pub object_lists: BTreeMap<ObjectListHash, Vec<u8>>,
     /// Filesystem-file lists keyed by their content digest.
     pub file_lists: BTreeMap<FsFileListHash, Vec<u8>>,
+}
+
+/// Authenticated current master and all immutable metadata it references.
+#[derive(Debug, Clone)]
+pub struct CurrentPublication {
+    /// SHA-256 of the exact tagged COSE master bytes.
+    pub master_hash: MasterHash,
+    /// Hash-verified metadata reachable from that master.
+    pub metadata: PublicationMetadata,
+}
+
+impl CurrentPublication {
+    /// Reconstructs writer state whose next master names this publication as
+    /// its predecessor.
+    pub fn state(&self) -> Result<PublicationState, RepositoryError> {
+        PublicationState::from_metadata(self.master_hash, &self.metadata)
+    }
 }
 
 impl SlotContents {
@@ -126,32 +146,25 @@ impl SlotContents {
 }
 
 impl PublicationState {
-    /// Initializes a repository with a caller-selected number of current slots.
-    ///
-    /// Empty sealed slots precede an active slot populated with `initial`.
-    pub fn initialize(
-        data_base_url: Url,
-        current_slot_count: usize,
-        initial: SlotContents,
-    ) -> Result<Self, RepositoryError> {
-        if current_slot_count == 0 {
-            return Err(RepositoryError::new(
-                "repository must have at least one current slot",
-            ));
-        }
-        let mut slots = (0..current_slot_count)
-            .map(|serial| PublicationSlot {
-                serial: serial as u64,
+    /// Initializes a repository with one active slot populated from `initial`.
+    pub fn initialize(data_base_url: Url, initial: SlotContents) -> Result<Self, RepositoryError> {
+        initial.validate_closure()?;
+        let state = Self {
+            previous_master_hash: None,
+            data_base_url,
+            slots: vec![PublicationSlot {
+                serial: 1,
                 retain_until: None,
-                contents: SlotContents::default(),
-            })
-            .collect::<Vec<_>>();
-        slots.last_mut().expect("nonempty slots").contents = initial;
-        Self::from_slots(data_base_url, slots)
+                contents: initial,
+            }],
+        };
+        state.metadata()?;
+        Ok(state)
     }
 
     /// Reconstructs publication state from authenticated, hash-verified slots.
     pub fn from_slots(
+        current_master_hash: MasterHash,
         data_base_url: Url,
         slots: Vec<PublicationSlot>,
     ) -> Result<Self, RepositoryError> {
@@ -159,6 +172,7 @@ impl PublicationState {
             slot.contents.validate_closure()?;
         }
         let state = Self {
+            previous_master_hash: Some(current_master_hash),
             data_base_url,
             slots,
         };
@@ -167,7 +181,10 @@ impl PublicationState {
     }
 
     /// Reconstructs durable state from already hash-verified publication metadata.
-    pub fn from_metadata(metadata: &PublicationMetadata) -> Result<Self, RepositoryError> {
+    pub fn from_metadata(
+        current_master_hash: MasterHash,
+        metadata: &PublicationMetadata,
+    ) -> Result<Self, RepositoryError> {
         let mut slots = Vec::with_capacity(metadata.master.slots().len());
         for descriptor in metadata.master.slots() {
             let build_bytes = metadata.builds.get(&descriptor.build).ok_or_else(|| {
@@ -224,10 +241,15 @@ impl PublicationState {
                 )?,
             });
         }
-        Self::from_slots(metadata.master.data_base_url().clone(), slots)
+        Self::from_slots(
+            current_master_hash,
+            metadata.master.data_base_url().clone(),
+            slots,
+        )
     }
 
-    /// Applies exactly the append or rotation operation selected by the caller.
+    /// Applies exactly the append, add-slot, or rotation operation selected by
+    /// the caller.
     pub fn publish(
         &mut self,
         mode: PublicationMode,
@@ -254,6 +276,13 @@ impl PublicationState {
                     serial: next_serial,
                     retain_until: None,
                     contents: replacement,
+                });
+            }
+            PublicationMode::AddSlot => {
+                self.slots.push(PublicationSlot {
+                    serial: next_serial,
+                    retain_until: None,
+                    contents: incoming,
                 });
             }
             PublicationMode::Rotate { retain_until } => {
@@ -312,7 +341,11 @@ impl PublicationState {
             });
         }
         Ok(PublicationMetadata {
-            master: Master::new(self.data_base_url.clone(), descriptors)?,
+            master: Master::new(
+                self.previous_master_hash,
+                self.data_base_url.clone(),
+                descriptors,
+            )?,
             builds,
             reuses,
             object_lists,
@@ -387,7 +420,6 @@ mod tests {
     fn append_retires_old_active_and_prefers_new_candidate() {
         let mut state = PublicationState::initialize(
             Url::parse("https://example/data/").unwrap(),
-            3,
             contents(1, 1),
         )
         .unwrap();
@@ -397,10 +429,10 @@ mod tests {
                 contents(1, 2),
             )
             .unwrap();
-        assert_eq!(state.slots().len(), 4);
-        assert_eq!(state.slots()[2].retain_until, Some(50));
+        assert_eq!(state.slots().len(), 2);
+        assert_eq!(state.slots()[0].retain_until, Some(50));
         assert_eq!(
-            state.slots()[3].contents.build_records(),
+            state.slots()[1].contents.build_records(),
             vec![
                 (BuildKey::from_bytes([1; 32]), object(2)),
                 (BuildKey::from_bytes([1; 32]), object(1)),
@@ -409,15 +441,20 @@ mod tests {
     }
 
     #[test]
-    fn rotate_preserves_current_slot_count_and_starts_fresh() {
+    fn add_slot_grows_and_rotate_preserves_current_slot_count() {
         let mut state = PublicationState::initialize(
             Url::parse("https://example/data/").unwrap(),
-            3,
             contents(1, 1),
         )
         .unwrap();
         state
-            .publish(PublicationMode::Rotate { retain_until: 70 }, contents(2, 2))
+            .publish(PublicationMode::AddSlot, contents(2, 2))
+            .unwrap();
+        state
+            .publish(PublicationMode::AddSlot, contents(3, 3))
+            .unwrap();
+        state
+            .publish(PublicationMode::Rotate { retain_until: 70 }, contents(4, 4))
             .unwrap();
         assert_eq!(
             state
@@ -428,7 +465,7 @@ mod tests {
             3
         );
         assert_eq!(state.slots()[0].retain_until, Some(70));
-        assert_eq!(state.slots().last().unwrap().contents, contents(2, 2));
+        assert_eq!(state.slots().last().unwrap().contents, contents(4, 4));
     }
 
     #[test]
@@ -442,11 +479,16 @@ mod tests {
     fn publication_metadata_roundtrips_to_state() {
         let state = PublicationState::initialize(
             Url::parse("https://example/data/").unwrap(),
-            2,
             contents(1, 1),
         )
         .unwrap();
         let metadata = state.metadata().unwrap();
-        assert_eq!(PublicationState::from_metadata(&metadata).unwrap(), state);
+        let current_master_hash = MasterHash::from_bytes([9; 32]);
+        let restored = PublicationState::from_metadata(current_master_hash, &metadata).unwrap();
+        assert_eq!(restored.slots(), state.slots());
+        assert_eq!(
+            restored.metadata().unwrap().master.previous_master_hash(),
+            Some(current_master_hash)
+        );
     }
 }

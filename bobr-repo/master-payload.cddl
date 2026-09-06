@@ -6,6 +6,7 @@
 
 bobr-repository-master-payload = {
     "repository_format": 1,
+    "previous_master_hash": nil / sha256,
     "data_base_url": data-base-url,
     "slots": [+ slot],
 }

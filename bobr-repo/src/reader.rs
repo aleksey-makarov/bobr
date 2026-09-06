@@ -1,10 +1,11 @@
 //! Authenticated immutable repository snapshots.
 
 use crate::{
-    BuildIndex, BuildIndexHash, FetchRequest, FetchResult, FsFileList, FsFileListHash,
-    HttpTransport, MAX_ENCODED_CONTENT_BYTES, MAX_MASTER_BYTES, MAX_METADATA_BYTES, Master,
-    ObjectKind, ObjectList, ObjectListHash, RepositoryCache, RepositoryError, RepositoryTransport,
-    ReuseIndex, ReuseIndexHash, Slot, TrustedKeys, decode_fs_file, decode_object,
+    BuildIndex, BuildIndexHash, CurrentPublication, FetchRequest, FetchResult, FsFileList,
+    FsFileListHash, HttpTransport, MAX_ENCODED_CONTENT_BYTES, MAX_MASTER_BYTES, MAX_METADATA_BYTES,
+    Master, ObjectKind, ObjectList, ObjectListHash, RepositoryCache, RepositoryError,
+    RepositoryTransport, ReuseIndex, ReuseIndexHash, Slot, TrustedKeys, VerifiedMaster,
+    decode_fs_file, decode_object,
 };
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use bobr_store::fs_tree::FsFileHash;
@@ -163,7 +164,7 @@ impl RepositoryReader {
 
     /// Revalidates `/master` and loads the current slot metadata it authenticates.
     pub async fn snapshot(&self) -> Result<RepositorySnapshot, RepositoryError> {
-        let master = self.fetch_master().await?;
+        let master = self.fetch_master().await?.master;
         let mut slots = Vec::new();
         for descriptor in master.current_slots_newest_first() {
             let build = Arc::new(
@@ -195,10 +196,10 @@ impl RepositoryReader {
 
     /// Loads every current and retained metadata object needed by a publisher
     /// or garbage collector to reconstruct durable repository state.
-    pub async fn publication_metadata(
-        &self,
-    ) -> Result<crate::PublicationMetadata, RepositoryError> {
-        let master = self.fetch_master().await?;
+    pub async fn publication_metadata(&self) -> Result<CurrentPublication, RepositoryError> {
+        let verified = self.fetch_master().await?;
+        let master_hash = verified.signed_hash;
+        let master = verified.master;
         let mut builds = std::collections::BTreeMap::new();
         let mut reuses = std::collections::BTreeMap::new();
         let mut object_lists = std::collections::BTreeMap::new();
@@ -217,16 +218,19 @@ impl RepositoryReader {
             object_lists.insert(slot.object_list, objects.as_bytes().to_vec());
             file_lists.insert(slot.file_list, files.as_bytes().to_vec());
         }
-        Ok(crate::PublicationMetadata {
-            master,
-            builds,
-            reuses,
-            object_lists,
-            file_lists,
+        Ok(CurrentPublication {
+            master_hash,
+            metadata: crate::PublicationMetadata {
+                master,
+                builds,
+                reuses,
+                object_lists,
+                file_lists,
+            },
         })
     }
 
-    async fn fetch_master(&self) -> Result<Master, RepositoryError> {
+    async fn fetch_master(&self) -> Result<VerifiedMaster, RepositoryError> {
         let cache = &self.inner.cache;
         let cached_path = cache.master_path();
         let etag = std::fs::read_to_string(cache.master_etag_path()).ok();
@@ -262,7 +266,7 @@ impl RepositoryReader {
                 return Err(RepositoryError::new("repository master is missing"));
             }
         };
-        Ok(self.inner.trusted_keys.verify(&bytes)?.master)
+        self.inner.trusted_keys.verify(&bytes)
     }
 
     async fn fetch_build(
@@ -642,7 +646,7 @@ fn read_cached_master(path: &Path) -> Result<Vec<u8>, RepositoryError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Compression, MemoryTransport, Slot, TrustedKeys, encode_object};
+    use crate::{Compression, MasterHash, MemoryTransport, Slot, TrustedKeys, encode_object};
     use ed25519_dalek::SigningKey;
 
     #[tokio::test]
@@ -668,6 +672,7 @@ mod tests {
         let object_list_hash = ObjectListHash::digest(&object_list_bytes);
         let file_list_hash = FsFileListHash::digest(&file_list_bytes);
         let master = Master::new(
+            None,
             base.clone(),
             vec![Slot {
                 serial: 1,
@@ -679,9 +684,11 @@ mod tests {
             }],
         )
         .unwrap();
+        let signed_master = master.sign(b"key", &signing).unwrap();
+        let signed_master_hash = MasterHash::digest(&signed_master);
         transport.insert(
             master_url.clone(),
-            master.sign(b"key", &signing).unwrap(),
+            signed_master,
             "application/cose; cose-type=\"cose-sign1\"",
             "no-cache",
         );
@@ -745,6 +752,19 @@ mod tests {
         std::fs::write(&cached_build, b"corrupt cache entry").unwrap();
         let refreshed = reader.snapshot().await.unwrap();
         assert_eq!(refreshed.build_candidates(build_key), vec![object_hash]);
+
+        let current = reader.publication_metadata().await.unwrap();
+        assert_eq!(current.master_hash, signed_master_hash);
+        assert_eq!(
+            current
+                .state()
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .master
+                .previous_master_hash(),
+            Some(signed_master_hash)
+        );
     }
 
     #[test]

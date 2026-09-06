@@ -104,6 +104,15 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    pub(crate) fn null_or_bytes(&mut self) -> Result<Option<&'a [u8]>, RepositoryError> {
+        if self.peek()? == 0xf6 {
+            self.offset += 1;
+            Ok(None)
+        } else {
+            self.bytes().map(Some)
+        }
+    }
+
     pub(crate) fn finish(self) -> Result<(), RepositoryError> {
         if self.offset == self.bytes.len() {
             Ok(())

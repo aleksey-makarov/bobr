@@ -16,6 +16,7 @@ from that state.
 In particular, `/master`:
 
 - declares its wire-format version;
+- names the exact signed master from which this publication was prepared;
 - names the HTTPS base URL of immutable repository data;
 - describes the current and temporarily retained slot states without fixing
   the number of current slots;
@@ -115,6 +116,7 @@ The payload has the following logical structure:
 
 ```text
 repository_format = 1
+previous_master_hash
 data_base_url
 slots = [slot, ...]
 ```
@@ -127,6 +129,24 @@ schema.
 
 `repository_format` describes the remote repository wire format, not the Bobr
 implementation version. Its value is exactly `1` for this document.
+
+### Previous master hash
+
+`previous_master_hash` is `null` in the first publication of an empty
+repository. In every subsequent publication it is the SHA-256 digest of the
+exact tagged COSE bytes of the immediately preceding `/master` response.
+
+The field is part of the signed payload. Before publishing a candidate, the
+writer fetches the authoritative `/master` and requires its exact digest to
+equal `previous_master_hash`. It then uses a conditional single-object write
+to ensure that `/master` has not changed between that check and replacement.
+This prevents a stale candidate from overwriting a newer publication without
+introducing a separate candidate envelope format.
+
+Readers do not use this field for build or reuse lookup and must not require it
+to match a locally cached master. A reader may legitimately skip any number of
+intermediate publications. The link is a writer precondition and an audit
+record, not a requirement that ordinary readers retrieve master history.
 
 ### Data base URL
 
@@ -317,18 +337,15 @@ marks the previous active entry as retired and appends its replacement with
 `serial = max(slots.serial) + 1` and `retain_until = null`. Thus changing a slot
 never changes the meaning of an existing serial.
 
+An add-slot publication appends a fresh active entry with the next serial and
+does not retire another current entry. A repository therefore does not have a
+configured or protocol-fixed slot count. It starts with one current slot and
+the sole publisher explicitly adds current slots as needed.
+
 At rotation, the publisher retires the current entry with the smallest serial
 and appends a fresh active entry with the next serial. The formerly active
-entry remains current and thereby becomes sealed. The number of current entries
-therefore remains unchanged. Repository initialization chooses that number;
-later publisher runs can recover it by counting entries whose `retain_until` is
-`null`.
-
-An initialized repository uses canonical empty build and reuse indexes,
-canonical empty object lists, and canonical empty filesystem-file lists for
-slots that have not yet been populated. Consequently every current entry
-always has all four metadata digests; optional or partially initialized
-descriptors are not needed.
+entry remains current and thereby becomes sealed. Rotation therefore preserves
+the current slot count, whereas add-slot increases it.
 
 ### Slot closure
 
@@ -463,17 +480,19 @@ content would be checked by `ObjectHash`.
 For one publication the sole publisher:
 
 1. Reads and verifies the current master.
-2. Computes the replacement active-slot state, any rotation, and the updated
-   retention deadlines.
+2. Omits retired states whose retention deadline has passed, then computes an
+   append, add-slot, or rotation operation and the updated retention deadlines.
 3. Uploads missing immutable content under `o/` and `f/`.
 4. Uploads the new immutable build index, reuse index, object list, and
    filesystem-file list under `b/`, `r/`, `lo/`, and `lf/`.
-5. Constructs the next payload, using the next serial for every newly created
-   slot state and retaining all unexpired retired states.
+5. Constructs the next payload, setting `previous_master_hash` to the digest of
+   the exact current COSE bytes, using the next serial for every newly created
+   slot state, and retaining all unexpired retired states.
 6. Encodes the payload and COSE object deterministically and signs it with the
    configured Ed25519 key.
-7. Replaces `/master` last using the object store's atomic single-object
-   replacement operation.
+7. Fetches `/master` again and requires it to remain the predecessor named by
+   the candidate, then replaces it last using a conditional atomic
+   single-object operation.
 
 If the publisher fails before the last step, it may leave unreachable immutable
 objects but cannot expose a partially committed repository state. If it fails
@@ -490,8 +509,9 @@ Repository format version 1 deliberately has no monotonic revision or trusted
 time mechanism. The response obtained from the configured master URL is
 authoritative. Comparing its bytes or digest with a cached response detects a
 change but does not distinguish a legitimate older state from a rollback. The
-signature alone therefore does not prevent replay or freeze attacks by the
-master origin.
+`previous_master_hash` link cannot change that for an ordinary reader which
+may skip intermediate publications. The signature alone therefore does not
+prevent replay or freeze attacks by the master origin.
 
 Build and reuse indexes from the repository may be used as trusted `BuildKey`
 and `ReuseKey` answers only when client configuration grants that capability to
