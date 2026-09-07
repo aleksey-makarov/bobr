@@ -1086,8 +1086,9 @@ mod tests {
     #[test]
     fn secondary_runtime_registry_contains_fs_file_transfer_functions() {
         let functions = crate::runtime_functions();
-        assert_eq!(functions.len(), 2);
-        assert_eq!(functions[0].name(), "secondary-hardlink-fs-files");
-        assert_eq!(functions[1].name(), "repository-copy-fs-files");
+        assert_eq!(functions.len(), 3);
+        assert_eq!(functions[0].name(), "bobr_store_inventory");
+        assert_eq!(functions[1].name(), "secondary-hardlink-fs-files");
+        assert_eq!(functions[2].name(), "repository-copy-fs-files");
     }
 }

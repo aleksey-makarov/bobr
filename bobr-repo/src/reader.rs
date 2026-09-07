@@ -199,6 +199,7 @@ impl RepositoryReader {
     pub async fn publication_metadata(&self) -> Result<CurrentPublication, RepositoryError> {
         let verified = self.fetch_master().await?;
         let master_hash = verified.signed_hash;
+        let key_id = verified.key_id;
         let master = verified.master;
         let mut builds = std::collections::BTreeMap::new();
         let mut reuses = std::collections::BTreeMap::new();
@@ -220,6 +221,7 @@ impl RepositoryReader {
         }
         Ok(CurrentPublication {
             master_hash,
+            key_id,
             metadata: crate::PublicationMetadata {
                 master,
                 builds,

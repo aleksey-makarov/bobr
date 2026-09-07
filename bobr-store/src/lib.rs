@@ -20,6 +20,7 @@ compile_error!("bobr requires Linux");
 mod copy_content;
 mod error;
 pub mod fs_tree;
+mod inventory;
 mod local_content;
 mod object;
 mod record;
@@ -32,6 +33,7 @@ mod store;
 
 pub use copy_content::LocalCopyContentSource;
 pub use error::StoreError;
+pub use inventory::{StoreInventory, StoredFsFile, StoredObject};
 pub use object::import_build;
 pub use ref_name::validate_ref_name;
 pub use refs::{load_build_object_hash, load_reuse_object_hash, publish_existing_build};
@@ -47,9 +49,10 @@ pub use secondary_resolver::{
 pub use source::{SourceImportOutcome, import_source_object, record_existing_source_object};
 pub use store::{ReadOnlyStore, Store};
 
-/// Returns namespace runtime functions used by secondary-store imports.
+/// Returns namespace runtime functions used by store import and inspection.
 pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
     vec![
+        bobr_runtime::runtime_ns::NsFunction::new(inventory::StoreInventoryFunction),
         bobr_runtime::runtime_ns::NsFunction::new(secondary::HardlinkFsFilesFunction),
         bobr_runtime::runtime_ns::NsFunction::new(copy_content::CopyFsFilesFunction),
     ]

@@ -8,7 +8,12 @@ repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+aws-config.workspace = true
+aws-sdk-s3.workspace = true
+aws-smithy-runtime-api.workspace = true
+aws-smithy-types.workspace = true
 bobr-core.workspace = true
+bobr-runtime.workspace = true
 bobr-store.workspace = true
 coset.workspace = true
 ed25519-dalek.workspace = true
@@ -16,6 +21,8 @@ futures-util.workspace = true
 fsobj-hash.workspace = true
 libc.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

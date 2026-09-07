@@ -36,9 +36,9 @@ tar -xf "${BOBR_ARCHIVE}"
 export PATH="${PWD}/bobr-v${BOBR_VERSION}-${BOBR_TARGET}/bin:${PATH}"
 ```
 
-The archive contains static `bobr`, `fsobj-hash`, and
-`bobr-sandbox-launcher` binaries. Keep its `bin/` on `PATH` for the rest of this
-chapter; `bobr` finds the sandbox launcher next to its own executable.
+The archive contains static `bobr`, `bobr-repo`, `fsobj-hash`, and
+`bobr-sandbox-launcher` binaries. Keep its `bin/` on `PATH` for the rest of
+this chapter; `bobr` finds the sandbox launcher next to its own executable.
 
 ## Your first build
 

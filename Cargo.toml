@@ -36,10 +36,14 @@ fsobj-hash = { path = "fsobj-hash", version = "0.1.9" }
 
 # External crates. Versions live here so the whole workspace stays on one
 # version of each; per-crate feature selections stay in the member manifests.
-bzip2 = "0.5"
 async-trait = "0.1"
+aws-config = "1"
+aws-sdk-s3 = "1"
+aws-smithy-runtime-api = "1"
+aws-smithy-types = "1"
+bzip2 = "0.5"
 coset = "0.3.8"
-ed25519-dalek = "2.1"
+ed25519-dalek = { version = "2.1", features = ["pem", "pkcs8"] }
 flate2 = "1.0"
 futures-util = "0.3"
 globset = "0.4"

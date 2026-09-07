@@ -17,7 +17,8 @@
 #
 # The layout mirrors the release archive on purpose: `bobr` locates
 # `bobr-sandbox-launcher` beside its own executable, so the two have to travel
-# together.
+# together. The administrative `bobr-repo` command is installed from the same
+# workspace build.
 #
 # This script does not build recipes. Once it has run, build them with the
 # recipes' bin/bobr-build.sh as usual.
@@ -107,6 +108,7 @@ install_binary() {
 mkdir -p "${bin_dir}"
 step "install into ${bin_dir}"
 install_binary "target/${profile}/bobr" bobr
+install_binary "target/${profile}/bobr-repo" bobr-repo
 install_binary "target/${profile}/fsobj-hash" fsobj-hash
 install_binary "target/${musl_target}/${profile}/bobr-sandbox-launcher" bobr-sandbox-launcher
 # A directory upgraded from a pre-Realizer build must not keep advertising the

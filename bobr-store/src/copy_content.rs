@@ -279,7 +279,8 @@ fn rename_noreplace(source: &Path, destination: &Path) -> io::Result<()> {
     let source = CString::new(source.as_os_str().as_bytes())?;
     let destination = CString::new(destination.as_os_str().as_bytes())?;
     let result = unsafe {
-        libc::renameat2(
+        libc::syscall(
+            libc::SYS_renameat2,
             libc::AT_FDCWD,
             source.as_ptr(),
             libc::AT_FDCWD,

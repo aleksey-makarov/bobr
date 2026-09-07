@@ -56,12 +56,22 @@ case "${host_target}" in
   *) other_target="x86_64-unknown-linux-musl" ;;
 esac
 
-# The main archive wants three binaries, and two places name the packages that
+# Rust ships self-contained startup objects for musl targets, so a build can
+# get as far as the final link with the host `cc`. Native dependencies would
+# then be compiled against glibc and leave unresolved glibc-only symbols in the
+# attempted musl binary. Select the target C compiler explicitly, just as the
+# release workflow does.
+command -v musl-gcc >/dev/null 2>&1 \
+  || die "musl-gcc not found on PATH (install a native musl C toolchain)"
+host_cc_variable="CC_${host_target//-/_}"
+export "${host_cc_variable}=musl-gcc"
+
+# The main archive wants four binaries, and two places name the packages that
 # build them: this script and the release workflow. They drifted once -- a
 # package was added here and not there, so this stayed green while a real
 # release failed at packaging, which is after the tag has been pushed. Nothing
 # else compares them, so this does, before spending minutes on the checks.
-main_packages=(bobr-build fsobj-hash bobr-sandbox-launcher)
+main_packages=(bobr-build bobr-repo fsobj-hash bobr-sandbox-launcher)
 workflow="${repo}/.github/workflows/release.yml"
 workflow_step="$(
   awk '

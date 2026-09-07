@@ -10,23 +10,34 @@ compile_error!("bobr requires Linux");
 mod cache;
 mod cbor;
 mod content;
+mod encoding;
 mod error;
 mod format;
 mod index;
 mod master;
 mod publisher;
 mod reader;
+mod s3;
 mod tar_profile;
 mod transport;
 
 pub use cache::*;
 pub(crate) use cbor::{Decoder, Encoder};
 pub use content::*;
+pub use encoding::{encode_preferred_fs_files, encode_preferred_object};
 pub use error::RepositoryError;
 pub use format::*;
 pub use index::*;
 pub use master::*;
 pub use publisher::*;
 pub use reader::*;
+pub use s3::*;
 pub use tar_profile::*;
 pub use transport::*;
+
+/// Returns namespace runtime functions required by the repository publisher.
+pub fn runtime_functions() -> Vec<bobr_runtime::runtime_ns::NsFunction> {
+    vec![bobr_runtime::runtime_ns::NsFunction::new(
+        encoding::EncodeFsFilesFunction,
+    )]
+}

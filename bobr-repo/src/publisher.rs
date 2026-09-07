@@ -74,6 +74,8 @@ pub struct PublicationMetadata {
 pub struct CurrentPublication {
     /// SHA-256 of the exact tagged COSE master bytes.
     pub master_hash: MasterHash,
+    /// Pinned key identifier which authenticated the current master.
+    pub key_id: Vec<u8>,
     /// Hash-verified metadata reachable from that master.
     pub metadata: PublicationMetadata,
 }
