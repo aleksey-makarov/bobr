@@ -8,8 +8,13 @@ use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadError;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier};
+use aws_smithy_http_client::{
+    Builder as HttpClientBuilder,
+    tls::{self, rustls_provider::CryptoMode},
+};
 use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use aws_smithy_types::byte_stream::Length;
+use aws_smithy_types::checksum_config::RequestChecksumCalculation;
 use aws_smithy_types::error::metadata::ProvideErrorMetadata;
 use std::path::Path;
 use url::Url;
@@ -139,7 +144,12 @@ impl S3Repository {
     /// Loads credentials, region, endpoint, and retry configuration from the
     /// standard AWS SDK configuration chain.
     pub async fn from_environment(location: S3Location) -> Result<Self, RepositoryError> {
+        let http_client = HttpClientBuilder::new()
+            .tls_provider(tls::Provider::Rustls(CryptoMode::Ring))
+            .build_https();
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .http_client(http_client)
+            .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
             .load()
             .await;
         Ok(Self {

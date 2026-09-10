@@ -37,8 +37,9 @@ fsobj-hash = { path = "fsobj-hash", version = "0.1.9" }
 # External crates. Versions live here so the whole workspace stays on one
 # version of each; per-crate feature selections stay in the member manifests.
 async-trait = "0.1"
-aws-config = "1"
-aws-sdk-s3 = "1"
+aws-config = { version = "1", default-features = false, features = ["credentials-process", "rt-tokio", "sso"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["http-1x", "rt-tokio"] }
+aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
 aws-smithy-runtime-api = "1"
 aws-smithy-types = "1"
 bzip2 = "0.5"
