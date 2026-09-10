@@ -104,7 +104,7 @@ if [ "${kind}" = "main" ]; then
   "${root}/bin/bobr-repo" --version >/dev/null
   bobr_version="$("${root}/bin/bobr" --version)"
   case "${bobr_version}" in
-    "bobr ${release_tag#v} (request bobr-request-v4)") ;;
+    "bobr ${release_tag#v} (request bobr-request-v5)") ;;
     *) die "unexpected bobr version output: ${bobr_version}" ;;
   esac
   protocol_info="$("${root}/bin/bobr-sandbox-launcher" --protocol-info)"
@@ -118,7 +118,7 @@ if [ "${kind}" = "main" ]; then
     "${smoke}/store/work/release-smoke"
   cat >"${smoke}/request.json" <<EOF
 {
-  "schema": "bobr-request-v4",
+  "schema": "bobr-request-v5",
   "store": "${smoke}/store",
   "logs": "${smoke}/store/logs/release-smoke",
   "work": "${smoke}/store/work/release-smoke",
