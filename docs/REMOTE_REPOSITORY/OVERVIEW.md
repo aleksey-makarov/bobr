@@ -12,6 +12,9 @@ section:
 - [`bobr-repo` command-line utility](CLI.md) describes preparation from a
   complete local store, signing on a separate trusted machine, publication,
   status reporting, and garbage collection.
+- [Self-hosting with VersityGW](SERVER.md) shows how to run an S3-compatible
+  endpoint, configure HTTPS and anonymous object reads, and generate the S3,
+  TLS, and repository-signing credentials.
 - [Repository master](MASTER.md) specifies the authenticated root, immutable
   mapping indexes and content lists, slots, retention, and the reader
   algorithm.

@@ -37,6 +37,7 @@
    `bobr-repo` administration workflow, and garbage collection.
 
    - [`bobr-repo` command-line utility](./REMOTE_REPOSITORY/CLI.md)
+   - [Self-hosting with VersityGW](./REMOTE_REPOSITORY/SERVER.md)
    - [Repository master](./REMOTE_REPOSITORY/MASTER.md)
    - [Ordinary objects](./REMOTE_REPOSITORY/OBJECT.md)
    - [Filesystem files](./REMOTE_REPOSITORY/FS_FILE.md)
