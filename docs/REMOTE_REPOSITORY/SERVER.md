@@ -620,12 +620,17 @@ master URL:         https://s3.example.net:7070/bobr-repository/master
 data base URL:      https://s3.example.net:7070/bobr-repository/
 ```
 
-*Clients* must be configured to trust
-`local-repository-ca.cert.pem`. The current `bobr-repo` command does not yet
-provide a custom-CA option, so it cannot complete the publication workflow
-against this private-CA endpoint yet. Until that support is implemented, use
-the setup to test the S3 API with AWS CLI and the public object path with
-`curl`. Disabling certificate verification is not an acceptable substitute.
+Pass the public CA certificate to every `bobr-repo` command which addresses
+this repository:
+
+```text
+--ca-bundle local-repository-ca.cert.pem
+```
+
+The additional CA is used for both authenticated S3 requests and anonymous
+reads through the public URLs. It is added to the standard trusted roots, so
+the same command may still follow repository URLs certified by a public CA.
+Disabling certificate verification is not an acceptable substitute.
 
 ## Backup and rotation
 

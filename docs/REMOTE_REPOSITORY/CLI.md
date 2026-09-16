@@ -96,6 +96,24 @@ Storage, and other S3-compatible services without a Bobr-specific credentials
 file. A non-AWS deployment can, for example, set `AWS_ENDPOINT_URL_S3` and
 `AWS_REGION` in addition to its credentials.
 
+Every command also accepts an optional repository-local CA bundle:
+
+```text
+--ca-bundle CA-BUNDLE.pem
+```
+
+The file may contain one or more PEM certificates. They are added to the
+standard trusted roots rather than replacing them. The same additional roots
+are used for authenticated S3 requests and anonymous reads through the public
+master and data URLs. This allows one invocation to use a private-CA S3
+endpoint and a publicly certified CDN, or to trust different private CAs
+listed in the same bundle. Hostname and IP Subject Alternative Name checks
+remain enabled.
+
+The bundle is a local transport setting. It is not embedded in `/master`, is
+not part of repository identity, and is not stored in the metadata cache.
+Malformed, empty, or unreadable bundles fail before the first network request.
+
 The public immutable-data URL is a separate value:
 
 ```text
@@ -188,6 +206,7 @@ bobr-repo prepare \
     --trusted-key PUBLIC-KEY ... \
     [--data-base-url HTTPS-URL] \
     [--cache DIR] \
+    [--ca-bundle CA-BUNDLE.pem] \
     [--append | --add-slot | --rotate] \
     [--retention DURATION] \
     --output candidate-master.cbor
@@ -279,6 +298,7 @@ bobr-repo publish \
     --repository s3://BUCKET/PREFIX \
     --signing-key PRIVATE-KEY \
     [--trusted-key PUBLIC-KEY ...] \
+    [--ca-bundle CA-BUNDLE.pem] \
     [--yes]
 ```
 
@@ -345,6 +365,7 @@ bobr-repo status \
     --master-url https://repo.example.org/master \
     --trusted-key PUBLIC-KEY ... \
     [--cache DIR] \
+    [--ca-bundle CA-BUNDLE.pem] \
     [--compact]
 ```
 
@@ -382,7 +403,8 @@ bobr-repo status \
     --trusted-key PUBLIC-KEY ... \
     --repository s3://BUCKET/PREFIX \
     --scan-storage \
-    [--cache DIR]
+    [--cache DIR] \
+    [--ca-bundle CA-BUNDLE.pem]
 ```
 
 This mode additionally lists the recognized S3 namespaces. S3 listing returns
@@ -424,6 +446,7 @@ bobr-repo gc \
     --master-url https://repo.example.org/master \
     --trusted-key PUBLIC-KEY ... \
     [--cache DIR] \
+    [--ca-bundle CA-BUNDLE.pem] \
     [--dry-run]
 ```
 

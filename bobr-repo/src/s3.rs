@@ -1,7 +1,8 @@
 //! Administrative S3 storage transport.
 
 use crate::{
-    FetchRequest, FetchResult, RepositoryError, RepositoryTransport, RepresentationMetadata,
+    FetchRequest, FetchResult, RepositoryError, RepositoryTlsConfig, RepositoryTransport,
+    RepresentationMetadata,
 };
 use async_trait::async_trait;
 use aws_sdk_s3::error::SdkError;
@@ -143,9 +144,13 @@ impl S3Location {
 impl S3Repository {
     /// Loads credentials, region, endpoint, and retry configuration from the
     /// standard AWS SDK configuration chain.
-    pub async fn from_environment(location: S3Location) -> Result<Self, RepositoryError> {
+    pub async fn from_environment(
+        location: S3Location,
+        tls_config: &RepositoryTlsConfig,
+    ) -> Result<Self, RepositoryError> {
         let http_client = HttpClientBuilder::new()
             .tls_provider(tls::Provider::Rustls(CryptoMode::Ring))
+            .tls_context(tls_config.smithy_tls_context()?)
             .build_https();
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .http_client(http_client)

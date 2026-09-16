@@ -1,6 +1,6 @@
 //! Asynchronous byte transport for public repository objects.
 
-use crate::RepositoryError;
+use crate::{RepositoryError, RepositoryTlsConfig};
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::header::{
@@ -62,11 +62,13 @@ pub struct HttpTransport {
 
 impl HttpTransport {
     /// Creates an anonymous transport with conservative default timeouts.
-    pub fn anonymous() -> Result<Self, RepositoryError> {
-        let client = reqwest::Client::builder()
+    pub fn anonymous(tls_config: &RepositoryTlsConfig) -> Result<Self, RepositoryError> {
+        let builder = reqwest::Client::builder()
             .user_agent(concat!("bobr-repo/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(15))
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(120));
+        let client = tls_config
+            .configure_reqwest(builder)
             .build()
             .map_err(|error| {
                 RepositoryError::new(format!("failed to create HTTP client: {error}"))

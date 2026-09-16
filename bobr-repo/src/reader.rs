@@ -4,8 +4,8 @@ use crate::{
     BuildIndex, BuildIndexHash, CurrentPublication, FetchRequest, FetchResult, FsFileList,
     FsFileListHash, HttpTransport, MAX_ENCODED_CONTENT_BYTES, MAX_MASTER_BYTES, MAX_METADATA_BYTES,
     Master, ObjectKind, ObjectList, ObjectListHash, RepositoryCache, RepositoryError,
-    RepositoryTransport, ReuseIndex, ReuseIndexHash, Slot, TrustedKeys, VerifiedMaster,
-    decode_fs_file, decode_object,
+    RepositoryTlsConfig, RepositoryTransport, ReuseIndex, ReuseIndexHash, Slot, TrustedKeys,
+    VerifiedMaster, decode_fs_file, decode_object,
 };
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use bobr_store::fs_tree::FsFileHash;
@@ -138,12 +138,13 @@ impl RepositoryReader {
         master_url: Url,
         trusted_keys: TrustedKeys,
         cache_root: &Path,
+        tls_config: &RepositoryTlsConfig,
     ) -> Result<Self, RepositoryError> {
         Self::new(
             master_url,
             trusted_keys,
             cache_root,
-            Arc::new(HttpTransport::anonymous()?),
+            Arc::new(HttpTransport::anonymous(tls_config)?),
         )
     }
 

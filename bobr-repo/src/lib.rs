@@ -19,6 +19,7 @@ mod publisher;
 mod reader;
 mod s3;
 mod tar_profile;
+mod tls_config;
 mod transport;
 
 pub use cache::*;
@@ -33,6 +34,7 @@ pub use publisher::*;
 pub use reader::*;
 pub use s3::*;
 pub use tar_profile::*;
+pub use tls_config::*;
 pub use transport::*;
 
 /// Returns namespace runtime functions required by the repository publisher.

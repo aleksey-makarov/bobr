@@ -4,9 +4,9 @@
 
 use bobr_repo::{
     CurrentPublication, ImmutableUpload, MAX_MASTER_BYTES, Master, MasterHash, PublicationMetadata,
-    PublicationMode, PublicationState, RepositoryError, RepositoryReader, S3Location, S3Repository,
-    S3RepositoryTransport, SlotContents, StoredKey, TrustedKeys, encode_preferred_fs_files,
-    encode_preferred_object,
+    PublicationMode, PublicationState, RepositoryError, RepositoryReader, RepositoryTlsConfig,
+    S3Location, S3Repository, S3RepositoryTransport, SlotContents, StoredKey, TrustedKeys,
+    encode_preferred_fs_files, encode_preferred_object,
 };
 use bobr_runtime::runtime_provider::{RuntimeProvider, runtime_provider_for_current_process};
 use bobr_store::{ReadOnlyStore, StoreInventory};
@@ -80,6 +80,7 @@ struct PrepareArgs {
     trusted_keys: Vec<PathBuf>,
     data_base_url: Option<Url>,
     cache: Option<PathBuf>,
+    ca_bundle: Option<PathBuf>,
     action: PrepareAction,
     retention: Option<u64>,
     output: PathBuf,
@@ -100,6 +101,7 @@ impl PrepareArgs {
         let mut trusted_keys = Vec::new();
         let mut data_base_url = None;
         let mut cache = None;
+        let mut ca_bundle = None;
         let mut action = PrepareAction::Append;
         let mut action_seen = false;
         let mut retention = None;
@@ -116,6 +118,7 @@ impl PrepareArgs {
                     data_base_url = Some(parse_https(&args.value(&flag)?, "data base URL")?)
                 }
                 "--cache" => cache = Some(args.value_path(&flag)?),
+                "--ca-bundle" => ca_bundle = Some(args.value_path(&flag)?),
                 "--append" => set_action(&mut action, &mut action_seen, PrepareAction::Append)?,
                 "--add-slot" => set_action(&mut action, &mut action_seen, PrepareAction::AddSlot)?,
                 "--rotate" => set_action(&mut action, &mut action_seen, PrepareAction::Rotate)?,
@@ -140,6 +143,7 @@ impl PrepareArgs {
             trusted_keys,
             data_base_url,
             cache,
+            ca_bundle,
             action,
             retention,
             output: required(output, "--output")?,
@@ -153,6 +157,7 @@ struct PublishArgs {
     repository: String,
     signing_key: PathBuf,
     trusted_keys: Vec<PathBuf>,
+    ca_bundle: Option<PathBuf>,
     yes: bool,
 }
 
@@ -162,6 +167,7 @@ impl PublishArgs {
         let mut repository = None;
         let mut signing_key = None;
         let mut trusted_keys = Vec::new();
+        let mut ca_bundle = None;
         let mut yes = false;
         while let Some(flag) = args.next_utf8()? {
             match flag.as_str() {
@@ -169,6 +175,7 @@ impl PublishArgs {
                 "--repository" => repository = Some(args.value(&flag)?),
                 "--signing-key" => signing_key = Some(args.value_path(&flag)?),
                 "--trusted-key" => trusted_keys.push(args.value_path(&flag)?),
+                "--ca-bundle" => ca_bundle = Some(args.value_path(&flag)?),
                 "--yes" => yes = true,
                 _ => {
                     return Err(RepositoryError::new(format!(
@@ -182,6 +189,7 @@ impl PublishArgs {
             repository: required(repository, "--repository")?,
             signing_key: required(signing_key, "--signing-key")?,
             trusted_keys,
+            ca_bundle,
             yes,
         })
     }
@@ -192,6 +200,7 @@ struct StatusArgs {
     master_url: Url,
     trusted_keys: Vec<PathBuf>,
     cache: Option<PathBuf>,
+    ca_bundle: Option<PathBuf>,
     compact: bool,
     repository: Option<String>,
     scan_storage: bool,
@@ -202,6 +211,7 @@ impl StatusArgs {
         let mut master_url = None;
         let mut trusted_keys = Vec::new();
         let mut cache = None;
+        let mut ca_bundle = None;
         let mut compact = false;
         let mut repository = None;
         let mut scan_storage = false;
@@ -212,6 +222,7 @@ impl StatusArgs {
                 }
                 "--trusted-key" => trusted_keys.push(args.value_path(&flag)?),
                 "--cache" => cache = Some(args.value_path(&flag)?),
+                "--ca-bundle" => ca_bundle = Some(args.value_path(&flag)?),
                 "--compact" => compact = true,
                 "--repository" => repository = Some(args.value(&flag)?),
                 "--scan-storage" => scan_storage = true,
@@ -229,6 +240,7 @@ impl StatusArgs {
             master_url: required(master_url, "--master-url")?,
             trusted_keys,
             cache,
+            ca_bundle,
             compact,
             repository,
             scan_storage,
@@ -242,6 +254,7 @@ struct GcArgs {
     master_url: Url,
     trusted_keys: Vec<PathBuf>,
     cache: Option<PathBuf>,
+    ca_bundle: Option<PathBuf>,
     dry_run: bool,
 }
 
@@ -251,6 +264,7 @@ impl GcArgs {
         let mut master_url = None;
         let mut trusted_keys = Vec::new();
         let mut cache = None;
+        let mut ca_bundle = None;
         let mut dry_run = false;
         while let Some(flag) = args.next_utf8()? {
             match flag.as_str() {
@@ -260,6 +274,7 @@ impl GcArgs {
                 }
                 "--trusted-key" => trusted_keys.push(args.value_path(&flag)?),
                 "--cache" => cache = Some(args.value_path(&flag)?),
+                "--ca-bundle" => ca_bundle = Some(args.value_path(&flag)?),
                 "--dry-run" => dry_run = true,
                 _ => return Err(RepositoryError::new(format!("unknown gc option '{flag}'"))),
             }
@@ -269,14 +284,16 @@ impl GcArgs {
             master_url: required(master_url, "--master-url")?,
             trusted_keys,
             cache,
+            ca_bundle,
             dry_run,
         })
     }
 }
 
 async fn prepare(args: PrepareArgs) -> Result<(), RepositoryError> {
+    let tls_config = load_tls_config(args.ca_bundle.as_deref())?;
     let location = S3Location::parse(&args.repository)?;
-    let repository = S3Repository::from_environment(location).await?;
+    let repository = S3Repository::from_environment(location, &tls_config).await?;
     let trusted = load_trusted_keys(&args.trusted_keys)?;
     let current_object = repository.get_bytes("master", MAX_MASTER_BYTES).await?;
     let current_verified = current_object
@@ -361,7 +378,9 @@ async fn publish(args: PublishArgs) -> Result<(), RepositoryError> {
     if master.encode_payload() != candidate {
         return Err(RepositoryError::new("candidate is not deterministic CBOR"));
     }
-    let repository = S3Repository::from_environment(S3Location::parse(&args.repository)?).await?;
+    let tls_config = load_tls_config(args.ca_bundle.as_deref())?;
+    let repository =
+        S3Repository::from_environment(S3Location::parse(&args.repository)?, &tls_config).await?;
     let trusted = load_trusted_keys(&args.trusted_keys)?;
     let current = repository.get_bytes("master", MAX_MASTER_BYTES).await?;
     let (predecessor_etag, current_master) = match (master.previous_master_hash(), current.as_ref())
@@ -418,18 +437,23 @@ async fn publish(args: PublishArgs) -> Result<(), RepositoryError> {
 }
 
 async fn status(args: StatusArgs) -> Result<(), RepositoryError> {
+    let tls_config = load_tls_config(args.ca_bundle.as_deref())?;
     let trusted = load_trusted_keys(&args.trusted_keys)?;
     let cache = CacheRoot::new(args.cache.as_deref())?;
-    let reader = RepositoryReader::https(args.master_url.clone(), trusted, cache.path())?;
+    let reader =
+        RepositoryReader::https(args.master_url.clone(), trusted, cache.path(), &tls_config)?;
     let publication = reader.publication_metadata().await?;
     let now = unix_time()?;
     let mut document = logical_status(&args.master_url, &publication, now);
     if args.scan_storage {
-        let repository = S3Repository::from_environment(S3Location::parse(
-            args.repository
-                .as_deref()
-                .expect("validated status repository"),
-        )?)
+        let repository = S3Repository::from_environment(
+            S3Location::parse(
+                args.repository
+                    .as_deref()
+                    .expect("validated status repository"),
+            )?,
+            &tls_config,
+        )
         .await?;
         let keys = repository.list().await?;
         document["storage"] = storage_status(&publication.metadata, &keys, now);
@@ -443,7 +467,9 @@ async fn status(args: StatusArgs) -> Result<(), RepositoryError> {
 }
 
 async fn gc(args: GcArgs) -> Result<(), RepositoryError> {
-    let repository = S3Repository::from_environment(S3Location::parse(&args.repository)?).await?;
+    let tls_config = load_tls_config(args.ca_bundle.as_deref())?;
+    let repository =
+        S3Repository::from_environment(S3Location::parse(&args.repository)?, &tls_config).await?;
     let master_object = repository
         .get_bytes("master", MAX_MASTER_BYTES)
         .await?
@@ -1010,6 +1036,13 @@ fn confirm_publication() -> Result<(), RepositoryError> {
     Ok(())
 }
 
+fn load_tls_config(path: Option<&Path>) -> Result<RepositoryTlsConfig, RepositoryError> {
+    path.map_or_else(
+        || Ok(RepositoryTlsConfig::default_roots()),
+        RepositoryTlsConfig::from_ca_bundle,
+    )
+}
+
 fn load_trusted_keys(paths: &[PathBuf]) -> Result<TrustedKeys, RepositoryError> {
     let mut trusted = TrustedKeys::default();
     for path in paths {
@@ -1259,6 +1292,80 @@ mod tests {
         ];
         let mut args = Arguments::new(values.into_iter().map(OsString::from));
         assert!(PrepareArgs::parse(&mut args).is_err());
+    }
+
+    #[test]
+    fn every_command_accepts_the_repository_ca_bundle() {
+        let path = PathBuf::from("/tmp/repository-ca.pem");
+
+        let mut args = Arguments::new(
+            [
+                "--store",
+                "/tmp/store",
+                "--repository",
+                "s3://bucket",
+                "--master-url",
+                "https://example/master",
+                "--ca-bundle",
+                "/tmp/repository-ca.pem",
+                "--output",
+                "/tmp/candidate",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+        assert_eq!(
+            PrepareArgs::parse(&mut args).unwrap().ca_bundle,
+            Some(path.clone())
+        );
+
+        let mut args = Arguments::new(
+            [
+                "--candidate",
+                "/tmp/candidate",
+                "--repository",
+                "s3://bucket",
+                "--signing-key",
+                "/tmp/signing-key",
+                "--ca-bundle",
+                "/tmp/repository-ca.pem",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+        assert_eq!(
+            PublishArgs::parse(&mut args).unwrap().ca_bundle,
+            Some(path.clone())
+        );
+
+        let mut args = Arguments::new(
+            [
+                "--master-url",
+                "https://example/master",
+                "--ca-bundle",
+                "/tmp/repository-ca.pem",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+        assert_eq!(
+            StatusArgs::parse(&mut args).unwrap().ca_bundle,
+            Some(path.clone())
+        );
+
+        let mut args = Arguments::new(
+            [
+                "--repository",
+                "s3://bucket",
+                "--master-url",
+                "https://example/master",
+                "--ca-bundle",
+                "/tmp/repository-ca.pem",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+        assert_eq!(GcArgs::parse(&mut args).unwrap().ca_bundle, Some(path));
     }
 
     #[test]
