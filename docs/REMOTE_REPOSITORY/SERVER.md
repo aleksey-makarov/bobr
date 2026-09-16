@@ -461,82 +461,30 @@ means the CA or SAN is wrong; `InvalidAccessKeyId` or `SignatureDoesNotMatch`
 means the AWS CLI profile and `/etc/versitygw/versitygw.env` do not contain
 the same S3 credentials.
 
-## Create the repository bucket
+## Initialize the repository bucket
 
-An empty S3 bucket is sufficient. `bobr-repo` creates the repository when it
-publishes the first signed master:
-
-```sh
-aws \
-    --endpoint-url "$S3_ENDPOINT" \
-    s3api create-bucket \
-    --bucket "$S3_BUCKET"
-```
-
-Do not enable S3 object versioning merely for Bobr. Bobr's immutable keys are
-already content-addressed, while publication of `/master` uses conditional
-replacement.
-
-## Permit anonymous object reads
-
-Ordinary Bobr *clients* do not use S3 credentials. Give anonymous *clients* only
-`GetObject`, not bucket listing or any write operation.
-
-Create `public-read-policy.json`, replacing the bucket name if necessary:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "PublicBobrRepositoryRead",
-      "Effect": "Allow",
-      "Principal": "*",
-      "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::bobr-repository/*"
-    }
-  ]
-}
-```
-
-Install the policy with an authenticated administrative request:
+Export the endpoint for the standard AWS SDK configuration chain, then let
+`bobr-repo` create and configure the dedicated bucket:
 
 ```sh
-aws \
-    --endpoint-url "$S3_ENDPOINT" \
-    s3api put-bucket-policy \
-    --bucket "$S3_BUCKET" \
-    --policy file://public-read-policy.json
+export AWS_ENDPOINT_URL_S3="$S3_ENDPOINT"
+
+bobr-repo init \
+    --repository "s3://$S3_BUCKET" \
+    --ca-bundle "$BOBR_PKI/local-repository-ca.cert.pem"
 ```
 
-A canned `public-read` ACL is broader under VersityGW because it also grants
-bucket read and listing operations. The explicit policy above exposes only
-objects whose complete keys are already known to a *client*.
+The operation is idempotent. It owns the bucket's complete policy, exposes
+anonymous `GetObject` only for Bobr's public namespaces, and configures
+bucket-level Public Access Block so public ACLs stay disabled while the
+explicit public-read policy remains usable. VersityGW may report Public Access
+Block as unsupported; `bobr-repo` reports this and still installs the policy.
 
-Before a Bobr master exists, upload a disposable probe with the authenticated
-AWS CLI:
+Do not use this bucket for unrelated data. Do not enable S3 object versioning
+merely for Bobr: immutable repository keys are already content-addressed,
+while publication of `/master` uses conditional replacement.
 
-```sh
-printf 'bobr repository probe\n' > /tmp/bobr-repository-probe
-
-aws \
-    --endpoint-url "$S3_ENDPOINT" \
-    s3api put-object \
-    --bucket "$S3_BUCKET" \
-    --key probe \
-    --body /tmp/bobr-repository-probe
-```
-
-Anonymous HTTPS GET must succeed:
-
-```sh
-curl \
-    --fail \
-    --cacert "$BOBR_PKI/local-repository-ca.cert.pem" \
-    "$S3_ENDPOINT/$S3_BUCKET/probe"
-```
-
-Anonymous listing must fail:
+Verify that anonymous listing is denied:
 
 ```sh
 aws \
@@ -545,16 +493,6 @@ aws \
     --endpoint-url "$S3_ENDPOINT" \
     s3api list-objects-v2 \
     --bucket "$S3_BUCKET"
-```
-
-Delete the probe with the authenticated AWS CLI:
-
-```sh
-aws \
-    --endpoint-url "$S3_ENDPOINT" \
-    s3api delete-object \
-    --bucket "$S3_BUCKET" \
-    --key probe
 ```
 
 ## Generate the Bobr repository signing key

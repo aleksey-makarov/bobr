@@ -60,6 +60,7 @@ async fn run() -> Result<(), RepositoryError> {
         return Ok(());
     }
     match command.as_str() {
+        "init" => init(InitArgs::parse(&mut args)?).await,
         "prepare" => prepare(PrepareArgs::parse(&mut args)?).await,
         "publish" => publish(PublishArgs::parse(&mut args)?).await,
         "status" => status(StatusArgs::parse(&mut args)?).await,
@@ -69,6 +70,34 @@ async fn run() -> Result<(), RepositoryError> {
             Ok(())
         }
         _ => Err(usage_error()),
+    }
+}
+
+#[derive(Debug)]
+struct InitArgs {
+    repository: String,
+    ca_bundle: Option<PathBuf>,
+}
+
+impl InitArgs {
+    fn parse(args: &mut Arguments) -> Result<Self, RepositoryError> {
+        let mut repository = None;
+        let mut ca_bundle = None;
+        while let Some(flag) = args.next_utf8()? {
+            match flag.as_str() {
+                "--repository" => repository = Some(args.value(&flag)?),
+                "--ca-bundle" => ca_bundle = Some(args.value_path(&flag)?),
+                _ => {
+                    return Err(RepositoryError::new(format!(
+                        "unknown init option '{flag}'"
+                    )));
+                }
+            }
+        }
+        Ok(Self {
+            repository: required(repository, "--repository")?,
+            ca_bundle,
+        })
     }
 }
 
@@ -288,6 +317,29 @@ impl GcArgs {
             dry_run,
         })
     }
+}
+
+async fn init(args: InitArgs) -> Result<(), RepositoryError> {
+    let tls_config = load_tls_config(args.ca_bundle.as_deref())?;
+    let location = S3Location::parse(&args.repository)?;
+    location.require_bucket_root()?;
+    let repository = S3Repository::from_environment(location, &tls_config).await?;
+    let initialized = repository.initialize_dedicated_bucket().await?;
+    let bucket = if initialized.created {
+        "created"
+    } else {
+        "already existed"
+    };
+    let policy = if initialized.policy_updated {
+        "installed"
+    } else {
+        "already current"
+    };
+    eprintln!("bucket {bucket}; public-read policy {policy}");
+    if !initialized.public_access_block_supported {
+        eprintln!("bucket Public Access Block is not supported by this S3 implementation");
+    }
+    Ok(())
 }
 
 async fn prepare(args: PrepareArgs) -> Result<(), RepositoryError> {
@@ -1221,7 +1273,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn usage_error() -> RepositoryError {
-    RepositoryError::new("usage: bobr-repo <prepare|publish|status|gc> [options]")
+    RepositoryError::new("usage: bobr-repo <init|prepare|publish|status|gc> [options]")
 }
 
 fn json_pretty(value: &Value) -> Result<String, RepositoryError> {
@@ -1235,7 +1287,7 @@ fn json_compact(value: &Value) -> Result<String, RepositoryError> {
 }
 
 fn print_usage() {
-    println!("usage: bobr-repo <prepare|publish|status|gc> [options]");
+    println!("usage: bobr-repo <init|prepare|publish|status|gc> [options]");
 }
 
 fn run_runtime_worker_if_requested() -> Option<ExitCode> {
@@ -1297,6 +1349,21 @@ mod tests {
     #[test]
     fn every_command_accepts_the_repository_ca_bundle() {
         let path = PathBuf::from("/tmp/repository-ca.pem");
+
+        let mut args = Arguments::new(
+            [
+                "--repository",
+                "s3://bucket",
+                "--ca-bundle",
+                "/tmp/repository-ca.pem",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+        assert_eq!(
+            InitArgs::parse(&mut args).unwrap().ca_bundle,
+            Some(path.clone())
+        );
 
         let mut args = Arguments::new(
             [

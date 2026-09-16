@@ -8,7 +8,10 @@ use async_trait::async_trait;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadError;
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier};
+use aws_sdk_s3::types::{
+    BucketLocationConstraint, CompletedMultipartUpload, CompletedPart, CreateBucketConfiguration,
+    Delete, ObjectIdentifier, PublicAccessBlockConfiguration,
+};
 use aws_smithy_http_client::{
     Builder as HttpClientBuilder,
     tls::{self, rustls_provider::CryptoMode},
@@ -47,6 +50,17 @@ pub enum ImmutableUpload {
     Created,
     /// The key already existed and was left unchanged.
     AlreadyExists,
+}
+
+/// Changes made while initializing a dedicated repository bucket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BucketInitialization {
+    /// Whether this invocation created the bucket.
+    pub created: bool,
+    /// Whether the S3 implementation accepted bucket-level Public Access Block.
+    pub public_access_block_supported: bool,
+    /// Whether this invocation installed or replaced the bucket policy.
+    pub policy_updated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +127,17 @@ impl S3Location {
         Ok(Self { bucket, prefix })
     }
 
+    /// Requires this location to name a bucket rather than a key prefix.
+    pub fn require_bucket_root(&self) -> Result<(), RepositoryError> {
+        if self.prefix.is_empty() {
+            Ok(())
+        } else {
+            Err(RepositoryError::new(
+                "repository initialization requires a bucket root (s3://BUCKET)",
+            ))
+        }
+    }
+
     fn key(&self, relative: &str) -> Result<String, RepositoryError> {
         if relative.is_empty()
             || relative.starts_with('/')
@@ -166,6 +191,25 @@ impl S3Repository {
     /// Constructs a repository around an explicitly configured SDK client.
     pub fn new(client: aws_sdk_s3::Client, location: S3Location) -> Self {
         Self { client, location }
+    }
+
+    /// Creates or repairs a dedicated Bobr repository bucket.
+    ///
+    /// Initialization owns the complete bucket policy and therefore rejects
+    /// repository locations with an S3 key prefix.
+    pub async fn initialize_dedicated_bucket(
+        &self,
+    ) -> Result<BucketInitialization, RepositoryError> {
+        self.location.require_bucket_root()?;
+
+        let created = self.ensure_bucket().await?;
+        let public_access_block_supported = self.configure_public_access_block().await?;
+        let policy_updated = self.configure_public_read_policy().await?;
+        Ok(BucketInitialization {
+            created,
+            public_access_block_supported,
+            policy_updated,
+        })
     }
 
     /// Fetches a small mutable object into memory.
@@ -340,6 +384,88 @@ impl S3Repository {
             }
         }
         Ok(())
+    }
+
+    async fn ensure_bucket(&self) -> Result<bool, RepositoryError> {
+        match self
+            .client
+            .head_bucket()
+            .bucket(&self.location.bucket)
+            .send()
+            .await
+        {
+            Ok(_) => return Ok(false),
+            Err(error) if is_status(&error, 404, "NotFound") => {}
+            Err(error) => return Err(s3_error("inspect bucket", "", &error)),
+        }
+
+        let mut request = self.client.create_bucket().bucket(&self.location.bucket);
+        if let Some(region) = self.client.config().region().map(AsRef::<str>::as_ref)
+            && region != "us-east-1"
+        {
+            request = request.create_bucket_configuration(
+                CreateBucketConfiguration::builder()
+                    .location_constraint(BucketLocationConstraint::from(region))
+                    .build(),
+            );
+        }
+        match request.send().await {
+            Ok(_) => Ok(true),
+            Err(error) if service_code(&error) == Some("BucketAlreadyOwnedByYou") => Ok(false),
+            Err(error) => Err(s3_error("create bucket", "", &error)),
+        }
+    }
+
+    async fn configure_public_access_block(&self) -> Result<bool, RepositoryError> {
+        let configuration = PublicAccessBlockConfiguration::builder()
+            .block_public_acls(true)
+            .ignore_public_acls(true)
+            .block_public_policy(false)
+            .restrict_public_buckets(false)
+            .build();
+        match self
+            .client
+            .put_public_access_block()
+            .bucket(&self.location.bucket)
+            .public_access_block_configuration(configuration)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(error) if is_not_implemented(&error) => Ok(false),
+            Err(error) => Err(s3_error("configure bucket Public Access Block", "", &error)),
+        }
+    }
+
+    async fn configure_public_read_policy(&self) -> Result<bool, RepositoryError> {
+        let expected = public_read_policy(&self.location.bucket);
+        let current = match self
+            .client
+            .get_bucket_policy()
+            .bucket(&self.location.bucket)
+            .send()
+            .await
+        {
+            Ok(output) => output
+                .policy()
+                .and_then(|policy| serde_json::from_str(policy).ok()),
+            Err(error) if is_status(&error, 404, "NoSuchBucketPolicy") => None,
+            Err(error) => return Err(s3_error("read bucket policy", "", &error)),
+        };
+        if current.as_ref() == Some(&expected) {
+            return Ok(false);
+        }
+        let policy = serde_json::to_string(&expected).map_err(|error| {
+            RepositoryError::new(format!("failed to encode bucket policy: {error}"))
+        })?;
+        self.client
+            .put_bucket_policy()
+            .bucket(&self.location.bucket)
+            .policy(policy)
+            .send()
+            .await
+            .map_err(|error| s3_error("configure bucket policy", "", &error))?;
+        Ok(true)
     }
 
     async fn put_small(
@@ -611,6 +737,38 @@ where
             .is_some_and(|response| response.status().as_u16() == status)
 }
 
+fn is_not_implemented<E>(error: &SdkError<E, HttpResponse>) -> bool
+where
+    E: ProvideErrorMetadata,
+{
+    matches!(service_code(error), Some("NotImplemented" | "NotSupported"))
+        || error
+            .raw_response()
+            .is_some_and(|response| response.status().as_u16() == 501)
+}
+
+fn public_read_policy(bucket: &str) -> serde_json::Value {
+    let resource = |key: &str| format!("arn:aws:s3:::{bucket}/{key}");
+    serde_json::json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Sid": "BobrRepositoryPublicRead",
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "s3:GetObject",
+            "Resource": [
+                resource("master"),
+                resource("b/*"),
+                resource("r/*"),
+                resource("lo/*"),
+                resource("lf/*"),
+                resource("o/*"),
+                resource("f/*"),
+            ],
+        }],
+    })
+}
+
 fn complete_precondition_failed(
     error: &SdkError<CompleteMultipartUploadError, HttpResponse>,
 ) -> bool {
@@ -651,6 +809,36 @@ mod tests {
     fn rejects_non_s3_and_noncanonical_locations() {
         assert!(S3Location::parse("https://example/a").is_err());
         assert!(S3Location::parse("s3://example/a?query").is_err());
+    }
+
+    #[test]
+    fn bucket_initialization_rejects_a_prefix() {
+        assert!(
+            S3Location::parse("s3://example/prefix")
+                .unwrap()
+                .require_bucket_root()
+                .is_err()
+        );
+        S3Location::parse("s3://example")
+            .unwrap()
+            .require_bucket_root()
+            .unwrap();
+    }
+
+    #[test]
+    fn public_policy_exposes_only_repository_reads() {
+        let policy = public_read_policy("example");
+        let statement = &policy["Statement"][0];
+        assert_eq!(statement["Action"], "s3:GetObject");
+        assert_eq!(statement["Principal"], "*");
+        assert_eq!(statement["Resource"].as_array().unwrap().len(), 7);
+        assert!(
+            statement["Resource"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("arn:aws:s3:::example/master"))
+        );
+        assert!(!policy.to_string().contains("ListBucket"));
     }
 
     #[test]

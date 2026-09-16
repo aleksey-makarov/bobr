@@ -12,17 +12,18 @@ library implementation as the future Bobr remote-repository client.
 
 ## Scope
 
-`bobr-repo` has four subcommands:
+`bobr-repo` has five subcommands:
 
 ```text
+bobr-repo init
 bobr-repo prepare
 bobr-repo publish
 bobr-repo status
 bobr-repo gc
 ```
 
-There is no repository initialization command. An empty S3 prefix becomes a
-repository when its first master is published. There is no fixed slot-count
+`init` creates and configures a dedicated S3 bucket. The first signed master
+still creates the repository's logical state. There is no fixed slot-count
 configuration and no general reconfiguration command. Slots are added and
 rotated explicitly by `prepare`.
 
@@ -69,6 +70,11 @@ only `/master`. It does not need permission to write or delete immutable data.
 An administrative S3 identity used for `gc` may list and delete immutable
 keys, but does not need the signing key or permission to replace `/master`.
 
+An S3 administrator runs `init`. This identity may create the dedicated bucket
+and replace its complete bucket policy and bucket-level Public Access Block
+configuration. It is more privileged than any steady-state publication
+identity and need not be present on the build server.
+
 Ordinary Bobr clients use anonymous HTTPS and pinned public keys. They have no
 S3 credentials and no repository secrets.
 
@@ -89,6 +95,9 @@ URI:
 
 The mutable master is stored at `master` below this prefix. All immutable keys
 use the relative paths defined by `MASTER.md`.
+
+`init` is the exception: because it owns the complete bucket policy, it accepts
+only a bucket root in the form `s3://bucket`. It rejects a repository prefix.
 
 S3 endpoint, region, credentials, and session tokens come from the standard
 AWS credential and configuration chain. This permits AWS S3, Hetzner Object
@@ -113,6 +122,42 @@ remain enabled.
 The bundle is a local transport setting. It is not embedded in `/master`, is
 not part of repository identity, and is not stored in the metadata cache.
 Malformed, empty, or unreadable bundles fail before the first network request.
+
+## `init`
+
+`init` prepares a dedicated bucket for a Bobr repository:
+
+```text
+bobr-repo init \
+    --repository s3://BUCKET \
+    [--ca-bundle CA-BUNDLE.pem]
+```
+
+The command is idempotent. It creates the bucket when it is absent, then owns
+and converges these two bucket-level settings:
+
+- Public Access Block has `BlockPublicAcls = true`,
+  `IgnorePublicAcls = true`, `BlockPublicPolicy = false`, and
+  `RestrictPublicBuckets = false`;
+- the complete bucket policy grants anonymous `s3:GetObject` only for
+  `master`, `b/*`, `r/*`, `lo/*`, `lf/*`, `o/*`, and `f/*`.
+
+It grants neither anonymous bucket listing nor anonymous writes. Because the
+policy is replaced rather than merged, the bucket must be dedicated to one
+Bobr repository. `init` does not alter account-level Public Access Block.
+
+Some S3-compatible implementations do not implement bucket-level Public
+Access Block. A recognized `NotImplemented` response is reported and does not
+prevent installation of the explicit bucket policy. Other failures are fatal.
+A missing bucket is distinguished from an inaccessible bucket: an access
+denial is never treated as permission to create a replacement.
+
+If bucket creation succeeds but later configuration fails, the bucket is not
+deleted. A newly created S3 bucket is private at this point, and rerunning
+`init` repairs the incomplete configuration. The command does not create a
+master, a slot, repository content, or signing keys.
+
+## Public data location
 
 The public immutable-data URL is a separate value:
 
