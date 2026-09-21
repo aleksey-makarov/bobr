@@ -76,6 +76,11 @@ pub(crate) fn with_fresh_run(request_bytes: &[u8]) -> Vec<u8> {
         Value::String(work.to_string_lossy().into_owned()),
     );
     request.insert("run_id".to_string(), Value::String(run_id));
+    // These requests are realized in-process while libtest owns the terminal.
+    // A live progress sink writes terminal control sequences below libtest's
+    // output capture and corrupts its one-line-per-test display. Keep the full
+    // file logs, but suppress routine terminal progress for these test runs.
+    request.insert("quiet".to_string(), Value::Bool(true));
     LAST_RUN_LOGS.with(|last| *last.borrow_mut() = Some(logs));
     serde_json::to_vec(&Value::Object(request)).unwrap_or_else(|_| request_bytes.to_vec())
 }

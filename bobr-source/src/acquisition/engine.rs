@@ -1069,7 +1069,7 @@ mod tests {
         work: PathBuf,
         run_id: String,
         limits: Limits,
-        quiet: Option<bool>,
+        quiet: bool,
         sources: Vec<SourceEntry>,
     }
 
@@ -1142,7 +1142,11 @@ mod tests {
             work,
             run_id: "260809120000".to_string(),
             limits: Limits::default(),
-            quiet: None,
+            // Unit tests run the engine in-process under libtest. A live
+            // terminal sink bypasses libtest's output capture and overwrites
+            // its one-line-per-test display; the persistent logs remain the
+            // source of diagnostics for these runs.
+            quiet: true,
             sources,
         }
     }
@@ -1163,7 +1167,7 @@ mod tests {
         let logger = Arc::new(BuildRunLogger::new(
             run.logs_dir(),
             run.run_id(),
-            request.quiet.unwrap_or(false),
+            request.quiet,
         )?);
         let secondary = Arc::new(
             SecondaryResolver::new(store.clone(), run.run_id(), Vec::new(), content_sources)
@@ -1275,7 +1279,7 @@ mod tests {
             },
             store: store_root.clone(),
             limits: Limits::default(),
-            quiet: None,
+            quiet: true,
         };
         assert!(run_test(warmup).await.unwrap().is_success());
         handle.join().unwrap();
@@ -1391,7 +1395,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let mut request = request_in(&temp, vec![http_source("flaky", declared, &[&url])]);
-        request.quiet = Some(true);
+        request.quiet = true;
         let summary = run_test(request).await.unwrap();
         handle.join().unwrap();
         assert!(summary.is_success(), "{summary:?}");

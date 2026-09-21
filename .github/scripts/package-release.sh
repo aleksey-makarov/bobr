@@ -123,6 +123,7 @@ if [ "${kind}" = "main" ]; then
   "logs": "${smoke}/store/logs/release-smoke",
   "work": "${smoke}/store/work/release-smoke",
   "run_id": "release-smoke",
+  "quiet": true,
   "goals": ["root"],
   "nodes": {
     "root": {
