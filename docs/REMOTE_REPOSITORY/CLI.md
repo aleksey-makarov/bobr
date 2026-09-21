@@ -417,6 +417,7 @@ bobr-repo status \
 The command authenticates `/master` and fetches the object and filesystem-file
 lists referenced by all current and retained states. It reports:
 
+- `state = "ready"`, the number of current slots, and the active slot serial;
 - the master URL, data base URL, signing key identifier, and master hash;
 - active, sealed, and retained states with their serials and deadlines;
 - object and filesystem-file references per state;
@@ -426,7 +427,8 @@ lists referenced by all current and retained states. It reports:
 - expired retained states which a future preparation may prune.
 
 This mode does not list S3 and cannot report encoded byte sizes or unreferenced
-bucket objects.
+bucket objects. Consequently, the top-level
+`active_slot.content_bytes` field is `null`.
 
 ### Shared metadata cache
 
@@ -452,9 +454,49 @@ bobr-repo status \
     [--ca-bundle CA-BUNDLE.pem]
 ```
 
-This mode additionally lists the recognized S3 namespaces. S3 listing returns
-encoded object sizes, so the command does not download every `o/*` and `f/*`
-value or issue a separate HEAD request for every key.
+This mode treats authenticated S3 as the authoritative administrative view. It
+reads and verifies `master` directly through S3, fetches the immutable metadata
+named by that master through the S3 transport, and lists the recognized S3
+namespaces. A public HTTP cache therefore cannot make publication decisions
+from a stale or missing master.
+
+S3 listing returns encoded object sizes, so the command does not download every
+`o/*` and `f/*` value or issue a separate HEAD request for every key.
+
+The stable top-level policy fields for a populated repository are:
+
+```json
+{
+  "state": "ready",
+  "current_slots": 3,
+  "active_slot": {
+    "serial": 17,
+    "content_bytes": 184532000000
+  }
+}
+```
+
+`current_slots` excludes retained slots. `content_bytes` is the sum of the
+encoded S3 sizes of the distinct `o/*` and `f/*` keys advertised by the active
+slot. It excludes `b/*`, `r/*`, `lo/*`, `lf/*`, and `master`. Content shared by
+several slots is counted in the size of every slot that advertises it; this is
+a policy measure, not exclusive physical ownership.
+
+An accessible bucket without `master` is a successful empty result:
+
+```json
+{"state":"empty","current_slots":0,"active_slot":null}
+```
+
+A definitive S3 `NoSuchBucket` is also a successful typed result:
+
+```json
+{"state":"missing","current_slots":0,"active_slot":null}
+```
+
+The publication wrapper decides whether `missing` permits bucket creation.
+Authorization failures, TLS failures, timeouts, and other ambiguous errors are
+not converted to `missing`.
 
 The JSON result additionally reports:
 
@@ -467,7 +509,12 @@ The JSON result additionally reports:
 - currently unreferenced immutable keys and bytes;
 - total bytes that become reclaimable after pruning all expired retained
   states;
-- advertised content keys missing from S3.
+- per-slot encoded content bytes used by publication policy.
+
+If an authenticated master advertises an immutable metadata or content key
+which the S3 scan cannot find, `status` fails instead of reporting a truncated
+size. A master change during the scan causes one complete retry; another change
+is an error rather than a mixed snapshot.
 
 Per-slot size is never presented as one ambiguous number. The output names
 `referenced_bytes`, `exclusive_bytes`, and

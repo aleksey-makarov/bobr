@@ -63,6 +63,15 @@ pub struct BucketInitialization {
     pub policy_updated: bool,
 }
 
+/// Result of an authenticated S3 bucket existence probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BucketPresence {
+    /// The configured bucket exists and is accessible.
+    Present,
+    /// S3 definitively reported that the configured bucket does not exist.
+    Missing,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConditionalPut {
     Written,
@@ -71,7 +80,7 @@ enum ConditionalPut {
 }
 
 /// Result of fetching one mutable S3 object.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct S3Object {
     /// Exact response bytes.
     pub bytes: Vec<u8>,
@@ -191,6 +200,24 @@ impl S3Repository {
     /// Constructs a repository around an explicitly configured SDK client.
     pub fn new(client: aws_sdk_s3::Client, location: S3Location) -> Self {
         Self { client, location }
+    }
+
+    /// Distinguishes an accessible bucket from a definite `NoSuchBucket`.
+    ///
+    /// Authorization, transport, and TLS failures remain errors rather than
+    /// being mistaken for absence.
+    pub async fn bucket_presence(&self) -> Result<BucketPresence, RepositoryError> {
+        match self
+            .client
+            .head_bucket()
+            .bucket(&self.location.bucket)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(BucketPresence::Present),
+            Err(error) if is_missing_bucket(&error) => Ok(BucketPresence::Missing),
+            Err(error) => Err(s3_error("inspect bucket", "", &error)),
+        }
     }
 
     /// Creates or repairs a dedicated Bobr repository bucket.
@@ -387,16 +414,9 @@ impl S3Repository {
     }
 
     async fn ensure_bucket(&self) -> Result<bool, RepositoryError> {
-        match self
-            .client
-            .head_bucket()
-            .bucket(&self.location.bucket)
-            .send()
-            .await
-        {
-            Ok(_) => return Ok(false),
-            Err(error) if is_status(&error, 404, "NotFound") => {}
-            Err(error) => return Err(s3_error("inspect bucket", "", &error)),
+        match self.bucket_presence().await? {
+            BucketPresence::Present => return Ok(false),
+            BucketPresence::Missing => {}
         }
 
         let mut request = self.client.create_bucket().bucket(&self.location.bucket);
@@ -747,6 +767,16 @@ where
             .is_some_and(|response| response.status().as_u16() == 501)
 }
 
+fn is_missing_bucket<E>(error: &SdkError<E, HttpResponse>) -> bool
+where
+    E: ProvideErrorMetadata,
+{
+    matches!(service_code(error), Some("NoSuchBucket" | "NotFound"))
+        || error
+            .raw_response()
+            .is_some_and(|response| response.status().as_u16() == 404)
+}
+
 fn public_read_policy(bucket: &str) -> serde_json::Value {
     let resource = |key: &str| format!("arn:aws:s3:::{bucket}/{key}");
     serde_json::json!({
@@ -791,7 +821,7 @@ fn s3_error<E: ProvideErrorMetadata + std::fmt::Debug, R: std::fmt::Debug>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aws_sdk_s3::operation::put_object::PutObjectError;
+    use aws_sdk_s3::operation::{head_bucket::HeadBucketError, put_object::PutObjectError};
     use aws_smithy_runtime_api::http::StatusCode;
     use aws_smithy_types::body::SdkBody;
     use aws_smithy_types::error::ErrorMetadata;
@@ -857,6 +887,30 @@ mod tests {
         );
         assert!(is_status(&coded_error, 412, "PreconditionFailed"));
         assert!(!is_status(&coded_error, 409, "ConditionalRequestConflict"));
+    }
+
+    #[test]
+    fn bucket_absence_does_not_include_access_denial() {
+        let not_found = HttpResponse::new(StatusCode::try_from(404).unwrap(), SdkBody::empty());
+        let not_found = SdkError::service_error(
+            HeadBucketError::generic(ErrorMetadata::builder().build()),
+            not_found,
+        );
+        assert!(is_missing_bucket(&not_found));
+
+        let denied = HttpResponse::new(StatusCode::try_from(403).unwrap(), SdkBody::empty());
+        let denied = SdkError::service_error(
+            HeadBucketError::generic(ErrorMetadata::builder().code("AccessDenied").build()),
+            denied,
+        );
+        assert!(!is_missing_bucket(&denied));
+
+        let coded = HttpResponse::new(StatusCode::try_from(500).unwrap(), SdkBody::empty());
+        let coded = SdkError::service_error(
+            HeadBucketError::generic(ErrorMetadata::builder().code("NoSuchBucket").build()),
+            coded,
+        );
+        assert!(is_missing_bucket(&coded));
     }
 
     #[test]

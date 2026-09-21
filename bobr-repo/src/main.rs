@@ -2,20 +2,24 @@
 
 #![allow(missing_docs)]
 
+mod status_report;
+
+use async_trait::async_trait;
 use bobr_repo::{
-    CurrentPublication, ImmutableUpload, MAX_MASTER_BYTES, Master, MasterHash, PublicationMetadata,
+    BucketPresence, ImmutableUpload, MAX_MASTER_BYTES, Master, MasterHash, PublicationMetadata,
     PublicationMode, PublicationState, RepositoryError, RepositoryReader, RepositoryTlsConfig,
-    S3Location, S3Repository, S3RepositoryTransport, SlotContents, StoredKey, TrustedKeys,
-    encode_preferred_fs_files, encode_preferred_object,
+    RepositoryTransport, S3Location, S3Object, S3Repository, S3RepositoryTransport, SlotContents,
+    StoredKey, TrustedKeys, encode_preferred_fs_files, encode_preferred_object,
 };
 use bobr_runtime::runtime_provider::{RuntimeProvider, runtime_provider_for_current_process};
 use bobr_store::{ReadOnlyStore, StoreInventory};
 use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use futures_util::{StreamExt, stream};
+use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -27,6 +31,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::{NamedTempFile, TempDir};
 use url::Url;
+
+use status_report::{RepositoryState, StatusReport};
 
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 const OCTET_STREAM: &str = "application/octet-stream";
@@ -492,12 +498,8 @@ async fn status(args: StatusArgs) -> Result<(), RepositoryError> {
     let tls_config = load_tls_config(args.ca_bundle.as_deref())?;
     let trusted = load_trusted_keys(&args.trusted_keys)?;
     let cache = CacheRoot::new(args.cache.as_deref())?;
-    let reader =
-        RepositoryReader::https(args.master_url.clone(), trusted, cache.path(), &tls_config)?;
-    let publication = reader.publication_metadata().await?;
     let now = unix_time()?;
-    let mut document = logical_status(&args.master_url, &publication, now);
-    if args.scan_storage {
+    let report = if args.scan_storage {
         let repository = S3Repository::from_environment(
             S3Location::parse(
                 args.repository
@@ -507,15 +509,152 @@ async fn status(args: StatusArgs) -> Result<(), RepositoryError> {
             &tls_config,
         )
         .await?;
-        let keys = repository.list().await?;
-        document["storage"] = storage_status(&publication.metadata, &keys, now);
-    }
-    if args.compact {
-        println!("{}", json_compact(&document)?);
+        administrative_status(&args.master_url, trusted, cache.path(), repository, now).await?
     } else {
-        println!("{}", json_pretty(&document)?);
+        let reader =
+            RepositoryReader::https(args.master_url.clone(), trusted, cache.path(), &tls_config)?;
+        let publication = reader.publication_metadata().await?;
+        StatusReport::ready(&args.master_url, &publication, None, now)?
+    };
+    if args.compact {
+        println!("{}", json_compact(&report)?);
+    } else {
+        println!("{}", json_pretty(&report)?);
     }
     Ok(())
+}
+
+async fn administrative_status(
+    master_url: &Url,
+    trusted: TrustedKeys,
+    cache_root: &Path,
+    repository: impl StatusRepository,
+    now: u64,
+) -> Result<StatusReport, RepositoryError> {
+    administrative_status_from(master_url, trusted, cache_root, &repository, now).await
+}
+
+#[async_trait]
+trait StatusRepository: Send + Sync {
+    async fn bucket_presence(&self) -> Result<BucketPresence, RepositoryError>;
+    async fn get_master(&self) -> Result<Option<S3Object>, RepositoryError>;
+    async fn list(&self) -> Result<Vec<StoredKey>, RepositoryError>;
+    fn metadata_transport(
+        &self,
+        master_url: Url,
+        data_base_url: Url,
+    ) -> Arc<dyn RepositoryTransport>;
+}
+
+#[async_trait]
+impl StatusRepository for S3Repository {
+    async fn bucket_presence(&self) -> Result<BucketPresence, RepositoryError> {
+        S3Repository::bucket_presence(self).await
+    }
+
+    async fn get_master(&self) -> Result<Option<S3Object>, RepositoryError> {
+        self.get_bytes("master", MAX_MASTER_BYTES).await
+    }
+
+    async fn list(&self) -> Result<Vec<StoredKey>, RepositoryError> {
+        S3Repository::list(self).await
+    }
+
+    fn metadata_transport(
+        &self,
+        master_url: Url,
+        data_base_url: Url,
+    ) -> Arc<dyn RepositoryTransport> {
+        Arc::new(S3RepositoryTransport::new(
+            self.clone(),
+            master_url,
+            data_base_url,
+        ))
+    }
+}
+
+async fn administrative_status_from(
+    master_url: &Url,
+    trusted: TrustedKeys,
+    cache_root: &Path,
+    repository: &impl StatusRepository,
+    now: u64,
+) -> Result<StatusReport, RepositoryError> {
+    for attempt in 0..2 {
+        if repository.bucket_presence().await? == BucketPresence::Missing {
+            return Ok(StatusReport::empty(RepositoryState::Missing));
+        }
+        let Some(observed_master) = repository.get_master().await? else {
+            if repository.bucket_presence().await? == BucketPresence::Missing {
+                return Ok(StatusReport::empty(RepositoryState::Missing));
+            }
+            if repository.get_master().await?.is_none() {
+                return Ok(StatusReport::empty(RepositoryState::Empty));
+            }
+            if attempt == 0 {
+                continue;
+            }
+            return Err(RepositoryError::new(
+                "repository master changed repeatedly while collecting status",
+            ));
+        };
+        let verified = trusted.verify(&observed_master.bytes)?;
+        let transport = repository
+            .metadata_transport(master_url.clone(), verified.master.data_base_url().clone());
+        let reader =
+            RepositoryReader::new(master_url.clone(), trusted.clone(), cache_root, transport)?;
+        let publication = match reader.publication_metadata().await {
+            Ok(publication) => publication,
+            Err(error) => {
+                if repository_master_changed(repository, &observed_master.bytes).await? {
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Err(RepositoryError::new(
+                        "repository master changed repeatedly while collecting status",
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        let stored = match repository.list().await {
+            Ok(stored) => stored,
+            Err(error) => {
+                if repository.bucket_presence().await? == BucketPresence::Missing {
+                    if attempt == 0 {
+                        continue;
+                    }
+                    return Err(RepositoryError::new(
+                        "repository disappeared repeatedly while collecting status",
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        let current = repository.get_master().await?;
+        if current
+            .as_ref()
+            .is_some_and(|master| MasterHash::digest(&master.bytes) == publication.master_hash)
+        {
+            return StatusReport::ready(master_url, &publication, Some(&stored), now);
+        }
+        if attempt == 1 {
+            return Err(RepositoryError::new(
+                "repository master changed repeatedly while collecting status",
+            ));
+        }
+    }
+    unreachable!("administrative status retry loop has a fixed non-empty range")
+}
+
+async fn repository_master_changed(
+    repository: &impl StatusRepository,
+    observed: &[u8],
+) -> Result<bool, RepositoryError> {
+    Ok(repository
+        .get_master()
+        .await?
+        .is_none_or(|current| current.bytes != observed))
 }
 
 async fn gc(args: GcArgs) -> Result<(), RepositoryError> {
@@ -761,177 +900,6 @@ fn write_temporary_bytes(bytes: &[u8]) -> Result<NamedTempFile, RepositoryError>
     Ok(temporary)
 }
 
-fn logical_status(master_url: &Url, publication: &CurrentPublication, now: u64) -> Value {
-    let active = publication.metadata.master.active_slot().serial;
-    let object_sets = publication
-        .metadata
-        .master
-        .slots()
-        .iter()
-        .map(|slot| metadata_hashes(&publication.metadata.object_lists, slot.object_list))
-        .collect::<Vec<_>>();
-    let file_sets = publication
-        .metadata
-        .master
-        .slots()
-        .iter()
-        .map(|slot| metadata_hashes(&publication.metadata.file_lists, slot.file_list))
-        .collect::<Vec<_>>();
-    let object_frequency = frequencies(&object_sets);
-    let file_frequency = frequencies(&file_sets);
-    let slots = publication
-        .metadata
-        .master
-        .slots()
-        .iter()
-        .enumerate()
-        .map(|(index, slot)| {
-            let kind = if slot.retain_until.is_some() {
-                "retained"
-            } else if slot.serial == active {
-                "active"
-            } else {
-                "sealed"
-            };
-            json!({
-                "serial": slot.serial,
-                "state": kind,
-                "retain_until": slot.retain_until,
-                "build_index": slot.build.to_string(),
-                "reuse_index": slot.reuse.to_string(),
-                "object_list": slot.object_list.to_string(),
-                "file_list": slot.file_list.to_string(),
-                "objects": content_count(&publication.metadata.object_lists, slot.object_list, 32),
-                "files": content_count(&publication.metadata.file_lists, slot.file_list, 32),
-                "exclusive_objects": object_sets[index].iter().filter(|hash| object_frequency.get(*hash) == Some(&1)).count(),
-                "exclusive_files": file_sets[index].iter().filter(|hash| file_frequency.get(*hash) == Some(&1)).count(),
-                "retention_expired": slot.retain_until.is_some_and(|deadline| deadline <= now),
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "master_url": master_url.as_str(),
-        "data_base_url": publication.metadata.master.data_base_url().as_str(),
-        "master_hash": publication.master_hash.to_string(),
-        "key_id": hex(&publication.key_id),
-        "content": {
-            "unique_objects": object_frequency.len(),
-            "unique_files": file_frequency.len(),
-            "shared_objects": object_frequency.values().filter(|count| **count > 1).count(),
-            "shared_files": file_frequency.values().filter(|count| **count > 1).count(),
-        },
-        "slots": slots,
-    })
-}
-
-fn content_count<T>(values: &BTreeMap<T, Vec<u8>>, hash: T, record_size: usize) -> usize
-where
-    T: Ord,
-{
-    values
-        .get(&hash)
-        .map_or(0, |bytes| bytes.len() / record_size)
-}
-
-fn storage_status(metadata: &PublicationMetadata, stored: &[StoredKey], now: u64) -> Value {
-    let live = live_keys(metadata);
-    let by_namespace =
-        stored
-            .iter()
-            .fold(BTreeMap::<String, (u64, usize)>::new(), |mut map, key| {
-                let namespace = key.key.split('/').next().unwrap_or("other").to_owned();
-                let entry = map.entry(namespace).or_default();
-                entry.0 += key.size;
-                entry.1 += 1;
-                map
-            });
-    let stored_set = stored
-        .iter()
-        .map(|entry| entry.key.as_str())
-        .collect::<HashSet<_>>();
-    let missing = live
-        .iter()
-        .filter(|key| !stored_set.contains(key.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    let unreferenced = stored
-        .iter()
-        .filter(|entry| recognized_immutable(&entry.key) && !live.contains(&entry.key))
-        .map(|entry| entry.key.clone())
-        .collect::<Vec<_>>();
-    let unreferenced_bytes = stored
-        .iter()
-        .filter(|entry| recognized_immutable(&entry.key) && !live.contains(&entry.key))
-        .map(|entry| entry.size)
-        .sum::<u64>();
-    let sizes = stored
-        .iter()
-        .map(|entry| (entry.key.as_str(), entry.size))
-        .collect::<HashMap<_, _>>();
-    let slot_keys = metadata
-        .master
-        .slots()
-        .iter()
-        .map(|slot| live_slot_keys(metadata, slot))
-        .collect::<Vec<_>>();
-    let mut references = HashMap::<&str, usize>::new();
-    for keys in &slot_keys {
-        for key in keys {
-            *references.entry(key.as_str()).or_default() += 1;
-        }
-    }
-    let retained_expired = metadata
-        .master
-        .slots()
-        .iter()
-        .zip(&slot_keys)
-        .filter(|(slot, _)| slot.retain_until.is_some_and(|deadline| deadline <= now))
-        .flat_map(|(_, keys)| keys.iter().cloned())
-        .collect::<BTreeSet<_>>();
-    let not_expired = metadata
-        .master
-        .slots()
-        .iter()
-        .zip(&slot_keys)
-        .filter(|(slot, _)| slot.retain_until.is_none_or(|deadline| deadline > now))
-        .flat_map(|(_, keys)| keys.iter().cloned())
-        .collect::<BTreeSet<_>>();
-    let reclaimable_after_expired_prune_bytes = retained_expired
-        .difference(&not_expired)
-        .filter_map(|key| sizes.get(key.as_str()))
-        .sum::<u64>();
-    let slots = metadata
-        .master
-        .slots()
-        .iter()
-        .zip(&slot_keys)
-        .map(|(slot, keys)| {
-            let referenced_bytes = keys.iter().filter_map(|key| sizes.get(key.as_str())).sum::<u64>();
-            let exclusive_bytes = keys
-                .iter()
-                .filter(|key| references.get(key.as_str()) == Some(&1))
-                .filter_map(|key| sizes.get(key.as_str()))
-                .sum::<u64>();
-            json!({
-                "serial": slot.serial,
-                "referenced_bytes": referenced_bytes,
-                "exclusive_bytes": exclusive_bytes,
-                "reclaimable_bytes_if_pruned_alone": if slot.retain_until.is_some_and(|deadline| deadline <= now) { exclusive_bytes } else { 0 },
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "keys": stored.len(),
-        "bytes": stored.iter().map(|entry| entry.size).sum::<u64>(),
-        "namespaces": by_namespace.into_iter().map(|(name, (bytes, keys))| (name, json!({"keys": keys, "bytes": bytes}))).collect::<serde_json::Map<_, _>>(),
-        "missing": missing,
-        "unreferenced": unreferenced,
-        "unreferenced_bytes": unreferenced_bytes,
-        "reclaimable_after_expired_prune_bytes": reclaimable_after_expired_prune_bytes,
-        "slots": slots,
-    })
-}
-
 fn live_keys(metadata: &PublicationMetadata) -> BTreeSet<String> {
     let mut live = BTreeSet::new();
     for slot in metadata.master.slots() {
@@ -951,49 +919,6 @@ fn live_keys(metadata: &PublicationMetadata) -> BTreeSet<String> {
         }
     }
     live
-}
-
-fn live_slot_keys(metadata: &PublicationMetadata, slot: &bobr_repo::Slot) -> BTreeSet<String> {
-    let mut live = BTreeSet::from([
-        format!("b/{}", slot.build),
-        format!("r/{}", slot.reuse),
-        format!("lo/{}", slot.object_list),
-        format!("lf/{}", slot.file_list),
-    ]);
-    if let Some(bytes) = metadata.object_lists.get(&slot.object_list) {
-        live.extend(
-            bytes
-                .chunks_exact(32)
-                .map(|hash| format!("o/{}", hex(hash))),
-        );
-    }
-    if let Some(bytes) = metadata.file_lists.get(&slot.file_list) {
-        live.extend(
-            bytes
-                .chunks_exact(32)
-                .map(|hash| format!("f/{}", hex(hash))),
-        );
-    }
-    live
-}
-
-fn metadata_hashes<T: Ord + Copy>(values: &BTreeMap<T, Vec<u8>>, key: T) -> BTreeSet<[u8; 32]> {
-    values
-        .get(&key)
-        .into_iter()
-        .flat_map(|bytes| bytes.chunks_exact(32))
-        .map(|hash| hash.try_into().expect("validated metadata hash record"))
-        .collect()
-}
-
-fn frequencies(sets: &[BTreeSet<[u8; 32]>]) -> HashMap<[u8; 32], usize> {
-    let mut frequencies = HashMap::new();
-    for set in sets {
-        for hash in set {
-            *frequencies.entry(*hash).or_default() += 1;
-        }
-    }
-    frequencies
 }
 
 fn recognized_immutable(key: &str) -> bool {
@@ -1276,12 +1201,12 @@ fn usage_error() -> RepositoryError {
     RepositoryError::new("usage: bobr-repo <init|prepare|publish|status|gc> [options]")
 }
 
-fn json_pretty(value: &Value) -> Result<String, RepositoryError> {
+fn json_pretty(value: &impl Serialize) -> Result<String, RepositoryError> {
     serde_json::to_string_pretty(value)
         .map_err(|error| RepositoryError::new(format!("failed to encode JSON: {error}")))
 }
 
-fn json_compact(value: &Value) -> Result<String, RepositoryError> {
+fn json_compact(value: &impl Serialize) -> Result<String, RepositoryError> {
     serde_json::to_string(value)
         .map_err(|error| RepositoryError::new(format!("failed to encode JSON: {error}")))
 }
@@ -1316,16 +1241,160 @@ fn run_runtime_worker_if_requested() -> Option<ExitCode> {
 mod tests {
     use super::*;
     use bobr_repo::{
-        BuildIndexHash, FsFileList, FsFileListHash, ObjectList, ObjectListHash, ReuseIndexHash,
-        Slot,
+        BuildIndexHash, FsFileListHash, MemoryTransport, ObjectListHash, ReuseIndexHash, Slot,
     };
-    use bobr_store::fs_tree::FsFileHash;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    #[derive(Debug)]
+    struct FakeStatusRepository {
+        presence: BucketPresence,
+        masters: Mutex<VecDeque<Option<S3Object>>>,
+        stored: Vec<StoredKey>,
+        transports: BTreeMap<String, MemoryTransport>,
+        list_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl StatusRepository for FakeStatusRepository {
+        async fn bucket_presence(&self) -> Result<BucketPresence, RepositoryError> {
+            Ok(self.presence)
+        }
+
+        async fn get_master(&self) -> Result<Option<S3Object>, RepositoryError> {
+            let mut masters = self.masters.lock().unwrap();
+            Ok(if masters.len() > 1 {
+                masters.pop_front().unwrap()
+            } else {
+                masters.front().cloned().unwrap_or(None)
+            })
+        }
+
+        async fn list(&self) -> Result<Vec<StoredKey>, RepositoryError> {
+            self.list_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(self.stored.clone())
+        }
+
+        fn metadata_transport(
+            &self,
+            _master_url: Url,
+            data_base_url: Url,
+        ) -> Arc<dyn RepositoryTransport> {
+            Arc::new(
+                self.transports
+                    .get(data_base_url.as_str())
+                    .expect("test transport for data base URL")
+                    .clone(),
+            )
+        }
+    }
+
+    struct RepositoryVersion {
+        master: S3Object,
+        data_base_url: Url,
+        transport: MemoryTransport,
+        stored: Vec<StoredKey>,
+    }
 
     #[test]
     fn duration_suffixes_are_explicit() {
         assert_eq!(parse_duration("1d").unwrap(), 86_400);
         assert_eq!(parse_duration("5m").unwrap(), 300);
         assert!(parse_duration("1day").is_err());
+    }
+
+    #[tokio::test]
+    async fn administrative_status_distinguishes_empty_and_missing() {
+        for (presence, expected) in [
+            (BucketPresence::Present, "empty"),
+            (BucketPresence::Missing, "missing"),
+        ] {
+            let repository = FakeStatusRepository {
+                presence,
+                masters: Mutex::new(VecDeque::from([None])),
+                stored: Vec::new(),
+                transports: BTreeMap::new(),
+                list_calls: std::sync::atomic::AtomicUsize::new(0),
+            };
+            let cache = tempfile::tempdir().unwrap();
+            let report = administrative_status_from(
+                &master_url(),
+                trusted_keys(),
+                cache.path(),
+                &repository,
+                0,
+            )
+            .await
+            .unwrap();
+            let value = serde_json::to_value(report).unwrap();
+            assert_eq!(value["state"], expected);
+            assert_eq!(value["current_slots"], 0);
+            assert!(value["active_slot"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn administrative_status_retries_one_master_change() {
+        let first = repository_version(1);
+        let second = repository_version(2);
+        let repository = FakeStatusRepository {
+            presence: BucketPresence::Present,
+            masters: Mutex::new(VecDeque::from([
+                Some(first.master.clone()),
+                Some(second.master.clone()),
+                Some(second.master.clone()),
+                Some(second.master.clone()),
+            ])),
+            stored: second.stored.clone(),
+            transports: BTreeMap::from([
+                (first.data_base_url.to_string(), first.transport),
+                (second.data_base_url.to_string(), second.transport),
+            ]),
+            list_calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let cache = tempfile::tempdir().unwrap();
+        let report =
+            administrative_status_from(&master_url(), trusted_keys(), cache.path(), &repository, 0)
+                .await
+                .unwrap();
+        let value = serde_json::to_value(report).unwrap();
+        assert_eq!(value["state"], "ready");
+        assert_eq!(value["active_slot"]["serial"], 2);
+        assert_eq!(
+            repository
+                .list_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn administrative_status_rejects_repeated_master_changes() {
+        let first = repository_version(1);
+        let second = repository_version(2);
+        let third = repository_version(3);
+        let repository = FakeStatusRepository {
+            presence: BucketPresence::Present,
+            masters: Mutex::new(VecDeque::from([
+                Some(first.master.clone()),
+                Some(second.master.clone()),
+                Some(second.master.clone()),
+                Some(third.master.clone()),
+            ])),
+            stored: second.stored.clone(),
+            transports: BTreeMap::from([
+                (first.data_base_url.to_string(), first.transport),
+                (second.data_base_url.to_string(), second.transport),
+            ]),
+            list_calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let cache = tempfile::tempdir().unwrap();
+        let error =
+            administrative_status_from(&master_url(), trusted_keys(), cache.path(), &repository, 0)
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("changed repeatedly"));
     }
 
     #[test]
@@ -1471,55 +1540,6 @@ mod tests {
         assert_eq!(comparison["pruned_slots"], json!([]));
     }
 
-    #[test]
-    fn storage_status_counts_shared_expired_reclaimability_once() {
-        let shared = bobr_core::ObjectHash::from_bytes([21; 32]);
-        let expired_only = bobr_core::ObjectHash::from_bytes([22; 32]);
-        let current_only = bobr_core::ObjectHash::from_bytes([23; 32]);
-        let expired = slot(1, Some(1), 1);
-        let current = slot(2, None, 2);
-        let master = Master::new(
-            None,
-            Url::parse("https://example.test/data/").unwrap(),
-            vec![expired.clone(), current.clone()],
-        )
-        .unwrap();
-        let expired_objects = ObjectList::encode([shared, expired_only]);
-        let current_objects = ObjectList::encode([shared, current_only]);
-        let empty_files = FsFileList::encode(std::iter::empty::<FsFileHash>());
-        let metadata = PublicationMetadata {
-            master,
-            builds: BTreeMap::new(),
-            reuses: BTreeMap::new(),
-            object_lists: BTreeMap::from([
-                (expired.object_list, expired_objects),
-                (current.object_list, current_objects),
-            ]),
-            file_lists: BTreeMap::from([
-                (expired.file_list, empty_files.clone()),
-                (current.file_list, empty_files),
-            ]),
-        };
-        let stored = [
-            StoredKey {
-                key: format!("o/{shared}"),
-                size: 10,
-            },
-            StoredKey {
-                key: format!("o/{expired_only}"),
-                size: 20,
-            },
-            StoredKey {
-                key: format!("o/{current_only}"),
-                size: 30,
-            },
-        ];
-        let status = storage_status(&metadata, &stored, 2);
-        assert_eq!(status["reclaimable_after_expired_prune_bytes"], 20);
-        assert_eq!(status["slots"][0]["exclusive_bytes"], 20);
-        assert_eq!(status["slots"][1]["exclusive_bytes"], 30);
-    }
-
     fn slot(serial: u64, retain_until: Option<u64>, byte: u8) -> Slot {
         Slot {
             serial,
@@ -1528,6 +1548,90 @@ mod tests {
             object_list: ObjectListHash::from_bytes([byte.wrapping_add(20); 32]),
             file_list: FsFileListHash::from_bytes([byte.wrapping_add(30); 32]),
             retain_until,
+        }
+    }
+
+    fn master_url() -> Url {
+        Url::parse("https://example.test/master").unwrap()
+    }
+
+    fn signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[42; 32])
+    }
+
+    fn trusted_keys() -> TrustedKeys {
+        let key = signing_key().verifying_key();
+        let key_id: [u8; 32] = Sha256::digest(key.as_bytes()).into();
+        let mut trusted = TrustedKeys::default();
+        trusted.insert(key_id.to_vec(), key).unwrap();
+        trusted
+    }
+
+    fn repository_version(serial: u64) -> RepositoryVersion {
+        let empty = Vec::new();
+        let slot = Slot {
+            serial,
+            build: BuildIndexHash::digest(&empty),
+            reuse: ReuseIndexHash::digest(&empty),
+            object_list: ObjectListHash::digest(&empty),
+            file_list: FsFileListHash::digest(&empty),
+            retain_until: None,
+        };
+        let data_base_url = Url::parse(&format!("https://example.test/data-{serial}/")).unwrap();
+        let master = Master::new(None, data_base_url.clone(), vec![slot.clone()]).unwrap();
+        let signing_key = signing_key();
+        let key_id: [u8; 32] = Sha256::digest(signing_key.verifying_key().as_bytes()).into();
+        let signed = master.sign(&key_id, &signing_key).unwrap();
+        let transport = MemoryTransport::default();
+        transport.insert(
+            master_url(),
+            signed.clone(),
+            "application/cose; cose-type=\"cose-sign1\"",
+            "no-cache",
+        );
+        for (namespace, hash) in [
+            ("b", slot.build.to_string()),
+            ("r", slot.reuse.to_string()),
+            ("lo", slot.object_list.to_string()),
+            ("lf", slot.file_list.to_string()),
+        ] {
+            transport.insert(
+                data_base_url.join(&format!("{namespace}/{hash}")).unwrap(),
+                empty.clone(),
+                OCTET_STREAM,
+                IMMUTABLE_CACHE_CONTROL,
+            );
+        }
+        let stored = vec![
+            StoredKey {
+                key: "master".to_owned(),
+                size: signed.len() as u64,
+            },
+            StoredKey {
+                key: format!("b/{}", slot.build),
+                size: 0,
+            },
+            StoredKey {
+                key: format!("r/{}", slot.reuse),
+                size: 0,
+            },
+            StoredKey {
+                key: format!("lo/{}", slot.object_list),
+                size: 0,
+            },
+            StoredKey {
+                key: format!("lf/{}", slot.file_list),
+                size: 0,
+            },
+        ];
+        RepositoryVersion {
+            master: S3Object {
+                bytes: signed,
+                etag: format!("\"master-{serial}\""),
+            },
+            data_base_url,
+            transport,
+            stored,
         }
     }
 }
