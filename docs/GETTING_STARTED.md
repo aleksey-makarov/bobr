@@ -130,11 +130,13 @@ name the request format they emit, and the build driver checks it against what
 `bobr --version` accepts before doing anything.
 
 Building takes two things: a **store** to build into, and a **build profile**
-describing your installation. The profile is a small Nickel file you keep in your
-working directory; start from the shipped example and read what is in it:
+describing your installation. The profile is a small Nickel file you keep in
+your working directory. Import the maintained user preset, so later recipe
+updates do not leave a copied template behind:
 
 ```sh
-cp bobr-recipes/bobr.ncl.example bobr.ncl
+printf '%s\n' \
+  'import "bobr-recipes/build-profile/bobr-user.ncl"' > bobr.ncl
 mkdir bobr-store
 bobr-recipes/bin/bobr-build.sh
 ```
@@ -144,7 +146,7 @@ configured secondary stores, acquires missing Source content from local paths,
 HTTP mirrors, or OCI registries, and runs builders only where cache resolution
 misses.
 
-That builds the profile's `target`, which the example sets to `world` — every
+That builds the profile's `target`, which the preset sets to `world` — every
 shipped OS image and HostBundle, without the separate acceptance tests. Expect
 it to run for hours: nothing arrives pre-built, so the first build starts at the
 toolchain and works its way up. Run `--target test_all` when you want the rootfs,

@@ -146,10 +146,10 @@ retain comparable provenance.
 In order, the script:
 
 1. pulls the recipes and verifies the already installed host tools;
-2. creates `<workspace>/bobr-store.<YYMMDDhhmmss>` and copies
-   `bobr.ncl.example` into it as the build profile, with its store pointed at
-   the new one — a rebuild goes through the same settings a reader of the
-   recipes would get, not through a private file that could drift from them;
+2. creates `<workspace>/bobr-store.<YYMMDDhhmmss>` and writes a build profile
+   there which imports `build-profile/bobr-user.ncl` and points its store at
+   the new directory — a rebuild therefore follows the maintained preset
+   instead of a copied template that could drift from it;
 3. adds the last successful store as an untrusted hardlink local repository;
    known Source content is acquired from it lazily, but its build and reuse
    mappings are unavailable, so this remains a cold build;

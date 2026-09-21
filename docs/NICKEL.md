@@ -49,8 +49,9 @@ fun pkgs =>
 and optional overlays, it selects that recipe from `mkPkgs overlays` and lowers
 it to a full [request](./REQUEST.md). Callers rarely invoke it directly —
 `bin/bobr-build.sh` does, reading everything but the run's own identity from a
-**build profile** (`bobr.ncl`, shaped by `build-profile.ncl`; copy
-`bobr.ncl.example` to start one).
+**build profile** (`bobr.ncl`, shaped by
+`build-profile/build-profile.ncl`). A normal profile imports the maintained
+`build-profile/bobr-user.ncl` preset instead of copying a template.
 
 A build profile can attach ordered local stores to the Realizer:
 
