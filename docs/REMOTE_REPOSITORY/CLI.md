@@ -287,6 +287,19 @@ the input store:
 
 The number of current slots does not change.
 
+Before uploading content or allocating a serial, `prepare --append` encodes
+the merged active state and compares its build-index, reuse-index,
+ordinary-object-list, and filesystem-file-list hashes with the authenticated
+active slot. If all four hashes match and no expired retained state needs to
+be pruned, the operation is unchanged: it performs no S3 writes, allocates no
+serial, and leaves the candidate file untouched.
+
+An expired retained state is a logical change even when the active slot is
+unchanged. In that case `prepare` produces a prune-only candidate: it removes
+the expired state while preserving the active slot and its serial. All
+immutable values referenced by this candidate already exist, so no content or
+metadata upload is needed.
+
 ### Add slot
 
 `--add-slot` appends a fresh current state containing exactly the input store.
@@ -313,13 +326,31 @@ authoritative repository until that candidate is signed and published.
 
 ### Preparation result
 
-`prepare` uploads all missing content and the four immutable metadata values
-for every new slot state before it writes its output file. It never writes
-`/master`.
+`prepare` reports exactly one compact JSON value on standard output:
 
-The output file is the exact deterministic-CBOR master payload defined by
-`master-payload.cddl`, without a COSE envelope or signature. There is no
-separate candidate wire format. Its `previous_master_hash` is:
+```json
+{"result":"candidate"}
+```
+
+or:
+
+```json
+{"result":"unchanged"}
+```
+
+Both are successful results. Human-readable progress remains on standard
+error. `unchanged` is possible only for append to an existing repository;
+initial publication, add-slot, rotate, and prune-only transitions always
+return `candidate`.
+
+For a changed slot, `prepare` uploads all missing content and its four
+immutable metadata values before writing the output file. It never writes
+`/master`. A prune-only transition needs no immutable uploads.
+
+For `candidate`, the output file is the exact deterministic-CBOR master
+payload defined by `master-payload.cddl`, without a COSE envelope or
+signature. There is no separate candidate wire format. Its
+`previous_master_hash` is:
 
 - `null` for the first publication;
 - otherwise SHA-256 of the exact tagged COSE bytes fetched as the current
@@ -328,10 +359,15 @@ separate candidate wire format. Its `previous_master_hash` is:
 The candidate contains no secret. It can be copied to the trusted workstation
 over an ordinary authenticated transport such as SSH.
 
+The candidate is written to a temporary file in the destination directory,
+synced, and atomically renamed over the requested path only after every prior
+step has succeeded. An error or `unchanged` result leaves any existing file at
+that path byte-for-byte untouched.
+
 Running `prepare` again is safe. It may reuse immutable values uploaded by an
-interrupted or superseded preparation. A newer preparation from the same
-current master supersedes an older candidate; only one of them can pass the
-predecessor check after either is published.
+interrupted or superseded preparation. A newer changed preparation from the
+same current master supersedes an older candidate; only one of them can pass
+the predecessor check after either is published.
 
 ## `publish`
 

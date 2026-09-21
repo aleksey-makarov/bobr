@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use bobr_repo::{
     BucketPresence, ImmutableUpload, MAX_MASTER_BYTES, Master, MasterHash, PublicationMetadata,
     PublicationMode, PublicationState, RepositoryError, RepositoryReader, RepositoryTlsConfig,
-    RepositoryTransport, S3Location, S3Object, S3Repository, S3RepositoryTransport, SlotContents,
-    StoredKey, TrustedKeys, encode_preferred_fs_files, encode_preferred_object,
+    RepositoryTransport, S3Location, S3Object, S3Repository, S3RepositoryTransport, Slot,
+    SlotContents, StoredKey, TrustedKeys, encode_preferred_fs_files, encode_preferred_object,
 };
 use bobr_runtime::runtime_provider::{RuntimeProvider, runtime_provider_for_current_process};
 use bobr_store::{ReadOnlyStore, StoreInventory};
@@ -126,6 +126,27 @@ enum PrepareAction {
     Append,
     AddSlot,
     Rotate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum PrepareResultKind {
+    Candidate,
+    Unchanged,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct PrepareResult {
+    result: PrepareResultKind,
+}
+
+#[derive(Debug)]
+enum ExistingPreparePlan {
+    Unchanged,
+    Candidate {
+        metadata: Box<PublicationMetadata>,
+        upload_immutable: bool,
+    },
 }
 
 impl PrepareArgs {
@@ -361,7 +382,7 @@ async fn prepare(args: PrepareArgs) -> Result<(), RepositoryError> {
     let cache = CacheRoot::new(args.cache.as_deref())?;
     let runtime = runtime_provider_for_current_process();
 
-    let mut state = if let Some(verified) = current_verified {
+    let state = if let Some(verified) = current_verified {
         if let Some(url) = &args.data_base_url
             && url != verified.master.data_base_url()
         {
@@ -392,37 +413,112 @@ async fn prepare(args: PrepareArgs) -> Result<(), RepositoryError> {
         let state = PublicationState::initialize(data_base_url, incoming)?;
         let metadata = state.metadata()?;
         upload_metadata(&repository, &metadata).await?;
-        write_candidate(&args.output, &metadata.master.encode_payload())?;
+        let result = persist_prepare_candidate(&args.output, Some(&metadata))?;
         eprintln!(
             "prepared initial repository state from {}",
             args.store.display()
         );
+        print_prepare_result(result)?;
         return Ok(());
     };
 
     let inventory = scan_inventory(&args.store, runtime.clone()).await?;
     let incoming = inventory_contents(&inventory)?;
-    upload_inventory(&repository, &inventory, &runtime).await?;
     let now = unix_time()?;
-    state.prune_expired(now)?;
     let retention = args.retention.unwrap_or(DEFAULT_RETENTION_SECONDS);
-    let retain_until = now
-        .checked_add(retention)
-        .ok_or_else(|| RepositoryError::new("retention deadline overflow"))?;
-    let mode = match args.action {
-        PrepareAction::Append => PublicationMode::AppendToActive { retain_until },
-        PrepareAction::AddSlot => PublicationMode::AddSlot,
-        PrepareAction::Rotate => PublicationMode::Rotate { retain_until },
+    let plan = plan_existing_prepare(state, args.action, incoming, now, retention)?;
+    let ExistingPreparePlan::Candidate {
+        metadata,
+        upload_immutable,
+    } = plan
+    else {
+        eprintln!("active repository slot is unchanged");
+        let result = persist_prepare_candidate(&args.output, None)?;
+        print_prepare_result(result)?;
+        return Ok(());
     };
-    state.publish(mode, incoming)?;
-    let metadata = state.metadata()?;
-    upload_metadata(&repository, &metadata).await?;
-    write_candidate(&args.output, &metadata.master.encode_payload())?;
+    if upload_immutable {
+        upload_inventory(&repository, &inventory, &runtime).await?;
+        upload_metadata(&repository, &metadata).await?;
+    }
+    let result = persist_prepare_candidate(&args.output, Some(&metadata))?;
     eprintln!(
         "prepared repository candidate with {} slot state(s)",
         metadata.master.slots().len()
     );
+    print_prepare_result(result)?;
     Ok(())
+}
+
+fn plan_existing_prepare(
+    mut state: PublicationState,
+    action: PrepareAction,
+    incoming: SlotContents,
+    now: u64,
+    retention: u64,
+) -> Result<ExistingPreparePlan, RepositoryError> {
+    let pruned = state.prune_expired(now)? > 0;
+    let retain_until = now
+        .checked_add(retention)
+        .ok_or_else(|| RepositoryError::new("retention deadline overflow"))?;
+
+    if action == PrepareAction::Append {
+        let current_metadata = state.metadata()?;
+        let mut appended = state.clone();
+        appended.publish(PublicationMode::AppendToActive { retain_until }, incoming)?;
+        let appended_metadata = appended.metadata()?;
+        if slot_metadata_equal(
+            current_metadata.master.active_slot(),
+            appended_metadata.master.active_slot(),
+        ) {
+            return if pruned {
+                Ok(ExistingPreparePlan::Candidate {
+                    metadata: Box::new(current_metadata),
+                    upload_immutable: false,
+                })
+            } else {
+                Ok(ExistingPreparePlan::Unchanged)
+            };
+        }
+        return Ok(ExistingPreparePlan::Candidate {
+            metadata: Box::new(appended_metadata),
+            upload_immutable: true,
+        });
+    }
+
+    let mode = match action {
+        PrepareAction::Append => unreachable!("append handled above"),
+        PrepareAction::AddSlot => PublicationMode::AddSlot,
+        PrepareAction::Rotate => PublicationMode::Rotate { retain_until },
+    };
+    state.publish(mode, incoming)?;
+    Ok(ExistingPreparePlan::Candidate {
+        metadata: Box::new(state.metadata()?),
+        upload_immutable: true,
+    })
+}
+
+fn slot_metadata_equal(left: &Slot, right: &Slot) -> bool {
+    left.build == right.build
+        && left.reuse == right.reuse
+        && left.object_list == right.object_list
+        && left.file_list == right.file_list
+}
+
+fn print_prepare_result(result: PrepareResultKind) -> Result<(), RepositoryError> {
+    println!("{}", json_compact(&PrepareResult { result })?);
+    Ok(())
+}
+
+fn persist_prepare_candidate(
+    path: &Path,
+    metadata: Option<&PublicationMetadata>,
+) -> Result<PrepareResultKind, RepositoryError> {
+    let Some(metadata) = metadata else {
+        return Ok(PrepareResultKind::Unchanged);
+    };
+    write_candidate(path, &metadata.master.encode_payload())?;
+    Ok(PrepareResultKind::Candidate)
 }
 
 async fn publish(args: PublishArgs) -> Result<(), RepositoryError> {
@@ -990,7 +1086,7 @@ fn publication_comparison(current: Option<&Master>, candidate: &Master) -> Value
     })
 }
 
-fn slot_summary(slot: &bobr_repo::Slot) -> Value {
+fn slot_summary(slot: &Slot) -> Value {
     json!({
         "serial": slot.serial,
         "retain_until": slot.retain_until,
@@ -1240,6 +1336,7 @@ fn run_runtime_worker_if_requested() -> Option<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bobr_core::{BuildKey, ObjectHash};
     use bobr_repo::{
         BuildIndexHash, FsFileListHash, MemoryTransport, ObjectListHash, ReuseIndexHash, Slot,
     };
@@ -1302,6 +1399,109 @@ mod tests {
         assert_eq!(parse_duration("1d").unwrap(), 86_400);
         assert_eq!(parse_duration("5m").unwrap(), 300);
         assert!(parse_duration("1day").is_err());
+    }
+
+    #[test]
+    fn prepare_result_is_stable_compact_json() {
+        assert_eq!(
+            json_compact(&PrepareResult {
+                result: PrepareResultKind::Candidate,
+            })
+            .unwrap(),
+            r#"{"result":"candidate"}"#
+        );
+        assert_eq!(
+            json_compact(&PrepareResult {
+                result: PrepareResultKind::Unchanged,
+            })
+            .unwrap(),
+            r#"{"result":"unchanged"}"#
+        );
+    }
+
+    #[test]
+    fn unchanged_append_preserves_the_existing_candidate() {
+        let state = PublicationState::initialize(data_base_url(), contents(1, 1)).unwrap();
+        let plan =
+            plan_existing_prepare(state, PrepareAction::Append, contents(1, 1), 100, 50).unwrap();
+        assert!(matches!(plan, ExistingPreparePlan::Unchanged));
+
+        let temporary = tempfile::tempdir().unwrap();
+        let candidate = temporary.path().join("candidate.cbor");
+        fs::write(&candidate, b"previous candidate").unwrap();
+        let result = persist_prepare_candidate(&candidate, None).unwrap();
+        assert_eq!(result, PrepareResultKind::Unchanged);
+        assert_eq!(fs::read(candidate).unwrap(), b"previous candidate");
+    }
+
+    #[test]
+    fn changed_append_replaces_the_active_slot() {
+        let state = PublicationState::initialize(data_base_url(), contents(1, 1)).unwrap();
+        let ExistingPreparePlan::Candidate {
+            metadata,
+            upload_immutable,
+        } = plan_existing_prepare(state, PrepareAction::Append, contents(2, 2), 100, 50).unwrap()
+        else {
+            panic!("changed append must produce a candidate");
+        };
+        assert!(upload_immutable);
+        assert_eq!(metadata.master.slots().len(), 2);
+        assert_eq!(metadata.master.slots()[0].retain_until, Some(150));
+        assert_eq!(metadata.master.active_slot().serial, 2);
+    }
+
+    #[test]
+    fn expired_retention_produces_a_prune_only_candidate() {
+        let mut state = PublicationState::initialize(data_base_url(), contents(1, 1)).unwrap();
+        state
+            .publish(
+                PublicationMode::AppendToActive { retain_until: 50 },
+                contents(2, 2),
+            )
+            .unwrap();
+        let active = state.slots().last().unwrap().contents.clone();
+        let ExistingPreparePlan::Candidate {
+            metadata,
+            upload_immutable,
+        } = plan_existing_prepare(state, PrepareAction::Append, active, 50, 25).unwrap()
+        else {
+            panic!("expired retention must produce a candidate");
+        };
+        assert!(!upload_immutable);
+        assert_eq!(metadata.master.slots().len(), 1);
+        assert_eq!(metadata.master.active_slot().serial, 2);
+        assert_eq!(metadata.master.active_slot().retain_until, None);
+    }
+
+    #[test]
+    fn explicit_slot_actions_never_become_noops() {
+        for action in [PrepareAction::AddSlot, PrepareAction::Rotate] {
+            let state = PublicationState::initialize(data_base_url(), contents(1, 1)).unwrap();
+            let ExistingPreparePlan::Candidate {
+                upload_immutable, ..
+            } = plan_existing_prepare(state, action, contents(1, 1), 100, 50).unwrap()
+            else {
+                panic!("explicit slot action must produce a candidate");
+            };
+            assert!(upload_immutable);
+        }
+    }
+
+    #[test]
+    fn changed_candidate_atomically_replaces_the_existing_file() {
+        let state = PublicationState::initialize(data_base_url(), contents(1, 1)).unwrap();
+        let metadata = state.metadata().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let candidate = temporary.path().join("candidate.cbor");
+        fs::write(&candidate, b"previous candidate").unwrap();
+
+        let result = persist_prepare_candidate(&candidate, Some(&metadata)).unwrap();
+
+        assert_eq!(result, PrepareResultKind::Candidate);
+        assert_eq!(
+            fs::read(candidate).unwrap(),
+            metadata.master.encode_payload()
+        );
     }
 
     #[tokio::test]
@@ -1538,6 +1738,24 @@ mod tests {
         );
         assert_eq!(comparison["modified_existing_slots"], json!([1]));
         assert_eq!(comparison["pruned_slots"], json!([]));
+    }
+
+    fn data_base_url() -> Url {
+        Url::parse("https://example.test/data/").unwrap()
+    }
+
+    fn object(byte: u8) -> ObjectHash {
+        ObjectHash::from_bytes([byte; 32])
+    }
+
+    fn contents(key: u8, candidate: u8) -> SlotContents {
+        SlotContents::new(
+            [(BuildKey::from_bytes([key; 32]), object(candidate))],
+            [],
+            [object(candidate)],
+            [],
+        )
+        .unwrap()
     }
 
     fn slot(serial: u64, retain_until: Option<u64>, byte: u8) -> Slot {

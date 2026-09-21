@@ -305,12 +305,14 @@ impl PublicationState {
         Ok(())
     }
 
-    /// Omits retired entries whose grace deadline has passed.
-    pub fn prune_expired(&mut self, now: u64) -> Result<(), RepositoryError> {
+    /// Omits retired entries whose grace deadline has passed and returns how
+    /// many slot states were removed.
+    pub fn prune_expired(&mut self, now: u64) -> Result<usize, RepositoryError> {
+        let previous_len = self.slots.len();
         self.slots
             .retain(|slot| slot.retain_until.is_none_or(|deadline| deadline > now));
         self.metadata()?;
-        Ok(())
+        Ok(previous_len - self.slots.len())
     }
 
     /// Encodes and hashes every immutable table and constructs the next master.
