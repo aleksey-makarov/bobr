@@ -6,6 +6,10 @@ description = "Content-addressed hashing of filesystem objects for the bobr buil
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "bobr-fsobj-hash"
+path = "src/main.rs"
+
 [dependencies]
 serde.workspace = true
 sha2.workspace = true

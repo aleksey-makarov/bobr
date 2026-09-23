@@ -147,15 +147,15 @@ symlink entries are rejected. Any path kind conflict is rejected.
 
 ## CLI
 
-The `fsobj-hash` crate also provides a small helper binary:
+The `fsobj-hash` crate also provides a small `bobr-fsobj-hash` helper binary:
 
 ```text
-fsobj-hash <path> [--mode=auto|direct|tar]
+bobr-fsobj-hash <path> [--mode=auto|direct|tar]
 ```
 
 It prints a single lowercase hex `object_hash` to stdout.
 
-`fsobj-hash --help` prints the command usage and available modes.
+`bobr-fsobj-hash --help` prints the command usage and available modes.
 
 ### Modes
 
@@ -173,7 +173,7 @@ It prints a single lowercase hex `object_hash` to stdout.
 The CLI supports tar input from stdin only in explicit tar mode:
 
 ```text
-fsobj-hash - --mode=tar
+bobr-fsobj-hash - --mode=tar
 ```
 
 `-` is not accepted in `auto` or `direct` mode.

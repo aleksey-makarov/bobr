@@ -36,7 +36,7 @@ tar -xf "${BOBR_ARCHIVE}"
 export PATH="${PWD}/bobr-v${BOBR_VERSION}-${BOBR_TARGET}/bin:${PATH}"
 ```
 
-The archive contains static `bobr`, `bobr-repo`, `fsobj-hash`, and
+The archive contains static `bobr`, `bobr-repo`, `bobr-fsobj-hash`, and
 `bobr-sandbox-launcher` binaries. Keep its `bin/` on `PATH` for the rest of
 this chapter; `bobr` finds the sandbox launcher next to its own executable.
 
@@ -170,7 +170,7 @@ few things that belong to one invocation stay on the command line:
 - `--dry-run` — print the resolved profile and the JSON request, build nothing;
 - a positional argument names a different profile (`bobr-build.sh ../ci/bobr.ncl`).
 
-`bobr` and `fsobj-hash` are taken from `PATH` — the ones from the release
+`bobr` and `bobr-fsobj-hash` are taken from `PATH` — the ones from the release
 archive you unpacked earlier. Nothing is guessed, so what gets used is what
 `bobr --version` reports; the driver checks that its request format matches
 these recipes before it starts, and says so plainly when it does not.

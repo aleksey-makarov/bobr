@@ -12,9 +12,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
 
-const USAGE: &str = "usage: fsobj-hash <path> [--mode=auto|direct|tar]";
+const USAGE: &str = "usage: bobr-fsobj-hash <path> [--mode=auto|direct|tar]";
 const HELP: &str = "\
-usage: fsobj-hash <path> [--mode=auto|direct|tar]
+usage: bobr-fsobj-hash <path> [--mode=auto|direct|tar]
 
 Compute the filesystem object hash of a path or tar stream.
 

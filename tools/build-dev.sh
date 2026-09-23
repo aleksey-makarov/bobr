@@ -109,11 +109,11 @@ mkdir -p "${bin_dir}"
 step "install into ${bin_dir}"
 install_binary "target/${profile}/bobr" bobr
 install_binary "target/${profile}/bobr-repo" bobr-repo
-install_binary "target/${profile}/fsobj-hash" fsobj-hash
+install_binary "target/${profile}/bobr-fsobj-hash" bobr-fsobj-hash
 install_binary "target/${musl_target}/${profile}/bobr-sandbox-launcher" bobr-sandbox-launcher
-# A directory upgraded from a pre-Realizer build must not keep advertising the
-# removed standalone command merely because installs replace files in place.
-rm -f -- "${bin_dir}/bobr-fetch"
+# An upgraded directory must not keep advertising removed or renamed commands
+# merely because installs replace files in place.
+rm -f -- "${bin_dir}/bobr-fetch" "${bin_dir}/fsobj-hash"
 
 "${bin_dir}/bobr" --version >&2
 

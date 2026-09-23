@@ -116,7 +116,7 @@ fn missing_path_argument_is_usage_error() {
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("missing path argument"), "{stderr}");
-    assert!(stderr.contains("usage: fsobj-hash <path>"), "{stderr}");
+    assert!(stderr.contains("usage: bobr-fsobj-hash <path>"), "{stderr}");
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn help_prints_usage_and_exits_successfully() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("usage: fsobj-hash <path>"), "{stdout}");
+    assert!(stdout.contains("usage: bobr-fsobj-hash <path>"), "{stdout}");
     assert!(stdout.contains("--mode"), "{stdout}");
     assert!(stdout.contains("auto"), "{stdout}");
     assert!(stdout.contains("direct"), "{stdout}");
@@ -199,7 +199,7 @@ fn help_prints_usage_and_exits_successfully() {
 }
 
 fn run_cli<const N: usize>(args: [&str; N], stdin: Option<&[u8]>) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_fsobj-hash"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_bobr-fsobj-hash"));
     command.args(args);
     if stdin.is_some() {
         command.stdin(Stdio::piped());
