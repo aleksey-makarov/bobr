@@ -10,7 +10,7 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use bobr::{Request, realize};
+use bobr::{BuildInfo, Request, realize};
 use bobr_core::CancellationToken;
 
 type MResult<T> = Result<T, BobrError>;
@@ -51,14 +51,7 @@ fn main() -> ExitCode {
         return exit_code;
     }
 
-    if wants_version() {
-        print_version();
-        return ExitCode::SUCCESS;
-    }
-
-    let cancellation = CancellationToken::new();
-    signal::install_handlers(cancellation.clone());
-    let result = build(cancellation);
+    let result = run();
 
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -70,6 +63,25 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Invocation {
+    Build(Option<PathBuf>),
+    BuildInfo,
+    Version,
+}
+
+fn run() -> MResult<()> {
+    match invocation_from_args()? {
+        Invocation::Build(request_file) => {
+            let cancellation = CancellationToken::new();
+            signal::install_handlers(cancellation.clone());
+            build(request_file, cancellation)
+        }
+        Invocation::BuildInfo => print_build_info(),
+        Invocation::Version => print_version(),
     }
 }
 
@@ -104,8 +116,7 @@ fn runtime_worker_exit_code(result: bobr_runtime::runtime::RuntimeResult<()>) ->
     }
 }
 
-fn build(cancellation: CancellationToken) -> MResult<()> {
-    let request_file = request_file_from_args()?;
+fn build(request_file: Option<PathBuf>, cancellation: CancellationToken) -> MResult<()> {
     let request_bytes = read_request_bytes(request_file.as_ref())?;
     let request = Request::parse_json(&request_bytes).map_err(map_execution_error)?;
 
@@ -131,38 +142,58 @@ fn build(cancellation: CancellationToken) -> MResult<()> {
     Ok(())
 }
 
-fn wants_version() -> bool {
-    env::args_os()
-        .skip(1)
-        .any(|arg| arg == "--version" || arg == "-V")
-}
-
 /// Prints the build's own version and the request schema it accepts.
 ///
 /// The two answer different questions: the version identifies this build in a
 /// report, while the schema is what decides whether a given recipe layer can
 /// talk to it at all.
-fn print_version() {
+fn print_version() -> MResult<()> {
+    let build_info = current_build_info()?;
     println!(
         "bobr {} (request {})",
-        env!("CARGO_PKG_VERSION"),
-        bobr::REQUEST_SCHEMA
+        build_info.version, build_info.request_schema
     );
+    Ok(())
 }
 
-fn request_file_from_args() -> MResult<Option<PathBuf>> {
+fn print_build_info() -> MResult<()> {
+    let build_info = current_build_info()?;
+    println!(
+        "{}",
+        serde_json::to_string(&build_info).map_err(|error| {
+            BobrError::BuildFailed(format!("failed to encode build information: {error}"))
+        })?
+    );
+    Ok(())
+}
+
+fn current_build_info() -> MResult<BuildInfo> {
+    BuildInfo::current().map_err(|error| {
+        BobrError::BuildFailed(format!("invalid compile-time build information: {error}"))
+    })
+}
+
+fn invocation_from_args() -> MResult<Invocation> {
     let mut args = env::args_os();
     let _program = args.next();
-    let Some(request_file) = args.next() else {
-        return Ok(None);
+    let Some(first) = args.next() else {
+        return Ok(Invocation::Build(None));
     };
+
     if let Some(extra) = args.next() {
         return Err(BobrError::InvalidInput(format!(
-            "unexpected argument '{}'; usage: bobr [--version] [request.json]",
+            "unexpected argument '{}'; usage: bobr [--version | --build-info | request.json]",
             extra.to_string_lossy()
         )));
     }
-    Ok(Some(PathBuf::from(request_file)))
+
+    if first == "--version" || first == "-V" {
+        Ok(Invocation::Version)
+    } else if first == "--build-info" {
+        Ok(Invocation::BuildInfo)
+    } else {
+        Ok(Invocation::Build(Some(PathBuf::from(first))))
+    }
 }
 
 fn read_request_bytes(request_file: Option<&PathBuf>) -> MResult<Vec<u8>> {

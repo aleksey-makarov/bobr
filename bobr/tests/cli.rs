@@ -98,6 +98,44 @@ fn cli_reports_its_version_and_request_schema() {
 }
 
 #[test]
+fn cli_reports_machine_readable_build_info() {
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
+        .arg("--build-info")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let line = String::from_utf8(output.stdout).unwrap();
+    let expected = serde_json::to_string(&bobr::BuildInfo::current().unwrap()).unwrap();
+    assert_eq!(line, format!("{expected}\n"));
+}
+
+#[test]
+fn cli_rejects_combining_metadata_options_with_other_arguments() {
+    for arguments in [
+        ["--version", "request.json"],
+        ["request.json", "--version"],
+        ["--build-info", "request.json"],
+        ["--version", "--build-info"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
+            .args(arguments)
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success(), "{arguments:?}: {output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("error[invalid-input]"), "{stderr}");
+        assert!(stderr.contains("unexpected argument"), "{stderr}");
+        assert!(
+            stderr.contains("usage: bobr [--version | --build-info | request.json]"),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
 fn cli_reads_request_from_stdin_when_path_is_omitted() {
     let workspace = tempdir().unwrap();
     let request_path = workspace.path().join("stdin.json");
@@ -803,7 +841,7 @@ fn cli_rejects_more_than_one_request_argument() {
     assert!(stderr.contains("error[invalid-input]"), "{stderr}");
     assert!(stderr.contains("unexpected argument"), "{stderr}");
     assert!(
-        stderr.contains("usage: bobr [--version] [request.json]"),
+        stderr.contains("usage: bobr [--version | --build-info | request.json]"),
         "{stderr}"
     );
 }

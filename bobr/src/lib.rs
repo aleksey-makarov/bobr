@@ -12,11 +12,13 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");
 
+mod build_info;
 mod builder_registry;
 mod error;
 mod realize;
 mod request;
 
+pub use build_info::{BuildInfo, BuildInfoError, GitProvenance};
 pub use error::ExecutionError;
 pub use realize::{GoalResult, realize};
 pub use request::{REQUEST_SCHEMA, Request};

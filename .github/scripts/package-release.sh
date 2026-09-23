@@ -86,6 +86,12 @@ make_archive() {
 if [ "${kind}" = "main" ]; then
   [ "${target}" = "x86_64-unknown-linux-musl" ] \
     || die "the main bobr archive is currently x86_64-only"
+  [ -n "${BOBR_BUILD_GIT_COMMIT:-}" ] \
+    || die "BOBR_BUILD_GIT_COMMIT is required for the main release archive"
+  case "${BOBR_BUILD_GIT_DIRTY:-}" in
+    false | true) ;;
+    *) die "BOBR_BUILD_GIT_DIRTY must be 'true' or 'false' for the main release archive" ;;
+  esac
 
   root_name="bobr-${release_tag}-${target}"
   root="${staging}/${root_name}"
@@ -107,6 +113,12 @@ if [ "${kind}" = "main" ]; then
     "bobr ${release_tag#v} (request bobr-request-v5)") ;;
     *) die "unexpected bobr version output: ${bobr_version}" ;;
   esac
+  build_info="$("${root}/bin/bobr" --build-info)"
+  expected_build_info="$(printf \
+    '{"version":"%s","request_schema":"bobr-request-v5","provenance":{"git_commit":"%s","git_dirty":%s}}' \
+    "${release_tag#v}" "${BOBR_BUILD_GIT_COMMIT}" "${BOBR_BUILD_GIT_DIRTY}")"
+  [ "${build_info}" = "${expected_build_info}" ] \
+    || die "unexpected bobr build information: ${build_info}"
   protocol_info="$("${root}/bin/bobr-sandbox-launcher" --protocol-info)"
   [ "${protocol_info}" = '{"name":"bobr-sandbox-launcher","protocol_version":6}' ] \
     || die "unexpected sandbox launcher protocol info: ${protocol_info}"

@@ -37,6 +37,13 @@ cd "${repo}"
 command -v cargo >/dev/null 2>&1 || die "cargo not found on PATH"
 command -v strip >/dev/null 2>&1 || die "strip not found on PATH"
 
+git_commit="$(git rev-parse --verify HEAD)"
+[ -n "${git_commit}" ] || die "failed to resolve the checkout's HEAD commit"
+[ -z "$(git status --porcelain=v1 --untracked-files=normal)" ] \
+  || die "checkout is dirty; commit or remove local changes before checking a release"
+export BOBR_BUILD_GIT_COMMIT="${git_commit}"
+export BOBR_BUILD_GIT_DIRTY=false
+
 # Read the version exactly as the workflow's prepare job does, so that a
 # mismatch is caught here rather than by a job that has already started.
 version="$(sed -n '/^\[workspace.package\]$/,/^\[/s/^version = "\([^"]*\)"$/\1/p' Cargo.toml)"

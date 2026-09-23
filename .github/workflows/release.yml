@@ -19,6 +19,7 @@ jobs:
   prepare:
     runs-on: ubuntu-24.04
     outputs:
+      git_commit: ${{ steps.release.outputs.git_commit }}
       release_tag: ${{ steps.release.outputs.release_tag }}
       source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}
     steps:
@@ -36,6 +37,7 @@ jobs:
             echo "tag ${GITHUB_REF_NAME} does not match workspace version ${release_tag}" >&2
             exit 1
           fi
+          echo "git_commit=$(git rev-parse --verify HEAD)" >>"${GITHUB_OUTPUT}"
           echo "release_tag=${release_tag}" >>"${GITHUB_OUTPUT}"
           echo "source_date_epoch=$(git show -s --format=%ct HEAD)" >>"${GITHUB_OUTPUT}"
 
@@ -61,6 +63,9 @@ jobs:
   build-main-x86_64:
     needs: [prepare, test]
     runs-on: ubuntu-24.04
+    env:
+      BOBR_BUILD_GIT_COMMIT: ${{ needs.prepare.outputs.git_commit }}
+      BOBR_BUILD_GIT_DIRTY: 'false'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -80,6 +85,8 @@ jobs:
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
         run: |
+          [ "$(git rev-parse --verify HEAD)" = "${BOBR_BUILD_GIT_COMMIT}" ]
+          [ -z "$(git status --porcelain=v1 --untracked-files=normal)" ]
           cargo build --release --locked \
             --target x86_64-unknown-linux-musl \
             -p bobr-build \
