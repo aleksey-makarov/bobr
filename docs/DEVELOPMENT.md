@@ -94,21 +94,21 @@ The build tells you when this is needed, and names the tool.
 ## Before tagging a release
 
 ```sh
-tools/release-check.sh [TAG]
+tools/release-check-and-install.sh [--allow-dirty] [--bin-dir DIR]
 ```
 
-`TAG` defaults to `v` plus the workspace version, and giving a different one is
-refused — the release workflow reads the version the same way and rejects a tag
-that disagrees, so it is worth learning here rather than from a job that has
-already started.
+The script derives the prospective tag from the workspace version. It requires
+a clean checkout by default; `--allow-dirty` records a dirty build explicitly
+for local development rather than permitting it to look like a release.
 
 It then runs what that workflow runs, short of publishing: the formatting,
-clippy and test pass, then a static musl build and the real packaging script for
-both archives. That last part is the point. The packaging script writes a
-request by hand, checks the sandbox launcher's protocol version and verifies
-static linkage, and none of it is reached by `cargo test` or by CI on master —
-so it can rot unnoticed until a tag is pushed, which is exactly how a request
-schema bump once broke a release.
+clippy, test, and rustdoc passes, then a static musl build and the real packaging
+script for both archives. After every check succeeds, it installs the binaries
+from the verified main archive. That last part is the point. The packaging
+script writes a request by hand, checks the sandbox launcher's protocol version
+and verifies static linkage, and none of it is reached by `cargo test` or by CI
+on master — so it can rot unnoticed until a tag is pushed, which is exactly how
+a request schema bump once broke a release.
 
 The aarch64 half stays with CI. The build is skipped unless that target is
 installed, and the launcher tests need a machine of that architecture to run on
