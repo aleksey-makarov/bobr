@@ -106,7 +106,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: main-x86_64
-          path: dist/*.tar.xz
+          path: dist/bobr-x86_64-unknown-linux-musl.tar.xz
           if-no-files-found: error
           retention-days: 7
 
@@ -149,7 +149,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bundle-launcher-${{ matrix.target }}
-          path: dist/*.tar.xz
+          path: dist/bobr-bundle-launcher-${{ matrix.target }}.tar.xz
           if-no-files-found: error
           retention-days: 7
 
@@ -170,8 +170,16 @@ jobs:
         run: |
           set -euo pipefail
           cd release-artifacts
-          [ "$(find . -maxdepth 1 -type f -name '*.tar.xz' | wc -l)" -eq 3 ]
-          sha256sum ./*.tar.xz | LC_ALL=C sort -k2 >SHA256SUMS
+          archives=(
+            bobr-x86_64-unknown-linux-musl.tar.xz
+            bobr-bundle-launcher-x86_64-unknown-linux-musl.tar.xz
+            bobr-bundle-launcher-aarch64-unknown-linux-musl.tar.xz
+          )
+          [ "$(find . -maxdepth 1 -type f -name '*.tar.xz' | wc -l)" -eq "${#archives[@]}" ]
+          for archive in "${archives[@]}"; do
+            [ -f "${archive}" ]
+          done
+          sha256sum "${archives[@]}" | LC_ALL=C sort -k2 >SHA256SUMS
           sha256sum --check SHA256SUMS
 
       - name: Publish GitHub Release

@@ -69,7 +69,8 @@ verify_static_elf() {
 
 make_archive() {
   local root_name="$1"
-  local archive="${output_dir}/${root_name}.tar.xz"
+  local archive_name="$2"
+  local archive="${output_dir}/${archive_name}"
   tar \
     --format=gnu \
     --sort=name \
@@ -162,7 +163,7 @@ EOF
   [[ "${object_hash}" =~ ^[0-9a-f]{64}$ ]] \
     || die "bobr smoke test returned an invalid object hash: ${object_hash}"
 
-  make_archive "${root_name}"
+  make_archive "${root_name}" "bobr-${target}.tar.xz"
   exit 0
 fi
 
@@ -184,4 +185,6 @@ fi
 grep -Fq 'usage: bobr-bundle-launcher --run TOOL' "${launcher_stderr}" \
   || die "bundle launcher smoke test did not print the expected usage"
 
-make_archive "${root_name}"
+make_archive \
+  "${root_name}" \
+  "bobr-bundle-launcher-${target}.tar.xz"

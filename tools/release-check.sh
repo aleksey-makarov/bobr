@@ -105,6 +105,23 @@ source_date_epoch="$(git -C "${repo}" log -1 --format=%ct)"
 out="$(mktemp -d)"
 trap 'rm -rf "${out}"' EXIT
 
+verify_archive() {
+  local archive_name="$1"
+  local root_name="$2"
+  local archive="${out}/${archive_name}"
+
+  [ -f "${archive}" ] || die "missing release archive: ${archive_name}"
+  if tar -tJf "${archive}" | awk -F/ -v expected="${root_name}" '
+    $1 != expected { invalid = 1 }
+    $0 == expected "/" { found_root = 1 }
+    END { exit invalid || !found_root }
+  '; then
+    :
+  else
+    die "${archive_name} does not contain exactly the root ${root_name}/"
+  fi
+}
+
 step "checks (the workflow's test job)"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -118,12 +135,18 @@ done
 cargo build --release --locked --target "${host_target}" "${package_flags[@]}" --bins
 .github/scripts/package-release.sh main "${tag}" "${host_target}" \
   "${source_date_epoch}" "${out}"
+verify_archive \
+  "bobr-${host_target}.tar.xz" \
+  "bobr-${tag}-${host_target}"
 
 step "bundle launcher, ${host_target}"
 cargo test --locked -p bobr-bundle-launcher
 cargo build --release --locked --target "${host_target}" -p bobr-bundle-launcher
 .github/scripts/package-release.sh bundle "${tag}" "${host_target}" \
   "${source_date_epoch}" "${out}"
+verify_archive \
+  "bobr-bundle-launcher-${host_target}.tar.xz" \
+  "bobr-bundle-launcher-${tag}-${host_target}"
 
 # The other architecture is build-only even when its target is installed: its
 # tests need a machine of that architecture to run on.
@@ -132,10 +155,30 @@ if cargo build --release --locked --target "${other_target}" \
   step "bundle launcher, ${other_target} (build and package only)"
   .github/scripts/package-release.sh bundle "${tag}" "${other_target}" \
     "${source_date_epoch}" "${out}"
+  verify_archive \
+    "bobr-bundle-launcher-${other_target}.tar.xz" \
+    "bobr-bundle-launcher-${tag}-${other_target}"
 else
   echo "note: skipping ${other_target}; install the target to cover it" >&2
 fi
 
 step "archives built for ${tag}"
+find "${out}" -maxdepth 1 -type f -name '*.tar.xz' -printf '%f\n' \
+  | LC_ALL=C sort >"${out}/archive-names"
+expected_archive_names="$({
+  printf '%s\n' \
+    "bobr-${host_target}.tar.xz" \
+    "bobr-bundle-launcher-${host_target}.tar.xz"
+  if [ -f "${out}/bobr-bundle-launcher-${other_target}.tar.xz" ]; then
+    printf '%s\n' "bobr-bundle-launcher-${other_target}.tar.xz"
+  fi
+} | LC_ALL=C sort)"
+[ "$(cat "${out}/archive-names")" = "${expected_archive_names}" ] \
+  || die "release packaging produced an unexpected archive set"
+(
+  cd "${out}"
+  sha256sum ./*.tar.xz | LC_ALL=C sort -k2 >SHA256SUMS
+  sha256sum --check SHA256SUMS
+)
 ls -l "${out}" >&2
 echo "release-check.sh: ok" >&2
