@@ -5,49 +5,43 @@ release, put its `bin/` on `PATH`, build. This chapter is about working *on* it,
 where the binaries come from a checkout you are editing and the recipes tree is
 one you keep changing.
 
-The arrangement is deliberately the same as a user's. You build the binaries into
-a directory and keep that directory on `PATH`; from there, everything —
-the recipes' `bin/bobr-build.sh`, the QEMU bundles, `bobr-rebuild-world.sh` —
-finds them exactly as it finds an unpacked release. Nothing downstream knows or
-cares that the binaries came from source.
+The arrangement is deliberately the same as a user's. You install the host
+tools into one directory on `PATH`; from there, everything — the recipes'
+`bin/bobr-build.sh`, the QEMU bundles, `bobr-rebuild-world.sh` — finds them
+exactly as it finds an unpacked release. Nothing downstream knows or cares that
+the binaries came from source.
 
 ```text
 <workspace>/
   bobr/           # the engine, a git checkout
   bobr-recipes/   # the recipes, a git checkout
-  bobr-bin/bin/   # the binaries you build, and what you put on PATH
   bobr-store/     # the store
 ```
 
-Put `<workspace>/bobr-bin/bin` on `PATH` once, ahead of anything else that might
-provide `bobr`, and the rest of this chapter follows.
-
 ## Installing the binaries
 
-`tools/build-dev.sh` builds this checkout and installs it:
+Run the complete release gate and install exactly the archive it verifies:
 
 ```sh
-tools/build-dev.sh [--quick] [--debug]
+tools/release-check-and-install.sh [--allow-dirty] [--bin-dir DIR]
 ```
 
-It runs the checks you would otherwise run by hand, then installs — in this
-order, so that formatting is caught in a second rather than after three minutes
-of compiling, and so that a failed build never replaces working binaries:
+The default destination follows Cargo's convention:
+`$CARGO_INSTALL_ROOT/bin`, then `$CARGO_HOME/bin`, then `~/.cargo/bin`.
+`--bin-dir` overrides it. Keep the selected directory on `PATH`; Bobr does not
+maintain a workspace-private binary directory or inject one into child
+processes.
 
-1. `cargo fmt --all --check`
-2. `cargo build --release`
-3. `cargo build-sandbox-launcher-<arch>` — `bobr-sandbox-launcher`, static musl
-4. `cargo build-bundle-launcher-<arch>` — `bobr-bundle-launcher`, static musl
-5. `cargo clippy --workspace --all-targets`
-6. `cargo test --workspace --all-features`
-7. `cargo doc --workspace --no-deps`
-8. install `bobr`, `bobr-repo`, `bobr-fsobj-hash`, and
-   `bobr-sandbox-launcher`
+The gate requires a clean checkout by default, checks that the local Rust
+version matches CI, runs formatting, clippy, tests, and rustdoc, builds the
+static musl release archives, and smoke-tests them. Only then does it replace
+`bobr`, `bobr-repo`, `bobr-fsobj-hash`, and `bobr-sandbox-launcher` in the
+destination. `--allow-dirty` permits an iterative build while recording that
+fact in `bobr --build-info`.
 
-`--quick` keeps only the build and the install, for when you are iterating and
-will run the checks before committing. `--debug` installs debug binaries; the
-default is release, because these are what multi-hour recipe builds run on.
-`BOBR_DEV_BIN` overrides the install directory.
+For a quick edit-compile cycle, use Cargo directly. This does not update the
+tools on `PATH`; run the complete gate before using a build for acceptance
+testing or a long recipe build.
 
 Two different launchers are built here, and only one of them is installed:
 
@@ -62,15 +56,6 @@ Two different launchers are built here, and only one of them is installed:
   loader and libraries at run time. Recipes fetch it from a published release
   (`host-bundles/bobr-bundle-launcher.ncl`), not from this tree, so building it
   here only proves it still compiles.
-
-One more detail: the checks run in the debug profile while the installed binaries
-are release. They compile faster that way, and nothing about them depends on the
-profile.
-
-This is stricter than CI, which runs `fmt`, `clippy`, and `test` without
-`--all-features` and does not build the docs. `--all-features` turns on the
-`integration-tests` feature, and `cargo doc` is what catches broken intra-doc
-links, which are denied workspace-wide.
 
 ## Building recipes
 
@@ -124,25 +109,16 @@ store can hide a recipe that no longer builds, because the object it would
 produce is already there.
 
 ```sh
-tools/bobr-install.sh [--src | --potato]
 tools/bobr-rebuild-world.sh
 ```
 
-Installation is a separate, short-lived operation. With no option,
-`bobr-install.sh` downloads the latest published release and verifies it against
-`SHA256SUMS`. `--src` builds the public GitHub repository's HEAD locally;
-`--potato` does the same with `potato:/mnt/git/bobr.git`. Both source modes use
-`tools/build-dev.sh --quick` and share the script-owned
-`<workspace>/bobr-bin/src` checkout and its Cargo target directory. They never
-modify the developer's `<workspace>/bobr` checkout. Every mode installs the
-three host tools in `<workspace>/bobr-bin/bin` and records their exact Git
-commit in `<workspace>/bobr-bin/commit.txt`.
-
-`bobr-rebuild-world.sh` does not install or update those tools. It requires the
-complete installed set and its `commit.txt`, adds its `bin/` to `PATH`, and
-records that commit in the new store. Thus installation failure cannot become
-part of a multi-hour rebuild, and stores made from releases and source builds
-retain comparable provenance.
+Install the tools first, either with the source checkout's release gate or with
+the public `install.sh`, and put their common directory on `PATH`.
+`bobr-rebuild-world.sh` does not install, update, or override them. It requires
+all four host commands to resolve from the same directory, rejects a `bobr`
+whose build provenance is unknown, and records the complete compact
+`bobr --build-info` value in the new store. Dirty developer builds are allowed
+and remain identifiable there.
 
 In order, the script:
 
@@ -163,9 +139,10 @@ The hash locks are left alone: `bin/bobr-build.sh` checks them and refuses on a
 stale one, which is what should happen to a checkout that says one thing and
 contains another.
 
-Beside the store it records what produced it: `hashes.txt` with both commits,
-`bobr-rebuild-world.log` with the per-phase timings, and `host-stats.log` with
-load and memory samples taken around the build.
+Beside the store it records what produced it: `hashes.txt` with Bobr's build
+information and the recipes commit, `bobr-rebuild-world.log` with the per-phase
+timings, and `host-stats.log` with load and memory samples taken around the
+build.
 
 Expect hours. Recorded runs took 76 and 106 minutes with the sources already
 present; from an empty workspace the downloads add to that. Old stores are left
