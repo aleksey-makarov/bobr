@@ -110,10 +110,15 @@ if [ "${kind}" = "main" ]; then
   "${root}/bin/bobr-fsobj-hash" --help >/dev/null
   "${root}/bin/bobr-repo" --version >/dev/null
   bobr_version="$("${root}/bin/bobr" --version)"
-  case "${bobr_version}" in
-    "bobr ${release_tag#v} (request bobr-request-v5)") ;;
-    *) die "unexpected bobr version output: ${bobr_version}" ;;
-  esac
+  expected_provenance="${BOBR_BUILD_GIT_COMMIT}"
+  if [ "${BOBR_BUILD_GIT_DIRTY}" = true ]; then
+    expected_provenance="${expected_provenance}-dirty"
+  fi
+  expected_bobr_version="$(printf \
+    'bobr %s (request bobr-request-v5) (%s)' \
+    "${release_tag#v}" "${expected_provenance}")"
+  [ "${bobr_version}" = "${expected_bobr_version}" ] \
+    || die "unexpected bobr version output: ${bobr_version}"
   build_info="$("${root}/bin/bobr" --build-info)"
   expected_build_info="$(printf \
     '{"version":"%s","request_schema":"bobr-request-v5","provenance":{"git_commit":"%s","git_dirty":%s}}' \

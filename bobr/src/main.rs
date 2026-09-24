@@ -149,10 +149,7 @@ fn build(request_file: Option<PathBuf>, cancellation: CancellationToken) -> MRes
 /// talk to it at all.
 fn print_version() -> MResult<()> {
     let build_info = current_build_info()?;
-    println!(
-        "bobr {} (request {})",
-        build_info.version, build_info.request_schema
-    );
+    println!("{build_info}");
     Ok(())
 }
 

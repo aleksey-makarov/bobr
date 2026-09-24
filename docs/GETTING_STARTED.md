@@ -161,8 +161,8 @@ mv "bobr-recipes-${BOBR_VERSION}" bobr-recipes
 ```
 
 Versions that disagree are caught rather than left to misbehave: the recipes
-name the request format they emit, and the build driver checks it against what
-`bobr --version` accepts before doing anything.
+name the request format they emit, and the build driver checks it against the
+machine-readable schema in `bobr --build-info` before doing anything.
 
 Building takes two things: a **store** to build into, and a **build profile**
 describing your installation. The profile is a small Nickel file you keep in
@@ -207,8 +207,9 @@ few things that belong to one invocation stay on the command line:
 
 `bobr` and `bobr-fsobj-hash` are taken from `PATH` — normally the ones the
 installer placed there. Nothing is guessed, so what gets used is what
-`bobr --version` reports; the driver checks that its request format matches
-these recipes before it starts, and says so plainly when it does not.
+`bobr --version` reports; the driver checks `bobr --build-info` to ensure its
+request format matches these recipes before it starts, and says so plainly when
+it does not.
 
 Later builds reuse cached objects and rebuild only what a change actually
 reaches, so that cost is paid once rather than on every build.

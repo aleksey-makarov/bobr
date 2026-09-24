@@ -34,10 +34,11 @@ The request is a single JSON object:
 }
 ```
 
-- `schema` — format version; must be `"bobr-request-v5"`. `bobr --version`
-  reports the schema this build accepts (`bobr 0.1.9 (request
-  bobr-request-v5)`), so a recipe layer can check compatibility before building
-  rather than finding out from the parse error
+- `schema` — format version; must be `"bobr-request-v5"`. `bobr --build-info`
+  reports the schema this build accepts in machine-readable form, so a recipe
+  layer can check compatibility before building rather than finding out from
+  the parse error; `bobr --version` shows the same schema together with
+  human-readable build provenance
 - `store` — the store root for this request: an absolute path to an existing
   directory (see [Store](./STORE.md))
 - `logs` — this run's log directory: an absolute path to an existing directory,

@@ -78,6 +78,26 @@ impl BuildInfo {
     }
 }
 
+impl fmt::Display for BuildInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "bobr {} (request {}) ",
+            self.version, self.request_schema
+        )?;
+        match self.provenance {
+            Some(provenance) => {
+                write!(f, "({}", provenance.git_commit)?;
+                if provenance.git_dirty {
+                    f.write_str("-dirty")?;
+                }
+                f.write_str(")")
+            }
+            None => f.write_str("(provenance unknown)"),
+        }
+    }
+}
+
 impl fmt::Display for BuildInfoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -123,6 +143,39 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn formats_human_readable_identity() {
+        let unknown = BuildInfo::from_compile_metadata(None, None).unwrap();
+        assert_eq!(
+            unknown.to_string(),
+            format!(
+                "bobr {} (request {}) (provenance unknown)",
+                env!("CARGO_PKG_VERSION"),
+                crate::REQUEST_SCHEMA
+            )
+        );
+
+        let clean = BuildInfo::from_compile_metadata(Some(COMMIT), Some("false")).unwrap();
+        assert_eq!(
+            clean.to_string(),
+            format!(
+                "bobr {} (request {}) ({COMMIT})",
+                env!("CARGO_PKG_VERSION"),
+                crate::REQUEST_SCHEMA
+            )
+        );
+
+        let dirty = BuildInfo::from_compile_metadata(Some(COMMIT), Some("true")).unwrap();
+        assert_eq!(
+            dirty.to_string(),
+            format!(
+                "bobr {} (request {}) ({COMMIT}-dirty)",
+                env!("CARGO_PKG_VERSION"),
+                crate::REQUEST_SCHEMA
+            )
+        );
     }
 
     #[test]

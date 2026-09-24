@@ -30,7 +30,7 @@ cat >"${fixture_root}/bin/bobr" <<'EOF'
 #!/bin/sh
 case "${1:-}" in
   --version)
-    echo 'bobr 9.8.7 (request bobr-request-v5)'
+    echo 'bobr 9.8.7 (request bobr-request-v5) (0123456789abcdef0123456789abcdef01234567)'
     ;;
   --build-info)
     if [ -n "${BOBR_TEST_BAD_BUILD_INFO:-}" ]; then

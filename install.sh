@@ -179,9 +179,6 @@ for command in "${commands[@]}"; do
     || die "archive contains a non-executable bin/${command}"
 done
 
-expected_version="bobr ${version} (request bobr-request-v5)"
-[ "$("${staged_bin}/bobr" --version)" = "${expected_version}" ] \
-  || die "staged bobr reports an unexpected version"
 build_info="$("${staged_bin}/bobr" --build-info)" \
   || die "staged bobr failed to report build information"
 build_info_prefix="{\"version\":\"${version}\",\"request_schema\":\"bobr-request-v5\",\"provenance\":{\"git_commit\":\""
@@ -196,6 +193,9 @@ git_commit="${git_commit%"${build_info_suffix}"}"
   || die "staged bobr reports an invalid Git commit"
 [ "${build_info}" = "${build_info_prefix}${git_commit}${build_info_suffix}" ] \
   || die "staged bobr reports invalid build information"
+expected_version="bobr ${version} (request bobr-request-v5) (${git_commit})"
+[ "$("${staged_bin}/bobr" --version)" = "${expected_version}" ] \
+  || die "staged bobr reports an unexpected version"
 [ "$("${staged_bin}/bobr-repo" --version)" = "bobr-repo ${version}" ] \
   || die "staged bobr-repo reports an unexpected version"
 "${staged_bin}/bobr-fsobj-hash" --help >/dev/null \
