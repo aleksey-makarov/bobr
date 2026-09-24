@@ -200,6 +200,9 @@ cargo test --workspace --locked
 step "documentation"
 cargo doc --workspace --no-deps --locked
 
+step "user installer"
+tools/test-install.sh
+
 step "main archive, ${host_target}"
 package_flags=()
 for package in "${main_packages[@]}"; do
