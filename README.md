@@ -50,6 +50,19 @@ loader, libraries, data, and a tiny static launcher. Run it from the store or
 copy it to another compatible Linux machine — it keeps using its bundled
 runtime, not the host's.
 
+## Install
+
+On x86-64 Linux, install the latest release with:
+
+```sh
+curl -fsSL https://aleksey-makarov.github.io/bobr/install.sh | bash
+```
+
+The installer verifies the release checksum and installs into
+`~/.local/bin`. See [Getting Started](./docs/GETTING_STARTED.md) for a
+review-before-running variant, custom destinations, prerequisites, and
+uninstallation.
+
 ## Documentation
 
 Documentation lives in [`docs/`](./docs/). New here? Start with

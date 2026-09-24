@@ -1,9 +1,8 @@
 # Development
 
-[Getting Started](./GETTING_STARTED.md) describes using `bobr`: unpack a
-release, put its `bin/` on `PATH`, build. This chapter is about working *on* it,
-where the binaries come from a checkout you are editing and the recipes tree is
-one you keep changing.
+[Getting Started](./GETTING_STARTED.md) describes installing and using a
+release. This chapter is about working *on* `bobr`, where the binaries come
+from a checkout you are editing and the recipes tree is one you keep changing.
 
 The arrangement is deliberately the same as a user's. You install the host
 tools into one directory on `PATH`; from there, everything — the recipes'
@@ -32,16 +31,23 @@ The default destination follows Cargo's convention:
 maintain a workspace-private binary directory or inject one into child
 processes.
 
-The gate requires a clean checkout by default, checks that the local Rust
-version matches CI, runs formatting, clippy, tests, and rustdoc, builds the
-static musl release archives, and smoke-tests them. Only then does it replace
-`bobr`, `bobr-repo`, `bobr-fsobj-hash`, and `bobr-sandbox-launcher` in the
-destination. `--allow-dirty` permits an iterative build while recording that
-fact in `bobr --build-info`.
+The gate requires a clean checkout by default. It reads the single explicit
+`RUST_TOOLCHAIN` value from both CI and release workflows, requires the two to
+match, and requires the local `rustc` to have that exact version. It then runs
+formatting, clippy, tests, and rustdoc, builds the static musl release archives,
+and smoke-tests them. Only after every check succeeds does it replace `bobr`,
+`bobr-repo`, `bobr-fsobj-hash`, and `bobr-sandbox-launcher` in the destination.
+`--allow-dirty` permits an iterative build while recording that fact in
+`bobr --build-info`.
 
 For a quick edit-compile cycle, use Cargo directly. This does not update the
 tools on `PATH`; run the complete gate before using a build for acceptance
 testing or a long recipe build.
+
+The directory selected by the gate must precede other Bobr installations on
+`PATH`. The script warns when `command -v bobr` selects another copy. To remove
+an installation, delete the four commands above from that directory; the gate
+does not maintain an installation database or change shell startup files.
 
 Two different launchers are built here, and only one of them is installed:
 
@@ -98,6 +104,21 @@ a request schema bump once broke a release.
 The aarch64 half stays with CI. The build is skipped unless that target is
 installed, and the launcher tests need a machine of that architecture to run on
 at all.
+
+## Publishing the user installer
+
+The installer source is the repository-root `install.sh`. Its public URL is:
+
+```text
+https://aleksey-makarov.github.io/bobr/install.sh
+```
+
+The Pages workflow will publish it by copying `install.sh` to
+`book/install.sh` after `mdbook build` and deploying that directory as the
+Pages artifact. This is enabled only together with a release that provides the
+stable archive names consumed by the installer. CI and release workflows
+continue to run their own jobs; they invoke neither `install.sh` nor the local
+developer gate.
 
 ## Rebuilding the world
 

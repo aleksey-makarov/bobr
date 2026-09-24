@@ -1,6 +1,6 @@
 # Getting Started
 
-This chapter goes from a downloaded `bobr` release to a built object twice:
+This chapter goes from an installed `bobr` release to a built object twice:
 first by running `bobr` on a tiny request by hand, then by building a real
 target from the Nickel recipes. For the ideas behind it all, see
 [Concepts](./CONCEPTS.md).
@@ -9,7 +9,8 @@ target from the Nickel recipes. For the ideas behind it all, see
 
 - An x86-64 Linux host. The main release archive is currently published for
   `x86_64-unknown-linux-musl`.
-- `curl`, `tar`, and `sha256sum` to download, unpack, and verify the release.
+- Bash, `curl`, `tar`, `xz`, `sha256sum`, and ordinary core utilities to
+  download, verify, and install the release.
 - `newuidmap` and `newgidmap` on `PATH` (the `shadow` / `uidmap` package). Bobr
   runs each builder in a Linux user namespace when you are not root, and uses
   these setuid helpers to set up the uid/gid map. As root — or under `podman
@@ -18,27 +19,60 @@ target from the Nickel recipes. For the ideas behind it all, see
 
 ## Install bobr
 
-Choose a release from the
-[bobr releases](https://github.com/aleksey-makarov/bobr/releases), download the
-main archive and its checksum file, and verify it before unpacking. For example,
-for version 0.1.9:
+The shortest installation command is:
 
 ```sh
-BOBR_VERSION=0.1.9
-BOBR_TARGET=x86_64-unknown-linux-musl
-BOBR_ARCHIVE="bobr-v${BOBR_VERSION}-${BOBR_TARGET}.tar.xz"
-BOBR_RELEASE="https://github.com/aleksey-makarov/bobr/releases/download/v${BOBR_VERSION}"
-
-curl -fLO "${BOBR_RELEASE}/${BOBR_ARCHIVE}"
-curl -fLO "${BOBR_RELEASE}/SHA256SUMS"
-sha256sum --ignore-missing --check SHA256SUMS
-tar -xf "${BOBR_ARCHIVE}"
-export PATH="${PWD}/bobr-v${BOBR_VERSION}-${BOBR_TARGET}/bin:${PATH}"
+curl -fsSL https://aleksey-makarov.github.io/bobr/install.sh | bash
 ```
 
-The archive contains static `bobr`, `bobr-repo`, `bobr-fsobj-hash`, and
-`bobr-sandbox-launcher` binaries. Keep its `bin/` on `PATH` for the rest of
-this chapter; `bobr` finds the sandbox launcher next to its own executable.
+If you prefer to inspect code before running it, download the same script
+first:
+
+```sh
+curl -fsSLo bobr-install.sh \
+  https://aleksey-makarov.github.io/bobr/install.sh
+less bobr-install.sh
+bash bobr-install.sh
+rm bobr-install.sh
+```
+
+The installer downloads the latest x86-64 Linux release, verifies its entry in
+the release's `SHA256SUMS`, validates all four commands and their build
+provenance, and only then replaces the installed files. By default it installs
+static `bobr`, `bobr-repo`, `bobr-fsobj-hash`, and
+`bobr-sandbox-launcher` binaries into `~/.local/bin`. It neither invokes
+`sudo` nor edits shell startup files.
+
+Use `--bin-dir` for one invocation, or `BOBR_INSTALL_DIR` for the environment:
+
+```sh
+bash bobr-install.sh --bin-dir /path/to/bin
+BOBR_INSTALL_DIR=/path/to/bin bash bobr-install.sh
+```
+
+The chosen directory must precede older Bobr installations on `PATH`. For the
+default destination:
+
+```sh
+export PATH="${HOME}/.local/bin:${PATH}"
+command -v bobr
+```
+
+The installer prints this instruction when the newly installed command is not
+the one selected by the current `PATH`.
+
+There is no installation database. To uninstall the default installation,
+remove exactly the four installed commands:
+
+```sh
+rm -- \
+  "${HOME}/.local/bin/bobr" \
+  "${HOME}/.local/bin/bobr-repo" \
+  "${HOME}/.local/bin/bobr-fsobj-hash" \
+  "${HOME}/.local/bin/bobr-sandbox-launcher"
+```
+
+For a custom destination, use that directory instead.
 
 ## Your first build
 
@@ -117,9 +151,10 @@ Writing requests by hand does not scale; real targets are authored in
 [Nickel](https://nickel-lang.org/) in the separate
 [**bobr-recipes**](https://github.com/aleksey-makarov/bobr-recipes) repository
 and lowered to a request. The two are released together, so take the recipes
-release matching the `bobr` you unpacked above:
+release matching the installed `bobr`:
 
 ```sh
+BOBR_VERSION="$(bobr --version | awk '{print $2}')"
 curl -fLO "https://github.com/aleksey-makarov/bobr-recipes/archive/refs/tags/v${BOBR_VERSION}.tar.gz"
 tar -xf "v${BOBR_VERSION}.tar.gz"
 mv "bobr-recipes-${BOBR_VERSION}" bobr-recipes
@@ -170,8 +205,8 @@ few things that belong to one invocation stay on the command line:
 - `--dry-run` — print the resolved profile and the JSON request, build nothing;
 - a positional argument names a different profile (`bobr-build.sh ../ci/bobr.ncl`).
 
-`bobr` and `bobr-fsobj-hash` are taken from `PATH` — the ones from the release
-archive you unpacked earlier. Nothing is guessed, so what gets used is what
+`bobr` and `bobr-fsobj-hash` are taken from `PATH` — normally the ones the
+installer placed there. Nothing is guessed, so what gets used is what
 `bobr --version` reports; the driver checks that its request format matches
 these recipes before it starts, and says so plainly when it does not.
 
