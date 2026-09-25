@@ -159,15 +159,21 @@ run_installer() {
     "${tool_bin}/bash" "${installer}" "${@:2}"
 }
 
+commands=(bobr bobr-repo bobr-fsobj-hash bobr-sandbox-launcher)
 home="${test_root}/home"
 mkdir -p "${home}/.local/bin"
+for command in "${commands[@]}"; do
+  printf 'old-%s\n' "${command}" >"${home}/.local/bin/${command}"
+done
 printf '%s\n' legacy-fetch >"${home}/.local/bin/bobr-fetch"
 printf '%s\n' legacy-hash >"${home}/.local/bin/fsobj-hash"
 run_installer "${home}" >"${test_root}/success.stdout" \
   2>"${test_root}/success.stderr"
-for command in bobr bobr-repo bobr-fsobj-hash bobr-sandbox-launcher; do
+for command in "${commands[@]}"; do
   [ -x "${home}/.local/bin/${command}" ] \
     || die "successful install omitted ${command}"
+  [ "$(cat "${home}/.local/bin/${command}")" != "old-${command}" ] \
+    || die "successful install did not replace ${command}"
 done
 [ "$(cat "${home}/.local/bin/bobr-fetch")" = legacy-fetch ] \
   || die "installer changed legacy bobr-fetch"
@@ -211,9 +217,25 @@ grep_command="$(command -v grep)"
   "${test_root}/platform.stderr" \
   || die "unsupported architecture error is not precise"
 
+missing_tool_bin="${test_root}/missing-tool-bin"
+mkdir "${missing_tool_bin}"
+for tool in awk curl install mkdir mktemp mv rm sha256sum tar uname; do
+  ln -s "${tool_bin}/${tool}" "${missing_tool_bin}/${tool}"
+done
+if "${env_command}" -i \
+  HOME="${home}" \
+  PATH="${missing_tool_bin}" \
+  BOBR_TEST_FIXTURE="${fixture}" \
+  "${tool_bin}/bash" "${installer}" \
+  >"${test_root}/missing-tool.stdout" 2>"${test_root}/missing-tool.stderr"; then
+  die "installer succeeded without xz"
+fi
+"${grep_command}" -Fq 'xz not found on PATH' \
+  "${test_root}/missing-tool.stderr" \
+  || die "missing-tool error is not precise"
+
 failure_bin="${test_root}/failure-bin"
 mkdir "${failure_bin}"
-commands=(bobr bobr-repo bobr-fsobj-hash bobr-sandbox-launcher)
 for command in "${commands[@]}"; do
   printf 'old-%s\n' "${command}" >"${failure_bin}/${command}"
 done

@@ -37,9 +37,11 @@ jobs:
             echo "tag ${GITHUB_REF_NAME} does not match workspace version ${release_tag}" >&2
             exit 1
           fi
-          echo "git_commit=$(git rev-parse --verify HEAD)" >>"${GITHUB_OUTPUT}"
-          echo "release_tag=${release_tag}" >>"${GITHUB_OUTPUT}"
-          echo "source_date_epoch=$(git show -s --format=%ct HEAD)" >>"${GITHUB_OUTPUT}"
+          {
+            echo "git_commit=$(git rev-parse --verify HEAD)"
+            echo "release_tag=${release_tag}"
+            echo "source_date_epoch=$(git show -s --format=%ct HEAD)"
+          } >>"${GITHUB_OUTPUT}"
 
   test:
     needs: prepare
