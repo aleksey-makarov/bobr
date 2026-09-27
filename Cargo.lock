@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-build"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "bobr-builder",
  "bobr-core",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-builder"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "bobr-bundle-launcher",
  "bobr-core",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-bundle-launcher"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "libc",
  "serde",
@@ -631,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "bobr-runtime",
  "fsobj-hash",
@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-repo"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-runtime"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "libc",
  "serde",
@@ -683,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-sandbox"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "bobr-builder",
  "bobr-core",
@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-sandbox-launcher"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "libc",
  "nix",
@@ -709,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-source"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "bobr-builder",
  "bobr-core",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "bobr-store"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "bobr-core",
  "bobr-runtime",
@@ -1203,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "fsobj-hash"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "serde",
  "serde_json",

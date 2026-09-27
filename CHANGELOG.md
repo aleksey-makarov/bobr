@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.10
 
 - Unified source acquisition and builder execution under a demand-driven,
   multi-goal Realizer with exact and reuse resolution.
