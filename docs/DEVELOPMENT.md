@@ -82,44 +82,6 @@ bin/bobr-update-fsobj-hashes.sh
 
 The build tells you when this is needed, and names the tool.
 
-## Before tagging a release
-
-```sh
-tools/release-check-and-install.sh [--allow-dirty] [--bin-dir DIR]
-```
-
-The script derives the prospective tag from the workspace version. It requires
-a clean checkout by default; `--allow-dirty` records a dirty build explicitly
-for local development rather than permitting it to look like a release.
-
-It then runs what that workflow runs, short of publishing: the formatting,
-clippy, test, and rustdoc passes, then a static musl build and the real packaging
-script for both archives. After every check succeeds, it installs the binaries
-from the verified main archive. That last part is the point. The packaging
-script writes a request by hand, checks the sandbox launcher's protocol version
-and verifies static linkage, and none of it is reached by `cargo test` or by CI
-on master — so it can rot unnoticed until a tag is pushed, which is exactly how
-a request schema bump once broke a release.
-
-The aarch64 half stays with CI. The build is skipped unless that target is
-installed, and the launcher tests need a machine of that architecture to run on
-at all.
-
-## Publishing the user installer
-
-The installer source is the repository-root `install.sh`. Its public URL is:
-
-```text
-https://aleksey-makarov.github.io/bobr/install.sh
-```
-
-The Pages workflow will publish it by copying `install.sh` to
-`book/install.sh` after `mdbook build` and deploying that directory as the
-Pages artifact. This is enabled only together with a release that provides the
-stable archive names consumed by the installer. CI and release workflows
-continue to run their own jobs; they invoke neither `install.sh` nor the local
-developer gate.
-
 ## Rebuilding the world
 
 `tools/bobr-rebuild-world.sh`, in the recipes repository, rebuilds the complete
