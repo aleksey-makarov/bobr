@@ -6,6 +6,7 @@ on:
     paths:
       - 'docs/**'
       - 'book.toml'
+      - 'install.sh'
       - '.github/workflows/docs.yml'
   workflow_dispatch:
 
@@ -33,6 +34,9 @@ jobs:
 
       - name: Build book
         run: mdbook build
+
+      - name: Add installer
+        run: install -m 0644 install.sh book/install.sh
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
