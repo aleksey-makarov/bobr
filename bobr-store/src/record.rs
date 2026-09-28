@@ -39,7 +39,7 @@ pub(crate) struct ObjectRecord {
 ///
 /// The object for `object_hash` must exist; its object record is written
 /// idempotently.
-pub(crate) fn record_existing_object(
+pub fn record_existing_object(
     store: &Store,
     object_hash: ObjectHash,
     run_id: &str,

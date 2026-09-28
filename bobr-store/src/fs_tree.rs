@@ -30,7 +30,11 @@ const CANONICAL_SCHEMA_LINE: &[u8] = br#"{"schema":"bobr-fs-tree-manifest"}
 "#;
 const FS_FILE_HASH_TAG: &[u8] = b"bobr:fs-file:v1\0";
 
-pub(crate) fn read_manifest_if_marked(path: &Path) -> Result<Option<FsTreeManifest>, StoreError> {
+/// Reads a canonical fs-tree manifest when `path` carries its schema marker.
+///
+/// Ordinary files, directories, and symlinks return `None`. A marked but
+/// malformed manifest is an error.
+pub fn read_manifest_if_marked(path: &Path) -> Result<Option<FsTreeManifest>, StoreError> {
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         StoreError::Io(format!(
             "failed to inspect possible fs-tree manifest '{}': {error}",

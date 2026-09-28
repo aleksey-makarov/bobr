@@ -41,7 +41,8 @@ pub struct Limits {
 }
 
 impl Limits {
-    pub(crate) fn resolved_max_local_jobs(&self) -> usize {
+    /// Returns the local-I/O concurrency bound with its default applied.
+    pub fn resolved_max_local_jobs(&self) -> usize {
         self.max_local_jobs.unwrap_or(DEFAULT_MAX_LOCAL_JOBS).max(1) as usize
     }
 }
@@ -52,7 +53,6 @@ pub(crate) struct ResolvedLimits {
     pub(crate) per_host_default: u32,
     pub(crate) per_host: BTreeMap<String, u32>,
     pub(crate) max_connections: u32,
-    pub(crate) max_local_jobs: u32,
 }
 
 impl ResolvedLimits {
@@ -63,10 +63,6 @@ impl ResolvedLimits {
             max_connections: limits
                 .max_connections
                 .unwrap_or_else(|| default_max_connections(nofile_limit()))
-                .max(1),
-            max_local_jobs: limits
-                .max_local_jobs
-                .unwrap_or(DEFAULT_MAX_LOCAL_JOBS)
                 .max(1),
         }
     }
@@ -127,7 +123,10 @@ mod tests {
         assert_eq!(resolved.for_host("ftp.gnu.org"), 3);
         assert_eq!(resolved.for_host("crates.io"), DEFAULT_PER_HOST);
         assert_eq!(resolved.max_connections, 10);
-        assert_eq!(resolved.max_local_jobs, DEFAULT_MAX_LOCAL_JOBS);
+        assert_eq!(
+            limits.resolved_max_local_jobs(),
+            DEFAULT_MAX_LOCAL_JOBS as usize
+        );
     }
 
     #[test]
@@ -136,7 +135,7 @@ mod tests {
             max_local_jobs: Some(1),
             ..Default::default()
         };
-        assert_eq!(ResolvedLimits::from_request(&limits).max_local_jobs, 1);
+        assert_eq!(limits.resolved_max_local_jobs(), 1);
     }
 
     #[test]

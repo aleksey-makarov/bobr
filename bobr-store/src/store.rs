@@ -36,7 +36,7 @@ struct StoreInner {
 ///
 /// Unlike [`Store::create`], opening this handle never creates or repairs
 /// directories. The type exposes no mutation operations; secondary-store
-/// capabilities wrap it to read trusted indexes or locate content without
+/// capabilities wrap it to read authoritative mappings or locate content without
 /// accidentally treating the secondary as the working store.
 #[derive(Debug, Clone)]
 pub struct ReadOnlyStore {

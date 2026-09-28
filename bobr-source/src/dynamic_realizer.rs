@@ -13,15 +13,18 @@ use crate::build_executor::{
 };
 use crate::graph::{PlannedGraph, PlannedNode};
 use crate::realizer::execute_builder_miss;
+use crate::{
+    ContentTransferEvent, ContentTransferReport, KnownObjectResolution, LocalIoScheduler,
+    MappingCandidates, SecondaryResolver,
+};
 use bobr_builder::{BuilderInputs, BuilderPlannedSubject, materialize_fs_tree_root};
 use bobr_core::{
     BuildKey, BuildLogEvent, BuildLogLevel, BuildRunLogger, BuildStatus, CancellationToken,
     ObjectHash, ReuseKey, Run, RuntimeProvider, SubjectIdentity,
 };
 use bobr_store::{
-    ContentTransferEvent, ContentTransferReport, KnownObjectResolution, MappingCandidates,
-    SecondaryResolver, Store, StoreError, load_build_object_hash, load_reuse_object_hash,
-    publish_existing_build, record_existing_source_object,
+    Store, StoreError, load_build_object_hash, load_reuse_object_hash, publish_existing_build,
+    record_existing_source_object,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -164,6 +167,7 @@ impl DynamicRealizer {
         secondary: Arc<SecondaryResolver>,
         build_executor: BuildExecutorHandle,
         limits: crate::acquisition::Limits,
+        local_io: LocalIoScheduler,
     ) -> Result<Self, DynamicRealizeError> {
         let max_local_jobs = limits.resolved_max_local_jobs();
         if max_local_jobs == 0 {
@@ -184,6 +188,7 @@ impl DynamicRealizer {
             logger.clone(),
             cancellation.clone(),
             secondary.clone(),
+            local_io,
             limits,
         )
         .map_err(DynamicRealizeError::new)?;
@@ -707,18 +712,15 @@ impl DynamicRealizer {
         let result = cell
             .get_or_init(|| async {
                 self.check_cancelled()?;
-                let permit = self.acquire_local_io_permit().await?;
-                self.check_cancelled()?;
                 let secondary = self.secondary.clone();
                 let logger = self.logger.clone();
                 let cancellation = self.cancellation.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    let identity = content_identity(hash);
-                    let mut started = false;
-                    let mut transferred_bytes = 0_u64;
-                    let mut completed_transfers = Vec::new();
-                    let result = secondary.ensure_objects_with_progress(&[hash], |event| {
+                let identity = content_identity(hash);
+                let mut started = false;
+                let mut transferred_bytes = 0_u64;
+                let mut completed_transfers = Vec::new();
+                let result = secondary
+                    .ensure_objects_with_progress(&[hash], |event| {
                         started = true;
                         log_content_progress(
                             &logger,
@@ -727,24 +729,25 @@ impl DynamicRealizer {
                             &mut transferred_bytes,
                             &mut completed_transfers,
                         );
-                    });
-                    if started {
-                        log_content_terminal(
-                            &logger,
-                            &identity,
-                            hash,
-                            &result,
-                            &completed_transfers,
-                            cancellation.is_cancelled(),
-                        );
+                    })
+                    .await;
+                if started {
+                    log_content_terminal(
+                        &logger,
+                        &identity,
+                        hash,
+                        &result,
+                        &completed_transfers,
+                        cancellation.is_cancelled(),
+                    );
+                }
+                let result = result.map_err(|error| {
+                    if cancellation.is_cancelled() {
+                        DynamicRealizeError::cancelled("build cancelled by signal")
+                    } else {
+                        DynamicRealizeError::from(error)
                     }
-                    result
-                })
-                .await
-                .map_err(|error| {
-                    DynamicRealizeError::new(format!("content acquisition task panicked: {error}"))
-                })?
-                .map_err(DynamicRealizeError::from)?;
+                })?;
                 // A copy/hash transaction already inside synchronous store or
                 // namespace code is allowed to reach its atomic publication
                 // boundary. Do not publish graph mappings after cancellation.
@@ -815,13 +818,9 @@ impl DynamicRealizer {
         &self,
         keys: &[BuildKey],
     ) -> Result<Vec<MappingCandidates<BuildKey>>, DynamicRealizeError> {
-        let resolver = self.secondary.clone();
-        let keys = keys.to_vec();
-        tokio::task::spawn_blocking(move || resolver.lookup_builds(&keys))
+        self.secondary
+            .lookup_builds(keys)
             .await
-            .map_err(|error| {
-                DynamicRealizeError::new(format!("secondary build lookup panicked: {error}"))
-            })?
             .map_err(DynamicRealizeError::from)
     }
 
@@ -829,13 +828,9 @@ impl DynamicRealizer {
         &self,
         keys: &[ReuseKey],
     ) -> Result<Vec<MappingCandidates<ReuseKey>>, DynamicRealizeError> {
-        let resolver = self.secondary.clone();
-        let keys = keys.to_vec();
-        tokio::task::spawn_blocking(move || resolver.lookup_reuses(&keys))
+        self.secondary
+            .lookup_reuses(keys)
             .await
-            .map_err(|error| {
-                DynamicRealizeError::new(format!("secondary reuse lookup panicked: {error}"))
-            })?
             .map_err(DynamicRealizeError::from)
     }
 
@@ -867,9 +862,9 @@ impl DynamicRealizer {
             status: BuildStatus::Running,
             op: Some(format!("secondary-{kind}")),
             message: if conflict {
-                format!("trusted indexes disagree for {kind} key '{key}'")
+                format!("mapping providers disagree for {kind} key '{key}'")
             } else {
-                format!("trusted index resolved {kind} key '{key}'")
+                format!("mapping provider resolved {kind} key '{key}'")
             },
             object_hash: None,
             raw_log_path: None,
@@ -877,7 +872,7 @@ impl DynamicRealizer {
                 "mapping_kind": kind,
                 "key": key,
                 "mapping_providers": report.answers.iter().map(|answer| json!({
-                    "name": answer.index,
+                    "name": answer.provider,
                     "object_hash": answer.object_hash,
                 })).collect::<Vec<_>>(),
             })
@@ -1137,12 +1132,12 @@ fn dedup_reuse_keys(keys: Vec<ReuseKey>) -> Vec<ReuseKey> {
 mod tests {
     use super::*;
     use crate::graph::plan_graph;
+    use crate::{NamedContentProvider, NamedMappingProvider};
     use bobr_runtime::runtime_provider::RuntimeProvider;
     use bobr_store::fs_tree::{FsFileHash, FsTreeEntry, FsTreeManifest};
     use bobr_store::{
         ContentImportOutcome, ContentSource, LocalCopyContentSource, LocalHardlinkContentSource,
-        LocalRepository, LocalTrustedKeyIndex, NamedContentSource, NamedTrustedKeyIndex,
-        ReadOnlyStore, import_build, import_source_object,
+        LocalRepository, LocalTrustedKeyIndex, ReadOnlyStore, import_build, import_source_object,
     };
     use serde_json::{Value, json};
     use std::fs;
@@ -1416,35 +1411,44 @@ mod tests {
         ReuseKey::from_str(&digit.to_string().repeat(64)).unwrap()
     }
 
-    fn object_hash(digit: char) -> ObjectHash {
-        ObjectHash::from_str(&digit.to_string().repeat(64)).unwrap()
+    fn local_io(max_jobs: usize, cancellation: CancellationToken) -> LocalIoScheduler {
+        LocalIoScheduler::new(max_jobs, cancellation).unwrap()
     }
 
-    fn index(name: &str, root: &std::path::Path) -> NamedTrustedKeyIndex {
-        NamedTrustedKeyIndex::new(
+    fn index(name: &str, root: &std::path::Path) -> NamedMappingProvider {
+        NamedMappingProvider::new(
             name,
-            Arc::new(LocalTrustedKeyIndex::new(LocalRepository::new(
-                ReadOnlyStore::open(root).unwrap(),
-            ))),
-        )
-    }
-
-    fn hardlink_content(name: &str, root: &std::path::Path) -> NamedContentSource {
-        NamedContentSource::new(
-            name,
-            Arc::new(LocalHardlinkContentSource::with_runtime(
-                LocalRepository::new(ReadOnlyStore::open(root).unwrap()),
-                RuntimeProvider::host(),
+            Arc::new(crate::LocalMappingProvider::new(
+                Arc::new(LocalTrustedKeyIndex::new(LocalRepository::new(
+                    ReadOnlyStore::open(root).unwrap(),
+                ))),
+                local_io(8, CancellationToken::new()),
             )),
         )
     }
 
-    fn copy_content(name: &str, root: &std::path::Path) -> NamedContentSource {
-        NamedContentSource::new(
+    fn hardlink_content(name: &str, root: &std::path::Path) -> NamedContentProvider {
+        NamedContentProvider::new(
             name,
-            Arc::new(LocalCopyContentSource::with_runtime(
-                LocalRepository::new(ReadOnlyStore::open(root).unwrap()),
-                RuntimeProvider::host(),
+            Arc::new(crate::LocalContentProvider::new(
+                Arc::new(LocalHardlinkContentSource::with_runtime(
+                    LocalRepository::new(ReadOnlyStore::open(root).unwrap()),
+                    RuntimeProvider::host(),
+                )),
+                local_io(8, CancellationToken::new()),
+            )),
+        )
+    }
+
+    fn copy_content(name: &str, root: &std::path::Path) -> NamedContentProvider {
+        NamedContentProvider::new(
+            name,
+            Arc::new(crate::LocalContentProvider::new(
+                Arc::new(LocalCopyContentSource::with_runtime(
+                    LocalRepository::new(ReadOnlyStore::open(root).unwrap()),
+                    RuntimeProvider::host(),
+                )),
+                local_io(8, CancellationToken::new()),
             )),
         )
     }
@@ -1515,8 +1519,8 @@ mod tests {
     fn dynamic(
         environment: &TestEnvironment,
         graph: Arc<PlannedGraph>,
-        indexes: Vec<NamedTrustedKeyIndex>,
-        sources: Vec<NamedContentSource>,
+        indexes: Vec<NamedMappingProvider>,
+        sources: Vec<NamedContentProvider>,
     ) -> (Arc<DynamicRealizer>, crate::build_executor::BuildExecutor) {
         dynamic_with_local_jobs(
             environment,
@@ -1531,10 +1535,31 @@ mod tests {
     fn dynamic_with_local_jobs(
         environment: &TestEnvironment,
         graph: Arc<PlannedGraph>,
-        indexes: Vec<NamedTrustedKeyIndex>,
-        sources: Vec<NamedContentSource>,
+        indexes: Vec<NamedMappingProvider>,
+        sources: Vec<NamedContentProvider>,
         cancellation: CancellationToken,
         max_local_jobs: u32,
+    ) -> (Arc<DynamicRealizer>, crate::build_executor::BuildExecutor) {
+        let local_io = local_io(max_local_jobs as usize, cancellation.clone());
+        dynamic_with_scheduler(
+            environment,
+            graph,
+            indexes,
+            sources,
+            cancellation,
+            max_local_jobs,
+            local_io,
+        )
+    }
+
+    fn dynamic_with_scheduler(
+        environment: &TestEnvironment,
+        graph: Arc<PlannedGraph>,
+        indexes: Vec<NamedMappingProvider>,
+        sources: Vec<NamedContentProvider>,
+        cancellation: CancellationToken,
+        max_local_jobs: u32,
+        local_io: LocalIoScheduler,
     ) -> (Arc<DynamicRealizer>, crate::build_executor::BuildExecutor) {
         let secondary = Arc::new(
             SecondaryResolver::new(
@@ -1560,6 +1585,7 @@ mod tests {
                     max_local_jobs: Some(max_local_jobs),
                     ..Default::default()
                 },
+                local_io,
             )
             .unwrap(),
         );
@@ -2017,7 +2043,7 @@ mod tests {
         }
         environment.logger.flush();
         let events = fs::read_to_string(environment.run.logs_dir().join("events.jsonl")).unwrap();
-        assert!(events.contains("trusted indexes disagree for build key"));
+        assert!(events.contains("mapping providers disagree for build key"));
         executor.shutdown().await.unwrap();
     }
 
@@ -2382,13 +2408,17 @@ mod tests {
             ),
             Duration::from_millis(75),
         );
+        let tracked_io = local_io(2, CancellationToken::new());
         let (realizer, executor) = dynamic_with_local_jobs(
             &environment,
             graph,
             Vec::new(),
-            vec![NamedContentSource::new(
+            vec![NamedContentProvider::new(
                 "tracked",
-                Arc::new(tracked.clone()),
+                Arc::new(crate::LocalContentProvider::new(
+                    Arc::new(tracked.clone()),
+                    tracked_io,
+                )),
             )],
             CancellationToken::new(),
             2,
@@ -2437,9 +2467,12 @@ mod tests {
             &environment,
             graph,
             Vec::new(),
-            vec![NamedContentSource::new(
+            vec![NamedContentProvider::new(
                 "tracked",
-                Arc::new(tracked.clone()),
+                Arc::new(crate::LocalContentProvider::new(
+                    Arc::new(tracked.clone()),
+                    local_io(8, CancellationToken::new()),
+                )),
             )],
         );
 
@@ -2460,26 +2493,46 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cancellation_interrupts_a_repository_import_waiting_for_local_io() {
         let environment = environment("repository-cancel-wait");
+        let repository_root = environment._temp.path().join("repository");
+        let repository = store(&repository_root);
+        let hash = publish_source_object(
+            &repository,
+            &environment._temp.path().join("staged"),
+            "waiting-source",
+            b"waiting repository object\n",
+        );
         let graph = Arc::new(
             plan_graph(
-                &BTreeMap::from([("source".to_string(), source("source", object_hash('a')))]),
+                &BTreeMap::from([("source".to_string(), source("source", hash))]),
                 &["source".to_string()],
             )
             .unwrap(),
         );
         let cancellation = CancellationToken::new();
-        let (realizer, executor) = dynamic_with_local_jobs(
+        let local_io = local_io(1, cancellation.clone());
+        let content = NamedContentProvider::new(
+            "waiting",
+            Arc::new(crate::LocalContentProvider::new(
+                Arc::new(LocalCopyContentSource::with_runtime(
+                    LocalRepository::new(ReadOnlyStore::open(&repository_root).unwrap()),
+                    RuntimeProvider::host(),
+                )),
+                local_io.clone(),
+            )),
+        );
+        let (realizer, executor) = dynamic_with_scheduler(
             &environment,
             graph,
             Vec::new(),
-            Vec::new(),
+            vec![content],
             cancellation.clone(),
             1,
+            local_io,
         );
         let permit = realizer.source_engine.acquire_local_permit().await.unwrap();
         let task = {
             let realizer = realizer.clone();
-            tokio::spawn(async move { realizer.ensure_object(object_hash('a')).await })
+            tokio::spawn(async move { realizer.ensure_object(hash).await })
         };
         tokio::time::sleep(Duration::from_millis(20)).await;
         cancellation.cancel();
@@ -2521,13 +2574,17 @@ mod tests {
             Duration::from_millis(100),
         );
         let cancellation = CancellationToken::new();
+        let tracked_io = local_io(1, cancellation.clone());
         let (realizer, executor) = dynamic_with_local_jobs(
             &environment,
             graph,
             Vec::new(),
-            vec![NamedContentSource::new(
+            vec![NamedContentProvider::new(
                 "tracked",
-                Arc::new(tracked.clone()),
+                Arc::new(crate::LocalContentProvider::new(
+                    Arc::new(tracked.clone()),
+                    tracked_io,
+                )),
             )],
             cancellation.clone(),
             1,

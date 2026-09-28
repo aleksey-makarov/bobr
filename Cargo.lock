@@ -713,6 +713,7 @@ dependencies = [
 name = "bobr-source"
 version = "0.1.10"
 dependencies = [
+ "async-trait",
  "bobr-builder",
  "bobr-core",
  "bobr-runtime",

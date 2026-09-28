@@ -11,10 +11,9 @@ use crate::build_executor::{
     publish_builder_output,
 };
 use crate::graph::PlannedGraph;
+use crate::{SecondaryResolution, SecondaryResolver};
 use bobr_core::{BuildKey, ObjectHash};
-use bobr_store::{
-    SecondaryResolution, SecondaryResolver, Store, StoreError, load_build_object_hash,
-};
+use bobr_store::{Store, StoreError, load_build_object_hash};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
@@ -160,14 +159,11 @@ pub async fn resolve_lazy_exact(
         }
 
         let mut unresolved = misses;
-        if secondary.has_trusted_indexes() && !unresolved.is_empty() {
-            let resolver = secondary.clone();
-            let query = unresolved.clone();
-            let reports = tokio::task::spawn_blocking(move || resolver.resolve_builds(&query))
+        if secondary.has_mapping_providers() && !unresolved.is_empty() {
+            let reports = secondary
+                .resolve_builds(&unresolved)
                 .await
-                .map_err(|error| {
-                    LazyExactError::new(format!("secondary exact lookup panicked: {error}"))
-                })??;
+                .map_err(LazyExactError::from)?;
             unresolved.clear();
             for report in reports {
                 if let Some(hit) = &report.resolved {
@@ -211,11 +207,12 @@ pub async fn resolve_lazy_exact(
 mod tests {
     use super::*;
     use crate::graph::plan_graph;
+    use crate::{NamedContentProvider, NamedMappingProvider};
     use bobr_core::ReuseKey;
     use bobr_runtime::runtime_provider::RuntimeProvider;
     use bobr_store::{
-        LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex, NamedContentSource,
-        NamedTrustedKeyIndex, ReadOnlyStore, Store, import_build,
+        LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex, ReadOnlyStore, Store,
+        import_build,
     };
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
@@ -223,6 +220,10 @@ mod tests {
     use std::path::Path;
     use std::str::FromStr;
     use tempfile::tempdir;
+
+    fn local_io() -> crate::LocalIoScheduler {
+        crate::LocalIoScheduler::new(8, bobr_core::CancellationToken::new()).unwrap()
+    }
 
     fn source(name: &str, hash_digit: char) -> Value {
         json!({
@@ -357,15 +358,21 @@ mod tests {
             SecondaryResolver::new(
                 working.clone(),
                 "test-run",
-                vec![NamedTrustedKeyIndex::new(
+                vec![NamedMappingProvider::new(
                     "secondary",
-                    Arc::new(LocalTrustedKeyIndex::new(repository.clone())),
+                    Arc::new(crate::LocalMappingProvider::new(
+                        Arc::new(LocalTrustedKeyIndex::new(repository.clone())),
+                        local_io(),
+                    )),
                 )],
-                vec![NamedContentSource::new(
+                vec![NamedContentProvider::new(
                     "secondary",
-                    Arc::new(LocalHardlinkContentSource::with_runtime(
-                        repository,
-                        RuntimeProvider::host(),
+                    Arc::new(crate::LocalContentProvider::new(
+                        Arc::new(LocalHardlinkContentSource::with_runtime(
+                            repository,
+                            RuntimeProvider::host(),
+                        )),
+                        local_io(),
                     )),
                 )],
             )
@@ -423,28 +430,40 @@ mod tests {
                 store(&temp.path().join("working")),
                 "test-run",
                 vec![
-                    NamedTrustedKeyIndex::new(
+                    NamedMappingProvider::new(
                         "first-index",
-                        Arc::new(LocalTrustedKeyIndex::new(first.clone())),
+                        Arc::new(crate::LocalMappingProvider::new(
+                            Arc::new(LocalTrustedKeyIndex::new(first.clone())),
+                            local_io(),
+                        )),
                     ),
-                    NamedTrustedKeyIndex::new(
+                    NamedMappingProvider::new(
                         "second-index",
-                        Arc::new(LocalTrustedKeyIndex::new(second.clone())),
+                        Arc::new(crate::LocalMappingProvider::new(
+                            Arc::new(LocalTrustedKeyIndex::new(second.clone())),
+                            local_io(),
+                        )),
                     ),
                 ],
                 vec![
-                    NamedContentSource::new(
+                    NamedContentProvider::new(
                         "first-content",
-                        Arc::new(LocalHardlinkContentSource::with_runtime(
-                            first,
-                            RuntimeProvider::host(),
+                        Arc::new(crate::LocalContentProvider::new(
+                            Arc::new(LocalHardlinkContentSource::with_runtime(
+                                first,
+                                RuntimeProvider::host(),
+                            )),
+                            local_io(),
                         )),
                     ),
-                    NamedContentSource::new(
+                    NamedContentProvider::new(
                         "second-content",
-                        Arc::new(LocalHardlinkContentSource::with_runtime(
-                            second,
-                            RuntimeProvider::host(),
+                        Arc::new(crate::LocalContentProvider::new(
+                            Arc::new(LocalHardlinkContentSource::with_runtime(
+                                second,
+                                RuntimeProvider::host(),
+                            )),
+                            local_io(),
                         )),
                     ),
                 ],
@@ -460,7 +479,7 @@ mod tests {
             report
                 .answers
                 .iter()
-                .map(|answer| (answer.index.as_str(), answer.object_hash))
+                .map(|answer| (answer.provider.as_str(), answer.object_hash))
                 .collect::<Vec<_>>(),
             [("first-index", first_hash), ("second-index", second_hash)]
         );

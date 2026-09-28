@@ -257,7 +257,7 @@ fn neutral_record_requires_existing_object() {
     let object_hash =
         parse_object_hash("1111111111111111111111111111111111111111111111111111111111111111");
 
-    let error = record::record_existing_object(&layout, object_hash, TEST_RUN_ID).unwrap_err();
+    let error = record_existing_object(&layout, object_hash, TEST_RUN_ID).unwrap_err();
 
     assert!(matches!(error, StoreError::Io(message) if message.contains("object")));
     assert!(!layout.object_record_path(object_hash).exists());
@@ -289,7 +289,7 @@ fn record_existing_source_object_reuses_canonical_record() {
     let stage = temp.path().join("source.txt");
     fs::write(&stage, b"hello").unwrap();
     let object_hash = import_object(&layout, &stage).unwrap();
-    record::record_existing_object(&layout, object_hash, TEST_RUN_ID).unwrap();
+    record_existing_object(&layout, object_hash, TEST_RUN_ID).unwrap();
 
     let hit = record_existing_source_object(&layout, object_hash, "source", TEST_RUN_ID)
         .unwrap()

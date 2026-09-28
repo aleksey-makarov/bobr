@@ -27,7 +27,6 @@ mod record;
 mod ref_name;
 mod refs;
 mod secondary;
-mod secondary_resolver;
 mod source;
 mod store;
 
@@ -35,16 +34,15 @@ pub use copy_content::LocalCopyContentSource;
 pub use error::StoreError;
 pub use inventory::{StoreInventory, StoredFsFile, StoredObject};
 pub use object::import_build;
+pub use record::record_existing_object;
 pub use ref_name::validate_ref_name;
-pub use refs::{load_build_object_hash, load_reuse_object_hash, publish_existing_build};
+pub use refs::{
+    load_build_object_hash, load_reuse_object_hash, publish_existing_build,
+    publish_existing_build_mapping, publish_existing_reuse_mapping,
+};
 pub use secondary::{
     ContentImportOutcome, ContentSource, ContentTransferMode, LocalHardlinkContentSource,
     LocalRepository, LocalTrustedKeyIndex, TrustedKeyIndex, TrustedResolution,
-};
-pub use secondary_resolver::{
-    ContentTransferEvent, ContentTransferReport, KnownObjectResolution, MappingCandidates,
-    NamedContentSource, NamedTrustedKeyIndex, ResolvedSecondaryContent, ReuseQuery,
-    SecondaryResolution, SecondaryResolver, TrustedAnswer,
 };
 pub use source::{SourceImportOutcome, import_source_object, record_existing_source_object};
 pub use store::{ReadOnlyStore, Store};

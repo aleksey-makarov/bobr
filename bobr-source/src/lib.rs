@@ -22,6 +22,7 @@ pub mod build_executor;
 pub mod dynamic_realizer;
 pub mod graph;
 mod http;
+mod local_io;
 /// OCI registry client: pulls and stages an image's layers by pinned digest.
 ///
 /// Public only under the `test-support` feature (used by `bobr`'s integration
@@ -33,10 +34,18 @@ mod oci_registry;
 mod origin;
 mod origins;
 pub mod realizer;
+mod secondary_resolver;
 
 // The origin abstractions are the crate's public API; re-export them at the root
 // rather than exposing the module path.
+pub use local_io::LocalIoScheduler;
 pub use origin::{OriginContext, OriginHandler, OriginSpec, ParsedOrigin};
+pub use secondary_resolver::{
+    ContentProvider, ContentTransferEvent, ContentTransferReport, KnownObjectResolution,
+    LocalBackendRegistry, LocalContentProvider, LocalMappingProvider, MappingAnswer,
+    MappingCandidates, MappingProvider, NamedContentProvider, NamedMappingProvider,
+    ResolvedSecondaryContent, ReuseQuery, SecondaryResolution, SecondaryResolver,
+};
 
 use bobr_core::{BuildKey, BuildLogSubject, ObjectHash, Workspace};
 use serde_json::{Map, Value};

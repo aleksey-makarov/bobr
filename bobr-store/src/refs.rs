@@ -156,6 +156,38 @@ pub fn publish_existing_build(
     update_object_ref(store, object_ref_name, object_hash)
 }
 
+/// Publishes a build mapping for complete content already in the working store.
+///
+/// A neutral local object record is written before the mapping becomes
+/// visible. Unlike [`publish_existing_build`], this narrow operation does not
+/// create a user-facing object ref.
+pub fn publish_existing_build_mapping(
+    store: &Store,
+    build_key: BuildKey,
+    object_hash: ObjectHash,
+    run_id: &str,
+) -> Result<(), StoreError> {
+    crate::record::record_existing_object(store, object_hash, run_id)?;
+    store_build_ref(store, build_key, object_hash)
+}
+
+/// Publishes reuse and current-build mappings for complete existing content.
+///
+/// A neutral local object record is written before either mapping becomes
+/// visible. This is the store-side atomic boundary used after secondary
+/// content acquisition.
+pub fn publish_existing_reuse_mapping(
+    store: &Store,
+    build_key: BuildKey,
+    reuse_key: ReuseKey,
+    object_hash: ObjectHash,
+    run_id: &str,
+) -> Result<(), StoreError> {
+    crate::record::record_existing_object(store, object_hash, run_id)?;
+    store_reuse_ref(store, reuse_key, object_hash)?;
+    store_build_ref(store, build_key, object_hash)
+}
+
 /// Updates the current object ref for `object_ref_name`.
 ///
 /// If the current ref points at a different object, the previous symlink target

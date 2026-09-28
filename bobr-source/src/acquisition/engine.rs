@@ -10,6 +10,8 @@
 //! imports and builder-input preparation performed by the Realizer.
 
 use super::{ResolvedLimits, oci};
+use crate::LocalIoScheduler;
+use crate::SecondaryResolver;
 use crate::http::{
     self, HttpOrigin, HttpOriginError, HttpRetryPolicy, HttpTimeouts, Retry, UrlAttemptState,
 };
@@ -18,10 +20,7 @@ use bobr_core::{
     BuildLogEvent, BuildLogLevel, BuildLogSubject, BuildLogger, BuildRunLogger, BuildStatus,
     CancellationToken, ObjectHash, Run, Workspace,
 };
-use bobr_store::{
-    SecondaryResolver, SourceImportOutcome, Store, import_source_object,
-    record_existing_source_object,
-};
+use bobr_store::{SourceImportOutcome, Store, import_source_object, record_existing_source_object};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::{Map, Value};
@@ -66,7 +65,7 @@ pub(crate) struct Engine {
     /// Local filesystem work is bounded separately from the network: it
     /// competes for a disk head, not for sockets. The Realizer acquires this
     /// same semaphore for repository imports and builder-input preparation.
-    local: Arc<Semaphore>,
+    local: LocalIoScheduler,
     cancellation: CancellationToken,
     cancel_rx: watch::Receiver<bool>,
     /// Held so `cancel_rx.changed()` cannot resolve by sender-drop; cancelling
@@ -81,6 +80,7 @@ pub(crate) fn engine_for_dynamic_realizer(
     logger: Arc<BuildRunLogger>,
     cancellation: CancellationToken,
     secondary: Arc<SecondaryResolver>,
+    local: LocalIoScheduler,
     limits: crate::acquisition::Limits,
 ) -> Result<Arc<Engine>, String> {
     let limits = ResolvedLimits::from_request(&limits);
@@ -92,7 +92,7 @@ pub(crate) fn engine_for_dynamic_realizer(
         logger,
         client,
         global: Arc::new(Semaphore::new(limits.max_connections as usize)),
-        local: Arc::new(Semaphore::new(limits.max_local_jobs as usize)),
+        local,
         limits,
         hosts: Mutex::new(HashMap::new()),
         cancellation,
@@ -158,12 +158,10 @@ impl Engine {
     pub(crate) async fn acquire_local_permit(
         &self,
     ) -> Result<OwnedSemaphorePermit, HttpOriginError> {
-        tokio::select! {
-            _ = self.until_cancelled() => Err(cancelled_error()),
-            permit = self.local.clone().acquire_owned() => {
-                Ok(permit.expect("local semaphore closed"))
-            }
-        }
+        self.local
+            .acquire()
+            .await
+            .map_err(|error| HttpOriginError::fatal_network(error.to_string()))
     }
 }
 
@@ -236,21 +234,11 @@ async fn process_source_inner(
     }
 
     if engine.secondary.has_content_sources() {
-        let permit = engine
-            .acquire_local_permit()
+        let secondary = engine
+            .secondary
+            .ensure_objects(&[declared])
             .await
             .map_err(|error| error.to_string())?;
-        let secondary = {
-            let engine = engine.clone();
-            run_blocking(move || {
-                let _permit = permit;
-                engine
-                    .secondary
-                    .ensure_objects(&[declared])
-                    .map_err(|error| error.to_string())
-            })
-            .await??
-        };
         if engine.is_cancelled() {
             return Err("cancelled".to_string());
         }
@@ -1030,11 +1018,11 @@ fn log_download(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NamedContentProvider;
     use crate::acquisition::Limits;
     use bobr_runtime::runtime_provider::RuntimeProvider;
     use bobr_store::{
-        LocalHardlinkContentSource, LocalRepository, NamedContentSource, ReadOnlyStore,
-        import_source_object,
+        LocalHardlinkContentSource, LocalRepository, ReadOnlyStore, import_source_object,
     };
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -1157,7 +1145,7 @@ mod tests {
 
     async fn run_test_with_content(
         request: TestRequest,
-        content_sources: Vec<NamedContentSource>,
+        content_sources: Vec<NamedContentProvider>,
     ) -> Result<TestSummary, String> {
         let store = Store::create(&request.store).map_err(|error| error.to_string())?;
         let run = Arc::new(
@@ -1173,12 +1161,19 @@ mod tests {
             SecondaryResolver::new(store.clone(), run.run_id(), Vec::new(), content_sources)
                 .map_err(|error| error.to_string())?,
         );
+        let cancellation = CancellationToken::new();
+        let local_io = LocalIoScheduler::new(
+            request.limits.resolved_max_local_jobs(),
+            cancellation.clone(),
+        )
+        .map_err(|error| error.to_string())?;
         let engine = engine_for_dynamic_realizer(
             store,
             run,
             logger.clone(),
-            CancellationToken::new(),
+            cancellation,
             secondary,
+            local_io,
             request.limits,
         )?;
         let mut tasks = JoinSet::new();
@@ -1320,11 +1315,14 @@ mod tests {
             }],
         );
         let working_root = request.store.clone();
-        let content = NamedContentSource::new(
+        let content = NamedContentProvider::new(
             "secondary",
-            Arc::new(LocalHardlinkContentSource::with_runtime(
-                LocalRepository::new(ReadOnlyStore::open(&secondary_root).unwrap()),
-                RuntimeProvider::host(),
+            Arc::new(crate::LocalContentProvider::new(
+                Arc::new(LocalHardlinkContentSource::with_runtime(
+                    LocalRepository::new(ReadOnlyStore::open(&secondary_root).unwrap()),
+                    RuntimeProvider::host(),
+                )),
+                LocalIoScheduler::new(4, CancellationToken::new()).unwrap(),
             )),
         );
 

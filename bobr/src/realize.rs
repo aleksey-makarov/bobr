@@ -7,9 +7,15 @@ use bobr_runtime::runtime_provider::{RuntimeProvider, runtime_provider_for_curre
 use bobr_source::build_executor::BuildExecutor;
 use bobr_source::dynamic_realizer::DynamicRealizer;
 use bobr_source::graph::{GraphPlanError, GraphPlanErrorKind, plan_graph};
+use bobr_source::{
+    LocalBackendRegistry, LocalContentProvider, LocalIoScheduler, LocalMappingProvider,
+    NamedContentProvider, NamedMappingProvider, SecondaryResolver,
+};
+#[cfg(test)]
+use bobr_store::ReadOnlyStore;
 use bobr_store::{
     LocalCopyContentSource, LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex,
-    NamedContentSource, NamedTrustedKeyIndex, ReadOnlyStore, SecondaryResolver, Store,
+    Store,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -71,11 +77,19 @@ pub async fn realize(
     );
     let _resize_monitor = ResizeMonitor::spawn(&logger);
     let runtime_provider = runtime_provider_for_current_process();
+    let local_io = LocalIoScheduler::new(limits.resolved_max_local_jobs(), cancellation.clone())
+        .map_err(map_store_error)?;
     let repository_log = repository_log_details(&repositories);
-    let (indexes, sources) = repository_capabilities(repositories, runtime_provider.clone());
+    let (mapping_providers, content_providers) =
+        repository_capabilities(repositories, runtime_provider.clone(), local_io.clone());
     let secondary = Arc::new(
-        SecondaryResolver::new(store.clone(), run.run_id(), indexes, sources)
-            .map_err(map_store_error)?,
+        SecondaryResolver::new(
+            store.clone(),
+            run.run_id(),
+            mapping_providers,
+            content_providers,
+        )
+        .map_err(map_store_error)?,
     );
     let queue_capacity = jobs.saturating_mul(2).max(1);
     let executor = BuildExecutor::new(jobs, queue_capacity)
@@ -91,6 +105,7 @@ pub async fn realize(
             secondary,
             executor.handle(),
             limits,
+            local_io,
         )
         .map_err(|error| ExecutionError::Build(error.to_string()))?,
     );
@@ -201,26 +216,27 @@ fn open_local_repositories(
     repositories: Vec<LocalRepositoryConfig>,
 ) -> Result<Vec<OpenedLocalRepository>, ExecutionError> {
     let mut canonical_roots = HashMap::new();
+    let mut registry = LocalBackendRegistry::default();
     let mut opened = Vec::with_capacity(repositories.len());
     for repository in repositories {
-        let store = ReadOnlyStore::open(&repository.store).map_err(map_store_error)?;
-        if store.root() == working.root() {
+        let backend = registry.open(&repository.store).map_err(map_store_error)?;
+        if backend.store().root() == working.root() {
             return Err(ExecutionError::InvalidRequest(format!(
                 "local repository '{}' is a canonical alias of the working store '{}'",
                 repository.name,
                 working.root().display()
             )));
         }
-        if let Some(previous_name) =
-            canonical_roots.insert(store.root().to_path_buf(), repository.name.clone())
-        {
+        if let Some(previous_name) = canonical_roots.insert(
+            backend.store().root().to_path_buf(),
+            repository.name.clone(),
+        ) {
             return Err(ExecutionError::InvalidRequest(format!(
                 "local repositories '{previous_name}' and '{}' resolve to the same store root '{}'",
                 repository.name,
-                store.root().display()
+                backend.store().root().display()
             )));
         }
-        let backend = LocalRepository::new(store);
         if repository.transfer == LocalTransferPolicy::Hardlink {
             backend
                 .validate_hardlink_compatible_with(working)
@@ -244,14 +260,18 @@ fn open_local_repositories(
 fn repository_capabilities(
     repositories: Vec<OpenedLocalRepository>,
     runtime_provider: RuntimeProvider,
-) -> (Vec<NamedTrustedKeyIndex>, Vec<NamedContentSource>) {
-    let mut indexes = Vec::new();
-    let mut sources = Vec::with_capacity(repositories.len());
+    local_io: LocalIoScheduler,
+) -> (Vec<NamedMappingProvider>, Vec<NamedContentProvider>) {
+    let mut mapping_providers = Vec::new();
+    let mut content_providers = Vec::with_capacity(repositories.len());
     for repository in repositories {
         if repository.trusted {
-            indexes.push(NamedTrustedKeyIndex::new(
+            mapping_providers.push(NamedMappingProvider::new(
                 repository.name.clone(),
-                Arc::new(LocalTrustedKeyIndex::new(repository.repository.clone())),
+                Arc::new(LocalMappingProvider::new(
+                    Arc::new(LocalTrustedKeyIndex::new(repository.repository.clone())),
+                    local_io.clone(),
+                )),
             ));
         }
         let source = match repository.transfer {
@@ -264,9 +284,12 @@ fn repository_capabilities(
                 runtime_provider.clone(),
             )),
         };
-        sources.push(NamedContentSource::new(repository.name, source));
+        content_providers.push(NamedContentProvider::new(
+            repository.name,
+            Arc::new(LocalContentProvider::new(source, local_io.clone())),
+        ));
     }
-    (indexes, sources)
+    (mapping_providers, content_providers)
 }
 
 fn repository_log_details(repositories: &[OpenedLocalRepository]) -> Vec<serde_json::Value> {
@@ -382,8 +405,8 @@ mod tests {
     use std::str::FromStr;
     use tempfile::tempdir;
 
-    #[test]
-    fn untrusted_repository_mappings_are_not_exposed_or_read() {
+    #[tokio::test]
+    async fn untrusted_repository_mappings_are_not_exposed_or_read() {
         let temp = tempdir().unwrap();
         let repository_root = temp.path().join("repository");
         let working_root = temp.path().join("working");
@@ -398,6 +421,7 @@ mod tests {
         )
         .unwrap();
         let repository = LocalRepository::new(ReadOnlyStore::open(&repository_root).unwrap());
+        let local_io = LocalIoScheduler::new(4, CancellationToken::new()).unwrap();
 
         let (indexes, sources) = repository_capabilities(
             vec![OpenedLocalRepository {
@@ -407,12 +431,17 @@ mod tests {
                 repository: repository.clone(),
             }],
             RuntimeProvider::host(),
+            local_io.clone(),
         );
         let resolver =
             SecondaryResolver::new(working.clone(), "untrusted-run", indexes, sources).unwrap();
-        assert!(!resolver.has_trusted_indexes());
+        assert!(!resolver.has_mapping_providers());
         assert!(resolver.has_content_sources());
-        let report = resolver.resolve_builds(&[build_key]).unwrap().remove(0);
+        let report = resolver
+            .resolve_builds(&[build_key])
+            .await
+            .unwrap()
+            .remove(0);
         assert!(report.answers.is_empty());
         assert!(report.resolved.is_none());
 
@@ -424,9 +453,10 @@ mod tests {
                 repository,
             }],
             RuntimeProvider::host(),
+            local_io,
         );
         let resolver = SecondaryResolver::new(working, "trusted-run", indexes, sources).unwrap();
-        let error = resolver.resolve_builds(&[build_key]).unwrap_err();
+        let error = resolver.resolve_builds(&[build_key]).await.unwrap_err();
         assert!(error.to_string().contains("is not a symlink"), "{error}");
     }
 }

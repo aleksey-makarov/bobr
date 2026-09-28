@@ -1,32 +1,268 @@
 //! Mapping-first, content-second resolution across secondary-store capabilities.
 
-use crate::fs_tree::{FsFileHash, FsTreeEntry, FsTreeManifest, read_manifest_if_marked};
-use crate::{
-    ContentImportOutcome, ContentSource, ContentTransferMode, Store, StoreError, TrustedKeyIndex,
-    TrustedResolution,
-};
+use crate::LocalIoScheduler;
+use async_trait::async_trait;
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
+use bobr_store::fs_tree::{FsFileHash, FsTreeEntry, FsTreeManifest, read_manifest_if_marked};
+use bobr_store::{
+    ContentImportOutcome, ContentSource, ContentTransferMode, LocalRepository, ReadOnlyStore,
+    Store, StoreError, TrustedKeyIndex, TrustedResolution, publish_existing_build_mapping,
+    publish_existing_reuse_mapping, record_existing_object,
+};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::fs;
 use std::hash::Hash;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::task::JoinSet;
 
-/// One named trusted key-index capability in configured priority order.
-#[derive(Debug, Clone)]
-pub struct NamedTrustedKeyIndex {
-    name: String,
-    index: Arc<dyn TrustedKeyIndex>,
+/// Per-run registry of canonical local repository backends.
+///
+/// Complementary logical capabilities clone the same [`LocalRepository`]
+/// handle instead of reopening and revalidating its store layout.
+#[derive(Debug, Default)]
+pub struct LocalBackendRegistry {
+    repositories: HashMap<PathBuf, LocalRepository>,
 }
 
-impl NamedTrustedKeyIndex {
-    /// Names one trusted index for diagnostics and priority selection.
-    pub fn new(name: impl Into<String>, index: Arc<dyn TrustedKeyIndex>) -> Self {
+impl LocalBackendRegistry {
+    /// Opens or reuses one local repository by canonical store root.
+    pub fn open(&mut self, root: &Path) -> Result<LocalRepository, StoreError> {
+        let canonical_root = canonical_local_root(root)?;
+        if let Some(repository) = self.repositories.get(&canonical_root) {
+            return Ok(repository.clone());
+        }
+        let store = ReadOnlyStore::open(&canonical_root)?;
+        let repository = LocalRepository::new(store);
+        self.repositories.insert(canonical_root, repository.clone());
+        Ok(repository)
+    }
+
+    /// Returns the number of distinct canonical local stores opened.
+    pub fn len(&self) -> usize {
+        self.repositories.len()
+    }
+
+    /// Returns whether no local backend has been opened.
+    pub fn is_empty(&self) -> bool {
+        self.repositories.is_empty()
+    }
+}
+
+fn canonical_local_root(root: &Path) -> Result<PathBuf, StoreError> {
+    if !root.is_absolute() {
+        return Err(StoreError::InvalidInput(format!(
+            "store root must be absolute: '{}'",
+            root.display()
+        )));
+    }
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            StoreError::InvalidInput(format!("store root must exist: '{}'", root.display()))
+        } else {
+            StoreError::Io(format!(
+                "failed to resolve store root '{}': {error}",
+                root.display()
+            ))
+        }
+    })?;
+    let metadata = fs::metadata(&canonical_root).map_err(|error| {
+        StoreError::Io(format!(
+            "failed to inspect store root '{}': {error}",
+            canonical_root.display()
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(StoreError::InvalidInput(format!(
+            "store root must be a directory: '{}'",
+            root.display()
+        )));
+    }
+    Ok(canonical_root)
+}
+
+/// Asynchronous authoritative build/reuse mapping capability.
+#[async_trait]
+pub trait MappingProvider: fmt::Debug + Send + Sync {
+    /// Resolves every available build key in one batch.
+    async fn resolve_builds(
+        &self,
+        keys: &[BuildKey],
+    ) -> Result<Vec<TrustedResolution<BuildKey>>, StoreError>;
+
+    /// Resolves every available reuse key in one batch.
+    async fn resolve_reuses(
+        &self,
+        keys: &[ReuseKey],
+    ) -> Result<Vec<TrustedResolution<ReuseKey>>, StoreError>;
+}
+
+/// Asynchronous content capability for already-known object identities.
+#[async_trait]
+pub trait ContentProvider: fmt::Debug + Send + Sync {
+    /// Physical transport used when content is imported.
+    fn transfer_mode(&self) -> ContentTransferMode;
+
+    /// Locates top-level objects in one batch.
+    async fn locate_objects(
+        &self,
+        hashes: &[ObjectHash],
+    ) -> Result<HashSet<ObjectHash>, StoreError>;
+
+    /// Reads an object as an fs-tree manifest when it carries that schema.
+    async fn object_manifest(&self, hash: ObjectHash)
+    -> Result<Option<FsTreeManifest>, StoreError>;
+
+    /// Locates filesystem files in one batch.
+    async fn locate_fs_files(
+        &self,
+        hashes: &[FsFileHash],
+    ) -> Result<HashSet<FsFileHash>, StoreError>;
+
+    /// Imports one batch of filesystem files into the working store.
+    async fn import_fs_files(
+        &self,
+        working: &Store,
+        hashes: &[FsFileHash],
+    ) -> Result<(), StoreError>;
+
+    /// Imports one top-level object into the working store.
+    async fn import_object(
+        &self,
+        working: &Store,
+        hash: ObjectHash,
+    ) -> Result<ContentImportOutcome, StoreError>;
+}
+
+/// Async adapter for one synchronous local mapping index.
+#[derive(Debug, Clone)]
+pub struct LocalMappingProvider {
+    index: Arc<dyn TrustedKeyIndex>,
+    local_io: LocalIoScheduler,
+}
+
+impl LocalMappingProvider {
+    /// Wraps a local mapping index under shared blocking-I/O scheduling.
+    pub fn new(index: Arc<dyn TrustedKeyIndex>, local_io: LocalIoScheduler) -> Self {
+        Self { index, local_io }
+    }
+}
+
+#[async_trait]
+impl MappingProvider for LocalMappingProvider {
+    async fn resolve_builds(
+        &self,
+        keys: &[BuildKey],
+    ) -> Result<Vec<TrustedResolution<BuildKey>>, StoreError> {
+        let index = self.index.clone();
+        let keys = keys.to_vec();
+        self.local_io.run(move || index.resolve_builds(&keys)).await
+    }
+
+    async fn resolve_reuses(
+        &self,
+        keys: &[ReuseKey],
+    ) -> Result<Vec<TrustedResolution<ReuseKey>>, StoreError> {
+        let index = self.index.clone();
+        let keys = keys.to_vec();
+        self.local_io.run(move || index.resolve_reuses(&keys)).await
+    }
+}
+
+/// Async adapter for one synchronous local content source.
+#[derive(Debug, Clone)]
+pub struct LocalContentProvider {
+    source: Arc<dyn ContentSource>,
+    local_io: LocalIoScheduler,
+}
+
+impl LocalContentProvider {
+    /// Wraps local content operations under shared blocking-I/O scheduling.
+    pub fn new(source: Arc<dyn ContentSource>, local_io: LocalIoScheduler) -> Self {
+        Self { source, local_io }
+    }
+}
+
+#[async_trait]
+impl ContentProvider for LocalContentProvider {
+    fn transfer_mode(&self) -> ContentTransferMode {
+        self.source.transfer_mode()
+    }
+
+    async fn locate_objects(
+        &self,
+        hashes: &[ObjectHash],
+    ) -> Result<HashSet<ObjectHash>, StoreError> {
+        let source = self.source.clone();
+        let hashes = hashes.to_vec();
+        self.local_io
+            .run(move || source.locate_objects(&hashes))
+            .await
+    }
+
+    async fn object_manifest(
+        &self,
+        hash: ObjectHash,
+    ) -> Result<Option<FsTreeManifest>, StoreError> {
+        let source = self.source.clone();
+        self.local_io
+            .run(move || source.object_manifest(hash))
+            .await
+    }
+
+    async fn locate_fs_files(
+        &self,
+        hashes: &[FsFileHash],
+    ) -> Result<HashSet<FsFileHash>, StoreError> {
+        let source = self.source.clone();
+        let hashes = hashes.to_vec();
+        self.local_io
+            .run(move || source.locate_fs_files(&hashes))
+            .await
+    }
+
+    async fn import_fs_files(
+        &self,
+        working: &Store,
+        hashes: &[FsFileHash],
+    ) -> Result<(), StoreError> {
+        let source = self.source.clone();
+        let working = working.clone();
+        let hashes = hashes.to_vec();
+        self.local_io
+            .run(move || source.import_fs_files(&working, &hashes))
+            .await
+    }
+
+    async fn import_object(
+        &self,
+        working: &Store,
+        hash: ObjectHash,
+    ) -> Result<ContentImportOutcome, StoreError> {
+        let source = self.source.clone();
+        let working = working.clone();
+        self.local_io
+            .run(move || source.import_object(&working, hash))
+            .await
+    }
+}
+
+/// One named mapping capability in configured priority order.
+#[derive(Debug, Clone)]
+pub struct NamedMappingProvider {
+    name: String,
+    provider: Arc<dyn MappingProvider>,
+}
+
+impl NamedMappingProvider {
+    /// Names one mapping provider for diagnostics and priority selection.
+    pub fn new(name: impl Into<String>, provider: Arc<dyn MappingProvider>) -> Self {
         Self {
             name: name.into(),
-            index,
+            provider,
         }
     }
 
@@ -38,14 +274,14 @@ impl NamedTrustedKeyIndex {
 
 /// One named content-source capability in configured priority order.
 #[derive(Debug, Clone)]
-pub struct NamedContentSource {
+pub struct NamedContentProvider {
     name: String,
-    source: Arc<dyn ContentSource>,
+    source: Arc<dyn ContentProvider>,
 }
 
-impl NamedContentSource {
+impl NamedContentProvider {
     /// Names one content source for diagnostics and priority selection.
-    pub fn new(name: impl Into<String>, source: Arc<dyn ContentSource>) -> Self {
+    pub fn new(name: impl Into<String>, source: Arc<dyn ContentProvider>) -> Self {
         Self {
             name: name.into(),
             source,
@@ -58,28 +294,28 @@ impl NamedContentSource {
     }
 }
 
-/// One trusted index answer retained for conflict diagnostics.
+/// One authoritative mapping answer retained for conflict diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustedAnswer {
-    /// Index that supplied the answer.
-    pub index: String,
-    /// Object named by the index.
+pub struct MappingAnswer {
+    /// Provider that supplied the answer.
+    pub provider: String,
+    /// Object named by the provider.
     pub object_hash: ObjectHash,
 }
 
-/// Ordered, hash-only answers for one trusted build or reuse lookup.
+/// Ordered, hash-only answers for one build or reuse mapping lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MappingCandidates<K> {
     /// Queried build or reuse key.
     pub key: K,
-    /// Every trusted answer in index priority order, including agreements.
-    pub answers: Vec<TrustedAnswer>,
+    /// Every answer in provider priority order, including agreements.
+    pub answers: Vec<MappingAnswer>,
     /// Distinct object hashes in first-answer order.
     pub object_hashes: Vec<ObjectHash>,
 }
 
 impl<K> MappingCandidates<K> {
-    /// Returns true when trusted indexes named more than one distinct hash.
+    /// Returns true when mapping providers named more than one distinct hash.
     pub fn has_conflict(&self) -> bool {
         self.object_hashes.len() > 1
     }
@@ -90,8 +326,8 @@ impl<K> MappingCandidates<K> {
 pub struct ResolvedSecondaryContent {
     /// Selected object hash.
     pub object_hash: ObjectHash,
-    /// First trusted index that named the selected candidate.
-    pub mapping_index: String,
+    /// First mapping provider that named the selected candidate.
+    pub mapping_provider: String,
     /// Content sources used for the top-level object or fs-file closure.
     ///
     /// This is empty when the complete candidate was already in the working
@@ -154,8 +390,8 @@ pub enum ContentTransferEvent {
 pub struct SecondaryResolution<K> {
     /// Queried build or reuse identity.
     pub key: K,
-    /// Every trusted answer in index priority order.
-    pub answers: Vec<TrustedAnswer>,
+    /// Every answer in provider priority order.
+    pub answers: Vec<MappingAnswer>,
     /// Candidate hashes that no complete set of content sources could provide.
     pub unavailable: Vec<ObjectHash>,
     /// Selected result, or `None` for a complete secondary miss.
@@ -163,7 +399,7 @@ pub struct SecondaryResolution<K> {
 }
 
 impl<K> SecondaryResolution<K> {
-    /// Returns true when trusted indexes named more than one distinct hash.
+    /// Returns true when mapping providers named more than one distinct hash.
     pub fn has_conflict(&self) -> bool {
         self.answers
             .iter()
@@ -183,14 +419,14 @@ pub struct ReuseQuery {
     pub reuse_key: ReuseKey,
 }
 
-/// Coordinator performing trusted mapping lookup before independent content
+/// Coordinator performing authoritative mapping lookup before independent content
 /// acquisition and promotion into one working store.
 #[derive(Debug)]
 pub struct SecondaryResolver {
     working: Store,
     run_id: String,
-    indexes: Vec<NamedTrustedKeyIndex>,
-    sources: Vec<NamedContentSource>,
+    mapping_providers: Vec<NamedMappingProvider>,
+    sources: Vec<NamedContentProvider>,
 }
 
 struct AcquiredContent {
@@ -210,16 +446,16 @@ impl SecondaryResolver {
     /// The same name may appear once in each list because one configured local
     /// store normally contributes both independent capabilities. `run_id` is
     /// written into neutral local object records after successful acquisition;
-    /// records from trusted indexes are never opened or copied.
+    /// records from mapping providers are never opened or copied.
     pub fn new(
         working: Store,
         run_id: impl Into<String>,
-        indexes: Vec<NamedTrustedKeyIndex>,
-        sources: Vec<NamedContentSource>,
+        mapping_providers: Vec<NamedMappingProvider>,
+        sources: Vec<NamedContentProvider>,
     ) -> Result<Self, StoreError> {
         validate_names(
-            "trusted index",
-            indexes.iter().map(|entry| entry.name.as_str()),
+            "mapping provider",
+            mapping_providers.iter().map(|entry| entry.name.as_str()),
         )?;
         validate_names(
             "content source",
@@ -228,7 +464,7 @@ impl SecondaryResolver {
         Ok(Self {
             working,
             run_id: run_id.into(),
-            indexes,
+            mapping_providers,
             sources,
         })
     }
@@ -243,9 +479,81 @@ impl SecondaryResolver {
         !self.sources.is_empty()
     }
 
-    /// Returns whether any trusted index can resolve build or reuse keys.
-    pub fn has_trusted_indexes(&self) -> bool {
-        !self.indexes.is_empty()
+    /// Returns whether any mapping provider can resolve build or reuse keys.
+    pub fn has_mapping_providers(&self) -> bool {
+        !self.mapping_providers.is_empty()
+    }
+
+    async fn query_build_providers(
+        &self,
+        keys: &[BuildKey],
+    ) -> Result<Vec<(String, Vec<TrustedResolution<BuildKey>>)>, StoreError> {
+        let mut tasks = JoinSet::new();
+        for (order, entry) in self.mapping_providers.iter().cloned().enumerate() {
+            let keys = keys.to_vec();
+            tasks.spawn(async move {
+                let result = entry.provider.resolve_builds(&keys).await;
+                (order, entry.name, result)
+            });
+        }
+        collect_ordered_provider_tasks(tasks, self.mapping_providers.len(), "build mapping").await
+    }
+
+    async fn query_reuse_providers(
+        &self,
+        keys: &[ReuseKey],
+    ) -> Result<Vec<(String, Vec<TrustedResolution<ReuseKey>>)>, StoreError> {
+        let mut tasks = JoinSet::new();
+        for (order, entry) in self.mapping_providers.iter().cloned().enumerate() {
+            let keys = keys.to_vec();
+            tasks.spawn(async move {
+                let result = entry.provider.resolve_reuses(&keys).await;
+                (order, entry.name, result)
+            });
+        }
+        collect_ordered_provider_tasks(tasks, self.mapping_providers.len(), "reuse mapping").await
+    }
+
+    async fn locate_objects(
+        &self,
+        hashes: &[ObjectHash],
+    ) -> Result<Vec<HashSet<ObjectHash>>, StoreError> {
+        let mut tasks = JoinSet::new();
+        for (order, entry) in self.sources.iter().cloned().enumerate() {
+            let hashes = hashes.to_vec();
+            tasks.spawn(async move {
+                let result = entry.source.locate_objects(&hashes).await;
+                (order, entry.name, result)
+            });
+        }
+        Ok(
+            collect_ordered_provider_tasks(tasks, self.sources.len(), "object availability")
+                .await?
+                .into_iter()
+                .map(|(_, hashes)| hashes)
+                .collect(),
+        )
+    }
+
+    async fn locate_fs_files(
+        &self,
+        hashes: &[FsFileHash],
+    ) -> Result<Vec<HashSet<FsFileHash>>, StoreError> {
+        let mut tasks = JoinSet::new();
+        for (order, entry) in self.sources.iter().cloned().enumerate() {
+            let hashes = hashes.to_vec();
+            tasks.spawn(async move {
+                let result = entry.source.locate_fs_files(&hashes).await;
+                (order, entry.name, result)
+            });
+        }
+        Ok(
+            collect_ordered_provider_tasks(tasks, self.sources.len(), "fs-file availability")
+                .await?
+                .into_iter()
+                .map(|(_, hashes)| hashes)
+                .collect(),
+        )
     }
 
     /// Ensures content for already-known object hashes without consulting or
@@ -254,19 +562,19 @@ impl SecondaryResolver {
     /// Duplicate hashes are reported once in first-input order. Complete
     /// working-store objects do not query content sources. Remaining hashes are
     /// located in one batch per source before imports begin.
-    pub fn ensure_objects(
+    pub async fn ensure_objects(
         &self,
         hashes: &[ObjectHash],
     ) -> Result<Vec<KnownObjectResolution>, StoreError> {
-        self.ensure_objects_with_progress(hashes, |_| {})
+        self.ensure_objects_with_progress(hashes, |_| {}).await
     }
 
     /// Ensures known objects while reporting transfers selected after content
     /// discovery. Mapping lookup is deliberately not part of this callback.
-    pub fn ensure_objects_with_progress(
+    pub async fn ensure_objects_with_progress(
         &self,
         hashes: &[ObjectHash],
-        mut progress: impl FnMut(ContentTransferEvent),
+        mut progress: impl FnMut(ContentTransferEvent) + Send,
     ) -> Result<Vec<KnownObjectResolution>, StoreError> {
         let hashes = unique_in_order(hashes);
         let mut need_content = Vec::new();
@@ -278,16 +586,13 @@ impl SecondaryResolver {
         let availability = if need_content.is_empty() {
             vec![HashSet::new(); self.sources.len()]
         } else {
-            self.sources
-                .iter()
-                .map(|source| source.source.locate_objects(&need_content))
-                .collect::<Result<Vec<_>, _>>()?
+            self.locate_objects(&need_content).await?
         };
 
         let mut reports = Vec::with_capacity(hashes.len());
         for hash in hashes {
             if self.working.object_is_complete(hash)? {
-                crate::record::record_existing_object(&self.working, hash, &self.run_id)?;
+                record_existing_object(&self.working, hash, &self.run_id)?;
                 reports.push(KnownObjectResolution {
                     object_hash: hash,
                     content_sources: Vec::new(),
@@ -296,9 +601,11 @@ impl SecondaryResolver {
                 });
                 continue;
             }
-            let acquired = self.acquire_candidate(hash, &availability, &mut progress)?;
+            let acquired = self
+                .acquire_candidate(hash, &availability, &mut progress)
+                .await?;
             if acquired.is_some() {
-                crate::record::record_existing_object(&self.working, hash, &self.run_id)?;
+                record_existing_object(&self.working, hash, &self.run_id)?;
             }
             reports.push(match acquired {
                 Some(acquired) => KnownObjectResolution {
@@ -319,27 +626,25 @@ impl SecondaryResolver {
     }
 
     /// Resolves trusted build mappings without locating or importing content.
-    pub fn lookup_builds(
+    pub async fn lookup_builds(
         &self,
         keys: &[BuildKey],
     ) -> Result<Vec<MappingCandidates<BuildKey>>, StoreError> {
         Ok(self
-            .lookup_build_groups(keys)?
+            .lookup_build_groups(keys)
+            .await?
             .into_iter()
             .map(mapping_candidates)
             .collect())
     }
 
     /// Resolves trusted reuse mappings without locating or importing content.
-    pub fn lookup_reuses(
+    pub async fn lookup_reuses(
         &self,
         keys: &[ReuseKey],
     ) -> Result<Vec<MappingCandidates<ReuseKey>>, StoreError> {
         let keys = unique_in_order(keys);
-        let mut per_index = Vec::with_capacity(self.indexes.len());
-        for entry in &self.indexes {
-            per_index.push((entry.name.clone(), entry.index.resolve_reuses(&keys)?));
-        }
+        let per_index = self.query_reuse_providers(&keys).await?;
         Ok(combine_index_results("reuse", &keys, per_index)?
             .into_iter()
             .map(mapping_candidates)
@@ -349,16 +654,16 @@ impl SecondaryResolver {
     /// Resolves exact build mappings and content in input-key order.
     ///
     /// Duplicate input keys are queried and reported once, at their first
-    /// position. Every trusted index is queried before any content is imported.
-    pub fn resolve_builds(
+    /// position. Every mapping provider is queried before content is imported.
+    pub async fn resolve_builds(
         &self,
         keys: &[BuildKey],
     ) -> Result<Vec<SecondaryResolution<BuildKey>>, StoreError> {
-        let groups = self.lookup_build_groups(keys)?;
-        let availability = self.locate_candidate_objects(&groups)?;
-        groups
-            .into_iter()
-            .map(|group| {
+        let groups = self.lookup_build_groups(keys).await?;
+        let availability = self.locate_candidate_objects(&groups).await?;
+        let mut reports = Vec::with_capacity(groups.len());
+        for group in groups {
+            reports.push(
                 self.resolve_group(group, &availability, |candidate| {
                     promote_build(
                         &self.working,
@@ -367,19 +672,18 @@ impl SecondaryResolver {
                         &self.run_id,
                     )
                 })
-            })
-            .collect()
+                .await?,
+            );
+        }
+        Ok(reports)
     }
 
-    fn lookup_build_groups(
+    async fn lookup_build_groups(
         &self,
         keys: &[BuildKey],
     ) -> Result<Vec<CandidateGroup<BuildKey>>, StoreError> {
         let keys = unique_in_order(keys);
-        let mut per_index = Vec::with_capacity(self.indexes.len());
-        for entry in &self.indexes {
-            per_index.push((entry.name.clone(), entry.index.resolve_builds(&keys)?));
-        }
+        let per_index = self.query_build_providers(&keys).await?;
         combine_index_results("build", &keys, per_index)
     }
 
@@ -387,7 +691,7 @@ impl SecondaryResolver {
     ///
     /// A hit publishes both the reuse mapping and the current build mapping.
     /// Duplicate `(build_key, reuse_key)` queries are reported once.
-    pub fn resolve_reuses(
+    pub async fn resolve_reuses(
         &self,
         queries: &[ReuseQuery],
     ) -> Result<Vec<SecondaryResolution<ReuseQuery>>, StoreError> {
@@ -400,15 +704,15 @@ impl SecondaryResolver {
         );
         let mut answers_by_key =
             HashMap::<ReuseKey, Vec<(String, TrustedResolution<ReuseKey>)>>::new();
-        for entry in &self.indexes {
-            for answer in entry.index.resolve_reuses(&reuse_keys)? {
+        for (name, answers) in self.query_reuse_providers(&reuse_keys).await? {
+            for answer in answers {
                 if !reuse_keys.contains(&answer.key) {
                     return Err(unrequested_key_error("reuse", &answer.key.to_string()));
                 }
                 answers_by_key
                     .entry(answer.key)
                     .or_default()
-                    .push((entry.name.clone(), answer));
+                    .push((name.clone(), answer));
             }
         }
 
@@ -433,10 +737,10 @@ impl SecondaryResolver {
                 group_answers(query, answers)
             })
             .collect::<Vec<_>>();
-        let availability = self.locate_candidate_objects(&groups)?;
-        groups
-            .into_iter()
-            .map(|group| {
+        let availability = self.locate_candidate_objects(&groups).await?;
+        let mut reports = Vec::with_capacity(groups.len());
+        for group in groups {
+            reports.push(
                 self.resolve_group(group, &availability, |candidate| {
                     promote_reuse(
                         &self.working,
@@ -446,11 +750,13 @@ impl SecondaryResolver {
                         &self.run_id,
                     )
                 })
-            })
-            .collect()
+                .await?,
+            );
+        }
+        Ok(reports)
     }
 
-    fn resolve_group<K, F>(
+    async fn resolve_group<K, F>(
         &self,
         group: CandidateGroup<K>,
         availability: &[HashSet<ObjectHash>],
@@ -472,7 +778,7 @@ impl SecondaryResolver {
                 promote(candidate)?;
                 report.resolved = Some(ResolvedSecondaryContent {
                     object_hash: candidate.object_hash,
-                    mapping_index: candidate.index.clone(),
+                    mapping_provider: candidate.provider.clone(),
                     content_sources: Vec::new(),
                     transfers: Vec::new(),
                     import_outcome: ContentImportOutcome::AlreadyPresent,
@@ -483,13 +789,14 @@ impl SecondaryResolver {
 
         let mut ignore_progress = |_: ContentTransferEvent| {};
         for candidate in &group.candidates {
-            if let Some(acquired) =
-                self.acquire_candidate(candidate.object_hash, availability, &mut ignore_progress)?
+            if let Some(acquired) = self
+                .acquire_candidate(candidate.object_hash, availability, &mut ignore_progress)
+                .await?
             {
                 promote(candidate)?;
                 report.resolved = Some(ResolvedSecondaryContent {
                     object_hash: candidate.object_hash,
-                    mapping_index: candidate.index.clone(),
+                    mapping_provider: candidate.provider.clone(),
                     content_sources: acquired.sources,
                     transfers: acquired.transfers,
                     import_outcome: acquired.outcome,
@@ -501,7 +808,7 @@ impl SecondaryResolver {
         Ok(report)
     }
 
-    fn locate_candidate_objects<K>(
+    async fn locate_candidate_objects<K>(
         &self,
         groups: &[CandidateGroup<K>],
     ) -> Result<Vec<HashSet<ObjectHash>>, StoreError> {
@@ -527,17 +834,14 @@ impl SecondaryResolver {
         if hashes.is_empty() {
             return Ok(vec![HashSet::new(); self.sources.len()]);
         }
-        self.sources
-            .iter()
-            .map(|source| source.source.locate_objects(&hashes))
-            .collect()
+        self.locate_objects(&hashes).await
     }
 
-    fn acquire_candidate(
+    async fn acquire_candidate(
         &self,
         hash: ObjectHash,
         availability: &[HashSet<ObjectHash>],
-        progress: &mut dyn FnMut(ContentTransferEvent),
+        progress: &mut (dyn FnMut(ContentTransferEvent) + Send),
     ) -> Result<Option<AcquiredContent>, StoreError> {
         if let Some(working_path) = self.working.object_path(hash)? {
             let Some(manifest) = read_manifest_if_marked(&working_path)? else {
@@ -547,7 +851,10 @@ impl SecondaryResolver {
                     transfers: Vec::new(),
                 }));
             };
-            let Some(closure) = self.ensure_manifest_closure(hash, &manifest, progress)? else {
+            let Some(closure) = self
+                .ensure_manifest_closure(hash, &manifest, progress)
+                .await?
+            else {
                 return Ok(None);
             };
             return Ok(Some(AcquiredContent {
@@ -563,9 +870,12 @@ impl SecondaryResolver {
             if !availability[index].contains(&hash) {
                 continue;
             }
-            let manifest = source.source.object_manifest(hash)?;
+            let manifest = source.source.object_manifest(hash).await?;
             if let Some(manifest) = &manifest {
-                let Some(closure) = self.ensure_manifest_closure(hash, manifest, progress)? else {
+                let Some(closure) = self
+                    .ensure_manifest_closure(hash, manifest, progress)
+                    .await?
+                else {
                     return Ok(None);
                 };
                 for name in closure.sources {
@@ -579,7 +889,7 @@ impl SecondaryResolver {
                 transfer_mode: source.source.transfer_mode(),
             });
             let started = Instant::now();
-            match source.source.import_object(&self.working, hash)? {
+            match source.source.import_object(&self.working, hash).await? {
                 ContentImportOutcome::NotFound => continue,
                 outcome => {
                     insert_name_once(&mut used_sources, &source.name);
@@ -613,16 +923,16 @@ impl SecondaryResolver {
         Ok(None)
     }
 
-    fn ensure_manifest_closure(
+    async fn ensure_manifest_closure(
         &self,
         object_hash: ObjectHash,
         manifest: &FsTreeManifest,
-        progress: &mut dyn FnMut(ContentTransferEvent),
+        progress: &mut (dyn FnMut(ContentTransferEvent) + Send),
     ) -> Result<Option<AcquiredClosure>, StoreError> {
         let hashes = manifest_fs_files(manifest);
         let mut missing = Vec::new();
         for hash in hashes {
-            let path = self.working.fs_file_path_unchecked(hash);
+            let path = self.working.fs_file_path(hash);
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_file() => {}
                 Ok(_) => {
@@ -649,8 +959,8 @@ impl SecondaryResolver {
 
         let mut by_source = vec![Vec::new(); self.sources.len()];
         let mut assigned = HashSet::new();
-        for (index, source) in self.sources.iter().enumerate() {
-            let available = source.source.locate_fs_files(&missing)?;
+        let availability = self.locate_fs_files(&missing).await?;
+        for (index, available) in availability.into_iter().enumerate() {
             for hash in &missing {
                 if !assigned.contains(hash) && available.contains(hash) {
                     assigned.insert(*hash);
@@ -675,9 +985,9 @@ impl SecondaryResolver {
                 transfer_mode: source.source.transfer_mode(),
             });
             let started = Instant::now();
-            source.source.import_fs_files(&self.working, hashes)?;
+            source.source.import_fs_files(&self.working, hashes).await?;
             let bytes = hashes.iter().try_fold(0_u64, |total, hash| {
-                let path = self.working.fs_file_path_unchecked(*hash);
+                let path = self.working.fs_file_path(*hash);
                 let length = fs::symlink_metadata(&path)
                     .map_err(|error| {
                         StoreError::Io(format!(
@@ -711,14 +1021,35 @@ impl SecondaryResolver {
 struct Candidate<K> {
     key: K,
     object_hash: ObjectHash,
-    index: String,
+    provider: String,
 }
 
 #[derive(Debug)]
 struct CandidateGroup<K> {
     key: K,
-    answers: Vec<TrustedAnswer>,
+    answers: Vec<MappingAnswer>,
     candidates: Vec<Candidate<K>>,
+}
+
+async fn collect_ordered_provider_tasks<T: Send + 'static>(
+    mut tasks: JoinSet<(usize, String, Result<T, StoreError>)>,
+    count: usize,
+    operation: &str,
+) -> Result<Vec<(String, T)>, StoreError> {
+    let mut ordered = (0..count).map(|_| None).collect::<Vec<_>>();
+    while let Some(joined) = tasks.join_next().await {
+        let (order, name, result) = joined.map_err(|error| {
+            StoreError::Io(format!("secondary {operation} task panicked: {error}"))
+        })?;
+        ordered[order] = Some((name, result));
+    }
+    ordered
+        .into_iter()
+        .map(|entry| {
+            let (name, result) = entry.expect("every provider task produces one result");
+            result.map(|value| (name, value))
+        })
+        .collect()
 }
 
 fn combine_index_results<K>(
@@ -731,7 +1062,7 @@ where
 {
     let requested = keys.iter().copied().collect::<HashSet<_>>();
     let mut answers_by_key = HashMap::<K, Vec<(String, TrustedResolution<K>)>>::new();
-    for (index, answers) in per_index {
+    for (provider, answers) in per_index {
         for answer in answers {
             if !requested.contains(&answer.key) {
                 return Err(unrequested_key_error(kind, &answer.key.to_string()));
@@ -739,7 +1070,7 @@ where
             answers_by_key
                 .entry(answer.key)
                 .or_default()
-                .push((index.clone(), answer));
+                .push((provider.clone(), answer));
         }
     }
     Ok(keys
@@ -767,19 +1098,19 @@ where
 {
     let public_answers = answers
         .iter()
-        .map(|(index, answer)| TrustedAnswer {
-            index: index.clone(),
+        .map(|(provider, answer)| MappingAnswer {
+            provider: provider.clone(),
             object_hash: answer.object_hash,
         })
         .collect();
     let mut seen = HashSet::new();
     let candidates = answers
         .into_iter()
-        .filter_map(|(index, answer)| {
+        .filter_map(|(provider, answer)| {
             seen.insert(answer.object_hash).then_some(Candidate {
                 key,
                 object_hash: answer.object_hash,
-                index,
+                provider,
             })
         })
         .collect();
@@ -867,8 +1198,7 @@ fn promote_build(
     run_id: &str,
 ) -> Result<(), StoreError> {
     ensure_promotable(working, object_hash)?;
-    crate::record::record_existing_object(working, object_hash, run_id)?;
-    crate::refs::store_build_ref(working, build_key, object_hash)
+    publish_existing_build_mapping(working, build_key, object_hash, run_id)
 }
 
 fn promote_reuse(
@@ -879,9 +1209,7 @@ fn promote_reuse(
     run_id: &str,
 ) -> Result<(), StoreError> {
     ensure_promotable(working, object_hash)?;
-    crate::record::record_existing_object(working, object_hash, run_id)?;
-    crate::refs::store_reuse_ref(working, reuse_key, object_hash)?;
-    crate::refs::store_build_ref(working, build_key, object_hash)
+    publish_existing_reuse_mapping(working, build_key, reuse_key, object_hash, run_id)
 }
 
 fn ensure_promotable(working: &Store, object_hash: ObjectHash) -> Result<(), StoreError> {
@@ -928,7 +1256,7 @@ fn validate_names<'a>(
 
 fn unrequested_key_error(kind: &str, key: &str) -> StoreError {
     StoreError::InvalidData(format!(
-        "trusted index returned unrequested {kind} key '{key}'"
+        "mapping provider returned unrequested {kind} key '{key}'"
     ))
 }
 
@@ -941,17 +1269,20 @@ fn insert_name_once(names: &mut Vec<String>, name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fs_tree::FsTreeEntry;
-    use crate::{
-        LocalCopyContentSource, LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex,
-        ReadOnlyStore, import_build, load_build_object_hash,
-    };
+    use bobr_core::CancellationToken;
     use bobr_runtime::runtime_provider::RuntimeProvider;
+    use bobr_store::fs_tree::FsTreeEntry;
+    use bobr_store::{
+        LocalCopyContentSource, LocalHardlinkContentSource, LocalRepository, LocalTrustedKeyIndex,
+        ReadOnlyStore, import_build, load_build_object_hash, load_reuse_object_hash,
+    };
     use serde_json::Value;
     use std::os::unix::fs::MetadataExt;
     use std::path::Path;
     use std::str::FromStr;
+    use std::time::Duration;
     use tempfile::tempdir;
+    use tokio::sync::Barrier;
 
     fn build_key(byte: char) -> BuildKey {
         BuildKey::from_str(&byte.to_string().repeat(64)).unwrap()
@@ -968,6 +1299,17 @@ mod tests {
 
     fn local_repository(path: &Path) -> LocalRepository {
         LocalRepository::new(ReadOnlyStore::open(path).unwrap())
+    }
+
+    fn object_record_path(store: &Store, hash: ObjectHash) -> PathBuf {
+        store
+            .root()
+            .join("object-records")
+            .join(format!("{}.json", hash.to_hex()))
+    }
+
+    fn local_io() -> LocalIoScheduler {
+        LocalIoScheduler::new(8, CancellationToken::new()).unwrap()
     }
 
     fn publish_file(
@@ -990,37 +1332,46 @@ mod tests {
         .unwrap()
     }
 
-    fn index(name: &str, root: &Path) -> NamedTrustedKeyIndex {
-        NamedTrustedKeyIndex::new(
+    fn index(name: &str, root: &Path) -> NamedMappingProvider {
+        NamedMappingProvider::new(
             name,
-            Arc::new(LocalTrustedKeyIndex::new(local_repository(root))),
-        )
-    }
-
-    fn source(name: &str, root: &Path) -> NamedContentSource {
-        NamedContentSource::new(
-            name,
-            Arc::new(LocalHardlinkContentSource::with_runtime(
-                local_repository(root),
-                RuntimeProvider::host(),
+            Arc::new(LocalMappingProvider::new(
+                Arc::new(LocalTrustedKeyIndex::new(local_repository(root))),
+                local_io(),
             )),
         )
     }
 
-    fn copy_source(name: &str, root: &Path) -> NamedContentSource {
-        NamedContentSource::new(
+    fn source(name: &str, root: &Path) -> NamedContentProvider {
+        NamedContentProvider::new(
             name,
-            Arc::new(LocalCopyContentSource::with_runtime(
-                local_repository(root),
-                RuntimeProvider::host(),
+            Arc::new(LocalContentProvider::new(
+                Arc::new(LocalHardlinkContentSource::with_runtime(
+                    local_repository(root),
+                    RuntimeProvider::host(),
+                )),
+                local_io(),
+            )),
+        )
+    }
+
+    fn copy_source(name: &str, root: &Path) -> NamedContentProvider {
+        NamedContentProvider::new(
+            name,
+            Arc::new(LocalContentProvider::new(
+                Arc::new(LocalCopyContentSource::with_runtime(
+                    local_repository(root),
+                    RuntimeProvider::host(),
+                )),
+                local_io(),
             )),
         )
     }
 
     fn resolver(
         working: Store,
-        indexes: Vec<NamedTrustedKeyIndex>,
-        sources: Vec<NamedContentSource>,
+        indexes: Vec<NamedMappingProvider>,
+        sources: Vec<NamedContentProvider>,
     ) -> SecondaryResolver {
         SecondaryResolver::new(working, "test-run", indexes, sources).unwrap()
     }
@@ -1070,8 +1421,185 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct BarrierMappingProvider {
+        barrier: Arc<Barrier>,
+        object_hash: ObjectHash,
+        delay: Duration,
+    }
+
+    #[async_trait]
+    impl MappingProvider for BarrierMappingProvider {
+        async fn resolve_builds(
+            &self,
+            keys: &[BuildKey],
+        ) -> Result<Vec<TrustedResolution<BuildKey>>, StoreError> {
+            self.barrier.wait().await;
+            tokio::time::sleep(self.delay).await;
+            Ok(keys
+                .first()
+                .copied()
+                .map(|key| TrustedResolution {
+                    key,
+                    object_hash: self.object_hash,
+                })
+                .into_iter()
+                .collect())
+        }
+
+        async fn resolve_reuses(
+            &self,
+            _keys: &[ReuseKey],
+        ) -> Result<Vec<TrustedResolution<ReuseKey>>, StoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Debug)]
+    struct BarrierContentProvider {
+        barrier: Arc<Barrier>,
+    }
+
+    #[async_trait]
+    impl ContentProvider for BarrierContentProvider {
+        fn transfer_mode(&self) -> ContentTransferMode {
+            ContentTransferMode::Copy
+        }
+
+        async fn locate_objects(
+            &self,
+            _hashes: &[ObjectHash],
+        ) -> Result<HashSet<ObjectHash>, StoreError> {
+            self.barrier.wait().await;
+            Ok(HashSet::new())
+        }
+
+        async fn object_manifest(
+            &self,
+            _hash: ObjectHash,
+        ) -> Result<Option<FsTreeManifest>, StoreError> {
+            unreachable!("unavailable objects have no manifest")
+        }
+
+        async fn locate_fs_files(
+            &self,
+            _hashes: &[FsFileHash],
+        ) -> Result<HashSet<FsFileHash>, StoreError> {
+            unreachable!("unavailable objects have no fs-files")
+        }
+
+        async fn import_fs_files(
+            &self,
+            _working: &Store,
+            _hashes: &[FsFileHash],
+        ) -> Result<(), StoreError> {
+            unreachable!("unavailable fs-files are not imported")
+        }
+
+        async fn import_object(
+            &self,
+            _working: &Store,
+            _hash: ObjectHash,
+        ) -> Result<ContentImportOutcome, StoreError> {
+            unreachable!("unavailable objects are not imported")
+        }
+    }
+
     #[test]
-    fn trusted_mapping_and_content_can_come_from_different_stores() {
+    fn local_backend_registry_reuses_canonical_store_aliases() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repository");
+        empty_store(&root);
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+
+        let mut registry = LocalBackendRegistry::default();
+        let direct = registry.open(&root).unwrap();
+        let through_alias = registry.open(&alias).unwrap();
+
+        assert_eq!(registry.len(), 1);
+        assert_eq!(direct.store().root(), through_alias.store().root());
+    }
+
+    #[tokio::test]
+    async fn mapping_queries_run_concurrently_but_merge_in_provider_order() {
+        let temp = tempdir().unwrap();
+        let working = empty_store(&temp.path().join("working"));
+        let barrier = Arc::new(Barrier::new(2));
+        let first_hash = ObjectHash::from_str(&"a".repeat(64)).unwrap();
+        let second_hash = ObjectHash::from_str(&"b".repeat(64)).unwrap();
+        let resolver = resolver(
+            working,
+            vec![
+                NamedMappingProvider::new(
+                    "first",
+                    Arc::new(BarrierMappingProvider {
+                        barrier: barrier.clone(),
+                        object_hash: first_hash,
+                        delay: Duration::from_millis(25),
+                    }),
+                ),
+                NamedMappingProvider::new(
+                    "second",
+                    Arc::new(BarrierMappingProvider {
+                        barrier,
+                        object_hash: second_hash,
+                        delay: Duration::ZERO,
+                    }),
+                ),
+            ],
+            Vec::new(),
+        );
+
+        let reports = tokio::time::timeout(
+            Duration::from_secs(1),
+            resolver.lookup_builds(&[build_key('1')]),
+        )
+        .await
+        .expect("mapping providers were queried sequentially")
+        .unwrap();
+
+        assert_eq!(
+            reports[0]
+                .answers
+                .iter()
+                .map(|answer| (answer.provider.as_str(), answer.object_hash))
+                .collect::<Vec<_>>(),
+            vec![("first", first_hash), ("second", second_hash)]
+        );
+    }
+
+    #[tokio::test]
+    async fn content_availability_queries_run_concurrently() {
+        let temp = tempdir().unwrap();
+        let working = empty_store(&temp.path().join("working"));
+        let barrier = Arc::new(Barrier::new(2));
+        let content = ["first", "second"]
+            .into_iter()
+            .map(|name| {
+                NamedContentProvider::new(
+                    name,
+                    Arc::new(BarrierContentProvider {
+                        barrier: barrier.clone(),
+                    }),
+                )
+            })
+            .collect();
+        let resolver = resolver(working, Vec::new(), content);
+        let hash = ObjectHash::from_str(&"a".repeat(64)).unwrap();
+
+        let reports =
+            tokio::time::timeout(Duration::from_secs(1), resolver.ensure_objects(&[hash]))
+                .await
+                .expect("content providers were queried sequentially")
+                .unwrap();
+
+        assert_eq!(reports[0].object_hash, hash);
+        assert_eq!(reports[0].outcome, None);
+    }
+
+    #[tokio::test]
+    async fn trusted_mapping_and_content_can_come_from_different_stores() {
         let temp = tempdir().unwrap();
         let index_root = temp.path().join("index");
         let content_root = temp.path().join("content");
@@ -1102,12 +1630,12 @@ mod tests {
             vec![index("trusted-index", &index_root)],
             vec![source("content-mirror", &content_root)],
         );
-        let reports = resolver.resolve_builds(&[build]).unwrap();
+        let reports = resolver.resolve_builds(&[build]).await.unwrap();
 
         assert_eq!(reports.len(), 1);
         let resolved = reports[0].resolved.as_ref().unwrap();
         assert_eq!(resolved.object_hash, object_hash);
-        assert_eq!(resolved.mapping_index, "trusted-index");
+        assert_eq!(resolved.mapping_provider, "trusted-index");
         assert_eq!(resolved.content_sources, ["content-mirror"]);
         assert_eq!(resolved.import_outcome, ContentImportOutcome::Imported);
         assert_eq!(resolved.transfers.len(), 1);
@@ -1126,7 +1654,7 @@ mod tests {
             Some(object_hash)
         );
         let local_record: Value =
-            serde_json::from_slice(&fs::read(working.object_record_path(object_hash)).unwrap())
+            serde_json::from_slice(&fs::read(object_record_path(&working, object_hash)).unwrap())
                 .unwrap();
         assert_eq!(
             local_record["build_key"],
@@ -1136,8 +1664,8 @@ mod tests {
         assert_eq!(local_record["inputs"], serde_json::json!([]));
     }
 
-    #[test]
-    fn known_secondary_content_gets_a_new_neutral_working_record() {
+    #[tokio::test]
+    async fn known_secondary_content_gets_a_new_neutral_working_record() {
         let temp = tempdir().unwrap();
         let secondary_root = temp.path().join("secondary");
         let working_root = temp.path().join("working");
@@ -1156,11 +1684,15 @@ mod tests {
             vec![source("secondary", &secondary_root)],
         );
 
-        let resolution = resolver.ensure_objects(&[object_hash]).unwrap().remove(0);
+        let resolution = resolver
+            .ensure_objects(&[object_hash])
+            .await
+            .unwrap()
+            .remove(0);
 
         assert_eq!(resolution.outcome, Some(ContentImportOutcome::Imported));
         let local_record: Value =
-            serde_json::from_slice(&fs::read(working.object_record_path(object_hash)).unwrap())
+            serde_json::from_slice(&fs::read(object_record_path(&working, object_hash)).unwrap())
                 .unwrap();
         assert_eq!(
             local_record["build_key"],
@@ -1170,8 +1702,8 @@ mod tests {
         assert_eq!(local_record["inputs"], serde_json::json!([]));
     }
 
-    #[test]
-    fn complete_working_candidate_beats_an_earlier_nonlocal_conflict() {
+    #[tokio::test]
+    async fn complete_working_candidate_beats_an_earlier_nonlocal_conflict() {
         let temp = tempdir().unwrap();
         let first_root = temp.path().join("first");
         let second_root = temp.path().join("second");
@@ -1206,17 +1738,20 @@ mod tests {
                 index("first-index", &first_root),
                 index("second-index", &second_root),
             ],
-            vec![NamedContentSource::new(
+            vec![NamedContentProvider::new(
                 "must-not-be-queried",
-                Arc::new(UnexpectedContentSource),
+                Arc::new(LocalContentProvider::new(
+                    Arc::new(UnexpectedContentSource),
+                    local_io(),
+                )),
             )],
         );
-        let report = resolver.resolve_builds(&[build]).unwrap().remove(0);
+        let report = resolver.resolve_builds(&[build]).await.unwrap().remove(0);
 
         assert!(report.has_conflict());
         let resolved = report.resolved.unwrap();
         assert_eq!(resolved.object_hash, y);
-        assert_eq!(resolved.mapping_index, "second-index");
+        assert_eq!(resolved.mapping_provider, "second-index");
         assert!(resolved.content_sources.is_empty());
         assert_eq!(
             resolved.import_outcome,
@@ -1226,8 +1761,8 @@ mod tests {
         assert_eq!(load_build_object_hash(&working, build).unwrap(), Some(y));
     }
 
-    #[test]
-    fn mapping_priority_selects_first_when_both_candidates_are_local() {
+    #[tokio::test]
+    async fn mapping_priority_selects_first_when_both_candidates_are_local() {
         let temp = tempdir().unwrap();
         let first_root = temp.path().join("first");
         let second_root = temp.path().join("second");
@@ -1271,12 +1806,12 @@ mod tests {
             ],
             Vec::new(),
         );
-        let report = resolver.resolve_builds(&[build]).unwrap().remove(0);
+        let report = resolver.resolve_builds(&[build]).await.unwrap().remove(0);
         assert_eq!(report.resolved.unwrap().object_hash, x);
     }
 
-    #[test]
-    fn stale_first_mapping_falls_back_to_next_available_candidate() {
+    #[tokio::test]
+    async fn stale_first_mapping_falls_back_to_next_available_candidate() {
         let temp = tempdir().unwrap();
         let first_root = temp.path().join("first");
         let second_root = temp.path().join("second");
@@ -1309,15 +1844,15 @@ mod tests {
             ],
             vec![source("good-content", &second_root)],
         );
-        let report = resolver.resolve_builds(&[build]).unwrap().remove(0);
+        let report = resolver.resolve_builds(&[build]).await.unwrap().remove(0);
 
         assert_eq!(report.unavailable, [x]);
         assert_eq!(report.resolved.unwrap().object_hash, y);
         assert_eq!(load_build_object_hash(&working, build).unwrap(), Some(y));
     }
 
-    #[test]
-    fn unavailable_content_never_publishes_trusted_mapping() {
+    #[tokio::test]
+    async fn unavailable_content_never_publishes_trusted_mapping() {
         let temp = tempdir().unwrap();
         let index_root = temp.path().join("index");
         let working_root = temp.path().join("working");
@@ -1338,16 +1873,16 @@ mod tests {
             vec![index("index", &index_root)],
             Vec::new(),
         );
-        let report = resolver.resolve_builds(&[build]).unwrap().remove(0);
+        let report = resolver.resolve_builds(&[build]).await.unwrap().remove(0);
 
         assert!(report.resolved.is_none());
         assert_eq!(report.unavailable, [object_hash]);
         assert_eq!(load_build_object_hash(&working, build).unwrap(), None);
-        assert!(!working.object_record_path(object_hash).exists());
+        assert!(!object_record_path(&working, object_hash).exists());
     }
 
-    #[test]
-    fn reuse_hit_publishes_reuse_and_current_build_mappings() {
+    #[tokio::test]
+    async fn reuse_hit_publishes_reuse_and_current_build_mappings() {
         let temp = tempdir().unwrap();
         let secondary_root = temp.path().join("secondary");
         let working_root = temp.path().join("working");
@@ -1374,6 +1909,7 @@ mod tests {
                 build_key: current_build,
                 reuse_key: reuse,
             }])
+            .await
             .unwrap()
             .remove(0);
 
@@ -1382,11 +1918,14 @@ mod tests {
             load_build_object_hash(&working, current_build).unwrap(),
             Some(object_hash)
         );
-        assert!(working.reuse_ref_path(reuse).is_symlink());
+        assert_eq!(
+            load_reuse_object_hash(&working, reuse).unwrap(),
+            Some(object_hash)
+        );
     }
 
-    #[test]
-    fn fs_tree_manifest_and_fs_file_can_come_from_different_content_sources() {
+    #[tokio::test]
+    async fn fs_tree_manifest_and_fs_file_can_come_from_different_content_sources() {
         let temp = tempdir().unwrap();
         let manifest_root = temp.path().join("manifest-store");
         let file_root = temp.path().join("file-store");
@@ -1419,8 +1958,8 @@ mod tests {
             "test-run",
         )
         .unwrap();
-        let source_fs_file = manifest_store.fs_file_path_unchecked(fs_file_hash);
-        let destination_fs_file = file_store.fs_file_path_unchecked(fs_file_hash);
+        let source_fs_file = manifest_store.fs_file_path(fs_file_hash);
+        let destination_fs_file = file_store.fs_file_path(fs_file_hash);
         fs::create_dir(destination_fs_file.parent().unwrap()).unwrap();
         fs::hard_link(&source_fs_file, &destination_fs_file).unwrap();
         fs::remove_file(source_fs_file).unwrap();
@@ -1433,7 +1972,7 @@ mod tests {
                 copy_source("file-content", &file_root),
             ],
         );
-        let report = resolver.resolve_builds(&[build]).unwrap().remove(0);
+        let report = resolver.resolve_builds(&[build]).await.unwrap().remove(0);
 
         let resolved = report.resolved.unwrap();
         assert_eq!(resolved.object_hash, object_hash);
@@ -1454,9 +1993,8 @@ mod tests {
             ContentTransferMode::Hardlink
         );
         assert_eq!(resolved.transfers[1].files, 1);
-        let source_metadata =
-            fs::metadata(file_store.fs_file_path_unchecked(fs_file_hash)).unwrap();
-        let working_metadata = fs::metadata(working.fs_file_path_unchecked(fs_file_hash)).unwrap();
+        let source_metadata = fs::metadata(file_store.fs_file_path(fs_file_hash)).unwrap();
+        let working_metadata = fs::metadata(working.fs_file_path(fs_file_hash)).unwrap();
         assert_eq!(source_metadata.dev(), working_metadata.dev());
         assert_ne!(source_metadata.ino(), working_metadata.ino());
     }
@@ -1478,7 +2016,7 @@ mod tests {
         assert!(
             duplicate
                 .to_string()
-                .contains("duplicate secondary trusted index")
+                .contains("duplicate secondary mapping provider")
         );
 
         let empty =
