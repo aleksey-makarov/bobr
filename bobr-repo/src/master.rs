@@ -5,8 +5,11 @@ use crate::{
     ObjectListHash, REPOSITORY_FORMAT, RepositoryError, ReuseIndexHash,
 };
 use coset::{Algorithm, CoseSign1, CoseSign1Builder, HeaderBuilder, TaggedCborSerializable, iana};
+use ed25519_dalek::pkcs8::DecodePublicKey;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use url::Url;
 
 /// COSE protected-header content type for a repository master.
@@ -226,12 +229,45 @@ impl TrustedKeys {
     /// Adds one key under its exact opaque identifier.
     pub fn insert(&mut self, key_id: Vec<u8>, key: VerifyingKey) -> Result<(), RepositoryError> {
         if key_id.is_empty() {
-            return Err(RepositoryError::new("pinned key id must not be empty"));
+            return Err(RepositoryError::configuration(
+                "pinned key id must not be empty",
+            ));
         }
         if self.keys.insert(key_id, key).is_some() {
-            return Err(RepositoryError::new("duplicate pinned key id"));
+            return Err(RepositoryError::configuration("duplicate pinned key id"));
         }
         Ok(())
+    }
+
+    /// Loads Ed25519 SubjectPublicKeyInfo files in PEM or DER form.
+    ///
+    /// Each opaque COSE key identifier is SHA-256 of the raw 32-byte Ed25519
+    /// public key, matching the repository administration commands.
+    pub fn from_files(paths: &[PathBuf]) -> Result<Self, RepositoryError> {
+        let mut trusted = Self::default();
+        for path in paths {
+            trusted.insert_file(path)?;
+        }
+        Ok(trusted)
+    }
+
+    /// Parses and adds one pinned Ed25519 public-key file.
+    pub fn insert_file(&mut self, path: &Path) -> Result<(), RepositoryError> {
+        let bytes = std::fs::read(path).map_err(|error| {
+            RepositoryError::configuration(format!(
+                "failed to read public key '{}': {error}",
+                path.display()
+            ))
+        })?;
+        let key = parse_verifying_key(&bytes).map_err(|error| {
+            RepositoryError::configuration(format!(
+                "failed to parse public key '{}': {error}",
+                path.display()
+            ))
+        })?;
+        let key_id: [u8; 32] = Sha256::digest(key.as_bytes()).into();
+        self.insert(key_id.to_vec(), key)
+            .map_err(|error| RepositoryError::configuration(error.to_string()))
     }
 
     /// Authenticates and decodes a tagged repository master.
@@ -248,12 +284,14 @@ impl TrustedKeys {
         let key = self
             .keys
             .get(&key_id)
-            .ok_or_else(|| RepositoryError::new("master uses an untrusted COSE kid"))?;
+            .ok_or_else(|| RepositoryError::authentication("master uses an untrusted COSE kid"))?;
         cose.verify_signature(&[], |signature, data| {
             let signature = Signature::from_slice(signature)?;
             key.verify(data, &signature)
         })
-        .map_err(|error| RepositoryError::new(format!("invalid master signature: {error}")))?;
+        .map_err(|error| {
+            RepositoryError::authentication(format!("invalid master signature: {error}"))
+        })?;
         let payload = cose
             .payload
             .as_deref()
@@ -279,6 +317,15 @@ impl TrustedKeys {
             signed_hash: MasterHash::digest(bytes),
         })
     }
+}
+
+fn parse_verifying_key(bytes: &[u8]) -> Result<VerifyingKey, String> {
+    if let Ok(text) = std::str::from_utf8(bytes)
+        && let Ok(key) = VerifyingKey::from_public_key_pem(text)
+    {
+        return Ok(key);
+    }
+    VerifyingKey::from_public_key_der(bytes).map_err(|error| error.to_string())
 }
 
 fn validate_cose_headers(cose: &CoseSign1) -> Result<(), RepositoryError> {
@@ -404,6 +451,7 @@ fn require_length(actual: u64, expected: u64, what: &str) -> Result<(), Reposito
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::pkcs8::EncodePublicKey;
 
     fn master() -> Master {
         let digest = [7; 32];
@@ -449,6 +497,46 @@ mod tests {
         let last = tampered.len() - 1;
         tampered[last] ^= 1;
         assert!(keys.verify(&tampered).is_err());
+    }
+
+    #[test]
+    fn pinned_public_key_files_accept_der_and_pem() {
+        let temp = tempfile::tempdir().unwrap();
+        let der_signing = SigningKey::from_bytes(&[11; 32]);
+        let pem_signing = SigningKey::from_bytes(&[12; 32]);
+        let der_path = temp.path().join("release-der.pub");
+        let pem_path = temp.path().join("release-pem.pub");
+        std::fs::write(
+            &der_path,
+            der_signing
+                .verifying_key()
+                .to_public_key_der()
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(
+            &pem_path,
+            pem_signing
+                .verifying_key()
+                .to_public_key_pem(Default::default())
+                .unwrap(),
+        )
+        .unwrap();
+
+        let keys = TrustedKeys::from_files(&[der_path, pem_path]).unwrap();
+        for signing in [der_signing, pem_signing] {
+            let key_id: [u8; 32] = Sha256::digest(signing.verifying_key().as_bytes()).into();
+            let signed = master().sign(&key_id, &signing).unwrap();
+            keys.verify(&signed).unwrap();
+        }
+
+        let invalid = temp.path().join("invalid.pub");
+        std::fs::write(&invalid, b"not a public key").unwrap();
+        assert_eq!(
+            TrustedKeys::from_files(&[invalid]).unwrap_err().kind(),
+            crate::RepositoryErrorKind::Configuration
+        );
     }
 
     #[test]

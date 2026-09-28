@@ -1,11 +1,12 @@
 //! Authenticated immutable repository snapshots.
 
 use crate::{
-    BuildIndex, BuildIndexHash, CurrentPublication, FetchRequest, FetchResult, FsFileList,
-    FsFileListHash, HttpTransport, MAX_ENCODED_CONTENT_BYTES, MAX_MASTER_BYTES, MAX_METADATA_BYTES,
-    Master, ObjectKind, ObjectList, ObjectListHash, RepositoryCache, RepositoryError,
-    RepositoryTlsConfig, RepositoryTransport, ReuseIndex, ReuseIndexHash, Slot, TrustedKeys,
-    VerifiedMaster, decode_fs_file, decode_object,
+    BuildIndex, BuildIndexHash, CurrentPublication, FetchPurpose, FetchRequest, FetchResult,
+    FetchedFsFileRepresentation, FsFileList, FsFileListHash, HttpTransport,
+    MAX_ENCODED_CONTENT_BYTES, MAX_MASTER_BYTES, MAX_METADATA_BYTES, Master, ObjectKind,
+    ObjectList, ObjectListHash, RepositoryCache, RepositoryError, RepositoryTlsConfig,
+    RepositoryTransport, ReuseIndex, ReuseIndexHash, Slot, TrustedKeys, VerifiedMaster,
+    decode_object,
 };
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use bobr_store::fs_tree::FsFileHash;
@@ -82,10 +83,10 @@ impl std::fmt::Debug for RepositorySnapshot {
 
 struct SnapshotSlot {
     descriptor: Slot,
-    build: Arc<BuildIndex>,
+    build: OnceCell<Arc<BuildIndex>>,
     reuse: OnceCell<Arc<ReuseIndex>>,
-    objects: Arc<ObjectList>,
-    files: Arc<FsFileList>,
+    objects: OnceCell<Arc<ObjectList>>,
+    files: OnceCell<Arc<FsFileList>>,
 }
 
 impl RepositoryReader {
@@ -114,10 +115,10 @@ impl RepositoryReader {
         policy: ReaderPolicy,
     ) -> Result<Self, RepositoryError> {
         if master_url.scheme() != "https" {
-            return Err(RepositoryError::new("master URL must use HTTPS"));
+            return Err(RepositoryError::configuration("master URL must use HTTPS"));
         }
         if policy.max_blocking_decoders == 0 {
-            return Err(RepositoryError::new(
+            return Err(RepositoryError::configuration(
                 "max_blocking_decoders must be greater than zero",
             ));
         }
@@ -163,31 +164,23 @@ impl RepositoryReader {
         )
     }
 
-    /// Revalidates `/master` and loads the current slot metadata it authenticates.
+    /// Revalidates `/master` without fetching any immutable slot metadata.
+    ///
+    /// Mapping indexes and content lists are loaded independently on their
+    /// first use, so a mapping-only or content-only client does not fetch
+    /// capabilities it never queries.
     pub async fn snapshot(&self) -> Result<RepositorySnapshot, RepositoryError> {
         let master = self.fetch_master().await?.master;
-        let mut slots = Vec::new();
-        for descriptor in master.current_slots_newest_first() {
-            let build = Arc::new(
-                self.fetch_build(master.data_base_url(), descriptor.build)
-                    .await?,
-            );
-            let objects = Arc::new(
-                self.fetch_object_list(master.data_base_url(), descriptor.object_list)
-                    .await?,
-            );
-            let files = Arc::new(
-                self.fetch_file_list(master.data_base_url(), descriptor.file_list)
-                    .await?,
-            );
-            slots.push(SnapshotSlot {
+        let slots = master
+            .current_slots_newest_first()
+            .map(|descriptor| SnapshotSlot {
                 descriptor: descriptor.clone(),
-                build,
+                build: OnceCell::new(),
                 reuse: OnceCell::new(),
-                objects,
-                files,
-            });
-        }
+                objects: OnceCell::new(),
+                files: OnceCell::new(),
+            })
+            .collect();
         Ok(RepositorySnapshot {
             reader: self.clone(),
             master,
@@ -242,6 +235,7 @@ impl RepositoryReader {
             .inner
             .transport
             .fetch(FetchRequest {
+                purpose: FetchPurpose::Master,
                 url: self.inner.master_url.clone(),
                 destination: temporary.path().to_path_buf(),
                 max_bytes: MAX_MASTER_BYTES,
@@ -278,9 +272,13 @@ impl RepositoryReader {
         hash: BuildIndexHash,
     ) -> Result<BuildIndex, RepositoryError> {
         let path = self
-            .fetch_metadata(base, "b", hash.to_string(), |path| {
-                BuildIndex::open(path, hash).map(|_| ())
-            })
+            .fetch_metadata(
+                base,
+                "b",
+                hash.to_string(),
+                FetchPurpose::BuildIndex(hash),
+                |path| BuildIndex::open(path, hash).map(|_| ()),
+            )
             .await?;
         BuildIndex::open(&path, hash)
     }
@@ -291,9 +289,13 @@ impl RepositoryReader {
         hash: ReuseIndexHash,
     ) -> Result<ReuseIndex, RepositoryError> {
         let path = self
-            .fetch_metadata(base, "r", hash.to_string(), |path| {
-                ReuseIndex::open(path, hash).map(|_| ())
-            })
+            .fetch_metadata(
+                base,
+                "r",
+                hash.to_string(),
+                FetchPurpose::ReuseIndex(hash),
+                |path| ReuseIndex::open(path, hash).map(|_| ()),
+            )
             .await?;
         ReuseIndex::open(&path, hash)
     }
@@ -304,9 +306,13 @@ impl RepositoryReader {
         hash: ObjectListHash,
     ) -> Result<ObjectList, RepositoryError> {
         let path = self
-            .fetch_metadata(base, "lo", hash.to_string(), |path| {
-                ObjectList::open(path, hash).map(|_| ())
-            })
+            .fetch_metadata(
+                base,
+                "lo",
+                hash.to_string(),
+                FetchPurpose::ObjectList(hash),
+                |path| ObjectList::open(path, hash).map(|_| ()),
+            )
             .await?;
         ObjectList::open(&path, hash)
     }
@@ -317,9 +323,13 @@ impl RepositoryReader {
         hash: FsFileListHash,
     ) -> Result<FsFileList, RepositoryError> {
         let path = self
-            .fetch_metadata(base, "lf", hash.to_string(), |path| {
-                FsFileList::open(path, hash).map(|_| ())
-            })
+            .fetch_metadata(
+                base,
+                "lf",
+                hash.to_string(),
+                FetchPurpose::FsFileList(hash),
+                |path| FsFileList::open(path, hash).map(|_| ()),
+            )
             .await?;
         FsFileList::open(&path, hash)
     }
@@ -329,6 +339,7 @@ impl RepositoryReader {
         base: &Url,
         namespace: &str,
         hash: String,
+        purpose: FetchPurpose,
         validate: impl Fn(&Path) -> Result<(), RepositoryError>,
     ) -> Result<PathBuf, RepositoryError> {
         let path = self.inner.cache.metadata_path(namespace, &hash);
@@ -344,6 +355,7 @@ impl RepositoryReader {
             .inner
             .transport
             .fetch(FetchRequest {
+                purpose,
                 url: base.join(&format!("{namespace}/{hash}")).map_err(|error| {
                     RepositoryError::new(format!("failed to construct repository URL: {error}"))
                 })?,
@@ -374,12 +386,14 @@ impl RepositoryReader {
         namespace: &str,
         hash: &str,
         media_type: &str,
+        purpose: FetchPurpose,
     ) -> Result<tempfile::NamedTempFile, RepositoryError> {
         let temporary = self.inner.cache.create_temporary("content-")?;
         let result = self
             .inner
             .transport
             .fetch(FetchRequest {
+                purpose,
                 url: data_url_for(master, namespace, hash)?,
                 destination: temporary.path().to_path_buf(),
                 max_bytes: MAX_ENCODED_CONTENT_BYTES,
@@ -407,9 +421,30 @@ impl RepositorySnapshot {
         &self.master
     }
 
-    /// Returns ordered distinct build candidates across current slots.
-    pub fn build_candidates(&self, key: BuildKey) -> Vec<ObjectHash> {
-        combine_candidates(self.slots.iter().map(|slot| slot.build.candidates(key)))
+    /// Lazily fetches build indexes and returns ordered distinct candidates.
+    pub async fn build_candidates(
+        &self,
+        key: BuildKey,
+    ) -> Result<Vec<ObjectHash>, RepositoryError> {
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        for slot in &self.slots {
+            let index = slot
+                .build
+                .get_or_try_init(|| async {
+                    self.reader
+                        .fetch_build(self.master.data_base_url(), slot.descriptor.build)
+                        .await
+                        .map(Arc::new)
+                })
+                .await?;
+            for candidate in index.candidates(key) {
+                if seen.insert(candidate) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+        Ok(candidates)
     }
 
     /// Lazily fetches reuse indexes and returns ordered distinct candidates.
@@ -438,14 +473,42 @@ impl RepositorySnapshot {
         Ok(candidates)
     }
 
-    /// Returns whether current slot lists advertise an ordinary object.
-    pub fn contains_object(&self, hash: ObjectHash) -> bool {
-        self.slots.iter().any(|slot| slot.objects.contains(hash))
+    /// Lazily checks whether current slot lists advertise an ordinary object.
+    pub async fn contains_object(&self, hash: ObjectHash) -> Result<bool, RepositoryError> {
+        for slot in &self.slots {
+            let list = slot
+                .objects
+                .get_or_try_init(|| async {
+                    self.reader
+                        .fetch_object_list(self.master.data_base_url(), slot.descriptor.object_list)
+                        .await
+                        .map(Arc::new)
+                })
+                .await?;
+            if list.contains(hash) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
-    /// Returns whether current slot lists advertise a filesystem file.
-    pub fn contains_fs_file(&self, hash: FsFileHash) -> bool {
-        self.slots.iter().any(|slot| slot.files.contains(hash))
+    /// Lazily checks whether current slot lists advertise a filesystem file.
+    pub async fn contains_fs_file(&self, hash: FsFileHash) -> Result<bool, RepositoryError> {
+        for slot in &self.slots {
+            let list = slot
+                .files
+                .get_or_try_init(|| async {
+                    self.reader
+                        .fetch_file_list(self.master.data_base_url(), slot.descriptor.file_list)
+                        .await
+                        .map(Arc::new)
+                })
+                .await?;
+            if list.contains(hash) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Downloads and verifies one advertised ordinary object.
@@ -454,12 +517,18 @@ impl RepositorySnapshot {
         hash: ObjectHash,
         destination: &Path,
     ) -> Result<Option<ObjectKind>, RepositoryError> {
-        if !self.contains_object(hash) {
+        if !self.contains_object(hash).await? {
             return Ok(None);
         }
         let encoded = self
             .reader
-            .fetch_content(&self.master, "o", &hash.to_string(), OBJECT_MEDIA_TYPE)
+            .fetch_content(
+                &self.master,
+                "o",
+                &hash.to_string(),
+                OBJECT_MEDIA_TYPE,
+                FetchPurpose::Object(hash),
+            )
             .await?;
         let encoded_path = encoded.path().to_path_buf();
         let destination = destination.to_path_buf();
@@ -470,49 +539,43 @@ impl RepositorySnapshot {
             .clone()
             .acquire_owned()
             .await
-            .map_err(|_| RepositoryError::new("repository decoder semaphore is closed"))?;
+            .map_err(|_| RepositoryError::runtime("repository decoder semaphore is closed"))?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             decode_object(&encoded_path, hash, &destination)
         })
         .await
-        .map_err(|error| RepositoryError::new(format!("object decoder task failed: {error}")))?
+        .map_err(|error| RepositoryError::runtime(format!("object decoder task failed: {error}")))?
         .map(Some)
     }
 
-    /// Downloads and verifies one advertised filesystem file.
-    pub async fn fetch_fs_file(
+    /// Downloads one advertised filesystem-file representation.
+    ///
+    /// The response metadata and encoded-size limit are checked, but the bytes
+    /// remain untrusted until a caller passes one or more returned values to
+    /// [`crate::publish_fs_file_batch`].
+    pub async fn fetch_fs_file_representation(
         &self,
         hash: FsFileHash,
-        destination: &Path,
-    ) -> Result<Option<crate::FsFileMetadata>, RepositoryError> {
-        if !self.contains_fs_file(hash) {
+    ) -> Result<Option<FetchedFsFileRepresentation>, RepositoryError> {
+        if !self.contains_fs_file(hash).await? {
             return Ok(None);
         }
         let encoded = self
             .reader
-            .fetch_content(&self.master, "f", &hash.to_string(), FS_FILE_MEDIA_TYPE)
+            .fetch_content(
+                &self.master,
+                "f",
+                &hash.to_string(),
+                FS_FILE_MEDIA_TYPE,
+                FetchPurpose::FsFile(hash),
+            )
             .await?;
-        let encoded_path = encoded.path().to_path_buf();
-        let destination = destination.to_path_buf();
-        let permit = self
-            .reader
-            .inner
-            .blocking_decoders
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| RepositoryError::new("repository decoder semaphore is closed"))?;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            decode_fs_file(&encoded_path, hash, &destination)
-        })
-        .await
-        .map_err(|error| RepositoryError::new(format!("fs-file decoder task failed: {error}")))?
-        .map(Some)
+        FetchedFsFileRepresentation::new(hash, encoded).map(Some)
     }
 }
 
+#[cfg(test)]
 fn combine_candidates(iter: impl IntoIterator<Item = Vec<ObjectHash>>) -> Vec<ObjectHash> {
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
@@ -649,7 +712,12 @@ fn read_cached_master(path: &Path) -> Result<Vec<u8>, RepositoryError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Compression, MasterHash, MemoryTransport, Slot, TrustedKeys, encode_object};
+    use crate::{
+        Compression, MasterHash, MemoryTransport, Slot, TrustedKeys, encode_fs_file, encode_object,
+        publish_fs_file_batch,
+    };
+    use bobr_runtime::runtime_provider::RuntimeProvider;
+    use bobr_store::Store;
     use ed25519_dalek::SigningKey;
 
     #[tokio::test]
@@ -664,12 +732,17 @@ mod tests {
         let encoded = temp.path().join("object.cbor");
         std::fs::write(&source, b"repository object").unwrap();
         let object_hash = encode_object(&source, Compression::Zstd, &encoded).unwrap();
+        let fs_file_source = temp.path().join("fs-file-source");
+        let encoded_fs_file = temp.path().join("fs-file.cbor");
+        std::fs::write(&fs_file_source, b"filesystem file").unwrap();
+        let fs_file_hash =
+            encode_fs_file(&fs_file_source, Compression::Zstd, &encoded_fs_file).unwrap();
         let build_key = BuildKey::from_bytes([1; 32]);
         let reuse_key = ReuseKey::from_bytes([2; 32]);
         let build_bytes = BuildIndex::encode(&[(build_key, object_hash)]).unwrap();
         let reuse_bytes = ReuseIndex::encode(&[(reuse_key, object_hash)]).unwrap();
         let object_list_bytes = ObjectList::encode([object_hash]);
-        let file_list_bytes = FsFileList::encode([]);
+        let file_list_bytes = FsFileList::encode([fs_file_hash]);
         let build_hash = BuildIndexHash::digest(&build_bytes);
         let reuse_hash = ReuseIndexHash::digest(&reuse_bytes);
         let object_list_hash = ObjectListHash::digest(&object_list_bytes);
@@ -714,23 +787,54 @@ mod tests {
             OBJECT_MEDIA_TYPE,
             "public, max-age=31536000, immutable",
         );
+        transport.insert(
+            base.join(&format!("f/{fs_file_hash}")).unwrap(),
+            std::fs::read(encoded_fs_file).unwrap(),
+            FS_FILE_MEDIA_TYPE,
+            "public, max-age=31536000, immutable",
+        );
         let keys = TrustedKeys::new([(b"key".to_vec(), signing.verifying_key())]).unwrap();
         let reader = RepositoryReader::new(
-            master_url,
+            master_url.clone(),
             keys,
             &temp.path().join("cache"),
             Arc::new(transport.clone()),
         )
         .unwrap();
         let snapshot = reader.snapshot().await.unwrap();
+        assert_eq!(
+            transport.requested_purposes(&master_url),
+            vec![FetchPurpose::Master]
+        );
+        let build_url = base.join(&format!("b/{build_hash}")).unwrap();
         let reuse_url = base.join(&format!("r/{reuse_hash}")).unwrap();
+        let object_list_url = base.join(&format!("lo/{object_list_hash}")).unwrap();
+        let file_list_url = base.join(&format!("lf/{file_list_hash}")).unwrap();
+        assert_eq!(transport.request_count(&build_url), 0);
         assert_eq!(transport.request_count(&reuse_url), 0);
-        assert_eq!(snapshot.build_candidates(build_key), vec![object_hash]);
+        assert_eq!(transport.request_count(&object_list_url), 0);
+        assert_eq!(transport.request_count(&file_list_url), 0);
+        assert_eq!(
+            snapshot.build_candidates(build_key).await.unwrap(),
+            vec![object_hash]
+        );
+        assert_eq!(transport.request_count(&build_url), 1);
+        assert_eq!(
+            transport.requested_purposes(&build_url),
+            vec![FetchPurpose::BuildIndex(build_hash)]
+        );
+        assert_eq!(transport.request_count(&reuse_url), 0);
+        assert_eq!(transport.request_count(&object_list_url), 0);
+        assert_eq!(transport.request_count(&file_list_url), 0);
         assert_eq!(
             snapshot.reuse_candidates(reuse_key).await.unwrap(),
             vec![object_hash]
         );
         assert_eq!(transport.request_count(&reuse_url), 1);
+        assert_eq!(
+            transport.requested_purposes(&reuse_url),
+            vec![FetchPurpose::ReuseIndex(reuse_hash)]
+        );
         let destination = temp.path().join("decoded");
         assert!(
             snapshot
@@ -739,7 +843,44 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        assert_eq!(transport.request_count(&object_list_url), 1);
+        assert_eq!(
+            transport.requested_purposes(&object_list_url),
+            vec![FetchPurpose::ObjectList(object_list_hash)]
+        );
+        let object_url = base.join(&format!("o/{object_hash}")).unwrap();
+        assert_eq!(
+            transport.requested_purposes(&object_url),
+            vec![FetchPurpose::Object(object_hash)]
+        );
+        assert_eq!(transport.request_count(&file_list_url), 0);
         assert_eq!(std::fs::read(destination).unwrap(), b"repository object");
+        let representation = snapshot
+            .fetch_fs_file_representation(fs_file_hash)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(transport.request_count(&file_list_url), 1);
+        assert_eq!(
+            transport.requested_purposes(&file_list_url),
+            vec![FetchPurpose::FsFileList(file_list_hash)]
+        );
+        let fs_file_url = base.join(&format!("f/{fs_file_hash}")).unwrap();
+        assert_eq!(
+            transport.requested_purposes(&fs_file_url),
+            vec![FetchPurpose::FsFile(fs_file_hash)]
+        );
+        let store_root = temp.path().join("store");
+        std::fs::create_dir(&store_root).unwrap();
+        let store = Store::create(&store_root).unwrap();
+        let report = publish_fs_file_batch(
+            &RuntimeProvider::host(),
+            &store,
+            std::slice::from_ref(&representation),
+        )
+        .unwrap();
+        assert_eq!(report.published, 1);
+        store.verify_fs_file(fs_file_hash).unwrap();
         assert!(
             snapshot
                 .fetch_object(ObjectHash::from_bytes([9; 32]), &temp.path().join("absent"))
@@ -747,6 +888,10 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let absent_url = base
+            .join(&format!("o/{}", ObjectHash::from_bytes([9; 32])))
+            .unwrap();
+        assert_eq!(transport.request_count(&absent_url), 0);
 
         let cached_build = reader
             .inner
@@ -754,7 +899,10 @@ mod tests {
             .metadata_path("b", &build_hash.to_string());
         std::fs::write(&cached_build, b"corrupt cache entry").unwrap();
         let refreshed = reader.snapshot().await.unwrap();
-        assert_eq!(refreshed.build_candidates(build_key), vec![object_hash]);
+        assert_eq!(
+            refreshed.build_candidates(build_key).await.unwrap(),
+            vec![object_hash]
+        );
 
         let current = reader.publication_metadata().await.unwrap();
         assert_eq!(current.master_hash, signed_master_hash);

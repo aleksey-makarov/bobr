@@ -45,23 +45,26 @@ impl RepositoryTlsConfig {
     /// Loads a PEM bundle whose certificates are added to the platform roots.
     pub fn from_ca_bundle(path: &Path) -> Result<Self, RepositoryError> {
         let pem = std::fs::read(path).map_err(|error| {
-            RepositoryError::new(format!(
+            RepositoryError::configuration(format!(
                 "failed to read CA bundle '{}': {error}",
                 path.display()
             ))
         })?;
         Self::from_ca_bundle_pem(&pem).map_err(|error| {
-            RepositoryError::new(format!("invalid CA bundle '{}': {error}", path.display()))
+            RepositoryError::configuration(format!(
+                "invalid CA bundle '{}': {error}",
+                path.display()
+            ))
         })
     }
 
     /// Parses PEM certificates which are added to the platform roots.
     pub fn from_ca_bundle_pem(pem: &[u8]) -> Result<Self, RepositoryError> {
         let certificates = reqwest::Certificate::from_pem_bundle(pem).map_err(|error| {
-            RepositoryError::new(format!("failed to parse PEM certificates: {error}"))
+            RepositoryError::configuration(format!("failed to parse PEM certificates: {error}"))
         })?;
         if certificates.is_empty() {
-            return Err(RepositoryError::new(
+            return Err(RepositoryError::configuration(
                 "the PEM bundle contains no certificates",
             ));
         }
@@ -94,7 +97,7 @@ impl RepositoryTlsConfig {
             .with_trust_store(trust_store)
             .build()
             .map_err(|error| {
-                RepositoryError::new(format!("failed to configure S3 TLS trust: {error}"))
+                RepositoryError::configuration(format!("failed to configure S3 TLS trust: {error}"))
             })
     }
 }

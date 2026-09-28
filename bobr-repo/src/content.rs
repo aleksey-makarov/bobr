@@ -184,9 +184,21 @@ pub fn decode_fs_file(
     destination: &Path,
 ) -> Result<FsFileMetadata, RepositoryError> {
     require_absent(destination)?;
-    let envelope = parse_fs_file_envelope(encoded)?;
     let parent = output_parent(destination)?;
-    let mut staging = tempfile::NamedTempFile::new_in(parent)?;
+    let (staging, metadata) = decode_fs_file_staged(encoded, expected, parent)?;
+    staging
+        .persist_noclobber(destination)
+        .map_err(|error| error.error)?;
+    Ok(metadata)
+}
+
+pub(crate) fn decode_fs_file_staged(
+    encoded: &Path,
+    expected: FsFileHash,
+    staging_directory: &Path,
+) -> Result<(tempfile::NamedTempFile, FsFileMetadata), RepositoryError> {
+    let envelope = parse_fs_file_envelope(encoded)?;
+    let mut staging = tempfile::NamedTempFile::new_in(staging_directory)?;
     let (size, content_hash) = decode_payload(encoded, &envelope.common, staging.as_file_mut())?;
     let actual = hash_fs_file_parts(
         envelope.metadata.uid,
@@ -226,10 +238,7 @@ pub fn decode_fs_file(
         ));
     }
     staging.as_file().sync_all()?;
-    staging
-        .persist_noclobber(destination)
-        .map_err(|error| error.error)?;
-    Ok(envelope.metadata)
+    Ok((staging, envelope.metadata))
 }
 
 #[derive(Debug)]

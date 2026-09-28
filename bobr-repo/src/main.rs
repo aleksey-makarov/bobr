@@ -13,8 +13,8 @@ use bobr_repo::{
 };
 use bobr_runtime::runtime_provider::{RuntimeProvider, runtime_provider_for_current_process};
 use bobr_store::{ReadOnlyStore, StoreInventory};
-use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::SigningKey;
+use ed25519_dalek::pkcs8::DecodePrivateKey;
 use futures_util::{StreamExt, stream};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -373,7 +373,7 @@ async fn prepare(args: PrepareArgs) -> Result<(), RepositoryError> {
     let tls_config = load_tls_config(args.ca_bundle.as_deref())?;
     let location = S3Location::parse(&args.repository)?;
     let repository = S3Repository::from_environment(location, &tls_config).await?;
-    let trusted = load_trusted_keys(&args.trusted_keys)?;
+    let trusted = TrustedKeys::from_files(&args.trusted_keys)?;
     let current_object = repository.get_bytes("master", MAX_MASTER_BYTES).await?;
     let current_verified = current_object
         .as_ref()
@@ -535,7 +535,7 @@ async fn publish(args: PublishArgs) -> Result<(), RepositoryError> {
     let tls_config = load_tls_config(args.ca_bundle.as_deref())?;
     let repository =
         S3Repository::from_environment(S3Location::parse(&args.repository)?, &tls_config).await?;
-    let trusted = load_trusted_keys(&args.trusted_keys)?;
+    let trusted = TrustedKeys::from_files(&args.trusted_keys)?;
     let current = repository.get_bytes("master", MAX_MASTER_BYTES).await?;
     let (predecessor_etag, current_master) = match (master.previous_master_hash(), current.as_ref())
     {
@@ -592,7 +592,7 @@ async fn publish(args: PublishArgs) -> Result<(), RepositoryError> {
 
 async fn status(args: StatusArgs) -> Result<(), RepositoryError> {
     let tls_config = load_tls_config(args.ca_bundle.as_deref())?;
-    let trusted = load_trusted_keys(&args.trusted_keys)?;
+    let trusted = TrustedKeys::from_files(&args.trusted_keys)?;
     let cache = CacheRoot::new(args.cache.as_deref())?;
     let now = unix_time()?;
     let report = if args.scan_storage {
@@ -761,7 +761,7 @@ async fn gc(args: GcArgs) -> Result<(), RepositoryError> {
         .get_bytes("master", MAX_MASTER_BYTES)
         .await?
         .ok_or_else(|| RepositoryError::new("repository master is missing"))?;
-    let trusted = load_trusted_keys(&args.trusted_keys)?;
+    let trusted = TrustedKeys::from_files(&args.trusted_keys)?;
     let verified = trusted.verify(&master_object.bytes)?;
     let cache = CacheRoot::new(args.cache.as_deref())?;
     let transport = Arc::new(S3RepositoryTransport::new(
@@ -1114,31 +1114,6 @@ fn load_tls_config(path: Option<&Path>) -> Result<RepositoryTlsConfig, Repositor
         || Ok(RepositoryTlsConfig::default_roots()),
         RepositoryTlsConfig::from_ca_bundle,
     )
-}
-
-fn load_trusted_keys(paths: &[PathBuf]) -> Result<TrustedKeys, RepositoryError> {
-    let mut trusted = TrustedKeys::default();
-    for path in paths {
-        let bytes = fs::read(path)?;
-        let key = parse_verifying_key(&bytes).map_err(|error| {
-            RepositoryError::new(format!(
-                "failed to parse public key '{}': {error}",
-                path.display()
-            ))
-        })?;
-        let key_id: [u8; 32] = Sha256::digest(key.as_bytes()).into();
-        trusted.insert(key_id.to_vec(), key)?;
-    }
-    Ok(trusted)
-}
-
-fn parse_verifying_key(bytes: &[u8]) -> Result<VerifyingKey, String> {
-    if let Ok(text) = std::str::from_utf8(bytes)
-        && let Ok(key) = VerifyingKey::from_public_key_pem(text)
-    {
-        return Ok(key);
-    }
-    VerifyingKey::from_public_key_der(bytes).map_err(|error| error.to_string())
 }
 
 fn load_signing_key(path: &Path) -> Result<SigningKey, RepositoryError> {

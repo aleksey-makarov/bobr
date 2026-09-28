@@ -1,7 +1,12 @@
 //! Asynchronous byte transport for public repository objects.
 
-use crate::{RepositoryError, RepositoryTlsConfig};
+use crate::{
+    BuildIndexHash, FsFileListHash, ObjectListHash, RepositoryError, RepositoryTlsConfig,
+    ReuseIndexHash,
+};
 use async_trait::async_trait;
+use bobr_core::ObjectHash;
+use bobr_store::fs_tree::FsFileHash;
 use futures_util::StreamExt;
 use reqwest::header::{
     CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_NONE_MATCH,
@@ -13,6 +18,11 @@ use url::Url;
 /// Conditional fetch request passed to a repository transport.
 #[derive(Debug, Clone)]
 pub struct FetchRequest {
+    /// Logical repository value being transferred.
+    ///
+    /// Custom transports use this without parsing URLs to attach cancellation,
+    /// scheduling, and progress reporting to the surrounding realizer.
+    pub purpose: FetchPurpose,
     /// Absolute public HTTPS URL.
     pub url: Url,
     /// Destination file replaced with the response body on success.
@@ -21,6 +31,25 @@ pub struct FetchRequest {
     pub max_bytes: u64,
     /// Previously observed opaque ETag, if any.
     pub if_none_match: Option<String>,
+}
+
+/// Logical identity of bytes requested from a repository transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchPurpose {
+    /// Mutable authenticated repository master.
+    Master,
+    /// Immutable build-key mapping index.
+    BuildIndex(BuildIndexHash),
+    /// Immutable reuse-key mapping index.
+    ReuseIndex(ReuseIndexHash),
+    /// Immutable ordinary-object membership list.
+    ObjectList(ObjectListHash),
+    /// Immutable filesystem-file membership list.
+    FsFileList(FsFileListHash),
+    /// Encoded ordinary object.
+    Object(ObjectHash),
+    /// Encoded filesystem file.
+    FsFile(FsFileHash),
 }
 
 /// Headers needed to validate a repository HTTP representation.
@@ -51,6 +80,11 @@ pub enum FetchResult {
 #[async_trait]
 pub trait RepositoryTransport: Send + Sync {
     /// Fetches one URL and stores a successful body without buffering it whole.
+    ///
+    /// Implementations should treat dropping the returned future as
+    /// cancellation, stop producing bytes promptly, and never publish anything
+    /// besides the caller-owned `destination`. `purpose` supplies stable
+    /// progress identity without requiring URL parsing.
     async fn fetch(&self, request: FetchRequest) -> Result<FetchResult, RepositoryError>;
 }
 
@@ -71,7 +105,7 @@ impl HttpTransport {
             .configure_reqwest(builder)
             .build()
             .map_err(|error| {
-                RepositoryError::new(format!("failed to create HTTP client: {error}"))
+                RepositoryError::configuration(format!("failed to create HTTP client: {error}"))
             })?;
         Ok(Self { client })
     }
@@ -86,16 +120,18 @@ impl HttpTransport {
 impl RepositoryTransport for HttpTransport {
     async fn fetch(&self, request: FetchRequest) -> Result<FetchResult, RepositoryError> {
         if request.url.scheme() != "https" {
-            return Err(RepositoryError::new("repository transport requires HTTPS"));
+            return Err(RepositoryError::configuration(
+                "repository transport requires HTTPS",
+            ));
         }
         let mut builder = self.client.get(request.url.clone());
         if let Some(etag) = &request.if_none_match {
             builder = builder.header(IF_NONE_MATCH, etag);
         }
-        let response = builder
-            .send()
-            .await
-            .map_err(|error| RepositoryError::new(format!("HTTP request failed: {error}")))?;
+        let response = builder.send().await.map_err(|error| {
+            let retryable = error.is_timeout() || error.is_connect() || error.is_body();
+            RepositoryError::transport(format!("HTTP request failed: {error}"), retryable)
+        })?;
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
             return Ok(FetchResult::NotModified);
         }
@@ -103,10 +139,11 @@ impl RepositoryTransport for HttpTransport {
             return Ok(FetchResult::Missing);
         }
         if !response.status().is_success() {
-            return Err(RepositoryError::new(format!(
-                "repository HTTP request returned {}",
-                response.status()
-            )));
+            let status = response.status();
+            return Err(RepositoryError::transport(
+                format!("repository HTTP request returned {status}"),
+                status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS,
+            ));
         }
         if response
             .headers()
@@ -130,7 +167,10 @@ impl RepositoryTransport for HttpTransport {
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|error| {
-                RepositoryError::new(format!("failed to read HTTP response body: {error}"))
+                RepositoryError::transport(
+                    format!("failed to read HTTP response body: {error}"),
+                    true,
+                )
             })?;
             received = received
                 .checked_add(chunk.len() as u64)
@@ -167,6 +207,7 @@ pub struct MemoryTransport {
 struct MemoryState {
     objects: BTreeMap<String, MemoryObject>,
     requests: BTreeMap<String, usize>,
+    purposes: BTreeMap<String, Vec<FetchPurpose>>,
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +248,17 @@ impl MemoryTransport {
             .copied()
             .unwrap_or(0)
     }
+
+    /// Returns logical purposes observed for one URL in request order.
+    pub fn requested_purposes(&self, url: &Url) -> Vec<FetchPurpose> {
+        self.state
+            .lock()
+            .expect("memory transport lock")
+            .purposes
+            .get(url.as_str())
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 #[async_trait]
@@ -215,6 +267,11 @@ impl RepositoryTransport for MemoryTransport {
         let object = {
             let mut state = self.state.lock().expect("memory transport lock");
             *state.requests.entry(request.url.to_string()).or_default() += 1;
+            state
+                .purposes
+                .entry(request.url.to_string())
+                .or_default()
+                .push(request.purpose);
             state.objects.get(request.url.as_str()).cloned()
         };
         let Some(object) = object else {

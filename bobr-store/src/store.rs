@@ -170,6 +170,19 @@ impl Store {
         Ok(true)
     }
 
+    /// Returns the canonical working-store path for one filesystem file.
+    ///
+    /// The path is derived solely from `hash`; its existence and contents are
+    /// not checked.
+    pub fn fs_file_path(&self, hash: FsFileHash) -> PathBuf {
+        self.fs_file_path_unchecked(hash)
+    }
+
+    /// Verifies an existing filesystem file, including its canonical metadata.
+    pub fn verify_fs_file(&self, hash: FsFileHash) -> Result<(), StoreError> {
+        crate::local_content::verify_fs_file(&self.fs_file_path_unchecked(hash), hash)
+    }
+
     /// Returns the canonical path of an imported object without checking that it
     /// exists. The path is `<store>/objects/<64-lowercase-object-hash>`.
     pub(crate) fn object_path_unchecked(&self, object_hash: ObjectHash) -> PathBuf {
