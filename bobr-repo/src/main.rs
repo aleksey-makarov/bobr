@@ -2,6 +2,7 @@
 
 #![allow(missing_docs)]
 
+mod progress;
 mod status_report;
 
 use async_trait::async_trait;
@@ -32,6 +33,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::{NamedTempFile, TempDir};
 use url::Url;
 
+use progress::RepositoryProgress;
 use status_report::{RepositoryState, StatusReport};
 
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
@@ -119,6 +121,7 @@ struct PrepareArgs {
     action: PrepareAction,
     retention: Option<u64>,
     output: PathBuf,
+    quiet: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,6 +165,7 @@ impl PrepareArgs {
         let mut action_seen = false;
         let mut retention = None;
         let mut output = None;
+        let mut quiet = false;
         while let Some(flag) = args.next_utf8()? {
             match flag.as_str() {
                 "--store" => store = Some(args.value_path(&flag)?),
@@ -180,6 +184,7 @@ impl PrepareArgs {
                 "--rotate" => set_action(&mut action, &mut action_seen, PrepareAction::Rotate)?,
                 "--retention" => retention = Some(parse_duration(&args.value(&flag)?)?),
                 "--output" => output = Some(args.value_path(&flag)?),
+                "--quiet" => quiet = true,
                 _ => {
                     return Err(RepositoryError::new(format!(
                         "unknown prepare option '{flag}'"
@@ -203,6 +208,7 @@ impl PrepareArgs {
             action,
             retention,
             output: required(output, "--output")?,
+            quiet,
         })
     }
 }
@@ -260,6 +266,7 @@ struct StatusArgs {
     compact: bool,
     repository: Option<String>,
     scan_storage: bool,
+    quiet: bool,
 }
 
 impl StatusArgs {
@@ -271,6 +278,7 @@ impl StatusArgs {
         let mut compact = false;
         let mut repository = None;
         let mut scan_storage = false;
+        let mut quiet = false;
         while let Some(flag) = args.next_utf8()? {
             match flag.as_str() {
                 "--master-url" => {
@@ -282,6 +290,7 @@ impl StatusArgs {
                 "--compact" => compact = true,
                 "--repository" => repository = Some(args.value(&flag)?),
                 "--scan-storage" => scan_storage = true,
+                "--quiet" => quiet = true,
                 _ => {
                     return Err(RepositoryError::new(format!(
                         "unknown status option '{flag}'"
@@ -300,6 +309,7 @@ impl StatusArgs {
             compact,
             repository,
             scan_storage,
+            quiet,
         })
     }
 }
@@ -370,10 +380,13 @@ async fn init(args: InitArgs) -> Result<(), RepositoryError> {
 }
 
 async fn prepare(args: PrepareArgs) -> Result<(), RepositoryError> {
+    let progress = RepositoryProgress::new(args.quiet);
+    progress.phase("connecting to repository");
     let tls_config = load_tls_config(args.ca_bundle.as_deref())?;
     let location = S3Location::parse(&args.repository)?;
     let repository = S3Repository::from_environment(location, &tls_config).await?;
     let trusted = TrustedKeys::from_files(&args.trusted_keys)?;
+    progress.phase("reading current master");
     let current_object = repository.get_bytes("master", MAX_MASTER_BYTES).await?;
     let current_verified = current_object
         .as_ref()
@@ -397,6 +410,7 @@ async fn prepare(args: PrepareArgs) -> Result<(), RepositoryError> {
         ));
         let reader =
             RepositoryReader::new(args.master_url.clone(), trusted, cache.path(), transport)?;
+        progress.phase("reading current repository metadata");
         reader.publication_metadata().await?.state()?
     } else {
         if args.action != PrepareAction::Append {
@@ -407,22 +421,28 @@ async fn prepare(args: PrepareArgs) -> Result<(), RepositoryError> {
         let data_base_url = args
             .data_base_url
             .ok_or_else(|| RepositoryError::new("an empty repository requires --data-base-url"))?;
+        progress.phase("scanning local store");
         let inventory = scan_inventory(&args.store, runtime.clone()).await?;
+        progress.detail(inventory_summary(&inventory));
         let incoming = inventory_contents(&inventory)?;
-        upload_inventory(&repository, &inventory, &runtime).await?;
+        upload_inventory(&repository, &inventory, &runtime, &progress).await?;
         let state = PublicationState::initialize(data_base_url, incoming)?;
         let metadata = state.metadata()?;
+        progress.phase("uploading repository metadata");
         upload_metadata(&repository, &metadata).await?;
         let result = persist_prepare_candidate(&args.output, Some(&metadata))?;
-        eprintln!(
+        progress.info(format!(
             "prepared initial repository state from {}",
             args.store.display()
-        );
+        ));
+        progress.finish();
         print_prepare_result(result)?;
         return Ok(());
     };
 
+    progress.phase("scanning local store");
     let inventory = scan_inventory(&args.store, runtime.clone()).await?;
+    progress.detail(inventory_summary(&inventory));
     let incoming = inventory_contents(&inventory)?;
     let now = unix_time()?;
     let retention = args.retention.unwrap_or(DEFAULT_RETENTION_SECONDS);
@@ -432,20 +452,23 @@ async fn prepare(args: PrepareArgs) -> Result<(), RepositoryError> {
         upload_immutable,
     } = plan
     else {
-        eprintln!("active repository slot is unchanged");
+        progress.info("active repository slot is unchanged");
+        progress.finish();
         let result = persist_prepare_candidate(&args.output, None)?;
         print_prepare_result(result)?;
         return Ok(());
     };
     if upload_immutable {
-        upload_inventory(&repository, &inventory, &runtime).await?;
+        upload_inventory(&repository, &inventory, &runtime, &progress).await?;
+        progress.phase("uploading repository metadata");
         upload_metadata(&repository, &metadata).await?;
     }
     let result = persist_prepare_candidate(&args.output, Some(&metadata))?;
-    eprintln!(
+    progress.info(format!(
         "prepared repository candidate with {} slot state(s)",
         metadata.master.slots().len()
-    );
+    ));
+    progress.finish();
     print_prepare_result(result)?;
     Ok(())
 }
@@ -591,6 +614,8 @@ async fn publish(args: PublishArgs) -> Result<(), RepositoryError> {
 }
 
 async fn status(args: StatusArgs) -> Result<(), RepositoryError> {
+    let progress = RepositoryProgress::new(args.quiet);
+    progress.phase("loading repository configuration");
     let tls_config = load_tls_config(args.ca_bundle.as_deref())?;
     let trusted = TrustedKeys::from_files(&args.trusted_keys)?;
     let cache = CacheRoot::new(args.cache.as_deref())?;
@@ -605,13 +630,23 @@ async fn status(args: StatusArgs) -> Result<(), RepositoryError> {
             &tls_config,
         )
         .await?;
-        administrative_status(&args.master_url, trusted, cache.path(), repository, now).await?
+        administrative_status(
+            &args.master_url,
+            trusted,
+            cache.path(),
+            repository,
+            now,
+            &progress,
+        )
+        .await?
     } else {
+        progress.phase("reading repository metadata");
         let reader =
             RepositoryReader::https(args.master_url.clone(), trusted, cache.path(), &tls_config)?;
         let publication = reader.publication_metadata().await?;
         StatusReport::ready(&args.master_url, &publication, None, now)?
     };
+    progress.finish();
     if args.compact {
         println!("{}", json_compact(&report)?);
     } else {
@@ -626,8 +661,9 @@ async fn administrative_status(
     cache_root: &Path,
     repository: impl StatusRepository,
     now: u64,
+    progress: &RepositoryProgress,
 ) -> Result<StatusReport, RepositoryError> {
-    administrative_status_from(master_url, trusted, cache_root, &repository, now).await
+    administrative_status_from(master_url, trusted, cache_root, &repository, now, progress).await
 }
 
 #[async_trait]
@@ -675,11 +711,14 @@ async fn administrative_status_from(
     cache_root: &Path,
     repository: &impl StatusRepository,
     now: u64,
+    progress: &RepositoryProgress,
 ) -> Result<StatusReport, RepositoryError> {
     for attempt in 0..2 {
+        progress.phase("checking repository bucket");
         if repository.bucket_presence().await? == BucketPresence::Missing {
             return Ok(StatusReport::empty(RepositoryState::Missing));
         }
+        progress.phase("reading current master");
         let Some(observed_master) = repository.get_master().await? else {
             if repository.bucket_presence().await? == BucketPresence::Missing {
                 return Ok(StatusReport::empty(RepositoryState::Missing));
@@ -699,6 +738,7 @@ async fn administrative_status_from(
             .metadata_transport(master_url.clone(), verified.master.data_base_url().clone());
         let reader =
             RepositoryReader::new(master_url.clone(), trusted.clone(), cache_root, transport)?;
+        progress.phase("reading repository metadata");
         let publication = match reader.publication_metadata().await {
             Ok(publication) => publication,
             Err(error) => {
@@ -713,6 +753,7 @@ async fn administrative_status_from(
                 return Err(error);
             }
         };
+        progress.phase("listing remote storage");
         let stored = match repository.list().await {
             Ok(stored) => stored,
             Err(error) => {
@@ -727,6 +768,12 @@ async fn administrative_status_from(
                 return Err(error);
             }
         };
+        progress.detail(format!(
+            "listed {} remote keys ({})",
+            stored.len(),
+            human_bytes(stored.iter().map(|entry| entry.size).sum())
+        ));
+        progress.phase("confirming current master");
         let current = repository.get_master().await?;
         if current
             .as_ref()
@@ -848,6 +895,31 @@ async fn scan_inventory(
     .map_err(|error| RepositoryError::new(error.to_string()))
 }
 
+fn inventory_summary(inventory: &StoreInventory) -> String {
+    format!(
+        "scanned local store · {} objects · {} files · {} build mappings · {} reuse mappings",
+        inventory.objects.len(),
+        inventory.files.len(),
+        inventory.builds.len(),
+        inventory.reuses.len()
+    )
+}
+
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 fn inventory_contents(inventory: &StoreInventory) -> Result<SlotContents, RepositoryError> {
     SlotContents::new(
         inventory.builds.iter().copied(),
@@ -861,14 +933,37 @@ async fn upload_inventory(
     repository: &S3Repository,
     inventory: &StoreInventory,
     runtime: &RuntimeProvider,
+    progress: &RepositoryProgress,
 ) -> Result<(), RepositoryError> {
-    let existing = repository
-        .list()
-        .await?
+    progress.phase("listing remote storage");
+    let stored = repository.list().await?;
+    progress.detail(format!(
+        "listed {} remote keys ({})",
+        stored.len(),
+        human_bytes(stored.iter().map(|entry| entry.size).sum())
+    ));
+    let existing = stored
         .into_iter()
         .map(|entry| entry.key)
         .collect::<HashSet<_>>();
+    let missing_objects = inventory
+        .objects
+        .iter()
+        .filter(|object| !existing.contains(&format!("o/{}", object.hash)))
+        .count();
+    let missing_files = inventory
+        .files
+        .iter()
+        .filter(|file| !existing.contains(&format!("f/{}", file.hash)))
+        .cloned()
+        .collect::<Vec<_>>();
+    let total = missing_objects + missing_files.len();
+    progress.phase(format!(
+        "publishing repository content · {missing_objects} objects · {} files",
+        missing_files.len()
+    ));
     let mut uploaded = 0usize;
+    let mut completed = 0usize;
     for objects in inventory.objects.chunks(ENCODING_BATCH_SIZE) {
         let temporary = tempfile::tempdir()?;
         let mut uploads = Vec::new();
@@ -877,21 +972,29 @@ async fn upload_inventory(
             if existing.contains(&key) {
                 continue;
             }
+            progress.detail(format!(
+                "encoding repository objects · {completed}/{total} content items complete"
+            ));
             let encoded = encode_preferred_object(&object.path, object.hash, temporary.path())?;
             let path = temporary.path().join(object.hash.to_string());
             encoded.persist(&path).map_err(|error| error.error)?;
             uploads.push((key, path, OBJECT_MEDIA_TYPE));
         }
-        uploaded += upload_batch(repository, &uploads).await?;
+        uploaded += upload_batch(
+            repository,
+            &uploads,
+            &mut completed,
+            total,
+            uploaded,
+            progress,
+        )
+        .await?;
     }
-    let missing_files = inventory
-        .files
-        .iter()
-        .filter(|file| !existing.contains(&format!("f/{}", file.hash)))
-        .cloned()
-        .collect::<Vec<_>>();
     for files in missing_files.chunks(ENCODING_BATCH_SIZE) {
         let temporary = tempfile::tempdir()?;
+        progress.detail(format!(
+            "encoding repository files · {completed}/{total} content items complete"
+        ));
         encode_preferred_fs_files(runtime, files, temporary.path())?;
         let uploads = files
             .iter()
@@ -903,15 +1006,27 @@ async fn upload_inventory(
                 )
             })
             .collect::<Vec<_>>();
-        uploaded += upload_batch(repository, &uploads).await?;
+        uploaded += upload_batch(
+            repository,
+            &uploads,
+            &mut completed,
+            total,
+            uploaded,
+            progress,
+        )
+        .await?;
     }
-    eprintln!("repository content: {uploaded} uploaded");
+    progress.info(format!("repository content: {uploaded} uploaded"));
     Ok(())
 }
 
 async fn upload_batch(
     repository: &S3Repository,
     uploads: &[(String, PathBuf, &'static str)],
+    completed: &mut usize,
+    total: usize,
+    uploaded_before: usize,
+    progress: &RepositoryProgress,
 ) -> Result<usize, RepositoryError> {
     let mut futures = stream::iter(uploads.iter().map(|(key, path, content_type)| async move {
         repository
@@ -924,6 +1039,12 @@ async fn upload_batch(
         if result? == ImmutableUpload::Created {
             created += 1;
         }
+        *completed += 1;
+        let completed_count = *completed;
+        progress.detail(format!(
+            "uploading repository content · {completed_count}/{total} complete · {} uploaded",
+            uploaded_before + created
+        ));
     }
     Ok(created)
 }
@@ -1493,12 +1614,14 @@ mod tests {
                 list_calls: std::sync::atomic::AtomicUsize::new(0),
             };
             let cache = tempfile::tempdir().unwrap();
+            let progress = RepositoryProgress::new(true);
             let report = administrative_status_from(
                 &master_url(),
                 trusted_keys(),
                 cache.path(),
                 &repository,
                 0,
+                &progress,
             )
             .await
             .unwrap();
@@ -1529,10 +1652,17 @@ mod tests {
             list_calls: std::sync::atomic::AtomicUsize::new(0),
         };
         let cache = tempfile::tempdir().unwrap();
-        let report =
-            administrative_status_from(&master_url(), trusted_keys(), cache.path(), &repository, 0)
-                .await
-                .unwrap();
+        let progress = RepositoryProgress::new(true);
+        let report = administrative_status_from(
+            &master_url(),
+            trusted_keys(),
+            cache.path(),
+            &repository,
+            0,
+            &progress,
+        )
+        .await
+        .unwrap();
         let value = serde_json::to_value(report).unwrap();
         assert_eq!(value["state"], "ready");
         assert_eq!(value["active_slot"]["serial"], 2);
@@ -1565,10 +1695,17 @@ mod tests {
             list_calls: std::sync::atomic::AtomicUsize::new(0),
         };
         let cache = tempfile::tempdir().unwrap();
-        let error =
-            administrative_status_from(&master_url(), trusted_keys(), cache.path(), &repository, 0)
-                .await
-                .unwrap_err();
+        let progress = RepositoryProgress::new(true);
+        let error = administrative_status_from(
+            &master_url(),
+            trusted_keys(),
+            cache.path(),
+            &repository,
+            0,
+            &progress,
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("changed repeatedly"));
     }
 
@@ -1588,6 +1725,33 @@ mod tests {
         ];
         let mut args = Arguments::new(values.into_iter().map(OsString::from));
         assert!(PrepareArgs::parse(&mut args).is_err());
+    }
+
+    #[test]
+    fn long_running_commands_accept_quiet_progress() {
+        let mut args = Arguments::new(
+            [
+                "--store",
+                "/tmp/store",
+                "--repository",
+                "s3://bucket",
+                "--master-url",
+                "https://example/master",
+                "--output",
+                "/tmp/candidate",
+                "--quiet",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+        assert!(PrepareArgs::parse(&mut args).unwrap().quiet);
+
+        let mut args = Arguments::new(
+            ["--master-url", "https://example/master", "--quiet"]
+                .into_iter()
+                .map(OsString::from),
+        );
+        assert!(StatusArgs::parse(&mut args).unwrap().quiet);
     }
 
     #[test]

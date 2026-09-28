@@ -662,6 +662,7 @@ dependencies = [
  "ed25519-dalek",
  "fsobj-hash",
  "futures-util",
+ "indicatif",
  "libc",
  "reqwest",
  "serde",

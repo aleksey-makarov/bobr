@@ -252,6 +252,7 @@ bobr-repo prepare \
     [--data-base-url HTTPS-URL] \
     [--cache DIR] \
     [--ca-bundle CA-BUNDLE.pem] \
+    [--quiet] \
     [--append | --add-slot | --rotate] \
     [--retention DURATION] \
     --output candidate-master.cbor
@@ -339,7 +340,9 @@ or:
 ```
 
 Both are successful results. Human-readable progress remains on standard
-error. `unchanged` is possible only for append to an existing repository;
+error. `--quiet` suppresses the live progress display without changing the
+JSON result or error diagnostics. `unchanged` is possible only for append to
+an existing repository;
 initial publication, add-slot, rotate, and prune-only transitions always
 return `candidate`.
 
@@ -447,6 +450,7 @@ bobr-repo status \
     --trusted-key PUBLIC-KEY ... \
     [--cache DIR] \
     [--ca-bundle CA-BUNDLE.pem] \
+    [--quiet] \
     [--compact]
 ```
 
@@ -487,7 +491,8 @@ bobr-repo status \
     --repository s3://BUCKET/PREFIX \
     --scan-storage \
     [--cache DIR] \
-    [--ca-bundle CA-BUNDLE.pem]
+    [--ca-bundle CA-BUNDLE.pem] \
+    [--quiet]
 ```
 
 This mode treats authenticated S3 as the authoritative administrative view. It
@@ -619,6 +624,11 @@ Machine-readable results are written to standard output. Human progress,
 retry notices, prompts, and diagnostics are written to standard error. Secret
 keys, S3 secrets, authorization headers, and private-key passphrases are never
 logged.
+
+Interactive `prepare` and `status` commands keep one live progress line on a
+terminal. Redirected standard error receives phase transitions without
+terminal control sequences. `--quiet` disables this progress output while
+preserving machine-readable results, final informational messages, and errors.
 
 All mutating commands support interruption. An interrupted `prepare` may leave
 unreferenced immutable keys, and an interrupted `gc` may leave unreachable
