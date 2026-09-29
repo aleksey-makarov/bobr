@@ -3,6 +3,7 @@
 use crate::LocalIoScheduler;
 use async_trait::async_trait;
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
+use bobr_repo::{RepositoryError, RepositoryErrorKind};
 use bobr_store::fs_tree::{FsFileHash, FsTreeEntry, FsTreeManifest, read_manifest_if_marked};
 use bobr_store::{
     ContentImportOutcome, ContentSource, ContentTransferMode, LocalRepository, ReadOnlyStore,
@@ -18,6 +19,77 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinSet;
+
+/// Typed failure produced by one mapping or content capability.
+///
+/// Local store failures and authenticated remote-repository failures stay
+/// distinct until the resolver applies its provider fallback policy.
+#[derive(Debug)]
+pub enum ProviderError {
+    /// Failure in a local store-backed capability.
+    Store(StoreError),
+    /// Failure in a remote repository reader or transport.
+    Repository(RepositoryError),
+}
+
+impl ProviderError {
+    /// Converts a provider failure for resolver APIs that still expose the
+    /// historical store-oriented error boundary.
+    pub fn into_store_error(self) -> StoreError {
+        match self {
+            Self::Store(error) => error,
+            Self::Repository(error) => {
+                let message = error.to_string();
+                match error.kind() {
+                    RepositoryErrorKind::Configuration => StoreError::InvalidInput(message),
+                    RepositoryErrorKind::Authentication
+                    | RepositoryErrorKind::InvalidRepository => StoreError::InvalidData(message),
+                    RepositoryErrorKind::Transport { .. }
+                    | RepositoryErrorKind::LocalIo
+                    | RepositoryErrorKind::Runtime
+                    | RepositoryErrorKind::Cancelled => StoreError::Io(message),
+                }
+            }
+        }
+    }
+
+    /// Returns the remote category, or `None` for a local-store failure.
+    pub fn repository_kind(&self) -> Option<RepositoryErrorKind> {
+        match self {
+            Self::Store(_) => None,
+            Self::Repository(error) => Some(error.kind()),
+        }
+    }
+}
+
+impl From<StoreError> for ProviderError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<RepositoryError> for ProviderError {
+    fn from(error: RepositoryError) -> Self {
+        Self::Repository(error)
+    }
+}
+
+impl From<ProviderError> for StoreError {
+    fn from(error: ProviderError) -> Self {
+        error.into_store_error()
+    }
+}
+
+impl fmt::Display for ProviderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => error.fmt(formatter),
+            Self::Repository(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ProviderError {}
 
 /// Per-run registry of canonical local repository backends.
 ///
@@ -91,13 +163,13 @@ pub trait MappingProvider: fmt::Debug + Send + Sync {
     async fn resolve_builds(
         &self,
         keys: &[BuildKey],
-    ) -> Result<Vec<TrustedResolution<BuildKey>>, StoreError>;
+    ) -> Result<Vec<TrustedResolution<BuildKey>>, ProviderError>;
 
     /// Resolves every available reuse key in one batch.
     async fn resolve_reuses(
         &self,
         keys: &[ReuseKey],
-    ) -> Result<Vec<TrustedResolution<ReuseKey>>, StoreError>;
+    ) -> Result<Vec<TrustedResolution<ReuseKey>>, ProviderError>;
 }
 
 /// Asynchronous content capability for already-known object identities.
@@ -110,31 +182,33 @@ pub trait ContentProvider: fmt::Debug + Send + Sync {
     async fn locate_objects(
         &self,
         hashes: &[ObjectHash],
-    ) -> Result<HashSet<ObjectHash>, StoreError>;
+    ) -> Result<HashSet<ObjectHash>, ProviderError>;
 
     /// Reads an object as an fs-tree manifest when it carries that schema.
-    async fn object_manifest(&self, hash: ObjectHash)
-    -> Result<Option<FsTreeManifest>, StoreError>;
+    async fn object_manifest(
+        &self,
+        hash: ObjectHash,
+    ) -> Result<Option<FsTreeManifest>, ProviderError>;
 
     /// Locates filesystem files in one batch.
     async fn locate_fs_files(
         &self,
         hashes: &[FsFileHash],
-    ) -> Result<HashSet<FsFileHash>, StoreError>;
+    ) -> Result<HashSet<FsFileHash>, ProviderError>;
 
     /// Imports one batch of filesystem files into the working store.
     async fn import_fs_files(
         &self,
         working: &Store,
         hashes: &[FsFileHash],
-    ) -> Result<(), StoreError>;
+    ) -> Result<(), ProviderError>;
 
     /// Imports one top-level object into the working store.
     async fn import_object(
         &self,
         working: &Store,
         hash: ObjectHash,
-    ) -> Result<ContentImportOutcome, StoreError>;
+    ) -> Result<ContentImportOutcome, ProviderError>;
 }
 
 /// Async adapter for one synchronous local mapping index.
@@ -156,19 +230,25 @@ impl MappingProvider for LocalMappingProvider {
     async fn resolve_builds(
         &self,
         keys: &[BuildKey],
-    ) -> Result<Vec<TrustedResolution<BuildKey>>, StoreError> {
+    ) -> Result<Vec<TrustedResolution<BuildKey>>, ProviderError> {
         let index = self.index.clone();
         let keys = keys.to_vec();
-        self.local_io.run(move || index.resolve_builds(&keys)).await
+        self.local_io
+            .run(move || index.resolve_builds(&keys))
+            .await
+            .map_err(Into::into)
     }
 
     async fn resolve_reuses(
         &self,
         keys: &[ReuseKey],
-    ) -> Result<Vec<TrustedResolution<ReuseKey>>, StoreError> {
+    ) -> Result<Vec<TrustedResolution<ReuseKey>>, ProviderError> {
         let index = self.index.clone();
         let keys = keys.to_vec();
-        self.local_io.run(move || index.resolve_reuses(&keys)).await
+        self.local_io
+            .run(move || index.resolve_reuses(&keys))
+            .await
+            .map_err(Into::into)
     }
 }
 
@@ -195,58 +275,63 @@ impl ContentProvider for LocalContentProvider {
     async fn locate_objects(
         &self,
         hashes: &[ObjectHash],
-    ) -> Result<HashSet<ObjectHash>, StoreError> {
+    ) -> Result<HashSet<ObjectHash>, ProviderError> {
         let source = self.source.clone();
         let hashes = hashes.to_vec();
         self.local_io
             .run(move || source.locate_objects(&hashes))
             .await
+            .map_err(Into::into)
     }
 
     async fn object_manifest(
         &self,
         hash: ObjectHash,
-    ) -> Result<Option<FsTreeManifest>, StoreError> {
+    ) -> Result<Option<FsTreeManifest>, ProviderError> {
         let source = self.source.clone();
         self.local_io
             .run(move || source.object_manifest(hash))
             .await
+            .map_err(Into::into)
     }
 
     async fn locate_fs_files(
         &self,
         hashes: &[FsFileHash],
-    ) -> Result<HashSet<FsFileHash>, StoreError> {
+    ) -> Result<HashSet<FsFileHash>, ProviderError> {
         let source = self.source.clone();
         let hashes = hashes.to_vec();
         self.local_io
             .run(move || source.locate_fs_files(&hashes))
             .await
+            .map_err(Into::into)
     }
 
     async fn import_fs_files(
         &self,
         working: &Store,
         hashes: &[FsFileHash],
-    ) -> Result<(), StoreError> {
+    ) -> Result<(), ProviderError> {
         let source = self.source.clone();
         let working = working.clone();
         let hashes = hashes.to_vec();
         self.local_io
             .run(move || source.import_fs_files(&working, &hashes))
             .await
+            .map_err(Into::into)
     }
 
     async fn import_object(
         &self,
         working: &Store,
         hash: ObjectHash,
-    ) -> Result<ContentImportOutcome, StoreError> {
+    ) -> Result<ContentImportOutcome, ProviderError> {
         let source = self.source.clone();
         let working = working.clone();
         self.local_io
             .run(move || source.import_object(&working, hash))
             .await
+            .map_err(Into::into)
     }
 }
 
@@ -1032,7 +1117,7 @@ struct CandidateGroup<K> {
 }
 
 async fn collect_ordered_provider_tasks<T: Send + 'static>(
-    mut tasks: JoinSet<(usize, String, Result<T, StoreError>)>,
+    mut tasks: JoinSet<(usize, String, Result<T, ProviderError>)>,
     count: usize,
     operation: &str,
 ) -> Result<Vec<(String, T)>, StoreError> {
@@ -1047,7 +1132,9 @@ async fn collect_ordered_provider_tasks<T: Send + 'static>(
         .into_iter()
         .map(|entry| {
             let (name, result) = entry.expect("every provider task produces one result");
-            result.map(|value| (name, value))
+            result
+                .map(|value| (name, value))
+                .map_err(ProviderError::into_store_error)
         })
         .collect()
 }
@@ -1312,6 +1399,15 @@ mod tests {
         LocalIoScheduler::new(8, CancellationToken::new()).unwrap()
     }
 
+    #[test]
+    fn provider_error_preserves_repository_category() {
+        let error = ProviderError::from(RepositoryError::cancelled("cancelled by test"));
+        assert_eq!(
+            error.repository_kind(),
+            Some(RepositoryErrorKind::Cancelled)
+        );
+    }
+
     fn publish_file(
         store: &Store,
         build: BuildKey,
@@ -1433,7 +1529,7 @@ mod tests {
         async fn resolve_builds(
             &self,
             keys: &[BuildKey],
-        ) -> Result<Vec<TrustedResolution<BuildKey>>, StoreError> {
+        ) -> Result<Vec<TrustedResolution<BuildKey>>, ProviderError> {
             self.barrier.wait().await;
             tokio::time::sleep(self.delay).await;
             Ok(keys
@@ -1450,7 +1546,7 @@ mod tests {
         async fn resolve_reuses(
             &self,
             _keys: &[ReuseKey],
-        ) -> Result<Vec<TrustedResolution<ReuseKey>>, StoreError> {
+        ) -> Result<Vec<TrustedResolution<ReuseKey>>, ProviderError> {
             Ok(Vec::new())
         }
     }
@@ -1469,7 +1565,7 @@ mod tests {
         async fn locate_objects(
             &self,
             _hashes: &[ObjectHash],
-        ) -> Result<HashSet<ObjectHash>, StoreError> {
+        ) -> Result<HashSet<ObjectHash>, ProviderError> {
             self.barrier.wait().await;
             Ok(HashSet::new())
         }
@@ -1477,14 +1573,14 @@ mod tests {
         async fn object_manifest(
             &self,
             _hash: ObjectHash,
-        ) -> Result<Option<FsTreeManifest>, StoreError> {
+        ) -> Result<Option<FsTreeManifest>, ProviderError> {
             unreachable!("unavailable objects have no manifest")
         }
 
         async fn locate_fs_files(
             &self,
             _hashes: &[FsFileHash],
-        ) -> Result<HashSet<FsFileHash>, StoreError> {
+        ) -> Result<HashSet<FsFileHash>, ProviderError> {
             unreachable!("unavailable objects have no fs-files")
         }
 
@@ -1492,7 +1588,7 @@ mod tests {
             &self,
             _working: &Store,
             _hashes: &[FsFileHash],
-        ) -> Result<(), StoreError> {
+        ) -> Result<(), ProviderError> {
             unreachable!("unavailable fs-files are not imported")
         }
 
@@ -1500,7 +1596,7 @@ mod tests {
             &self,
             _working: &Store,
             _hash: ObjectHash,
-        ) -> Result<ContentImportOutcome, StoreError> {
+        ) -> Result<ContentImportOutcome, ProviderError> {
             unreachable!("unavailable objects are not imported")
         }
     }

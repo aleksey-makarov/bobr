@@ -722,6 +722,7 @@ dependencies = [
  "bobr-sandbox",
  "bobr-store",
  "bzip2",
+ "ed25519-dalek",
  "flate2",
  "fsobj-hash",
  "libc",
@@ -734,6 +735,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "ureq",
+ "url",
  "xz2",
  "zip",
 ]

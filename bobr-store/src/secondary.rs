@@ -124,6 +124,8 @@ pub enum ContentTransferMode {
     Hardlink,
     /// Copy content into independent working-store inodes.
     Copy,
+    /// Download, verify, and decode an authenticated remote representation.
+    Download,
 }
 
 impl ContentTransferMode {
@@ -132,6 +134,7 @@ impl ContentTransferMode {
         match self {
             Self::Hardlink => "hardlink",
             Self::Copy => "copy",
+            Self::Download => "download",
         }
     }
 }

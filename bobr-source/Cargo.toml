@@ -19,6 +19,7 @@ flate2.workspace = true
 bobr-builder.workspace = true
 bobr-core.workspace = true
 bobr-repo.workspace = true
+bobr-runtime.workspace = true
 bobr-sandbox.workspace = true
 bobr-store.workspace = true
 reqwest.workspace = true
@@ -33,10 +34,11 @@ xz2.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
-bobr-runtime.workspace = true
+ed25519-dalek.workspace = true
 fsobj-hash.workspace = true
 mockito.workspace = true
 tempfile.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true

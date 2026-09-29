@@ -212,9 +212,58 @@ pub(crate) fn verify_fs_file(path: &Path, expected: FsFileHash) -> Result<(), St
 }
 
 /// Removes an incomplete repository import unless it has been published.
+#[derive(Debug)]
 pub(crate) struct RepositoryStagingGuard {
     path: PathBuf,
     armed: bool,
+}
+
+/// Store-owned staging allocation for one verified repository object import.
+///
+/// The path is allocated on the working store filesystem so a successful
+/// publication can use an atomic rename. Dropping an unpublished staging
+/// value removes any partially decoded object.
+#[derive(Debug)]
+pub struct RepositoryObjectStaging {
+    guard: RepositoryStagingGuard,
+}
+
+impl RepositoryObjectStaging {
+    /// Returns the path into which a repository reader should decode content.
+    pub fn path(&self) -> &Path {
+        &self.guard.path
+    }
+}
+
+impl crate::Store {
+    /// Allocates private staging for one repository object download.
+    pub fn allocate_repository_object_staging(
+        &self,
+    ) -> Result<RepositoryObjectStaging, StoreError> {
+        let path = allocate_repository_staging_path(self)?;
+        Ok(RepositoryObjectStaging {
+            guard: RepositoryStagingGuard::new(path),
+        })
+    }
+
+    /// Verifies and atomically publishes a decoded repository object.
+    ///
+    /// The staging allocation is consumed whether publication succeeds or
+    /// fails. A failed import therefore cannot leave a partial CAS entry.
+    pub fn publish_repository_object(
+        &self,
+        mut staging: RepositoryObjectStaging,
+        expected_hash: ObjectHash,
+    ) -> Result<crate::ContentImportOutcome, StoreError> {
+        let already_present = self.object_path(expected_hash)?.is_some();
+        crate::object::import_object_with_expected_hash(self, staging.path(), expected_hash)?;
+        staging.guard.disarm();
+        Ok(if already_present {
+            crate::ContentImportOutcome::AlreadyPresent
+        } else {
+            crate::ContentImportOutcome::Imported
+        })
+    }
 }
 
 impl RepositoryStagingGuard {

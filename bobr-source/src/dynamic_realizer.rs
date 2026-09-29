@@ -896,7 +896,12 @@ fn log_content_progress(
             ..
         } => {
             let mode = transfer_mode.as_str();
-            let message = format!("{mode} from local repository '{content_source}'");
+            let repository_kind = if transfer_mode == bobr_store::ContentTransferMode::Download {
+                "remote repository"
+            } else {
+                "local repository"
+            };
+            let message = format!("{mode} from {repository_kind} '{content_source}'");
             let details = json!({
                 "transfer": mode,
                 "host": content_source.clone(),
@@ -910,9 +915,15 @@ fn log_content_progress(
             *transferred_bytes = transferred_bytes.saturating_add(report.bytes);
             let mode = report.transfer_mode.as_str();
             let provider = report.content_source.clone();
+            let repository_kind =
+                if report.transfer_mode == bobr_store::ContentTransferMode::Download {
+                    "remote repository"
+                } else {
+                    "local repository"
+                };
             let message = format!(
-                "{mode} {} file(s), {} byte(s) from local repository '{}' in {} ms",
-                report.files, report.bytes, provider, report.duration_ms
+                "{mode} {} file(s), {} byte(s) from {repository_kind} '{}' in {} ms",
+                report.files, report.bytes, provider, report.duration_ms,
             );
             let details = json!({
                 "transfer": mode,

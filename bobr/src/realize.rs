@@ -5,13 +5,16 @@ use crate::request::{
 use bobr_core::{
     BuildLogEvent, BuildLogLevel, BuildRunLogger, BuildStatus, CancellationToken, ObjectHash, Run,
 };
+use bobr_repo::{HttpTransport, ReaderPolicy, RepositoryReader, RepositoryTlsConfig, TrustedKeys};
 use bobr_runtime::runtime_provider::{RuntimeProvider, runtime_provider_for_current_process};
 use bobr_source::build_executor::BuildExecutor;
 use bobr_source::dynamic_realizer::DynamicRealizer;
 use bobr_source::graph::{GraphPlanError, GraphPlanErrorKind, plan_graph};
 use bobr_source::{
     LocalBackendRegistry, LocalContentProvider, LocalIoScheduler, LocalMappingProvider,
-    NamedContentProvider, NamedMappingProvider, NetworkScheduler, SecondaryResolver,
+    NamedContentProvider, NamedMappingProvider, NetworkEvent, NetworkEventSink, NetworkScheduler,
+    RemoteBackendRegistry, RemoteContentProvider, RemoteMappingProvider, RemoteRepositoryBackend,
+    ScheduledRepositoryTransport, SecondaryResolver,
 };
 #[cfg(test)]
 use bobr_store::ReadOnlyStore;
@@ -64,9 +67,7 @@ pub async fn realize(
         .filter(|node| node.as_source().is_some())
         .count();
     let reachable_builders = reachable - reachable_sources;
-    reject_remote_providers(&secondaries.providers)?;
     let store = Store::create(&store_path).map_err(map_store_error)?;
-    let providers = open_local_providers(&store, secondaries.providers)?;
     let run = Arc::new(Run::new(run_id, &logs, &work)?);
     check_same_filesystem(&store, &run)?;
     let logger = Arc::new(
@@ -83,9 +84,20 @@ pub async fn realize(
     let local_io = LocalIoScheduler::new(limits.resolved_max_local_jobs(), cancellation.clone())
         .map_err(map_store_error)?;
     let network = NetworkScheduler::new(limits.resolved_network_limits(), cancellation.clone());
+    let providers = open_providers(
+        &store,
+        secondaries.providers,
+        &secondaries.repository_cache,
+        network.clone(),
+        limits.resolved_max_local_jobs(),
+    )?;
     let provider_log = provider_log_details(&providers);
-    let (mapping_providers, content_providers) =
-        local_provider_capabilities(providers, runtime_provider.clone(), local_io.clone());
+    let (mapping_providers, content_providers) = provider_capabilities(
+        providers,
+        store.clone(),
+        runtime_provider.clone(),
+        local_io.clone(),
+    );
     let secondary = Arc::new(
         SecondaryResolver::new(
             store.clone(),
@@ -208,119 +220,176 @@ fn check_same_filesystem(store: &Store, run: &Run) -> Result<(), ExecutionError>
     Ok(())
 }
 
-struct OpenedLocalProvider {
+struct OpenedProvider {
     name: String,
     capability: ProviderCapability,
-    transfer: Option<LocalTransferPolicy>,
-    repository: LocalRepository,
+    backend: OpenedProviderBackend,
 }
 
-fn reject_remote_providers(providers: &[ProviderConfig]) -> Result<(), ExecutionError> {
-    if let Some(provider) = providers
-        .iter()
-        .find(|provider| matches!(provider.backend, ProviderBackend::Remote { .. }))
-    {
-        return Err(ExecutionError::InvalidRequest(format!(
-            "remote secondary provider '{}' is not implemented by this build",
-            provider.name
-        )));
-    }
-    Ok(())
+enum OpenedProviderBackend {
+    Local {
+        transfer: Option<LocalTransferPolicy>,
+        repository: LocalRepository,
+    },
+    Remote {
+        master_url: url::Url,
+        repository: RemoteRepositoryBackend,
+    },
 }
 
-fn open_local_providers(
+#[derive(Debug)]
+struct IgnoreNetworkEvents;
+
+impl NetworkEventSink for IgnoreNetworkEvents {
+    fn event(&self, _event: NetworkEvent) {}
+}
+
+fn open_providers(
     working: &Store,
     providers: Vec<ProviderConfig>,
-) -> Result<Vec<OpenedLocalProvider>, ExecutionError> {
+    repository_cache: &std::path::Path,
+    network: NetworkScheduler,
+    max_local_jobs: usize,
+) -> Result<Vec<OpenedProvider>, ExecutionError> {
     let mut canonical_capabilities = HashMap::new();
     let mut canonical_by_name = HashMap::new();
-    let mut registry = LocalBackendRegistry::default();
+    let mut local_registry = LocalBackendRegistry::default();
+    let mut remote_registry = RemoteBackendRegistry::default();
     let mut opened = Vec::with_capacity(providers.len());
     for provider in providers {
-        let ProviderBackend::Local { store, transfer } = provider.backend else {
-            return Err(ExecutionError::InvalidRequest(format!(
-                "remote secondary provider '{}' is not implemented by this build",
-                provider.name
-            )));
-        };
-        let backend = registry.open(&store).map_err(map_store_error)?;
-        if backend.store().root() == working.root() {
-            return Err(ExecutionError::InvalidRequest(format!(
-                "local provider '{}' is a canonical alias of the working store '{}'",
-                provider.name,
-                working.root().display()
-            )));
-        }
-        let canonical_root = backend.store().root().to_path_buf();
-        if let Some(previous_name) = canonical_capabilities.insert(
-            (provider.capability, canonical_root.clone()),
-            provider.name.clone(),
-        ) {
-            return Err(ExecutionError::InvalidRequest(format!(
-                "{} providers '{previous_name}' and '{}' resolve to the same store root '{}'",
-                provider.capability.as_str(),
-                provider.name,
-                backend.store().root().display()
-            )));
-        }
-        if let Some(previous_root) =
-            canonical_by_name.insert(provider.name.clone(), canonical_root.clone())
-            && previous_root != canonical_root
-        {
-            return Err(ExecutionError::InvalidRequest(format!(
-                "complementary providers named '{}' resolve to different store roots",
-                provider.name
-            )));
-        }
-        if transfer == Some(LocalTransferPolicy::Hardlink) {
-            backend
-                .validate_hardlink_compatible_with(working)
-                .map_err(|error| {
-                    ExecutionError::InvalidRequest(format!(
-                        "local provider '{}' cannot use transfer mode 'hardlink': {error}",
+        let backend = match provider.backend {
+            ProviderBackend::Local { store, transfer } => {
+                let backend = local_registry.open(&store).map_err(map_store_error)?;
+                if backend.store().root() == working.root() {
+                    return Err(ExecutionError::InvalidRequest(format!(
+                        "local provider '{}' is a canonical alias of the working store '{}'",
+                        provider.name,
+                        working.root().display()
+                    )));
+                }
+                let canonical_root = backend.store().root().to_path_buf();
+                if let Some(previous_name) = canonical_capabilities.insert(
+                    (provider.capability, canonical_root.clone()),
+                    provider.name.clone(),
+                ) {
+                    return Err(ExecutionError::InvalidRequest(format!(
+                        "{} providers '{previous_name}' and '{}' resolve to the same store root '{}'",
+                        provider.capability.as_str(),
+                        provider.name,
+                        backend.store().root().display()
+                    )));
+                }
+                if let Some(previous_root) =
+                    canonical_by_name.insert(provider.name.clone(), canonical_root.clone())
+                    && previous_root != canonical_root
+                {
+                    return Err(ExecutionError::InvalidRequest(format!(
+                        "complementary providers named '{}' resolve to different store roots",
                         provider.name
-                    ))
-                })?;
-        }
-        opened.push(OpenedLocalProvider {
+                    )));
+                }
+                if transfer == Some(LocalTransferPolicy::Hardlink) {
+                    backend
+                        .validate_hardlink_compatible_with(working)
+                        .map_err(|error| {
+                            ExecutionError::InvalidRequest(format!(
+                                "local provider '{}' cannot use transfer mode 'hardlink': {error}",
+                                provider.name
+                            ))
+                        })?;
+                }
+                OpenedProviderBackend::Local {
+                    transfer,
+                    repository: backend,
+                }
+            }
+            ProviderBackend::Remote {
+                master_url,
+                trusted_keys,
+                ca_bundle,
+            } => {
+                let identity = master_url.to_string();
+                let repository = remote_registry
+                    .open_with(identity.clone(), || {
+                        let trusted = TrustedKeys::from_files(&trusted_keys)?;
+                        let tls = match &ca_bundle {
+                            Some(path) => RepositoryTlsConfig::from_ca_bundle(path)?,
+                            None => RepositoryTlsConfig::default_roots(),
+                        };
+                        let transport = Arc::new(ScheduledRepositoryTransport::new(
+                            identity,
+                            Arc::new(HttpTransport::anonymous(&tls)?),
+                            network.clone(),
+                            Arc::new(IgnoreNetworkEvents),
+                        ));
+                        RepositoryReader::with_policy(
+                            master_url.clone(),
+                            trusted,
+                            repository_cache,
+                            transport,
+                            ReaderPolicy {
+                                max_blocking_decoders: max_local_jobs,
+                            },
+                        )
+                    })
+                    .map_err(|error| {
+                        ExecutionError::InvalidRequest(format!(
+                            "failed to open remote provider '{}': {error}",
+                            provider.name
+                        ))
+                    })?;
+                OpenedProviderBackend::Remote {
+                    master_url,
+                    repository,
+                }
+            }
+        };
+        opened.push(OpenedProvider {
             name: provider.name,
             capability: provider.capability,
-            transfer,
-            repository: backend,
+            backend,
         });
     }
     Ok(opened)
 }
 
-fn local_provider_capabilities(
-    providers: Vec<OpenedLocalProvider>,
+fn provider_capabilities(
+    providers: Vec<OpenedProvider>,
+    working: Store,
     runtime_provider: RuntimeProvider,
     local_io: LocalIoScheduler,
 ) -> (Vec<NamedMappingProvider>, Vec<NamedContentProvider>) {
     let mut mapping_providers = Vec::new();
     let mut content_providers = Vec::new();
     for provider in providers {
-        match provider.capability {
-            ProviderCapability::Mappings => mapping_providers.push(NamedMappingProvider::new(
-                provider.name,
-                Arc::new(LocalMappingProvider::new(
-                    Arc::new(LocalTrustedKeyIndex::new(provider.repository)),
-                    local_io.clone(),
-                )),
-            )),
-            ProviderCapability::Content => {
-                let source = match provider
-                    .transfer
+        match (provider.capability, provider.backend) {
+            (ProviderCapability::Mappings, OpenedProviderBackend::Local { repository, .. }) => {
+                mapping_providers.push(NamedMappingProvider::new(
+                    provider.name,
+                    Arc::new(LocalMappingProvider::new(
+                        Arc::new(LocalTrustedKeyIndex::new(repository)),
+                        local_io.clone(),
+                    )),
+                ))
+            }
+            (
+                ProviderCapability::Content,
+                OpenedProviderBackend::Local {
+                    transfer,
+                    repository,
+                },
+            ) => {
+                let source = match transfer
                     .expect("validated local content provider has a transfer mode")
                 {
                     LocalTransferPolicy::Hardlink => {
                         Arc::new(LocalHardlinkContentSource::with_runtime(
-                            provider.repository,
+                            repository,
                             runtime_provider.clone(),
                         )) as Arc<dyn bobr_store::ContentSource>
                     }
                     LocalTransferPolicy::Copy => Arc::new(LocalCopyContentSource::with_runtime(
-                        provider.repository,
+                        repository,
                         runtime_provider.clone(),
                     )),
                 };
@@ -329,27 +398,57 @@ fn local_provider_capabilities(
                     Arc::new(LocalContentProvider::new(source, local_io.clone())),
                 ));
             }
+            (ProviderCapability::Mappings, OpenedProviderBackend::Remote { repository, .. }) => {
+                mapping_providers.push(NamedMappingProvider::new(
+                    provider.name,
+                    Arc::new(RemoteMappingProvider::new(repository)),
+                ))
+            }
+            (ProviderCapability::Content, OpenedProviderBackend::Remote { repository, .. }) => {
+                content_providers.push(NamedContentProvider::new(
+                    provider.name,
+                    Arc::new(RemoteContentProvider::new(
+                        repository,
+                        working.clone(),
+                        runtime_provider.clone(),
+                        local_io.clone(),
+                    )),
+                ))
+            }
         }
     }
     (mapping_providers, content_providers)
 }
 
-fn provider_log_details(providers: &[OpenedLocalProvider]) -> Vec<serde_json::Value> {
+fn provider_log_details(providers: &[OpenedProvider]) -> Vec<serde_json::Value> {
     providers
         .iter()
-        .map(|provider| {
-            let mut detail = json!({
+        .map(|provider| match &provider.backend {
+            OpenedProviderBackend::Local {
+                transfer,
+                repository,
+            } => {
+                let mut detail = json!({
+                    "name": provider.name,
+                    "capability": provider.capability.as_str(),
+                    "backend": {
+                        "kind": "local",
+                        "store": repository.store().root(),
+                    },
+                });
+                if let Some(transfer) = transfer {
+                    detail["backend"]["transfer"] = json!(transfer.as_str());
+                }
+                detail
+            }
+            OpenedProviderBackend::Remote { master_url, .. } => json!({
                 "name": provider.name,
                 "capability": provider.capability.as_str(),
                 "backend": {
-                    "kind": "local",
-                    "store": provider.repository.store().root(),
+                    "kind": "remote",
+                    "master_url": master_url,
                 },
-            });
-            if let Some(transfer) = provider.transfer {
-                detail["backend"]["transfer"] = json!(transfer.as_str());
-            }
-            detail
+            }),
         })
         .collect()
 }
@@ -471,13 +570,16 @@ mod tests {
         let repository = LocalRepository::new(ReadOnlyStore::open(&repository_root).unwrap());
         let local_io = LocalIoScheduler::new(4, CancellationToken::new()).unwrap();
 
-        let (indexes, sources) = local_provider_capabilities(
-            vec![OpenedLocalProvider {
+        let (indexes, sources) = provider_capabilities(
+            vec![OpenedProvider {
                 name: "content-only".to_string(),
                 capability: ProviderCapability::Content,
-                transfer: Some(LocalTransferPolicy::Hardlink),
-                repository: repository.clone(),
+                backend: OpenedProviderBackend::Local {
+                    transfer: Some(LocalTransferPolicy::Hardlink),
+                    repository: repository.clone(),
+                },
             }],
+            working.clone(),
             RuntimeProvider::host(),
             local_io.clone(),
         );
@@ -493,13 +595,16 @@ mod tests {
         assert!(report.answers.is_empty());
         assert!(report.resolved.is_none());
 
-        let (indexes, sources) = local_provider_capabilities(
-            vec![OpenedLocalProvider {
+        let (indexes, sources) = provider_capabilities(
+            vec![OpenedProvider {
                 name: "mappings-only".to_string(),
                 capability: ProviderCapability::Mappings,
-                transfer: None,
-                repository,
+                backend: OpenedProviderBackend::Local {
+                    transfer: None,
+                    repository,
+                },
             }],
+            working.clone(),
             RuntimeProvider::host(),
             local_io,
         );

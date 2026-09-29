@@ -798,9 +798,24 @@ fn cli_rejects_duplicate_canonical_repository_roots() {
 }
 
 #[test]
-fn cli_rejects_remote_providers_before_creating_the_working_store() {
+fn cli_does_not_fetch_remote_provider_for_complete_working_object() {
     let workspace = tempdir().unwrap();
-    let working_root = workspace.path().join("missing-store");
+    let working_root = workspace.path().join("working-store");
+    fs::create_dir(&working_root).unwrap();
+    let working = bobr_store::Store::create(&working_root).unwrap();
+    let staged = workspace.path().join("source");
+    fs::write(&staged, b"already local\n").unwrap();
+    let object_hash = fsobj_hash::hash_path(&staged).unwrap();
+    bobr_store::import_build(
+        &working,
+        BuildKey::from_object_hash(object_hash),
+        "3".repeat(64).parse::<ReuseKey>().unwrap(),
+        Vec::new(),
+        &staged,
+        "already-local",
+        "previous-run",
+    )
+    .unwrap();
     let key = workspace.path().join("repository-key.der");
     write_test_public_key(&key);
     let (logs, work) = make_run_dirs(workspace.path());
@@ -830,7 +845,7 @@ fn cli_rejects_remote_providers_before_creating_the_working_store() {
                 "source": {
                     "name": "source",
                     "tag": "Source",
-                    "object_hash": "1".repeat(64)
+                    "object_hash": object_hash
                 }
             }
         }))
@@ -844,13 +859,11 @@ fn cli_rejects_remote_providers_before_creating_the_working_store() {
         .output()
         .unwrap();
 
-    assert!(!output.status.success(), "{output:?}");
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(
-        stderr.contains("remote secondary provider 'remote' is not implemented by this build"),
-        "{stderr}"
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        object_hash.to_string()
     );
-    assert!(!working_root.exists());
 }
 
 #[test]

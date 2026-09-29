@@ -33,6 +33,7 @@ mod store;
 pub use copy_content::LocalCopyContentSource;
 pub use error::StoreError;
 pub use inventory::{StoreInventory, StoredFsFile, StoredObject};
+pub use local_content::RepositoryObjectStaging;
 pub use object::import_build;
 pub use record::record_existing_object;
 pub use ref_name::validate_ref_name;

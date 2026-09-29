@@ -35,6 +35,7 @@ mod oci_registry;
 mod origin;
 mod origins;
 pub mod realizer;
+mod remote_provider;
 mod secondary_resolver;
 
 // The origin abstractions are the crate's public API; re-export them at the root
@@ -45,10 +46,13 @@ pub use network::{
     NetworkScheduler, ScheduledRepositoryTransport,
 };
 pub use origin::{OriginContext, OriginHandler, OriginSpec, ParsedOrigin};
+pub use remote_provider::{
+    RemoteBackendRegistry, RemoteContentProvider, RemoteMappingProvider, RemoteRepositoryBackend,
+};
 pub use secondary_resolver::{
     ContentProvider, ContentTransferEvent, ContentTransferReport, KnownObjectResolution,
     LocalBackendRegistry, LocalContentProvider, LocalMappingProvider, MappingAnswer,
-    MappingCandidates, MappingProvider, NamedContentProvider, NamedMappingProvider,
+    MappingCandidates, MappingProvider, NamedContentProvider, NamedMappingProvider, ProviderError,
     ResolvedSecondaryContent, ReuseQuery, SecondaryResolution, SecondaryResolver,
 };
 
