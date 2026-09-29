@@ -291,7 +291,7 @@ for command in "${installed_commands[@]}"; do
 done
 
 expected_build_info="$(printf \
-  '{"version":"%s","request_schema":"bobr-request-v5","provenance":{"git_commit":"%s","git_dirty":%s}}' \
+  '{"version":"%s","request_schema":"bobr-request-v6","provenance":{"git_commit":"%s","git_dirty":%s}}' \
   "${version}" "${git_commit}" "${git_dirty}")"
 staged_build_info="$("${install_stage}/bobr" --build-info)"
 [ "${staged_build_info}" = "${expected_build_info}" ] \

@@ -181,7 +181,7 @@ done
 
 build_info="$("${staged_bin}/bobr" --build-info)" \
   || die "staged bobr failed to report build information"
-build_info_prefix="{\"version\":\"${version}\",\"request_schema\":\"bobr-request-v5\",\"provenance\":{\"git_commit\":\""
+build_info_prefix="{\"version\":\"${version}\",\"request_schema\":\"bobr-request-v6\",\"provenance\":{\"git_commit\":\""
 build_info_suffix='","git_dirty":false}}'
 case "${build_info}" in
   "${build_info_prefix}"*"${build_info_suffix}") ;;
@@ -193,7 +193,7 @@ git_commit="${git_commit%"${build_info_suffix}"}"
   || die "staged bobr reports an invalid Git commit"
 [ "${build_info}" = "${build_info_prefix}${git_commit}${build_info_suffix}" ] \
   || die "staged bobr reports invalid build information"
-expected_version="bobr ${version} (request bobr-request-v5) (${git_commit})"
+expected_version="bobr ${version} (request bobr-request-v6) (${git_commit})"
 [ "$("${staged_bin}/bobr" --version)" = "${expected_version}" ] \
   || die "staged bobr reports an unexpected version"
 [ "$("${staged_bin}/bobr-repo" --version)" = "bobr-repo ${version}" ] \

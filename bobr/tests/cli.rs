@@ -18,7 +18,7 @@ fn run_source_request(
     working_store: &Path,
     run_id: &str,
     object_hash: ObjectHash,
-    repositories: Vec<serde_json::Value>,
+    providers: Vec<serde_json::Value>,
 ) -> Output {
     let run_root = workspace.join(run_id);
     let (logs, work) = make_run_dirs(&run_root);
@@ -26,13 +26,13 @@ fn run_source_request(
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "store": working_store,
             "logs": logs,
             "work": work,
             "run_id": run_id,
             "goals": ["source"],
-            "secondaries": { "local_repositories": repositories },
+            "secondaries": { "providers": providers },
             "nodes": {
                 "source": {
                     "name": "source",
@@ -49,6 +49,38 @@ fn run_source_request(
         .current_dir(workspace)
         .output()
         .unwrap()
+}
+
+fn local_mapping_provider(name: &str, store: &Path) -> serde_json::Value {
+    json!({
+        "name": name,
+        "capability": "mappings",
+        "backend": { "kind": "local", "store": store }
+    })
+}
+
+fn local_content_provider(name: &str, store: &Path, transfer: &str) -> serde_json::Value {
+    json!({
+        "name": name,
+        "capability": "content",
+        "backend": {
+            "kind": "local",
+            "store": store,
+            "transfer": transfer
+        }
+    })
+}
+
+fn write_test_public_key(path: &Path) {
+    let mut der = vec![
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+    der.extend_from_slice(&[
+        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7, 0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07,
+        0x3a, 0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07,
+        0x51, 0x1a,
+    ]);
+    fs::write(path, der).unwrap();
 }
 
 fn cross_filesystem_tempdir(reference: &Path) -> Option<TempDir> {
@@ -228,7 +260,7 @@ fn warm_unified_run_reports_one_cache_hit_without_rebuilding() {
         fs::write(
             &request,
             serde_json::to_vec_pretty(&json!({
-                "schema": "bobr-request-v5",
+                "schema": "bobr-request-v6",
                 "store": &store,
                 "logs": logs,
                 "work": work,
@@ -282,7 +314,7 @@ fn cli_outputs_multi_goal_results_in_request_order() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "store": store,
             "logs": logs,
             "work": work,
@@ -327,7 +359,7 @@ fn cli_materializes_source_origin_without_a_fetch_phase() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "store": store,
             "logs": logs,
             "work": work,
@@ -366,13 +398,15 @@ fn cli_materializes_source_origin_without_a_fetch_phase() {
 }
 
 #[test]
-fn cli_uses_a_trusted_hardlink_local_repository() {
+fn cli_uses_local_mapping_and_hardlink_content_providers() {
     let workspace = tempdir().unwrap();
     let secondary_root = workspace.path().join("secondary");
     let working_root = store_root(workspace.path());
     fs::create_dir(&secondary_root).unwrap();
     fs::create_dir_all(&working_root).unwrap();
     let secondary = bobr_store::Store::create(&secondary_root).unwrap();
+    let secondary_alias = workspace.path().join("secondary-alias");
+    symlink(&secondary_root, &secondary_alias).unwrap();
     let staged = workspace.path().join("secondary-source");
     fs::write(&staged, b"secondary source\n").unwrap();
     let object_hash = fsobj_hash::hash_path(&staged).unwrap();
@@ -392,19 +426,17 @@ fn cli_uses_a_trusted_hardlink_local_repository() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "store": working_root,
             "logs": &logs,
             "work": work,
             "run_id": "secondary",
             "goals": ["source"],
             "secondaries": {
-                "local_repositories": [{
-                    "name": "old",
-                    "store": &secondary_root,
-                    "trusted": true,
-                    "transfer": "hardlink"
-                }]
+                "providers": [
+                    local_mapping_provider("old", &secondary_root),
+                    local_content_provider("old", &secondary_alias, "hardlink")
+                ]
             },
             "nodes": {
                 "source": {
@@ -443,13 +475,26 @@ fn cli_uses_a_trusted_hardlink_local_repository() {
         .find(|event| event["status"] == "run-started")
         .unwrap();
     assert_eq!(
-        started["details"]["local_repositories"],
-        json!([{
-            "name": "old",
-            "store": fs::canonicalize(&secondary_root).unwrap(),
-            "trusted": true,
-            "transfer": "hardlink"
-        }])
+        started["details"]["providers"],
+        json!([
+            {
+                "name": "old",
+                "capability": "mappings",
+                "backend": {
+                    "kind": "local",
+                    "store": fs::canonicalize(&secondary_root).unwrap()
+                }
+            },
+            {
+                "name": "old",
+                "capability": "content",
+                "backend": {
+                    "kind": "local",
+                    "store": fs::canonicalize(&secondary_root).unwrap(),
+                    "transfer": "hardlink"
+                }
+            }
+        ])
     );
     let mapping = fs::read_to_string(logs.join("events.jsonl"))
         .unwrap()
@@ -476,7 +521,7 @@ fn cli_uses_a_trusted_hardlink_local_repository() {
 }
 
 #[test]
-fn cli_uses_an_untrusted_copy_repository_as_content_only() {
+fn cli_uses_a_copy_content_provider_without_mappings() {
     let workspace = tempdir().unwrap();
     let repository_root = workspace.path().join("repository");
     let working_root = store_root(workspace.path());
@@ -502,19 +547,18 @@ fn cli_uses_an_untrusted_copy_repository_as_content_only() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "store": working_root,
             "logs": logs,
             "work": work,
             "run_id": "copy-repository",
             "goals": ["source"],
             "secondaries": {
-                "local_repositories": [{
-                    "name": "isolated",
-                    "store": repository_root,
-                    "trusted": false,
-                    "transfer": "copy"
-                }]
+                "providers": [local_content_provider(
+                    "isolated",
+                    &repository_root,
+                    "copy"
+                )]
             },
             "nodes": {
                 "source": {
@@ -615,12 +659,11 @@ fn cli_rejects_cross_filesystem_hardlink_and_accepts_copy() {
         &working_root,
         "cross-filesystem-hardlink",
         object_hash,
-        vec![json!({
-            "name": "cross-filesystem",
-            "store": &repository_root,
-            "trusted": true,
-            "transfer": "hardlink"
-        })],
+        vec![local_content_provider(
+            "cross-filesystem",
+            &repository_root,
+            "hardlink",
+        )],
     );
     assert!(!hardlink.status.success(), "{hardlink:?}");
     let stderr = String::from_utf8(hardlink.stderr).unwrap();
@@ -635,12 +678,11 @@ fn cli_rejects_cross_filesystem_hardlink_and_accepts_copy() {
         &working_root,
         "cross-filesystem-copy",
         object_hash,
-        vec![json!({
-            "name": "cross-filesystem",
-            "store": &repository_root,
-            "trusted": true,
-            "transfer": "copy"
-        })],
+        vec![local_content_provider(
+            "cross-filesystem",
+            &repository_root,
+            "copy",
+        )],
     );
     assert!(copied.status.success(), "{copied:?}");
     let working = bobr_store::Store::create(&working_root).unwrap();
@@ -667,19 +709,14 @@ fn cli_rejects_a_repository_that_aliases_the_working_store() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "store": working_root,
             "logs": logs,
             "work": work,
             "run_id": "working-alias",
             "goals": ["source"],
             "secondaries": {
-                "local_repositories": [{
-                    "name": "alias",
-                    "store": alias,
-                    "trusted": false,
-                    "transfer": "hardlink"
-                }]
+                "providers": [local_content_provider("alias", &alias, "hardlink")]
             },
             "nodes": {
                 "source": {
@@ -722,26 +759,16 @@ fn cli_rejects_duplicate_canonical_repository_roots() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "store": working_root,
             "logs": logs,
             "work": work,
             "run_id": "duplicate-repository",
             "goals": ["source"],
             "secondaries": {
-                "local_repositories": [
-                    {
-                        "name": "repository",
-                        "store": repository_root,
-                        "trusted": false,
-                        "transfer": "hardlink"
-                    },
-                    {
-                        "name": "alias",
-                        "store": alias,
-                        "trusted": false,
-                        "transfer": "hardlink"
-                    }
+                "providers": [
+                    local_content_provider("repository", &repository_root, "hardlink"),
+                    local_content_provider("alias", &alias, "hardlink")
                 ]
             },
             "nodes": {
@@ -771,6 +798,62 @@ fn cli_rejects_duplicate_canonical_repository_roots() {
 }
 
 #[test]
+fn cli_rejects_remote_providers_before_creating_the_working_store() {
+    let workspace = tempdir().unwrap();
+    let working_root = workspace.path().join("missing-store");
+    let key = workspace.path().join("repository-key.der");
+    write_test_public_key(&key);
+    let (logs, work) = make_run_dirs(workspace.path());
+    let request_path = workspace.path().join("remote-provider.json");
+    fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema": "bobr-request-v6",
+            "store": working_root,
+            "logs": logs,
+            "work": work,
+            "run_id": "remote-provider",
+            "goals": ["source"],
+            "secondaries": {
+                "repository_cache": workspace.path().join("repository-cache"),
+                "providers": [{
+                    "name": "remote",
+                    "capability": "content",
+                    "backend": {
+                        "kind": "remote",
+                        "master_url": "https://repo.example.test/master",
+                        "trusted_keys": [key]
+                    }
+                }]
+            },
+            "nodes": {
+                "source": {
+                    "name": "source",
+                    "tag": "Source",
+                    "object_hash": "1".repeat(64)
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_bobr"))
+        .arg(&request_path)
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("remote secondary provider 'remote' is not implemented by this build"),
+        "{stderr}"
+    );
+    assert!(!working_root.exists());
+}
+
+#[test]
 fn ordinary_goal_failure_is_not_reported_as_cancellation() {
     let workspace = tempdir().unwrap();
     let (logs, work) = make_run_dirs(workspace.path());
@@ -780,7 +863,7 @@ fn ordinary_goal_failure_is_not_reported_as_cancellation() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "store": store,
             "logs": logs,
             "work": work,
@@ -844,7 +927,7 @@ fn cli_reports_missing_store_option() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "goals": ["root"],
             "nodes": {
                 "root": tree_file_recipe("missing-store-option", "missing.txt", "hello", false)
@@ -948,7 +1031,7 @@ fn cli_reports_invalid_generic_input_shape() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "store": store.to_string_lossy(),
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),
@@ -989,7 +1072,7 @@ fn cli_reports_relative_store_path() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "store": "relative/store",
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),
@@ -1025,8 +1108,11 @@ fn cli_reports_relative_store_path() {
 
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("error[build-failed]"), "{stderr}");
-    assert!(stderr.contains("store root must be absolute"), "{stderr}");
+    assert!(stderr.contains("error[invalid-input]"), "{stderr}");
+    assert!(
+        stderr.contains("working store path must be absolute"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -1039,7 +1125,7 @@ fn cli_reports_unexpected_local_path() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "store": store.to_string_lossy(),
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),
@@ -1083,7 +1169,7 @@ fn cli_reports_relative_source_path() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "store": store.to_string_lossy(),
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),
@@ -1129,7 +1215,7 @@ fn cli_reports_missing_store_directory() {
     fs::write(
         &request_path,
         serde_json::to_vec_pretty(&json!({
-            "schema": "bobr-request-v5",
+            "schema": "bobr-request-v6",
             "store": missing_store.to_string_lossy(),
             "logs": logs.to_string_lossy(),
             "work": work.to_string_lossy(),

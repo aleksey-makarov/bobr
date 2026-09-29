@@ -1,5 +1,7 @@
 use crate::error::ExecutionError;
-use crate::request::{LocalRepositoryConfig, LocalTransferPolicy, Request};
+use crate::request::{
+    LocalTransferPolicy, ProviderBackend, ProviderCapability, ProviderConfig, Request,
+};
 use bobr_core::{
     BuildLogEvent, BuildLogLevel, BuildRunLogger, BuildStatus, CancellationToken, ObjectHash, Run,
 };
@@ -62,8 +64,9 @@ pub async fn realize(
         .filter(|node| node.as_source().is_some())
         .count();
     let reachable_builders = reachable - reachable_sources;
+    reject_remote_providers(&secondaries.providers)?;
     let store = Store::create(&store_path).map_err(map_store_error)?;
-    let repositories = open_local_repositories(&store, secondaries.local_repositories)?;
+    let providers = open_local_providers(&store, secondaries.providers)?;
     let run = Arc::new(Run::new(run_id, &logs, &work)?);
     check_same_filesystem(&store, &run)?;
     let logger = Arc::new(
@@ -80,9 +83,9 @@ pub async fn realize(
     let local_io = LocalIoScheduler::new(limits.resolved_max_local_jobs(), cancellation.clone())
         .map_err(map_store_error)?;
     let network = NetworkScheduler::new(limits.resolved_network_limits(), cancellation.clone());
-    let repository_log = repository_log_details(&repositories);
+    let provider_log = provider_log_details(&providers);
     let (mapping_providers, content_providers) =
-        repository_capabilities(repositories, runtime_provider.clone(), local_io.clone());
+        local_provider_capabilities(providers, runtime_provider.clone(), local_io.clone());
     let secondary = Arc::new(
         SecondaryResolver::new(
             store.clone(),
@@ -119,7 +122,7 @@ pub async fn realize(
             reachable_builders,
             reachable_sources,
             progress,
-            local_repositories: &repository_log,
+            providers: &provider_log,
         },
     );
     let realized = dynamic.realize_goals().await;
@@ -205,104 +208,148 @@ fn check_same_filesystem(store: &Store, run: &Run) -> Result<(), ExecutionError>
     Ok(())
 }
 
-struct OpenedLocalRepository {
+struct OpenedLocalProvider {
     name: String,
-    trusted: bool,
-    transfer: LocalTransferPolicy,
+    capability: ProviderCapability,
+    transfer: Option<LocalTransferPolicy>,
     repository: LocalRepository,
 }
 
-fn open_local_repositories(
+fn reject_remote_providers(providers: &[ProviderConfig]) -> Result<(), ExecutionError> {
+    if let Some(provider) = providers
+        .iter()
+        .find(|provider| matches!(provider.backend, ProviderBackend::Remote { .. }))
+    {
+        return Err(ExecutionError::InvalidRequest(format!(
+            "remote secondary provider '{}' is not implemented by this build",
+            provider.name
+        )));
+    }
+    Ok(())
+}
+
+fn open_local_providers(
     working: &Store,
-    repositories: Vec<LocalRepositoryConfig>,
-) -> Result<Vec<OpenedLocalRepository>, ExecutionError> {
-    let mut canonical_roots = HashMap::new();
+    providers: Vec<ProviderConfig>,
+) -> Result<Vec<OpenedLocalProvider>, ExecutionError> {
+    let mut canonical_capabilities = HashMap::new();
+    let mut canonical_by_name = HashMap::new();
     let mut registry = LocalBackendRegistry::default();
-    let mut opened = Vec::with_capacity(repositories.len());
-    for repository in repositories {
-        let backend = registry.open(&repository.store).map_err(map_store_error)?;
+    let mut opened = Vec::with_capacity(providers.len());
+    for provider in providers {
+        let ProviderBackend::Local { store, transfer } = provider.backend else {
+            return Err(ExecutionError::InvalidRequest(format!(
+                "remote secondary provider '{}' is not implemented by this build",
+                provider.name
+            )));
+        };
+        let backend = registry.open(&store).map_err(map_store_error)?;
         if backend.store().root() == working.root() {
             return Err(ExecutionError::InvalidRequest(format!(
-                "local repository '{}' is a canonical alias of the working store '{}'",
-                repository.name,
+                "local provider '{}' is a canonical alias of the working store '{}'",
+                provider.name,
                 working.root().display()
             )));
         }
-        if let Some(previous_name) = canonical_roots.insert(
-            backend.store().root().to_path_buf(),
-            repository.name.clone(),
+        let canonical_root = backend.store().root().to_path_buf();
+        if let Some(previous_name) = canonical_capabilities.insert(
+            (provider.capability, canonical_root.clone()),
+            provider.name.clone(),
         ) {
             return Err(ExecutionError::InvalidRequest(format!(
-                "local repositories '{previous_name}' and '{}' resolve to the same store root '{}'",
-                repository.name,
+                "{} providers '{previous_name}' and '{}' resolve to the same store root '{}'",
+                provider.capability.as_str(),
+                provider.name,
                 backend.store().root().display()
             )));
         }
-        if repository.transfer == LocalTransferPolicy::Hardlink {
+        if let Some(previous_root) =
+            canonical_by_name.insert(provider.name.clone(), canonical_root.clone())
+            && previous_root != canonical_root
+        {
+            return Err(ExecutionError::InvalidRequest(format!(
+                "complementary providers named '{}' resolve to different store roots",
+                provider.name
+            )));
+        }
+        if transfer == Some(LocalTransferPolicy::Hardlink) {
             backend
                 .validate_hardlink_compatible_with(working)
                 .map_err(|error| {
                     ExecutionError::InvalidRequest(format!(
-                        "local repository '{}' cannot use transfer mode 'hardlink': {error}",
-                        repository.name
+                        "local provider '{}' cannot use transfer mode 'hardlink': {error}",
+                        provider.name
                     ))
                 })?;
         }
-        opened.push(OpenedLocalRepository {
-            name: repository.name,
-            trusted: repository.trusted,
-            transfer: repository.transfer,
+        opened.push(OpenedLocalProvider {
+            name: provider.name,
+            capability: provider.capability,
+            transfer,
             repository: backend,
         });
     }
     Ok(opened)
 }
 
-fn repository_capabilities(
-    repositories: Vec<OpenedLocalRepository>,
+fn local_provider_capabilities(
+    providers: Vec<OpenedLocalProvider>,
     runtime_provider: RuntimeProvider,
     local_io: LocalIoScheduler,
 ) -> (Vec<NamedMappingProvider>, Vec<NamedContentProvider>) {
     let mut mapping_providers = Vec::new();
-    let mut content_providers = Vec::with_capacity(repositories.len());
-    for repository in repositories {
-        if repository.trusted {
-            mapping_providers.push(NamedMappingProvider::new(
-                repository.name.clone(),
+    let mut content_providers = Vec::new();
+    for provider in providers {
+        match provider.capability {
+            ProviderCapability::Mappings => mapping_providers.push(NamedMappingProvider::new(
+                provider.name,
                 Arc::new(LocalMappingProvider::new(
-                    Arc::new(LocalTrustedKeyIndex::new(repository.repository.clone())),
+                    Arc::new(LocalTrustedKeyIndex::new(provider.repository)),
                     local_io.clone(),
                 )),
-            ));
-        }
-        let source = match repository.transfer {
-            LocalTransferPolicy::Hardlink => Arc::new(LocalHardlinkContentSource::with_runtime(
-                repository.repository,
-                runtime_provider.clone(),
-            )) as Arc<dyn bobr_store::ContentSource>,
-            LocalTransferPolicy::Copy => Arc::new(LocalCopyContentSource::with_runtime(
-                repository.repository,
-                runtime_provider.clone(),
             )),
-        };
-        content_providers.push(NamedContentProvider::new(
-            repository.name,
-            Arc::new(LocalContentProvider::new(source, local_io.clone())),
-        ));
+            ProviderCapability::Content => {
+                let source = match provider
+                    .transfer
+                    .expect("validated local content provider has a transfer mode")
+                {
+                    LocalTransferPolicy::Hardlink => {
+                        Arc::new(LocalHardlinkContentSource::with_runtime(
+                            provider.repository,
+                            runtime_provider.clone(),
+                        )) as Arc<dyn bobr_store::ContentSource>
+                    }
+                    LocalTransferPolicy::Copy => Arc::new(LocalCopyContentSource::with_runtime(
+                        provider.repository,
+                        runtime_provider.clone(),
+                    )),
+                };
+                content_providers.push(NamedContentProvider::new(
+                    provider.name,
+                    Arc::new(LocalContentProvider::new(source, local_io.clone())),
+                ));
+            }
+        }
     }
     (mapping_providers, content_providers)
 }
 
-fn repository_log_details(repositories: &[OpenedLocalRepository]) -> Vec<serde_json::Value> {
-    repositories
+fn provider_log_details(providers: &[OpenedLocalProvider]) -> Vec<serde_json::Value> {
+    providers
         .iter()
-        .map(|repository| {
-            json!({
-                "name": repository.name,
-                "store": repository.repository.store().root(),
-                "trusted": repository.trusted,
-                "transfer": repository.transfer.as_str(),
-            })
+        .map(|provider| {
+            let mut detail = json!({
+                "name": provider.name,
+                "capability": provider.capability.as_str(),
+                "backend": {
+                    "kind": "local",
+                    "store": provider.repository.store().root(),
+                },
+            });
+            if let Some(transfer) = provider.transfer {
+                detail["backend"]["transfer"] = json!(transfer.as_str());
+            }
+            detail
         })
         .collect()
 }
@@ -326,7 +373,7 @@ struct RunStartedDetails<'a> {
     reachable_builders: usize,
     reachable_sources: usize,
     progress: bobr_core::ProgressPolicy,
-    local_repositories: &'a [serde_json::Value],
+    providers: &'a [serde_json::Value],
 }
 
 fn log_run_started(logger: &BuildRunLogger, details: RunStartedDetails<'_>) {
@@ -344,7 +391,7 @@ fn log_run_started(logger: &BuildRunLogger, details: RunStartedDetails<'_>) {
             "reachable_builders": details.reachable_builders,
             "reachable_sources": details.reachable_sources,
             "progress_policy": details.progress,
-            "local_repositories": details.local_repositories,
+            "providers": details.providers,
         })
         .as_object()
         .expect("run-start details are an object")
@@ -407,7 +454,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn untrusted_repository_mappings_are_not_exposed_or_read() {
+    async fn local_mapping_and_content_capabilities_are_independent() {
         let temp = tempdir().unwrap();
         let repository_root = temp.path().join("repository");
         let working_root = temp.path().join("working");
@@ -424,18 +471,18 @@ mod tests {
         let repository = LocalRepository::new(ReadOnlyStore::open(&repository_root).unwrap());
         let local_io = LocalIoScheduler::new(4, CancellationToken::new()).unwrap();
 
-        let (indexes, sources) = repository_capabilities(
-            vec![OpenedLocalRepository {
-                name: "untrusted".to_string(),
-                trusted: false,
-                transfer: LocalTransferPolicy::Hardlink,
+        let (indexes, sources) = local_provider_capabilities(
+            vec![OpenedLocalProvider {
+                name: "content-only".to_string(),
+                capability: ProviderCapability::Content,
+                transfer: Some(LocalTransferPolicy::Hardlink),
                 repository: repository.clone(),
             }],
             RuntimeProvider::host(),
             local_io.clone(),
         );
         let resolver =
-            SecondaryResolver::new(working.clone(), "untrusted-run", indexes, sources).unwrap();
+            SecondaryResolver::new(working.clone(), "content-only-run", indexes, sources).unwrap();
         assert!(!resolver.has_mapping_providers());
         assert!(resolver.has_content_sources());
         let report = resolver
@@ -446,17 +493,20 @@ mod tests {
         assert!(report.answers.is_empty());
         assert!(report.resolved.is_none());
 
-        let (indexes, sources) = repository_capabilities(
-            vec![OpenedLocalRepository {
-                name: "trusted".to_string(),
-                trusted: true,
-                transfer: LocalTransferPolicy::Hardlink,
+        let (indexes, sources) = local_provider_capabilities(
+            vec![OpenedLocalProvider {
+                name: "mappings-only".to_string(),
+                capability: ProviderCapability::Mappings,
+                transfer: None,
                 repository,
             }],
             RuntimeProvider::host(),
             local_io,
         );
-        let resolver = SecondaryResolver::new(working, "trusted-run", indexes, sources).unwrap();
+        let resolver =
+            SecondaryResolver::new(working, "mappings-only-run", indexes, sources).unwrap();
+        assert!(resolver.has_mapping_providers());
+        assert!(!resolver.has_content_sources());
         let error = resolver.resolve_builds(&[build_key]).await.unwrap_err();
         assert!(error.to_string().contains("is not a symlink"), "{error}");
     }

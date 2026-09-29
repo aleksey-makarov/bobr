@@ -53,25 +53,41 @@ it to a full [request](./REQUEST.md). Callers rarely invoke it directly —
 `build-profile/build-profile.ncl`). A normal profile imports the maintained
 `build-profile/bobr-user.ncl` preset instead of copying a template.
 
-A build profile can attach ordered local stores to the Realizer:
+A build profile can attach ordered local and remote backends to the Realizer.
+Capabilities are explicit and independent; enabling both on one profile entry
+is shorthand for two low-level request entries backed by the same source:
 
 ```nickel
-secondaries.local_repositories = [
+secondaries.providers = [
   {
     name = "previous",
-    store = "../bobr-store.previous",
-    trusted = true,
-    transfer = "hardlink",
+    mappings = true,
+    content = true,
+    local = {
+      store = "../bobr-store.previous",
+      transfer = "hardlink",
+    },
+  },
+  {
+    name = "public",
+    content = true,
+    remote = {
+      master_url = "https://repo.example/bobr/master",
+      trusted_keys = ["./repository-key.pem"],
+    },
   },
 ]
 ```
 
-Repository paths are resolved relative to the profile. `trusted` allows
-`BuildKey` and `ReuseKey` answers; every repository can still supply content
-for an already-known hash. `hardlink` requires the relevant store directories
+`mappings` allows authoritative `BuildKey` and `ReuseKey` answers; `content`
+allows acquisition for an already-known hash. Neither implies the other. Local
+content requires `transfer`: `hardlink` requires the relevant store directories
 to share filesystems, while `copy` deliberately creates independent inodes and
-works across filesystems. See [Request](./REQUEST.md#local-repositories) for the
-complete low-level contract.
+works across filesystems. Local store paths, remote key paths, an optional CA
+bundle, and `secondaries.repository_cache` are resolved relative to the
+top-level profile. An empty cache setting selects
+`<store>/repository-cache`. See
+[Request](./REQUEST.md#secondary-providers) for the normalized wire contract.
 
 ## Overlays
 

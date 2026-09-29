@@ -110,9 +110,9 @@ In order, the script:
    there which imports `build-profile/bobr-user.ncl` and points its store at
    the new directory — a rebuild therefore follows the maintained preset
    instead of a copied template that could drift from it;
-3. adds the last successful store as an untrusted hardlink local repository;
-   known Source content is acquired from it lazily, but its build and reuse
-   mappings are unavailable, so this remains a cold build;
+3. adds the last successful store as a content-only hardlink provider; known
+   Source content is acquired from it lazily, but its build and reuse mappings
+   are unavailable, so this remains a cold build;
 4. realizes `world` through `bin/bobr-build.sh`; Source acquisition and builder
    execution share one scheduler and one request;
 5. repoints the `bobr-store` symlink at the new store — **only if the build

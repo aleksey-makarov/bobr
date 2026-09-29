@@ -11,7 +11,7 @@ The request is a single JSON object:
 
 ```json
 {
-  "schema": "bobr-request-v5",
+  "schema": "bobr-request-v6",
   "store": "/abs/path/to/store",
   "logs": "/abs/path/to/logs/260803120000",
   "work": "/abs/path/to/work/260803120000",
@@ -25,7 +25,8 @@ The request is a single JSON object:
     "max_local_jobs": 4
   },
   "secondaries": {
-    "local_repositories": []
+    "repository_cache": "/abs/path/to/store/repository-cache",
+    "providers": []
   },
   "goals": ["root"],
   "nodes": {
@@ -34,7 +35,7 @@ The request is a single JSON object:
 }
 ```
 
-- `schema` — format version; must be `"bobr-request-v5"`. `bobr --build-info`
+- `schema` — format version; must be `"bobr-request-v6"`. `bobr --build-info`
   reports the schema this build accepts in machine-readable form, so a recipe
   layer can check compatibility before building rather than finding out from
   the parse error; `bobr --version` shows the same schema together with
@@ -58,7 +59,8 @@ The request is a single JSON object:
   This field never affects build identity and is ignored for non-TTY output
 - `limits` — optional HTTP/OCI and local Source acquisition limits, described
   below
-- `secondaries` — optional ordered local repositories, described below
+- `secondaries` — optional ordered mapping and content providers, described
+  below
 - `goals` — ordered, non-empty array of distinct, existing node ids to realize;
   its order determines the order of multi-goal results, not execution order
 - `nodes` — the recipe DAG
@@ -102,53 +104,98 @@ All `limits` fields are optional; every numeric limit, including each
   verification, and builder input path preparation; it limits disk work
   independently of network connections and builder slots
 
-### Local repositories
+### Secondary providers
 
-`secondaries.local_repositories` is an ordered list of local read-only bobr
-stores. Each repository has a non-empty unique name, an absolute store path,
-and explicit trust and transfer policies:
+`secondaries.providers` is an ordered list of independent mapping and content
+capabilities. The low-level request contains one capability per entry; a
+profile-level repository that enables both is lowered into two consecutive
+entries backed by the same source.
+
+`repository_cache` is an absolute path shared by all remote backends. If it is
+omitted, it defaults to `<store>/repository-cache`.
+
+A local read-only store can provide mappings, content, or both:
 
 ```json
 {
-  "local_repositories": [
+  "repository_cache": "/mnt/bobr/store/repository-cache",
+  "providers": [
     {
       "name": "previous",
-      "store": "/mnt/bobr/previous-store",
-      "trusted": true,
-      "transfer": "hardlink"
+      "capability": "mappings",
+      "backend": {
+        "kind": "local",
+        "store": "/mnt/bobr/previous-store"
+      }
+    },
+    {
+      "name": "previous",
+      "capability": "content",
+      "backend": {
+        "kind": "local",
+        "store": "/mnt/bobr/previous-store",
+        "transfer": "hardlink"
+      }
     }
   ]
 }
 ```
 
-- `trusted` permits the repository to answer `BuildKey` and `ReuseKey` lookups.
-  When false, bobr ignores its mappings but may still obtain content for an
-  already-known hash from it.
-- `transfer` is either `"hardlink"` or `"copy"` and controls how content is
-  imported into the working store. `"hardlink"` shares regular-file inodes;
+- `capability = "mappings"` permits authoritative `BuildKey` and `ReuseKey`
+  answers. It carries no content transfer policy.
+- `capability = "content"` permits acquisition by an already-known
+  `ObjectHash`. A local content backend requires `transfer`: either
+  `"hardlink"` or `"copy"`. `"hardlink"` shares regular-file inodes;
   directory structure and symlinks are reproduced without changing their
   logical contents. `"copy"` gives ordinary objects and every fs-file in an
   fs-tree closure independent working-store inodes while preserving the
   metadata that participates in their identities.
 
-Every repository is a content source. Trusted repositories additionally become
-trusted key indexes; this does not weaken content verification. Mapping and
-content lookup remain separate: bobr may learn a candidate hash from one trusted
-repository and obtain its bytes from another. Repositories are tried in declared
-order.
+Mapping and content lookup remain separate: bobr may learn a candidate hash
+from one backend and obtain its bytes from another. Providers are tried in
+declared order within each capability.
 
 Repository roots must exist and contain a complete bobr store layout. Paths are
 canonicalized when opened: a repository cannot alias the working store, and the
-same canonical repository root cannot be listed twice. `hardlink` requires the
-repository and working store `objects/` directories to share a filesystem, and
-likewise requires their `fs-files/` directories to share a filesystem. These
-pairs are checked separately before realization starts because either directory
-may be a mount point. There is no copy fallback after a hardlink-policy error.
-`copy` has no shared-filesystem requirement and always creates independent
-regular-file inodes, even on the same filesystem; it never silently optimizes
-the transfer into hardlinks. Both modes verify content identity and publish
-only a complete ordinary object or fs-tree closure. Both `trusted` and
-`transfer` are mandatory in the low-level JSON request.
+same canonical repository root cannot be repeated within one capability.
+Complementary entries may share it, and entries with the same name must do so.
+`hardlink` requires the repository and working store `objects/` directories to
+share a filesystem, and likewise requires their `fs-files/` directories to
+share a filesystem. These pairs are checked separately before realization
+starts because either directory may be a mount point. There is no copy fallback
+after a hardlink-policy error. `copy` has no shared-filesystem requirement and
+always creates independent regular-file inodes, even on the same filesystem;
+it never silently optimizes the transfer into hardlinks. Both modes verify
+content identity and publish only a complete ordinary object or fs-tree
+closure.
+
+A remote backend has this normalized shape:
+
+```json
+{
+  "name": "public",
+  "capability": "mappings",
+  "backend": {
+    "kind": "remote",
+    "master_url": "https://repo.example/bobr/master",
+    "trusted_keys": ["/etc/bobr/repository-key.pem"],
+    "ca_bundle": "/etc/bobr/repository-ca.pem"
+  }
+}
+```
+
+`master_url` must be an absolute HTTPS URL without credentials, query, or
+fragment. `trusted_keys` is a non-empty array of absolute paths to pinned
+Ed25519 public keys. `ca_bundle` is optional and adds private roots to the
+normal HTTPS roots. Entries that repeat one URL must use identical trust and
+TLS settings. Request v6 validates and represents remote providers, but this
+build rejects their use before creating the working store; remote realization
+is introduced by the following implementation stage.
+
+Within each capability, provider names and physical backends are unique. The
+same name may occur once for mappings and once for content only when both
+entries use the same backend. This makes diagnostics stable and prevents an
+apparently combined provider from naming unrelated sources.
 
 Repository configuration is required only while it is used. After successful
 import, complete content belongs to the working store; any mappings, records,
@@ -179,13 +226,13 @@ A recipe for the `Source` builder has this shape:
 - `origin` — how to obtain the object this recipe describes; defined below
 
 A recipe for the `Source` builder may also omit `origin`. Then its object must
-already be available from the working store or a configured local repository
+already be available from the working store or a configured content provider
 under its `object_hash`; if it is not, the source fails.
 
 An origin is the ordinary case in current `bobr-recipes`: unified `bobr`
 acquires missing Source content lazily while realizing the same DAG. Omitting
 it is useful for explicitly offline requests and requires the object to be
-available from the working or configured local stores.
+available from the working store or configured content providers.
 
 A recipe for any other builder has this shape:
 

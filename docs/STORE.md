@@ -97,11 +97,11 @@ If source materialization produces a different object than the declared
 object metadata or source `builds/<object_hash>` mapping is written, and the
 source import fails with the actual hash.
 
-### Local repository capabilities
+### Secondary provider capabilities
 
-A request can additionally name local repositories (see
-[Request](./REQUEST.md#local-repositories)). Each repository is one concrete
-read-only backend from which bobr derives separate capabilities:
+A request can additionally name local or remote backends (see
+[Request](./REQUEST.md#secondary-providers)). It exposes each backend through
+one or both independent capabilities:
 
 - a **trusted index** answers `BuildKey` and `ReuseKey` queries with candidate
   `ObjectHash` values; it supplies identity, not object bytes;
@@ -118,17 +118,17 @@ read-only backend from which bobr derives separate capabilities:
   pairs independently before scheduling realization and never falls back to
   copy.
 
-Every repository provides the content-source capability. A repository with
-`trusted = true` additionally provides the trusted-index capability; with
-`trusted = false`, its mappings are not exposed to the resolver at all.
+Configuration enables the mapping and content-source capabilities explicitly;
+neither implies the other. Profile syntax may combine both capabilities in one
+entry, but request lowering separates them again.
 
 The Realizer consults working-store mappings before repository mappings, and
 checks working-store content before secondary content. A secondary mapping can
 therefore be useful before its object is imported locally. Both adapters retain
 the same `LocalRepository` backend and its shared validated read-only content
 reader; they cannot be constructed directly from unrelated store handles.
-Mapping lookup never opens object records. Remote capabilities are not
-implemented yet.
+Mapping lookup never opens object records. Request v6 represents remote
+backends, but realization rejects them until the remote adapters are connected.
 
 An imported result is complete working-store content, not a borrowed path into
 the repository. With copy transport this follows from independent inodes. With

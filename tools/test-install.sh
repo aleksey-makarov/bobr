@@ -30,13 +30,13 @@ cat >"${fixture_root}/bin/bobr" <<'EOF'
 #!/bin/sh
 case "${1:-}" in
   --version)
-    echo 'bobr 9.8.7 (request bobr-request-v5) (0123456789abcdef0123456789abcdef01234567)'
+    echo 'bobr 9.8.7 (request bobr-request-v6) (0123456789abcdef0123456789abcdef01234567)'
     ;;
   --build-info)
     if [ -n "${BOBR_TEST_BAD_BUILD_INFO:-}" ]; then
-      echo '{"version":"9.8.7","request_schema":"bobr-request-v5","provenance":{"git_commit":"0123456789abcdef0123456789abcdef01234567","git_dirty":true}}'
+      echo '{"version":"9.8.7","request_schema":"bobr-request-v6","provenance":{"git_commit":"0123456789abcdef0123456789abcdef01234567","git_dirty":true}}'
     else
-      echo '{"version":"9.8.7","request_schema":"bobr-request-v5","provenance":{"git_commit":"0123456789abcdef0123456789abcdef01234567","git_dirty":false}}'
+      echo '{"version":"9.8.7","request_schema":"bobr-request-v6","provenance":{"git_commit":"0123456789abcdef0123456789abcdef01234567","git_dirty":false}}'
     fi
     ;;
   *) exit 2 ;;

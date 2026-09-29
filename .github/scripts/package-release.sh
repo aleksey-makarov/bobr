@@ -115,13 +115,13 @@ if [ "${kind}" = "main" ]; then
     expected_provenance="${expected_provenance}-dirty"
   fi
   expected_bobr_version="$(printf \
-    'bobr %s (request bobr-request-v5) (%s)' \
+    'bobr %s (request bobr-request-v6) (%s)' \
     "${release_tag#v}" "${expected_provenance}")"
   [ "${bobr_version}" = "${expected_bobr_version}" ] \
     || die "unexpected bobr version output: ${bobr_version}"
   build_info="$("${root}/bin/bobr" --build-info)"
   expected_build_info="$(printf \
-    '{"version":"%s","request_schema":"bobr-request-v5","provenance":{"git_commit":"%s","git_dirty":%s}}' \
+    '{"version":"%s","request_schema":"bobr-request-v6","provenance":{"git_commit":"%s","git_dirty":%s}}' \
     "${release_tag#v}" "${BOBR_BUILD_GIT_COMMIT}" "${BOBR_BUILD_GIT_DIRTY}")"
   [ "${build_info}" = "${expected_build_info}" ] \
     || die "unexpected bobr build information: ${build_info}"
@@ -136,7 +136,7 @@ if [ "${kind}" = "main" ]; then
     "${smoke}/store/work/release-smoke"
   cat >"${smoke}/request.json" <<EOF
 {
-  "schema": "bobr-request-v5",
+  "schema": "bobr-request-v6",
   "store": "${smoke}/store",
   "logs": "${smoke}/store/logs/release-smoke",
   "work": "${smoke}/store/work/release-smoke",
