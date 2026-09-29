@@ -23,6 +23,7 @@ pub mod dynamic_realizer;
 pub mod graph;
 mod http;
 mod local_io;
+mod network;
 /// OCI registry client: pulls and stages an image's layers by pinned digest.
 ///
 /// Public only under the `test-support` feature (used by `bobr`'s integration
@@ -39,6 +40,10 @@ mod secondary_resolver;
 // The origin abstractions are the crate's public API; re-export them at the root
 // rather than exposing the module path.
 pub use local_io::LocalIoScheduler;
+pub use network::{
+    NetworkEvent, NetworkEventKind, NetworkEventSink, NetworkLimits, NetworkOperation,
+    NetworkScheduler, ScheduledRepositoryTransport,
+};
 pub use origin::{OriginContext, OriginHandler, OriginSpec, ParsedOrigin};
 pub use secondary_resolver::{
     ContentProvider, ContentTransferEvent, ContentTransferReport, KnownObjectResolution,

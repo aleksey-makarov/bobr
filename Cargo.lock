@@ -716,6 +716,7 @@ dependencies = [
  "async-trait",
  "bobr-builder",
  "bobr-core",
+ "bobr-repo",
  "bobr-runtime",
  "bobr-sandbox",
  "bobr-store",

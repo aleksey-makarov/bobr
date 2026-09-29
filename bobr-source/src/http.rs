@@ -55,6 +55,7 @@ pub(crate) enum HttpOriginError {
     NetworkFailed { message: String, retry: Retry },
     ExtractFailed(String),
     FsFailed(String),
+    Cancelled(String),
 }
 
 impl HttpOriginError {
@@ -74,6 +75,14 @@ impl HttpOriginError {
         }
     }
 
+    pub(crate) fn cancelled(message: impl Into<String>) -> Self {
+        Self::Cancelled(message.into())
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled(_))
+    }
+
     pub(crate) fn retry(&self) -> Retry {
         match self {
             Self::NetworkFailed { retry, .. } => *retry,
@@ -88,7 +97,8 @@ impl HttpOriginError {
             Self::InvalidConfig(message)
             | Self::NetworkFailed { message, .. }
             | Self::ExtractFailed(message)
-            | Self::FsFailed(message) => message,
+            | Self::FsFailed(message)
+            | Self::Cancelled(message) => message,
         }
     }
 }
@@ -154,6 +164,16 @@ impl HttpRetryPolicy {
             max_delay: Duration::ZERO,
             jitter: 0.0,
             ..Self::production()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exact(attempts: u32, delay: Duration) -> Self {
+        Self {
+            attempts,
+            base_delay: delay,
+            max_delay: delay,
+            jitter: 0.0,
         }
     }
 
@@ -567,7 +587,7 @@ impl UrlAttemptState {
 /// letting it read as one more mirror that did not work out.
 fn check_not_cancelled(cx: &OriginContext<'_>) -> HResult<()> {
     if cx.is_cancelled() {
-        return Err(HttpOriginError::fatal_network(
+        return Err(HttpOriginError::cancelled(
             "download cancelled before trying the next URL",
         ));
     }
@@ -703,7 +723,7 @@ fn sleep_unless_cancelled(cx: &OriginContext<'_>, delay: Duration) -> Result<(),
     let deadline = Instant::now() + delay;
     loop {
         if cx.is_cancelled() {
-            return Err(HttpOriginError::fatal_network(
+            return Err(HttpOriginError::cancelled(
                 "download cancelled while waiting to retry",
             ));
         }
@@ -754,7 +774,7 @@ fn download_to_file(
         // Poll cancellation each chunk so a long download stops promptly. The
         // opaque error is reclassified to "cancelled" by the source executor.
         if cx.is_cancelled() {
-            return Err(HttpOriginError::fatal_network(format!(
+            return Err(HttpOriginError::cancelled(format!(
                 "download of '{url}' cancelled"
             )));
         }

@@ -15,7 +15,7 @@ use crate::graph::{PlannedGraph, PlannedNode};
 use crate::realizer::execute_builder_miss;
 use crate::{
     ContentTransferEvent, ContentTransferReport, KnownObjectResolution, LocalIoScheduler,
-    MappingCandidates, SecondaryResolver,
+    MappingCandidates, NetworkScheduler, SecondaryResolver,
 };
 use bobr_builder::{BuilderInputs, BuilderPlannedSubject, materialize_fs_tree_root};
 use bobr_core::{
@@ -166,15 +166,9 @@ impl DynamicRealizer {
         cancellation: CancellationToken,
         secondary: Arc<SecondaryResolver>,
         build_executor: BuildExecutorHandle,
-        limits: crate::acquisition::Limits,
         local_io: LocalIoScheduler,
+        network: NetworkScheduler,
     ) -> Result<Self, DynamicRealizeError> {
-        let max_local_jobs = limits.resolved_max_local_jobs();
-        if max_local_jobs == 0 {
-            return Err(DynamicRealizeError::new(
-                "DynamicRealizer max_local_jobs must be greater than zero",
-            ));
-        }
         if secondary.working().root() != store.root() {
             return Err(DynamicRealizeError::new(format!(
                 "DynamicRealizer working store '{}' differs from SecondaryResolver store '{}'",
@@ -189,7 +183,7 @@ impl DynamicRealizer {
             cancellation.clone(),
             secondary.clone(),
             local_io,
-            limits,
+            network,
         )
         .map_err(DynamicRealizeError::new)?;
         Ok(Self {
@@ -1578,14 +1572,18 @@ mod tests {
                 environment.run.clone(),
                 environment.logger.clone(),
                 RuntimeProvider::host(),
-                cancellation,
+                cancellation.clone(),
                 secondary,
                 executor.handle(),
-                crate::acquisition::Limits {
-                    max_local_jobs: Some(max_local_jobs),
-                    ..Default::default()
-                },
                 local_io,
+                NetworkScheduler::new(
+                    crate::acquisition::Limits {
+                        max_local_jobs: Some(max_local_jobs),
+                        ..Default::default()
+                    }
+                    .resolved_network_limits(),
+                    cancellation,
+                ),
             )
             .unwrap(),
         );

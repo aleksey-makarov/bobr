@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::time::Duration;
 
 /// Stable policy-relevant category of a repository failure.
 ///
@@ -33,6 +34,7 @@ pub enum RepositoryErrorKind {
 pub struct RepositoryError {
     kind: RepositoryErrorKind,
     message: String,
+    retry_after: Option<Duration>,
 }
 
 impl RepositoryError {
@@ -50,6 +52,7 @@ impl RepositoryError {
         Self {
             kind,
             message: message.into(),
+            retry_after: None,
         }
     }
 
@@ -61,6 +64,16 @@ impl RepositoryError {
     /// Creates a transport error and records whether it is retryable.
     pub fn transport(message: impl Into<String>, retryable: bool) -> Self {
         Self::with_kind(RepositoryErrorKind::Transport { retryable }, message)
+    }
+
+    /// Creates a retryable transport error with an optional server-requested
+    /// delay before the next attempt.
+    pub fn retryable_transport(message: impl Into<String>, retry_after: Option<Duration>) -> Self {
+        Self {
+            kind: RepositoryErrorKind::Transport { retryable: true },
+            message: message.into(),
+            retry_after,
+        }
     }
 
     /// Creates an authentication error.
@@ -100,6 +113,11 @@ impl RepositoryError {
             RepositoryErrorKind::Transport { retryable: true }
         )
     }
+
+    /// Returns the server-requested retry delay, when one was supplied.
+    pub fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
 }
 
 impl fmt::Display for RepositoryError {
@@ -119,6 +137,7 @@ impl From<std::io::Error> for RepositoryError {
 #[cfg(test)]
 mod tests {
     use super::{RepositoryError, RepositoryErrorKind};
+    use std::time::Duration;
 
     #[test]
     fn categories_and_retry_policy_are_typed() {
@@ -128,6 +147,11 @@ mod tests {
             RepositoryErrorKind::Transport { retryable: true }
         );
         assert!(transient.is_retryable());
+        assert_eq!(transient.retry_after(), None);
+
+        let rate_limited =
+            RepositoryError::retryable_transport("slow down", Some(Duration::from_secs(3)));
+        assert_eq!(rate_limited.retry_after(), Some(Duration::from_secs(3)));
 
         let invalid = RepositoryError::new("bad metadata");
         assert_eq!(invalid.kind(), RepositoryErrorKind::InvalidRepository);

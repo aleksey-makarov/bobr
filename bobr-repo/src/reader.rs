@@ -240,6 +240,7 @@ impl RepositoryReader {
                 destination: temporary.path().to_path_buf(),
                 max_bytes: MAX_MASTER_BYTES,
                 if_none_match: etag,
+                progress: None,
             })
             .await?;
         let bytes = match result {
@@ -362,6 +363,7 @@ impl RepositoryReader {
                 destination: temporary.path().to_path_buf(),
                 max_bytes: MAX_METADATA_BYTES,
                 if_none_match: None,
+                progress: None,
             })
             .await?;
         match result {
@@ -398,6 +400,7 @@ impl RepositoryReader {
                 destination: temporary.path().to_path_buf(),
                 max_bytes: MAX_ENCODED_CONTENT_BYTES,
                 if_none_match: None,
+                progress: None,
             })
             .await?;
         match result {

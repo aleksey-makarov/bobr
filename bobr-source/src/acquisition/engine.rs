@@ -9,13 +9,14 @@
 //! asynchronous. The local permit is also shared with repository content
 //! imports and builder-input preparation performed by the Realizer.
 
-use super::{ResolvedLimits, oci};
+use super::oci;
 use crate::LocalIoScheduler;
 use crate::SecondaryResolver;
 use crate::http::{
-    self, HttpOrigin, HttpOriginError, HttpRetryPolicy, HttpTimeouts, Retry, UrlAttemptState,
+    self, HttpOrigin, HttpOriginError, HttpRetryPolicy, HttpTimeouts, UrlAttemptState,
 };
 use crate::origin::OriginContext;
+use crate::{NetworkEvent, NetworkEventKind, NetworkEventSink, NetworkOperation, NetworkScheduler};
 use bobr_core::{
     BuildLogEvent, BuildLogLevel, BuildLogSubject, BuildLogger, BuildRunLogger, BuildStatus,
     CancellationToken, ObjectHash, Run, Workspace,
@@ -24,14 +25,12 @@ use bobr_store::{SourceImportOutcome, Store, import_source_object, record_existi
 #[cfg(test)]
 use serde_json::json;
 use serde_json::{Map, Value};
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::OwnedSemaphorePermit;
 
 /// One source whose downloaded content hashes differently than declared.
 #[derive(Debug)]
@@ -59,18 +58,12 @@ pub(crate) struct Engine {
     run: Arc<Run>,
     logger: Arc<BuildRunLogger>,
     client: reqwest::Client,
-    limits: ResolvedLimits,
-    global: Arc<Semaphore>,
-    hosts: Mutex<HashMap<String, Arc<Semaphore>>>,
+    network: NetworkScheduler,
     /// Local filesystem work is bounded separately from the network: it
     /// competes for a disk head, not for sockets. The Realizer acquires this
     /// same semaphore for repository imports and builder-input preparation.
     local: LocalIoScheduler,
     cancellation: CancellationToken,
-    cancel_rx: watch::Receiver<bool>,
-    /// Held so `cancel_rx.changed()` cannot resolve by sender-drop; cancelling
-    /// goes through [`Engine::cancel`].
-    cancel_tx: watch::Sender<bool>,
     secondary: Arc<SecondaryResolver>,
 }
 
@@ -81,75 +74,33 @@ pub(crate) fn engine_for_dynamic_realizer(
     cancellation: CancellationToken,
     secondary: Arc<SecondaryResolver>,
     local: LocalIoScheduler,
-    limits: crate::acquisition::Limits,
+    network: NetworkScheduler,
 ) -> Result<Arc<Engine>, String> {
-    let limits = ResolvedLimits::from_request(&limits);
     let client = http_client(HttpTimeouts::production())?;
-    let (cancel_tx, cancel_rx) = watch::channel(false);
     Ok(Arc::new(Engine {
         store,
         run,
         logger,
         client,
-        global: Arc::new(Semaphore::new(limits.max_connections as usize)),
+        network,
         local,
-        limits,
-        hosts: Mutex::new(HashMap::new()),
         cancellation,
-        cancel_rx,
-        cancel_tx,
         secondary,
     }))
 }
 
 impl Engine {
     pub(crate) fn cancel(&self) {
-        self.cancellation.cancel();
-        let _ = self.cancel_tx.send(true);
+        self.network.cancel();
     }
 
     pub(super) fn is_cancelled(&self) -> bool {
-        self.cancellation.is_cancelled()
+        self.network.is_cancelled()
     }
 
     /// Resolves once the run is cancelled; pends forever otherwise.
     async fn until_cancelled(&self) {
-        let mut rx = self.cancel_rx.clone();
-        while !*rx.borrow_and_update() {
-            if rx.changed().await.is_err() {
-                return;
-            }
-        }
-    }
-
-    /// One permit against the host's limit and one against the process-wide
-    /// cap, in that fixed order everywhere so the two layers cannot deadlock.
-    /// Waiting counts as neither an attempt nor a timeout, and cancellation
-    /// interrupts it.
-    async fn acquire_permits(
-        &self,
-        host: &str,
-    ) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit), HttpOriginError> {
-        let host_semaphore = {
-            let mut hosts = self.hosts.lock().expect("host semaphore map poisoned");
-            hosts
-                .entry(host.to_string())
-                .or_insert_with(|| Arc::new(Semaphore::new(self.limits.for_host(host) as usize)))
-                .clone()
-        };
-        let host_permit = tokio::select! {
-            _ = self.until_cancelled() => return Err(cancelled_error()),
-            permit = host_semaphore.acquire_owned() => {
-                permit.expect("host semaphore closed")
-            }
-        };
-        let global_permit = tokio::select! {
-            _ = self.until_cancelled() => return Err(cancelled_error()),
-            permit = self.global.clone().acquire_owned() => {
-                permit.expect("global semaphore closed")
-            }
-        };
-        Ok((host_permit, global_permit))
+        self.network.until_cancelled().await;
     }
 
     /// One permit for reading, hashing, copying, or materializing local
@@ -166,7 +117,73 @@ impl Engine {
 }
 
 fn cancelled_error() -> HttpOriginError {
-    HttpOriginError::fatal_network("download cancelled")
+    HttpOriginError::cancelled("download cancelled")
+}
+
+struct SourceNetworkEvents {
+    logger: Arc<dyn BuildLogger>,
+}
+
+impl std::fmt::Debug for SourceNetworkEvents {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SourceNetworkEvents")
+            .finish_non_exhaustive()
+    }
+}
+
+impl NetworkEventSink for SourceNetworkEvents {
+    fn event(&self, event: NetworkEvent) {
+        match event.kind {
+            NetworkEventKind::Started { .. } => log_download(
+                &self.logger,
+                BuildLogLevel::Info,
+                &event.host,
+                Some(0),
+                None,
+                format!("fetching {}", event.url),
+            ),
+            NetworkEventKind::Progress {
+                bytes, total_bytes, ..
+            } => log_download(
+                &self.logger,
+                BuildLogLevel::Progress,
+                &event.host,
+                Some(bytes),
+                total_bytes,
+                format!("downloaded {bytes} bytes from {}", event.url),
+            ),
+            NetworkEventKind::Retry {
+                attempt,
+                attempts,
+                delay,
+                error,
+            } => {
+                let (message, details) =
+                    http::retry_notice(&event.url, delay, attempt, attempts, &error);
+                self.logger.log_event(BuildLogEvent {
+                    level: BuildLogLevel::Info,
+                    status: BuildStatus::Running,
+                    op: Some("fetch".to_string()),
+                    message,
+                    object_hash: None,
+                    raw_log_path: None,
+                    details,
+                });
+            }
+            NetworkEventKind::Finished {
+                bytes, total_bytes, ..
+            } => log_download(
+                &self.logger,
+                BuildLogLevel::Info,
+                &event.host,
+                Some(bytes),
+                total_bytes,
+                format!("fetched {bytes} bytes from {}", event.url),
+            ),
+            NetworkEventKind::Failed { .. } | NetworkEventKind::Cancelled => {}
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -339,7 +356,7 @@ async fn process_source_inner(
                 .ok_or_else(|| format!("source '{}': origin: expected object", entry.name))?;
             let origin = http::parse_http_origin(origin_object, "origin")
                 .map_err(|error| format!("source '{}': {error}", entry.name))?;
-            fetch_http_source(engine, &origin, &workspace, &subject_logger).await
+            fetch_http_source(engine, &entry.name, &origin, &workspace, &subject_logger).await
         }
         "OciRegistry" => fetch_oci_source(engine, &origin_value, &workspace, &subject_logger).await,
         "Path" => fetch_path_source(engine, &origin_value, &workspace, &subject_logger).await,
@@ -437,13 +454,20 @@ fn reclassified(engine: &Engine, message: String) -> String {
 
 async fn fetch_http_source(
     engine: &Arc<Engine>,
+    source_name: &str,
     origin: &HttpOrigin,
     workspace: &Workspace,
     logger: &Arc<dyn BuildLogger>,
 ) -> Result<PathBuf, String> {
-    let blob = download_first_success(engine, &origin.urls, workspace.temp_dir(), logger)
-        .await
-        .map_err(|error| error.to_string())?;
+    let blob = download_first_success(
+        engine,
+        source_name,
+        &origin.urls,
+        workspace.temp_dir(),
+        logger,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
     let temp_root = workspace.temp_dir().to_path_buf();
     let origin = origin.clone();
     run_blocking(move || {
@@ -458,6 +482,7 @@ async fn fetch_http_source(
 /// whatever failed transiently.
 async fn download_first_success(
     engine: &Arc<Engine>,
+    source_name: &str,
     urls: &[String],
     temp_dir: &Path,
     logger: &Arc<dyn BuildLogger>,
@@ -473,13 +498,33 @@ async fn download_first_success(
     }
 
     let policy = HttpRetryPolicy::production();
+    let operation = NetworkOperation::Source {
+        name: source_name.to_string(),
+    };
+    let events: Arc<dyn NetworkEventSink> = Arc::new(SourceNetworkEvents {
+        logger: logger.clone(),
+    });
     let mut state: Vec<UrlAttemptState> = urls.iter().map(|_| UrlAttemptState::default()).collect();
 
     for (index, url) in urls.iter().enumerate() {
         if engine.is_cancelled() {
             return Err(cancelled_error());
         }
-        match download_with_attempts(engine, url, &download_path, logger, policy, 1, 0).await {
+        match engine
+            .network
+            .run_attempts(
+                crate::network::ScheduledAttempts {
+                    operation: operation.clone(),
+                    url: url.clone(),
+                    policy,
+                    attempts_here: 1,
+                    spent_before: 0,
+                    events: events.clone(),
+                },
+                |progress| download_once(&engine.client, url, &download_path, progress),
+            )
+            .await
+        {
             Ok(()) => return Ok(download_path),
             Err((error, attempts)) => {
                 state[index].record(&error, attempts);
@@ -504,39 +549,40 @@ async fn download_first_success(
             // that line is the only place a retry is ever counted.
             let spent = state[index].attempts;
             let delay = policy.delay_before(spent + 1, state[index].retry_after, url);
-            let (message, details) = http::retry_notice(
-                url,
-                delay,
-                spent + 1,
-                policy.attempts,
-                state[index]
-                    .last_error
-                    .as_deref()
-                    .unwrap_or("previous attempt failed"),
-            );
-            logger.log_event(BuildLogEvent {
-                level: BuildLogLevel::Info,
-                status: BuildStatus::Running,
-                op: Some("fetch".to_string()),
-                message,
-                object_hash: None,
-                raw_log_path: None,
-                details,
-            });
-            tokio::select! {
-                _ = engine.until_cancelled() => return Err(cancelled_error()),
-                _ = tokio::time::sleep(delay) => {}
+            if engine
+                .network
+                .wait_before_retry(
+                    &operation,
+                    http::url_host(url),
+                    url,
+                    spent + 1,
+                    policy.attempts,
+                    delay,
+                    state[index]
+                        .last_error
+                        .as_deref()
+                        .unwrap_or("previous attempt failed"),
+                    events.as_ref(),
+                )
+                .await
+                .is_err()
+            {
+                return Err(cancelled_error());
             }
-            match download_with_attempts(
-                engine,
-                url,
-                &download_path,
-                logger,
-                policy,
-                remaining,
-                spent,
-            )
-            .await
+            match engine
+                .network
+                .run_attempts(
+                    crate::network::ScheduledAttempts {
+                        operation: operation.clone(),
+                        url: url.clone(),
+                        policy,
+                        attempts_here: remaining,
+                        spent_before: spent,
+                        events: events.clone(),
+                    },
+                    |progress| download_once(&engine.client, url, &download_path, progress),
+                )
+                .await
             {
                 Ok(()) => return Ok(download_path),
                 Err((error, attempts)) => {
@@ -558,73 +604,16 @@ async fn download_first_success(
     )))
 }
 
-async fn download_with_attempts(
-    engine: &Arc<Engine>,
-    url: &str,
-    destination: &Path,
-    logger: &Arc<dyn BuildLogger>,
-    policy: HttpRetryPolicy,
-    attempts_here: u32,
-    spent_before: u32,
-) -> Result<(), (HttpOriginError, u32)> {
-    for attempt in 1..=attempts_here {
-        let overall = spent_before + attempt;
-        let error = match download_once(engine, url, destination, logger).await {
-            Ok(()) => return Ok(()),
-            Err(error) => error,
-        };
-        let Retry::After(retry_after) = error.retry() else {
-            return Err((error, attempt));
-        };
-        if attempt == attempts_here {
-            return Err((error, attempt));
-        }
-        let _ = fs::remove_file(destination);
-        let delay = policy.delay_before(overall + 1, retry_after, url);
-        let (message, details) =
-            http::retry_notice(url, delay, overall + 1, policy.attempts, &error.to_string());
-        logger.log_event(BuildLogEvent {
-            level: BuildLogLevel::Info,
-            status: BuildStatus::Running,
-            op: Some("fetch".to_string()),
-            message,
-            object_hash: None,
-            raw_log_path: None,
-            details,
-        });
-        tokio::select! {
-            _ = engine.until_cancelled() => return Err((cancelled_error(), attempt)),
-            _ = tokio::time::sleep(delay) => {}
-        }
-    }
-    unreachable!("the loop returns on the last attempt")
-}
-
 /// One attempt at one URL. The connection limits are taken here -- per
 /// attempt, not per URL -- so a backoff pause does not hold a slot on a host
 /// that other downloads are waiting for.
 async fn download_once(
-    engine: &Arc<Engine>,
+    client: &reqwest::Client,
     url: &str,
     destination: &Path,
-    logger: &Arc<dyn BuildLogger>,
+    progress: crate::network::NetworkTransferProgress,
 ) -> Result<(), HttpOriginError> {
-    let host = http::url_host(url).to_string();
-    let _permits = engine.acquire_permits(&host).await?;
-    log_download(
-        logger,
-        BuildLogLevel::Info,
-        &host,
-        Some(0),
-        None,
-        format!("fetching {url}"),
-    );
-
-    let response = tokio::select! {
-        _ = engine.until_cancelled() => return Err(cancelled_error()),
-        response = engine.client.get(url).send() => response,
-    };
-    let response = response.map_err(|error| {
+    let response = client.get(url).send().await.map_err(|error| {
         if error.is_timeout() {
             HttpOriginError::transient_network(
                 format!(
@@ -671,13 +660,7 @@ async fn download_once(
         })?;
     let mut response = response;
     let mut downloaded: u64 = 0;
-    let mut last_tick = Instant::now();
     loop {
-        if engine.is_cancelled() {
-            return Err(HttpOriginError::fatal_network(format!(
-                "download of '{url}' cancelled"
-            )));
-        }
         let chunk = response.chunk().await.map_err(|error| {
             HttpOriginError::transient_network(
                 format!(
@@ -695,17 +678,7 @@ async fn download_once(
             ))
         })?;
         downloaded += bytes.len() as u64;
-        if last_tick.elapsed() >= Duration::from_secs(1) {
-            log_download(
-                logger,
-                BuildLogLevel::Progress,
-                &host,
-                Some(downloaded),
-                total_bytes,
-                format!("downloaded {downloaded} bytes from {url}"),
-            );
-            last_tick = Instant::now();
-        }
+        progress.transferred(downloaded, total_bytes);
     }
     file.flush().await.map_err(|error| {
         HttpOriginError::FsFailed(format!(
@@ -713,14 +686,6 @@ async fn download_once(
             destination.display()
         ))
     })?;
-    log_download(
-        logger,
-        BuildLogLevel::Info,
-        &host,
-        Some(downloaded),
-        total_bytes,
-        format!("fetched {downloaded} bytes from {url}"),
-    );
     Ok(())
 }
 
@@ -778,9 +743,10 @@ async fn fetch_oci_source(
 ) -> Result<PathBuf, String> {
     let origin = oci::parse_oci_origin(origin_value, "origin")?;
     let _permits = engine
-        .acquire_permits(&origin.host())
+        .network
+        .acquire(&origin.host())
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| "cancelled".to_string())?;
 
     let pull = oci::materialize(
         &engine.client,
@@ -1167,6 +1133,10 @@ mod tests {
             cancellation.clone(),
         )
         .map_err(|error| error.to_string())?;
+        let network = NetworkScheduler::new(
+            request.limits.resolved_network_limits(),
+            cancellation.clone(),
+        );
         let engine = engine_for_dynamic_realizer(
             store,
             run,
@@ -1174,7 +1144,7 @@ mod tests {
             cancellation,
             secondary,
             local_io,
-            request.limits,
+            network,
         )?;
         let mut tasks = JoinSet::new();
         for source in request.sources {

@@ -9,7 +9,7 @@ use bobr_source::dynamic_realizer::DynamicRealizer;
 use bobr_source::graph::{GraphPlanError, GraphPlanErrorKind, plan_graph};
 use bobr_source::{
     LocalBackendRegistry, LocalContentProvider, LocalIoScheduler, LocalMappingProvider,
-    NamedContentProvider, NamedMappingProvider, SecondaryResolver,
+    NamedContentProvider, NamedMappingProvider, NetworkScheduler, SecondaryResolver,
 };
 #[cfg(test)]
 use bobr_store::ReadOnlyStore;
@@ -79,6 +79,7 @@ pub async fn realize(
     let runtime_provider = runtime_provider_for_current_process();
     let local_io = LocalIoScheduler::new(limits.resolved_max_local_jobs(), cancellation.clone())
         .map_err(map_store_error)?;
+    let network = NetworkScheduler::new(limits.resolved_network_limits(), cancellation.clone());
     let repository_log = repository_log_details(&repositories);
     let (mapping_providers, content_providers) =
         repository_capabilities(repositories, runtime_provider.clone(), local_io.clone());
@@ -104,8 +105,8 @@ pub async fn realize(
             cancellation.clone(),
             secondary,
             executor.handle(),
-            limits,
             local_io,
+            network,
         )
         .map_err(|error| ExecutionError::Build(error.to_string()))?,
     );

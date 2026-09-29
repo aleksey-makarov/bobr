@@ -717,6 +717,9 @@ impl RepositoryTransport for S3RepositoryTransport {
             content_encoding: output.content_encoding().map(str::to_owned),
             etag: output.e_tag().map(str::to_owned),
         };
+        let total_bytes = output
+            .content_length()
+            .and_then(|length| u64::try_from(length).ok());
         let mut destination = tokio::fs::File::create(request.destination).await?;
         let mut received = 0u64;
         while let Some(chunk) = output.body.next().await {
@@ -732,6 +735,9 @@ impl RepositoryTransport for S3RepositoryTransport {
                 ));
             }
             tokio::io::AsyncWriteExt::write_all(&mut destination, &chunk).await?;
+            if let Some(progress) = &request.progress {
+                progress.transferred(received, total_bytes);
+            }
         }
         tokio::io::AsyncWriteExt::flush(&mut destination).await?;
         Ok(FetchResult::Stored(metadata))

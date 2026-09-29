@@ -5,4 +5,3 @@ mod limits;
 mod oci;
 
 pub use limits::Limits;
-pub(crate) use limits::ResolvedLimits;

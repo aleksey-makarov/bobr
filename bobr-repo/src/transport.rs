@@ -31,6 +31,19 @@ pub struct FetchRequest {
     pub max_bytes: u64,
     /// Previously observed opaque ETag, if any.
     pub if_none_match: Option<String>,
+    /// Optional streaming byte-progress observer.
+    ///
+    /// The observer is transport-neutral and may be shared across retries by a
+    /// scheduling wrapper. Implementations report cumulative bytes for the
+    /// current attempt; zero-length and body-less responses need not report.
+    pub progress: Option<Arc<dyn FetchProgressObserver>>,
+}
+
+/// Receives cumulative byte progress while a repository response body is read.
+pub trait FetchProgressObserver: std::fmt::Debug + Send + Sync {
+    /// Reports bytes received for the current attempt and its advertised
+    /// length, when the transport supplied one.
+    fn transferred(&self, bytes: u64, total_bytes: Option<u64>);
 }
 
 /// Logical identity of bytes requested from a repository transport.
@@ -140,10 +153,21 @@ impl RepositoryTransport for HttpTransport {
         }
         if !response.status().is_success() {
             let status = response.status();
-            return Err(RepositoryError::transport(
-                format!("repository HTTP request returned {status}"),
-                status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS,
-            ));
+            let message = format!("repository HTTP request returned {status}");
+            return Err(
+                if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    RepositoryError::retryable_transport(
+                        message,
+                        response
+                            .headers()
+                            .get(reqwest::header::RETRY_AFTER)
+                            .and_then(|value| value.to_str().ok())
+                            .and_then(parse_retry_after),
+                    )
+                } else {
+                    RepositoryError::transport(message, false)
+                },
+            );
         }
         if response
             .headers()
@@ -162,6 +186,7 @@ impl RepositoryTransport for HttpTransport {
             content_encoding: header_string(response.headers(), CONTENT_ENCODING),
             etag: header_string(response.headers(), ETAG),
         };
+        let total_bytes = response.content_length();
         let mut file = tokio::fs::File::create(&request.destination).await?;
         let mut received = 0u64;
         let mut stream = response.bytes_stream();
@@ -181,10 +206,21 @@ impl RepositoryTransport for HttpTransport {
                 ));
             }
             tokio::io::AsyncWriteExt::write_all(&mut file, &chunk).await?;
+            if let Some(progress) = &request.progress {
+                progress.transferred(received, total_bytes);
+            }
         }
         tokio::io::AsyncWriteExt::flush(&mut file).await?;
         Ok(FetchResult::Stored(metadata))
     }
+}
+
+fn parse_retry_after(value: &str) -> Option<std::time::Duration> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(std::time::Duration::from_secs)
 }
 
 fn header_string(
@@ -285,7 +321,10 @@ impl RepositoryTransport for MemoryTransport {
                 "repository response exceeds the format size limit",
             ));
         }
-        tokio::fs::write(request.destination, object.body).await?;
+        tokio::fs::write(request.destination, &object.body).await?;
+        if let Some(progress) = &request.progress {
+            progress.transferred(object.body.len() as u64, Some(object.body.len() as u64));
+        }
         Ok(FetchResult::Stored(object.metadata))
     }
 }

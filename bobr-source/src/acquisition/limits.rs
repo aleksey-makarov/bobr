@@ -1,9 +1,10 @@
-//! Concurrency limits for Source acquisition.
+//! Concurrency limits shared by Source acquisition and repository traffic.
 
+use crate::NetworkLimits;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
-/// How many downloads one host is asked to serve at once, unless the request
+/// How many network operations one host is asked to serve at once, unless the request
 /// says otherwise. Browsers hold six HTTP/1.1 connections per host and servers
 /// are tuned for that; measurement agrees -- of 33 simultaneous fetches from
 /// one GNU mirror, the first handful succeeded and everything later was cut.
@@ -12,8 +13,8 @@ pub(crate) const DEFAULT_PER_HOST: u32 = 6;
 /// Ceiling for the derived total-connection limit.
 pub(crate) const MAX_CONNECTIONS_CAP: u32 = 64;
 
-/// How many local sources are read, hashed and copied at once, unless the
-/// request says otherwise.
+/// How many local sources, repository imports, and input-materialization jobs
+/// run at once, unless the request says otherwise.
 ///
 /// Unlike the connection limits this one is about a disk, and no default can be
 /// right for every disk: a spindle wants one (concurrent walks turn sequential
@@ -23,20 +24,20 @@ pub(crate) const MAX_CONNECTIONS_CAP: u32 = 64;
 /// degrades gracefully rather than thrashing.
 pub(crate) const DEFAULT_MAX_LOCAL_JOBS: u32 = 4;
 
-/// Connection limits as the request states them; all optional.
+/// Network and local-I/O limits as the request states them; all optional.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
-    /// Downloads one host serves at once, where `per_host` is silent.
+    /// Network operations one host serves at once, where `per_host` is silent.
     pub per_host_default: Option<u32>,
     /// Per-host overrides, keyed by host name.
     #[serde(default)]
     pub per_host: BTreeMap<String, u32>,
-    /// Cap on downloads in flight across all hosts.
+    /// Cap on Source and repository network operations across all hosts.
     pub max_connections: Option<u32>,
-    /// Cap on local sources being materialized at once. Nothing to do with the
-    /// connection limits -- this one bounds a disk, not a network -- so it gets
-    /// its own number rather than sharing theirs.
+    /// Cap on local content work. Nothing to do with the connection limits --
+    /// this one bounds a disk, not a network -- so it gets its own number
+    /// rather than sharing theirs.
     pub max_local_jobs: Option<u32>,
 }
 
@@ -45,34 +46,17 @@ impl Limits {
     pub fn resolved_max_local_jobs(&self) -> usize {
         self.max_local_jobs.unwrap_or(DEFAULT_MAX_LOCAL_JOBS).max(1) as usize
     }
-}
 
-/// The limits with every default filled in, ready for the engine.
-#[derive(Debug, Clone)]
-pub(crate) struct ResolvedLimits {
-    pub(crate) per_host_default: u32,
-    pub(crate) per_host: BTreeMap<String, u32>,
-    pub(crate) max_connections: u32,
-}
-
-impl ResolvedLimits {
-    pub(crate) fn from_request(limits: &Limits) -> Self {
-        Self {
-            per_host_default: limits.per_host_default.unwrap_or(DEFAULT_PER_HOST).max(1),
-            per_host: limits.per_host.clone(),
-            max_connections: limits
+    /// Resolves the network limits shared by Source and repository traffic.
+    pub fn resolved_network_limits(&self) -> NetworkLimits {
+        NetworkLimits {
+            per_host_default: self.per_host_default.unwrap_or(DEFAULT_PER_HOST).max(1),
+            per_host: self.per_host.clone(),
+            max_connections: self
                 .max_connections
                 .unwrap_or_else(|| default_max_connections(nofile_limit()))
                 .max(1),
         }
-    }
-
-    pub(crate) fn for_host(&self, host: &str) -> u32 {
-        self.per_host
-            .get(host)
-            .copied()
-            .unwrap_or(self.per_host_default)
-            .max(1)
     }
 }
 
@@ -118,7 +102,7 @@ mod tests {
             max_connections: Some(10),
             max_local_jobs: None,
         };
-        let resolved = ResolvedLimits::from_request(&limits);
+        let resolved = limits.resolved_network_limits();
         assert_eq!(resolved.per_host_default, DEFAULT_PER_HOST);
         assert_eq!(resolved.for_host("ftp.gnu.org"), 3);
         assert_eq!(resolved.for_host("crates.io"), DEFAULT_PER_HOST);
