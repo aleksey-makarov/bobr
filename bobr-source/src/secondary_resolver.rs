@@ -30,6 +30,8 @@ pub enum ProviderError {
     Store(StoreError),
     /// Failure in a remote repository reader or transport.
     Repository(RepositoryError),
+    /// Failure of one advertised remote content representation.
+    RepositoryContent(RepositoryError),
 }
 
 impl ProviderError {
@@ -50,6 +52,18 @@ impl ProviderError {
                     | RepositoryErrorKind::Cancelled => StoreError::Io(message),
                 }
             }
+            Self::RepositoryContent(error) => {
+                let message = error.to_string();
+                match error.kind() {
+                    RepositoryErrorKind::Configuration => StoreError::InvalidInput(message),
+                    RepositoryErrorKind::Authentication
+                    | RepositoryErrorKind::InvalidRepository => StoreError::InvalidData(message),
+                    RepositoryErrorKind::Transport { .. }
+                    | RepositoryErrorKind::LocalIo
+                    | RepositoryErrorKind::Runtime
+                    | RepositoryErrorKind::Cancelled => StoreError::Io(message),
+                }
+            }
         }
     }
 
@@ -57,8 +71,14 @@ impl ProviderError {
     pub fn repository_kind(&self) -> Option<RepositoryErrorKind> {
         match self {
             Self::Store(_) => None,
-            Self::Repository(error) => Some(error.kind()),
+            Self::Repository(error) | Self::RepositoryContent(error) => Some(error.kind()),
         }
+    }
+
+    /// Marks a failure as belonging to one advertised content representation,
+    /// not to the authenticated repository metadata that named it.
+    pub fn repository_content(error: RepositoryError) -> Self {
+        Self::RepositoryContent(error)
     }
 }
 
@@ -84,7 +104,7 @@ impl fmt::Display for ProviderError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(error) => error.fmt(formatter),
-            Self::Repository(error) => error.fmt(formatter),
+            Self::Repository(error) | Self::RepositoryContent(error) => error.fmt(formatter),
         }
     }
 }
@@ -581,7 +601,13 @@ impl SecondaryResolver {
                 (order, entry.name, result)
             });
         }
-        collect_ordered_provider_tasks(tasks, self.mapping_providers.len(), "build mapping").await
+        Ok(
+            collect_ordered_provider_tasks(tasks, self.mapping_providers.len(), "build mapping")
+                .await?
+                .into_iter()
+                .flatten()
+                .collect(),
+        )
     }
 
     async fn query_reuse_providers(
@@ -596,7 +622,13 @@ impl SecondaryResolver {
                 (order, entry.name, result)
             });
         }
-        collect_ordered_provider_tasks(tasks, self.mapping_providers.len(), "reuse mapping").await
+        Ok(
+            collect_ordered_provider_tasks(tasks, self.mapping_providers.len(), "reuse mapping")
+                .await?
+                .into_iter()
+                .flatten()
+                .collect(),
+        )
     }
 
     async fn locate_objects(
@@ -615,7 +647,7 @@ impl SecondaryResolver {
             collect_ordered_provider_tasks(tasks, self.sources.len(), "object availability")
                 .await?
                 .into_iter()
-                .map(|(_, hashes)| hashes)
+                .map(|entry| entry.map_or_else(HashSet::new, |(_, hashes)| hashes))
                 .collect(),
         )
     }
@@ -636,7 +668,7 @@ impl SecondaryResolver {
             collect_ordered_provider_tasks(tasks, self.sources.len(), "fs-file availability")
                 .await?
                 .into_iter()
-                .map(|(_, hashes)| hashes)
+                .map(|entry| entry.map_or_else(HashSet::new, |(_, hashes)| hashes))
                 .collect(),
         )
     }
@@ -955,13 +987,17 @@ impl SecondaryResolver {
             if !availability[index].contains(&hash) {
                 continue;
             }
-            let manifest = source.source.object_manifest(hash).await?;
+            let manifest = match source.source.object_manifest(hash).await {
+                Ok(manifest) => manifest,
+                Err(error) if content_item_failure(&error) => continue,
+                Err(error) => return Err(error.into_store_error()),
+            };
             if let Some(manifest) = &manifest {
                 let Some(closure) = self
                     .ensure_manifest_closure(hash, manifest, progress)
                     .await?
                 else {
-                    return Ok(None);
+                    continue;
                 };
                 for name in closure.sources {
                     insert_name_once(&mut used_sources, &name);
@@ -974,7 +1010,12 @@ impl SecondaryResolver {
                 transfer_mode: source.source.transfer_mode(),
             });
             let started = Instant::now();
-            match source.source.import_object(&self.working, hash).await? {
+            let imported = match source.source.import_object(&self.working, hash).await {
+                Ok(outcome) => outcome,
+                Err(error) if content_item_failure(&error) => continue,
+                Err(error) => return Err(error.into_store_error()),
+            };
+            match imported {
                 ContentImportOutcome::NotFound => continue,
                 outcome => {
                     insert_name_once(&mut used_sources, &source.name);
@@ -1042,24 +1083,16 @@ impl SecondaryResolver {
             }));
         }
 
-        let mut by_source = vec![Vec::new(); self.sources.len()];
-        let mut assigned = HashSet::new();
         let availability = self.locate_fs_files(&missing).await?;
-        for (index, available) in availability.into_iter().enumerate() {
-            for hash in &missing {
-                if !assigned.contains(hash) && available.contains(hash) {
-                    assigned.insert(*hash);
-                    by_source[index].push(*hash);
-                }
-            }
-        }
-        if assigned.len() != missing.len() {
-            return Ok(None);
-        }
-
+        let mut unresolved = missing.iter().copied().collect::<HashSet<_>>();
         let mut used_sources = Vec::new();
         let mut transfers = Vec::new();
-        for (index, hashes) in by_source.iter().enumerate() {
+        for (index, available) in availability.iter().enumerate() {
+            let hashes = missing
+                .iter()
+                .copied()
+                .filter(|hash| unresolved.contains(hash) && available.contains(hash))
+                .collect::<Vec<_>>();
             if hashes.is_empty() {
                 continue;
             }
@@ -1070,18 +1103,36 @@ impl SecondaryResolver {
                 transfer_mode: source.source.transfer_mode(),
             });
             let started = Instant::now();
-            source.source.import_fs_files(&self.working, hashes).await?;
+            match source.source.import_fs_files(&self.working, &hashes).await {
+                Ok(()) => {}
+                Err(error) if content_item_failure(&error) => {
+                    for hash in &hashes {
+                        if self.working.fs_file_path(*hash).is_file() {
+                            unresolved.remove(hash);
+                        }
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error.into_store_error()),
+            }
             let bytes = hashes.iter().try_fold(0_u64, |total, hash| {
                 let path = self.working.fs_file_path(*hash);
-                let length = fs::symlink_metadata(&path)
-                    .map_err(|error| {
+                let metadata = fs::symlink_metadata(&path).map_err(|error| {
                         StoreError::Io(format!(
                             "failed to inspect imported fs-file '{}': {error}",
                             path.display()
                         ))
-                    })?
-                    .len();
-                Ok::<_, StoreError>(total.saturating_add(length))
+                    })?;
+                if !metadata.file_type().is_file() {
+                    return Err(StoreError::InvalidData(format!(
+                        "content source '{}' reported fs-file '{}' imported, but '{}' is not a regular file",
+                        source.name,
+                        hash,
+                        path.display()
+                    )));
+                }
+                unresolved.remove(hash);
+                Ok::<_, StoreError>(total.saturating_add(metadata.len()))
             })?;
             let report = ContentTransferReport {
                 object_hash,
@@ -1094,6 +1145,9 @@ impl SecondaryResolver {
             progress(ContentTransferEvent::Finished(report.clone()));
             merge_transfer(&mut transfers, report);
             used_sources.push(source.name.clone());
+        }
+        if !unresolved.is_empty() {
+            return Ok(None);
         }
         Ok(Some(AcquiredClosure {
             sources: used_sources,
@@ -1120,7 +1174,7 @@ async fn collect_ordered_provider_tasks<T: Send + 'static>(
     mut tasks: JoinSet<(usize, String, Result<T, ProviderError>)>,
     count: usize,
     operation: &str,
-) -> Result<Vec<(String, T)>, StoreError> {
+) -> Result<Vec<Option<(String, T)>>, StoreError> {
     let mut ordered = (0..count).map(|_| None).collect::<Vec<_>>();
     while let Some(joined) = tasks.join_next().await {
         let (order, name, result) = joined.map_err(|error| {
@@ -1132,11 +1186,33 @@ async fn collect_ordered_provider_tasks<T: Send + 'static>(
         .into_iter()
         .map(|entry| {
             let (name, result) = entry.expect("every provider task produces one result");
-            result
-                .map(|value| (name, value))
-                .map_err(ProviderError::into_store_error)
+            match result {
+                Ok(value) => Ok(Some((name, value))),
+                Err(error) if provider_transport_failure(&error) => Ok(None),
+                Err(error) => Err(error.into_store_error()),
+            }
         })
         .collect()
+}
+
+fn provider_transport_failure(error: &ProviderError) -> bool {
+    matches!(
+        error.repository_kind(),
+        Some(RepositoryErrorKind::Transport { .. })
+    )
+}
+
+fn content_item_failure(error: &ProviderError) -> bool {
+    match error {
+        ProviderError::Repository(repository) => {
+            matches!(repository.kind(), RepositoryErrorKind::Transport { .. })
+        }
+        ProviderError::RepositoryContent(repository) => matches!(
+            repository.kind(),
+            RepositoryErrorKind::Transport { .. } | RepositoryErrorKind::InvalidRepository
+        ),
+        ProviderError::Store(_) => false,
+    }
 }
 
 fn combine_index_results<K>(
@@ -1406,6 +1482,11 @@ mod tests {
             error.repository_kind(),
             Some(RepositoryErrorKind::Cancelled)
         );
+        let metadata = ProviderError::from(RepositoryError::invalid_repository("bad list"));
+        let content =
+            ProviderError::repository_content(RepositoryError::invalid_repository("bad object"));
+        assert!(!content_item_failure(&metadata));
+        assert!(content_item_failure(&content));
     }
 
     fn publish_file(
@@ -1522,6 +1603,156 @@ mod tests {
         barrier: Arc<Barrier>,
         object_hash: ObjectHash,
         delay: Duration,
+    }
+
+    #[derive(Debug)]
+    struct TransportFailingMappingProvider;
+
+    #[derive(Debug)]
+    struct AuthenticationFailingMappingProvider;
+
+    #[async_trait]
+    impl MappingProvider for TransportFailingMappingProvider {
+        async fn resolve_builds(
+            &self,
+            _keys: &[BuildKey],
+        ) -> Result<Vec<TrustedResolution<BuildKey>>, ProviderError> {
+            Err(RepositoryError::transport("repository unavailable", false).into())
+        }
+
+        async fn resolve_reuses(
+            &self,
+            _keys: &[ReuseKey],
+        ) -> Result<Vec<TrustedResolution<ReuseKey>>, ProviderError> {
+            Err(RepositoryError::transport("repository unavailable", false).into())
+        }
+    }
+
+    #[async_trait]
+    impl MappingProvider for AuthenticationFailingMappingProvider {
+        async fn resolve_builds(
+            &self,
+            _keys: &[BuildKey],
+        ) -> Result<Vec<TrustedResolution<BuildKey>>, ProviderError> {
+            Err(RepositoryError::authentication("master signature is invalid").into())
+        }
+
+        async fn resolve_reuses(
+            &self,
+            _keys: &[ReuseKey],
+        ) -> Result<Vec<TrustedResolution<ReuseKey>>, ProviderError> {
+            Err(RepositoryError::authentication("master signature is invalid").into())
+        }
+    }
+
+    #[derive(Debug)]
+    struct BrokenRemoteContentProvider {
+        advertised: ObjectHash,
+    }
+
+    #[derive(Debug)]
+    struct BrokenRemoteFsContentProvider {
+        advertised: FsFileHash,
+    }
+
+    #[async_trait]
+    impl ContentProvider for BrokenRemoteFsContentProvider {
+        fn transfer_mode(&self) -> ContentTransferMode {
+            ContentTransferMode::Download
+        }
+
+        async fn locate_objects(
+            &self,
+            _hashes: &[ObjectHash],
+        ) -> Result<HashSet<ObjectHash>, ProviderError> {
+            Ok(HashSet::new())
+        }
+
+        async fn object_manifest(
+            &self,
+            _hash: ObjectHash,
+        ) -> Result<Option<FsTreeManifest>, ProviderError> {
+            unreachable!("this provider only advertises fs-files")
+        }
+
+        async fn locate_fs_files(
+            &self,
+            hashes: &[FsFileHash],
+        ) -> Result<HashSet<FsFileHash>, ProviderError> {
+            Ok(hashes
+                .iter()
+                .copied()
+                .filter(|hash| *hash == self.advertised)
+                .collect())
+        }
+
+        async fn import_fs_files(
+            &self,
+            _working: &Store,
+            _hashes: &[FsFileHash],
+        ) -> Result<(), ProviderError> {
+            Err(ProviderError::repository_content(
+                RepositoryError::invalid_repository("advertised fs-file is corrupt"),
+            ))
+        }
+
+        async fn import_object(
+            &self,
+            _working: &Store,
+            _hash: ObjectHash,
+        ) -> Result<ContentImportOutcome, ProviderError> {
+            unreachable!("this provider only advertises fs-files")
+        }
+    }
+
+    #[async_trait]
+    impl ContentProvider for BrokenRemoteContentProvider {
+        fn transfer_mode(&self) -> ContentTransferMode {
+            ContentTransferMode::Download
+        }
+
+        async fn locate_objects(
+            &self,
+            hashes: &[ObjectHash],
+        ) -> Result<HashSet<ObjectHash>, ProviderError> {
+            Ok(hashes
+                .iter()
+                .copied()
+                .filter(|hash| *hash == self.advertised)
+                .collect())
+        }
+
+        async fn object_manifest(
+            &self,
+            _hash: ObjectHash,
+        ) -> Result<Option<FsTreeManifest>, ProviderError> {
+            Err(ProviderError::repository_content(
+                RepositoryError::invalid_repository("advertised object is corrupt"),
+            ))
+        }
+
+        async fn locate_fs_files(
+            &self,
+            _hashes: &[FsFileHash],
+        ) -> Result<HashSet<FsFileHash>, ProviderError> {
+            Ok(HashSet::new())
+        }
+
+        async fn import_fs_files(
+            &self,
+            _working: &Store,
+            _hashes: &[FsFileHash],
+        ) -> Result<(), ProviderError> {
+            unreachable!("ordinary objects have no fs-file closure")
+        }
+
+        async fn import_object(
+            &self,
+            _working: &Store,
+            _hash: ObjectHash,
+        ) -> Result<ContentImportOutcome, ProviderError> {
+            unreachable!("manifest probe rejects the corrupt object")
+        }
     }
 
     #[async_trait]
@@ -1666,6 +1897,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exhausted_mapping_transport_falls_back_to_the_next_provider() {
+        let temp = tempdir().unwrap();
+        let repository_root = temp.path().join("repository");
+        let working = empty_store(&temp.path().join("working"));
+        let repository = empty_store(&repository_root);
+        let build = build_key('3');
+        let hash = publish_file(
+            &repository,
+            build,
+            reuse_key('4'),
+            b"mapping fallback\n",
+            &temp.path().join("staged"),
+        );
+        let resolver = resolver(
+            working,
+            vec![
+                NamedMappingProvider::new("unavailable", Arc::new(TransportFailingMappingProvider)),
+                index("available", &repository_root),
+            ],
+            Vec::new(),
+        );
+
+        let report = resolver.lookup_builds(&[build]).await.unwrap().remove(0);
+
+        assert_eq!(report.object_hashes, [hash]);
+        assert_eq!(report.answers[0].provider, "available");
+    }
+
+    #[tokio::test]
+    async fn mapping_authentication_failure_is_fatal() {
+        let temp = tempdir().unwrap();
+        let working = empty_store(&temp.path().join("working"));
+        let resolver = resolver(
+            working,
+            vec![NamedMappingProvider::new(
+                "untrusted",
+                Arc::new(AuthenticationFailingMappingProvider),
+            )],
+            Vec::new(),
+        );
+
+        let error = resolver.lookup_builds(&[build_key('7')]).await.unwrap_err();
+
+        assert!(matches!(error, StoreError::InvalidData(_)));
+        assert!(error.to_string().contains("master signature is invalid"));
+    }
+
+    #[tokio::test]
     async fn content_availability_queries_run_concurrently() {
         let temp = tempdir().unwrap();
         let working = empty_store(&temp.path().join("working"));
@@ -1758,6 +2037,39 @@ mod tests {
         );
         assert_eq!(local_record["run_id"], "test-run");
         assert_eq!(local_record["inputs"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn corrupt_advertised_object_falls_back_to_the_next_content_provider() {
+        let temp = tempdir().unwrap();
+        let repository_root = temp.path().join("repository");
+        let working = empty_store(&temp.path().join("working"));
+        let repository = empty_store(&repository_root);
+        let hash = publish_file(
+            &repository,
+            build_key('5'),
+            reuse_key('6'),
+            b"content fallback\n",
+            &temp.path().join("staged"),
+        );
+        let resolver = resolver(
+            working.clone(),
+            Vec::new(),
+            vec![
+                NamedContentProvider::new(
+                    "broken-remote",
+                    Arc::new(BrokenRemoteContentProvider { advertised: hash }),
+                ),
+                source("available-local", &repository_root),
+            ],
+        );
+
+        let report = resolver.ensure_objects(&[hash]).await.unwrap().remove(0);
+
+        assert_eq!(report.outcome, Some(ContentImportOutcome::Imported));
+        assert_eq!(report.content_sources, ["available-local"]);
+        assert!(working.object_is_complete(hash).unwrap());
+        assert!(object_record_path(&working, hash).is_file());
     }
 
     #[tokio::test]
@@ -2065,6 +2377,12 @@ mod tests {
             vec![index("manifest-index", &manifest_root)],
             vec![
                 source("manifest-content", &manifest_root),
+                NamedContentProvider::new(
+                    "broken-file-content",
+                    Arc::new(BrokenRemoteFsContentProvider {
+                        advertised: fs_file_hash,
+                    }),
+                ),
                 copy_source("file-content", &file_root),
             ],
         );

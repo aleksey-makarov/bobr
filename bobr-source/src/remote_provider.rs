@@ -22,6 +22,15 @@ use tokio::task::JoinSet;
 
 const FS_FILE_IMPORT_BATCH_SIZE: usize = 256;
 
+fn remote_store_validation_error(error: StoreError) -> ProviderError {
+    match error {
+        StoreError::InvalidData(message) => {
+            ProviderError::repository_content(RepositoryError::invalid_repository(message))
+        }
+        error => ProviderError::Store(error),
+    }
+}
+
 /// One authenticated remote repository shared by complementary capabilities.
 #[derive(Clone)]
 pub struct RemoteRepositoryBackend {
@@ -32,6 +41,13 @@ struct RemoteRepositoryBackendInner {
     identity: String,
     reader: RepositoryReader,
     snapshot: OnceCell<Arc<RepositorySnapshot>>,
+    disabled: Mutex<Option<DisabledRemote>>,
+}
+
+#[derive(Debug, Clone)]
+struct DisabledRemote {
+    kind: bobr_repo::RepositoryErrorKind,
+    message: String,
 }
 
 impl fmt::Debug for RemoteRepositoryBackend {
@@ -52,6 +68,7 @@ impl RemoteRepositoryBackend {
                 identity: identity.into(),
                 reader,
                 snapshot: OnceCell::new(),
+                disabled: Mutex::new(None),
             }),
         }
     }
@@ -63,11 +80,53 @@ impl RemoteRepositoryBackend {
 
     /// Lazily authenticates the master and freezes one snapshot for this run.
     pub async fn snapshot(&self) -> Result<Arc<RepositorySnapshot>, RepositoryError> {
-        self.inner
+        self.ensure_enabled()?;
+        let result = self
+            .inner
             .snapshot
             .get_or_try_init(|| async { self.inner.reader.snapshot().await.map(Arc::new) })
             .await
-            .cloned()
+            .cloned();
+        self.repository_result(result)
+    }
+
+    fn ensure_enabled(&self) -> Result<(), RepositoryError> {
+        let disabled = self.inner.disabled.lock().map_err(|_| {
+            RepositoryError::local_io("remote repository disabled-state lock is poisoned")
+        })?;
+        if let Some(disabled) = disabled.as_ref() {
+            return Err(RepositoryError::with_kind(
+                disabled.kind,
+                disabled.message.clone(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn repository_result<T>(
+        &self,
+        result: Result<T, RepositoryError>,
+    ) -> Result<T, RepositoryError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if matches!(
+                    error.kind(),
+                    bobr_repo::RepositoryErrorKind::Transport { .. }
+                ) && let Ok(mut disabled) = self.inner.disabled.lock()
+                    && disabled.is_none()
+                {
+                    *disabled = Some(DisabledRemote {
+                        kind: error.kind(),
+                        message: format!(
+                            "remote repository '{}' is disabled for this run after a transport failure: {error}",
+                            self.identity()
+                        ),
+                    });
+                }
+                Err(error)
+            }
+        }
     }
 }
 
@@ -133,7 +192,10 @@ impl MappingProvider for RemoteMappingProvider {
             if !seen.insert(*key) {
                 continue;
             }
-            for object_hash in snapshot.build_candidates(*key).await? {
+            let candidates = self
+                .backend
+                .repository_result(snapshot.build_candidates(*key).await)?;
+            for object_hash in candidates {
                 resolutions.push(TrustedResolution {
                     key: *key,
                     object_hash,
@@ -154,7 +216,10 @@ impl MappingProvider for RemoteMappingProvider {
             if !seen.insert(*key) {
                 continue;
             }
-            for object_hash in snapshot.reuse_candidates(*key).await? {
+            let candidates = self
+                .backend
+                .repository_result(snapshot.reuse_candidates(*key).await)?;
+            for object_hash in candidates {
                 resolutions.push(TrustedResolution {
                     key: *key,
                     object_hash,
@@ -234,13 +299,17 @@ impl RemoteContentProvider {
             .run(move || working.allocate_repository_object_staging())
             .await?;
         let snapshot = self.backend.snapshot().await?;
-        let found = snapshot.fetch_object(hash, staging.path()).await?;
+        let found = self
+            .backend
+            .repository_result(snapshot.fetch_object(hash, staging.path()).await)
+            .map_err(ProviderError::repository_content)?;
         if found.is_none() {
-            return Err(RepositoryError::invalid_repository(format!(
-                "remote repository '{}' no longer advertises object '{hash}'",
-                self.backend.identity()
-            ))
-            .into());
+            return Err(ProviderError::repository_content(
+                RepositoryError::invalid_repository(format!(
+                    "remote repository '{}' no longer advertises object '{hash}'",
+                    self.backend.identity()
+                )),
+            ));
         }
         state.staging = Some(staging);
         Ok(())
@@ -272,7 +341,13 @@ impl ContentProvider for RemoteContentProvider {
         let mut available = HashSet::new();
         let mut seen = HashSet::new();
         for hash in hashes {
-            if seen.insert(*hash) && snapshot.contains_object(*hash).await? {
+            if !seen.insert(*hash) {
+                continue;
+            }
+            let contains = self
+                .backend
+                .repository_result(snapshot.contains_object(*hash).await)?;
+            if contains {
                 available.insert(*hash);
             }
         }
@@ -309,7 +384,7 @@ impl ContentProvider for RemoteContentProvider {
         self.local_io
             .run(move || read_manifest_if_marked(&path))
             .await
-            .map_err(Into::into)
+            .map_err(remote_store_validation_error)
     }
 
     async fn locate_fs_files(
@@ -320,7 +395,13 @@ impl ContentProvider for RemoteContentProvider {
         let mut available = HashSet::new();
         let mut seen = HashSet::new();
         for hash in hashes {
-            if seen.insert(*hash) && snapshot.contains_fs_file(*hash).await? {
+            if !seen.insert(*hash) {
+                continue;
+            }
+            let contains = self
+                .backend
+                .repository_result(snapshot.contains_fs_file(*hash).await)?;
+            if contains {
                 available.insert(*hash);
             }
         }
@@ -351,10 +432,13 @@ impl ContentProvider for RemoteContentProvider {
             let mut tasks = JoinSet::new();
             for hash in batch {
                 let snapshot = snapshot.clone();
+                let backend = self.backend.clone();
                 let hash = *hash;
                 tasks.spawn(async move {
-                    let representation = snapshot.fetch_fs_file_representation(hash).await?;
-                    Ok::<_, RepositoryError>((hash, representation))
+                    let representation = backend
+                        .repository_result(snapshot.fetch_fs_file_representation(hash).await)
+                        .map_err(ProviderError::repository_content)?;
+                    Ok::<_, ProviderError>((hash, representation))
                 });
             }
             let mut representations = Vec::<FetchedFsFileRepresentation>::new();
@@ -365,10 +449,10 @@ impl ContentProvider for RemoteContentProvider {
                     )))
                 })??;
                 let representation = representation.ok_or_else(|| {
-                    RepositoryError::invalid_repository(format!(
+                    ProviderError::repository_content(RepositoryError::invalid_repository(format!(
                         "remote repository '{}' no longer advertises fs-file '{hash}'",
                         self.backend.identity()
-                    ))
+                    )))
                 })?;
                 representations.push(representation);
             }
@@ -384,7 +468,8 @@ impl ContentProvider for RemoteContentProvider {
                 ProviderError::Store(StoreError::Io(format!(
                     "remote fs-file publication task failed: {error}"
                 )))
-            })??;
+            })?
+            .map_err(ProviderError::repository_content)?;
         }
         Ok(())
     }
@@ -419,19 +504,21 @@ impl ContentProvider for RemoteContentProvider {
         self.local_io
             .run(move || working.publish_repository_object(staging, hash))
             .await
-            .map_err(Into::into)
+            .map_err(remote_store_validation_error)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{NamedContentProvider, NamedMappingProvider, SecondaryResolver};
     use bobr_core::CancellationToken;
     use bobr_repo::{
-        BuildIndex, BuildIndexHash, Compression, FsFileList, FsFileListHash, Master,
-        MemoryTransport, ObjectList, ObjectListHash, ReuseIndex, ReuseIndexHash, Slot, TrustedKeys,
-        encode_fs_file, encode_object,
+        BuildIndex, BuildIndexHash, Compression, FetchRequest, FetchResult, FsFileList,
+        FsFileListHash, Master, MemoryTransport, ObjectList, ObjectListHash, RepositoryTransport,
+        ReuseIndex, ReuseIndexHash, Slot, TrustedKeys, encode_fs_file, encode_object,
     };
+    use bobr_store::load_build_object_hash;
     use ed25519_dalek::SigningKey;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use url::Url;
@@ -447,6 +534,19 @@ mod tests {
         object_hash: ObjectHash,
         backend: RemoteRepositoryBackend,
         working: Store,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct TransportFailure {
+        requests: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl RepositoryTransport for TransportFailure {
+        async fn fetch(&self, _request: FetchRequest) -> Result<FetchResult, RepositoryError> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            Err(RepositoryError::transport("test endpoint is down", false))
+        }
     }
 
     fn fixture() -> Fixture {
@@ -594,6 +694,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transport_failure_disables_the_shared_backend_for_the_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let transport = TransportFailure::default();
+        let signing = SigningKey::from_bytes(&[9; 32]);
+        let trusted = TrustedKeys::new([(b"key".to_vec(), signing.verifying_key())]).unwrap();
+        let master_url = Url::parse("https://unavailable.example/master").unwrap();
+        let reader = RepositoryReader::new(
+            master_url.clone(),
+            trusted,
+            &temp.path().join("cache"),
+            Arc::new(transport.clone()),
+        )
+        .unwrap();
+        let backend = RemoteRepositoryBackend::new(master_url.to_string(), reader);
+        let mapping = RemoteMappingProvider::new(backend.clone());
+        let working_root = temp.path().join("working");
+        std::fs::create_dir(&working_root).unwrap();
+        let content = RemoteContentProvider::new(
+            backend,
+            Store::create(&working_root).unwrap(),
+            RuntimeProvider::host(),
+            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+        );
+
+        let first = mapping
+            .resolve_builds(&[BuildKey::from_bytes([1; 32])])
+            .await;
+        let second = content
+            .locate_objects(&[ObjectHash::from_bytes([2; 32])])
+            .await;
+
+        assert!(matches!(
+            first.unwrap_err().repository_kind(),
+            Some(bobr_repo::RepositoryErrorKind::Transport { .. })
+        ));
+        assert!(matches!(
+            second.unwrap_err().repository_kind(),
+            Some(bobr_repo::RepositoryErrorKind::Transport { .. })
+        ));
+        assert_eq!(transport.requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn content_capability_does_not_fetch_mapping_indexes() {
         let fixture = fixture();
         let content = RemoteContentProvider::new(
@@ -643,6 +786,51 @@ mod tests {
                 .object_path(fixture.object_hash)
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_remote_hit_publishes_local_record_and_build_mapping() {
+        let fixture = fixture();
+        let mapping = NamedMappingProvider::new(
+            "remote",
+            Arc::new(RemoteMappingProvider::new(fixture.backend.clone())),
+        );
+        let content = NamedContentProvider::new(
+            "remote",
+            Arc::new(RemoteContentProvider::new(
+                fixture.backend,
+                fixture.working.clone(),
+                RuntimeProvider::host(),
+                LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+            )),
+        );
+        let resolver = SecondaryResolver::new(
+            fixture.working.clone(),
+            "remote-test",
+            vec![mapping],
+            vec![content],
+        )
+        .unwrap();
+
+        let report = resolver
+            .resolve_builds(&[fixture.build_key])
+            .await
+            .unwrap()
+            .remove(0);
+
+        assert_eq!(report.resolved.unwrap().object_hash, fixture.object_hash);
+        assert_eq!(
+            load_build_object_hash(&fixture.working, fixture.build_key).unwrap(),
+            Some(fixture.object_hash)
+        );
+        assert!(
+            fixture
+                .working
+                .root()
+                .join("object-records")
+                .join(format!("{}.json", fixture.object_hash))
+                .is_file()
         );
     }
 

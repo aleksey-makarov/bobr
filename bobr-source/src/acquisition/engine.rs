@@ -11,7 +11,6 @@
 
 use super::oci;
 use crate::LocalIoScheduler;
-use crate::SecondaryResolver;
 use crate::http::{
     self, HttpOrigin, HttpOriginError, HttpRetryPolicy, HttpTimeouts, UrlAttemptState,
 };
@@ -64,7 +63,6 @@ pub(crate) struct Engine {
     /// same semaphore for repository imports and builder-input preparation.
     local: LocalIoScheduler,
     cancellation: CancellationToken,
-    secondary: Arc<SecondaryResolver>,
 }
 
 pub(crate) fn engine_for_dynamic_realizer(
@@ -72,7 +70,6 @@ pub(crate) fn engine_for_dynamic_realizer(
     run: Arc<Run>,
     logger: Arc<BuildRunLogger>,
     cancellation: CancellationToken,
-    secondary: Arc<SecondaryResolver>,
     local: LocalIoScheduler,
     network: NetworkScheduler,
 ) -> Result<Arc<Engine>, String> {
@@ -85,7 +82,6 @@ pub(crate) fn engine_for_dynamic_realizer(
         network,
         local,
         cancellation,
-        secondary,
     }))
 }
 
@@ -191,7 +187,6 @@ pub(crate) enum SourceOutcome {
     Downloaded,
     CacheHit,
     Local,
-    Secondary,
     Mismatched(Mismatch),
     Failed { name: String, message: String },
 }
@@ -248,57 +243,6 @@ async fn process_source_inner(
             Some(declared),
         ));
         return Ok(SourceOutcome::CacheHit);
-    }
-
-    if engine.secondary.has_content_sources() {
-        let secondary = engine
-            .secondary
-            .ensure_objects(&[declared])
-            .await
-            .map_err(|error| error.to_string())?;
-        if engine.is_cancelled() {
-            return Err("cancelled".to_string());
-        }
-        let secondary = secondary
-            .into_iter()
-            .next()
-            .expect("one requested secondary object produces one report");
-        if secondary.outcome.is_some() {
-            let recorded = {
-                let engine = engine.clone();
-                let name = entry.name.clone();
-                run_blocking(move || {
-                    record_existing_source_object(
-                        &engine.store,
-                        declared,
-                        &name,
-                        engine.run.run_id(),
-                    )
-                    .map_err(|error| error.to_string())
-                })
-                .await??
-            };
-            if recorded.is_none() {
-                return Err(format!(
-                    "secondary acquisition reported source object '{declared}' ready, but it is absent from the working store"
-                ));
-            }
-            engine.logger.log_run_event(run_event(
-                BuildLogLevel::Info,
-                BuildStatus::CacheHit,
-                format!(
-                    "source '{}' imported from secondary content source(s): {}",
-                    entry.name,
-                    if secondary.content_sources.is_empty() {
-                        "working store".to_string()
-                    } else {
-                        secondary.content_sources.join(", ")
-                    }
-                ),
-                Some(declared),
-            ));
-            return Ok(SourceOutcome::Secondary);
-        }
     }
 
     let Some(origin_value) = entry.origin.clone() else {
@@ -984,15 +928,9 @@ fn log_download(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::NamedContentProvider;
     use crate::acquisition::Limits;
-    use bobr_runtime::runtime_provider::RuntimeProvider;
-    use bobr_store::{
-        LocalHardlinkContentSource, LocalRepository, ReadOnlyStore, import_source_object,
-    };
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
     use tempfile::TempDir;
@@ -1003,7 +941,6 @@ mod tests {
         downloaded: u64,
         cache_hit: u64,
         local: u64,
-        secondary: u64,
         mismatched: Vec<Mismatch>,
         failed: Vec<(String, String)>,
         retries: std::collections::BTreeMap<String, u64>,
@@ -1106,13 +1043,6 @@ mod tests {
     }
 
     async fn run_test(request: TestRequest) -> Result<TestSummary, String> {
-        run_test_with_content(request, Vec::new()).await
-    }
-
-    async fn run_test_with_content(
-        request: TestRequest,
-        content_sources: Vec<NamedContentProvider>,
-    ) -> Result<TestSummary, String> {
         let store = Store::create(&request.store).map_err(|error| error.to_string())?;
         let run = Arc::new(
             Run::new(request.run_id, &request.logs, &request.work)
@@ -1123,10 +1053,6 @@ mod tests {
             run.run_id(),
             request.quiet,
         )?);
-        let secondary = Arc::new(
-            SecondaryResolver::new(store.clone(), run.run_id(), Vec::new(), content_sources)
-                .map_err(|error| error.to_string())?,
-        );
         let cancellation = CancellationToken::new();
         let local_io = LocalIoScheduler::new(
             request.limits.resolved_max_local_jobs(),
@@ -1142,7 +1068,6 @@ mod tests {
             run,
             logger.clone(),
             cancellation,
-            secondary,
             local_io,
             network,
         )?;
@@ -1157,7 +1082,6 @@ mod tests {
                 SourceOutcome::Downloaded => summary.downloaded += 1,
                 SourceOutcome::CacheHit => summary.cache_hit += 1,
                 SourceOutcome::Local => summary.local += 1,
-                SourceOutcome::Secondary => summary.secondary += 1,
                 SourceOutcome::Mismatched(mismatch) => summary.mismatched.push(mismatch),
                 SourceOutcome::Failed { name, message } => summary.failed.push((name, message)),
             }
@@ -1253,62 +1177,6 @@ mod tests {
         assert!(summary.is_success(), "{summary:?}");
         assert_eq!(summary.cache_hit, 1);
         assert_eq!(summary.downloaded, 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn acquisition_imports_known_object_from_secondary_content() {
-        let payload = b"secondary source payload\n";
-        let declared = declared_for(payload);
-        let temp = tempfile::tempdir().unwrap();
-        let secondary_root = temp.path().join("secondary");
-        fs::create_dir(&secondary_root).unwrap();
-        let secondary_store = Store::create(&secondary_root).unwrap();
-        let staged = temp.path().join("secondary-staged");
-        fs::write(&staged, payload).unwrap();
-        assert!(matches!(
-            import_source_object(
-                &secondary_store,
-                declared,
-                &staged,
-                "secondary-source",
-                "secondary-run"
-            )
-            .unwrap(),
-            SourceImportOutcome::Matched(hash) if hash == declared
-        ));
-        let request = request_in(
-            &temp,
-            vec![SourceEntry {
-                name: "secondary-source".to_string(),
-                object_hash: declared.to_string(),
-                origin: None,
-            }],
-        );
-        let working_root = request.store.clone();
-        let content = NamedContentProvider::new(
-            "secondary",
-            Arc::new(crate::LocalContentProvider::new(
-                Arc::new(LocalHardlinkContentSource::with_runtime(
-                    LocalRepository::new(ReadOnlyStore::open(&secondary_root).unwrap()),
-                    RuntimeProvider::host(),
-                )),
-                LocalIoScheduler::new(4, CancellationToken::new()).unwrap(),
-            )),
-        );
-
-        let summary = run_test_with_content(request, vec![content]).await.unwrap();
-
-        assert!(summary.is_success(), "{summary:?}");
-        assert_eq!(summary.secondary, 1);
-        assert_eq!(summary.downloaded, 0);
-        assert_eq!(
-            fs::metadata(secondary_store.object_path(declared).unwrap().unwrap())
-                .unwrap()
-                .ino(),
-            fs::metadata(working_root.join("objects").join(declared.to_string()))
-                .unwrap()
-                .ino()
-        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -181,7 +181,6 @@ impl DynamicRealizer {
             run.clone(),
             logger.clone(),
             cancellation.clone(),
-            secondary.clone(),
             local_io,
             network,
         )
@@ -510,10 +509,6 @@ impl DynamicRealizer {
                         source.declared_object_hash(),
                         "already_present",
                     );
-                    Ok(source.declared_object_hash())
-                }
-                SourceOutcome::Secondary => {
-                    self.log_source_cache_hit(&source, source.declared_object_hash(), "secondary");
                     Ok(source.declared_object_hash())
                 }
                 SourceOutcome::Mismatched(mismatch) => Err(DynamicRealizeError::new(format!(
@@ -1169,6 +1164,52 @@ mod tests {
         active: Arc<AtomicUsize>,
         peak: Arc<AtomicUsize>,
         delay: Duration,
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct TrackedMissContentSource {
+        lookups: Arc<AtomicUsize>,
+    }
+
+    impl ContentSource for TrackedMissContentSource {
+        fn transfer_mode(&self) -> bobr_store::ContentTransferMode {
+            bobr_store::ContentTransferMode::Copy
+        }
+
+        fn locate_objects(
+            &self,
+            _hashes: &[ObjectHash],
+        ) -> Result<HashSet<ObjectHash>, StoreError> {
+            self.lookups.fetch_add(1, Ordering::SeqCst);
+            Ok(HashSet::new())
+        }
+
+        fn object_manifest(&self, _hash: ObjectHash) -> Result<Option<FsTreeManifest>, StoreError> {
+            unreachable!("a missed object has no manifest")
+        }
+
+        fn locate_fs_files(
+            &self,
+            _hashes: &[FsFileHash],
+        ) -> Result<HashSet<FsFileHash>, StoreError> {
+            unreachable!("a missed object has no fs-file closure")
+        }
+
+        fn import_fs_files(
+            &self,
+            _working: &Store,
+            _hashes: &[FsFileHash],
+        ) -> Result<(), StoreError> {
+            unreachable!("a missed object is not imported")
+        }
+
+        fn import_object(
+            &self,
+            _working: &Store,
+            _hash: ObjectHash,
+        ) -> Result<ContentImportOutcome, StoreError> {
+            unreachable!("a missed object is not imported")
+        }
     }
 
     impl TrackedCopyContentSource {
@@ -2292,11 +2333,25 @@ mod tests {
             )
             .unwrap(),
         );
-        let (realizer, executor) = dynamic(&environment, graph.clone(), Vec::new(), Vec::new());
+        let missed = TrackedMissContentSource::default();
+        let lookups = missed.lookups.clone();
+        let (realizer, executor) = dynamic(
+            &environment,
+            graph.clone(),
+            Vec::new(),
+            vec![NamedContentProvider::new(
+                "miss",
+                Arc::new(crate::LocalContentProvider::new(
+                    Arc::new(missed),
+                    LocalIoScheduler::new(4, CancellationToken::new()).unwrap(),
+                )),
+            )],
+        );
 
         let realized = realizer.clone().realize_goals().await.unwrap();
 
         assert_eq!(realized, [(graph.goals()[0], hash)]);
+        assert_eq!(lookups.load(Ordering::SeqCst), 1);
         assert!(environment.store.object_path(hash).unwrap().is_some());
         environment.logger.flush();
         let events = fs::read_to_string(environment.run.logs_dir().join("events.jsonl")).unwrap();
