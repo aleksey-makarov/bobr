@@ -221,14 +221,39 @@ pub trait ContentProvider: fmt::Debug + Send + Sync {
         &self,
         working: &Store,
         hashes: &[FsFileHash],
-    ) -> Result<(), ProviderError>;
+    ) -> Result<ContentProviderImport<()>, ProviderError>;
 
     /// Imports one top-level object into the working store.
     async fn import_object(
         &self,
         working: &Store,
         hash: ObjectHash,
-    ) -> Result<ContentImportOutcome, ProviderError>;
+    ) -> Result<ContentProviderImport<ContentImportOutcome>, ProviderError>;
+}
+
+/// Result of one provider import together with transport-specific accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentProviderImport<T> {
+    /// Provider-specific import result.
+    pub value: T,
+    /// Encoded bytes received from a remote representation, when applicable.
+    pub encoded_bytes: Option<u64>,
+}
+
+impl<T> ContentProviderImport<T> {
+    pub(crate) fn local(value: T) -> Self {
+        Self {
+            value,
+            encoded_bytes: None,
+        }
+    }
+
+    pub(crate) fn remote(value: T, encoded_bytes: u64) -> Self {
+        Self {
+            value,
+            encoded_bytes: Some(encoded_bytes),
+        }
+    }
 }
 
 /// Async adapter for one synchronous local mapping index.
@@ -331,13 +356,14 @@ impl ContentProvider for LocalContentProvider {
         &self,
         working: &Store,
         hashes: &[FsFileHash],
-    ) -> Result<(), ProviderError> {
+    ) -> Result<ContentProviderImport<()>, ProviderError> {
         let source = self.source.clone();
         let working = working.clone();
         let hashes = hashes.to_vec();
         self.local_io
             .run(move || source.import_fs_files(&working, &hashes))
             .await
+            .map(ContentProviderImport::local)
             .map_err(Into::into)
     }
 
@@ -345,12 +371,13 @@ impl ContentProvider for LocalContentProvider {
         &self,
         working: &Store,
         hash: ObjectHash,
-    ) -> Result<ContentImportOutcome, ProviderError> {
+    ) -> Result<ContentProviderImport<ContentImportOutcome>, ProviderError> {
         let source = self.source.clone();
         let working = working.clone();
         self.local_io
             .run(move || source.import_object(&working, hash))
             .await
+            .map(ContentProviderImport::local)
             .map_err(Into::into)
     }
 }
@@ -470,6 +497,8 @@ pub struct ContentTransferReport {
     pub files: u64,
     /// Sum of transferred regular-file lengths.
     pub bytes: u64,
+    /// Encoded representation bytes received over the network, when any.
+    pub encoded_bytes: Option<u64>,
     /// Wall-clock duration of the synchronous transfer call.
     pub duration_ms: u64,
 }
@@ -488,6 +517,17 @@ pub enum ContentTransferEvent {
     },
     /// The selected provider completed an actual transfer.
     Finished(ContentTransferReport),
+    /// Advertised content from one provider was unavailable or invalid.
+    Failed {
+        /// Object whose payload or closure was being completed.
+        object_hash: ObjectHash,
+        /// Configured content-source name.
+        content_source: String,
+        /// Physical import transport.
+        transfer_mode: ContentTransferMode,
+        /// Verified failure which may be followed by another provider.
+        error: String,
+    },
 }
 
 /// Mapping/content resolution report for one queried key.
@@ -989,7 +1029,15 @@ impl SecondaryResolver {
             }
             let manifest = match source.source.object_manifest(hash).await {
                 Ok(manifest) => manifest,
-                Err(error) if content_item_failure(&error) => continue,
+                Err(error) if content_item_failure(&error) => {
+                    progress(ContentTransferEvent::Failed {
+                        object_hash: hash,
+                        content_source: source.name.clone(),
+                        transfer_mode: source.source.transfer_mode(),
+                        error: error.to_string(),
+                    });
+                    continue;
+                }
                 Err(error) => return Err(error.into_store_error()),
             };
             if let Some(manifest) = &manifest {
@@ -1012,10 +1060,18 @@ impl SecondaryResolver {
             let started = Instant::now();
             let imported = match source.source.import_object(&self.working, hash).await {
                 Ok(outcome) => outcome,
-                Err(error) if content_item_failure(&error) => continue,
+                Err(error) if content_item_failure(&error) => {
+                    progress(ContentTransferEvent::Failed {
+                        object_hash: hash,
+                        content_source: source.name.clone(),
+                        transfer_mode: source.source.transfer_mode(),
+                        error: error.to_string(),
+                    });
+                    continue;
+                }
                 Err(error) => return Err(error.into_store_error()),
             };
-            match imported {
+            match imported.value {
                 ContentImportOutcome::NotFound => continue,
                 outcome => {
                     insert_name_once(&mut used_sources, &source.name);
@@ -1033,6 +1089,7 @@ impl SecondaryResolver {
                             transfer_mode: source.source.transfer_mode(),
                             files,
                             bytes,
+                            encoded_bytes: imported.encoded_bytes,
                             duration_ms: duration_ms(started),
                         };
                         progress(ContentTransferEvent::Finished(report.clone()));
@@ -1103,9 +1160,15 @@ impl SecondaryResolver {
                 transfer_mode: source.source.transfer_mode(),
             });
             let started = Instant::now();
-            match source.source.import_fs_files(&self.working, &hashes).await {
-                Ok(()) => {}
+            let imported = match source.source.import_fs_files(&self.working, &hashes).await {
+                Ok(imported) => imported,
                 Err(error) if content_item_failure(&error) => {
+                    progress(ContentTransferEvent::Failed {
+                        object_hash,
+                        content_source: source.name.clone(),
+                        transfer_mode: source.source.transfer_mode(),
+                        error: error.to_string(),
+                    });
                     for hash in &hashes {
                         if self.working.fs_file_path(*hash).is_file() {
                             unresolved.remove(hash);
@@ -1114,7 +1177,7 @@ impl SecondaryResolver {
                     continue;
                 }
                 Err(error) => return Err(error.into_store_error()),
-            }
+            };
             let bytes = hashes.iter().try_fold(0_u64, |total, hash| {
                 let path = self.working.fs_file_path(*hash);
                 let metadata = fs::symlink_metadata(&path).map_err(|error| {
@@ -1140,6 +1203,7 @@ impl SecondaryResolver {
                 transfer_mode: source.source.transfer_mode(),
                 files: hashes.len() as u64,
                 bytes,
+                encoded_bytes: imported.encoded_bytes,
                 duration_ms: duration_ms(started),
             };
             progress(ContentTransferEvent::Finished(report.clone()));
@@ -1690,7 +1754,7 @@ mod tests {
             &self,
             _working: &Store,
             _hashes: &[FsFileHash],
-        ) -> Result<(), ProviderError> {
+        ) -> Result<ContentProviderImport<()>, ProviderError> {
             Err(ProviderError::repository_content(
                 RepositoryError::invalid_repository("advertised fs-file is corrupt"),
             ))
@@ -1700,7 +1764,7 @@ mod tests {
             &self,
             _working: &Store,
             _hash: ObjectHash,
-        ) -> Result<ContentImportOutcome, ProviderError> {
+        ) -> Result<ContentProviderImport<ContentImportOutcome>, ProviderError> {
             unreachable!("this provider only advertises fs-files")
         }
     }
@@ -1742,7 +1806,7 @@ mod tests {
             &self,
             _working: &Store,
             _hashes: &[FsFileHash],
-        ) -> Result<(), ProviderError> {
+        ) -> Result<ContentProviderImport<()>, ProviderError> {
             unreachable!("ordinary objects have no fs-file closure")
         }
 
@@ -1750,7 +1814,7 @@ mod tests {
             &self,
             _working: &Store,
             _hash: ObjectHash,
-        ) -> Result<ContentImportOutcome, ProviderError> {
+        ) -> Result<ContentProviderImport<ContentImportOutcome>, ProviderError> {
             unreachable!("manifest probe rejects the corrupt object")
         }
     }
@@ -1819,7 +1883,7 @@ mod tests {
             &self,
             _working: &Store,
             _hashes: &[FsFileHash],
-        ) -> Result<(), ProviderError> {
+        ) -> Result<ContentProviderImport<()>, ProviderError> {
             unreachable!("unavailable fs-files are not imported")
         }
 
@@ -1827,7 +1891,7 @@ mod tests {
             &self,
             _working: &Store,
             _hash: ObjectHash,
-        ) -> Result<ContentImportOutcome, ProviderError> {
+        ) -> Result<ContentProviderImport<ContentImportOutcome>, ProviderError> {
             unreachable!("unavailable objects are not imported")
         }
     }
@@ -2064,10 +2128,20 @@ mod tests {
             ],
         );
 
-        let report = resolver.ensure_objects(&[hash]).await.unwrap().remove(0);
+        let mut events = Vec::new();
+        let report = resolver
+            .ensure_objects_with_progress(&[hash], |event| events.push(event))
+            .await
+            .unwrap()
+            .remove(0);
 
         assert_eq!(report.outcome, Some(ContentImportOutcome::Imported));
         assert_eq!(report.content_sources, ["available-local"]);
+        assert!(matches!(
+            events.first(),
+            Some(ContentTransferEvent::Failed { content_source, .. })
+                if content_source == "broken-remote"
+        ));
         assert!(working.object_is_complete(hash).unwrap());
         assert!(object_record_path(&working, hash).is_file());
     }

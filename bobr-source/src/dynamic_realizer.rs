@@ -884,6 +884,39 @@ fn log_content_progress(
     transferred_bytes: &mut u64,
     completed: &mut Vec<ContentTransferReport>,
 ) {
+    if let ContentTransferEvent::Failed {
+        content_source,
+        transfer_mode,
+        error,
+        ..
+    } = &event
+    {
+        logger.log_subject_event(
+            identity,
+            BuildLogEvent {
+                level: BuildLogLevel::Warn,
+                status: BuildStatus::Running,
+                op: Some("repository-content-failure".to_string()),
+                message: format!(
+                    "{} content from '{}' failed verification or retrieval: {error}",
+                    transfer_mode.as_str(),
+                    content_source,
+                ),
+                object_hash: None,
+                raw_log_path: None,
+                details: json!({
+                    "content_failure": true,
+                    "content_provider": content_source,
+                    "transfer_mode": transfer_mode.as_str(),
+                    "error": error,
+                })
+                .as_object()
+                .expect("content failure details are an object")
+                .clone(),
+            },
+        );
+        return;
+    }
     let (mode, message, details) = match event {
         ContentTransferEvent::Started {
             content_source,
@@ -927,12 +960,15 @@ fn log_content_progress(
                 "transfer_mode": mode,
                 "files": report.files,
                 "transfer_bytes": report.bytes,
+                "encoded_bytes": report.encoded_bytes,
+                "decoded_bytes": report.bytes,
                 "bytes": *transferred_bytes,
                 "duration_ms": report.duration_ms,
             });
             completed.push(report);
             (mode, message, details)
         }
+        ContentTransferEvent::Failed { .. } => unreachable!("handled above"),
     };
     logger.log_subject_event(
         identity,
@@ -975,6 +1011,10 @@ fn log_content_terminal(
     }
     let files = transfers.iter().map(|transfer| transfer.files).sum::<u64>();
     let bytes = transfers.iter().map(|transfer| transfer.bytes).sum::<u64>();
+    let encoded_bytes = transfers
+        .iter()
+        .filter_map(|transfer| transfer.encoded_bytes)
+        .sum::<u64>();
     let duration_ms = transfers
         .iter()
         .map(|transfer| transfer.duration_ms)
@@ -987,6 +1027,8 @@ fn log_content_terminal(
                 "transfer_mode": transfer.transfer_mode.as_str(),
                 "files": transfer.files,
                 "bytes": transfer.bytes,
+                "encoded_bytes": transfer.encoded_bytes,
+                "decoded_bytes": transfer.bytes,
                 "duration_ms": transfer.duration_ms,
             })
         })
@@ -1026,7 +1068,10 @@ fn log_content_terminal(
                 "content_providers": providers,
                 "files": files,
                 "bytes": bytes,
+                "encoded_bytes": encoded_bytes,
+                "decoded_bytes": bytes,
                 "duration_ms": duration_ms,
+                "content_summary": true,
             })
             .as_object()
             .expect("content terminal details are an object")

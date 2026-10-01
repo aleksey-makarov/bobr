@@ -402,10 +402,14 @@ impl NetworkScheduler {
                 error: error.to_string(),
             },
         );
-        tokio::select! {
+        let result = tokio::select! {
             _ = self.until_cancelled() => Err(NetworkCancelled),
             _ = tokio::time::sleep(delay) => Ok(()),
+        };
+        if result.is_err() {
+            emit(events, operation, host, url, NetworkEventKind::Cancelled);
         }
+        result
     }
 }
 
@@ -754,6 +758,52 @@ mod tests {
                 .unwrap()
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_retry_backoff_emits_a_terminal_event() {
+        let scheduler = scheduler(1, 1, CancellationToken::new());
+        let events = Arc::new(RecordedEvents::default());
+        let operation = NetworkOperation::RepositoryMetadata {
+            repository: "primary".to_string(),
+            purpose: FetchPurpose::Master,
+        };
+        let waiter = {
+            let scheduler = scheduler.clone();
+            let events = events.clone();
+            tokio::spawn(async move {
+                scheduler
+                    .wait_before_retry(
+                        &operation,
+                        "repo.example",
+                        "https://repo.example/master",
+                        2,
+                        4,
+                        Duration::from_secs(60),
+                        "temporary failure",
+                        events.as_ref(),
+                    )
+                    .await
+            })
+        };
+        for _ in 0..100 {
+            if !events.0.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        scheduler.cancel();
+        assert!(
+            timeout(Duration::from_secs(1), waiter)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        let events = events.0.lock().unwrap();
+        assert!(matches!(events[0].kind, NetworkEventKind::Retry { .. }));
+        assert!(matches!(events[1].kind, NetworkEventKind::Cancelled));
     }
 
     #[derive(Debug)]

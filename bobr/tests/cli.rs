@@ -864,6 +864,24 @@ fn cli_does_not_fetch_remote_provider_for_complete_working_object() {
         String::from_utf8(output.stdout).unwrap().trim(),
         object_hash.to_string()
     );
+    let started = fs::read_to_string(logs.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|event| event["status"] == "run-started")
+        .unwrap();
+    assert_eq!(
+        started["details"]["providers"],
+        json!([{
+            "name": "remote",
+            "capability": "content",
+            "backend": {
+                "kind": "remote",
+                "master_url": "https://repo.example.test/master"
+            }
+        }])
+    );
+    assert!(!started.to_string().contains("repository-key.der"));
 }
 
 #[test]

@@ -306,6 +306,8 @@ pub struct RunOutcomeStats {
     pub hardlinked: u64,
     /// Known objects completed through at least one copy repository transfer.
     pub copied: u64,
+    /// Known objects completed through at least one remote repository download.
+    pub remote: u64,
     /// Source objects already complete in the working store.
     pub already_present: u64,
 }
@@ -321,7 +323,12 @@ struct OutcomeSink {
     secondary: AtomicU64,
     hardlinked: AtomicU64,
     copied: AtomicU64,
+    remote: AtomicU64,
     already_present: AtomicU64,
+}
+
+fn is_acquisition_tag(tag: &str) -> bool {
+    matches!(tag, "Source" | "SecondaryContent" | "RepositoryMetadata")
 }
 
 impl OutcomeSink {
@@ -337,6 +344,7 @@ impl OutcomeSink {
             secondary: load(&self.secondary),
             hardlinked: load(&self.hardlinked),
             copied: load(&self.copied),
+            remote: load(&self.remote),
             already_present: load(&self.already_present),
         }
     }
@@ -347,17 +355,22 @@ impl EventSink for OutcomeSink {
         let Some(subject) = &record.subject else {
             return;
         };
+        let network_lifecycle = record
+            .details
+            .get("network_lifecycle")
+            .and_then(Value::as_bool)
+            == Some(true);
         match record.status.as_str() {
-            "done" if subject.tag != "Source" && subject.tag != "SecondaryContent" => {
+            "done" if !is_acquisition_tag(&subject.tag) => {
                 self.built.fetch_add(1, Ordering::Relaxed);
             }
             "cache-hit" => {
                 self.cache_hit.fetch_add(1, Ordering::Relaxed);
             }
-            "failed" => {
+            "failed" if !network_lifecycle => {
                 self.failed.fetch_add(1, Ordering::Relaxed);
             }
-            "cancelled" => {
+            "cancelled" if !network_lifecycle => {
                 self.cancelled.fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
@@ -386,6 +399,7 @@ impl EventSink for OutcomeSink {
                 match outcome {
                     "hardlink" => self.hardlinked.fetch_add(1, Ordering::Relaxed),
                     "copy" => self.copied.fetch_add(1, Ordering::Relaxed),
+                    "download" => self.remote.fetch_add(1, Ordering::Relaxed),
                     _ => continue,
                 };
             }
@@ -1189,7 +1203,18 @@ impl FetchProgress {
             return false;
         };
         let key = subject.build_key.as_str();
-        if subject.tag == "SecondaryContent" && self.dynamic_content.insert(key.to_string()) {
+        if record
+            .details
+            .get("content_summary")
+            .and_then(Value::as_bool)
+            == Some(true)
+            && !self.subjects.contains_key(key)
+        {
+            return false;
+        }
+        if (subject.tag == "SecondaryContent" || subject.tag == "RepositoryMetadata")
+            && self.dynamic_content.insert(key.to_string())
+        {
             self.total += 1;
         }
 
@@ -1940,8 +1965,7 @@ impl LiveProgress {
         let network = transfer == Some("network");
         let activity_transfer = network || transfer == Some("copy");
         let builder_queue_event = record.subject.as_ref().is_some_and(|subject| {
-            subject.tag != "Source"
-                && subject.tag != "SecondaryContent"
+            !is_acquisition_tag(&subject.tag)
                 && status == BuildStatus::CacheMiss.as_str()
                 && record
                     .details
@@ -1957,13 +1981,12 @@ impl LiveProgress {
         }
         if status == BuildStatus::Start.as_str()
             && let Some(subject) = &record.subject
-            && subject.tag != "Source"
-            && subject.tag != "SecondaryContent"
+            && !is_acquisition_tag(&subject.tag)
         {
             self.queued_builders.remove(&subject.build_key);
         }
         let source_terminal = record.subject.as_ref().is_some_and(|subject| {
-            (subject.tag == "Source" || subject.tag == "SecondaryContent")
+            is_acquisition_tag(&subject.tag)
                 && matches!(
                     status,
                     value if value == BuildStatus::CacheHit.as_str()
@@ -1998,8 +2021,17 @@ impl LiveProgress {
             if let Some(subject) = &record.subject {
                 let key = ActivityKey::Source(subject.build_key.clone());
                 if status == BuildStatus::Failed.as_str() {
-                    self.viewport
-                        .fail(&key, format_progress_line(record, &self.run_log_dir));
+                    if record
+                        .details
+                        .get("network_lifecycle")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                    {
+                        self.finish_activity(&key);
+                    } else {
+                        self.viewport
+                            .fail(&key, format_progress_line(record, &self.run_log_dir));
+                    }
                 } else if source_terminal {
                     self.finish_activity(&key);
                 } else if source_transfer_started
@@ -2042,7 +2074,7 @@ impl LiveProgress {
             return;
         };
 
-        if subject.tag == "Source" || subject.tag == "SecondaryContent" {
+        if is_acquisition_tag(&subject.tag) {
             if record.level >= BuildLogLevel::Warn {
                 let _ = self
                     .multi
@@ -2305,6 +2337,7 @@ fn format_outcome_details(record: &EventLogRecord) -> String {
             format!("{} downloaded", detail_u64(record, "downloaded")),
             format!("{} local", detail_u64(record, "local")),
             format!("{} secondary", detail_u64(record, "secondary")),
+            format!("{} remote", detail_u64(record, "remote")),
             format!("{} hardlinked", detail_u64(record, "hardlinked")),
             format!("{} copied", detail_u64(record, "copied")),
             format!("{} already-present", detail_u64(record, "already_present")),
@@ -3036,7 +3069,11 @@ mod tests {
         ));
         sink.write_event(&content_record(
             BuildStatus::Done,
-            json!({ "content_outcomes": ["hardlink", "copy"] }),
+            json!({ "content_outcomes": ["hardlink", "copy", "download"] }),
+        ));
+        sink.write_event(&content_record(
+            BuildStatus::Failed,
+            json!({ "network_lifecycle": true }),
         ));
 
         assert_eq!(
@@ -3049,6 +3086,7 @@ mod tests {
                 downloaded: 1,
                 hardlinked: 1,
                 copied: 1,
+                remote: 1,
                 already_present: 1,
                 ..RunOutcomeStats::default()
             }
@@ -3368,6 +3406,82 @@ mod tests {
             Some(ActivityKey::Source("object-key".to_string()))
         );
         assert_eq!(live.running(), 0);
+    }
+
+    #[test]
+    fn repository_metadata_uses_the_fetch_view_without_becoming_a_builder() {
+        let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
+        sink.write_event(&live_run_record(
+            BuildStatus::RunStarted,
+            json!({ "reachable": 1, "reachable_sources": 0, "jobs": 1 }),
+        ));
+        let event = BuildLogEvent {
+            level: BuildLogLevel::Info,
+            status: BuildStatus::Running,
+            op: Some("repository-metadata".to_string()),
+            message: "fetching build index".to_string(),
+            object_hash: None,
+            raw_log_path: None,
+            details: json!({
+                "network_lifecycle": true,
+                "transfer": "network",
+                "host": "repo.example",
+                "bytes": 128,
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        };
+        let subject = SubjectIdentity::new(
+            "RepositoryMetadata",
+            "archive build index",
+            "repository:metadata:archive:build",
+        );
+        sink.write_event(&EventLogRecord::assemble(
+            0,
+            None,
+            Some(&subject),
+            &event,
+            Path::new("/run"),
+        ));
+
+        let ProgressSink::Live(state) = &sink else {
+            panic!("expected live sink");
+        };
+        let live = state.lock().unwrap();
+        assert_eq!(live.fetch_progress.active(), 1);
+        assert_eq!(live.running(), 0);
+        assert_eq!(live.fetch_progress.total, 1);
+    }
+
+    #[test]
+    fn content_summary_does_not_count_a_finished_network_item_twice() {
+        let mut progress = FetchProgress::new(0);
+        let running = content_record(
+            BuildStatus::Running,
+            json!({ "transfer": "network", "host": "repo.example", "bytes": 12 }),
+        );
+        assert!(progress.handle(&running));
+        let finished = content_record(
+            BuildStatus::Done,
+            json!({ "transfer": "network", "host": "repo.example", "bytes": 12 }),
+        );
+        assert!(progress.handle(&finished));
+        assert_eq!(progress.done, 1);
+        assert_eq!(progress.total, 1);
+
+        let summary = content_record(
+            BuildStatus::Done,
+            json!({
+                "content_summary": true,
+                "content_outcomes": ["download"],
+                "encoded_bytes": 12,
+                "decoded_bytes": 30,
+            }),
+        );
+        assert!(!progress.handle(&summary));
+        assert_eq!(progress.done, 1);
+        assert_eq!(progress.total, 1);
     }
 
     #[test]

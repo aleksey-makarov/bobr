@@ -4,17 +4,21 @@ use crate::request::{
 };
 use bobr_core::{
     BuildLogEvent, BuildLogLevel, BuildRunLogger, BuildStatus, CancellationToken, ObjectHash, Run,
+    SubjectIdentity,
 };
-use bobr_repo::{HttpTransport, ReaderPolicy, RepositoryReader, RepositoryTlsConfig, TrustedKeys};
+use bobr_repo::{
+    FetchPurpose, HttpTransport, ReaderPolicy, RepositoryReader, RepositoryTlsConfig, TrustedKeys,
+};
 use bobr_runtime::runtime_provider::{RuntimeProvider, runtime_provider_for_current_process};
 use bobr_source::build_executor::BuildExecutor;
 use bobr_source::dynamic_realizer::DynamicRealizer;
 use bobr_source::graph::{GraphPlanError, GraphPlanErrorKind, plan_graph};
 use bobr_source::{
     LocalBackendRegistry, LocalContentProvider, LocalIoScheduler, LocalMappingProvider,
-    NamedContentProvider, NamedMappingProvider, NetworkEvent, NetworkEventSink, NetworkScheduler,
-    RemoteBackendRegistry, RemoteContentProvider, RemoteMappingProvider, RemoteRepositoryBackend,
-    ScheduledRepositoryTransport, SecondaryResolver,
+    NamedContentProvider, NamedMappingProvider, NetworkEvent, NetworkEventKind, NetworkEventSink,
+    NetworkOperation, NetworkScheduler, RemoteBackendRegistry, RemoteContentProvider,
+    RemoteMappingProvider, RemoteRepositoryBackend, ScheduledRepositoryTransport,
+    SecondaryResolver,
 };
 #[cfg(test)]
 use bobr_store::ReadOnlyStore;
@@ -90,6 +94,7 @@ pub async fn realize(
         &secondaries.repository_cache,
         network.clone(),
         limits.resolved_max_local_jobs(),
+        logger.clone(),
     )?;
     let provider_log = provider_log_details(&providers);
     let (mapping_providers, content_providers) = provider_capabilities(
@@ -237,11 +242,212 @@ enum OpenedProviderBackend {
     },
 }
 
-#[derive(Debug)]
-struct IgnoreNetworkEvents;
+struct RepositoryNetworkEvents {
+    logger: Arc<BuildRunLogger>,
+}
 
-impl NetworkEventSink for IgnoreNetworkEvents {
-    fn event(&self, _event: NetworkEvent) {}
+impl std::fmt::Debug for RepositoryNetworkEvents {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RepositoryNetworkEvents")
+            .finish_non_exhaustive()
+    }
+}
+
+impl NetworkEventSink for RepositoryNetworkEvents {
+    fn event(&self, event: NetworkEvent) {
+        let (repository, purpose, class) = match &event.operation {
+            NetworkOperation::RepositoryMetadata {
+                repository,
+                purpose,
+            } => (repository, purpose, "metadata"),
+            NetworkOperation::RepositoryContent {
+                repository,
+                purpose,
+            } => (repository, purpose, "content"),
+            NetworkOperation::Source { .. } => return,
+        };
+        let (identity, purpose_name, object_hash) = repository_subject(repository, *purpose, class);
+        let mut details = json!({
+            "network_lifecycle": true,
+            "transfer": "network",
+            "repository": repository,
+            "repository_class": class,
+            "repository_purpose": purpose_name,
+            "host": event.host,
+        })
+        .as_object()
+        .expect("repository network details are an object")
+        .clone();
+        let (level, status, message) = match event.kind {
+            NetworkEventKind::Started { attempt } => {
+                details.insert("attempt".to_string(), json!(attempt));
+                details.insert("bytes".to_string(), json!(0));
+                (
+                    BuildLogLevel::Info,
+                    BuildStatus::Running,
+                    format!("fetching {purpose_name} from {}", event.host),
+                )
+            }
+            NetworkEventKind::Progress {
+                attempt,
+                bytes,
+                total_bytes,
+            } => {
+                details.insert("attempt".to_string(), json!(attempt));
+                details.insert("bytes".to_string(), json!(bytes));
+                details.insert("encoded_bytes".to_string(), json!(bytes));
+                if let Some(total_bytes) = total_bytes {
+                    details.insert("total_bytes".to_string(), json!(total_bytes));
+                }
+                (
+                    BuildLogLevel::Progress,
+                    BuildStatus::Running,
+                    format!(
+                        "received {bytes} bytes of {purpose_name} from {}",
+                        event.host
+                    ),
+                )
+            }
+            NetworkEventKind::Retry {
+                attempt,
+                attempts,
+                delay,
+                error,
+            } => {
+                details.insert("attempt".to_string(), json!(attempt));
+                details.insert("attempts".to_string(), json!(attempts));
+                details.insert("retry_host".to_string(), json!(event.host));
+                details.insert("retry_delay_ms".to_string(), json!(duration_ms(delay)));
+                details.insert("retry_reason".to_string(), json!(error));
+                (
+                    BuildLogLevel::Info,
+                    BuildStatus::Running,
+                    format!(
+                        "retrying {purpose_name} from {} in {:.1}s (attempt {attempt} of {attempts})",
+                        event.host,
+                        delay.as_secs_f64(),
+                    ),
+                )
+            }
+            NetworkEventKind::Finished {
+                attempt,
+                bytes,
+                total_bytes,
+                duration,
+            } => {
+                details.insert("attempt".to_string(), json!(attempt));
+                details.insert("bytes".to_string(), json!(bytes));
+                details.insert("encoded_bytes".to_string(), json!(bytes));
+                details.insert("duration_ms".to_string(), json!(duration_ms(duration)));
+                if let Some(total_bytes) = total_bytes {
+                    details.insert("total_bytes".to_string(), json!(total_bytes));
+                }
+                (
+                    BuildLogLevel::Info,
+                    BuildStatus::Done,
+                    format!(
+                        "fetched {bytes} bytes of {purpose_name} from {} in {} ms",
+                        event.host,
+                        duration_ms(duration),
+                    ),
+                )
+            }
+            NetworkEventKind::Failed { attempt, error } => {
+                details.insert("attempt".to_string(), json!(attempt));
+                details.insert("network_error".to_string(), json!(error.clone()));
+                (
+                    BuildLogLevel::Warn,
+                    BuildStatus::Failed,
+                    format!(
+                        "failed to fetch {purpose_name} from {}: {error}",
+                        event.host
+                    ),
+                )
+            }
+            NetworkEventKind::Cancelled => (
+                BuildLogLevel::Info,
+                BuildStatus::Cancelled,
+                format!("cancelled {purpose_name} transfer from {}", event.host),
+            ),
+        };
+        self.logger.log_subject_event(
+            &identity,
+            BuildLogEvent {
+                level,
+                status,
+                op: Some(format!("repository-{class}")),
+                message,
+                object_hash,
+                raw_log_path: None,
+                details,
+            },
+        );
+    }
+}
+
+fn repository_subject(
+    repository: &str,
+    purpose: FetchPurpose,
+    class: &str,
+) -> (SubjectIdentity, String, Option<ObjectHash>) {
+    let (tag, kind, value, object_hash) = match purpose {
+        FetchPurpose::Master => ("RepositoryMetadata", "master", None, None),
+        FetchPurpose::BuildIndex(hash) => (
+            "RepositoryMetadata",
+            "build index",
+            Some(hash.to_string()),
+            None,
+        ),
+        FetchPurpose::ReuseIndex(hash) => (
+            "RepositoryMetadata",
+            "reuse index",
+            Some(hash.to_string()),
+            None,
+        ),
+        FetchPurpose::ObjectList(hash) => (
+            "RepositoryMetadata",
+            "object list",
+            Some(hash.to_string()),
+            None,
+        ),
+        FetchPurpose::FsFileList(hash) => (
+            "RepositoryMetadata",
+            "filesystem-file list",
+            Some(hash.to_string()),
+            None,
+        ),
+        FetchPurpose::Object(hash) => (
+            "SecondaryContent",
+            "object",
+            Some(hash.to_string()),
+            Some(hash),
+        ),
+        FetchPurpose::FsFile(hash) => (
+            "SecondaryContent",
+            "filesystem file",
+            Some(hash.to_string()),
+            None,
+        ),
+    };
+    let purpose_name = match &value {
+        Some(value) => format!("{kind} {}", &value[..12]),
+        None => kind.to_string(),
+    };
+    let key = match value {
+        Some(value) if matches!(purpose, FetchPurpose::Object(_)) => value,
+        Some(value) => format!("repository:{class}:{repository}:{kind}:{value}"),
+        None => format!("repository:{class}:{repository}:{kind}"),
+    };
+    (
+        SubjectIdentity::new(tag, format!("{repository} {purpose_name}"), key),
+        purpose_name,
+        object_hash,
+    )
+}
+
+fn duration_ms(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn open_providers(
@@ -250,6 +456,7 @@ fn open_providers(
     repository_cache: &std::path::Path,
     network: NetworkScheduler,
     max_local_jobs: usize,
+    logger: Arc<BuildRunLogger>,
 ) -> Result<Vec<OpenedProvider>, ExecutionError> {
     let mut canonical_capabilities = HashMap::new();
     let mut canonical_by_name = HashMap::new();
@@ -317,10 +524,12 @@ fn open_providers(
                             None => RepositoryTlsConfig::default_roots(),
                         };
                         let transport = Arc::new(ScheduledRepositoryTransport::new(
-                            identity,
+                            provider.name.clone(),
                             Arc::new(HttpTransport::anonymous(&tls)?),
                             network.clone(),
-                            Arc::new(IgnoreNetworkEvents),
+                            Arc::new(RepositoryNetworkEvents {
+                                logger: logger.clone(),
+                            }),
                         ));
                         RepositoryReader::with_policy(
                             master_url.clone(),
@@ -523,6 +732,7 @@ fn log_run_finished(logger: &BuildRunLogger, result: Result<&[GoalResult], &Exec
     details["secondary"] = json!(stats.secondary);
     details["hardlinked"] = json!(stats.hardlinked);
     details["copied"] = json!(stats.copied);
+    details["remote"] = json!(stats.remote);
     details["already_present"] = json!(stats.already_present);
     details["logging_errors"] = json!(logger.logging_errors());
     let retries = logger.download_retries();
@@ -549,8 +759,71 @@ fn log_run_finished(logger: &BuildRunLogger, result: Result<&[GoalResult], &Exec
 mod tests {
     use super::*;
     use bobr_core::BuildKey;
+    use bobr_repo::FetchPurpose;
+    use bobr_source::NetworkEventKind;
+    use serde_json::Value;
     use std::str::FromStr;
+    use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn repository_network_events_are_structured_and_do_not_count_as_failures() {
+        let temp = tempdir().unwrap();
+        let run_log_dir = temp.path().join("logs");
+        let logger = Arc::new(BuildRunLogger::new(&run_log_dir, "run", true).unwrap());
+        let sink = RepositoryNetworkEvents {
+            logger: logger.clone(),
+        };
+        let metadata = NetworkOperation::RepositoryMetadata {
+            repository: "archive".to_string(),
+            purpose: FetchPurpose::Master,
+        };
+        sink.event(NetworkEvent {
+            operation: metadata.clone(),
+            host: "repo.example".to_string(),
+            url: "https://repo.example/master".to_string(),
+            kind: NetworkEventKind::Started { attempt: 1 },
+        });
+        sink.event(NetworkEvent {
+            operation: metadata,
+            host: "repo.example".to_string(),
+            url: "https://repo.example/master".to_string(),
+            kind: NetworkEventKind::Failed {
+                attempt: 1,
+                error: "connection reset".to_string(),
+            },
+        });
+        let object = ObjectHash::from_str(&"3".repeat(64)).unwrap();
+        sink.event(NetworkEvent {
+            operation: NetworkOperation::RepositoryContent {
+                repository: "archive".to_string(),
+                purpose: FetchPurpose::Object(object),
+            },
+            host: "cdn.example".to_string(),
+            url: format!("https://cdn.example/o/{object}"),
+            kind: NetworkEventKind::Finished {
+                attempt: 1,
+                bytes: 123,
+                total_bytes: Some(123),
+                duration: Duration::from_millis(25),
+            },
+        });
+        logger.flush();
+
+        let events = fs::read_to_string(run_log_dir.join("events.jsonl")).unwrap();
+        let records = events
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["subject"]["tag"], "RepositoryMetadata");
+        assert_eq!(records[0]["details"]["repository"], "archive");
+        assert_eq!(records[0]["details"]["repository_purpose"], "master");
+        assert_eq!(records[1]["level"], "warn");
+        assert_eq!(records[2]["subject"]["tag"], "SecondaryContent");
+        assert_eq!(records[2]["details"]["encoded_bytes"], 123);
+        assert_eq!(logger.outcome_stats().failed, 0);
+    }
 
     #[tokio::test]
     async fn local_mapping_and_content_capabilities_are_independent() {

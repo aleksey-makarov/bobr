@@ -1,6 +1,8 @@
 //! Remote repository backends exposed through secondary capabilities.
 
-use crate::{ContentProvider, LocalIoScheduler, MappingProvider, ProviderError};
+use crate::{
+    ContentProvider, ContentProviderImport, LocalIoScheduler, MappingProvider, ProviderError,
+};
 use async_trait::async_trait;
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
 use bobr_repo::{
@@ -233,6 +235,7 @@ impl MappingProvider for RemoteMappingProvider {
 #[derive(Debug, Default)]
 struct StagedObjectState {
     staging: Option<RepositoryObjectStaging>,
+    encoded_bytes: u64,
 }
 
 /// Self-verifying object and fs-file content from one remote repository.
@@ -303,14 +306,15 @@ impl RemoteContentProvider {
             .backend
             .repository_result(snapshot.fetch_object(hash, staging.path()).await)
             .map_err(ProviderError::repository_content)?;
-        if found.is_none() {
+        let Some(found) = found else {
             return Err(ProviderError::repository_content(
                 RepositoryError::invalid_repository(format!(
                     "remote repository '{}' no longer advertises object '{hash}'",
                     self.backend.identity()
                 )),
             ));
-        }
+        };
+        state.encoded_bytes = found.encoded_bytes;
         state.staging = Some(staging);
         Ok(())
     }
@@ -412,7 +416,7 @@ impl ContentProvider for RemoteContentProvider {
         &self,
         working: &Store,
         hashes: &[FsFileHash],
-    ) -> Result<(), ProviderError> {
+    ) -> Result<ContentProviderImport<()>, ProviderError> {
         if working.root() != self.working.root() {
             return Err(StoreError::InvalidInput(format!(
                 "remote content provider for '{}' cannot publish into working store '{}'",
@@ -428,6 +432,7 @@ impl ContentProvider for RemoteContentProvider {
             .copied()
             .filter(|hash| seen.insert(*hash))
             .collect::<Vec<_>>();
+        let mut encoded_bytes = 0_u64;
         for batch in hashes.chunks(FS_FILE_IMPORT_BATCH_SIZE) {
             let mut tasks = JoinSet::new();
             for hash in batch {
@@ -454,6 +459,7 @@ impl ContentProvider for RemoteContentProvider {
                         self.backend.identity()
                     )))
                 })?;
+                encoded_bytes = encoded_bytes.saturating_add(representation.encoded_bytes());
                 representations.push(representation);
             }
             let runtime = self.runtime.clone();
@@ -471,14 +477,14 @@ impl ContentProvider for RemoteContentProvider {
             })?
             .map_err(ProviderError::repository_content)?;
         }
-        Ok(())
+        Ok(ContentProviderImport::remote((), encoded_bytes))
     }
 
     async fn import_object(
         &self,
         working: &Store,
         hash: ObjectHash,
-    ) -> Result<ContentImportOutcome, ProviderError> {
+    ) -> Result<ContentProviderImport<ContentImportOutcome>, ProviderError> {
         if working.root() != self.working.root() {
             return Err(StoreError::InvalidInput(format!(
                 "remote content provider for '{}' cannot publish into working store '{}'",
@@ -488,22 +494,30 @@ impl ContentProvider for RemoteContentProvider {
             .into());
         }
         if self.working_object_path(hash).await?.is_some() {
-            return Ok(ContentImportOutcome::AlreadyPresent);
+            return Ok(ContentProviderImport::remote(
+                ContentImportOutcome::AlreadyPresent,
+                0,
+            ));
         }
         let staged = self.staged_object(hash)?;
         let mut state = staged.lock().await;
         if self.working_object_path(hash).await?.is_some() {
-            return Ok(ContentImportOutcome::AlreadyPresent);
+            return Ok(ContentProviderImport::remote(
+                ContentImportOutcome::AlreadyPresent,
+                0,
+            ));
         }
         self.ensure_staged_locked(hash, &mut state).await?;
         let staging = state
             .staging
             .take()
             .expect("staged object exists after successful download");
+        let encoded_bytes = std::mem::take(&mut state.encoded_bytes);
         let working = self.working.clone();
         self.local_io
             .run(move || working.publish_repository_object(staging, hash))
             .await
+            .map(|outcome| ContentProviderImport::remote(outcome, encoded_bytes))
             .map_err(remote_store_validation_error)
     }
 }
@@ -772,13 +786,12 @@ mod tests {
             None
         );
         assert_eq!(fixture.transport.request_count(&fixture.object_url), 1);
-        assert_eq!(
-            content
-                .import_object(&fixture.working, fixture.object_hash)
-                .await
-                .unwrap(),
-            ContentImportOutcome::Imported
-        );
+        let imported = content
+            .import_object(&fixture.working, fixture.object_hash)
+            .await
+            .unwrap();
+        assert_eq!(imported.value, ContentImportOutcome::Imported);
+        assert!(imported.encoded_bytes.is_some_and(|bytes| bytes > 0));
         assert_eq!(fixture.transport.request_count(&fixture.object_url), 1);
         assert!(
             fixture
@@ -915,7 +928,16 @@ mod tests {
             LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
         );
         let hashes = files.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
-        content.import_fs_files(&working, &hashes).await.unwrap();
+        let imported = content.import_fs_files(&working, &hashes).await.unwrap();
+        assert_eq!(
+            imported.encoded_bytes,
+            Some(
+                files
+                    .iter()
+                    .map(|(_, path)| std::fs::metadata(path).unwrap().len())
+                    .sum()
+            )
+        );
         for hash in hashes {
             assert!(working.fs_file_path(hash).is_file());
             assert_eq!(

@@ -418,6 +418,15 @@ impl RepositoryReader {
     }
 }
 
+/// One verified ordinary object downloaded from a remote repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FetchedObject {
+    /// Decoded object kind published into the caller-owned staging path.
+    pub kind: ObjectKind,
+    /// Complete encoded representation length received from the repository.
+    pub encoded_bytes: u64,
+}
+
 impl RepositorySnapshot {
     /// Returns the authenticated logical master for this immutable snapshot.
     pub fn master(&self) -> &Master {
@@ -519,7 +528,7 @@ impl RepositorySnapshot {
         &self,
         hash: ObjectHash,
         destination: &Path,
-    ) -> Result<Option<ObjectKind>, RepositoryError> {
+    ) -> Result<Option<FetchedObject>, RepositoryError> {
         if !self.contains_object(hash).await? {
             return Ok(None);
         }
@@ -534,6 +543,7 @@ impl RepositorySnapshot {
             )
             .await?;
         let encoded_path = encoded.path().to_path_buf();
+        let encoded_bytes = encoded.as_file().metadata()?.len();
         let destination = destination.to_path_buf();
         let permit = self
             .reader
@@ -543,13 +553,18 @@ impl RepositorySnapshot {
             .acquire_owned()
             .await
             .map_err(|_| RepositoryError::runtime("repository decoder semaphore is closed"))?;
-        tokio::task::spawn_blocking(move || {
+        let kind = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             decode_object(&encoded_path, hash, &destination)
         })
         .await
-        .map_err(|error| RepositoryError::runtime(format!("object decoder task failed: {error}")))?
-        .map(Some)
+        .map_err(|error| {
+            RepositoryError::runtime(format!("object decoder task failed: {error}"))
+        })??;
+        Ok(Some(FetchedObject {
+            kind,
+            encoded_bytes,
+        }))
     }
 
     /// Downloads one advertised filesystem-file representation.
