@@ -84,6 +84,8 @@ output never emit terminal control sequences.
 
 ```text
 <logs>/
+  context.json                         optional driver-owned run provenance
+  recipe-catalog.json                  optional driver-owned name/tag catalog
   events.jsonl                         run-level event log (the full audit log)
   index.jsonl                          workspace allocation index
   <serial>-<tag>[-<name>]/             one directory per built/materialized subject
@@ -100,6 +102,11 @@ events plus a copy of every subject event. Each subject's own
 and subject-level copies are byte-identical, so tooling can match them.
 
 Cache hits and other run-level events do **not** create a subject directory.
+
+`context.json` and `recipe-catalog.json` are not part of the event protocol and
+are not written by the Bobr logger. The standard recipes driver places them
+beside the event log so inspection tools can associate a store mapping with the
+Bobr/recipes versions and human-facing recipe labels observed by that run.
 
 ## Event record
 

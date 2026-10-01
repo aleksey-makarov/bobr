@@ -171,6 +171,8 @@ published out of it by renaming and hardlinking. Their contents are:
 
 ```text
 <logs>/
+  context.json
+  recipe-catalog.json
   events.jsonl
   index.jsonl
   <00000000>-<tag>[-<name>]/
@@ -277,6 +279,21 @@ Each run writes:
 - one run-level structured event log under `<logs>/events.jsonl`
 - one workspace index under `<logs>/index.jsonl`
 - per-subject logs under `<logs>/<00000000>-<tag>[-<name>]/`
+
+When the standard `bobr-recipes/bin/bobr-build.sh` driver starts the run, it
+also writes two inspection sidecars at the run-log root:
+
+- `context.json` records the target, run outcome, `bobr --build-info`, and the
+  recipes checkout commit and dirty state when Git provenance is available;
+- `recipe-catalog.json` contains only the reachable recipe names and builder
+  tags needed by store-inspection tools. It deliberately omits builder configs,
+  origins, provider configuration, and credentials.
+
+The driver creates no sidecars for a dry run. It records `running` before
+invoking Bobr and atomically replaces that state with `success` or `failed`
+after Bobr returns, so an interrupted process leaves an identifiable incomplete
+run. These files are diagnostic metadata, not inputs to cache lookup or object
+identity.
 
 The run id comes from the request; `bobr-build.sh` derives it from the local
 `<YYMMDDhhmmss>` timestamp and appends `.1`, `.2`, and so on when a directory of

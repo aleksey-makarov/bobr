@@ -6,7 +6,7 @@ from a checkout you are editing and the recipes tree is one you keep changing.
 
 The arrangement is deliberately the same as a user's. You install the host
 tools into one directory on `PATH`; from there, everything — the recipes'
-`bin/bobr-build.sh`, the QEMU bundles, `bobr-rebuild-world.sh` — finds them
+`bin/bobr-build.sh` and the QEMU bundles — finds them
 exactly as it finds an unpacked release. Nothing downstream knows or cares that
 the binaries came from source.
 
@@ -82,51 +82,28 @@ bin/bobr-update-fsobj-hashes.sh
 
 The build tells you when this is needed, and names the tool.
 
-## Rebuilding the world
+## Cold world builds
 
-`tools/bobr-rebuild-world.sh`, in the recipes repository, rebuilds the complete
-artifact-only `world` target from scratch, into a store that has never been
-written to. Explicit acceptance tests remain in the separate `test_all` target.
-Use a world rebuild to prove the shipped artifacts build from nothing — a cached
-store can hide a recipe that no longer builds, because the object it would
-produce is already there.
+The artifact-only `world` target and the explicit acceptance-test target
+`test_all` are ordinary profile targets. To prove the shipped artifacts build
+without working-store mappings, point a profile at a newly created empty store
+and run the normal driver:
 
 ```sh
-tools/bobr-rebuild-world.sh
+mkdir /path/to/new-store
+bin/bobr-build.sh --target world /path/to/profile.ncl
 ```
 
-Install the tools first, either with the source checkout's release gate or with
-the public `install.sh`, and put their common directory on `PATH`.
-`bobr-rebuild-world.sh` does not install, update, or override them. It requires
-all four host commands to resolve from the same directory, rejects a `bobr`
-whose build provenance is unknown, and records the complete compact
-`bobr --build-info` value in the new store. Dirty developer builds are allowed
-and remain identifiable there.
+The profile may still configure content-only secondary providers, including a
+previous local store or a remote repository. They can avoid downloading stable
+payloads again without exposing their build or reuse mappings.
 
-In order, the script:
-
-1. pulls the recipes and verifies the already installed host tools;
-2. creates `<workspace>/bobr-store.<YYMMDDhhmmss>` and writes a build profile
-   there which imports `build-profile/bobr-user.ncl` and points its store at
-   the new directory — a rebuild therefore follows the maintained preset
-   instead of a copied template that could drift from it;
-3. adds the last successful store as a content-only hardlink provider; known
-   Source content is acquired from it lazily, but its build and reuse mappings
-   are unavailable, so this remains a cold build;
-4. realizes `world` through `bin/bobr-build.sh`; Source acquisition and builder
-   execution share one scheduler and one request;
-5. repoints the `bobr-store` symlink at the new store — **only if the build
-   succeeded**, so a failed rebuild leaves you with the last good one.
+Each real invocation records its Bobr and recipes provenance, outcome, and a
+compact recipe-name catalog beside the structured log in
+`<logs>/<run-id>/context.json` and `recipe-catalog.json`. These records are
+diagnostic metadata used by store-inspection tools; the authoritative build and
+reuse mappings remain in the store itself. A dry run creates no record.
 
 The hash locks are left alone: `bin/bobr-build.sh` checks them and refuses on a
 stale one, which is what should happen to a checkout that says one thing and
-contains another.
-
-Beside the store it records what produced it: `hashes.txt` with Bobr's build
-information and the recipes commit, `bobr-rebuild-world.log` with the per-phase
-timings, and `host-stats.log` with load and memory samples taken around the
-build.
-
-Expect hours. Recorded runs took 76 and 106 minutes with the sources already
-present; from an empty workspace the downloads add to that. Old stores are left
-alone — remove them when you are sure you no longer want to fall back to one.
+contains another. Expect a cold `world` build to take hours.
