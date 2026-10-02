@@ -248,7 +248,7 @@ inputs = {
 `script_config` (materialized at `@{config}`): `configure_args`, `make_args`,
 `setup_args`, and `perl_args` become the arguments of the matching command;
 `env` entries are loaded by each synthetic build-script phase; `source_subdir`
-builds a subdirectory of the source; and `in-tree` (Autotools) builds in the
+builds a subdirectory of the source; and `in_tree` (Autotools) builds in the
 source tree instead of a separate build directory. Hooks are independent
 `Sandbox` steps, so a hook that needs environment variables must declare its
 own `env`.
@@ -265,7 +265,7 @@ synthetic builder.
 
 - **Steps:** `./configure --prefix=/usr <configure_args>` → `make -j <make_args>`
   → `make <make_args> install`.
-- **Config** (all optional): `configure_args`, `make_args`, `env`, `in-tree`,
+- **Config** (all optional): `configure_args`, `make_args`, `env`, `in_tree`,
   `source_subdir`, `pre_configure`, `post_install`.
 - **Default build tools:** the common native toolchain plus `autoconf`, `m4`,
   and `perl`.
