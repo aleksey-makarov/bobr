@@ -1963,7 +1963,13 @@ impl LiveProgress {
 
         let transfer = record.details.get("transfer").and_then(Value::as_str);
         let network = transfer == Some("network");
-        let activity_transfer = network || transfer == Some("copy");
+        // A top-level local hardlink is normally too short-lived to deserve an
+        // activity row. An fs-tree closure is one batched runtime operation,
+        // however, and can spend tens of seconds validating and linking many
+        // thousands of files. Track that batch as one stable object activity.
+        let hardlink_fs_files = transfer == Some("hardlink")
+            && record.details.get("content_kind").and_then(Value::as_str) == Some("fs-files");
+        let activity_transfer = network || transfer == Some("copy") || hardlink_fs_files;
         let builder_queue_event = record.subject.as_ref().is_some_and(|subject| {
             !is_acquisition_tag(&subject.tag)
                 && status == BuildStatus::CacheMiss.as_str()
@@ -3521,6 +3527,103 @@ mod tests {
                 "files": 2,
                 "bytes": 4096,
                 "duration_ms": 25,
+            }),
+        ));
+        let ProgressSink::Live(state) = &sink else {
+            panic!("expected live sink");
+        };
+        let live = state.lock().unwrap();
+        assert_eq!(live.fetch_progress.active(), 0);
+        assert_eq!(live.fetch_progress.done, 1);
+        assert!(live.slots.iter().all(|slot| slot.activity.is_none()));
+    }
+
+    #[test]
+    fn batched_hardlink_fs_files_use_one_stable_acquisition_row() {
+        let sink = ProgressSink::live_hidden(PathBuf::from("/run"));
+        sink.write_event(&live_run_record(
+            BuildStatus::RunStarted,
+            json!({ "reachable": 1, "reachable_sources": 0, "jobs": 1 }),
+        ));
+
+        // A single top-level object hardlink is deliberately too fine-grained
+        // for the activity viewport.
+        sink.write_event(&content_record(
+            BuildStatus::Running,
+            json!({
+                "host": "clean-build",
+                "transfer": "hardlink",
+                "content_kind": "object",
+                "bytes": 0,
+            }),
+        ));
+        {
+            let ProgressSink::Live(state) = &sink else {
+                panic!("expected live sink");
+            };
+            let live = state.lock().unwrap();
+            assert_eq!(live.fetch_progress.active(), 0);
+            assert!(live.slots.iter().all(|slot| slot.activity.is_none()));
+        }
+
+        let mut batch = content_record(
+            BuildStatus::Running,
+            json!({
+                "host": "clean-build",
+                "transfer": "hardlink",
+                "content_kind": "fs-files",
+                "files_total": 21_054,
+                "bytes": 0,
+            }),
+        );
+        batch.message =
+            "validating/hardlinking 21054 fs-file(s) from local repository 'clean-build'"
+                .to_string();
+        sink.write_event(&batch);
+        {
+            let ProgressSink::Live(state) = &sink else {
+                panic!("expected live sink");
+            };
+            let live = state.lock().unwrap();
+            assert_eq!(live.fetch_progress.active(), 1);
+            assert_eq!(live.fetch_progress.total, 1);
+            assert_eq!(
+                live.slots.first().and_then(|slot| slot.activity.clone()),
+                Some(ActivityKey::Source("content-key".to_string()))
+            );
+            assert!(live.slots[0].bar.message().contains("21054 fs-file(s)"));
+        }
+
+        // Finishing the batch updates aggregate bytes, but the row remains
+        // attached to the object until its complete content result arrives.
+        sink.write_event(&content_record(
+            BuildStatus::Running,
+            json!({
+                "host": "clean-build",
+                "transfer": "hardlink",
+                "files": 21_054,
+                "bytes": 895_389_659,
+            }),
+        ));
+        {
+            let ProgressSink::Live(state) = &sink else {
+                panic!("expected live sink");
+            };
+            let live = state.lock().unwrap();
+            assert_eq!(live.fetch_progress.active(), 1);
+            assert_eq!(
+                live.slots.first().and_then(|slot| slot.activity.clone()),
+                Some(ActivityKey::Source("content-key".to_string()))
+            );
+        }
+
+        sink.write_event(&content_record(
+            BuildStatus::Done,
+            json!({
+                "content_summary": true,
+                "content_outcomes": ["hardlink"],
+                "files": 21_054,
+                "bytes": 895_389_659,
             }),
         ));
         let ProgressSink::Live(state) = &sink else {

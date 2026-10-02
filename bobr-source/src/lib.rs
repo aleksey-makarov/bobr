@@ -50,10 +50,11 @@ pub use remote_provider::{
     RemoteBackendRegistry, RemoteContentProvider, RemoteMappingProvider, RemoteRepositoryBackend,
 };
 pub use secondary_resolver::{
-    ContentProvider, ContentProviderImport, ContentTransferEvent, ContentTransferReport,
-    KnownObjectResolution, LocalBackendRegistry, LocalContentProvider, LocalMappingProvider,
-    MappingAnswer, MappingCandidates, MappingProvider, NamedContentProvider, NamedMappingProvider,
-    ProviderError, ResolvedSecondaryContent, ReuseQuery, SecondaryResolution, SecondaryResolver,
+    ContentProvider, ContentProviderImport, ContentTransferEvent, ContentTransferKind,
+    ContentTransferReport, KnownObjectResolution, LocalBackendRegistry, LocalContentProvider,
+    LocalMappingProvider, MappingAnswer, MappingCandidates, MappingProvider, NamedContentProvider,
+    NamedMappingProvider, ProviderError, ResolvedSecondaryContent, ReuseQuery, SecondaryResolution,
+    SecondaryResolver,
 };
 
 use bobr_core::{BuildKey, BuildLogSubject, ObjectHash, Workspace};

@@ -14,8 +14,8 @@ use crate::build_executor::{
 use crate::graph::{PlannedGraph, PlannedNode};
 use crate::realizer::execute_builder_miss;
 use crate::{
-    ContentTransferEvent, ContentTransferReport, KnownObjectResolution, LocalIoScheduler,
-    MappingCandidates, NetworkScheduler, SecondaryResolver,
+    ContentTransferEvent, ContentTransferKind, ContentTransferReport, KnownObjectResolution,
+    LocalIoScheduler, MappingCandidates, NetworkScheduler, SecondaryResolver,
 };
 use bobr_builder::{BuilderInputs, BuilderPlannedSubject, materialize_fs_tree_root};
 use bobr_core::{
@@ -921,6 +921,7 @@ fn log_content_progress(
         ContentTransferEvent::Started {
             content_source,
             transfer_mode,
+            kind,
             ..
         } => {
             let mode = transfer_mode.as_str();
@@ -929,14 +930,38 @@ fn log_content_progress(
             } else {
                 "local repository"
             };
-            let message = format!("{mode} from {repository_kind} '{content_source}'");
-            let details = json!({
+            let (content_kind, files_total, message) = match kind {
+                ContentTransferKind::Object => (
+                    "object",
+                    None,
+                    format!("{mode} from {repository_kind} '{content_source}'"),
+                ),
+                ContentTransferKind::FsFiles { count } => {
+                    let action = match transfer_mode {
+                        bobr_store::ContentTransferMode::Hardlink => "validating/hardlinking",
+                        bobr_store::ContentTransferMode::Copy => "copying",
+                        bobr_store::ContentTransferMode::Download => "downloading",
+                    };
+                    (
+                        "fs-files",
+                        Some(count),
+                        format!(
+                            "{action} {count} fs-file(s) from {repository_kind} '{content_source}'"
+                        ),
+                    )
+                }
+            };
+            let mut details = json!({
                 "transfer": mode,
                 "host": content_source.clone(),
                 "content_provider": content_source,
                 "transfer_mode": mode,
+                "content_kind": content_kind,
                 "bytes": *transferred_bytes,
             });
+            if let Some(files_total) = files_total {
+                details["files_total"] = json!(files_total);
+            }
             (mode, message, details)
         }
         ContentTransferEvent::Finished(report) => {
@@ -1778,6 +1803,22 @@ mod tests {
             "identity"
         );
         assert!(mapping["details"].get("content_providers").is_none());
+        let closure_start = records
+            .iter()
+            .find(|record| {
+                record["op"] == "repository-copy" && record["details"]["content_kind"] == "fs-files"
+            })
+            .unwrap();
+        assert_eq!(closure_start["details"]["files_total"], 1);
+        assert!(
+            closure_start["message"]
+                .as_str()
+                .unwrap()
+                .contains("copying 1 fs-file(s)")
+        );
+        assert!(records.iter().any(|record| {
+            record["op"] == "repository-copy" && record["details"]["content_kind"] == "object"
+        }));
         let content = records
             .iter()
             .find(|record| record["op"] == "repository-content")

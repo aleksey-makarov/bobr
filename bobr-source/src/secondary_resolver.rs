@@ -503,6 +503,18 @@ pub struct ContentTransferReport {
     pub duration_ms: u64,
 }
 
+/// Granularity of one content-source transfer call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentTransferKind {
+    /// Import the top-level object payload.
+    Object,
+    /// Import one fs-tree closure batch.
+    FsFiles {
+        /// Number of fs-files submitted to the provider in this batch.
+        count: u64,
+    },
+}
+
 /// Lifecycle event for an actual content-source transfer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContentTransferEvent {
@@ -514,6 +526,8 @@ pub enum ContentTransferEvent {
         content_source: String,
         /// Physical import transport.
         transfer_mode: ContentTransferMode,
+        /// Granularity of this provider call.
+        kind: ContentTransferKind,
     },
     /// The selected provider completed an actual transfer.
     Finished(ContentTransferReport),
@@ -1056,6 +1070,7 @@ impl SecondaryResolver {
                 object_hash: hash,
                 content_source: source.name.clone(),
                 transfer_mode: source.source.transfer_mode(),
+                kind: ContentTransferKind::Object,
             });
             let started = Instant::now();
             let imported = match source.source.import_object(&self.working, hash).await {
@@ -1158,6 +1173,9 @@ impl SecondaryResolver {
                 object_hash,
                 content_source: source.name.clone(),
                 transfer_mode: source.source.transfer_mode(),
+                kind: ContentTransferKind::FsFiles {
+                    count: hashes.len() as u64,
+                },
             });
             let started = Instant::now();
             let imported = match source.source.import_fs_files(&self.working, &hashes).await {
@@ -2404,6 +2422,62 @@ mod tests {
             load_reuse_object_hash(&working, reuse).unwrap(),
             Some(object_hash)
         );
+    }
+
+    #[tokio::test]
+    async fn fs_tree_progress_reports_one_batch_instead_of_individual_fs_files() {
+        let temp = tempdir().unwrap();
+        let repository_root = temp.path().join("repository");
+        let working_root = temp.path().join("working");
+        let repository = empty_store(&repository_root);
+        let working = empty_store(&working_root);
+        let tree = temp.path().join("tree");
+        fs::create_dir(&tree).unwrap();
+        fs::write(tree.join("payload"), b"batched closure\n").unwrap();
+        let manifest = repository.fs_tree().intern_tree(tree).unwrap();
+        let staged_manifest = temp.path().join("manifest");
+        manifest.write_canonical(&staged_manifest).unwrap();
+        let object_hash = import_build(
+            &repository,
+            build_key('2'),
+            reuse_key('3'),
+            Vec::new(),
+            &staged_manifest,
+            "manifest",
+            "test-run",
+        )
+        .unwrap();
+        let resolver = resolver(
+            working,
+            Vec::new(),
+            vec![source("repository", &repository_root)],
+        );
+        let mut events = Vec::new();
+
+        let report = resolver
+            .ensure_objects_with_progress(&[object_hash], |event| events.push(event))
+            .await
+            .unwrap()
+            .remove(0);
+
+        assert_eq!(report.outcome, Some(ContentImportOutcome::Imported));
+        assert_eq!(events.len(), 4, "{events:#?}");
+        assert!(matches!(
+            &events[0],
+            ContentTransferEvent::Started {
+                kind: ContentTransferKind::FsFiles { count: 1 },
+                ..
+            }
+        ));
+        assert!(matches!(&events[1], ContentTransferEvent::Finished(_)));
+        assert!(matches!(
+            &events[2],
+            ContentTransferEvent::Started {
+                kind: ContentTransferKind::Object,
+                ..
+            }
+        ));
+        assert!(matches!(&events[3], ContentTransferEvent::Finished(_)));
     }
 
     #[tokio::test]
