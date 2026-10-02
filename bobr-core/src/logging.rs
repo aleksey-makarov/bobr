@@ -960,9 +960,9 @@ impl EventSink for FileSink {
 /// Progress sink: the build's live UI on stderr (the only stderr writer).
 ///
 /// In an interactive terminal (and not `quiet`) it renders a live block via
-/// indicatif — one line per active subject, updated in place, with a summary
-/// line at the bottom; `Warn`/`Error` print above the block. Otherwise (non-TTY
-/// or `quiet`) it falls back to plain per-line output. Transient `Progress`
+/// indicatif — a run/fetch/build status block followed by one line per visible
+/// activity, updated in place; `Warn`/`Error` print above the block. Otherwise
+/// (non-TTY or `quiet`) it falls back to plain per-line output. Transient `Progress`
 /// ticks are shown only in the live block — in plain mode they would be scroll
 /// noise, so the plain threshold starts at `Info`. File logs are unaffected
 /// (and never carry `Progress`).
@@ -1494,18 +1494,24 @@ fn terminal_height() -> Option<usize> {
     terminal_size().map(|(rows, _)| rows)
 }
 
-fn progress_line_budget(policy: ProgressPolicy, rows: usize) -> usize {
+const LIVE_STATUS_ROWS: usize = 3;
+const MIN_AUTO_ACTIVITY_ROWS: usize = 4;
+const TERMINAL_RESERVED_ROWS: usize = 2;
+
+fn activity_row_capacity(policy: ProgressPolicy, rows: usize, jobs: usize) -> usize {
+    let physical_limit = rows.saturating_sub(LIVE_STATUS_ROWS + TERMINAL_RESERVED_ROWS);
+    let concurrency_limit = jobs.max(MIN_AUTO_ACTIVITY_ROWS);
     match policy {
-        // The live block always owns fetch statistics, builder statistics, and
-        // the run status. Summary simply gives the activity viewport zero
-        // rows; it is not a different, dynamically shaped block.
-        ProgressPolicy::Summary => 3,
-        ProgressPolicy::Fixed { max_lines } => max_lines.min(rows.saturating_sub(2).max(3)),
-        ProgressPolicy::Auto => {
-            let screen = rows.saturating_sub(2).max(3);
-            let fraction = rows.saturating_mul(3) / 4;
-            fraction.max(MIN_FIXED_PROGRESS_LINES).min(screen)
-        }
+        // The live block always owns run, fetch, and builder status rows.
+        // Summary simply gives the activity viewport zero rows.
+        ProgressPolicy::Summary => 0,
+        ProgressPolicy::Fixed { max_lines } => max_lines
+            .saturating_sub(LIVE_STATUS_ROWS)
+            .min(physical_limit)
+            .min(concurrency_limit),
+        ProgressPolicy::Auto => (rows.saturating_mul(3) / 4)
+            .min(physical_limit)
+            .min(concurrency_limit),
     }
 }
 
@@ -1748,8 +1754,8 @@ struct Slot {
     activity: Option<ActivityKey>,
 }
 
-/// Live indicatif state with two fixed statistics rows, a fixed viewport of
-/// concrete activities, and a fixed bottom run summary.
+/// Live indicatif state with a three-line status block followed by a fixed
+/// viewport of concrete activities.
 struct LiveProgress {
     run_log_dir: PathBuf,
     multi: MultiProgress,
@@ -1763,6 +1769,7 @@ struct LiveProgress {
     viewport: ActivityViewport,
     policy: ProgressPolicy,
     rows_override: Option<usize>,
+    jobs: usize,
     reachable: usize,
     reachable_sources: usize,
     builder_done: usize,
@@ -1779,12 +1786,12 @@ const LIVE_REDRAW: Duration = Duration::from_millis(200);
 
 impl LiveProgress {
     fn new(run_log_dir: PathBuf, multi: MultiProgress, policy: ProgressPolicy) -> Self {
+        let summary = multi.add(ProgressBar::new_spinner());
+        summary.set_style(ProgressStyle::with_template("{wide_msg}").expect("valid template"));
         let fetch = multi.add(ProgressBar::new_spinner());
         fetch.set_style(ProgressStyle::with_template("{wide_msg}").expect("valid template"));
         let build = multi.add(ProgressBar::new_spinner());
         build.set_style(ProgressStyle::with_template("{wide_msg}").expect("valid template"));
-        let summary = multi.add(ProgressBar::new_spinner());
-        summary.set_style(ProgressStyle::with_template("{wide_msg}").expect("valid template"));
         let now = Instant::now();
         Self {
             run_log_dir,
@@ -1800,6 +1807,7 @@ impl LiveProgress {
             viewport: ActivityViewport::default(),
             policy,
             rows_override: None,
+            jobs: 0,
             reachable: 0,
             reachable_sources: 0,
             builder_done: 0,
@@ -1877,12 +1885,7 @@ impl LiveProgress {
     }
 
     fn reflow(&mut self, rows: usize) {
-        let budget = progress_line_budget(self.policy, rows);
-        let capacity = if matches!(self.policy, ProgressPolicy::Summary) {
-            0
-        } else {
-            budget.saturating_sub(3)
-        };
+        let capacity = activity_row_capacity(self.policy, rows, self.jobs);
         self.viewport.set_capacity(capacity);
         self.sync_activity_bars();
         self.update_headers();
@@ -1890,20 +1893,15 @@ impl LiveProgress {
 
     fn sync_activity_bars(&mut self) {
         while self.slots.len() < self.viewport.visible.len() {
-            let bar = self
-                .multi
-                .insert_before(&self.summary, ProgressBar::new_spinner());
+            let bar = self.multi.add(ProgressBar::new_spinner());
             self.slots.push(Slot {
                 bar,
                 activity: None,
             });
         }
         while self.slots.len() > self.viewport.visible.len() {
-            self.slots
-                .pop()
-                .expect("slot count was checked")
-                .bar
-                .finish_and_clear();
+            let slot = self.slots.pop().expect("slot count was checked");
+            self.multi.remove(&slot.bar);
         }
         for (index, key) in self.viewport.visible.iter().enumerate() {
             let slot = &mut self.slots[index];
@@ -1935,6 +1933,7 @@ impl LiveProgress {
         let status = record.status.as_str();
 
         if status == BuildStatus::RunStarted.as_str() {
+            self.jobs = detail_u64(record, "jobs") as usize;
             self.reachable = record
                 .details
                 .get("reachable")
@@ -2147,7 +2146,7 @@ struct RunProgress {
 
 fn format_run_progress(progress: &RunProgress) -> String {
     let mut line = format!(
-        "{} built · {} cache-hit · {} fetched · {} failed · {} reachable",
+        "run: {} built · {} cache-hit · {} fetched · {} failed · {} reachable",
         progress.built,
         progress.cache_hits,
         progress.fetched,
@@ -2892,6 +2891,7 @@ mod tests {
         };
         {
             let mut live = fixed.lock().unwrap();
+            live.jobs = 10;
             live.reflow_for_test(24);
             for index in 0..10 {
                 live.start_or_update_activity(
@@ -2931,6 +2931,7 @@ mod tests {
             panic!("expected live sink");
         };
         let mut live = state.lock().unwrap();
+        live.jobs = 20;
         live.reflow_for_test(24);
         for index in 0..20 {
             live.start_or_update_activity(
@@ -2939,18 +2940,35 @@ mod tests {
             );
         }
         assert_eq!(live.running(), 20);
-        assert_eq!(live.slots.len(), 15);
-        assert_eq!(live.viewport.hidden_builders(), 5);
+        assert_eq!(live.slots.len(), 18);
+        assert_eq!(live.viewport.hidden_builders(), 2);
 
         live.reflow_for_test(10);
         assert_eq!(live.running(), 20);
-        assert_eq!(live.slots.len(), 4);
-        assert_eq!(live.viewport.hidden_builders(), 16);
+        assert_eq!(live.slots.len(), 5);
+        assert_eq!(live.viewport.hidden_builders(), 15);
 
         live.reflow_for_test(40);
         assert_eq!(live.running(), 20);
-        assert_eq!(live.slots.len(), 27);
+        assert_eq!(live.slots.len(), 20);
         assert_eq!(live.viewport.hidden_builders(), 0);
+    }
+
+    #[test]
+    fn auto_layout_is_bounded_by_jobs_and_terminal_height() {
+        assert_eq!(activity_row_capacity(ProgressPolicy::Auto, 24, 8), 8);
+        assert_eq!(activity_row_capacity(ProgressPolicy::Auto, 24, 20), 18);
+        assert_eq!(activity_row_capacity(ProgressPolicy::Auto, 10, 20), 5);
+        assert_eq!(activity_row_capacity(ProgressPolicy::Auto, 6, 20), 1);
+        assert_eq!(
+            activity_row_capacity(ProgressPolicy::Fixed { max_lines: 8 }, 24, 20),
+            5
+        );
+        assert_eq!(
+            activity_row_capacity(ProgressPolicy::Fixed { max_lines: 20 }, 24, 2),
+            4
+        );
+        assert_eq!(activity_row_capacity(ProgressPolicy::Summary, 24, 20), 0);
     }
 
     #[test]
@@ -2966,7 +2984,7 @@ mod tests {
                 hidden_builders: 3,
                 hidden_sources: 2,
             }),
-            "24 built · 19 cache-hit · 712 fetched · 0 failed · 1907 reachable · 3 builders hidden · 2 acquisitions hidden"
+            "run: 24 built · 19 cache-hit · 712 fetched · 0 failed · 1907 reachable · 3 builders hidden · 2 acquisitions hidden"
         );
     }
 
@@ -3263,7 +3281,11 @@ mod tests {
         {
             let live = state.lock().unwrap();
             assert_eq!(live.fetch_progress.total, 991);
-            assert_eq!(live.slots.len(), 15, "two headers, 15 rows, one run line");
+            assert_eq!(
+                live.slots.len(),
+                18,
+                "three status rows, then 18 activities"
+            );
             assert!(live.slots.iter().all(|slot| slot.activity.is_none()));
             assert_eq!(
                 live.fetch.message(),
@@ -3295,7 +3317,7 @@ mod tests {
         {
             let live = state.lock().unwrap();
             assert_eq!(live.running(), 1, "Source is not a builder row");
-            assert_eq!(live.slots.len(), 15);
+            assert_eq!(live.slots.len(), 18);
             assert_eq!(live.fetch_progress.queued(), 1);
             assert!(live.slots[1].activity.is_none());
         }
