@@ -1,12 +1,15 @@
 #![allow(missing_docs)]
 mod support;
 
-use bobr_core::{BuildKey, ObjectHash, ReuseKey};
+use bobr_core::{BuildKey, CANONICAL_TIMESTAMP, ObjectHash, ReuseKey};
+use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest, hash_fs_file_parts};
 use serde_json::json;
-use std::fs;
-use std::os::unix::fs::{MetadataExt, symlink};
+use sha2::{Digest, Sha256};
+use std::fs::{self, FileTimes, OpenOptions};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::time::{Duration, UNIX_EPOCH};
 use support::{
     TEST_RUN_ID, make_run_dirs, recipe_node, store_root, tree_file_recipe, write_request,
     write_request_with_options,
@@ -518,6 +521,102 @@ fn cli_uses_local_mapping_and_hardlink_content_providers() {
         object_hash.to_string()
     );
     assert_eq!(fs::read(destination).unwrap(), b"secondary source\n");
+}
+
+#[test]
+fn cli_validates_an_existing_hardlinked_fs_file_in_its_namespace() {
+    // Root does not need a user namespace and therefore has no distinct host
+    // and logical ownership views to exercise in this regression test.
+    // SAFETY: geteuid has no preconditions and does not modify process state.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
+    let workspace = tempdir().unwrap();
+    let secondary_root = workspace.path().join("secondary");
+    let working_root = store_root(workspace.path());
+    fs::create_dir(&secondary_root).unwrap();
+    fs::create_dir_all(&working_root).unwrap();
+    let secondary = bobr_store::Store::create(&secondary_root).unwrap();
+    let working = bobr_store::Store::create(&working_root).unwrap();
+
+    let contents = b"shared fs-file\n";
+    let content_hash: [u8; 32] = Sha256::digest(contents).into();
+    let file_hash = hash_fs_file_parts(0, 0, 0o644, contents.len() as u64, content_hash).unwrap();
+    let secondary_file = secondary.fs_file_path(file_hash);
+    fs::create_dir_all(secondary_file.parent().unwrap()).unwrap();
+    fs::write(&secondary_file, contents).unwrap();
+    fs::set_permissions(&secondary_file, fs::Permissions::from_mode(0o644)).unwrap();
+    OpenOptions::new()
+        .read(true)
+        .open(&secondary_file)
+        .unwrap()
+        .set_times(
+            FileTimes::new()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(CANONICAL_TIMESTAMP as u64)),
+        )
+        .unwrap();
+
+    let manifest = FsTreeManifest::from_entries(vec![
+        FsTreeEntry::Directory {
+            path: String::new(),
+            uid: 0,
+            gid: 0,
+            mode: 0o755,
+        },
+        FsTreeEntry::File {
+            path: "payload".to_string(),
+            hash: file_hash,
+        },
+    ])
+    .unwrap();
+    let staged_manifest = workspace.path().join("manifest");
+    manifest.write_canonical(&staged_manifest).unwrap();
+    let object_hash = bobr_store::import_build(
+        &secondary,
+        "3".repeat(64).parse().unwrap(),
+        "4".repeat(64).parse().unwrap(),
+        Vec::new(),
+        &staged_manifest,
+        "logical-root-fs-tree",
+        "test-run",
+    )
+    .unwrap();
+
+    let working_file = working.fs_file_path(file_hash);
+    fs::create_dir_all(working_file.parent().unwrap()).unwrap();
+    fs::hard_link(&secondary_file, &working_file).unwrap();
+
+    // In the parent process, physical ownership makes the logical hash look
+    // wrong. The namespace worker maps this owner to uid/gid 0 and must accept
+    // the same file.
+    let direct_error = working.verify_fs_file(file_hash).unwrap_err();
+    assert!(
+        direct_error.to_string().contains("fs-file hash mismatch"),
+        "{direct_error}"
+    );
+
+    let output = run_source_request(
+        workspace.path(),
+        &working_root,
+        "existing-fs-file",
+        object_hash,
+        vec![local_content_provider(
+            "secondary",
+            &secondary_root,
+            "hardlink",
+        )],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap().trim(),
+        object_hash.to_string()
+    );
+    assert!(working.object_is_complete(object_hash).unwrap());
+    assert_eq!(
+        fs::metadata(&secondary_file).unwrap().ino(),
+        fs::metadata(&working_file).unwrap().ino()
+    );
 }
 
 #[test]

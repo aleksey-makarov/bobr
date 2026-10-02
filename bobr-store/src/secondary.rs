@@ -344,10 +344,10 @@ impl ContentSource for LocalHardlinkContentSource {
             }
             let working_path = working.fs_file_path_unchecked(*hash);
             match fs::symlink_metadata(&working_path) {
-                Ok(_) => {
-                    verify_fs_file(&working_path, *hash)?;
-                    continue;
-                }
+                // The host sees physical uid/gid values for files owned by a
+                // user namespace. Validate existing fs-files in the runtime
+                // call below, where their logical metadata is visible.
+                Ok(_) => continue,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(map_io(&working_path, "inspect working fs-file", error));
@@ -991,6 +991,39 @@ mod tests {
         assert!(error.to_string().contains("noncanonical mtime"), "{error}");
         assert!(working.object_path(object_hash).unwrap().is_none());
         assert!(!working.fs_file_path_unchecked(file_hash).exists());
+    }
+
+    #[test]
+    fn hardlink_worker_rejects_a_mismatched_existing_fs_file() {
+        let temp = tempdir().unwrap();
+        let secondary_root = temp.path().join("secondary");
+        let working_root = temp.path().join("working");
+        let (_secondary, _object_hash, file_hash) = fs_tree_object(&secondary_root);
+        let working = empty_store(&working_root);
+        let working_file = working.fs_file_path_unchecked(file_hash);
+        fs::create_dir_all(working_file.parent().unwrap()).unwrap();
+        fs::write(&working_file, b"corrupt fs-file\n").unwrap();
+        fs::set_permissions(&working_file, fs::Permissions::from_mode(0o644)).unwrap();
+        OpenOptions::new()
+            .read(true)
+            .open(&working_file)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(
+                UNIX_EPOCH + Duration::from_secs(bobr_core::CANONICAL_TIMESTAMP as u64),
+            ))
+            .unwrap();
+
+        let error = hardlink_fs_files(HardlinkFsFilesInput {
+            source_root: secondary_root,
+            working_root,
+            hashes: vec![file_hash.to_hex()],
+        })
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("fs-file hash mismatch"),
+            "{error}"
+        );
     }
 
     #[test]
