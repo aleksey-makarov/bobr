@@ -1389,6 +1389,11 @@ fn merge_transfer(transfers: &mut Vec<ContentTransferReport>, report: ContentTra
     }) {
         existing.files = existing.files.saturating_add(report.files);
         existing.bytes = existing.bytes.saturating_add(report.bytes);
+        existing.encoded_bytes = match (existing.encoded_bytes, report.encoded_bytes) {
+            (Some(existing), Some(report)) => Some(existing.saturating_add(report)),
+            (Some(bytes), None) | (None, Some(bytes)) => Some(bytes),
+            (None, None) => None,
+        };
         existing.duration_ms = existing.duration_ms.saturating_add(report.duration_ms);
     } else {
         transfers.push(report);

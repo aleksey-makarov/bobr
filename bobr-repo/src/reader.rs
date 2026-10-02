@@ -911,6 +911,16 @@ mod tests {
             .unwrap();
         assert_eq!(transport.request_count(&absent_url), 0);
 
+        // A new snapshot revalidates the mutable master, receives 304 from
+        // MemoryTransport, and reuses already verified immutable metadata.
+        let warm = reader.snapshot().await.unwrap();
+        assert_eq!(
+            warm.build_candidates(build_key).await.unwrap(),
+            vec![object_hash]
+        );
+        assert_eq!(transport.request_count(&master_url), 2);
+        assert_eq!(transport.request_count(&build_url), 1);
+
         let cached_build = reader
             .inner
             .cache
@@ -921,6 +931,8 @@ mod tests {
             refreshed.build_candidates(build_key).await.unwrap(),
             vec![object_hash]
         );
+        assert_eq!(transport.request_count(&master_url), 3);
+        assert_eq!(transport.request_count(&build_url), 2);
 
         let current = reader.publication_metadata().await.unwrap();
         assert_eq!(current.master_hash, signed_master_hash);
@@ -933,6 +945,301 @@ mod tests {
                 .master
                 .previous_master_hash(),
             Some(signed_master_hash)
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_authenticated_metadata_is_not_stuck_in_the_cache() {
+        let signing = SigningKey::from_bytes(&[5; 32]);
+        let base = Url::parse("https://data.example/invalid-metadata/").unwrap();
+        let master_url = Url::parse("https://master.example/invalid-metadata").unwrap();
+        let transport = MemoryTransport::default();
+        let temp = tempfile::tempdir().unwrap();
+        let build_key = BuildKey::from_bytes([1; 32]);
+        let object_hash = ObjectHash::from_bytes([2; 32]);
+        let build_bytes = BuildIndex::encode(&[(build_key, object_hash)]).unwrap();
+        let build_hash = BuildIndexHash::digest(&build_bytes);
+        let reuse_bytes = ReuseIndex::encode(&[]).unwrap();
+        let object_list_bytes = ObjectList::encode([]);
+        let file_list_bytes = FsFileList::encode([]);
+        let reuse_hash = ReuseIndexHash::digest(&reuse_bytes);
+        let object_list_hash = ObjectListHash::digest(&object_list_bytes);
+        let file_list_hash = FsFileListHash::digest(&file_list_bytes);
+        let master = Master::new(
+            None,
+            base.clone(),
+            vec![Slot {
+                serial: 1,
+                build: build_hash,
+                reuse: reuse_hash,
+                object_list: object_list_hash,
+                file_list: file_list_hash,
+                retain_until: None,
+            }],
+        )
+        .unwrap();
+        transport.insert(
+            master_url.clone(),
+            master.sign(b"key", &signing).unwrap(),
+            "application/cose; cose-type=\"cose-sign1\"",
+            "no-cache",
+        );
+        let build_url = base.join(&format!("b/{build_hash}")).unwrap();
+        transport.insert(
+            build_url.clone(),
+            b"not the authenticated build index".to_vec(),
+            OCTET_STREAM,
+            "public, max-age=31536000, immutable",
+        );
+        let keys = TrustedKeys::new([(b"key".to_vec(), signing.verifying_key())]).unwrap();
+        let reader = RepositoryReader::new(
+            master_url,
+            keys,
+            &temp.path().join("cache"),
+            Arc::new(transport.clone()),
+        )
+        .unwrap();
+
+        let first = reader
+            .snapshot()
+            .await
+            .unwrap()
+            .build_candidates(build_key)
+            .await
+            .unwrap_err();
+        assert_eq!(first.kind(), crate::RepositoryErrorKind::InvalidRepository);
+        assert_eq!(transport.request_count(&build_url), 1);
+
+        transport.insert(
+            build_url.clone(),
+            build_bytes,
+            OCTET_STREAM,
+            "public, max-age=31536000, immutable",
+        );
+        assert_eq!(
+            reader
+                .snapshot()
+                .await
+                .unwrap()
+                .build_candidates(build_key)
+                .await
+                .unwrap(),
+            vec![object_hash]
+        );
+        assert_eq!(transport.request_count(&build_url), 2);
+    }
+
+    #[tokio::test]
+    async fn invalid_master_signature_is_not_cached() {
+        let signing = SigningKey::from_bytes(&[14; 32]);
+        let wrong_signing = SigningKey::from_bytes(&[15; 32]);
+        let base = Url::parse("https://data.example/bad-signature/").unwrap();
+        let master_url = Url::parse("https://master.example/bad-signature").unwrap();
+        let empty_build = BuildIndex::encode(&[]).unwrap();
+        let empty_reuse = ReuseIndex::encode(&[]).unwrap();
+        let empty_objects = ObjectList::encode([]);
+        let empty_files = FsFileList::encode([]);
+        let master = Master::new(
+            None,
+            base,
+            vec![Slot {
+                serial: 1,
+                build: BuildIndexHash::digest(&empty_build),
+                reuse: ReuseIndexHash::digest(&empty_reuse),
+                object_list: ObjectListHash::digest(&empty_objects),
+                file_list: FsFileListHash::digest(&empty_files),
+                retain_until: None,
+            }],
+        )
+        .unwrap();
+        let transport = MemoryTransport::default();
+        transport.insert(
+            master_url.clone(),
+            master.sign(b"key", &signing).unwrap(),
+            "application/cose; cose-type=\"cose-sign1\"",
+            "no-cache",
+        );
+        let trusted = TrustedKeys::new([(b"key".to_vec(), wrong_signing.verifying_key())]).unwrap();
+        let cache_root = tempfile::tempdir().unwrap();
+        let reader = RepositoryReader::new(
+            master_url.clone(),
+            trusted,
+            cache_root.path(),
+            Arc::new(transport.clone()),
+        )
+        .unwrap();
+
+        let error = reader.snapshot().await.unwrap_err();
+        assert_eq!(error.kind(), crate::RepositoryErrorKind::Authentication);
+        assert!(!reader.inner.cache.master_path().exists());
+        assert_eq!(transport.request_count(&master_url), 1);
+    }
+
+    #[tokio::test]
+    async fn advertised_missing_and_hash_mismatched_objects_are_not_published() {
+        let signing = SigningKey::from_bytes(&[6; 32]);
+        let base = Url::parse("https://data.example/broken-content/").unwrap();
+        let master_url = Url::parse("https://master.example/broken-content").unwrap();
+        let transport = MemoryTransport::default();
+        let temp = tempfile::tempdir().unwrap();
+        let missing = ObjectHash::from_bytes([7; 32]);
+        let expected = ObjectHash::from_bytes([8; 32]);
+        let wrong_source = temp.path().join("wrong-source");
+        let wrong_encoded = temp.path().join("wrong.cbor");
+        std::fs::write(&wrong_source, b"wrong object bytes").unwrap();
+        encode_object(&wrong_source, Compression::Identity, &wrong_encoded).unwrap();
+        let build_bytes = BuildIndex::encode(&[]).unwrap();
+        let reuse_bytes = ReuseIndex::encode(&[]).unwrap();
+        let object_list_bytes = ObjectList::encode([missing, expected]);
+        let file_list_bytes = FsFileList::encode([]);
+        let build_hash = BuildIndexHash::digest(&build_bytes);
+        let reuse_hash = ReuseIndexHash::digest(&reuse_bytes);
+        let object_list_hash = ObjectListHash::digest(&object_list_bytes);
+        let file_list_hash = FsFileListHash::digest(&file_list_bytes);
+        let master = Master::new(
+            None,
+            base.clone(),
+            vec![Slot {
+                serial: 1,
+                build: build_hash,
+                reuse: reuse_hash,
+                object_list: object_list_hash,
+                file_list: file_list_hash,
+                retain_until: None,
+            }],
+        )
+        .unwrap();
+        transport.insert(
+            master_url.clone(),
+            master.sign(b"key", &signing).unwrap(),
+            "application/cose; cose-type=\"cose-sign1\"",
+            "no-cache",
+        );
+        let object_list_url = base.join(&format!("lo/{object_list_hash}")).unwrap();
+        transport.insert(
+            object_list_url,
+            object_list_bytes,
+            OCTET_STREAM,
+            "public, max-age=31536000, immutable",
+        );
+        let expected_url = base.join(&format!("o/{expected}")).unwrap();
+        transport.insert(
+            expected_url,
+            std::fs::read(wrong_encoded).unwrap(),
+            OBJECT_MEDIA_TYPE,
+            "public, max-age=31536000, immutable",
+        );
+        let keys = TrustedKeys::new([(b"key".to_vec(), signing.verifying_key())]).unwrap();
+        let snapshot = RepositoryReader::new(
+            master_url,
+            keys,
+            &temp.path().join("cache"),
+            Arc::new(transport),
+        )
+        .unwrap()
+        .snapshot()
+        .await
+        .unwrap();
+
+        let missing_destination = temp.path().join("missing-destination");
+        let missing_error = snapshot
+            .fetch_object(missing, &missing_destination)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            missing_error.kind(),
+            crate::RepositoryErrorKind::InvalidRepository
+        );
+        assert!(!missing_destination.exists());
+
+        let mismatched_destination = temp.path().join("mismatched-destination");
+        let mismatched_error = snapshot
+            .fetch_object(expected, &mismatched_destination)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            mismatched_error.kind(),
+            crate::RepositoryErrorKind::InvalidRepository
+        );
+        assert!(!mismatched_destination.exists());
+    }
+
+    #[tokio::test]
+    async fn mapping_candidates_follow_newest_slot_and_wire_order() {
+        let signing = SigningKey::from_bytes(&[7; 32]);
+        let base = Url::parse("https://data.example/slots/").unwrap();
+        let master_url = Url::parse("https://master.example/slots").unwrap();
+        let transport = MemoryTransport::default();
+        let temp = tempfile::tempdir().unwrap();
+        let key = BuildKey::from_bytes([1; 32]);
+        let first = ObjectHash::from_bytes([1; 32]);
+        let second = ObjectHash::from_bytes([2; 32]);
+        let third = ObjectHash::from_bytes([3; 32]);
+        let older_build = BuildIndex::encode(&[(key, first), (key, second)]).unwrap();
+        let newer_build = BuildIndex::encode(&[(key, second), (key, third)]).unwrap();
+        let older_build_hash = BuildIndexHash::digest(&older_build);
+        let newer_build_hash = BuildIndexHash::digest(&newer_build);
+        let reuse_bytes = ReuseIndex::encode(&[]).unwrap();
+        let object_list_bytes = ObjectList::encode([]);
+        let file_list_bytes = FsFileList::encode([]);
+        let reuse_hash = ReuseIndexHash::digest(&reuse_bytes);
+        let object_list_hash = ObjectListHash::digest(&object_list_bytes);
+        let file_list_hash = FsFileListHash::digest(&file_list_bytes);
+        let master = Master::new(
+            None,
+            base.clone(),
+            vec![
+                Slot {
+                    serial: 1,
+                    build: older_build_hash,
+                    reuse: reuse_hash,
+                    object_list: object_list_hash,
+                    file_list: file_list_hash,
+                    retain_until: None,
+                },
+                Slot {
+                    serial: 2,
+                    build: newer_build_hash,
+                    reuse: reuse_hash,
+                    object_list: object_list_hash,
+                    file_list: file_list_hash,
+                    retain_until: None,
+                },
+            ],
+        )
+        .unwrap();
+        transport.insert(
+            master_url.clone(),
+            master.sign(b"key", &signing).unwrap(),
+            "application/cose; cose-type=\"cose-sign1\"",
+            "no-cache",
+        );
+        for (hash, bytes) in [
+            (older_build_hash, older_build),
+            (newer_build_hash, newer_build),
+        ] {
+            transport.insert(
+                base.join(&format!("b/{hash}")).unwrap(),
+                bytes,
+                OCTET_STREAM,
+                "public, max-age=31536000, immutable",
+            );
+        }
+        let trusted = TrustedKeys::new([(b"key".to_vec(), signing.verifying_key())]).unwrap();
+        let snapshot = RepositoryReader::new(
+            master_url,
+            trusted,
+            &temp.path().join("cache"),
+            Arc::new(transport),
+        )
+        .unwrap()
+        .snapshot()
+        .await
+        .unwrap();
+
+        assert_eq!(
+            snapshot.build_candidates(key).await.unwrap(),
+            vec![second, third, first]
         );
     }
 

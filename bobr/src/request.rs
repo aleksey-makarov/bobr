@@ -798,6 +798,39 @@ mod tests {
     }
 
     #[test]
+    fn remote_provider_order_and_default_cache_are_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let key = temp.path().join("key.der");
+        write_test_public_key(&key);
+        let mut value = remote_request(&key);
+        value["secondaries"]
+            .as_object_mut()
+            .unwrap()
+            .remove("repository_cache");
+        let mut content = value["secondaries"]["providers"][0].clone();
+        content["capability"] = json!("content");
+        value["secondaries"]["providers"]
+            .as_array_mut()
+            .unwrap()
+            .push(content);
+
+        let request = Request::parse_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            request.secondaries.repository_cache,
+            PathBuf::from("/store/repository-cache")
+        );
+        assert_eq!(request.secondaries.providers.len(), 2);
+        assert_eq!(
+            request.secondaries.providers[0].capability,
+            ProviderCapability::Mappings
+        );
+        assert_eq!(
+            request.secondaries.providers[1].capability,
+            ProviderCapability::Content
+        );
+    }
+
+    #[test]
     fn provider_uniqueness_is_per_capability_and_physical_backend() {
         let temp = tempfile::tempdir().unwrap();
         let key = temp.path().join("key.der");
@@ -829,6 +862,25 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("use different physical backends")
+        );
+
+        let other_key = temp.path().join("other-key.der");
+        let mut other_der = fs::read(&key).unwrap();
+        *other_der.last_mut().unwrap() ^= 1;
+        fs::write(&other_key, other_der).unwrap();
+        let mut mismatched_trust = remote_request(&key);
+        let mut content = mismatched_trust["secondaries"]["providers"][0].clone();
+        content["capability"] = json!("content");
+        content["backend"]["trusted_keys"] = json!([other_key]);
+        mismatched_trust["secondaries"]["providers"]
+            .as_array_mut()
+            .unwrap()
+            .push(content);
+        assert!(
+            Request::parse_json(&serde_json::to_vec(&mismatched_trust).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("different trust or transport settings")
         );
     }
 

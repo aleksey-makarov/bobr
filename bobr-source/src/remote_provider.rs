@@ -525,14 +525,15 @@ impl ContentProvider for RemoteContentProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{NamedContentProvider, NamedMappingProvider, SecondaryResolver};
+    use crate::{NamedContentProvider, NamedMappingProvider, ReuseQuery, SecondaryResolver};
     use bobr_core::CancellationToken;
     use bobr_repo::{
         BuildIndex, BuildIndexHash, Compression, FetchRequest, FetchResult, FsFileList,
         FsFileListHash, Master, MemoryTransport, ObjectList, ObjectListHash, RepositoryTransport,
         ReuseIndex, ReuseIndexHash, Slot, TrustedKeys, encode_fs_file, encode_object,
     };
-    use bobr_store::load_build_object_hash;
+    use bobr_store::fs_tree::FsTreeEntry;
+    use bobr_store::{load_build_object_hash, load_reuse_object_hash};
     use ed25519_dalek::SigningKey;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use url::Url;
@@ -542,9 +543,11 @@ mod tests {
         transport: MemoryTransport,
         master_url: Url,
         build_url: Url,
+        reuse_url: Url,
         object_list_url: Url,
         object_url: Url,
         build_key: BuildKey,
+        reuse_key: ReuseKey,
         object_hash: ObjectHash,
         backend: RemoteRepositoryBackend,
         working: Store,
@@ -564,18 +567,23 @@ mod tests {
     }
 
     fn fixture() -> Fixture {
+        fixture_with_source(|source| std::fs::write(source, b"remote object\n").unwrap())
+    }
+
+    fn fixture_with_source(populate: impl FnOnce(&std::path::Path)) -> Fixture {
         let temp = tempfile::tempdir().unwrap();
         let working_root = temp.path().join("working");
         std::fs::create_dir(&working_root).unwrap();
         let working = Store::create(&working_root).unwrap();
         let object_source = temp.path().join("object-source");
         let object_encoded = temp.path().join("object.cbor");
-        std::fs::write(&object_source, b"remote object\n").unwrap();
+        populate(&object_source);
         let object_hash =
             encode_object(&object_source, Compression::Zstd, &object_encoded).unwrap();
         let build_key = BuildKey::from_bytes([1; 32]);
+        let reuse_key = ReuseKey::from_bytes([2; 32]);
         let build_bytes = BuildIndex::encode(&[(build_key, object_hash)]).unwrap();
-        let reuse_bytes = ReuseIndex::encode(&[]).unwrap();
+        let reuse_bytes = ReuseIndex::encode(&[(reuse_key, object_hash)]).unwrap();
         let object_list_bytes = ObjectList::encode([object_hash]);
         let file_list_bytes = FsFileList::encode([]);
         let build_hash = BuildIndexHash::digest(&build_bytes);
@@ -612,7 +620,7 @@ mod tests {
         let object_url = base_url.join(&format!("o/{object_hash}")).unwrap();
         for (url, bytes) in [
             (build_url.clone(), build_bytes),
-            (reuse_url, reuse_bytes),
+            (reuse_url.clone(), reuse_bytes),
             (object_list_url.clone(), object_list_bytes),
             (file_list_url, file_list_bytes),
         ] {
@@ -643,9 +651,11 @@ mod tests {
             transport,
             master_url,
             build_url,
+            reuse_url,
             object_list_url,
             object_url,
             build_key,
+            reuse_key,
             object_hash,
             backend,
             working,
@@ -848,6 +858,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn remote_reuse_hit_publishes_local_reuse_and_build_mappings() {
+        let fixture = fixture();
+        let current_build_key = BuildKey::from_bytes([3; 32]);
+        let mapping = NamedMappingProvider::new(
+            "remote",
+            Arc::new(RemoteMappingProvider::new(fixture.backend.clone())),
+        );
+        let content = NamedContentProvider::new(
+            "remote",
+            Arc::new(RemoteContentProvider::new(
+                fixture.backend,
+                fixture.working.clone(),
+                RuntimeProvider::host(),
+                LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+            )),
+        );
+        let resolver = SecondaryResolver::new(
+            fixture.working.clone(),
+            "remote-reuse-test",
+            vec![mapping],
+            vec![content],
+        )
+        .unwrap();
+
+        let query = ReuseQuery {
+            build_key: current_build_key,
+            reuse_key: fixture.reuse_key,
+        };
+        let report = resolver.resolve_reuses(&[query]).await.unwrap().remove(0);
+
+        assert_eq!(report.resolved.unwrap().object_hash, fixture.object_hash);
+        assert_eq!(fixture.transport.request_count(&fixture.reuse_url), 1);
+        assert_eq!(fixture.transport.request_count(&fixture.build_url), 0);
+        assert_eq!(
+            load_reuse_object_hash(&fixture.working, fixture.reuse_key).unwrap(),
+            Some(fixture.object_hash)
+        );
+        assert_eq!(
+            load_build_object_hash(&fixture.working, current_build_key).unwrap(),
+            Some(fixture.object_hash)
+        );
+    }
+
+    #[tokio::test]
+    async fn directory_object_is_downloaded_verified_and_published() {
+        let fixture = fixture_with_source(|source| {
+            std::fs::create_dir(source).unwrap();
+            std::fs::create_dir(source.join("subdir")).unwrap();
+            std::fs::write(source.join("top"), b"top-level\n").unwrap();
+            std::fs::write(source.join("subdir/leaf"), b"nested\n").unwrap();
+            std::os::unix::fs::symlink("../top", source.join("subdir/link")).unwrap();
+        });
+        let content = RemoteContentProvider::new(
+            fixture.backend,
+            fixture.working.clone(),
+            RuntimeProvider::host(),
+            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+        );
+
+        let imported = content
+            .import_object(&fixture.working, fixture.object_hash)
+            .await
+            .unwrap();
+        assert_eq!(imported.value, ContentImportOutcome::Imported);
+        let published = fixture
+            .working
+            .object_path(fixture.object_hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            std::fs::read(published.join("top")).unwrap(),
+            b"top-level\n"
+        );
+        assert_eq!(
+            std::fs::read(published.join("subdir/leaf")).unwrap(),
+            b"nested\n"
+        );
+        assert_eq!(
+            std::fs::read_link(published.join("subdir/link")).unwrap(),
+            PathBuf::from("../top")
+        );
+        assert_eq!(fixture.transport.request_count(&fixture.object_url), 1);
+    }
+
+    #[tokio::test]
     async fn fs_files_are_downloaded_then_published_as_one_batch() {
         let temp = tempfile::tempdir().unwrap();
         let working_root = temp.path().join("working");
@@ -944,6 +1039,169 @@ mod tests {
                 transport.request_count(&base_url.join(&format!("f/{hash}")).unwrap()),
                 1
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_fs_tree_imports_manifest_and_complete_file_closure() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("source-store");
+        let working_root = temp.path().join("working");
+        std::fs::create_dir(&source_root).unwrap();
+        std::fs::create_dir(&working_root).unwrap();
+        let source_store = Store::create(&source_root).unwrap();
+        let working = Store::create(&working_root).unwrap();
+        let tree = temp.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::write(tree.join("first"), b"first payload\n").unwrap();
+        std::fs::write(tree.join("second"), b"second payload\n").unwrap();
+        let manifest = source_store.fs_tree().intern_tree(tree).unwrap();
+        let fs_file_hashes = manifest
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                FsTreeEntry::File { hash, .. } => Some(*hash),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fs_file_hashes.len(), 2);
+        let manifest_source = temp.path().join("manifest.jsonl");
+        let manifest_encoded = temp.path().join("manifest.cbor");
+        manifest.write_canonical(&manifest_source).unwrap();
+        let object_hash =
+            encode_object(&manifest_source, Compression::Zstd, &manifest_encoded).unwrap();
+        let mut encoded_fs_files = Vec::new();
+        for (index, hash) in fs_file_hashes.iter().enumerate() {
+            let encoded = temp.path().join(format!("fs-file-{index}.cbor"));
+            assert_eq!(
+                encode_fs_file(
+                    &source_store.fs_file_path(*hash),
+                    Compression::Zstd,
+                    &encoded,
+                )
+                .unwrap(),
+                *hash
+            );
+            encoded_fs_files.push((*hash, encoded));
+        }
+
+        let build_key = BuildKey::from_bytes([11; 32]);
+        let reuse_key = ReuseKey::from_bytes([12; 32]);
+        let build_bytes = BuildIndex::encode(&[(build_key, object_hash)]).unwrap();
+        let reuse_bytes = ReuseIndex::encode(&[(reuse_key, object_hash)]).unwrap();
+        let object_list_bytes = ObjectList::encode([object_hash]);
+        let file_list_bytes = FsFileList::encode(fs_file_hashes.iter().copied());
+        let build_hash = BuildIndexHash::digest(&build_bytes);
+        let reuse_hash = ReuseIndexHash::digest(&reuse_bytes);
+        let object_list_hash = ObjectListHash::digest(&object_list_bytes);
+        let file_list_hash = FsFileListHash::digest(&file_list_bytes);
+        let base_url = Url::parse("https://tree-data.example/").unwrap();
+        let master_url = Url::parse("https://tree-master.example/master").unwrap();
+        let signing = SigningKey::from_bytes(&[13; 32]);
+        let master = Master::new(
+            None,
+            base_url.clone(),
+            vec![Slot {
+                serial: 1,
+                build: build_hash,
+                reuse: reuse_hash,
+                object_list: object_list_hash,
+                file_list: file_list_hash,
+                retain_until: None,
+            }],
+        )
+        .unwrap();
+        let transport = MemoryTransport::default();
+        transport.insert(
+            master_url.clone(),
+            master.sign(b"key", &signing).unwrap(),
+            "application/cose; cose-type=\"cose-sign1\"",
+            "no-cache",
+        );
+        for (namespace, hash, bytes) in [
+            ("b", build_hash.to_string(), build_bytes),
+            ("r", reuse_hash.to_string(), reuse_bytes),
+            ("lo", object_list_hash.to_string(), object_list_bytes),
+            ("lf", file_list_hash.to_string(), file_list_bytes),
+        ] {
+            transport.insert(
+                base_url.join(&format!("{namespace}/{hash}")).unwrap(),
+                bytes,
+                "application/octet-stream",
+                "public, max-age=31536000, immutable",
+            );
+        }
+        transport.insert(
+            base_url.join(&format!("o/{object_hash}")).unwrap(),
+            std::fs::read(&manifest_encoded).unwrap(),
+            "application/vnd.bobr.repository-object+cbor",
+            "public, max-age=31536000, immutable",
+        );
+        for (hash, encoded) in &encoded_fs_files {
+            transport.insert(
+                base_url.join(&format!("f/{hash}")).unwrap(),
+                std::fs::read(encoded).unwrap(),
+                "application/vnd.bobr.repository-fs-file+cbor",
+                "public, max-age=31536000, immutable",
+            );
+        }
+        let trusted = TrustedKeys::new([(b"key".to_vec(), signing.verifying_key())]).unwrap();
+        let backend = RemoteRepositoryBackend::new(
+            master_url.to_string(),
+            RepositoryReader::new(
+                master_url,
+                trusted,
+                &temp.path().join("cache"),
+                Arc::new(transport),
+            )
+            .unwrap(),
+        );
+        let resolver = SecondaryResolver::new(
+            working.clone(),
+            "remote-tree-test",
+            vec![NamedMappingProvider::new(
+                "remote",
+                Arc::new(RemoteMappingProvider::new(backend.clone())),
+            )],
+            vec![NamedContentProvider::new(
+                "remote",
+                Arc::new(RemoteContentProvider::new(
+                    backend,
+                    working.clone(),
+                    RuntimeProvider::host(),
+                    LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+                )),
+            )],
+        )
+        .unwrap();
+
+        let resolved = resolver
+            .resolve_builds(&[build_key])
+            .await
+            .unwrap()
+            .remove(0)
+            .resolved
+            .unwrap();
+        assert_eq!(resolved.object_hash, object_hash);
+        assert_eq!(resolved.content_sources, ["remote"]);
+        assert_eq!(resolved.transfers.len(), 1);
+        assert_eq!(
+            resolved.transfers[0].transfer_mode,
+            ContentTransferMode::Download
+        );
+        assert_eq!(resolved.transfers[0].files, 3);
+        let expected_encoded_bytes = std::fs::metadata(&manifest_encoded).unwrap().len()
+            + encoded_fs_files
+                .iter()
+                .map(|(_, path)| std::fs::metadata(path).unwrap().len())
+                .sum::<u64>();
+        assert_eq!(
+            resolved.transfers[0].encoded_bytes,
+            Some(expected_encoded_bytes)
+        );
+        assert!(working.object_is_complete(object_hash).unwrap());
+        for hash in fs_file_hashes {
+            working.verify_fs_file(hash).unwrap();
         }
     }
 }
