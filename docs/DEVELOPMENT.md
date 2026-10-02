@@ -34,8 +34,8 @@ processes.
 The gate requires a clean checkout by default. It reads the single explicit
 `RUST_TOOLCHAIN` value from both CI and release workflows, requires the two to
 match, and requires the local `rustc` to have that exact version. It then runs
-formatting, clippy, tests, and rustdoc, builds the static musl release archives,
-and smoke-tests them. Only after every check succeeds does it replace `bobr`,
+formatting, clippy, tests, and rustdoc, builds the static musl release archive,
+and smoke-tests it. Only after every check succeeds does it replace `bobr`,
 `bobr-repo`, `bobr-fsobj-hash`, and `bobr-sandbox-launcher` in the destination.
 `--allow-dirty` permits an iterative build while recording that fact in
 `bobr --build-info`.
@@ -56,12 +56,12 @@ Two different launchers are built here, and only one of them is installed:
   build, and `bobr` finds it by looking beside its own executable — which is also
   how the release archive is laid out, so this is the same path a user takes, not
   a development special case.
-- **The bundle launcher, `bobr-bundle-launcher`, is only built, never
-  installed.** It belongs to built artifacts rather than to your toolchain: it is
-  the small program a [HostBundle](./HOST_BUNDLE.md) carries to select its own
-  loader and libraries at run time. Recipes fetch it from a published release
-  (`host-bundles/bobr-bundle-launcher.ncl`), not from this tree, so building it
-  here only proves it still compiles.
+- **The bundle launcher, `bobr-bundle-launcher`, is tested, never installed.**
+  It belongs to built artifacts rather than to your toolchain: it is the small
+  program a [HostBundle](./HOST_BUNDLE.md) carries to select its own loader and
+  libraries at run time. Its recipe builds the published source crate from
+  crates.io, so workspace checks here validate its source without producing a
+  release asset.
 
 ## Building recipes
 

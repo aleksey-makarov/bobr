@@ -116,7 +116,6 @@ tag="v${version}"
 case "$(uname -m)" in
   x86_64)
     host_target="x86_64-unknown-linux-musl"
-    other_target="aarch64-unknown-linux-musl"
     ;;
   aarch64)
     die "the main release archive is currently published only for x86_64"
@@ -181,17 +180,6 @@ verify_archive() {
   fi
 }
 
-target_is_installed() {
-  local target="$1"
-  local target_libdir
-
-  target_libdir="$(
-    "${rustc_command}" --print target-libdir --target "${target}" 2>/dev/null
-  )" || return 1
-  [ -d "${target_libdir}" ] \
-    && compgen -G "${target_libdir}/libstd-*.rlib" >/dev/null
-}
-
 step "checks (the workflow's test job)"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -211,46 +199,15 @@ done
 cargo build --release --locked --target "${host_target}" \
   "${package_flags[@]}" --bins
 .github/scripts/package-release.sh \
-  main "${tag}" "${host_target}" "${source_date_epoch}" "${out}"
+  "${tag}" "${host_target}" "${source_date_epoch}" "${out}"
 main_archive="bobr-${host_target}.tar.xz"
 main_root="bobr-${tag}-${host_target}"
 verify_archive "${main_archive}" "${main_root}"
 
-step "bundle launcher, ${host_target}"
-cargo test --locked -p bobr-bundle-launcher
-cargo build --release --locked --target "${host_target}" \
-  -p bobr-bundle-launcher
-.github/scripts/package-release.sh \
-  bundle "${tag}" "${host_target}" "${source_date_epoch}" "${out}"
-verify_archive \
-  "bobr-bundle-launcher-${host_target}.tar.xz" \
-  "bobr-bundle-launcher-${tag}-${host_target}"
-
-# The second architecture is build-only: its tests cannot run on this host.
-if target_is_installed "${other_target}"; then
-  step "bundle launcher, ${other_target} (build and package only)"
-  cargo build --release --locked --target "${other_target}" \
-    -p bobr-bundle-launcher
-  .github/scripts/package-release.sh \
-    bundle "${tag}" "${other_target}" "${source_date_epoch}" "${out}"
-  verify_archive \
-    "bobr-bundle-launcher-${other_target}.tar.xz" \
-    "bobr-bundle-launcher-${tag}-${other_target}"
-else
-  echo "note: skipping ${other_target}; its Rust target is not installed" >&2
-fi
-
 step "archives built for ${tag}"
 find "${out}" -maxdepth 1 -type f -name '*.tar.xz' -printf '%f\n' \
   | LC_ALL=C sort >"${out}/archive-names"
-expected_archive_names="$({
-  printf '%s\n' \
-    "${main_archive}" \
-    "bobr-bundle-launcher-${host_target}.tar.xz"
-  if target_is_installed "${other_target}"; then
-    printf '%s\n' "bobr-bundle-launcher-${other_target}.tar.xz"
-  fi
-} | LC_ALL=C sort)"
+expected_archive_names="${main_archive}"
 [ "$(cat "${out}/archive-names")" = "${expected_archive_names}" ] \
   || die "release packaging produced an unexpected archive set"
 (

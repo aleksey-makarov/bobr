@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# Build deterministic bobr release archives from already-built Cargo outputs.
-# Usage: package-release.sh main|bundle RELEASE_TAG TARGET SOURCE_DATE_EPOCH OUT
+# Build the deterministic bobr release archive from already-built Cargo outputs.
+# Usage: package-release.sh RELEASE_TAG TARGET SOURCE_DATE_EPOCH OUT
 
 set -euo pipefail
 
@@ -10,34 +10,21 @@ die() {
   exit 2
 }
 
-[ "$#" -eq 5 ] || die "expected: main|bundle RELEASE_TAG TARGET SOURCE_DATE_EPOCH OUT"
+[ "$#" -eq 4 ] || die "expected: RELEASE_TAG TARGET SOURCE_DATE_EPOCH OUT"
 
-kind="$1"
-release_tag="$2"
-target="$3"
-source_date_epoch="$4"
-output_dir="$5"
+release_tag="$1"
+target="$2"
+source_date_epoch="$3"
+output_dir="$4"
 
-case "${kind}" in
-  main | bundle) ;;
-  *) die "unknown package kind '${kind}'" ;;
-esac
 [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
   || die "invalid release tag '${release_tag}'"
 [[ "${source_date_epoch}" =~ ^[0-9]+$ ]] \
   || die "invalid SOURCE_DATE_EPOCH '${source_date_epoch}'"
 
-case "${target}" in
-  x86_64-unknown-linux-musl)
-    machine_pattern="Advanced Micro Devices X86-64"
-    ;;
-  aarch64-unknown-linux-musl)
-    machine_pattern="AArch64"
-    ;;
-  *)
-    die "unsupported release target '${target}'"
-    ;;
-esac
+[ "${target}" = "x86_64-unknown-linux-musl" ] \
+  || die "unsupported release target '${target}'"
+machine_pattern="Advanced Micro Devices X86-64"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 target_dir="${repo_root}/target/${target}/release"
@@ -84,57 +71,54 @@ make_archive() {
   echo "created ${archive}" >&2
 }
 
-if [ "${kind}" = "main" ]; then
-  [ "${target}" = "x86_64-unknown-linux-musl" ] \
-    || die "the main bobr archive is currently x86_64-only"
-  [ -n "${BOBR_BUILD_GIT_COMMIT:-}" ] \
-    || die "BOBR_BUILD_GIT_COMMIT is required for the main release archive"
-  case "${BOBR_BUILD_GIT_DIRTY:-}" in
-    false | true) ;;
-    *) die "BOBR_BUILD_GIT_DIRTY must be 'true' or 'false' for the main release archive" ;;
-  esac
+[ -n "${BOBR_BUILD_GIT_COMMIT:-}" ] \
+  || die "BOBR_BUILD_GIT_COMMIT is required for the main release archive"
+case "${BOBR_BUILD_GIT_DIRTY:-}" in
+  false | true) ;;
+  *) die "BOBR_BUILD_GIT_DIRTY must be 'true' or 'false' for the main release archive" ;;
+esac
 
-  root_name="bobr-${release_tag}-${target}"
-  root="${staging}/${root_name}"
-  mkdir -p "${root}/bin"
-  for binary in bobr bobr-repo bobr-fsobj-hash bobr-sandbox-launcher; do
-    require_file "${target_dir}/${binary}"
-    install -m755 "${target_dir}/${binary}" "${root}/bin/${binary}"
-    strip "${root}/bin/${binary}"
-    verify_static_elf "${root}/bin/${binary}"
-  done
-  install -m644 "${repo_root}/README.md" "${root}/README.md"
-  install -m644 "${repo_root}/LICENSE-APACHE" "${root}/LICENSE-APACHE"
-  install -m644 "${repo_root}/LICENSE-MIT" "${root}/LICENSE-MIT"
+root_name="bobr-${release_tag}-${target}"
+root="${staging}/${root_name}"
+mkdir -p "${root}/bin"
+for binary in bobr bobr-repo bobr-fsobj-hash bobr-sandbox-launcher; do
+  require_file "${target_dir}/${binary}"
+  install -m755 "${target_dir}/${binary}" "${root}/bin/${binary}"
+  strip "${root}/bin/${binary}"
+  verify_static_elf "${root}/bin/${binary}"
+done
+install -m644 "${repo_root}/README.md" "${root}/README.md"
+install -m644 "${repo_root}/LICENSE-APACHE" "${root}/LICENSE-APACHE"
+install -m644 "${repo_root}/LICENSE-MIT" "${root}/LICENSE-MIT"
 
-  "${root}/bin/bobr-fsobj-hash" --help >/dev/null
-  "${root}/bin/bobr-repo" --version >/dev/null
-  bobr_version="$("${root}/bin/bobr" --version)"
-  expected_provenance="${BOBR_BUILD_GIT_COMMIT}"
-  if [ "${BOBR_BUILD_GIT_DIRTY}" = true ]; then
-    expected_provenance="${expected_provenance}-dirty"
-  fi
-  expected_bobr_version="$(printf \
-    'bobr %s (request bobr-request-v6) (%s)' \
-    "${release_tag#v}" "${expected_provenance}")"
-  [ "${bobr_version}" = "${expected_bobr_version}" ] \
-    || die "unexpected bobr version output: ${bobr_version}"
-  build_info="$("${root}/bin/bobr" --build-info)"
-  expected_build_info="$(printf \
-    '{"version":"%s","request_schema":"bobr-request-v6","provenance":{"git_commit":"%s","git_dirty":%s}}' \
-    "${release_tag#v}" "${BOBR_BUILD_GIT_COMMIT}" "${BOBR_BUILD_GIT_DIRTY}")"
-  [ "${build_info}" = "${expected_build_info}" ] \
-    || die "unexpected bobr build information: ${build_info}"
-  protocol_info="$("${root}/bin/bobr-sandbox-launcher" --protocol-info)"
-  [ "${protocol_info}" = '{"name":"bobr-sandbox-launcher","protocol_version":6}' ] \
-    || die "unexpected sandbox launcher protocol info: ${protocol_info}"
+"${root}/bin/bobr-fsobj-hash" --help >/dev/null
+"${root}/bin/bobr-repo" --version >/dev/null
+bobr_version="$("${root}/bin/bobr" --version)"
+expected_provenance="${BOBR_BUILD_GIT_COMMIT}"
+if [ "${BOBR_BUILD_GIT_DIRTY}" = true ]; then
+  expected_provenance="${expected_provenance}-dirty"
+fi
+expected_bobr_version="$(printf \
+  'bobr %s (request bobr-request-v6) (%s)' \
+  "${release_tag#v}" "${expected_provenance}")"
+[ "${bobr_version}" = "${expected_bobr_version}" ] \
+  || die "unexpected bobr version output: ${bobr_version}"
+build_info="$("${root}/bin/bobr" --build-info)"
+expected_build_info="$(printf \
+  '{"version":"%s","request_schema":"bobr-request-v6","provenance":{"git_commit":"%s","git_dirty":%s}}' \
+  "${release_tag#v}" "${BOBR_BUILD_GIT_COMMIT}" "${BOBR_BUILD_GIT_DIRTY}")"
+[ "${build_info}" = "${expected_build_info}" ] \
+  || die "unexpected bobr build information: ${build_info}"
+protocol_info="$("${root}/bin/bobr-sandbox-launcher" --protocol-info)"
+[ "${protocol_info}" = '{"name":"bobr-sandbox-launcher","protocol_version":6}' ] \
+  || die "unexpected sandbox launcher protocol info: ${protocol_info}"
 
-  smoke="${staging}/smoke"
-  # bobr creates none of these itself, so that a mistyped path fails at once.
-  # The run directories share the store's filesystem, which it also checks.
-  mkdir -p "${smoke}/store" "${smoke}/store/logs/release-smoke" \
-    "${smoke}/store/work/release-smoke"
-  cat >"${smoke}/request.json" <<EOF
+smoke="${staging}/smoke"
+# bobr creates none of these itself, so that a mistyped path fails at once.
+# The run directories share the store's filesystem, which it also checks.
+mkdir -p "${smoke}/store" "${smoke}/store/logs/release-smoke" \
+  "${smoke}/store/work/release-smoke"
+cat >"${smoke}/request.json" <<EOF
 {
   "schema": "bobr-request-v6",
   "store": "${smoke}/store",
@@ -164,32 +148,8 @@ if [ "${kind}" = "main" ]; then
   }
 }
 EOF
-  object_hash="$("${root}/bin/bobr" "${smoke}/request.json")"
-  [[ "${object_hash}" =~ ^[0-9a-f]{64}$ ]] \
-    || die "bobr smoke test returned an invalid object hash: ${object_hash}"
+object_hash="$("${root}/bin/bobr" "${smoke}/request.json")"
+[[ "${object_hash}" =~ ^[0-9a-f]{64}$ ]] \
+  || die "bobr smoke test returned an invalid object hash: ${object_hash}"
 
-  make_archive "${root_name}" "bobr-${target}.tar.xz"
-  exit 0
-fi
-
-root_name="bobr-bundle-launcher-${release_tag}-${target}"
-root="${staging}/${root_name}"
-require_file "${target_dir}/bobr-bundle-launcher"
-install -Dm755 \
-  "${target_dir}/bobr-bundle-launcher" \
-  "${root}/usr/libexec/bobr-bundle-launcher"
-strip "${root}/usr/libexec/bobr-bundle-launcher"
-verify_static_elf "${root}/usr/libexec/bobr-bundle-launcher"
-
-launcher_stdout="${staging}/launcher.stdout"
-launcher_stderr="${staging}/launcher.stderr"
-if "${root}/usr/libexec/bobr-bundle-launcher" \
-  >"${launcher_stdout}" 2>"${launcher_stderr}"; then
-  die "bundle launcher without an invocation mode unexpectedly succeeded"
-fi
-grep -Fq 'usage: bobr-bundle-launcher --run TOOL' "${launcher_stderr}" \
-  || die "bundle launcher smoke test did not print the expected usage"
-
-make_archive \
-  "${root_name}" \
-  "bobr-bundle-launcher-${target}.tar.xz"
+make_archive "${root_name}" "bobr-${target}.tar.xz"
