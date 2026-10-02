@@ -1780,11 +1780,11 @@ const LIVE_REDRAW: Duration = Duration::from_millis(200);
 impl LiveProgress {
     fn new(run_log_dir: PathBuf, multi: MultiProgress, policy: ProgressPolicy) -> Self {
         let fetch = multi.add(ProgressBar::new_spinner());
-        fetch.set_style(ProgressStyle::with_template("{msg}").expect("valid template"));
+        fetch.set_style(ProgressStyle::with_template("{wide_msg}").expect("valid template"));
         let build = multi.add(ProgressBar::new_spinner());
-        build.set_style(ProgressStyle::with_template("{msg}").expect("valid template"));
+        build.set_style(ProgressStyle::with_template("{wide_msg}").expect("valid template"));
         let summary = multi.add(ProgressBar::new_spinner());
-        summary.set_style(ProgressStyle::with_template("{msg}").expect("valid template"));
+        summary.set_style(ProgressStyle::with_template("{wide_msg}").expect("valid template"));
         let now = Instant::now();
         Self {
             run_log_dir,
@@ -1792,10 +1792,10 @@ impl LiveProgress {
             fetch,
             build,
             summary,
-            active_style: ProgressStyle::with_template("{spinner} {msg} ({elapsed})")
+            active_style: ProgressStyle::with_template("{spinner} {wide_msg} ({elapsed})")
                 .expect("valid template"),
-            failed_style: ProgressStyle::with_template("  {msg}").expect("valid template"),
-            idle_style: ProgressStyle::with_template("  {msg}").expect("valid template"),
+            failed_style: ProgressStyle::with_template("  {wide_msg}").expect("valid template"),
+            idle_style: ProgressStyle::with_template("  {wide_msg}").expect("valid template"),
             slots: Vec::new(),
             viewport: ActivityViewport::default(),
             policy,
@@ -2423,7 +2423,70 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     use std::fs;
+    use std::io::Result as IoResult;
+    use std::sync::atomic::AtomicUsize;
     use tempfile::tempdir;
+
+    /// Minimal terminal that records the widest string written by indicatif.
+    /// A live row is physically stable only when every logical line fits the
+    /// terminal instead of relying on terminal wrapping.
+    #[derive(Debug, Clone)]
+    struct WidthCheckingTerm {
+        width: u16,
+        height: u16,
+        max_write_width: Arc<AtomicUsize>,
+    }
+
+    impl WidthCheckingTerm {
+        fn record(&self, value: &str) {
+            self.max_write_width
+                .fetch_max(value.chars().count(), Ordering::Relaxed);
+        }
+    }
+
+    impl indicatif::TermLike for WidthCheckingTerm {
+        fn width(&self) -> u16 {
+            self.width
+        }
+
+        fn height(&self) -> u16 {
+            self.height
+        }
+
+        fn move_cursor_up(&self, _n: usize) -> IoResult<()> {
+            Ok(())
+        }
+
+        fn move_cursor_down(&self, _n: usize) -> IoResult<()> {
+            Ok(())
+        }
+
+        fn move_cursor_right(&self, _n: usize) -> IoResult<()> {
+            Ok(())
+        }
+
+        fn move_cursor_left(&self, _n: usize) -> IoResult<()> {
+            Ok(())
+        }
+
+        fn write_line(&self, value: &str) -> IoResult<()> {
+            self.record(value);
+            Ok(())
+        }
+
+        fn write_str(&self, value: &str) -> IoResult<()> {
+            self.record(value);
+            Ok(())
+        }
+
+        fn clear_line(&self) -> IoResult<()> {
+            Ok(())
+        }
+
+        fn flush(&self) -> IoResult<()> {
+            Ok(())
+        }
+    }
 
     fn run_event_log(run_log_dir: &Path) -> String {
         fs::read_to_string(run_log_dir.join("events.jsonl")).unwrap()
@@ -3488,6 +3551,39 @@ mod tests {
         assert!(!progress.handle(&summary));
         assert_eq!(progress.done, 1);
         assert_eq!(progress.total, 1);
+    }
+
+    #[test]
+    fn live_progress_rows_fit_the_terminal_width() {
+        const WIDTH: u16 = 48;
+        let max_write_width = Arc::new(AtomicUsize::new(0));
+        let terminal = WidthCheckingTerm {
+            width: WIDTH,
+            height: 24,
+            max_write_width: Arc::clone(&max_write_width),
+        };
+        let multi = MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::term_like(
+            Box::new(terminal),
+        ));
+        let mut live = LiveProgress::new(
+            PathBuf::from("/a/very/long/run/log/directory"),
+            multi,
+            ProgressPolicy::Fixed { max_lines: 4 },
+        );
+        live.reflow_for_test(24);
+        live.reachable = 1_907;
+        live.start_or_update_activity(
+            ActivityKey::Builder("builder".into()),
+            "Sandbox a-very-long-builder-name: a message followed by a log path that must not wrap"
+                .into(),
+        );
+        live.reflow_for_test(24);
+
+        assert!(
+            max_write_width.load(Ordering::Relaxed) <= usize::from(WIDTH),
+            "every logical live-progress row must occupy one physical terminal row"
+        );
+        live.clear();
     }
 
     #[test]
