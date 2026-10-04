@@ -166,12 +166,18 @@ machine-readable schema in `bobr --build-info` before doing anything.
 
 Building takes two things: a **store** to build into, and a **build profile**
 describing your installation. The profile is a small Nickel file you keep in
-your working directory. Import the maintained user preset, so later recipe
-updates do not leave a copied template behind:
+your working directory. Import the public package-set function and the
+maintained user preset, then select the ordered goals explicitly:
 
 ```sh
-printf '%s\n' \
-  'import "bobr-recipes/build-profile/bobr-user.ncl"' > bobr.ncl
+cat > bobr.ncl <<'EOF'
+let bobrpkgs = import "bobr-recipes/bobrpkgs.ncl" in
+let pkgs = bobrpkgs [] in
+(import "bobr-recipes/build-profile/bobr-user.ncl") & {
+  include pkgs,
+  goals = [pkgs.world],
+}
+EOF
 mkdir bobr-store
 bobr-recipes/bin/bobr-build.sh
 ```
@@ -181,8 +187,8 @@ configured secondary stores, acquires missing Source content from local paths,
 HTTP mirrors, or OCI registries, and runs builders only where cache resolution
 misses.
 
-That builds the profile's `target`, which the preset sets to `world` — every
-shipped OS image and HostBundle, without the separate acceptance tests. Expect
+That builds the profile's `world` goal — every shipped OS image and HostBundle,
+without the separate acceptance tests. Expect
 it to run for hours: nothing arrives pre-built, so the first build starts at the
 toolchain and works its way up. Run `--target test_all` when you want the rootfs,
 HostBundle, and final-toolchain checks. To try something smaller first, list
@@ -193,14 +199,16 @@ bobr-recipes/bin/bobr-list-pkgs.sh          # attribute, recipe name, tag
 bobr-recipes/bin/bobr-build.sh --target gzip
 ```
 
-`bobr-list-pkgs.sh` reads the same profile, so the list already reflects any
-overlays it applies.
+`bobr-list-pkgs.sh` reads the same final `pkgs`, so the list already reflects
+any overlays applied while constructing it.
 
-The profile holds what does not change between builds — the store, the log and
-work directories, overlays to apply, whether to run under `podman unshare`. The
+The profile holds what does not change between builds — the package set,
+ordered goals, store, log and work directories, and whether to run under
+`podman unshare`. The
 few things that belong to one invocation stay on the command line:
 
-- `--target NAME` — build this instead of the profile's target;
+- `--target NAME` — replace the profile goals for this run; repeat it to select
+  several goals in order;
 - `--jobs N`, `--quiet` — for this run only;
 - `--dry-run` — print the resolved profile and the JSON request, build nothing;
 - a positional argument names a different profile (`bobr-build.sh ../ci/bobr.ncl`).
@@ -234,9 +242,9 @@ To author or extend recipes, see [Recipes in Nickel](./NICKEL.md).
 
 The recipes are a fixed-point set of plain data records, and an **overlay** is a
 function over that set: given the set as it stands, it returns the fields that
-should differ. The profile lists the overlays to apply, so your changes live
-next to your profile rather than as edits inside the recipes checkout — which
-keeps them intact when you update it.
+should differ. The profile imports and applies overlays while constructing
+`pkgs`, so your changes live next to your profile rather than as edits inside
+the recipes checkout — which keeps them intact when you update it.
 
 Put this in `overlay.ncl`, beside your `bobr.ncl`:
 
@@ -254,10 +262,16 @@ configuration is an ordinary record of option names, the same kind of data as a
 package's version, and an overlay gets at it the same way. There is no separate
 mechanism for the kernel.
 
-Point the profile at it:
+Apply it when constructing the package set:
 
 ```nickel
-overlays = ["./overlay.ncl"],
+let bobrpkgs = import "bobr-recipes/bobrpkgs.ncl" in
+let local_overlay = import "./overlay.ncl" in
+let pkgs = bobrpkgs [local_overlay] in
+(import "bobr-recipes/build-profile/bobr-user.ncl") & {
+  include pkgs,
+  goals = [pkgs.world],
+}
 ```
 
 Nothing needs building to check that an overlay took effect — `bobr-list-pkgs.sh`

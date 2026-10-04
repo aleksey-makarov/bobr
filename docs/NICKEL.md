@@ -14,8 +14,8 @@ layer produces. This chapter describes how that layer works in bobr-recipes.
 
 ## The package set
 
-`recipe-set.ncl` exports `mkPkgs`, a function from a list of overlays to the
-**recipe set**; `(import "recipe-set.ncl") []` builds the default set. It folds
+`bobrpkgs.ncl` exports a function from an ordered list of overlays to the
+**recipe set**; `(import "bobrpkgs.ncl") []` builds the default set. It folds
 together the package recipes — one module per package, listed in `pkgs/pkgs.ncl`
 and living beside it in `pkgs/` — with the modules that assemble images, tests,
 and bundles. Each module is a function of the finished set, so recipes refer to
@@ -45,13 +45,30 @@ fun pkgs =>
   { include [libffi] }
 ```
 
-`request.ncl` ties it together: given the paths of one run, a target attribute,
-and optional overlays, it selects that recipe from `mkPkgs overlays` and lowers
-it to a full [request](./REQUEST.md). Callers rarely invoke it directly —
+`request.ncl` ties it together: given the paths of one run, the final package
+set, and an ordered non-empty array of recipe goals, it lowers their shared DAG
+to a full [request](./REQUEST.md). Callers rarely invoke it directly —
 `bin/bobr-build.sh` does, reading everything but the run's own identity from a
 **build profile** (`bobr.ncl`, shaped by
 `build-profile/build-profile.ncl`). A normal profile imports the maintained
 `build-profile/bobr-user.ncl` preset instead of copying a template.
+
+The profile is itself the Nickel program that constructs the package set and
+selects its goals:
+
+```nickel
+let bobrpkgs = import "bobr-recipes/bobrpkgs.ncl" in
+let pkgs = bobrpkgs [] in
+(import "bobr-recipes/build-profile/bobr-user.ncl") & {
+  include pkgs,
+  goals = [pkgs.world],
+}
+```
+
+`include pkgs` adds the existing local `pkgs` value as a record field. Multiple
+goals share one lowered DAG and retain their array order. Repeated `--target
+NAME` options replace the profile goals for one invocation; each name is looked
+up in the profile's final `pkgs`.
 
 A build profile can attach ordered local and remote backends to the Realizer.
 Capabilities are explicit and independent; enabling both on one profile entry
@@ -119,14 +136,14 @@ builder — `bobr` has no such builder. It is a **synthetic recipe**: a
 high-level, Nickel-only tag that stands for a common build pattern and is
 *lowered* (expanded) into real builder nodes before the request reaches `bobr`.
 
-Lowering happens in `recipe-lib.ncl`'s `to_request`, which walks the recipe
+Lowering happens in `recipe-lib.ncl`'s `to_request_goals`, which walks the recipe
 graph and looks each node's tag up in `synthetic/registry.ncl`. A node whose tag
 is already a real builder — `Tree`, `TreeMerge`, `Sandbox`, `SandboxInstall`,
 `Source`, and so on — passes through unchanged. A node with a synthetic tag is expanded into real
 builder nodes: typically a `Sandbox` that runs the build script, plus a
 `TreeMerge` that assembles its build rootfs. Expansion runs on the
 already-overlaid package set, so overlays always patch the high-level recipe and
-expansion sees the result; `to_request` then assigns node ids and emits the JSON
+expansion sees the result; lowering then assigns node ids and emits the JSON
 `nodes` map.
 
 `HostBundle` is different: it is a real bobr builder, used directly from a

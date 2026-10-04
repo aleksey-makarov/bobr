@@ -283,7 +283,8 @@ Each run writes:
 When the standard `bobr-recipes/bin/bobr-build.sh` driver starts the run, it
 also writes two inspection sidecars at the run-log root:
 
-- `context.json` records the target, run outcome, `bobr --build-info`, and the
+- `context.json` records the ordered goal recipe names, run outcome,
+  `bobr --build-info`, and the
   recipes checkout commit and dirty state when Git provenance is available;
 - `recipe-catalog.json` contains only the reachable recipe names and builder
   tags needed by store-inspection tools. It deliberately omits builder configs,

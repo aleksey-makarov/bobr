@@ -84,8 +84,8 @@ The build tells you when this is needed, and names the tool.
 
 ## Cold world builds
 
-The artifact-only `world` target and the explicit acceptance-test target
-`test_all` are ordinary profile targets. To prove the shipped artifacts build
+The artifact-only `world` goal and the explicit acceptance-test goal `test_all`
+are ordinary package-set attributes selected by a profile. To prove the shipped artifacts build
 without working-store mappings, point a profile at a newly created empty store
 and run the normal driver:
 
