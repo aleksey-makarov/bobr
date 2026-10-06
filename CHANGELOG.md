@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.11
+
+- Added the remote repository client with signed master verification, cached
+  metadata, and verified object and fs-file downloads.
+- Introduced request v6 with ordered, independent mapping and content providers
+  for local and remote repositories, using shared asynchronous fetch scheduling.
+- Improved repository administration and transfer progress, and fixed realtime
+  terminal layout and activity sizing.
+- Fixed hardlinked fs-file verification across user namespaces.
+- Stopped shipping bundle launcher binaries; recipes now build the source crate.
+- Moved the website and installer to `bobr.build` and separated installation
+  instructions from Getting Started.
+
 ## 0.1.10
 
 - Unified source acquisition and builder execution under a demand-driven,
