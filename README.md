@@ -1,10 +1,12 @@
 # Bobr
 
-<img src="docs/bobr.svg" alt="bobr" width="200">
+<img src="https://bobr.build/bobr.svg" alt="bobr" width="200">
 
 > `bobr` is a build system. It executes a request — a DAG of recipe nodes — and
 > yields reproducible, content-addressed objects such as filesystem trees and
 > root-filesystem images.
+
+Website and documentation: [bobr.build](https://bobr.build/).
 
 ## Key properties
 
@@ -44,10 +46,10 @@ and content-addressed derivations remain experimental.
 read-only rootfs. But OSTree is about delivering and updating that OS on the
 machine (atomic upgrades, rollback), where `bobr` builds the images.
 
-`bobr` [HostBundles](./docs/HOST_BUNDLE.md) offer container-like portability
-without a container runtime: a relocatable directory carrying the program, its
-loader, libraries, data, and a tiny static launcher. Run it from the store or
-copy it to another compatible Linux machine — it keeps using its bundled
+`bobr` [HostBundles](https://bobr.build/HOST_BUNDLE.html) offer container-like
+portability without a container runtime: a relocatable directory carrying the
+program, its loader, libraries, data, and a tiny static launcher. Run it from the
+store or copy it to another compatible Linux machine — it keeps using its bundled
 runtime, not the host's.
 
 ## Install
@@ -55,32 +57,29 @@ runtime, not the host's.
 On x86-64 Linux, install the latest release with:
 
 ```sh
-curl -fsSL https://aleksey-makarov.github.io/bobr/install.sh | bash
+curl -fsSL https://bobr.build/install.sh | bash
 ```
 
 The installer verifies the release checksum and installs into
-`~/.local/bin`. See [Getting Started](./docs/GETTING_STARTED.md) for a
+`~/.local/bin`. See [Getting Started](https://bobr.build/GETTING_STARTED.html) for a
 review-before-running variant, custom destinations, prerequisites, and
 uninstallation.
 
-## Documentation
-
-Documentation lives in [`docs/`](./docs/). New here? Start with
-[Getting Started](./docs/GETTING_STARTED.md); for the full table of
-contents see [`docs/CONTENTS.md`](./docs/CONTENTS.md).
-
 ## Independence and Affiliation
 
-This project is an independent personal open-source effort.
-It is not affiliated with, derived from, or endorsed by Qualcomm or the Yocto Project.
+This is a personal open-source project, developed independently rather than
+derived from an existing codebase. It is not affiliated with or endorsed by
+Qualcomm or any other organization.
 
 ## License
 
 Licensed under either of
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](./LICENSE-APACHE) or
+- Apache License, Version 2.0
+  ([LICENSE-APACHE](https://github.com/aleksey-makarov/bobr/blob/master/LICENSE-APACHE) or
   <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](./LICENSE-MIT) or
+- MIT license
+  ([LICENSE-MIT](https://github.com/aleksey-makarov/bobr/blob/master/LICENSE-MIT) or
   <http://opensource.org/licenses/MIT>)
 
 at your option.

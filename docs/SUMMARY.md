@@ -1,6 +1,6 @@
 # Summary
 
-[Contents](CONTENTS.md)
+[Bobr](INDEX.md)
 
 - [Getting Started](GETTING_STARTED.md)
 - [Concepts](CONCEPTS.md)

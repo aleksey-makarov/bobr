@@ -4,6 +4,7 @@ on:
   push:
     branches: [master]
     paths:
+      - 'README.md'
       - 'docs/**'
       - 'book.toml'
       - 'install.sh'

@@ -22,7 +22,7 @@ target from the Nickel recipes. For the ideas behind it all, see
 The shortest installation command is:
 
 ```sh
-curl -fsSL https://aleksey-makarov.github.io/bobr/install.sh | bash
+curl -fsSL https://bobr.build/install.sh | bash
 ```
 
 If you prefer to inspect code before running it, download the same script
@@ -30,7 +30,7 @@ first:
 
 ```sh
 curl -fsSLo bobr-install.sh \
-  https://aleksey-makarov.github.io/bobr/install.sh
+  https://bobr.build/install.sh
 less bobr-install.sh
 bash bobr-install.sh
 rm bobr-install.sh

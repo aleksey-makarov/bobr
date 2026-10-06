@@ -6,6 +6,7 @@ src = "docs"
 
 [build]
 build-dir = "book"
+extra-watch-dirs = ["README.md"]
 
 [output.html]
-site-url = "/bobr/"
+site-url = "/"
