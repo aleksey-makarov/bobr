@@ -61,7 +61,7 @@ curl -fsSL https://bobr.build/install.sh | bash
 ```
 
 The installer verifies the release checksum and installs into
-`~/.local/bin`. See [Getting Started](https://bobr.build/GETTING_STARTED.html) for a
+`~/.local/bin`. See [Installation](https://bobr.build/INSTALLATION.html) for a
 review-before-running variant, custom destinations, prerequisites, and
 uninstallation.
 

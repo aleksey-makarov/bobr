@@ -2,6 +2,7 @@
 
 [Bobr](INDEX.md)
 
+- [Installation](INSTALLATION.md)
 - [Getting Started](GETTING_STARTED.md)
 - [Concepts](CONCEPTS.md)
 - [Filesystem trees](FS_TREE.md)

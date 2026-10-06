@@ -1,8 +1,9 @@
 # Development
 
-[Getting Started](./GETTING_STARTED.md) describes installing and using a
-release. This chapter is about working *on* `bobr`, where the binaries come
-from a checkout you are editing and the recipes tree is one you keep changing.
+[Installation](./INSTALLATION.md) and [Getting Started](./GETTING_STARTED.md)
+describe installing and using a release. This chapter is about working *on*
+`bobr`, where the binaries come from a checkout you are editing and the recipes
+tree is one you keep changing.
 
 The arrangement is deliberately the same as a user's. You install the host
 tools into one directory on `PATH`; from there, everything — the recipes'

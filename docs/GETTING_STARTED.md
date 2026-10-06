@@ -1,78 +1,8 @@
 # Getting Started
 
-This chapter goes from an installed `bobr` release to a built object twice:
-first by running `bobr` on a tiny request by hand, then by building a real
-target from the Nickel recipes. For the ideas behind it all, see
-[Concepts](./CONCEPTS.md).
-
-## Prerequisites
-
-- An x86-64 Linux host. The main release archive is currently published for
-  `x86_64-unknown-linux-musl`.
-- Bash, `curl`, `tar`, `xz`, `sha256sum`, and ordinary core utilities to
-  download, verify, and install the release.
-- `newuidmap` and `newgidmap` on `PATH` (the `shadow` / `uidmap` package). Bobr
-  runs each builder in a Linux user namespace when you are not root, and uses
-  these setuid helpers to set up the uid/gid map. As root — or under `podman
-  unshare` — bobr uses its in-process host runtime and needs neither.
-- `nickel` — for the recipe workflow below.
-
-## Install bobr
-
-The shortest installation command is:
-
-```sh
-curl -fsSL https://bobr.build/install.sh | bash
-```
-
-If you prefer to inspect code before running it, download the same script
-first:
-
-```sh
-curl -fsSLo bobr-install.sh \
-  https://bobr.build/install.sh
-less bobr-install.sh
-bash bobr-install.sh
-rm bobr-install.sh
-```
-
-The installer downloads the latest x86-64 Linux release, verifies its entry in
-the release's `SHA256SUMS`, validates all four commands and their build
-provenance, and only then replaces the installed files. By default it installs
-static `bobr`, `bobr-repo`, `bobr-fsobj-hash`, and
-`bobr-sandbox-launcher` binaries into `~/.local/bin`. It neither invokes
-`sudo` nor edits shell startup files.
-
-Use `--bin-dir` for one invocation, or `BOBR_INSTALL_DIR` for the environment:
-
-```sh
-bash bobr-install.sh --bin-dir /path/to/bin
-BOBR_INSTALL_DIR=/path/to/bin bash bobr-install.sh
-```
-
-The chosen directory must precede older Bobr installations on `PATH`. For the
-default destination:
-
-```sh
-export PATH="${HOME}/.local/bin:${PATH}"
-command -v bobr
-```
-
-The installer prints this instruction when the newly installed command is not
-the one selected by the current `PATH`.
-
-There is no installation database. To uninstall the default installation,
-remove exactly the four installed commands:
-
-```sh
-rm -- \
-  "${HOME}/.local/bin/bobr" \
-  "${HOME}/.local/bin/bobr-repo" \
-  "${HOME}/.local/bin/bobr-fsobj-hash" \
-  "${HOME}/.local/bin/bobr-sandbox-launcher"
-```
-
-For a custom destination, use that directory instead.
+After [installing Bobr](./INSTALLATION.md), build your first object from a tiny
+JSON request, then build a real target from the Nickel recipes. For the ideas
+behind it all, see [Concepts](./CONCEPTS.md).
 
 ## Your first build
 
@@ -85,7 +15,10 @@ Create the directories the request names — the store, plus a log and a work
 directory for this run — and write a tiny request that stages one text file with
 the [`Tree`](./REQUEST.md#tree) builder. `bobr` writes into directories you give
 it and creates none of them itself, which is what lets you decide where a run's
-logs and scratch go, and keeps two runs from sharing them:
+logs and scratch go, and keeps two runs from sharing them.
+
+The store and work directory must be on the same filesystem. The layout below
+keeps them together:
 
 ```sh
 mkdir -p /tmp/bobr-store /tmp/bobr-store/logs/first /tmp/bobr-store/work/first
