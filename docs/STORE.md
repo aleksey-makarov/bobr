@@ -103,10 +103,10 @@ A request can additionally name local or remote backends (see
 [Request](./REQUEST.md#secondary-providers)). It exposes each backend through
 one or both independent capabilities:
 
-- a **trusted index** answers `BuildKey` and `ReuseKey` queries with candidate
+- a **mapping provider** answers `BuildKey` and `ReuseKey` queries with candidate
   `ObjectHash` values; it supplies identity, not object bytes;
-- a **content source** supplies an object's bytes by `ObjectHash`. The current
-  implementation can hardlink objects and every referenced fs-file, or copy
+- a **content provider** supplies an object's bytes by `ObjectHash`. Local
+  providers can hardlink objects and every referenced fs-file, or copy
   both ordinary objects and complete fs-tree closures into independent
   working-store inodes. A hardlink import shares regular-file inodes while
   recreating directory containers and symlinks; a copy import shares no regular
@@ -116,7 +116,9 @@ one or both independent capabilities:
   require the repository and working-store `objects/` directories to share a
   filesystem, as must their `fs-files/` directories; bobr validates the two
   pairs independently before scheduling realization and never falls back to
-  copy.
+  copy. Remote providers download and verify ordinary objects or complete
+  fs-tree closures, fetching missing fs-files before publishing the imported
+  result in the working store.
 
 Configuration enables the mapping and content-source capabilities explicitly;
 neither implies the other. Profile syntax may combine both capabilities in one
@@ -124,19 +126,21 @@ entry, but request lowering separates them again.
 
 The Realizer consults working-store mappings before repository mappings, and
 checks working-store content before secondary content. A secondary mapping can
-therefore be useful before its object is imported locally. Both adapters retain
-the same `LocalRepository` backend and its shared validated read-only content
-reader; they cannot be constructed directly from unrelated store handles.
-Mapping lookup never opens object records. Request v6 represents remote
-backends, but realization rejects them until the remote adapters are connected.
+therefore be useful before its object is imported locally. Complementary
+capabilities share one opened backend: a validated read-only `LocalRepository`
+for local providers, or a lazily authenticated repository snapshot for remote
+providers. Remote indexes and content lists are fetched on demand and cached.
+Mapping lookup never opens object records, and authenticating a remote master
+does not grant mapping authority unless that capability is explicitly enabled.
 
 An imported result is complete working-store content, not a borrowed path into
 the repository. With copy transport this follows from independent inodes. With
 hardlink transport the repository and working store have independent directory
 entries naming shared immutable inodes, so unlinking the repository names does
 not remove the working names. A subsequent offline request may omit the
-repository entirely. If it still names a repository, that store is validated
-at startup even when every requested result is already local.
+repository entirely. Local store layouts and provider settings are validated
+at startup even when every requested result is already local; remote metadata
+is fetched lazily when a provider is consulted.
 
 ## Store Layout
 

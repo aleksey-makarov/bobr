@@ -188,9 +188,11 @@ A remote backend has this normalized shape:
 fragment. `trusted_keys` is a non-empty array of absolute paths to pinned
 Ed25519 public keys. `ca_bundle` is optional and adds private roots to the
 normal HTTPS roots. Entries that repeat one URL must use identical trust and
-TLS settings. Request v6 validates and represents remote providers, but this
-build rejects their use before creating the working store; remote realization
-is introduced by the following implementation stage.
+TLS settings. Remote providers support both mapping lookup and verified content
+downloads. They authenticate the signed repository master with the pinned keys
+and fetch metadata lazily, caching it under `repository_cache`. Authenticating
+the master does not enable either capability implicitly: each must be requested
+explicitly.
 
 Within each capability, provider names and physical backends are unique. The
 same name may occur once for mappings and once for content only when both
@@ -202,8 +204,9 @@ import, complete content belongs to the working store; any mappings, records,
 and refs published for the selected result are working-store entries as well. A
 later offline request can omit the repository and reuse that content; removing
 the repository's directory entries does not invalidate either copied files or
-hardlinked working-store names. Conversely, a repository that remains
-explicitly configured must still exist and validate when the request starts.
+hardlinked working-store names. Explicitly configured local stores and all
+provider settings are validated at startup; remote metadata is fetched only
+when that provider is needed.
 
 A recipe for the `Source` builder has this shape:
 
