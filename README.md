@@ -28,12 +28,12 @@ and lower to the JSON request `bobr` executes.
 
 ## What `bobr` is like
 
-`bobr` is like Yocto, but with sane recipe syntax. Recipes are a separate
+`bobr` is like [Yocto](https://www.yoctoproject.org/), but with sane recipe syntax. Recipes are a separate
 Nickel layer — a real type-and-contract system, with Nix-style overlays for
 composing them. And where Yocto is built around cross-compiling for embedded
 targets, `bobr` so far builds ordinary systems natively.
 
-`bobr` is like Nix, but with sane filesystem structure — a recipe choice, not a
+`bobr` is like [Nix](https://nixos.org/), but with sane filesystem structure — a recipe choice, not a
 `bobr` constraint; the same engine could produce a Nix-style store. The trade-off
 is that such a layout can't keep several versions of a package side by side, the
 way Nix can; in exchange it should feel more like a normal system and be more
@@ -42,7 +42,7 @@ hermetic, sandboxed builds and heavy deduplication. Unlike Nix, it is
 content-addressed from the start, whereas Nix store paths are input-addressed
 and content-addressed derivations remain experimental.
 
-`bobr` borrows ideas from OSTree — a content-addressed store, and an immutable
+`bobr` borrows ideas from [OSTree](https://ostreedev.github.io/ostree/) — a content-addressed store, and an immutable
 read-only rootfs. But OSTree is about delivering and updating that OS on the
 machine (atomic upgrades, rollback), where `bobr` builds the images.
 
