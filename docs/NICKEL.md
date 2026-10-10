@@ -50,8 +50,8 @@ set, and an ordered non-empty array of recipe goals, it lowers their shared DAG
 to a full [request](./REQUEST.md). Callers rarely invoke it directly —
 `bin/bobr-build.sh` does, reading everything but the run's own identity from a
 **build profile** (`bobr.ncl`, shaped by
-`build-profile/build-profile.ncl`). A normal profile imports the maintained
-`build-profile/bobr-user.ncl` preset instead of copying a template.
+`profiles/contracts.ncl`). A normal profile imports the maintained
+`profiles/bobr-user.ncl` preset instead of copying a template.
 
 The profile is itself the Nickel program that constructs the package set and
 selects its goals:
@@ -59,7 +59,7 @@ selects its goals:
 ```nickel
 let bobrpkgs = import "bobr-recipes/bobrpkgs.ncl" in
 let pkgs = bobrpkgs [] in
-(import "bobr-recipes/build-profile/bobr-user.ncl") & {
+(import "bobr-recipes/profiles/bobr-user.ncl") & {
   include pkgs,
   goals = [pkgs.world],
 }
