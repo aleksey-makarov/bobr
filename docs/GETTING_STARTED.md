@@ -1,8 +1,91 @@
 # Getting Started
 
-After [installing Bobr](./INSTALLATION.md), build your first object from a tiny
-JSON request, then build a real target from the Nickel recipes. For the ideas
-behind it all, see [Concepts](./CONCEPTS.md).
+## Download the recipes
+
+In your working directory, download the
+[bobr-recipes](https://github.com/aleksey-makarov/bobr-recipes) release matching
+your installed Bobr:
+
+```sh
+BOBR_VERSION="$(bobr --version | awk '{print $2}')"
+curl -fLO "https://github.com/aleksey-makarov/bobr-recipes/archive/refs/tags/v${BOBR_VERSION}.tar.gz"
+tar -xf "v${BOBR_VERSION}.tar.gz"
+mv "bobr-recipes-${BOBR_VERSION}" bobr-recipes
+```
+
+## Build and boot a QEMU system
+
+Create `bobr.ncl` beside `bobr-recipes` with this content:
+
+```nickel
+let bobrpkgs = import "bobr-recipes/bobrpkgs.ncl" in
+let pkgs = bobrpkgs [] in
+(import "bobr-recipes/profiles/bobr-user.ncl") & {
+  include pkgs,
+  goals = [pkgs.qemu_image, pkgs.initrd, pkgs.linux_bzimage],
+  secondaries.providers = [
+    import "bobr-recipes/profiles/provider-hetzner.ncl",
+  ],
+}
+```
+
+`bobr.ncl` is your build profile. `bobr-build.sh` evaluates it with Nickel and
+generates a JSON request for Bobr. This profile imports the package set and user
+defaults, selects three boot artifacts as goals, and enables a repository of
+prebuilt objects to speed up the build.
+
+```sh
+mkdir -p bobr-store
+bobr-recipes/bin/bobr-build.sh
+```
+
+This produces the EROFS root filesystem image, initramfs, and kernel.
+You can find them through the `qemu-image`, `initrd`, and `linux-bzimage` links
+in `bobr-store/object-refs/`. Allow roughly 1–2 minutes to download the prebuilt
+objects, depending on your connection.
+
+To run the script, `qemu-system-x86_64` and `mkfs.ext4` must be on `PATH`, and
+your user must have access to `/dev/kvm` on an x86-64 Linux host:
+
+```sh
+bobr-recipes/tools/bobr-run-qemu.sh
+```
+
+The script finds the boot artifacts in the adjacent `bobr-store` and creates
+`bobr-home.img` beside it on first launch: a persistent 1 GiB ext4 disk for
+`/home`. It reuses that disk on subsequent launches.
+
+The terminal becomes the guest's root console, with automatic login. Shut down
+with `poweroff`; press **Ctrl-A, X** to exit QEMU directly. Changes under `/home`
+persist in `bobr-home.img`; changes elsewhere are discarded on reboot.
+
+## Build and boot a GNOME system
+
+Using the same profile, build the GNOME image:
+
+```sh
+bobr-recipes/bin/bobr-build.sh --target qemu_gnome_image
+```
+
+Alternatively, change the profile’s `goals` to `[pkgs.qemu_gnome_image]` and run
+without `--target`.
+
+Your host QEMU must support SDL/OpenGL and virtio GPU with Venus; the host also
+needs a working Vulkan driver. See
+[QEMU graphics requirements](https://www.qemu.org/docs/master/system/devices/virtio/virtio-gpu.html).
+
+Launch GNOME:
+
+```sh
+bobr-recipes/tools/bobr-run-qemu-gnome.sh
+```
+
+The desktop opens in a window. The script reuses `bobr-home.img`; do not run
+both guests simultaneously.
+
+The systems booted above are still proof-of-concept demos, with much left to
+improve. For now, Bobr’s primary focus is the build system rather than a complete
+OS.
 
 ## Your first build
 
@@ -83,19 +166,7 @@ human-facing name for the result (see [Store](./STORE.md)).
 Writing requests by hand does not scale; real targets are authored in
 [Nickel](https://nickel-lang.org/) in the separate
 [**bobr-recipes**](https://github.com/aleksey-makarov/bobr-recipes) repository
-and lowered to a request. The two are released together, so take the recipes
-release matching the installed `bobr`:
-
-```sh
-BOBR_VERSION="$(bobr --version | awk '{print $2}')"
-curl -fLO "https://github.com/aleksey-makarov/bobr-recipes/archive/refs/tags/v${BOBR_VERSION}.tar.gz"
-tar -xf "v${BOBR_VERSION}.tar.gz"
-mv "bobr-recipes-${BOBR_VERSION}" bobr-recipes
-```
-
-Versions that disagree are caught rather than left to misbehave: the recipes
-name the request format they emit, and the build driver checks it against the
-machine-readable schema in `bobr --build-info` before doing anything.
+and lowered to a request.
 
 Building takes two things: a **store** to build into, and a **build profile**
 describing your installation. The profile is a small Nickel file you keep in
@@ -106,9 +177,12 @@ maintained user preset, then select the ordered goals explicitly:
 cat > bobr.ncl <<'EOF'
 let bobrpkgs = import "bobr-recipes/bobrpkgs.ncl" in
 let pkgs = bobrpkgs [] in
-(import "bobr-recipes/build-profile/bobr-user.ncl") & {
+(import "bobr-recipes/profiles/bobr-user.ncl") & {
   include pkgs,
   goals = [pkgs.world],
+  secondaries.providers = [
+    import "bobr-recipes/profiles/provider-hetzner.ncl",
+  ],
 }
 EOF
 mkdir bobr-store
@@ -121,9 +195,9 @@ HTTP mirrors, or OCI registries, and runs builders only where cache resolution
 misses.
 
 That builds the profile's `world` goal — every shipped OS image and HostBundle,
-without the separate acceptance tests. Expect
-it to run for hours: nothing arrives pre-built, so the first build starts at the
-toolchain and works its way up. Run `--target test_all` when you want the rootfs,
+without the separate acceptance tests. The Hetzner repository supplies matching
+prebuilt results; missing results are built locally, which can take hours.
+Run `--target test_all` when you want the rootfs,
 HostBundle, and final-toolchain checks. To try something smaller first, list
 what there is and name it:
 
@@ -201,9 +275,12 @@ Apply it when constructing the package set:
 let bobrpkgs = import "bobr-recipes/bobrpkgs.ncl" in
 let local_overlay = import "./overlay.ncl" in
 let pkgs = bobrpkgs [local_overlay] in
-(import "bobr-recipes/build-profile/bobr-user.ncl") & {
+(import "bobr-recipes/profiles/bobr-user.ncl") & {
   include pkgs,
   goals = [pkgs.world],
+  secondaries.providers = [
+    import "bobr-recipes/profiles/provider-hetzner.ncl",
+  ],
 }
 ```
 
