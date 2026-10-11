@@ -12,6 +12,8 @@ audio sockets, network, and system services. HostBundle controls how declared
 commands enter the copied userspace; it does not isolate those commands from the
 host.
 
+HostBundle is still a proof of concept, with further development and testing ahead.
+
 ## Model
 
 A normal dynamically linked ELF names an absolute interpreter in `PT_INTERP`,
