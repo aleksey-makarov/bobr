@@ -209,9 +209,11 @@ decoded tar bytes
 ```
 
 Hashing with one tar parser and subsequently invoking a general-purpose
-`tar -xf` implementation is not conforming. Extraction operates relative to a
-staging-directory descriptor, rejects traversal, and never follows a symlink
-created by an earlier entry.
+`tar -xf` implementation is not conforming. Extraction uses a private staging
+directory. Paths are validated against the parsed tree; absolute paths, parent
+traversal, and entries beneath symbolic links are rejected. The staging tree
+must remain under the importing process's exclusive control during extraction
+and verification.
 
 The staging directory is published only after the complete tar stream,
 terminator, decoded size, enclosing CBOR value, and expected `ObjectHash` have
