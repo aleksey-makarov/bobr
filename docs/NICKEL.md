@@ -114,20 +114,28 @@ applied in order, and each one's fields replace the matching packages — the sa
 idea as Nix overlays. For example, to pin a different `shadow` version:
 
 ```nickel
-[ fun final => fun prev => { shadow = prev.shadow & { version = "4.18.0" } } ]
+[
+  fun final => fun prev => {
+    shadow = prev.shadow & {
+      version = "4.18.0",
+      source_object_hash = "add4604d3bc410344433122a819ee4154b79dd8316a56298c60417e637c07608",
+    },
+  },
+]
 ```
 
-Because the set is a fixed point, an override is visible everywhere the package
-is used, without editing the package's own module.
+The version and source archive hash must match. For an override to propagate,
+consumers of a public recipe must refer to it through `pkgs` (or `final` in an
+overlay), not a module-local binding that still names the original recipe.
 
 ## Recipes are data, not functions
 
-For overlays to work, recipes are kept as **plain data records** — never
-functions. The package set is assembled by merging records (`&`), and an overlay
-overrides a package by merging new fields into it. A function value cannot be
-merged or patched that way, so a recipe written as a function would be opaque to
-overlays. Keeping every recipe a record means any field — a version, a configure
-flag, an input — can be reached and overridden from an overlay.
+Values in the recipe set are **plain data records**, not functions. Modules and
+factories may be functions returning records; their evaluated results are the
+recipes. An overlay replaces selected fields of the set and can explicitly merge
+changes into `prev.foo` with `&`. A function value cannot be patched that way.
+Keeping recipes as records makes their versions, configure flags, and inputs
+accessible to overlays.
 
 ## Synthetic recipes
 
@@ -139,9 +147,10 @@ high-level, Nickel-only tag that stands for a common build pattern and is
 Lowering happens in `recipe-lib.ncl`'s `to_request_goals`, which walks the recipe
 graph and looks each node's tag up in `synthetic/registry.ncl`. A node whose tag
 is already a real builder — `Tree`, `TreeMerge`, `Sandbox`, `SandboxInstall`,
-`Source`, and so on — passes through unchanged. A node with a synthetic tag is expanded into real
-builder nodes: typically a `Sandbox` that runs the build script, plus a
-`TreeMerge` that assembles its build rootfs. Expansion runs on the
+`Source`, and so on — passes through unchanged. A node with a synthetic tag is
+expanded into real builder nodes: ordinary build families use `SandboxInstall`
+with a build rootfs assembled by `TreeMerge`; staging variants also use
+`TreeMove`. Expansion runs on the
 already-overlaid package set, so overlays always patch the high-level recipe and
 expansion sees the result; lowering then assigns node ids and emits the JSON
 `nodes` map.
@@ -158,7 +167,7 @@ A dependency-aware synthetic recipe carries `deps = { build = [...], runtime =
 - **`build`** — packages needed to build this one. The lowering layer assembles
   the build environment as a `TreeMerge` of `base_filesystem` with the **runtime
   closure** of a default toolchain plus these build deps, and injects it as the
-  `Sandbox` rootfs.
+  build sandbox's `_rootfs` input.
 - **`runtime`** — packages this one needs at run time. They form the package's
   own runtime closure, which is followed transitively wherever the package
   appears in another recipe's `build` or `runtime` list.
@@ -210,12 +219,13 @@ Most build families come in two flavors:
 
 - the dependency-aware ones (`Autotools`, `Makefile`, `Meson`, `Cmake`,
   `PerlModule`, `PythonModule`, `Cargo`, plus the custom-steps
-  `SandboxInstallDeps` and `SandboxStageDeps`) take a `source` input and a `deps`
-  record, and build their own rootfs from `deps.build`;
+  `SandboxInstallDeps` and `SandboxStageDeps`) take a `deps` record and build
+  their own rootfs from `deps.build`; scripted families require `source`, while
+  custom-step recipes declare only the inputs their steps need;
 - the explicit-rootfs variants (`AutotoolsStageRootfs`, `MakefileStageRootfs`,
   `MesonRootfs`, `CargoRootfs`, `SandboxStageRootfs`) take an explicit `_rootfs`
-  input and no `deps`, for bootstrap recipes that must choose the build rootfs
-  directly.
+  input instead of deriving it from `deps.build`; they may still declare
+  `deps.runtime` for consumers of their output.
 
 New, non-bootstrap recipes should use the plain dependency-aware builders; the
 `*Rootfs` and `*Stage*` variants are bootstrap-chain machinery and are rarely the
@@ -302,7 +312,7 @@ synthetic builder.
 - **Config** (all optional): `setup_args`, `env`, `source_subdir`,
   `pre_configure`, `post_install`.
 - **Default build tools:** the common native toolchain plus `pkgconf`, `python`,
-  and `ninja`.
+  `meson`, `ninja`, `python_setuptools`, and `python_packaging`.
 
 ### `Cmake`
 
@@ -348,9 +358,13 @@ builder reads `cargo_lock` and, via
 `Source`s — one per crates.io entry. Each Source's `object_hash` is exactly the
 `checksum` recorded in `Cargo.lock`: the fsobj-hash of a non-executable file
 equals its SHA-256, and crates.io serves each version as an immutable `.crate`,
-so the lockfile alone content-addresses and verifies every dependency. The bundle
-is injected as the `crates` input, and a built-in step unpacks it into an offline
-cargo `vendor/` tree before the build.
+so the lockfile content-addresses and verifies every vendored crates.io
+dependency. Git, path, and alternative-registry dependencies are not fetched by
+this helper. The bundle is injected as the `crates` input, and a built-in step
+unpacks it into an offline cargo `vendor/` tree before the build.
+
+`CargoRootfs` does not inject this bundle automatically: its recipe must supply
+the `crates` input alongside `source` and `_rootfs`.
 
 ### `SandboxInstallDeps`, `SandboxStageDeps`, `SandboxStageRootfs`
 
@@ -364,7 +378,7 @@ do them in your own steps. All three capture their result **additively**:
 - `SandboxStageDeps` — build rootfs from `deps`; the steps must install into a
   virgin `/stage`, re-rooted `/stage → /` by `TreeMove`;
 - `SandboxStageRootfs` — the `/stage` model of `SandboxStageDeps`, but with an
-  explicit `_rootfs` input and no `deps`.
+  explicit `_rootfs` input rather than one derived from `deps.build`.
 
 For a plain-object result — a `@{out}` staging directory rather than an fs-tree,
 e.g. a disk image — use the low-level `Sandbox` builder with an explicit
@@ -397,7 +411,7 @@ EROFS image, use the `recipe.erofs_image` helper — it lowers to a low-level
 and `pkgs.bash`) that runs `mkfs.erofs` over the materialized tree:
 
 ```nickel
-let qemu_image = recipe.erofs_image pkgs { name = "qemu-image", tree = qemu_rootfs }
+let qemu_image = recipe.erofs_image pkgs { name = "qemu-image", tree = pkgs.qemu_rootfs }
 ```
 
 The reproducibility flags (`--sort=path`, a fixed `-T`) and the constant label

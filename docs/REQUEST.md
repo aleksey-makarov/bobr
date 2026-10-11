@@ -57,8 +57,8 @@ The request is a single JSON object:
   statistics, and a run summary; `summary` hides only its individual activity
   rows. `fixed` requires `max_lines >= 4` and caps the complete live block.
   This field never affects build identity and is ignored for non-TTY output
-- `limits` — optional HTTP/OCI and local Source acquisition limits, described
-  below
+- `limits` — optional shared Source/repository network and local-I/O limits,
+  described below
 - `secondaries` — optional ordered mapping and content providers, described
   below
 - `goals` — ordered, non-empty array of distinct, existing node ids to realize;
@@ -84,7 +84,8 @@ duplicate build identities are shared.
 ### Acquisition limits
 
 All `limits` fields are optional; every numeric limit, including each
-`per_host` value, must be positive. Omitted fields use bobr's defaults:
+`per_host` value, must be positive. Omitted fields use bobr's defaults. A typical
+resolved configuration is:
 
 ```json
 {
@@ -95,14 +96,17 @@ All `limits` fields are optional; every numeric limit, including each
 }
 ```
 
-- `per_host_default` — maximum simultaneous HTTP/OCI downloads from one host
-  when `per_host` has no entry for it
+- `per_host_default` — maximum simultaneous Source and repository network
+  operations on one host when `per_host` has no entry for it; this includes
+  HTTP/OCI downloads and repository metadata and content fetches
 - `per_host` — per-host overrides of that limit
-- `max_connections` — total maximum simultaneous HTTP/OCI downloads
+- `max_connections` — total maximum simultaneous Source and repository network
+  operations; the default is one quarter of the process's soft file-descriptor
+  limit, clamped to `1..64`
 - `max_local_jobs` — one shared bound for local `Path` source materialization,
-  Source import and hashing, local-repository content transfer and
-  verification, and builder input path preparation; it limits disk work
-  independently of network connections and builder slots
+  Source import and hashing, local-repository content transfer and verification,
+  downloaded repository fs-file publication, and builder input path preparation;
+  it limits disk work independently of network connections and builder slots
 
 ### Secondary providers
 
@@ -316,15 +320,17 @@ binary files and richer file-mode control are not yet supported.
 
 Collects an arbitrary number of file inputs into one directory object.
 
-**Inputs:** one or more file inputs (as extra inputs). Each input must be a
-regular file (not a directory or symlink).
+**Inputs:** one or more extra inputs. Each must be a regular file or a directory
+containing exactly one regular file at its top level. Other directory entries
+are ignored; symlinks cannot be passed as standalone inputs.
 
 **Config:** none (`{}`).
 
 **Behavior:**
 
 - writes a plain directory object with one entry per input, a hardlink named by
-  the input's own name (inputs are hardlinked, never copied)
+  the input key (inputs are hardlinked, never copied); for a single-file directory
+  input, the inner filename does not determine the output name
 - the result is ordinary data with no ownership or mode identity — unlike the
   fs-tree builders; use it to hand a downstream build many inputs as a single
   directory (one bind mount) instead of one bind mount per input, e.g. to bundle
@@ -332,10 +338,11 @@ regular file (not a directory or symlink).
 
 ### `FsTreeImport`
 
-Imports one ordinary object into an fs-tree, applying install rules that set
-logical ownership and mode.
+Imports one ordinary directory object into an fs-tree, applying install rules
+that set logical ownership and mode.
 
-**Inputs:** required `input` — one ordinary file or directory object.
+**Inputs:** required `input` — one ordinary directory object. To import a file
+object, first place it in a directory with [`Bundle`](#bundle).
 
 **Config:** `install.rules`, evaluated in order; each rule is a glob `path` plus
 `attrs` (any of `uid`, `gid`, `directory_mode`, `regular_file_mode`,
@@ -365,6 +372,9 @@ logical ownership and mode.
 - imports the input contents into the store's shared file storage and writes one
   fs-tree object
 - later matching rules override earlier attributes field by field
+- rules must provide `uid`, `gid`, and the applicable mode for every entry,
+  including the root directory (whose relative path is empty); `"**"` matches
+  the root as well as its descendants
 - directory, regular-file, and executable-file modes come from install
   attributes; symlink mode is not represented
 - runs as a namespace function, since importing needs namespace-root access to
@@ -418,7 +428,8 @@ lexical name order).
 
 - reads the input manifests directly and does not materialize them
 - overlapping directory paths are allowed only when `uid`, `gid`, and mode match
-- duplicate file paths are allowed only when the referenced file content matches
+- duplicate file paths are allowed only when their `FsFileHash` values match,
+  including file bytes, ownership, and mode
 - duplicate symlink paths are allowed only when `uid`, `gid`, and target match
 - file-vs-directory, symlink-vs-directory, and parent/child leaf conflicts are
   rejected
@@ -726,8 +737,10 @@ it.
 **Behavior:**
 
 - runs the steps on the same read-write overlay root, then writes one fs-tree
-  object from the upper layer (created and modified entries, pruned of pure
-  copy-ups)
+  object containing only additions, pruning unchanged directory copy-ups
+- overwriting existing files or symlinks, deleting lower-layer entries, changing
+  existing directory metadata, or hiding existing directory contents fails the
+  build; the result is not a general-purpose modification layer
 - there is no `@{out}` / `BOBR_OUT_DIR`; using `@{out}` is an unknown-variable
   error — the result is the delta, not a staging directory
 
@@ -752,7 +765,7 @@ A recipe for the `Source` builder obtains its object from an `origin`, one of:
   `false`) treats it as a tar archive when true.
 - **`Http`** — `origin.url` is one HTTP(S) URL or an ordered list of fallbacks;
   `origin.unpack` (default `false`); `origin.archive_format` may override archive
-  detection for unpacked sources.
+  detection for unpacked sources: `"tar-gz"`, `"tar-xz"`, `"tar-bz2"`, or `"zip"`.
 - **`OciRegistry`** — `origin.image` is the registry image locator,
   `origin.digest` the pinned `sha256:` manifest or index digest, and
   `origin.platform` (`{ "os": …, "architecture": … }`) selects the platform to

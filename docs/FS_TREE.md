@@ -7,18 +7,20 @@ the building blocks for whole filesystems: the root filesystem of a target
 system, or the one a build runs inside (a `Sandbox` container).
 
 A real filesystem needs files with specific owners and modes — `root`-owned
-files, set-uid binaries — yet a build runs unprivileged and cannot `chown` to
-`root`. So an fs-tree records each entry's **logical** owner and mode: the
-ownership it should have in the finished filesystem, not that of the bytes as
-`bobr` stores them. `bobr` applies it through a user namespace, building a
-`root`-owned filesystem without ever being real root.
+files, set-uid binaries. `bobr` uses a user namespace to create files with these
+**logical** owners and modes without requiring host-root privileges. Regular
+files in `fs-files/` already carry that ownership and mode in the namespace;
+materialization preserves them by hardlinking, not by restoring them from the
+manifest.
 
 An fs-tree's payload is a **manifest** listing the tree's entries; regular-file
 contents live separately as content-addressed **fs-files**, shared across trees.
 Assembling a real directory from a manifest is fast and space-cheap — identical
 files are hard-linked into place, sharing one inode — at the cost of one firm
 rule: such a filesystem is mounted read-only, since writing a shared file would
-change every tree that references it. An fs-tree is immutable.
+change every tree that references it. Sandboxed builds can write through a
+separate overlay without changing the read-only lower tree. An fs-tree is
+immutable.
 
 The manifest lists one entry per path:
 
@@ -41,9 +43,9 @@ modeled yet).
 
 Among the built-in builders:
 
-- `FsTreeImport` turns an ordinary object into an fs-tree, `OciExtract` produces
-  one from an OCI image, and `SandboxInstall` captures a sandboxed build's
-  changes as an additive fs-tree layer;
+- `FsTreeImport` turns an ordinary directory object into an fs-tree,
+  `OciExtract` produces one from an OCI image, and `SandboxInstall` captures a
+  sandboxed build's changes as an additive fs-tree layer;
 - `TreeMerge`, `TreeSubset`, and `TreeMove` transform fs-trees at the manifest
   level, without materializing them;
 - `Sandbox` and `SandboxInstall` use a materialized fs-tree as the image their
