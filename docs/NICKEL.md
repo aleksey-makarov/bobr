@@ -70,6 +70,17 @@ goals share one lowered DAG and retain their array order. Repeated `--target
 NAME` options replace the profile goals for one invocation; each name is looked
 up in the profile's final `pkgs`.
 
+Profile goals are recipe values, not attribute names. They can also contain a
+recipe imported from outside `pkgs`, for example:
+
+```nickel
+goals = [(import "./hello.ncl") pkgs],
+```
+
+Here `hello.ncl` is a function returning a recipe record. Such a recipe needs no
+overlay to be built, but cannot be selected by `--target` unless added to `pkgs`.
+See [Compile a local program](./GETTING_STARTED.md#compile-a-local-program).
+
 A build profile can attach ordered local and remote backends to the Realizer.
 Capabilities are explicit and independent; enabling both on one profile entry
 is shorthand for two low-level request entries backed by the same source:
@@ -105,6 +116,50 @@ bundle, and `secondaries.repository_cache` are resolved relative to the
 top-level profile. An empty cache setting selects
 `<store>/repository-cache`. See
 [Request](./REQUEST.md#secondary-providers) for the normalized wire contract.
+
+An optional `output_repository` section enables a post-build publication stage in
+`bobr-build.sh`. After a successful non-dry-run build, the driver uploads missing
+content and prepares an unsigned candidate master when the repository state
+changes; signing and publishing that master are separate administrator actions.
+This section is not included in the JSON build request. See
+[Repository CLI](./REMOTE_REPOSITORY/CLI.md) for preparation and publication.
+
+## Local sources
+
+Local files and directories are `Source` recipes with a declared content hash.
+Inside `bobr-recipes`, `RecipePath` names a path relative to the recipes checkout;
+request lowering converts it to `Path` with an absolute host path. For example,
+a recipe in `pkgs/foo/` can refer to a sibling patch:
+
+```nickel
+{
+  name = "foo-fix",
+  tag = "Source",
+  object_hash = std.string.trim (import "./fix.patch.fsobj-hash" as 'Text),
+  origin = {
+    tag = "RecipePath",
+    path = "pkgs/foo/fix.patch",
+  },
+}
+```
+
+The hash import is relative to the Nickel file; `RecipePath.path` is relative to
+the checkout root. A plain `Path` origin instead requires an absolute host path,
+including for sources outside the checkout.
+
+The adjacent `.fsobj-hash` file pins the source content. After editing the patch,
+refresh it from the recipes checkout:
+
+```sh
+bin/bobr-update-fsobj-hashes.sh pkgs/foo/fix.patch
+```
+
+`bobr-build.sh` checks existing hash locks inside the recipes checkout before
+lowering; it does not update them or check sources outside that checkout. For
+external sources, update the declared hash yourself after changes. An object
+already cached under the declared hash can be reused without rereading its
+origin. See [Compile a local program](./GETTING_STARTED.md#compile-a-local-program)
+for an external-source example.
 
 ## Overlays
 

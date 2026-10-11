@@ -15,6 +15,9 @@ manifest.
 
 An fs-tree's payload is a **manifest** listing the tree's entries; regular-file
 contents live separately as content-addressed **fs-files**, shared across trees.
+A complete fs-tree requires both its manifest and all referenced fs-files; the
+manifest alone is not sufficient to materialize it.
+
 Assembling a real directory from a manifest is fast and space-cheap — identical
 files are hard-linked into place, sharing one inode — at the cost of one firm
 rule: such a filesystem is mounted read-only, since writing a shared file would
