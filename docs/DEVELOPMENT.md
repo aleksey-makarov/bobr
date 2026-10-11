@@ -68,7 +68,7 @@ Two different launchers are built here, and only one of them is installed:
 
 There is no separate build driver for development. With the binaries on `PATH`,
 use `bin/bobr-build.sh` exactly as
-[Getting Started](./GETTING_STARTED.md#building-a-real-target) describes it.
+[Getting Started](./GETTING_STARTED.md#build-a-specific-target) describes it.
 
 One difference matters while editing recipes. Local sources are pinned by a
 `*.fsobj-hash` lock beside them, and `bin/bobr-build.sh` **checks** those locks

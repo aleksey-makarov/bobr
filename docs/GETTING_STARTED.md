@@ -1,5 +1,8 @@
 # Getting Started
 
+Recipes and build profiles are written in [Nickel](https://nickel-lang.org/).
+Basic familiarity with the language will help you follow the examples below.
+
 ## Download the recipes
 
 In your working directory, download the
@@ -87,297 +90,391 @@ The systems booted above are still proof-of-concept demos, with much left to
 improve. For now, Bobr’s primary focus is the build system rather than a complete
 OS.
 
-## Your first build
+## Boot QEMU from a host bundle
 
-`bobr` reads a JSON [request](./REQUEST.md) — a DAG of recipes — from standard
-input (or a file named on the command line), realizes its ordered goals, and
-prints their [`ObjectHash`](./CONCEPTS.md) values to standard output. This
-first request has one goal, named `root`.
+You can also run programs built by Bobr on your host using a host bundle, which
+packages a program with its runtime dependencies. Host bundles are still a proof
+of concept, but `host_bundle_qemu` includes QEMU and the boot images, so no host
+QEMU installation is needed. Access to `/dev/kvm` is still required.
 
-Create the directories the request names — the store, plus a log and a work
-directory for this run — and write a tiny request that stages one text file with
-the [`Tree`](./REQUEST.md#tree) builder. `bobr` writes into directories you give
-it and creates none of them itself, which is what lets you decide where a run's
-logs and scratch go, and keeps two runs from sharing them.
-
-The store and work directory must be on the same filesystem. The layout below
-keeps them together:
+Build and run directly from the store:
 
 ```sh
-mkdir -p /tmp/bobr-store /tmp/bobr-store/logs/first /tmp/bobr-store/work/first
+bobr-recipes/bin/bobr-build.sh --target host_bundle_qemu
+bobr-store/object-refs/host-bundle-qemu/bin/bobr-run-qemu
 ```
 
-`hello.json`:
+The runner creates a persistent `home.img` in the current directory. Use `--help`
+for options.
 
-```json
-{
-  "schema": "bobr-request-v6",
-  "store": "/tmp/bobr-store",
-  "logs": "/tmp/bobr-store/logs/first",
-  "work": "/tmp/bobr-store/work/first",
-  "run_id": "first",
-  "goals": ["root"],
-  "nodes": {
-    "root": {
-      "name": "hello",
-      "tag": "Tree",
-      "config": {
-        "tree": {
-          "entries": [
-            { "type": "file", "path": "hello.txt", "text": "hello, bobr\n", "executable": false }
-          ]
-        }
+`host_bundle_qemu_gnome` is also available, but it is a large download and requires
+a working Vulkan driver on the host.
+
+## Build a specific target
+
+List the available targets:
+
+```sh
+bobr-recipes/bin/bobr-list-pkgs.sh
+```
+
+Build `gzip` using your existing profile:
+
+```sh
+bobr-recipes/bin/bobr-build.sh --target gzip
+```
+
+Inspect its filesystem-tree manifest:
+
+```sh
+cat bobr-store/object-refs/gzip-1.14
+```
+
+The list shows the attribute used by `--target` and the recipe name used in
+`object-refs/`.
+
+The manifest lists paths, file metadata, and content hashes. Regular file contents
+are stored separately in `bobr-store/fs-files/`, shared between trees with
+identical files. The manifest itself does not contain those bytes.
+
+For details, see [Filesystem trees](./FS_TREE.md).
+
+## Reuse results from another local store
+
+After building `gzip`, create `reuse.ncl` beside `bobr.ncl`:
+
+```nickel
+let bobrpkgs = import "bobr-recipes/bobrpkgs.ncl" in
+let pkgs = bobrpkgs [] in
+(import "bobr-recipes/profiles/bobr-user.ncl") & {
+  include pkgs,
+  goals = [pkgs.gzip],
+  store = "bobr-store.new",
+  secondaries.providers = [
+    {
+      name = "previous",
+      mappings = true,
+      content = true,
+      local = {
+        store = "bobr-store",
+        transfer = "hardlink",
       },
-      "inputs": {}
-    }
-  }
+    },
+  ],
 }
 ```
 
-Build it:
+Build into a new store using this profile:
 
 ```sh
-bobr < hello.json
+mkdir bobr-store.new
+bobr-recipes/bin/bobr-build.sh reuse.ncl
 ```
 
-bobr prints the object's hash:
+Bobr finds the build mapping in the previous store and imports the result using
+hardlinks, without downloading or rebuilding. Both stores must be on the same
+filesystem.
 
-```text
-f9deedd4f7809f00b0ef6fe93d4001fd70f8495478dafdaa8a01c34ef0269af1
+The result is available through `bobr-store.new/object-refs/`. Your original
+`bobr.ncl` remains unchanged.
+
+## Add a recipe with an overlay
+
+An overlay adds or changes recipes without editing `bobr-recipes`, following the
+same model as Nix overlays. The package set is defined as a fixed point: recipes
+refer to the final set, including all overlay changes. Each overlay receives
+`final`, that final set, and `prev`, the set before this overlay, and returns the
+fields to add or replace.
+
+Create `overlay.ncl` beside `bobr.ncl`:
+
+```nickel
+fun final => fun prev => {
+  greeting = {
+    name = "greeting",
+    tag = "Tree",
+    config.tree.entries = [
+      {
+        type = "file",
+        path = "etc/greeting.txt",
+        text = "Hello from my overlay!\n",
+        executable = false,
+      },
+    ],
+    inputs = {},
+  },
+}
 ```
 
-The hash is derived from the content, not from the path or name, so you will get
-the same value. The result is in the store:
+`tag` selects the builder; [`Tree` in Request](./REQUEST.md#tree) describes how
+this builder creates files and directories from inline data.
+The nested path makes the result a directory containing `etc/greeting.txt`.
+
+In `bobr.ncl`, replace:
+
+```nickel
+let pkgs = bobrpkgs [] in
+```
+
+with:
+
+```nickel
+let pkgs = bobrpkgs [import "./overlay.ncl"] in
+```
+
+Build the new target and read the resulting file:
 
 ```sh
-$ cat /tmp/bobr-store/objects/f9deedd4f7809f00b0ef6fe93d4001fd70f8495478dafdaa8a01c34ef0269af1
-hello, bobr
-$ readlink /tmp/bobr-store/object-refs/hello
-../objects/f9deedd4f7809f00b0ef6fe93d4001fd70f8495478dafdaa8a01c34ef0269af1
+bobr-recipes/bin/bobr-build.sh --target greeting
+cat bobr-store/object-refs/greeting/etc/greeting.txt
 ```
 
-Because the single entry is one top-level file, the object is that file; a tree
-with more entries would produce a filesystem-tree object instead (see
-[Filesystem trees](./FS_TREE.md)). The `object-refs/hello` symlink is the
-human-facing name for the result (see [Store](./STORE.md)).
+Change `text` in the overlay and build again to update the file.
 
-## Building a real target
+## Import a file into an fs-tree
 
-Writing requests by hand does not scale; real targets are authored in
-[Nickel](https://nickel-lang.org/) in the separate
-[**bobr-recipes**](https://github.com/aleksey-makarov/bobr-recipes) repository
-and lowered to a request.
+Add another recipe inside the record returned by `overlay.ncl`, alongside
+`greeting`:
 
-Building takes two things: a **store** to build into, and a **build profile**
-describing your installation. The profile is a small Nickel file you keep in
-your working directory. Import the public package-set function and the
-maintained user preset, then select the ordered goals explicitly:
+```nickel
+greeting = {
+  # Keep the greeting recipe from the previous example.
+},
+greeting_tree = {
+  name = "greeting-tree",
+  tag = "FsTreeImport",
+  config.install.rules = [
+    {
+      path = "**",
+      attrs = {
+        uid = 0,
+        gid = 0,
+        directory_mode = 0o755,
+        regular_file_mode = 0o644,
+        executable_file_mode = 0o755,
+      },
+    },
+  ],
+  inputs = { input = final.greeting },
+},
+```
+
+[`FsTreeImport`](./REQUEST.md#fstreeimport) imports the directory into an fs-tree,
+assigning root ownership and file mode `0644`. `final.greeting` refers to the
+recipe from the final overlaid set.
+
+Build and inspect the manifest:
 
 ```sh
-cat > bobr.ncl <<'EOF'
+bobr-recipes/bin/bobr-build.sh --target greeting_tree
+cat bobr-store/object-refs/greeting-tree
+```
+
+The manifest records the `etc/greeting.txt` path, ownership, mode, and fs-file hash.
+The file contents are stored separately in `bobr-store/fs-files/`.
+
+The files in `fs-files/` already carry their required ownership and permissions.
+Bobr can assemble a usable filesystem by hardlinking them into the layout
+described by an fs-tree manifest.
+
+## Compile a local program
+
+Create `hello-src/` beside `bobr.ncl`, containing these two files.
+
+`hello.c`:
+
+```c
+#include <stdio.h>
+
+int main(void)
+{
+    puts("Hello from Bobr!");
+    return 0;
+}
+```
+
+`Makefile` (indent commands with tabs):
+
+```make
+hello: hello.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+install: hello
+	mkdir -p /usr/bin
+	install -m 0755 hello /usr/bin/hello
+
+.PHONY: install
+```
+
+Record the source directory’s absolute path and content hash:
+
+```sh
+realpath hello-src > hello-source.path
+bobr-fsobj-hash hello-src > hello-source.fsobj-hash
+```
+
+Create `hello.ncl` beside `bobr.ncl`:
+
+```nickel
+let hello_source = {
+  name = "hello-source",
+  tag = "Source",
+  object_hash =
+    std.string.trim (import "./hello-source.fsobj-hash" as 'Text),
+  origin = {
+    tag = "Path",
+    path = std.string.trim (import "./hello-source.path" as 'Text),
+  },
+}
+in
+fun pkgs => {
+  name = "hello",
+  tag = "Makefile",
+  deps = {
+    build = [],
+    runtime = [pkgs.c_runtime],
+  },
+  config = {},
+  inputs.source = hello_source,
+}
+```
+
+In `bobr.ncl`, replace the `goals` line with:
+
+```nickel
+goals = [(import "./hello.ncl") pkgs],
+```
+
+Goals can refer directly to recipes outside the package set; no overlay is
+needed to build this recipe.
+
+Build, inspect the stored sources, and read the resulting fs-tree manifest:
+
+```sh
+bobr-recipes/bin/bobr-build.sh
+ls bobr-store/object-refs/hello-source/
+cat bobr-store/object-refs/hello
+```
+
+`hello-source` points to the source directory stored by Bobr; `hello` points to
+the resulting fs-tree manifest.
+
+The first compilation requires a substantial download of the build environment.
+The recipe runs `make` and `make install`, producing an fs-tree containing
+`/usr/bin/hello`.
+
+After changing either source file, update the source hash before rebuilding:
+
+```sh
+bobr-fsobj-hash hello-src > hello-source.fsobj-hash
+```
+
+## Add the program to a QEMU system
+
+Add these fields to the record returned by `overlay.ncl`:
+
+```nickel
+greeting = {
+  # Keep the greeting recipe from the previous example.
+},
+greeting_tree = {
+  # Keep the greeting_tree recipe from the previous example.
+},
+hello = (import "./hello.ncl") final,
+qemu_rootfs = prev.qemu_rootfs & {
+  inputs.hello = final.hello,
+},
+```
+
+This adds `hello` and its runtime dependencies to the image’s root filesystem.
+
+Rebuild the image and boot:
+
+```sh
+bobr-recipes/bin/bobr-build.sh --target qemu_image
+bobr-recipes/tools/bobr-run-qemu.sh
+```
+
+Allow several minutes (about six in a test run): changing the rootfs requires
+downloading its constituent objects and repacking the EROFS image. In the guest,
+run:
+
+```sh
+hello
+```
+
+It prints `Hello from Bobr!`.
+
+## Rebuild world using repository sources
+
+Use a new working directory containing `bobr-recipes`, or remove the existing
+`bobr-store` and `bobr.ncl`. Removing the store deletes all previous build results.
+
+Create `bobr.ncl`:
+
+```nickel
 let bobrpkgs = import "bobr-recipes/bobrpkgs.ncl" in
 let pkgs = bobrpkgs [] in
 (import "bobr-recipes/profiles/bobr-user.ncl") & {
   include pkgs,
   goals = [pkgs.world],
   secondaries.providers = [
-    import "bobr-recipes/profiles/provider-hetzner.ncl",
+    (import "bobr-recipes/profiles/provider-hetzner.ncl") & {
+      mappings = false,
+    },
   ],
 }
-EOF
+```
+
+The repository supplies content whose hash is already known, such as source
+archives. Build-result mappings are disabled, so Bobr builds from source rather
+than downloading prebuilt results. Missing sources are fetched from their
+configured origins.
+
+This is useful if you trust the source hashes in the recipes but do not want to
+trust prebuilt Bobr results. The build still relies on a prebuilt bootstrap
+environment. You can independently verify those source hashes
+by downloading the sources from upstream and running
+`bobr-fsobj-hash --mode=direct`. For non-executable files, this produces the same
+hash as `sha256sum`.
+
+```sh
 mkdir bobr-store
 bobr-recipes/bin/bobr-build.sh
 ```
 
-One command realizes the complete target. `bobr` checks the working and
-configured secondary stores, acquires missing Source content from local paths,
-HTTP mirrors, or OCI registries, and runs builders only where cache resolution
-misses.
+Expect several gigabytes of downloads and many hours of compilation. `world`
+builds all shipped images and host bundles.
 
-That builds the profile's `world` goal — every shipped OS image and HostBundle,
-without the separate acceptance tests. The Hetzner repository supplies matching
-prebuilt results; missing results are built locally, which can take hours.
-Run `--target test_all` when you want the rootfs,
-HostBundle, and final-toolchain checks. To try something smaller first, list
-what there is and name it:
+## Build world without secondary stores
 
-```sh
-bobr-recipes/bin/bobr-list-pkgs.sh          # attribute, recipe name, tag
-bobr-recipes/bin/bobr-build.sh --target gzip
-```
+Again, use a new working directory containing `bobr-recipes`, or remove the
+existing `bobr-store` and `bobr.ncl`.
 
-`bobr-list-pkgs.sh` reads the same final `pkgs`, so the list already reflects
-any overlays applied while constructing it.
-
-The profile holds what does not change between builds — the package set,
-ordered goals, store, log and work directories, and whether to run under
-`podman unshare`. The
-few things that belong to one invocation stay on the command line:
-
-- `--target NAME` — replace the profile goals for this run; repeat it to select
-  several goals in order;
-- `--jobs N`, `--quiet` — for this run only;
-- `--dry-run` — print the resolved profile and the JSON request, build nothing;
-- a positional argument names a different profile (`bobr-build.sh ../ci/bobr.ncl`).
-
-`bobr` and `bobr-fsobj-hash` are taken from `PATH` — normally the ones the
-installer placed there. Nothing is guessed, so what gets used is what
-`bobr --version` reports; the driver checks `bobr --build-info` to ensure its
-request format matches these recipes before it starts, and says so plainly when
-it does not.
-
-Later builds reuse cached objects and rebuild only what a change actually
-reaches, so that cost is paid once rather than on every build.
-
-The result is referenced at `object-refs/<name>`, but do not expect a directory
-of installed files there: for a package like `gzip` that object is an
-[fs-tree](./FS_TREE.md) **manifest** — a small text file listing each entry and,
-for regular files, its content hash. The bytes themselves live deduplicated in
-`fs-files/`, each stored with its correct (in-namespace) owner, group, and mode.
-This manifest + `fs-files/` split exists so a tree can be reproduced *quickly*
-and with the exact per-file ownership and mode a container's root filesystem
-needs — which a plain single-owner store directory could never hold. When a
-builder consumes the fs-tree it is **materialized** into a real directory under
-`fs-trees/<hash>/` (files hardlinked from `fs-files/`), and `fs-tree-refs/<name>`
-is a by-name symlink to that materialized root; that tree is what gets
-bind-mounted as a container root. To pull specific files out as ordinary files,
-use an [`FsTreeExport`](./REQUEST.md) recipe.
-
-To author or extend recipes, see [Recipes in Nickel](./NICKEL.md).
-
-## Changing a recipe without editing it
-
-The recipes are a fixed-point set of plain data records, and an **overlay** is a
-function over that set: given the set as it stands, it returns the fields that
-should differ. The profile imports and applies overlays while constructing
-`pkgs`, so your changes live next to your profile rather than as edits inside
-the recipes checkout — which keeps them intact when you update it.
-
-Put this in `overlay.ncl`, beside your `bobr.ncl`:
-
-```nickel
-fun final => fun prev => {
-  linux = prev.linux & {
-    config_options = prev.linux.config_options & { LOCALVERSION = "-mine" },
-  },
-}
-```
-
-`CONFIG_LOCALVERSION` is appended to the kernel release, so this is a change you
-can see rather than infer. Note what is being reached into: the kernel
-configuration is an ordinary record of option names, the same kind of data as a
-package's version, and an overlay gets at it the same way. There is no separate
-mechanism for the kernel.
-
-Apply it when constructing the package set:
+Create `bobr.ncl`:
 
 ```nickel
 let bobrpkgs = import "bobr-recipes/bobrpkgs.ncl" in
-let local_overlay = import "./overlay.ncl" in
-let pkgs = bobrpkgs [local_overlay] in
+let pkgs = bobrpkgs [] in
 (import "bobr-recipes/profiles/bobr-user.ncl") & {
   include pkgs,
   goals = [pkgs.world],
-  secondaries.providers = [
-    import "bobr-recipes/profiles/provider-hetzner.ncl",
-  ],
+  secondaries.providers = [],
 }
 ```
 
-Nothing needs building to check that an overlay took effect — `bobr-list-pkgs.sh`
-and `--dry-run` both apply overlays, so the lowered request already shows the
-result:
+Sources come from upstream servers or local recipe files.
+
+This bypasses the prebuilt repository. You can also build Bobr itself from source
+instead of using its prebuilt binaries; see [Development](./DEVELOPMENT.md).
 
 ```sh
-bobr-recipes/bin/bobr-build.sh --target linux --dry-run | grep LOCALVERSION
+mkdir bobr-store
+bobr-recipes/bin/bobr-build.sh
 ```
 
-Then build and boot (see the next section), and the guest answers for itself:
-
-```sh
-uname -r          # 6.18.38-mine, where it used to say 6.18.38-bobr
-```
-
-### Two things that catch people out
-
-**Merging a field that already has a value fails.** Above, `config_options` is
-declared with `| default`, and overriding a default is what merging is for. A
-field holding a plain value is different: `&` refuses, and for arrays it says so
-in terms of an equality contract, which reads like a bug in your overlay rather
-than a rule. Force the field instead:
-
-```nickel
-less = prev.less & {
-  config.configure_args
-    | force
-    = prev.less.config.configure_args @ ["--with-editor=vim"],
-},
-```
-
-**A version pin needs the matching source hash.** A different version is a
-different tarball, and the hash in the recipe is what proves the download is the
-right one. Set `version` and `source_object_hash` together; build once with a
-wrong hash on purpose, and the error reports the real one to paste in.
-
-### What a change costs
-
-An override rebuilds the recipe it names and everything downstream of it, so
-where you aim matters. Tagging the kernel rebuilds the kernel, the initramfs,
-every root filesystem and image built from them. Changing a package that only a
-few things use costs a fraction of that.
-
-Downstream is decided by the *result*, not by the edit: if a rebuilt recipe
-produces the identical object — a configure flag that turns out to select what
-was already the default, say — then everything depending on it sees an unchanged
-input and stays cached. A build reporting one rebuilt recipe and hundreds of
-cache hits is that working, not a sign the overlay was ignored.
-
-## Booting a system under QEMU
-
-`host_bundle_qemu` is a self-contained directory object carrying QEMU, its
-userspace runtime, and the kernel, initramfs, and EROFS image it boots. Nothing
-has to be installed on the host — not even QEMU. Build it like any other recipe
-target:
-
-```sh
-bobr-recipes/bin/bobr-build.sh --target host_bundle_qemu
-```
-
-The result is an ordinary directory rather than an fs-tree manifest. Resolve
-its path while still in the directory containing your profile, add its public
-`bin/` to `PATH`, then run from a writable working directory:
-
-```sh
-bundle="$(readlink -f bobr-store/object-refs/host-bundle-qemu)"
-export PATH="${bundle}/bin:${PATH}"
-mkdir -p /tmp/bobr-qemu-run
-cd /tmp/bobr-qemu-run
-bobr-run-qemu
-```
-
-The runner uses the QEMU and boot artifacts inside the bundle, while still
-using host interfaces such as `/dev/kvm`. It boots the plain image headlessly,
-puts the serial console on the terminal, creates a sparse 1 GiB `home.img` in
-the working directory, creates `diag.sock`, and forwards host TCP port 2222 to
-the guest's SSH port. Run it with `--help` for resource and path options; QEMU's
-`Ctrl-A X` escape exits the VM.
-
-The graphical systems come as their own bundles, built and run the same way:
-`host_bundle_qemu_weston` and `host_bundle_qemu_gnome`. Those open a window and
-need KVM. Each names its `home.img` and `diag.sock` after itself, so all three
-can run side by side in one working directory.
-
-The other public entries can be used directly as well:
-
-```sh
-qemu-img --help
-qemu-system-x86_64 --version
-```
-
-Adding `bin/` to `PATH` only exposes the public commands; the launcher selects
-the copied glibc loader, libraries, and per-command environment. See
-[HostBundle](./HOST_BUNDLE.md) for the directory layout, verifier, wrappers, and
-portability boundary.
+Expect several gigabytes of downloads and many hours of compilation. Subsequent
+runs reuse results in this store.
 
 ## Next steps
 
