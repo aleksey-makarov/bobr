@@ -2,9 +2,10 @@
 
 ## Summary
 
-The store contains immutable payloads, user-facing object metadata, per-run
-operational logs, the `BuildKey` → `ObjectHash` and `ReuseKey` → `ObjectHash`
-reuse mappings, and mutable refs from a name to its object. It is a
+The store contains immutable payloads, user-facing object metadata, the
+`BuildKey` → `ObjectHash` and `ReuseKey` → `ObjectHash` reuse mappings, and
+mutable refs from a name to its object. Run logs and scratch directories are
+configured separately and conventionally placed under the store. It is a
 content-addressed store (CAS): payload identity is derived from normalized
 content, not from the path or name used to reach it.
 
@@ -29,33 +30,37 @@ build key. Source recipes have no inputs.
 For a builder recipe, `build_key` is computed from:
 
 - builder tag
-- normalized config payload
-- ordered direct dependency `build_key`s
+- builder implementation-version token
+- canonical config digest, after typed parsing and defaults
+- direct dependency `build_key`s keyed by input name
 
-Dependency order follows the builder input contract:
+The version token includes the common build-semantics version and the builder's
+implementation version; architecture-dependent builders also include the build
+architecture. It is not simply the Bobr release version.
 
-- reserved inputs in spec order
-- extra inputs in lexical name order
-
-It does not follow the order of fields in JSON.
+The fingerprint includes both each input name and its hash, in lexical input-name
+order, independent of JSON field order. This is distinct from the builder's input
+consumption order. The key is SHA-256 of the canonical invocation fingerprint.
 
 `build_key` identifies a recipe; the store maps it to the object the recipe
 produced (`builds/<build_key>`). For a builder recipe, a hit on that mapping can
 be used before looking through the recipe's direct inputs.
 
-After a builder's direct inputs are realized, the builder-only canonical reuse
-identity, `reuse_key`, is computed from:
+Once the identities of a builder's direct input objects are known, its
+`reuse_key` is computed from:
 
 - builder tag
-- normalized config payload
-- ordered direct dependency `object_hash` values
+- the same implementation-version token
+- the same canonical config digest
+- direct dependency `object_hash` values keyed by input name
 
-The same builder input contract order is used for these `object_hash` values.
+The same lexical input-name order is used. Build and reuse fingerprints use
+different invocation schemas to separate the two key domains. Determining an
+input object's identity does not require its content to be present locally.
 
 `reuse_key` is independent from the particular dependency invocations that
-produced those input objects. Different build graph fragments can therefore
-reuse one canonical builder object when their direct input payload identities
-match.
+produced those input objects. Different build graph fragments can therefore reuse
+a stored result when their direct input payload identities match.
 
 Executing a builder or materializing a source produces one payload object. The
 payload is addressed by `object_hash`.
@@ -66,8 +71,7 @@ stage the same payload. The record is not part of object identity or cache
 resolution.
 
 Recipe names do not participate in object identity, `build_key`, or
-`reuse_key`. The language-level realized object is `RealizedObject`; it carries
-the `build_key` that resolved to the object when that key is known.
+`reuse_key`; input slot names do.
 
 ## Reuse Model
 
@@ -76,13 +80,19 @@ For a builder recipe, the working-store lookup starts with an exact
 On an exact miss, bobr resolves possible `object_hash` identities of the direct
 inputs and computes the corresponding `reuse_key` values. It then checks those
 keys in `reuses/`. This identity resolution may happen before input content has
-been copied into the working store. Only when exact and reuse lookup both miss
-does bobr realize complete direct inputs and execute the builder.
+been copied into the working store. A mapping supplies a candidate hash, not a
+guarantee of available content. If no candidate can be reused, bobr realizes
+complete direct inputs, checks reuse again with their actual hashes, and executes
+the builder if no reusable result is available.
 
 If a reuse hit provides an object but the current `build_key` mapping is
 missing, bobr publishes that mapping and reuses the object. A builder can also
 publish every reuse key in the current candidate set that resolves to the chosen
 object.
+
+Local `builds/` and `reuses/` each hold one current object per key. A key does not
+prove that a builder is deterministic: publishing a different result for the same
+key replaces that mapping, while the previous payload remains in the store.
 
 For `Source`, there is a `build_key` but no `reuse_key`.
 
@@ -96,6 +106,18 @@ If source materialization produces a different object than the declared
 `object_hash`, the actual object is still imported into `objects/`, but no
 object metadata or source `builds/<object_hash>` mapping is written, and the
 source import fails with the actual hash.
+
+### Complete content
+
+An ordinary object is complete when its payload is present as a file or directory
+in `objects/`. An fs-tree additionally requires every fs-file referenced by its
+canonical manifest. Neither an object record nor an already materialized
+`fs-trees/` cache entry is required for completeness.
+
+Working-store completeness checks inspect presence and file types and parse
+manifests; they do not rehash all payloads on every cache hit. Store content must
+remain immutable. Secondary transfers verify the expected object and fs-file
+identities before publishing a complete result.
 
 ### Secondary provider capabilities
 
@@ -125,13 +147,13 @@ neither implies the other. Profile syntax may combine both capabilities in one
 entry, but request lowering separates them again.
 
 The Realizer consults working-store mappings before repository mappings, and
-checks working-store content before secondary content. A secondary mapping can
-therefore be useful before its object is imported locally. Complementary
-capabilities share one opened backend: a validated read-only `LocalRepository`
-for local providers, or a lazily authenticated repository snapshot for remote
-providers. Remote indexes and content lists are fetched on demand and cached.
-Mapping lookup never opens object records, and authenticating a remote master
-does not grant mapping authority unless that capability is explicitly enabled.
+checks working-store content before secondary content. Providers are consulted
+in their declared order within each capability. A hash learned from a mapping
+provider can be supplied by a different content provider. Mapping lookup never
+opens object records.
+
+The remote protocol, signed metadata, wire representations, and publication
+workflow are specified in [Remote repositories](./REMOTE_REPOSITORY/OVERVIEW.md).
 
 An imported result is complete working-store content, not a borrowed path into
 the repository. With copy transport this follows from independent inodes. With
@@ -159,7 +181,8 @@ The filesystem layout mirrors the identity model:
   object-refs/
     <name> -> ../objects/<object_hash>
   fs-files/
-    ...
+    <first-two-hex-digits>/
+      <fs-file-hash>
   fs-trees/
     <manifest-object-hash>/
   fs-tree-refs/
@@ -195,7 +218,9 @@ published out of it by renaming and hardlinking. Their contents are:
 - `object-refs/` holds human-facing refs from recipe name to the latest
   successful object for that name.
 - `fs-files/` holds regular-file payloads referenced by fs-tree manifest
-  objects.
+  objects. Each file already carries its logical ownership and mode in the build
+  namespace; materialization preserves them through hardlinks. Its hash covers
+  both metadata and bytes; see [Filesystem trees](./FS_TREE.md).
 - `fs-trees/` caches materialized filesystem roots for fs-tree manifest
   objects.
 - `fs-tree-refs/` holds human-facing refs from recipe name to the latest
@@ -209,7 +234,8 @@ directories.
 Filesystem tree builder results store a canonical fs-tree manifest text file
 as the object payload. Regular file entries in that manifest reference payloads
 stored under `fs-files/`. Materialized roots under `fs-trees/` are cache
-entries created on demand for builders that need a filesystem root path.
+entries created on demand for builders that need a filesystem root path; a fresh
+build output can also populate this cache while its files are interned.
 When a named builder input asks for a filesystem root, the runtime also updates
 `fs-tree-refs/<name> -> ../fs-trees/<manifest-object-hash>`. These refs are
 for inspection only. Runtime lookup uses object identity and the
@@ -217,6 +243,13 @@ for inspection only. Runtime lookup uses object identity and the
 is later materialized from a different manifest object, the old current ref is
 rotated into an mtime-suffixed generation ref before the new current ref is
 installed.
+
+Remote metadata has a separate auxiliary cache, defaulting to
+`<store>/repository-cache` and configurable as `secondaries.repository_cache`.
+This is not CAS payload storage: successfully imported objects and fs-files live
+in the normal directories above. See [Request](./REQUEST.md#secondary-providers)
+for configuration and [Repository cache](./REMOTE_REPOSITORY/CLI.md#shared-metadata-cache)
+for its shared client/utility use.
 
 Generic CAS objects may contain non-UTF-8 filesystem names. Such objects can
 still be imported and addressed by `object_hash`. Fs-tree objects are
@@ -254,8 +287,8 @@ directory is left in place.
 ## Object Refs
 
 Every recipe carries a name. The name enters no identity computation — not
-`object_hash`, `build_key`, or `reuse_key`; it is used only to create the refs
-described here.
+`object_hash`, `build_key`, or `reuse_key`; it is used for the refs described here
+and for diagnostics and logs.
 
 When a named recipe successfully resolves to an object, the current object ref
 is updated:
@@ -270,11 +303,21 @@ its user-facing metadata is normally available as
 `object-records/<object_hash>.json`; object-ref lookup does not depend on that
 metadata.
 
-Unlike `object-refs/`, `fs-tree-refs/` are inspection aids only, created when a
-filesystem root is materialized for a named input.
+Both `object-refs/` and `fs-tree-refs/` are inspection aids, not cache lookup
+inputs. The latter are created when a filesystem root is materialized for a named
+input.
 
 If the current object ref already points at a different object, the old current
 ref is rotated into a timestamp-suffixed history ref.
+
+## Local store lifecycle
+
+Updating a mapping or name ref does not delete the previous object or its
+fs-files. Bobr currently has no local store garbage collector: old payloads,
+records, and history refs remain until explicitly removed. Immutable shared
+files must not be modified in place. Remote repository retention and garbage
+collection are separate mechanisms described in
+[Repository CLI](./REMOTE_REPOSITORY/CLI.md#gc).
 
 ## Logging
 
@@ -302,15 +345,18 @@ identity.
 
 The run id comes from the request; `bobr-build.sh` derives it from the local
 `<YYMMDDhhmmss>` timestamp and appends `.1`, `.2`, and so on when a directory of
-that name is already taken. Each builder,
-source, or scheduler subject gets a store-allocated serial number for its log
-directory name. The serial is an internal allocation detail; the full original
-tag, recipe name, subject key, and workspace paths are stored in that subject's
-`meta.json`. Subject keys are build keys; for source subjects that build key is
-the declared object hash.
+that name is already taken. A subject with an allocated workspace receives a
+serial number for its log directory name. The serial is an internal allocation
+detail; the full original tag, recipe name, subject key, and workspace paths are
+stored in that subject's
+`meta.json`. Recipe subjects use build keys; for `Source`, that is the declared
+object hash. Repository metadata and content transfers use their own activity
+identifiers, not necessarily build keys.
 
-The run-level event log is the full audit log of the run, and subject events
-are also written to each subject's own `events.jsonl`. Raw logs created by
-builders are written under the subject's `raw/` directory. The event record
-format, the closed `status` vocabulary, and the format guarantees are specified
+The run-level event log is the full audit log of the run. Subjects with dedicated
+logs also write their events to their own `events.jsonl`; events without a bound
+subject workspace, including repository transfers, appear only in the run-level
+log. Raw logs created by builders are written under the subject's `raw/`
+directory. The event record format, the closed `status` vocabulary, and the
+format guarantees are specified
 in [Build logging](LOGGING.md).
