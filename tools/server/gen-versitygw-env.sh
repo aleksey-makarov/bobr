@@ -66,7 +66,7 @@ ROOT_SECRET_ACCESS_KEY=$secret_key
 EOF
 
 cat > "$aws_credentials" <<EOF
-[bobr-potato]
+[bobr-server]
 aws_access_key_id = $access_key
 aws_secret_access_key = $secret_key
 EOF
@@ -74,4 +74,4 @@ EOF
 chmod 600 "$versitygw_env" "$aws_credentials"
 
 echo "Wrote $versitygw_env (mode 600)"
-echo "Wrote $aws_credentials (mode 600, profile bobr-potato)"
+echo "Wrote $aws_credentials (mode 600, profile bobr-server)"

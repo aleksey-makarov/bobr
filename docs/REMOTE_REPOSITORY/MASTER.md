@@ -1,8 +1,6 @@
 # Remote repository master
 
-Status: format design draft.
-
-This document specifies the purpose and proposed version 1 wire format of the
+This document specifies the purpose and version 1 wire format of the
 mutable `/master` object in a Bobr remote repository. The normative CDDL schema
 of its payload is in [`master-payload.cddl`](master-payload.cddl).
 
@@ -45,6 +43,10 @@ Cache-Control: no-cache
 `no-cache` permits local storage but requires revalidation before reuse. An
 origin should provide an `ETag` or `Last-Modified` validator so an unchanged
 master normally produces a small `304 Not Modified` response.
+
+The current Bobr client caches `ETag` and revalidates with `If-None-Match`.
+It does not yet send `If-Modified-Since` based on `Last-Modified`; without an
+ETag, it fetches the master again rather than using a cached response unchecked.
 
 The signed payload contains `data_base_url`. Immutable object keys are resolved
 relative to that URL, so moving data does not require changing the stable
@@ -465,12 +467,19 @@ A client processing `/master` performs these operations in order:
 8. Treat the verified response from the configured master URL as the
    authoritative repository state. A byte-identical cached response may be
    reused after successful HTTP revalidation.
-9. Fetch missing current build indexes, object lists, and filesystem-file lists
-   by their digests. Fetch reuse indexes lazily when exact lookup misses and
-   reuse lookup becomes possible.
-10. Verify every fetched immutable metadata file before using it. A publisher
-    or GC additionally fetches retired indexes and lists when it needs to
-    compute the complete live set.
+9. Load current-slot immutable metadata lazily by its authenticated digest when
+   needed: build indexes for build-key lookup, reuse indexes for reuse-key lookup,
+   object lists for object availability, and filesystem-file lists for fs-file
+   availability. A mapping-only client need not load content lists, and a
+   content-only client need not load mapping indexes.
+10. Verify every fetched immutable metadata file before using it.
+
+An ordinary reader uses only current slots. Administrative operations instead
+load all four metadata files for every current and retained state: `prepare`
+reconstructs publication state, `status` computes statistics, and GC determines
+the complete live sets. This full traversal uses the same master-signature and
+metadata-hash checks as the ordinary reader; it does not download all object or
+fs-file payloads.
 
 No mapping from an unverified master may be used, even when the eventual
 content would be checked by `ObjectHash`.

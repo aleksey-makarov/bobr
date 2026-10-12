@@ -6,6 +6,10 @@ store or CDN, while a small signed master authenticates the current repository
 state. Clients verify mappings, metadata, ordinary objects, and filesystem
 files before importing them into a working store.
 
+To use a repository during builds, configure providers in a
+[Nickel build profile](../NICKEL.md#the-package-set). The normalized JSON
+configuration is specified in [Request: secondary providers](../REQUEST.md#secondary-providers).
+
 The repository protocol and its administration are documented in this
 section:
 

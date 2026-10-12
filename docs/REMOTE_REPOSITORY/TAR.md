@@ -1,7 +1,5 @@
 # Remote repository directory tar profile
 
-Status: format design draft.
-
 This document specifies the tar profile used for directory payloads in Bobr
 remote repository objects. It is part of repository format version 1 and is
 referenced by [`OBJECT.md`](OBJECT.md).
@@ -224,4 +222,4 @@ all been verified.
 - POSIX ustar archive format: POSIX.1-1988 and later tar specifications.
 - GNU LongName and LongLink: GNU tar archive extensions.
 - Ordinary-object identity: Bobr
-  [Filesystem Object Hashing](../docs/FSOBJ_HASH.md).
+  [Filesystem Object Hashing](../FSOBJ_HASH.md).

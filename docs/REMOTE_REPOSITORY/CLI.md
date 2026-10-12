@@ -8,7 +8,7 @@ and performs garbage collection.
 The remote wire format is specified separately in
 [`MASTER.md`](MASTER.md), [`OBJECT.md`](OBJECT.md),
 [`FS_FILE.md`](FS_FILE.md), and [`TAR.md`](TAR.md). The command uses the same
-library implementation as the future Bobr remote-repository client.
+library implementation as the Bobr remote-repository client.
 
 ## Scope
 
@@ -189,10 +189,9 @@ never trusted merely because the repository supplied it.
 
 ## The local store as publication input
 
-`prepare` consumes a fresh local Bobr store produced by a complete realization
-of the intended `world`. Recipe lowering is responsible for making every
-reachable recipe node a public goal so an exact hit at the top does not prune
-the rest of the DAG.
+`prepare` publishes the content and mappings already present in the specified
+local Bobr store. It does not build recipes or fill in missing parts of their
+dependency graph.
 
 The publisher includes:
 
@@ -206,8 +205,12 @@ references, object records, temporary files, and other derived or
 user-convenience state. An fs-tree manifest is included because it is an
 ordinary object under `objects/`; its separately materialized tree is not.
 
-The input store is already the reachability filter. `bobr-repo` does not accept
-recipe goals and does not traverse the recipe DAG itself.
+`bobr-repo` does not accept recipe goals or traverse the recipe DAG to select
+publication content. Use a fresh store to limit publication to the intended
+build. An ordinary `world` request does not make every reachable recipe a goal:
+an exact hit on a high-level target can skip its dependencies. To rebuild the
+full graph, use a fresh store with content-only providers or no secondaries;
+this is a build configuration choice, not automatic behavior of `prepare`.
 
 Before upload, the publisher validates the store layout, every mapping target,
 every ordinary-object identity, every fs-tree manifest, and the complete set
@@ -454,8 +457,12 @@ bobr-repo status \
     [--compact]
 ```
 
-The command authenticates `/master` and fetches the object and filesystem-file
-lists referenced by all current and retained states. It reports:
+The command authenticates `/master` and loads all four metadata files referenced
+by every current and retained state: build index, reuse index, object list, and
+filesystem-file list. The current implementation also loads mapping indexes even
+though content counts primarily require the lists. With `--cache`, unchanged
+metadata is read and verified locally; without it, metadata is downloaded again
+on each invocation. No `o/*` or `f/*` payloads are downloaded. It reports:
 
 - `state = "ready"`, the number of current slots, and the active slot serial;
 - the master URL, data base URL, signing key identifier, and master hash;
@@ -474,7 +481,7 @@ bucket objects. Consequently, the top-level
 
 `--cache DIR` uses `DIR` as a `RepositoryCache` root. The directory layout,
 master-URL namespace, ETag handling, immutable metadata paths, and validation
-rules are exactly those used by the Bobr remote-repository reader. A later Bobr
+rules are exactly those used by the Bobr remote-repository reader. The Bobr
 client can therefore use the same directory directly; `status` does not create
 a CLI-specific cache format.
 

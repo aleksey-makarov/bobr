@@ -1,8 +1,6 @@
 # Remote repository object
 
-Status: format design draft.
-
-This document specifies the proposed repository format version 1 wire format
+This document specifies the repository format version 1 wire format
 of immutable objects stored under `o/<ObjectHash>`. The normative CDDL schema
 is in [`object.cddl`](object.cddl).
 
@@ -26,7 +24,7 @@ filesystem object hashing rules:
 
 Root symbolic links and other filesystem kinds are not supported. The
 normative filesystem identity and tar normalization rules are specified in
-[Filesystem Object Hashing](../docs/FSOBJ_HASH.md).
+[Filesystem Object Hashing](../FSOBJ_HASH.md).
 
 An object key is write-once. A publisher that finds an existing
 `o/<ObjectHash>` reuses it and must not replace it with another equivalent
@@ -132,7 +130,7 @@ After decompression, the payload is one tar stream describing the directory
 contents. The stream must satisfy the repository
 [directory tar profile](TAR.md). The reader applies that profile to obtain the
 normalized tree defined by
-[Filesystem Object Hashing](../docs/FSOBJ_HASH.md), computes its hash, and
+[Filesystem Object Hashing](../FSOBJ_HASH.md), computes its hash, and
 requires it to equal the `ObjectHash` in the requested key.
 
 The object identity is independent of tar header layout, entry order, implicit
@@ -271,4 +269,4 @@ mode. Its wire representation is specified in
 - Zstandard: RFC 8878.
 - Directory transport tar profile: [`TAR.md`](TAR.md).
 - Tar identity and normalization: Bobr
-  [Filesystem Object Hashing](../docs/FSOBJ_HASH.md).
+  [Filesystem Object Hashing](../FSOBJ_HASH.md).

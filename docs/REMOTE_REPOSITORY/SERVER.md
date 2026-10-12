@@ -113,6 +113,7 @@ The machine used to administer the *hoster* needs:
 
 - OpenSSL;
 - AWS CLI v2;
+- `bobr-repo` on `PATH` (see [Installation](../INSTALLATION.md));
 - SSH and SCP access to the *hoster*.
 
 The *hoster* needs a filesystem with extended-attribute support. VersityGW's

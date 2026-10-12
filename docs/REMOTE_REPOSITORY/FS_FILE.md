@@ -1,8 +1,6 @@
 # Remote repository filesystem file
 
-Status: format design draft.
-
-This document specifies the proposed repository format version 1 wire format
+This document specifies the repository format version 1 wire format
 of immutable filesystem files stored under `f/<FsFileHash>`. The normative CDDL
 schema is in [`fs-file.cddl`](fs-file.cddl).
 
@@ -212,5 +210,5 @@ the canonical local fs-file into place.
 - CDDL: RFC 8610.
 - Zstandard: RFC 8878.
 - Fs-tree integration: Bobr
-  [Filesystem trees](../docs/FS_TREE.md) and
-  [fs-tree Manifest](../docs/FS_TREE_MANIFEST.md).
+  [Filesystem trees](../FS_TREE.md) and
+  [fs-tree Manifest](../FS_TREE_MANIFEST.md).
