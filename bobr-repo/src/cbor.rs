@@ -72,6 +72,10 @@ impl<'a> Decoder<'a> {
         Self { bytes, offset: 0 }
     }
 
+    pub(crate) fn remaining_bytes(&self) -> usize {
+        self.bytes.len() - self.offset
+    }
+
     pub(crate) fn array(&mut self) -> Result<u64, RepositoryError> {
         self.head(4, "array")
     }

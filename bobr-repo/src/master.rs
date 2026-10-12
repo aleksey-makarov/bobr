@@ -15,6 +15,11 @@ use url::Url;
 /// COSE protected-header content type for a repository master.
 pub const MASTER_CONTENT_TYPE: &str = "application/vnd.bobr.repository-master+cbor";
 
+// Version 1's six-field slot map occupies at least 193 bytes: its fixed keys,
+// four 32-byte digests, and one-byte serial and retention values. This is a
+// lower bound on valid encoding size, not an additional slot-count policy.
+const MIN_ENCODED_SLOT_BYTES: usize = 193;
+
 /// SHA-256 digest of the exact tagged COSE representation of a master.
 pub type MasterHash = MetadataHash<Master>;
 
@@ -131,13 +136,26 @@ impl Master {
 
     /// Decodes and validates a deterministic CBOR payload.
     pub fn decode_payload(bytes: &[u8]) -> Result<Self, RepositoryError> {
+        if bytes.len() as u64 > MAX_MASTER_BYTES {
+            return Err(RepositoryError::new(
+                "master payload exceeds the format limit",
+            ));
+        }
         let mut decoder = Decoder::new(bytes);
         require_length(decoder.map()?, 4, "master map")?;
         require_text(&mut decoder, "slots")?;
         let slot_count = decoder.array()?;
         let slot_count = usize::try_from(slot_count)
             .map_err(|_| RepositoryError::new("slot count is too large"))?;
-        let mut slots = Vec::with_capacity(slot_count);
+        if slot_count > decoder.remaining_bytes() / MIN_ENCODED_SLOT_BYTES {
+            return Err(RepositoryError::new(
+                "slot count exceeds the remaining payload size",
+            ));
+        }
+        let mut slots = Vec::new();
+        slots.try_reserve_exact(slot_count).map_err(|error| {
+            RepositoryError::runtime(format!("failed to reserve master slots: {error}"))
+        })?;
         for _ in 0..slot_count {
             slots.push(decode_slot(&mut decoder)?);
         }
@@ -480,6 +498,91 @@ mod tests {
         let mut noncanonical = vec![0xb8, 4];
         noncanonical.extend_from_slice(&bytes[1..]);
         assert!(Master::decode_payload(&noncanonical).is_err());
+    }
+
+    #[test]
+    fn minimum_slot_encoding_size_matches_format() {
+        let mut slot = master().slots[0].clone();
+        slot.serial = 0;
+        for retain_until in [None, Some(0), Some(23)] {
+            slot.retain_until = retain_until;
+            let mut encoder = Encoder::new();
+            encode_slot(&mut encoder, &slot);
+            assert_eq!(encoder.finish().len(), MIN_ENCODED_SLOT_BYTES);
+        }
+    }
+
+    fn impossible_slot_array(count: u64) -> Vec<u8> {
+        let mut encoder = Encoder::new();
+        encoder.map(4);
+        encoder.text("slots");
+        encoder.array(count);
+        encoder.finish()
+    }
+
+    #[test]
+    fn impossible_slot_counts_return_errors_before_allocation() {
+        for count in [1, 24, u32::MAX as u64, 1_u64 << 32, u64::MAX] {
+            let error = Master::decode_payload(&impossible_slot_array(count)).unwrap_err();
+            assert!(error.to_string().contains("slot count"), "{count}: {error}");
+        }
+    }
+
+    #[test]
+    fn truncated_slot_array_is_bounded_by_actual_bytes() {
+        let master = master();
+        let mut bytes = master.encode_payload();
+        // The canonical prefix is map(4), text("slots"), array(1).
+        assert_eq!(bytes[7], 0x81);
+        bytes[7] = 0x82;
+        let error = Master::decode_payload(&bytes).unwrap_err();
+        assert!(error.to_string().contains("remaining payload size"));
+    }
+
+    #[test]
+    fn multiple_slots_with_short_and_long_values_roundtrip() {
+        let mut master = master();
+        master.slots = [0, 23, 24, u32::MAX as u64, u64::MAX]
+            .into_iter()
+            .map(|serial| {
+                let mut slot = master.slots[0].clone();
+                slot.serial = serial;
+                slot.retain_until = (serial != u64::MAX).then_some(u64::MAX);
+                slot
+            })
+            .collect();
+        assert_eq!(
+            Master::decode_payload(&master.encode_payload()).unwrap(),
+            master
+        );
+    }
+
+    #[test]
+    fn oversized_payload_is_rejected_before_parsing() {
+        let bytes = vec![0; MAX_MASTER_BYTES as usize + 1];
+        let error = Master::decode_payload(&bytes).unwrap_err();
+        assert!(error.to_string().contains("format limit"));
+    }
+
+    #[test]
+    fn authenticated_impossible_slot_array_returns_an_error() {
+        let signing = SigningKey::from_bytes(&[3; 32]);
+        let key_id = b"release-1";
+        let protected = HeaderBuilder::new()
+            .algorithm(iana::Algorithm::EdDSA)
+            .content_type(MASTER_CONTENT_TYPE.to_owned())
+            .key_id(key_id.to_vec())
+            .build();
+        let bytes = CoseSign1Builder::new()
+            .protected(protected)
+            .payload(impossible_slot_array(u64::MAX))
+            .create_signature(&[], |data| signing.sign(data).to_bytes().to_vec())
+            .build()
+            .to_tagged_vec()
+            .unwrap();
+        let keys = TrustedKeys::new([(key_id.to_vec(), signing.verifying_key())]).unwrap();
+        let error = keys.verify(&bytes).unwrap_err();
+        assert!(error.to_string().contains("slot count"));
     }
 
     #[test]
