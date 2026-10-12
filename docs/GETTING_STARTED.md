@@ -27,7 +27,7 @@ let pkgs = bobrpkgs [] in
   include pkgs,
   goals = [pkgs.qemu_image, pkgs.initrd, pkgs.linux_bzimage],
   secondaries.providers = [
-    import "bobr-recipes/profiles/provider-hetzner.ncl",
+    import "bobr-recipes/profiles/provider-public.ncl",
   ],
 }
 ```
@@ -419,7 +419,7 @@ let pkgs = bobrpkgs [] in
   include pkgs,
   goals = [pkgs.world],
   secondaries.providers = [
-    (import "bobr-recipes/profiles/provider-hetzner.ncl") & {
+    (import "bobr-recipes/profiles/provider-public.ncl") & {
       mappings = false,
     },
   ],

@@ -100,9 +100,9 @@ use the relative paths defined by `MASTER.md`.
 only a bucket root in the form `s3://bucket`. It rejects a repository prefix.
 
 S3 endpoint, region, credentials, and session tokens come from the standard
-AWS credential and configuration chain. This permits AWS S3, Hetzner Object
-Storage, and other S3-compatible services without a Bobr-specific credentials
-file. A non-AWS deployment can, for example, set `AWS_ENDPOINT_URL_S3` and
+AWS credential and configuration chain. This permits AWS S3 and other
+S3-compatible services without a Bobr-specific credentials file. A non-AWS
+deployment can, for example, set `AWS_ENDPOINT_URL_S3` and
 `AWS_REGION` in addition to its credentials.
 
 Every command also accepts an optional repository-local CA bundle:
