@@ -1,110 +1,101 @@
 # Development
 
-[Installation](./INSTALLATION.md) and [Getting Started](./GETTING_STARTED.md)
-describe installing and using a release. This chapter is about working *on*
-`bobr`, where the binaries come from a checkout you are editing and the recipes
-tree is one you keep changing.
+Commands below assume sibling `bobr` and `bobr-recipes` checkouts and are run
+from their parent directory. Recipe builds require the environment described
+in [Installation](./INSTALLATION.md#prerequisites).
 
-The arrangement is deliberately the same as a user's. You install the host
-tools into one directory on `PATH`; from there, everything — the recipes'
-`bin/bobr-build.sh` and the QEMU bundles — finds them
-exactly as it finds an unpacked release. Nothing downstream knows or cares that
-the binaries came from source.
+## Build and check Bobr
 
-```text
-<workspace>/
-  bobr/           # the engine, a git checkout
-  bobr-recipes/   # the recipes, a git checkout
-  bobr-store/     # the store
-```
+Source builds require Rust/Cargo, a native C toolchain, and `rustfmt`/`clippy`.
+The complete release gate also requires the `x86_64-unknown-linux-musl` Rust
+target, `musl-gcc`, and packaging tools including `readelf`, `strip`, `tar`,
+`xz`, and `sha256sum`. It runs on x86-64 Linux and requires the exact Rust
+version selected by `RUST_TOOLCHAIN` in both CI and release workflows.
 
-## Installing the binaries
-
-Run the complete release gate and install exactly the archive it verifies:
+For an edit-compile-test cycle:
 
 ```sh
-tools/release-check-and-install.sh [--allow-dirty] [--bin-dir DIR]
+(cd bobr && cargo build --workspace --locked)
+(cd bobr && cargo test --workspace --locked)
 ```
 
-The default destination follows Cargo's convention:
-`$CARGO_INSTALL_ROOT/bin`, then `$CARGO_HOME/bin`, then `~/.cargo/bin`.
-`--bin-dir` overrides it. Keep the selected directory on `PATH`; Bobr does not
-maintain a workspace-private binary directory or inject one into child
-processes.
-
-The gate requires a clean checkout by default. It reads the single explicit
-`RUST_TOOLCHAIN` value from both CI and release workflows, requires the two to
-match, and requires the local `rustc` to have that exact version. It then runs
-formatting, clippy, tests, and rustdoc, builds the static musl release archive,
-and smoke-tests it. Only after every check succeeds does it replace `bobr`,
-`bobr-repo`, `bobr-fsobj-hash`, and `bobr-sandbox-launcher` in the destination.
-`--allow-dirty` permits an iterative build while recording that fact in
-`bobr --build-info`.
-
-For a quick edit-compile cycle, use Cargo directly. This does not update the
-tools on `PATH`; run the complete gate before using a build for acceptance
-testing or a long recipe build.
-
-The directory selected by the gate must precede other Bobr installations on
-`PATH`. The script warns when `command -v bobr` selects another copy. To remove
-an installation, delete the four commands above from that directory; the gate
-does not maintain an installation database or change shell startup files.
-
-Two different launchers are built here, and only one of them is installed:
-
-- **The sandbox launcher, `bobr-sandbox-launcher`, is installed** next to
-  `bobr`. It is the process that sets up the user namespace for every sandboxed
-  build, and `bobr` finds it by looking beside its own executable — which is also
-  how the release archive is laid out, so this is the same path a user takes, not
-  a development special case.
-- **The bundle launcher, `bobr-bundle-launcher`, is tested, never installed.**
-  It belongs to built artifacts rather than to your toolchain: it is the small
-  program a [HostBundle](./HOST_BUNDLE.md) carries to select its own loader and
-  libraries at run time. Its recipe builds the published source crate from
-  crates.io, so workspace checks here validate its source without producing a
-  release asset.
-
-## Building recipes
-
-There is no separate build driver for development. With the binaries on `PATH`,
-use `bin/bobr-build.sh` exactly as
-[Getting Started](./GETTING_STARTED.md#build-a-specific-target) describes it.
-
-One difference matters while editing recipes. Local sources are pinned by a
-`*.fsobj-hash` lock beside them, and `bin/bobr-build.sh` **checks** those locks
-rather than rewriting them: a stale lock would otherwise reuse the old content
-of a file you just edited, since the hash it still declares names an object the
-store may already have. After editing a patch, a build script, or anything else
-under a local `Source`, refresh the locks yourself:
+Additional tests gated by `integration-tests` require a working Linux sandbox
+environment (user namespaces and mounts):
 
 ```sh
-bin/bobr-update-fsobj-hashes.sh
+(cd bobr && cargo test --workspace --all-features --locked)
 ```
 
-The build tells you when this is needed, and names the tool.
+CI and the release gate do not currently enable these feature-gated tests.
 
-## Cold world builds
+These commands do not install binaries. Before acceptance testing, run the
+complete release gate and install its verified archive:
 
-The artifact-only `world` goal and the explicit acceptance-test goal `test_all`
-are ordinary package-set attributes selected by a profile. To prove the shipped artifacts build
-without working-store mappings, point a profile at a newly created empty store
-and run the normal driver:
+```sh
+bobr/tools/release-check-and-install.sh
+```
+
+The gate checks formatting, clippy, tests, rustdoc, the installer, and static
+musl release packaging and smoke tests. It installs `bobr`, `bobr-repo`,
+`bobr-fsobj-hash`, and `bobr-sandbox-launcher` only after all checks pass.
+The bundle launcher is checked but not installed.
+
+A clean checkout is required by default. Use `--allow-dirty` while developing;
+the installed `bobr --build-info` records the commit and dirty state.
+The destination is `$CARGO_INSTALL_ROOT/bin`, then `$CARGO_HOME/bin`, then
+`~/.cargo/bin`; `--bin-dir DIR` overrides it. Put that directory before other
+Bobr installations on `PATH`.
+
+## Check recipes
+
+Run the standalone recipe check suite with Nickel, `bobr-fsobj-hash`, and the
+other tools required by `tools/check.sh` on `PATH`:
+
+```sh
+bobr-recipes/tools/check.sh
+```
+
+After editing local sources in the recipes checkout, refresh their adjacent
+`*.fsobj-hash` locks:
+
+```sh
+bobr-recipes/bin/bobr-update-fsobj-hashes.sh
+```
+
+`bobr-build.sh` checks existing locks in that checkout; it does not rewrite
+them or check external user sources automatically. Validate a profile and
+lower its request without building:
+
+```sh
+bobr-recipes/bin/bobr-build.sh --dry-run /path/to/profile.ncl
+```
+
+For profile and target selection, see
+[Getting Started](./GETTING_STARTED.md#build-a-specific-target).
+
+## Acceptance builds
+
+For a cold `world` build, create an empty store and set the profile's `store`
+to that path. Disable mappings on every secondary provider, or use
+`secondaries.providers = []`; an empty working store alone does not prevent
+prebuilt mapping hits. Content-only local or remote providers are allowed.
+Leave `output_repository` unset unless publication is intended.
 
 ```sh
 mkdir /path/to/new-store
-bin/bobr-build.sh --target world /path/to/profile.ncl
+bobr-recipes/bin/bobr-build.sh --target world /path/to/profile.ncl
+bobr-recipes/bin/bobr-build.sh --target test_all /path/to/profile.ncl
 ```
 
-The profile may still configure content-only secondary providers, including a
-previous local store or a remote repository. They can avoid downloading stable
-payloads again without exposing their build or reuse mappings.
+`world` builds the shipped images and host bundles; `test_all` runs the separate
+acceptance recipes and can reuse results from the preceding build. A cold
+`world` build takes hours. See [Build logging](./LOGGING.md) for diagnostics.
 
-Each real invocation records its Bobr and recipes provenance, outcome, and a
-compact recipe-name catalog beside the structured log in
-`<logs>/<run-id>/context.json` and `recipe-catalog.json`. These records are
-diagnostic metadata used by store-inspection tools; the authoritative build and
-reuse mappings remain in the store itself. A dry run creates no record.
+## Documentation
 
-The hash locks are left alone: `bin/bobr-build.sh` checks them and refuses on a
-stale one, which is what should happen to a checkout that says one thing and
-contains another. Expect a cold `world` build to take hours.
+Build or preview the user documentation with mdBook:
+
+```sh
+(cd bobr && mdbook build)
+(cd bobr && mdbook serve)
+```

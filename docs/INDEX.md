@@ -65,3 +65,6 @@
 14. [Scheduler](./SCHEDULER.md)
    Demand-driven DAG realization, exact and reuse resolution, Source
     acquisition, builder execution, concurrency limits, and cancellation.
+
+15. [TODO](./TODO.md)
+   Major planned improvements.

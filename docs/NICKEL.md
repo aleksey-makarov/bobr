@@ -453,15 +453,14 @@ packages into a usable rootfs.
 
 ## Filesystem images
 
-Packing a filesystem tree into an image is a recipe's job, not a builder's:
-`bobr` has no image builders at all. An image recipe is an ordinary plain-object
-`Sandbox` that takes the tree as a materialized `_tree` input and runs the packer
-over it, in a rootfs assembled from that packer's runtime closure.
+Filesystem images are produced by `Sandbox` recipes that run a packing tool
+over a materialized `_tree` input, in a rootfs assembled from the tool's runtime
+closure. The result is an ordinary object containing the image file.
 
 ### EROFS
 
-There is no `ErofsRootfs` builder. To pack a filesystem tree into a reproducible
-EROFS image, use the `recipe.erofs_image` helper — it lowers to a low-level
+To pack a filesystem tree into a reproducible EROFS image, use the
+`recipe.erofs_image` helper — it lowers to a low-level
 `Sandbox` (with an explicit `_rootfs`: a `RootfsClosure` of `pkgs.erofs_utils`
 and `pkgs.bash`) that runs `mkfs.erofs` over the materialized tree:
 

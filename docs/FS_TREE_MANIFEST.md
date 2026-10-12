@@ -9,7 +9,8 @@ filesystem trees. It describes filesystem tree structure, directory metadata,
 symlink metadata, and references to regular file payloads stored in
 `<store>/fs-files/`.
 
-The manifest itself is an ordinary store object, produced by builders such as
+The manifest itself is an ordinary non-executable file object, produced by
+builders such as
 `FsTreeImport`, `OciExtract`, `TreeMerge`, `TreeMove`, `TreeSubset`, and
 `SandboxInstall`.
 Materialized roots are cache entries under
@@ -109,8 +110,8 @@ Together these rules give a tree exactly one valid byte encoding: the parser
 accepts only that encoding and rejects any deviation in entry order, field set,
 field order, whitespace, or escaping. Because the manifest is an ordinary store
 object, its `ObjectHash` (see [Filesystem Object Hashing](./FSOBJ_HASH.md)) is
-taken over these canonical bytes and is therefore a deterministic function of
-the tree.
+exactly the SHA-256 of these canonical bytes and is therefore a deterministic
+function of the tree.
 
 ## Tree Shape Rules
 
@@ -120,11 +121,14 @@ The manifest must contain at least the root directory entry:
 {"p":"","t":"d","u":0,"g":0,"m":493}
 ```
 
+The root's uid, gid, and mode are not fixed by the format; the values above are
+an example and obey the same constraints as any other directory entry.
+
 Every non-root entry must have an explicit parent directory entry in the same
 manifest. Duplicate paths are invalid. A file or symlink cannot be the parent
 of another entry.
 
-Paths are always relative UTF-8 strings:
+The root path is the empty string. Every other path is a relative UTF-8 string:
 
 - no leading `/`;
 - no trailing `/`;
@@ -139,14 +143,20 @@ metadata represented by those hashes live in `<store>/fs-files/`; the manifest
 does not inline them. Directory and symlink metadata are stored directly in the
 manifest.
 
-The runtime materializes a manifest object only when a builder input asks for a
-filesystem root. The cache path is `<store>/fs-trees/<manifest-object-hash>/`.
+The runtime materializes a manifest object when a builder input asks for a
+filesystem root. A fresh build output can also populate the materialized cache
+while its files are interned. The cache path is
+`<store>/fs-trees/<manifest-object-hash>/`.
 For named materializations, the runtime also updates
 `<store>/fs-tree-refs/<name>` to point at that cache root. These refs are
 user-facing inspection aids; runtime cache lookup does not read them.
 Builders that only need to read or transform manifests, such as `TreeMerge`,
 `TreeMove`, and `TreeSubset`, consume the manifest object directly and do not
 materialize the tree.
+
+Parsing a canonical manifest validates its representation and tree shape, not
+the presence of referenced fs-files. A complete fs-tree requires those files as
+well; see [Store: complete content](./STORE.md#complete-content).
 
 ## Scope Boundaries
 

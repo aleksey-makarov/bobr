@@ -6,22 +6,25 @@ closed `status` vocabulary, and the format guarantees tooling may rely on.
 
 ## Channels
 
-There are three non-overlapping output channels:
+There are three output channels with distinct purposes:
 
 - **Run logs** (the request's `logs` directory) are the single source of truth
-  for a run, for both humans (rendered) and machines (JSONL). Everything
-  build-significant goes here, at every level. The caller names the directory
-  and creates it; by convention it is `<store>/logs/<run-id>` (see
+  for a run, for both humans (rendered) and machines (JSONL). Durable
+  build-significant events go here; transient progress is screen-only.
+  Diagnostics before logging is initialized and logging failures may appear
+  only on stderr. The caller names the directory and creates it; by convention
+  it is `<store>/logs/<run-id>` (see
   [Request](./REQUEST.md)).
-- **stderr** is the live UI only: build progress plus warnings and errors, as a
-  projection of the run logs onto the screen. The progress renderer is the
-  only writer of stderr. In an interactive terminal (and not `quiet`) it draws a
-  **live block** (two statistics rows, a bounded activity viewport, and a
-  bottom run summary, with warnings/errors printed above) via `indicatif`;
-  otherwise (non-TTY, e.g.
-  CI or a pipe, or `quiet`) it falls back to **plain per-line** output.
+- **stderr** carries the live UI and human diagnostics. The progress renderer
+  projects structured events onto the screen; CLI diagnostics and logging-error
+  notices may also write there. In an interactive terminal (and not `quiet`) it
+  draws a **live block** (run summary, fetch/build statistics, then a bounded
+  activity viewport, with warnings/errors printed above) via `indicatif`;
+  otherwise (non-TTY, e.g. CI or a pipe, or `quiet`) it falls back to
+  **plain per-line** output.
   Transient `progress` ticks appear only in the live block — the plain path
-  omits them. How much it shows is a threshold (see [Verbosity](#verbosity)).
+  omits them. How much it shows is a threshold (see
+  [Levels and verbosity](#levels-and-verbosity)).
 - **stdout** carries the machine-readable result: a single goal prints its
   `ObjectHash`, while multiple goals print their ordered JSON results. Moving
   the result into a store file is a related, separate concern and is not part
@@ -33,34 +36,41 @@ The request's `progress` policy controls only an interactive TTY. Every live
 block has this fixed order:
 
 ```text
-fetch  <Source acquisition statistics>
+run    <whole-run summary>
+fetch  <Source and repository acquisition statistics>
 build  <builder statistics>
 <N activity rows>
-run    <whole-run summary>
 ```
 
-The two statistics rows and the run row always exist. `N` is the line budget
-minus three, so normal activity events do not change the block's height.
+The three status rows always exist; activity rows are additional. Their budget
+is stable across ordinary activity events and is recomputed on terminal resize.
 
-- `auto` uses at most three quarters of the terminal height while leaving at
-  least two rows outside the live block;
-- `fixed` caps the complete block at `max_lines` rows;
+- `auto` caps activity rows at the greater of `jobs` and four, and at three
+  quarters of the terminal height. The complete block also leaves at least two
+  terminal rows free when space permits. Small terminals can reduce activity
+  capacity below four;
+- `fixed` caps the complete block at `max_lines` rows (minimum four), with the
+  same terminal-space and concurrency caps;
 - `summary` keeps the three fixed rows and hides individual activity rows.
 
-Each activity row belongs to one concrete builder, network Source acquisition,
-or repository copy until its terminal event. Empty rows display `—`. Local Path
-Sources, working-store hits, and repository hardlinks update fetch statistics
-but do not take an activity row. A network Source waiting for a connection slot
-also updates only fetch statistics; it takes an activity row at its first
-`running` network milestone. A repository copy takes a row when its selected
-content provider starts copying, so a large local transfer remains visible.
+An activity row represents a concrete builder, network acquisition, repository
+copy, or batched fs-file hardlink import. Empty rows display `—`. Local Path
+Sources, working-store hits, and short ordinary-object hardlinks update fetch
+statistics without taking a row. A potentially long fs-file hardlink import
+takes one stable row for the batch, not one row per linked file. A network Source
+waiting for a connection slot updates only fetch statistics. Network activities
+take a row at their first `running` network milestone. Repository copies take a
+row when copying starts. Remote metadata and content transfers use the same
+activity viewport.
 
 The renderer keeps every activity in its model even when only part fits on
-screen. There are separate FIFO queues for hidden builders and hidden Source
-acquisitions. When a row becomes free, the oldest hidden builder takes it; if
-there is none, the oldest hidden Source does. The policy affects display only,
-never execution. A visible failed activity stays in its row until the run
-finishes, so the immediate failure context does not disappear.
+screen. There are separate FIFO queues for hidden builders and acquisitions.
+When a row becomes free, the oldest hidden builder takes it; if there is none,
+the oldest hidden acquisition does. The policy affects display only, never
+execution. A visible failed builder remains until the run finishes. Network
+activities with `details.network_lifecycle = true` release their row on failure
+so a failed transfer does not occupy it throughout fallback to another provider;
+the diagnostic remains above the live block and in the log.
 
 The `fetch` row reports current `transferring`, connection-slot `waiting`,
 `complete`, transient `retrying`, and `failed` counts. The `build` row reports
@@ -68,10 +78,11 @@ workers `running`, jobs `waiting` in the bounded BuildExecutor FIFO,
 `complete`, and `failed`. The `run` row reports whole-run outcomes plus the
 number of builders and acquisitions hidden only by the viewport.
 
-The initial acquisition total is the number of reachable Source nodes. A
-selected `SecondaryContent` object extends that total when its first event is
-seen, because lazy exact/reuse resolution cannot know all repository content
-work at run start.
+The initial acquisition total is the number of reachable Source nodes.
+`SecondaryContent` and `RepositoryMetadata` activities extend it when first
+observed, including individual remote fs-file transfers. Lazy resolution cannot
+know all repository work at run start. Acquisition counts are therefore not
+counts of distinct built objects or just upstream source downloads.
 
 The number of visible rows never limits builder execution. A Tokio task listens
 for `SIGWINCH` and immediately asks the logger to reflow the viewport; build
@@ -97,11 +108,13 @@ output never emit terminal control sequences.
 The run-level `events.jsonl` is created exclusively: a run given a log directory
 another run already wrote to fails at once, rather than appending to someone
 else's audit trail. It is the full audit log of the run: it contains run-level
-events plus a copy of every subject event. Each subject's own
-`events.jsonl` contains only that subject's events. A subject event's run-level
-and subject-level copies are byte-identical, so tooling can match them.
+events plus a copy of every bound subject event. Each bound subject's own
+`events.jsonl` contains only that subject's events. Its run-level and
+subject-level copies are byte-identical, so tooling can match them.
 
-Cache hits and other run-level events do **not** create a subject directory.
+Events may carry a subject identity without being bound to a subject workspace.
+Cache hits and repository network events use this form: they appear only in the
+run-level log and do **not** create a subject directory or `subject_seq`.
 
 `context.json` and `recipe-catalog.json` are not part of the event protocol and
 are not written by the Bobr logger. The standard recipes driver places them
@@ -118,16 +131,16 @@ producer can neither forge nor omit envelope fields.
 {
   "schema": "bobr-build-event-v1",   // format version
   "seq": 412,                        // monotonic per run; primary ordering
-  "subject_seq": 3,                  // monotonic per subject; only on subject events
+  "subject_seq": 3,                  // monotonic per bound subject; optional
   "ts": "2026-06-23T21:21:51.229Z",  // UTC, RFC3339, milliseconds, always 'Z'
   "level": "info",                   // info | warn | error
   "status": "done",                  // closed lifecycle enum (see below)
   "op": "sandbox",                   // optional, free-form builder operation
-  "subject": {                       // omitted for run-level events
+  "subject": {                       // optional identity, even without a workspace
     "tag": "Sandbox",
     "name": "qemu-image",
     "build_key": "<full build key>",
-    "object_hash": "<full object hash>"   // optional (present on completion/cache hit)
+    "object_hash": "<full object hash>"   // optional, when an object identity is known
   },
   "message": "…",
   "raw_log": "00000009-Sandbox-bash/raw/sandbox-result.log",  // optional, run-relative
@@ -145,8 +158,13 @@ Field notes:
   or parallelism. **`ts`** is secondary.
 - **`subject_seq`** orders a single subject's events; it is present only on
   events bound to a subject.
-- **`build_key` and `object_hash` are the full values.** A 12-character short
-  form is derived by truncation for the live screen line only; it is not stored.
+- **`subject.build_key`** contains the full BuildKey for recipe subjects. For
+  synthetic repository activities, the historical field name holds an opaque
+  activity identifier, which is not necessarily a hash. Tooling must use the
+  subject tag and event context rather than parse every such value as BuildKey.
+- **`object_hash`**, when present, contains the full ObjectHash. Display text and
+  synthetic activity names may include 12-character prefixes; those are not
+  substitutes for full identities.
 - **`raw_log`** is relative to the run directory; the stderr renderer rejoins
   the run directory to show an absolute path.
 
@@ -164,9 +182,9 @@ filtering by lifecycle is reliable while builders stay free to name their work.
 | `run-finished` | run-level: realization finished (goals or error class, counters) |
 | `start`        | subject execution started                                      |
 | `cache-miss`   | no reusable result at this point; acquisition or execution follows |
-| `running`      | subject's builder/source implementation is running             |
+| `running`      | builder/source work or repository acquisition is running       |
 | `cache-hit`    | subject served from cache (no workspace; run-level)            |
-| `done`         | subject completed; carries `object_hash`                       |
+| `done`         | recipe or acquisition completed; `object_hash` is optional     |
 | `failed`       | subject or run failed                                          |
 | `cancelled`    | cancelled                                                      |
 | `cleanup`      | post-execution cleanup (e.g. temp-dir removal warning)         |
@@ -182,18 +200,23 @@ The run-level `events.jsonl` is a full audit log, not just an aggregate of
 subject events. Beyond the fanned-out subject events it carries:
 
 - `run-started`: ordered goals, `jobs`, total reachable nodes, reachable
-  builders and Sources, the selected progress policy, and configured local
-  repositories with their canonical paths, trust flags, and transfer modes;
+  builders and Sources, the selected progress policy, and ordered providers.
+  Each provider records its name, capability, and backend kind: local backends
+  include the canonical store path and content transfer mode, remote backends
+  the master URL. Signing-key contents, credentials, and authorization headers
+  are not included; there is no legacy `trusted` flag;
 - `cache-hit`: one per subject served from a reusable object during realization
   (carries the subject identity and `object_hash`), including reuse discovered
   within the current run. A fully exact-cached run records only the resolved
   boundary, not pruned interior subtrees;
 - `run-finished`: realized goals or `details.error_class`, plus exact terminal
   counters: `built`, `cache_hit`, `failed`, `cancelled`, `downloaded`, `local`,
-  `secondary`, `hardlinked`, `copied`, and `already_present`. `hardlinked` and
-  `copied` count completed known-object acquisitions that used each repository
-  transport; a mixed fs-tree closure contributes to both. Retry totals and
-  logging failures are included when present.
+  `secondary`, `hardlinked`, `copied`, `remote`, and `already_present`.
+  `hardlinked`, `copied`, and `remote` count completed known-object acquisitions
+  using hardlink, copy, or download transport, respectively; they are not counts
+  of individual fs-files or HTTP requests. A mixed fs-tree closure can contribute
+  to several transport counters. Retry totals and logging failures are included
+  when present.
 
 Source terminal/cache events carry `details.source_outcome` with one of
 `downloaded`, `local`, `secondary`, or `already_present`. Network milestones
@@ -202,14 +225,35 @@ materialization uses `transfer = "local"`.
 
 Trusted mapping and content provenance use separate events and fields. A
 `secondary-build` or `secondary-reuse` run event carries
-`details.mapping_providers`, each with the configured index name and asserted
+`details.mapping_providers`, each with the configured provider name and asserted
 `object_hash`; it never claims that the same repository supplied bytes.
 Physical repository acquisition uses a synthetic `SecondaryContent` subject.
 Its `running` milestones carry `content_provider`, `transfer_mode`, and byte,
 file, and duration measurements. The terminal `repository-content` event
 carries the aggregate `content_providers`, `content_outcomes`, `files`, `bytes`,
-and `duration_ms`. This records split closures accurately when the manifest and
-its fs-files come from different repositories or use different transports.
+`encoded_bytes`, `decoded_bytes`, and `duration_ms`. Transfer-mode values are
+`hardlink`, `copy`, or `download`. This records split closures accurately when the
+manifest and its fs-files come from different repositories or use different
+transports.
+
+### Remote network events
+
+Repository network lifecycle events have `op = "repository-metadata"` or
+`"repository-content"` and `details.network_lifecycle = true`. Their synthetic
+subject tags are `RepositoryMetadata` for master/index/list requests and
+`SecondaryContent` for object/fs-file requests. They are run-level-only events,
+not one allocated workspace per downloaded fs-file.
+
+Details identify `repository`, `repository_class`, `repository_purpose`, `host`,
+and `transfer = "network"`. Start/progress/completion records carry attempt and
+byte measurements when available; retries carry `retry_host`, `retry_delay_ms`,
+and `retry_reason`. Cancellation is reported with `status = "cancelled"`.
+Network byte measurements describe encoded response bodies; aggregate content
+events distinguish them from decoded content sizes.
+
+Expected lookup misses do not produce warning/error diagnostics or their own
+activity rows. Failure to retrieve or verify advertised content is reported
+separately and may be followed by acquisition from another provider.
 
 ## Levels and verbosity
 

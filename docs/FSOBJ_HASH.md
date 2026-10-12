@@ -9,9 +9,9 @@ This document defines the hashing rules for filesystem objects.
 > are different: they make ownership and mode part of file identity, so their
 > files are content-addressed by a separate fs-file hash, described in
 > [Filesystem trees](./FS_TREE.md) and the
-> [fs-tree Manifest](./FS_TREE_MANIFEST.md). These are two distinct hash domains:
-> an `object_hash` is never an fs-file hash, and the two must not be compared or
-> interchanged.
+> [fs-tree Manifest](./FS_TREE_MANIFEST.md). `ObjectHash` and `FsFileHash` are
+> distinct semantic types and must not be interchanged; this does not imply
+> that their digest values can never coincide.
 
 ## Summary
 
@@ -56,7 +56,9 @@ A regular file hash depends on:
 - file bytes
 - executable bit only
 
-All other mode bits are ignored.
+A file is executable exactly when `(mode & 0o111) != 0`: any owner, group, or
+other execute bit is set. This uses the filesystem mode for path input and the
+regular-file header mode for tar input. All other mode bits are ignored.
 
 A **non-executable** regular file hashes to *exactly* the SHA-256 of its bytes.
 Its `object_hash` therefore equals the digest upstreams publish (crates.io and
@@ -65,12 +67,13 @@ published checksum without fetching and re-hashing it first.
 
 An **executable** regular file uses a tagged hash instead (a SHA-256 over a
 domain-separation tag, the executable bit, the size, and the SHA-256 of the
-bytes). This keeps an executable and a non-executable file with identical bytes
-distinct — the executable bit is part of file identity. The asymmetry is
-deliberate: the "hash equals plain SHA-256" property holds only for
+bytes). Executable and non-executable files with identical bytes therefore use
+different hash inputs — the executable bit is part of file identity. The
+asymmetry is deliberate: the "hash equals plain SHA-256" property holds only for
 non-executable files, which is the common case for source archives and crates.
-Directory and symlink hashes keep their own tags, so a non-executable file hash
-can never collide with a directory or symlink hash.
+Directory and symlink hashes use their own tags, but these do not separate them
+from arbitrary non-executable file bytes; see
+[Cross-kind ambiguity](#cross-kind-ambiguity).
 
 This is intentionally narrower than install semantics:
 
@@ -97,10 +100,61 @@ A directory hash depends on:
 
 Child entries are sorted by raw name bytes.
 
+### Exact hash input encoding
+
+Let `SHA256` return a raw 32-byte digest, `||` mean byte concatenation, and
+`U64BE(n)` encode an unsigned integer as exactly eight bytes in big-endian
+order. All lengths count bytes. Tags are literal ASCII bytes followed by one
+NUL byte (`\0`), not the two characters backslash and zero:
+
+```text
+FILE_TAG    = b"fsobj:file:v1\0"
+DIR_TAG     = b"fsobj:dir:v1\0"
+SYMLINK_TAG = b"fsobj:symlink:v1\0"
+
+non_executable_file(bytes) = SHA256(bytes)
+executable_file(bytes)     = SHA256(FILE_TAG || 0x01 || U64BE(len(bytes))
+                                   || SHA256(bytes))
+symlink(target)           = SHA256(SYMLINK_TAG || U64BE(len(target)) || target)
+
+entry(child) = kind(child) || U64BE(len(name(child))) || name(child) || hash(child)
+directory(children) = SHA256(DIR_TAG || entry(child_1) || ... || entry(child_n))
+```
+
+The executable marker is one byte, `0x01`. Entry kinds are one ASCII byte:
+`f` (`0x66`) for a file, `d` (`0x64`) for a directory, and `l` (`0x6c`) for a
+symlink. A child name is a single raw path component, not its full relative
+path. Children are ordered lexicographically by unsigned name bytes, with a
+shorter prefix before a longer name. Child hashes are recursively computed
+32-byte digests, not hexadecimal strings. There is no child count, separator,
+padding, or terminator after the directory entries; an empty directory hashes
+only `DIR_TAG`.
+
+### Cross-kind ambiguity
+
+The current encoding does not guarantee distinct identities across object
+kinds. An empty directory and a non-executable file containing exactly the
+13 bytes `b"fsobj:dir:v1\0"` have the same `ObjectHash`:
+
+```text
+b9fc118a1a95607accd6d739f6c0caa8658c415677c522ce48caa9d003f6e077
+```
+
+The file includes a final NUL byte and no newline. This is not a cryptographic
+SHA-256 collision: both objects supply exactly the same bytes to SHA-256.
+More generally, a non-executable file can contain the encoded hash input of a
+tagged object. The tags separate the tagged encodings from each other, but not
+from the unrestricted bytes of non-executable files. An `ObjectHash` alone
+therefore does not uniquely identify an object kind; hash-keyed storage can
+encounter different kinds with the same identity. This is a limitation of the
+current algorithm, not a guarantee that such inputs are rejected.
+
 ## Leaf Hashes
 
-`fsobj-hash` can compute a transient leaf index while hashing a filesystem
-path. The index records only regular file and symlink node hashes, keyed by
+The `fsobj-hash` library API `hash_path_with_leaf_index` returns an
+`IndexedPathHash` containing the root `ObjectHash` and a transient `LeafIndex`.
+The CLI does not expose this index; it prints only the root `ObjectHash`.
+The index records only regular file and symlink node hashes, keyed by
 object-relative path. Directory entries are intentionally not part of that
 leaf set.
 
@@ -124,6 +178,13 @@ The hash ignores:
 - tar entry order
 
 ## Tar Normalization Rules
+
+These rules describe generic tar hashing through `fsobj-hash`'s
+`hash_tar_reader` and `hash_tar_file` APIs and the CLI's `tar` mode. They are
+not a transport-validation profile. Remote repository directory payloads must
+also satisfy the stricter [repository tar profile](./REMOTE_REPOSITORY/TAR.md),
+including its header, extension, padding, termination, and resource limits.
+An archive accepted by generic hashing need not be valid repository content.
 
 Tar archives are normalized before hashing.
 

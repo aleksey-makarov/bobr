@@ -13,14 +13,18 @@ synchronous builders.
 
 ## Components
 
-One realization run has four scheduling components:
+One realization run has these cooperating components:
 
 - the `DynamicRealizer` traverses the planned DAG, resolves object identities,
   decides whether content or a build is required, and coordinates all goals;
 - the Source acquisition engine obtains pinned `Path`, `Http`, and
   `OciRegistry` content;
-- the secondary resolver separates trusted key lookup from content lookup and
-  verified import;
+- the asynchronous `SecondaryResolver` separates explicitly enabled mapping
+  providers from content providers and verified import;
+- the shared `NetworkScheduler` bounds Source and remote-repository traffic
+  with one global and per-host budget;
+- the shared `LocalIoScheduler` bounds local provider operations, Source
+  materialization/import, and builder input preparation;
 - the `BuildExecutor` runs synchronous builders under the `jobs` limit.
 
 Their relationship is:
@@ -30,7 +34,7 @@ request goals
     |
     v
 DynamicRealizer
-    |-- trusted mapping lookup ------> SecondaryResolver
+    |-- mapping lookup --------------> SecondaryResolver
     |-- known-hash content lookup ---> SecondaryResolver
     |-- Source origin ---------------> Source acquisition engine
     `-- ready BuilderJob ------------> BuildExecutor
@@ -38,19 +42,36 @@ DynamicRealizer
                                            `-- staged output -> publication
 ```
 
-Mapping lookup, content acquisition, and builder execution are separate
-operations. A trusted mapping can provide an `ObjectHash` without providing
-the bytes of that object, and the hash can participate in a parent `ReuseKey`
-before its content is present in the working store.
+Source network acquisition and remote providers share the `NetworkScheduler`.
+Local provider adapters and selected blocking filesystem operations share the
+`LocalIoScheduler`.
 
-Before scheduling the graph, bobr opens every configured local repository,
-canonicalizes and deduplicates its root, and derives its requested capabilities.
+Mapping lookup, content acquisition, and builder execution are separate
+operations. An enabled mapping provider can supply an `ObjectHash` without
+providing the bytes of that object, and the hash can participate in a parent
+`ReuseKey` before its content is present in the working store.
+
+Before realization, bobr validates the ordered provider configuration and opens
+its backends. Mapping and content providers are separate projections of that
+list; each projection retains request order. Complementary capabilities share
+one backend, identified by canonical store root for local providers or master
+URL for remote providers. Repeating the same backend capability is rejected.
+
+Every configured local repository is opened and its root canonicalized.
 Hardlink repositories are rejected at this boundary unless both their
 `objects/` and `fs-files/` directories are on the corresponding working-store
 filesystems. Copy repositories have no same-filesystem requirement. An
 explicitly configured repository is therefore not an optional cache hint: an
-absent or malformed store is a request error even when the goal is already
-complete locally.
+absent or malformed local store is a request error even when the goal is
+already complete locally.
+
+Remote setup loads pinned public keys and optional CA configuration without
+fetching the repository. The first use authenticates the master and freezes
+one snapshot shared by that backend's capabilities for the run. Build/reuse
+indexes and object/fs-file lists are loaded lazily when needed. A complete
+working-store hit can therefore avoid all remote requests, though invalid
+local key or CA files still fail setup. See
+[Store](./STORE.md#secondary-provider-capabilities).
 
 ## Graph planning
 
@@ -123,6 +144,9 @@ Each table entry is a Tokio `OnceCell` shared by every waiter. The mutex around
 each table protects only creation and lookup of cells; it is not held while the
 underlying operation runs.
 
+If local realization later produces a hash absent from a node's cached
+candidate list, subsequent candidate requests append that hash to the result.
+
 An unavailable known object is not cached permanently in the content table.
 The failed-to-locate cell is removed, allowing a later Source materialization
 or another completed operation to make the same hash available.
@@ -133,8 +157,8 @@ For one node, candidate resolution follows this order.
 
 1. Read the working-store `builds/<build-key>` mapping. The mapping supplies a
    hash only; its content is not checked at this stage.
-2. On a working mapping miss, query every configured trusted secondary build
-   index. Candidate hashes retain trusted-index priority and are deduplicated.
+2. On a working mapping miss, query every configured mapping provider for build
+   mappings. Candidate hashes retain provider priority and are deduplicated.
 3. For a Source with no exact mapping, use its declared `object_hash`.
 4. For a builder with no exact mapping, calculate possible reuse keys from its
    input candidate sets.
@@ -144,7 +168,8 @@ For one node, candidate resolution follows this order.
 A working exact mapping short-circuits secondary exact lookup. If its hash
 later proves unavailable from the working store and all configured content
 sources, local realization falls back to the node's Source or builder path.
-It does not return to secondary exact indexes to ask for a different hash.
+It does not return to secondary exact mappings to ask for a different hash
+during candidate fallback. Publication may separately re-query mappings.
 
 ## Dynamic reuse resolution
 
@@ -164,11 +189,12 @@ computes one `ReuseKey`.
 The lookup order is:
 
 1. inspect working-store reuse mappings for every candidate combination;
-2. if none of them hit, query secondary reuse indexes in batches of 256 keys;
+2. if none of them hit, query mapping providers for reuse mappings in batches
+   of 256 keys;
 3. collect ordered, duplicate-free output hash candidates;
 4. if there is still no reuse candidate, proceed toward a real build.
 
-Any working reuse candidates take priority as a group: secondary reuse indexes
+Any working reuse candidates take priority as a group: secondary reuse mappings
 are not queried during this candidate pass when at least one working mapping
 was found.
 
@@ -189,18 +215,28 @@ For one known hash, content resolution does the following:
 3. import and verify obtainable content into the working store;
 4. report a content miss if no source can provide a complete object.
 
-Trusted mapping lookup is not repeated during this content pass. The secondary
-resolver's trusted-index and content-source capabilities are independent.
-Content sources retain request order. For an fs-tree, different sources may
+Mapping lookup is not repeated during this content pass. The secondary
+resolver's mapping and content capabilities are independent. Mapping and
+availability queries run concurrently across providers, but their results are
+merged in configuration order, not completion order. Imports try content
+providers in that order. For an fs-tree, different providers may
 provide disjoint missing fs-files and the manifest object, but the working
 manifest is not published until its full closure is complete. Every actual
-hardlink or copy is verified and atomically published under the working-store
-name; no result remains dependent on a repository directory entry.
+hardlink, copy, or download is verified and atomically published under the
+working-store name; no result remains dependent on a provider directory entry
+or continued remote access.
 
-After a candidate becomes local, the realizer publishes the current build
-mapping and user-facing ref. It also records every reuse key known to resolve
-to the selected builder output when that publication came through reuse rather
-than exact identity.
+Remote fs-files are fetched concurrently in batches of at most 256 files.
+After all representations in a batch arrive, one blocking namespace operation
+verifies and publishes the batch under a local-I/O permit. The next batch then
+starts. There is no namespace-runtime call per network response, and downloads
+do not hold a local-I/O permit while waiting for the network.
+
+After a builder candidate becomes local, the realizer publishes the current
+build mapping and user-facing ref. It also records every reuse key known to
+resolve to the selected builder output when that publication came through reuse
+rather than exact identity. Source hits record Source metadata and refs, not
+builder build/reuse mappings.
 
 If all known candidates miss content, the node-specific fallback runs:
 
@@ -265,7 +301,7 @@ When a builder must produce a local result, the realizer follows this path.
 6. On a complete reuse miss, prepare filesystem paths for all builder inputs.
 7. Submit a `BuilderJob` to the `BuildExecutor`.
 8. Wait asynchronously for a staged output.
-9. Import and publish the output after the builder worker releases its slot.
+9. Import and publish the staged output outside the synchronous builder call.
 
 The second reuse check is necessary because candidate resolution may have
 considered several identities, while builder execution uses one concrete set
@@ -279,20 +315,22 @@ runtime worker.
 
 ## BuildExecutor
 
-The `BuildExecutor` is the only part of the scheduler that owns a FIFO job
-queue. It bridges asynchronous DAG realization to synchronous builder code.
+The `BuildExecutor` owns the explicit FIFO builder-job queue. It bridges
+asynchronous DAG realization to synchronous builder code; network and local-I/O
+work instead waits on semaphores.
 
 At run startup, `bobr` resolves `jobs` from the request or from the host's
 available parallelism. It creates the executor with:
 
 ```text
 active worker limit = jobs
-waiting queue limit = 2 * jobs
+submission channel capacity = 2 * jobs
 accepted active + waiting limit = 3 * jobs
 ```
 
-The accepted-work limit applies backpressure to asynchronous submitters before
-unbounded `BuilderJob` objects can accumulate.
+The dispatcher drains the submission channel into its FIFO queue. A separate
+accepted-work semaphore bounds active plus queued jobs and applies backpressure
+to asynchronous submitters; channel capacity alone is not the total queue bound.
 
 The executor consists of:
 
@@ -305,9 +343,10 @@ The executor consists of:
 FIFO order is the order in which concurrent realizer tasks successfully submit
 commands. It is not a promise of request, graph, or lexical node order.
 
-A worker produces a staged output. Final store import and publication happen
-after that worker finishes, on Tokio's blocking pool, so publication does not
-occupy a builder slot.
+A worker returns a staged output and notifies the dispatcher that execution
+has finished. Final store import and publication run separately on Tokio's
+blocking pool; the builder worker does not wait for publication before becoming
+available for another job.
 
 ## Independent concurrency limits
 
@@ -316,20 +355,32 @@ The request controls several independent resources.
 | Setting | Work bounded | Queue or mechanism |
 |---|---|---|
 | `jobs` | synchronous builders | `BuildExecutor` FIFO queue and worker limit |
-| `limits.max_connections` | all HTTP and OCI transfers | global network semaphore |
-| `limits.per_host_default` | transfers to one host | per-host semaphore |
-| `limits.per_host.<host>` | transfers to a named host | per-host override semaphore |
-| `limits.max_local_jobs` | local Source materialization and import, repository content transfer and verification, and builder input path preparation | one shared local-I/O semaphore |
+| `limits.max_connections` | Source HTTP attempts, OCI pulls, and remote-repository metadata/content requests | shared global network semaphore |
+| `limits.per_host_default` | network operations charged to one host | shared per-host semaphore |
+| `limits.per_host.<host>` | network operations charged to a named host | per-host override semaphore |
+| `limits.max_local_jobs` | local provider mapping/availability queries and imports, Source materialization/import, remote content publication, and builder input preparation | one shared local-I/O semaphore |
 
-Local copy and hash work runs through Tokio's blocking pool after acquiring the
-shared local-I/O permit. It therefore neither occupies a Tokio worker nor a
-builder slot. Secondary mapping lookup is small synchronous metadata work and
-does not consume a local-I/O permit; acquiring and verifying content does.
+Local provider copy and verification work runs through Tokio's blocking pool
+after acquiring the shared local-I/O permit. It therefore neither occupies a
+Tokio worker nor a builder slot. Local mapping lookup also uses this shared
+permit. Remote metadata fetches use network permits, not local-I/O permits.
+
+Each remote reader additionally bounds blocking ordinary-object decoding with
+its own semaphore, currently set to `limits.max_local_jobs`. These per-backend
+decoder semaphores are not the shared local-I/O semaphore. Builder-output
+publication and HTTP archive finalization run on the blocking pool without a
+shared local-I/O permit. The setting is therefore not a universal limit on all
+filesystem work.
 
 Network permit acquisition always takes the per-host permit before the global
 permit. Every network task uses that order, avoiding a lock-order deadlock.
 Waiting for a permit is cancellation-aware and is not counted as a download
 attempt or timeout.
+
+For Source HTTP and repository requests, permits cover one attempt and are
+released before retry backoff. An OCI Source instead holds one permit pair
+charged to the registry host for its entire pull, including its internal
+requests and retries. It does not acquire a new scheduler permit per blob.
 
 ## Ordering and nondeterminism
 
@@ -339,7 +390,7 @@ The scheduler preserves these orders:
 - builder inputs follow their deterministic name order;
 - candidate hashes preserve resolution priority;
 - reuse combinations follow deterministic Cartesian-product order;
-- secondary indexes and content sources follow configuration order;
+- mapping and content provider results follow configuration order;
 - accepted builder jobs start in FIFO submission order, subject to available
   worker slots.
 
@@ -356,6 +407,8 @@ and publication invariants, not on those completion timings.
 ## Publication
 
 Only complete, verified content is published as a successful local result.
+Already stored content is checked for completeness, not rehashed on every hit;
+see [Store: complete content](./STORE.md#complete-content).
 Publication may write:
 
 - the object and any fs-tree files;
@@ -372,10 +425,18 @@ content converge on the same content-addressed object.
 
 ## Failure and cancellation
 
+Expected mapping/content misses are not run failures. An exhausted remote
+transport failure allows provider fallback and disables that backend for the
+rest of the run. Authentication failures and invalid repository metadata are
+fatal. A corrupt advertised content representation can fall back to another
+content provider; already verified fs-files may remain available for that
+fallback. Local-store failures are not silently converted to provider misses.
+
 An error from any goal fails the whole realization run. The realizer then:
 
 1. cancels the shared run token;
-2. cancels Source acquisition;
+2. cancels the shared network scheduler, covering both Source and repository
+   acquisition;
 3. aborts the remaining goal tasks;
 4. shuts down the `BuildExecutor`.
 
@@ -385,7 +446,7 @@ to finish before acknowledging shutdown. Cancellation of synchronous builder
 code is cooperative: an already running builder or child process may take time
 to reach a cancellation-aware boundary.
 
-Network waits, retry backoffs, and network transfers observe Source-engine
+Network permit waits, retry backoffs, and transfers observe shared run
 cancellation. Failed or cancelled acquisition keeps partial data in per-run
 work only where the relevant origin implementation explicitly permits it;
 partial content is never published as the declared object.
