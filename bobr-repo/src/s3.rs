@@ -510,7 +510,7 @@ impl S3Repository {
             .content_type(content_type)
             .cache_control(cache_control);
         if let Some(etag) = if_match {
-            request = request.if_match(etag);
+            request = request.if_match(conditional_put_etag(etag));
         }
         if if_absent {
             request = request.if_none_match("*");
@@ -652,6 +652,15 @@ impl S3Repository {
 fn multipart_part_size(size: u64) -> u64 {
     size.div_ceil(MAX_MULTIPART_PARTS)
         .max(MIN_MULTIPART_PART_SIZE)
+}
+
+fn conditional_put_etag(etag: &str) -> &str {
+    // GetObject returns the HTTP rendering, including quotes, while the
+    // PutObject input is the opaque ETag value. Some S3 implementations reject
+    // the quoted response form even when it names the current object.
+    etag.strip_prefix('"')
+        .and_then(|etag| etag.strip_suffix('"'))
+        .unwrap_or(etag)
 }
 
 impl S3RepositoryTransport {
@@ -875,6 +884,14 @@ mod tests {
                 .contains(&serde_json::json!("arn:aws:s3:::example/master"))
         );
         assert!(!policy.to_string().contains("ListBucket"));
+    }
+
+    #[test]
+    fn conditional_put_uses_the_etag_value_without_response_quotes() {
+        assert_eq!(conditional_put_etag("\"012345\""), "012345");
+        assert_eq!(conditional_put_etag("012345"), "012345");
+        assert_eq!(conditional_put_etag("\"012345"), "\"012345");
+        assert_eq!(conditional_put_etag("W/\"012345\""), "W/\"012345\"");
     }
 
     #[test]
