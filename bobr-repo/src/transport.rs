@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use reqwest::header::{
     CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_NONE_MATCH,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use url::Url;
 
@@ -110,10 +110,23 @@ pub struct HttpTransport {
 impl HttpTransport {
     /// Creates an anonymous transport with conservative default timeouts.
     pub fn anonymous(tls_config: &RepositoryTlsConfig) -> Result<Self, RepositoryError> {
+        Self::anonymous_with_timeouts(
+            tls_config,
+            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(120),
+        )
+    }
+
+    fn anonymous_with_timeouts(
+        tls_config: &RepositoryTlsConfig,
+        connect: std::time::Duration,
+        read: std::time::Duration,
+    ) -> Result<Self, RepositoryError> {
         let builder = reqwest::Client::builder()
             .user_agent(concat!("bobr-repo/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .timeout(std::time::Duration::from_secs(120));
+            .connect_timeout(connect)
+            // Limit stalls, not the total time needed to transfer a large object.
+            .read_timeout(read);
         let client = tls_config
             .configure_reqwest(builder)
             .build()
@@ -143,7 +156,10 @@ impl RepositoryTransport for HttpTransport {
         }
         let response = builder.send().await.map_err(|error| {
             let retryable = error.is_timeout() || error.is_connect() || error.is_body();
-            RepositoryError::transport(format!("HTTP request failed: {error}"), retryable)
+            RepositoryError::transport(
+                format!("HTTP request failed: {}", error_with_causes(&error)),
+                retryable,
+            )
         })?;
         if response.status() == reqwest::StatusCode::NOT_MODIFIED {
             return Ok(FetchResult::NotModified);
@@ -193,7 +209,10 @@ impl RepositoryTransport for HttpTransport {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|error| {
                 RepositoryError::transport(
-                    format!("failed to read HTTP response body: {error}"),
+                    format!(
+                        "failed to read HTTP response body: {}",
+                        error_with_causes(&error)
+                    ),
                     true,
                 )
             })?;
@@ -212,6 +231,80 @@ impl RepositoryTransport for HttpTransport {
         }
         tokio::io::AsyncWriteExt::flush(&mut file).await?;
         Ok(FetchResult::Stored(metadata))
+    }
+}
+
+fn error_with_causes(error: &reqwest::Error) -> String {
+    let mut message = error.to_string();
+    let mut cause = std::error::Error::source(error);
+    while let Some(error) = cause {
+        message.push_str(": ");
+        message.push_str(&error.to_string());
+        cause = error.source();
+    }
+    message
+}
+
+type ResourceFailure = Arc<tokio::sync::Mutex<Option<RepositoryError>>>;
+
+/// Remembers failed URLs for one realization run, outside the retry decorator.
+/// Successful responses are never shared: each caller owns its destination.
+pub(crate) struct RunTransport {
+    inner: Arc<dyn RepositoryTransport>,
+    resources: Mutex<HashMap<String, ResourceFailure>>,
+}
+
+impl RunTransport {
+    pub(crate) fn new(inner: Arc<dyn RepositoryTransport>) -> Self {
+        Self {
+            inner,
+            resources: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl std::fmt::Debug for RunTransport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RunTransport")
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl RepositoryTransport for RunTransport {
+    async fn fetch(&self, request: FetchRequest) -> Result<FetchResult, RepositoryError> {
+        let url = request.url.to_string();
+        let resource = self
+            .resources
+            .lock()
+            .map_err(|_| RepositoryError::local_io("repository resource failure lock is poisoned"))?
+            .entry(url.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
+            .clone();
+        // Concurrent callers for a failing resource share one retry budget.
+        // Dropping a cancelled fetch releases the gate without recording failure.
+        let mut failure = resource.lock().await;
+        if let Some(error) = failure.as_ref() {
+            return Err(error.clone());
+        }
+        let result = self.inner.fetch(request).await;
+        if let Err(error) = &result
+            && matches!(error.kind(), crate::RepositoryErrorKind::Transport { .. })
+        {
+            *failure = Some(error.clone());
+        }
+        if failure.is_none() {
+            // Keep failures, not an entry for every successfully fetched fs-file.
+            // Waiters already holding this gate finish before its last removal.
+            let mut resources = self.resources.lock().map_err(|_| {
+                RepositoryError::local_io("repository resource failure lock is poisoned")
+            })?;
+            if Arc::strong_count(&resource) == 2 {
+                resources.remove(&url);
+            }
+        }
+        result
     }
 }
 
@@ -328,3 +421,7 @@ impl RepositoryTransport for MemoryTransport {
         Ok(FetchResult::Stored(object.metadata))
     }
 }
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod tests;

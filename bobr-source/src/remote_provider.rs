@@ -33,6 +33,36 @@ fn remote_store_validation_error(error: StoreError) -> ProviderError {
     }
 }
 
+fn available_resource<T>(
+    result: Result<T, RepositoryError>,
+    unavailable: &mut Option<RepositoryError>,
+) -> Result<Option<T>, RepositoryError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error)
+            if matches!(
+                error.kind(),
+                bobr_repo::RepositoryErrorKind::Transport { .. }
+            ) =>
+        {
+            unavailable.get_or_insert(error);
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn finish_partial<T>(
+    values: T,
+    empty: bool,
+    unavailable: Option<RepositoryError>,
+) -> Result<T, ProviderError> {
+    if empty && let Some(error) = unavailable {
+        return Err(error.into());
+    }
+    Ok(values)
+}
+
 /// One authenticated remote repository shared by complementary capabilities.
 #[derive(Clone)]
 pub struct RemoteRepositoryBackend {
@@ -43,13 +73,6 @@ struct RemoteRepositoryBackendInner {
     identity: String,
     reader: RepositoryReader,
     snapshot: OnceCell<Arc<RepositorySnapshot>>,
-    disabled: Mutex<Option<DisabledRemote>>,
-}
-
-#[derive(Debug, Clone)]
-struct DisabledRemote {
-    kind: bobr_repo::RepositoryErrorKind,
-    message: String,
 }
 
 impl fmt::Debug for RemoteRepositoryBackend {
@@ -68,9 +91,8 @@ impl RemoteRepositoryBackend {
         Self {
             inner: Arc::new(RemoteRepositoryBackendInner {
                 identity: identity.into(),
-                reader,
+                reader: reader.for_run(),
                 snapshot: OnceCell::new(),
-                disabled: Mutex::new(None),
             }),
         }
     }
@@ -82,53 +104,11 @@ impl RemoteRepositoryBackend {
 
     /// Lazily authenticates the master and freezes one snapshot for this run.
     pub async fn snapshot(&self) -> Result<Arc<RepositorySnapshot>, RepositoryError> {
-        self.ensure_enabled()?;
-        let result = self
-            .inner
+        self.inner
             .snapshot
             .get_or_try_init(|| async { self.inner.reader.snapshot().await.map(Arc::new) })
             .await
-            .cloned();
-        self.repository_result(result)
-    }
-
-    fn ensure_enabled(&self) -> Result<(), RepositoryError> {
-        let disabled = self.inner.disabled.lock().map_err(|_| {
-            RepositoryError::local_io("remote repository disabled-state lock is poisoned")
-        })?;
-        if let Some(disabled) = disabled.as_ref() {
-            return Err(RepositoryError::with_kind(
-                disabled.kind,
-                disabled.message.clone(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn repository_result<T>(
-        &self,
-        result: Result<T, RepositoryError>,
-    ) -> Result<T, RepositoryError> {
-        match result {
-            Ok(value) => Ok(value),
-            Err(error) => {
-                if matches!(
-                    error.kind(),
-                    bobr_repo::RepositoryErrorKind::Transport { .. }
-                ) && let Ok(mut disabled) = self.inner.disabled.lock()
-                    && disabled.is_none()
-                {
-                    *disabled = Some(DisabledRemote {
-                        kind: error.kind(),
-                        message: format!(
-                            "remote repository '{}' is disabled for this run after a transport failure: {error}",
-                            self.identity()
-                        ),
-                    });
-                }
-                Err(error)
-            }
-        }
+            .cloned()
     }
 }
 
@@ -190,13 +170,16 @@ impl MappingProvider for RemoteMappingProvider {
         let snapshot = self.backend.snapshot().await?;
         let mut resolutions = Vec::new();
         let mut seen = HashSet::new();
+        let mut unavailable = None;
         for key in keys {
             if !seen.insert(*key) {
                 continue;
             }
-            let candidates = self
-                .backend
-                .repository_result(snapshot.build_candidates(*key).await)?;
+            let Some(candidates) =
+                available_resource(snapshot.build_candidates(*key).await, &mut unavailable)?
+            else {
+                continue;
+            };
             for object_hash in candidates {
                 resolutions.push(TrustedResolution {
                     key: *key,
@@ -204,7 +187,8 @@ impl MappingProvider for RemoteMappingProvider {
                 });
             }
         }
-        Ok(resolutions)
+        let empty = resolutions.is_empty();
+        finish_partial(resolutions, empty, unavailable)
     }
 
     async fn resolve_reuses(
@@ -214,13 +198,16 @@ impl MappingProvider for RemoteMappingProvider {
         let snapshot = self.backend.snapshot().await?;
         let mut resolutions = Vec::new();
         let mut seen = HashSet::new();
+        let mut unavailable = None;
         for key in keys {
             if !seen.insert(*key) {
                 continue;
             }
-            let candidates = self
-                .backend
-                .repository_result(snapshot.reuse_candidates(*key).await)?;
+            let Some(candidates) =
+                available_resource(snapshot.reuse_candidates(*key).await, &mut unavailable)?
+            else {
+                continue;
+            };
             for object_hash in candidates {
                 resolutions.push(TrustedResolution {
                     key: *key,
@@ -228,7 +215,8 @@ impl MappingProvider for RemoteMappingProvider {
                 });
             }
         }
-        Ok(resolutions)
+        let empty = resolutions.is_empty();
+        finish_partial(resolutions, empty, unavailable)
     }
 }
 
@@ -302,9 +290,9 @@ impl RemoteContentProvider {
             .run(move || working.allocate_repository_object_staging())
             .await?;
         let snapshot = self.backend.snapshot().await?;
-        let found = self
-            .backend
-            .repository_result(snapshot.fetch_object(hash, staging.path()).await)
+        let found = snapshot
+            .fetch_object(hash, staging.path())
+            .await
             .map_err(ProviderError::repository_content)?;
         let Some(found) = found else {
             return Err(ProviderError::repository_content(
@@ -344,18 +332,22 @@ impl ContentProvider for RemoteContentProvider {
         let snapshot = self.backend.snapshot().await?;
         let mut available = HashSet::new();
         let mut seen = HashSet::new();
+        let mut unavailable = None;
         for hash in hashes {
             if !seen.insert(*hash) {
                 continue;
             }
-            let contains = self
-                .backend
-                .repository_result(snapshot.contains_object(*hash).await)?;
+            let Some(contains) =
+                available_resource(snapshot.contains_object(*hash).await, &mut unavailable)?
+            else {
+                continue;
+            };
             if contains {
                 available.insert(*hash);
             }
         }
-        Ok(available)
+        let empty = available.is_empty();
+        finish_partial(available, empty, unavailable)
     }
 
     async fn object_manifest(
@@ -398,18 +390,22 @@ impl ContentProvider for RemoteContentProvider {
         let snapshot = self.backend.snapshot().await?;
         let mut available = HashSet::new();
         let mut seen = HashSet::new();
+        let mut unavailable = None;
         for hash in hashes {
             if !seen.insert(*hash) {
                 continue;
             }
-            let contains = self
-                .backend
-                .repository_result(snapshot.contains_fs_file(*hash).await)?;
+            let Some(contains) =
+                available_resource(snapshot.contains_fs_file(*hash).await, &mut unavailable)?
+            else {
+                continue;
+            };
             if contains {
                 available.insert(*hash);
             }
         }
-        Ok(available)
+        let empty = available.is_empty();
+        finish_partial(available, empty, unavailable)
     }
 
     async fn import_fs_files(
@@ -437,11 +433,11 @@ impl ContentProvider for RemoteContentProvider {
             let mut tasks = JoinSet::new();
             for hash in batch {
                 let snapshot = snapshot.clone();
-                let backend = self.backend.clone();
                 let hash = *hash;
                 tasks.spawn(async move {
-                    let representation = backend
-                        .repository_result(snapshot.fetch_fs_file_representation(hash).await)
+                    let representation = snapshot
+                        .fetch_fs_file_representation(hash)
+                        .await
                         .map_err(ProviderError::repository_content)?;
                     Ok::<_, ProviderError>((hash, representation))
                 });
@@ -718,7 +714,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transport_failure_disables_the_shared_backend_for_the_run() {
+    async fn master_transport_failure_is_remembered_for_the_run() {
         let temp = tempfile::tempdir().unwrap();
         let transport = TransportFailure::default();
         let signing = SigningKey::from_bytes(&[9; 32]);
@@ -758,6 +754,542 @@ mod tests {
             Some(bobr_repo::RepositoryErrorKind::Transport { .. })
         ));
         assert_eq!(transport.requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[derive(Debug)]
+    struct ResourceFaults {
+        inner: MemoryTransport,
+        failed: Mutex<HashSet<String>>,
+        requests: Mutex<HashMap<String, usize>>,
+    }
+
+    #[async_trait]
+    impl RepositoryTransport for ResourceFaults {
+        async fn fetch(&self, request: FetchRequest) -> Result<FetchResult, RepositoryError> {
+            *self
+                .requests
+                .lock()
+                .unwrap()
+                .entry(request.url.to_string())
+                .or_default() += 1;
+            let failed = self.failed.lock().unwrap().contains(request.url.as_str());
+            if failed {
+                tokio::fs::write(request.destination, b"partial").await?;
+                return Err(RepositoryError::transport("test resource timeout", true));
+            }
+            self.inner.fetch(request).await
+        }
+    }
+
+    #[derive(Debug)]
+    struct IgnoreNetworkEvents;
+
+    impl crate::NetworkEventSink for IgnoreNetworkEvents {
+        fn event(&self, _event: crate::NetworkEvent) {}
+    }
+
+    fn backend_with_faults(
+        fixture: &Fixture,
+        urls: &[Url],
+    ) -> (RemoteRepositoryBackend, Arc<ResourceFaults>) {
+        let faults = Arc::new(ResourceFaults {
+            inner: fixture.transport.clone(),
+            failed: Mutex::new(urls.iter().map(ToString::to_string).collect()),
+            requests: Mutex::new(HashMap::new()),
+        });
+        let scheduled = crate::ScheduledRepositoryTransport::new(
+            "fault-fixture",
+            faults.clone(),
+            crate::NetworkScheduler::new(
+                crate::NetworkLimits {
+                    max_connections: 4,
+                    per_host_default: 4,
+                    per_host: Default::default(),
+                },
+                CancellationToken::new(),
+            ),
+            Arc::new(IgnoreNetworkEvents),
+        )
+        .with_policy(crate::http::HttpRetryPolicy::instant());
+        let signing = SigningKey::from_bytes(&[7; 32]);
+        let trusted = TrustedKeys::new([(b"key".to_vec(), signing.verifying_key())]).unwrap();
+        let reader = RepositoryReader::new(
+            fixture.master_url.clone(),
+            trusted,
+            &fixture._temp.path().join("fault-cache"),
+            Arc::new(scheduled),
+        )
+        .unwrap();
+        (
+            RemoteRepositoryBackend::new("fault-fixture", reader),
+            faults,
+        )
+    }
+
+    fn add_second_object(fixture: &Fixture) -> ObjectHash {
+        let source = fixture._temp.path().join("second-source");
+        let encoded = fixture._temp.path().join("second-encoded");
+        std::fs::write(&source, b"second remote object\n").unwrap();
+        let hash = encode_object(&source, Compression::Zstd, &encoded).unwrap();
+        let base = Url::parse("https://data.example/").unwrap();
+        fixture.transport.insert(
+            base.join(&format!("o/{hash}")).unwrap(),
+            std::fs::read(encoded).unwrap(),
+            "application/vnd.bobr.repository-object+cbor",
+            "public, max-age=31536000, immutable",
+        );
+        let bytes = ObjectList::encode([fixture.object_hash, hash]);
+        let list_hash = ObjectListHash::digest(&bytes);
+        fixture.transport.insert(
+            base.join(&format!("lo/{list_hash}")).unwrap(),
+            bytes,
+            "application/octet-stream",
+            "public, max-age=31536000, immutable",
+        );
+        let master = Master::new(
+            None,
+            base,
+            vec![Slot {
+                serial: 1,
+                build: BuildIndexHash::digest(
+                    &BuildIndex::encode(&[(fixture.build_key, fixture.object_hash)]).unwrap(),
+                ),
+                reuse: ReuseIndexHash::digest(
+                    &ReuseIndex::encode(&[(fixture.reuse_key, fixture.object_hash)]).unwrap(),
+                ),
+                object_list: list_hash,
+                file_list: FsFileListHash::digest(&FsFileList::encode([])),
+                retain_until: None,
+            }],
+        )
+        .unwrap();
+        fixture.transport.insert(
+            fixture.master_url.clone(),
+            master
+                .sign(b"key", &SigningKey::from_bytes(&[7; 32]))
+                .unwrap(),
+            "application/cose; cose-type=\"cose-sign1\"",
+            "no-cache",
+        );
+        hash
+    }
+
+    #[tokio::test]
+    async fn exhausted_content_retries_leave_mappings_and_other_objects_available() {
+        let fixture = fixture();
+        let second = add_second_object(&fixture);
+        let (backend, faults) =
+            backend_with_faults(&fixture, std::slice::from_ref(&fixture.object_url));
+        let reader = backend.inner.reader.clone();
+        let mapping = RemoteMappingProvider::new(backend.clone());
+        let content = RemoteContentProvider::new(
+            backend,
+            fixture.working.clone(),
+            RuntimeProvider::host(),
+            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+        );
+        assert_eq!(
+            mapping
+                .resolve_builds(&[fixture.build_key])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        for _ in 0..2 {
+            let error = content
+                .object_manifest(fixture.object_hash)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error.repository_kind(),
+                Some(bobr_repo::RepositoryErrorKind::Transport { .. })
+            ));
+            assert!(
+                fixture
+                    .working
+                    .object_path(fixture.object_hash)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            faults.requests.lock().unwrap()[fixture.object_url.as_str()],
+            4
+        );
+        assert_eq!(
+            mapping
+                .resolve_builds(&[fixture.build_key])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            mapping
+                .resolve_reuses(&[fixture.reuse_key])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            content.locate_objects(&[second]).await.unwrap(),
+            HashSet::from([second])
+        );
+        assert_eq!(
+            content
+                .import_object(&fixture.working, second)
+                .await
+                .unwrap()
+                .value,
+            ContentImportOutcome::Imported
+        );
+        assert!(fixture.working.object_path(second).unwrap().is_some());
+        // A new run can use the same underlying reader after the endpoint recovers.
+        faults.failed.lock().unwrap().clear();
+        let next = RemoteContentProvider::new(
+            RemoteRepositoryBackend::new("next-run", reader),
+            fixture.working.clone(),
+            RuntimeProvider::host(),
+            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+        );
+        next.import_object(&fixture.working, fixture.object_hash)
+            .await
+            .unwrap();
+        assert_eq!(
+            faults.requests.lock().unwrap()[fixture.object_url.as_str()],
+            5
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_build_index_does_not_disable_reuse_index_or_content() {
+        let fixture = fixture();
+        let (backend, faults) =
+            backend_with_faults(&fixture, std::slice::from_ref(&fixture.build_url));
+        let mapping = RemoteMappingProvider::new(backend.clone());
+        let content = RemoteContentProvider::new(
+            backend,
+            fixture.working.clone(),
+            RuntimeProvider::host(),
+            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+        );
+        for key in [fixture.build_key, BuildKey::from_bytes([42; 32])] {
+            assert!(matches!(
+                mapping
+                    .resolve_builds(&[key])
+                    .await
+                    .unwrap_err()
+                    .repository_kind(),
+                Some(bobr_repo::RepositoryErrorKind::Transport { .. })
+            ));
+        }
+        assert_eq!(
+            faults.requests.lock().unwrap()[fixture.build_url.as_str()],
+            4
+        );
+        assert_eq!(
+            mapping
+                .resolve_reuses(&[fixture.reuse_key])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            content
+                .locate_objects(&[fixture.object_hash])
+                .await
+                .unwrap(),
+            HashSet::from([fixture.object_hash])
+        );
+        assert_eq!(
+            content
+                .import_object(&fixture.working, fixture.object_hash)
+                .await
+                .unwrap()
+                .value,
+            ContentImportOutcome::Imported
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_slot_metadata_preserves_verified_hits_and_partial_batches() {
+        let fixture = fixture();
+        let base = Url::parse("https://data.example/").unwrap();
+        let source = fixture._temp.path().join("leaf");
+        let encoded = fixture._temp.path().join("leaf.cbor");
+        std::fs::write(&source, b"verified fs-file\n").unwrap();
+        let file = encode_fs_file(&source, Compression::Zstd, &encoded).unwrap();
+        fixture.transport.insert(
+            base.join(&format!("f/{file}")).unwrap(),
+            std::fs::read(encoded).unwrap(),
+            "application/vnd.bobr.repository-fs-file+cbor",
+            "public, max-age=31536000, immutable",
+        );
+        let files = FsFileList::encode([file]);
+        let files_hash = FsFileListHash::digest(&files);
+        fixture.transport.insert(
+            base.join(&format!("lf/{files_hash}")).unwrap(),
+            files,
+            "application/octet-stream",
+            "public, max-age=31536000, immutable",
+        );
+        let empty_build = BuildIndexHash::digest(&BuildIndex::encode(&[]).unwrap());
+        let empty_reuse = ReuseIndexHash::digest(&ReuseIndex::encode(&[]).unwrap());
+        let empty_objects = ObjectListHash::digest(&ObjectList::encode([]));
+        let empty_files = FsFileListHash::digest(&FsFileList::encode([]));
+        let master = Master::new(
+            None,
+            base.clone(),
+            vec![
+                Slot {
+                    serial: 1,
+                    build: BuildIndexHash::digest(
+                        &BuildIndex::encode(&[(fixture.build_key, fixture.object_hash)]).unwrap(),
+                    ),
+                    reuse: ReuseIndexHash::digest(
+                        &ReuseIndex::encode(&[(fixture.reuse_key, fixture.object_hash)]).unwrap(),
+                    ),
+                    object_list: ObjectListHash::digest(&ObjectList::encode([fixture.object_hash])),
+                    file_list: files_hash,
+                    retain_until: None,
+                },
+                Slot {
+                    serial: 2,
+                    build: empty_build,
+                    reuse: empty_reuse,
+                    object_list: empty_objects,
+                    file_list: empty_files,
+                    retain_until: None,
+                },
+            ],
+        )
+        .unwrap();
+        fixture.transport.insert(
+            fixture.master_url.clone(),
+            master
+                .sign(b"key", &SigningKey::from_bytes(&[7; 32]))
+                .unwrap(),
+            "application/cose; cose-type=\"cose-sign1\"",
+            "no-cache",
+        );
+        let failed = [
+            base.join(&format!("b/{empty_build}")).unwrap(),
+            base.join(&format!("r/{empty_reuse}")).unwrap(),
+            base.join(&format!("lo/{empty_objects}")).unwrap(),
+            base.join(&format!("lf/{empty_files}")).unwrap(),
+        ];
+        let (backend, faults) = backend_with_faults(&fixture, &failed);
+        let snapshot = backend.snapshot().await.unwrap();
+        let mapping = RemoteMappingProvider::new(backend.clone());
+        let content = RemoteContentProvider::new(
+            backend.clone(),
+            fixture.working.clone(),
+            RuntimeProvider::host(),
+            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+        );
+        // Unknown entries must not erase successful entries from a batch.
+        assert_eq!(
+            mapping
+                .resolve_builds(&[fixture.build_key, BuildKey::from_bytes([42; 32])])
+                .await
+                .unwrap(),
+            vec![TrustedResolution {
+                key: fixture.build_key,
+                object_hash: fixture.object_hash
+            }]
+        );
+        assert_eq!(
+            mapping
+                .resolve_reuses(&[fixture.reuse_key, ReuseKey::from_bytes([42; 32])])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            content
+                .locate_objects(&[fixture.object_hash, ObjectHash::from_bytes([42; 32])])
+                .await
+                .unwrap(),
+            HashSet::from([fixture.object_hash])
+        );
+        let missing_file = "42".repeat(32).parse::<FsFileHash>().unwrap();
+        assert_eq!(
+            content
+                .locate_fs_files(&[file, missing_file])
+                .await
+                .unwrap(),
+            HashSet::from([file])
+        );
+        assert!(matches!(
+            snapshot
+                .build_candidates(BuildKey::from_bytes([42; 32]))
+                .await
+                .unwrap_err()
+                .kind(),
+            bobr_repo::RepositoryErrorKind::Transport { .. }
+        ));
+        assert!(
+            snapshot
+                .contains_object(ObjectHash::from_bytes([42; 32]))
+                .await
+                .is_err()
+        );
+        assert!(snapshot.contains_fs_file(missing_file).await.is_err());
+        content
+            .import_fs_files(&fixture.working, &[file])
+            .await
+            .unwrap();
+        assert!(fixture.working.fs_file_path(file).is_file());
+        // Administrative traversal still requires every authenticated metadata item.
+        assert!(matches!(
+            backend
+                .inner
+                .reader
+                .publication_metadata()
+                .await
+                .unwrap_err()
+                .kind(),
+            bobr_repo::RepositoryErrorKind::Transport { .. }
+        ));
+        for url in &failed {
+            assert_eq!(faults.requests.lock().unwrap()[url.as_str()], 4);
+        }
+        // A corrupt index, unlike a transport failure, must remain fatal.
+        faults.failed.lock().unwrap().clear();
+        faults.inner.insert(
+            failed[0].clone(),
+            b"corrupt authenticated index".to_vec(),
+            "application/octet-stream",
+            "public, max-age=31536000, immutable",
+        );
+        let next = RemoteMappingProvider::new(RemoteRepositoryBackend::new(
+            "next",
+            backend.inner.reader.clone(),
+        ));
+        assert_eq!(
+            next.resolve_builds(&[fixture.build_key])
+                .await
+                .unwrap_err()
+                .repository_kind(),
+            Some(bobr_repo::RepositoryErrorKind::InvalidRepository)
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_master_revalidation_never_uses_stale_cached_master() {
+        let fixture = fixture();
+        let (backend, faults) = backend_with_faults(&fixture, &[]);
+        backend.snapshot().await.unwrap();
+        let reader = backend.inner.reader.clone();
+        faults
+            .failed
+            .lock()
+            .unwrap()
+            .insert(fixture.master_url.to_string());
+        let next = RemoteMappingProvider::new(RemoteRepositoryBackend::new("next", reader.clone()));
+        for _ in 0..2 {
+            assert!(matches!(
+                next.resolve_builds(&[fixture.build_key])
+                    .await
+                    .unwrap_err()
+                    .repository_kind(),
+                Some(bobr_repo::RepositoryErrorKind::Transport { .. })
+            ));
+        }
+        // One successful revalidation and four failed attempts, not eight.
+        assert_eq!(
+            faults.requests.lock().unwrap()[fixture.master_url.as_str()],
+            5
+        );
+        faults.failed.lock().unwrap().clear();
+        let recovered =
+            RemoteMappingProvider::new(RemoteRepositoryBackend::new("recovered", reader));
+        assert_eq!(
+            recovered
+                .resolve_builds(&[fixture.build_key])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_fs_file_is_remembered_across_batches_without_disabling_other_files() {
+        let fixture = fixture();
+        let base = Url::parse("https://data.example/").unwrap();
+        let mut files = Vec::new();
+        for index in 0..2 {
+            let source = fixture._temp.path().join(format!("leaf-{index}"));
+            let encoded = fixture._temp.path().join(format!("leaf-{index}.cbor"));
+            std::fs::write(&source, format!("fs-file {index}\n")).unwrap();
+            let hash = encode_fs_file(&source, Compression::Zstd, &encoded).unwrap();
+            fixture.transport.insert(
+                base.join(&format!("f/{hash}")).unwrap(),
+                std::fs::read(encoded).unwrap(),
+                "application/vnd.bobr.repository-fs-file+cbor",
+                "public, max-age=31536000, immutable",
+            );
+            files.push(hash);
+        }
+        let bytes = FsFileList::encode(files.iter().copied());
+        let list_hash = FsFileListHash::digest(&bytes);
+        fixture.transport.insert(
+            base.join(&format!("lf/{list_hash}")).unwrap(),
+            bytes,
+            "application/octet-stream",
+            "public, max-age=31536000, immutable",
+        );
+        let old = fixture.backend.snapshot().await.unwrap();
+        let mut slots = old.master().slots().to_vec();
+        slots[0].file_list = list_hash;
+        let master = Master::new(None, base.clone(), slots).unwrap();
+        fixture.transport.insert(
+            fixture.master_url.clone(),
+            master
+                .sign(b"key", &SigningKey::from_bytes(&[7; 32]))
+                .unwrap(),
+            "application/cose; cose-type=\"cose-sign1\"",
+            "no-cache",
+        );
+        let failed_url = base.join(&format!("f/{}", files[0])).unwrap();
+        let (backend, faults) = backend_with_faults(&fixture, std::slice::from_ref(&failed_url));
+        let mapping = RemoteMappingProvider::new(backend.clone());
+        let content = RemoteContentProvider::new(
+            backend,
+            fixture.working.clone(),
+            RuntimeProvider::host(),
+            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+        );
+        for _ in 0..2 {
+            assert!(matches!(
+                content
+                    .import_fs_files(&fixture.working, &files[..1])
+                    .await
+                    .unwrap_err()
+                    .repository_kind(),
+                Some(bobr_repo::RepositoryErrorKind::Transport { .. })
+            ));
+            assert!(!fixture.working.fs_file_path(files[0]).exists());
+        }
+        assert_eq!(faults.requests.lock().unwrap()[failed_url.as_str()], 4);
+        content
+            .import_fs_files(&fixture.working, &files[1..])
+            .await
+            .unwrap();
+        fixture.working.verify_fs_file(files[1]).unwrap();
+        assert_eq!(
+            mapping
+                .resolve_builds(&[fixture.build_key])
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

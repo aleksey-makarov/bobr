@@ -585,7 +585,7 @@ impl ScheduledRepositoryTransport {
     }
 
     #[cfg(test)]
-    fn with_policy(mut self, policy: HttpRetryPolicy) -> Self {
+    pub(crate) fn with_policy(mut self, policy: HttpRetryPolicy) -> Self {
         self.policy = policy;
         self
     }

@@ -24,6 +24,7 @@ const FS_FILE_MEDIA_TYPE: &str = "application/vnd.bobr.repository-fs-file+cbor";
 #[derive(Clone)]
 pub struct RepositoryReader {
     inner: Arc<ReaderInner>,
+    run_transport: Option<Arc<crate::transport::RunTransport>>,
 }
 
 struct ReaderInner {
@@ -67,6 +68,7 @@ impl std::fmt::Debug for RepositoryReader {
             .debug_struct("RepositoryReader")
             .field("master_url", &self.inner.master_url)
             .field("cache", &self.inner.cache)
+            .field("run_scoped", &self.run_transport.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -131,7 +133,31 @@ impl RepositoryReader {
                 transport,
                 blocking_decoders: Arc::new(Semaphore::new(policy.max_blocking_decoders)),
             }),
+            run_transport: None,
         })
+    }
+
+    /// Creates a reader scope remembering failed network URLs for one run.
+    ///
+    /// Only transport failures are remembered, after the supplied transport's
+    /// retry budget is exhausted. Failure of one URL never disables another.
+    /// Clones share this scope; another call creates a fresh scope even when
+    /// called on a scoped reader. Verified metadata and decoder limits remain
+    /// shared, and a failed master revalidation never falls back to stale bytes.
+    pub fn for_run(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            run_transport: Some(Arc::new(crate::transport::RunTransport::new(
+                self.inner.transport.clone(),
+            ))),
+        }
+    }
+
+    async fn fetch(&self, request: FetchRequest) -> Result<FetchResult, RepositoryError> {
+        match &self.run_transport {
+            Some(transport) => transport.fetch(request).await,
+            None => self.inner.transport.fetch(request).await,
+        }
     }
 
     /// Creates an anonymous HTTPS reader with default network policy.
@@ -232,8 +258,6 @@ impl RepositoryReader {
         let etag = std::fs::read_to_string(cache.master_etag_path()).ok();
         let temporary = cache.create_temporary("master-")?;
         let result = self
-            .inner
-            .transport
             .fetch(FetchRequest {
                 purpose: FetchPurpose::Master,
                 url: self.inner.master_url.clone(),
@@ -353,8 +377,6 @@ impl RepositoryReader {
         }
         let temporary = self.inner.cache.create_temporary("metadata-")?;
         let result = self
-            .inner
-            .transport
             .fetch(FetchRequest {
                 purpose,
                 url: base.join(&format!("{namespace}/{hash}")).map_err(|error| {
@@ -392,8 +414,6 @@ impl RepositoryReader {
     ) -> Result<tempfile::NamedTempFile, RepositoryError> {
         let temporary = self.inner.cache.create_temporary("content-")?;
         let result = self
-            .inner
-            .transport
             .fetch(FetchRequest {
                 purpose,
                 url: data_url_for(master, namespace, hash)?,
@@ -434,12 +454,17 @@ impl RepositorySnapshot {
     }
 
     /// Lazily fetches build indexes and returns ordered distinct candidates.
+    ///
+    /// Unavailable indexes do not hide candidates from readable slots. If no
+    /// candidate was found and an index could not be read, returns its transport
+    /// error rather than claiming a definite miss. Invalid metadata is fatal.
     pub async fn build_candidates(
         &self,
         key: BuildKey,
     ) -> Result<Vec<ObjectHash>, RepositoryError> {
         let mut candidates = Vec::new();
         let mut seen = HashSet::new();
+        let mut unavailable = None;
         for slot in &self.slots {
             let index = slot
                 .build
@@ -449,23 +474,30 @@ impl RepositorySnapshot {
                         .await
                         .map(Arc::new)
                 })
-                .await?;
+                .await;
+            let Some(index) = available_metadata(index, &mut unavailable)? else {
+                continue;
+            };
             for candidate in index.candidates(key) {
                 if seen.insert(candidate) {
                     candidates.push(candidate);
                 }
             }
         }
-        Ok(candidates)
+        finish_lookup(candidates, unavailable)
     }
 
     /// Lazily fetches reuse indexes and returns ordered distinct candidates.
+    ///
+    /// Readable slots remain usable after another index's transport failure;
+    /// an uncertain miss is returned as an error, not an empty candidate list.
     pub async fn reuse_candidates(
         &self,
         key: ReuseKey,
     ) -> Result<Vec<ObjectHash>, RepositoryError> {
         let mut candidates = Vec::new();
         let mut seen = HashSet::new();
+        let mut unavailable = None;
         for slot in &self.slots {
             let index = slot
                 .reuse
@@ -475,18 +507,22 @@ impl RepositorySnapshot {
                         .await
                         .map(Arc::new)
                 })
-                .await?;
+                .await;
+            let Some(index) = available_metadata(index, &mut unavailable)? else {
+                continue;
+            };
             for candidate in index.candidates(key) {
                 if seen.insert(candidate) {
                     candidates.push(candidate);
                 }
             }
         }
-        Ok(candidates)
+        finish_lookup(candidates, unavailable)
     }
 
     /// Lazily checks whether current slot lists advertise an ordinary object.
     pub async fn contains_object(&self, hash: ObjectHash) -> Result<bool, RepositoryError> {
+        let mut unavailable = None;
         for slot in &self.slots {
             let list = slot
                 .objects
@@ -496,16 +532,20 @@ impl RepositorySnapshot {
                         .await
                         .map(Arc::new)
                 })
-                .await?;
+                .await;
+            let Some(list) = available_metadata(list, &mut unavailable)? else {
+                continue;
+            };
             if list.contains(hash) {
                 return Ok(true);
             }
         }
-        Ok(false)
+        unavailable.map_or(Ok(false), Err)
     }
 
     /// Lazily checks whether current slot lists advertise a filesystem file.
     pub async fn contains_fs_file(&self, hash: FsFileHash) -> Result<bool, RepositoryError> {
+        let mut unavailable = None;
         for slot in &self.slots {
             let list = slot
                 .files
@@ -515,12 +555,15 @@ impl RepositorySnapshot {
                         .await
                         .map(Arc::new)
                 })
-                .await?;
+                .await;
+            let Some(list) = available_metadata(list, &mut unavailable)? else {
+                continue;
+            };
             if list.contains(hash) {
                 return Ok(true);
             }
         }
-        Ok(false)
+        unavailable.map_or(Ok(false), Err)
     }
 
     /// Downloads and verifies one advertised ordinary object.
@@ -591,6 +634,32 @@ impl RepositorySnapshot {
             .await?;
         FetchedFsFileRepresentation::new(hash, encoded).map(Some)
     }
+}
+
+fn available_metadata<T>(
+    result: Result<T, RepositoryError>,
+    unavailable: &mut Option<RepositoryError>,
+) -> Result<Option<T>, RepositoryError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if matches!(error.kind(), crate::RepositoryErrorKind::Transport { .. }) => {
+            unavailable.get_or_insert(error);
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn finish_lookup(
+    candidates: Vec<ObjectHash>,
+    unavailable: Option<RepositoryError>,
+) -> Result<Vec<ObjectHash>, RepositoryError> {
+    if candidates.is_empty()
+        && let Some(error) = unavailable
+    {
+        return Err(error);
+    }
+    Ok(candidates)
 }
 
 #[cfg(test)]

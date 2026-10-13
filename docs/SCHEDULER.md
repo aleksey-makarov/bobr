@@ -426,8 +426,12 @@ content converge on the same content-addressed object.
 ## Failure and cancellation
 
 Expected mapping/content misses are not run failures. An exhausted remote
-transport failure allows provider fallback and disables that backend for the
-rest of the run. Authentication failures and invalid repository metadata are
+transport failure allows provider fallback and is remembered only for that
+URL until the next run. It never disables the other resources or capabilities
+of that backend. Verified hits from readable slots remain usable when another
+slot's metadata cannot be fetched; an uncertain miss remains a transport
+error. Master revalidation failures never fall back to stale cached master
+bytes. Authentication failures and invalid repository metadata are
 fatal. A corrupt advertised content representation can fall back to another
 content provider; already verified fs-files may remain available for that
 fallback. Local-store failures are not silently converted to provider misses.

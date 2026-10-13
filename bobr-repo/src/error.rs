@@ -30,7 +30,7 @@ pub enum RepositoryErrorKind {
 }
 
 /// Failure while reading, validating, caching, or publishing a repository.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RepositoryError {
     kind: RepositoryErrorKind,
     message: String,

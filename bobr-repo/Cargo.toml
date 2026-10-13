@@ -31,5 +31,9 @@ tokio.workspace = true
 url.workspace = true
 zstd.workspace = true
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "io-util"] }
+tokio-rustls.workspace = true
+
 [lints]
 workspace = true
