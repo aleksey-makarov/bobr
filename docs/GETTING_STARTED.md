@@ -293,15 +293,17 @@ int main(void)
 }
 ```
 
-`Makefile` (indent commands with tabs):
+`Makefile`:
 
 ```make
+.RECIPEPREFIX := >
+
 hello: hello.c
-	$(CC) $(CFLAGS) -o $@ $<
+>$(CC) $(CFLAGS) -o $@ $<
 
 install: hello
-	mkdir -p /usr/bin
-	install -m 0755 hello /usr/bin/hello
+>mkdir -p /usr/bin
+>install -m 0755 hello /usr/bin/hello
 
 .PHONY: install
 ```
@@ -392,7 +394,7 @@ int main(void)
 Add `-lz` to the link command in `Makefile`:
 
 ```make
-	$(CC) $(CFLAGS) -o $@ $< -lz
+>$(CC) $(CFLAGS) -o $@ $< -lz
 ```
 
 Then change `deps` in `hello.ncl`:
