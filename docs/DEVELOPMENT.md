@@ -48,8 +48,8 @@ Bobr installations on `PATH`.
 
 ## Check recipes
 
-Run the standalone recipe check suite with Nickel, `bobr-fsobj-hash`, and the
-other tools required by `tools/check.sh` on `PATH`:
+Run the standalone recipe check suite with `git`, `jq`, Nickel, `patch`,
+Python 3, `rg`, `shellcheck`, `tar`, and `bobr-fsobj-hash` on `PATH`:
 
 ```sh
 bobr-recipes/tools/check.sh

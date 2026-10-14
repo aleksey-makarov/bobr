@@ -6,9 +6,8 @@
    Host requirements, release installation, PATH setup, and uninstallation.
 
 2. [Getting Started](./GETTING_STARTED.md)
-   Build your first object from a tiny hand-written request, then a real
-   target built from the Nickel recipes, and how to change a recipe without
-   editing it.
+   Build and boot QEMU systems, reuse results from a local store, customize the
+   package set with overlays, and write recipes for local sources.
 
 3. [Concepts](./CONCEPTS.md)
    The ideas bobr is built on — content addressing, objects, keys, and

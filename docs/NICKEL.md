@@ -28,21 +28,21 @@ A package module returns named recipes:
 
 ```nickel
 fun pkgs =>
-  let libffi_src = fun version => {
+  let libffi_src = {
+    version | default = "3.6.0",
     name = "libffi-src-%{version}",
     tag = "Source",
-    object_hash = "…",
+    object_hash | default = "…",
     origin = { tag = "Http", url = "https://github.com/libffi/libffi/releases/download/v%{version}/libffi-%{version}.tar.gz" },
   } in
   let libffi = {
-    version | default = "3.6.0",
-    name = "libffi-%{version}",
+    name = "libffi-%{inputs.source.version}",
     tag = "Autotools",
     deps = { build = [], runtime = [pkgs.glibc_libs] },
     config = { configure_args = ["--disable-static"] },
-    inputs = { source = libffi_src version },
+    inputs = { source = pkgs.libffi_src },
   } in
-  { include [libffi] }
+  { include [libffi_src, libffi] }
 ```
 
 `request.ncl` ties it together: given the paths of one run, the final package
@@ -171,9 +171,9 @@ idea as Nix overlays. For example, to pin a different `shadow` version:
 ```nickel
 [
   fun final => fun prev => {
-    shadow = prev.shadow & {
+    shadow_src = prev.shadow_src & {
       version = "4.18.0",
-      source_object_hash = "add4604d3bc410344433122a819ee4154b79dd8316a56298c60417e637c07608",
+      object_hash = "add4604d3bc410344433122a819ee4154b79dd8316a56298c60417e637c07608",
     },
   },
 ]
@@ -182,6 +182,32 @@ idea as Nix overlays. For example, to pin a different `shadow` version:
 The version and source archive hash must match. For an override to propagate,
 consumers of a public recipe must refer to it through `pkgs` (or `final` in an
 overlay), not a module-local binding that still names the original recipe.
+
+Recipe names are also the current lowering layer's deduplication keys. Multiple
+consumers may share the same recipe value and name, but different reachable
+recipe definitions must have different names. Lowering does not currently
+diagnose a conflict: if two different recipes have the same name, it keeps one
+definition and makes both references point to it.
+
+Replacing a public Source such as `shadow_src` above leaves only one shared
+definition, so its version-derived name is sufficient. If an overlay instead
+replaces the Source input of only one consumer while the original Source remains
+reachable, the replacement needs an explicitly distinct name:
+
+```nickel
+fun _final => fun prev => {
+  gzip = prev.gzip & {
+    inputs.source | force = prev.gzip_src & {
+      name | force = "gzip-src-1.14-local",
+      object_hash = "…",
+    },
+  },
+}
+```
+
+Changing only `object_hash` does not change a name derived from `version`.
+Names need to be unique only among different recipes reachable in the same
+lowered graph.
 
 ## Recipes are data, not functions
 
@@ -257,7 +283,8 @@ hand-written `systemd_dev`):
   architecture-independent runtime data
 
 Avoid `_runtime` (already the `deps.runtime` role) and `_closure` (used by
-`RootfsClosure`); `_src` and `_gen1` keep their bootstrap meaning.
+`RootfsClosure`). `_src` denotes a public upstream Source recipe, while `_gen1`
+marks a bootstrap stage.
 
 ## Synthetic builders
 

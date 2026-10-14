@@ -13,9 +13,10 @@ Website and documentation: [bobr.build](https://bobr.build/).
 Every object — a fetched source or a build result — is named by the hash of
 its content and kept in a content-addressed store. Identical results are
 deduplicated and reused across builds, so a request rebuilds only what is
-actually missing and serves everything else from the store. The same inputs
-always produce the same object hash. Filesystem trees are assembled by
-hard-linking files into place, not copying — so they build fast and cheap.
+actually missing and serves everything else from the store. Reproducible builds
+with the same inputs produce the same content-addressed object. Filesystem trees
+are assembled by hard-linking files into place, not copying — so they build fast
+and cheap.
 
 Builders run in Linux user-namespace sandboxes with an explicit root filesystem
 and a controlled environment, so a build cannot silently depend on the host.
