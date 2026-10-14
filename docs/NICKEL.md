@@ -275,8 +275,9 @@ Most build families come in two flavors:
 - the dependency-aware ones (`Autotools`, `Makefile`, `Meson`, `Cmake`,
   `PerlModule`, `PythonModule`, `Cargo`, plus the custom-steps
   `SandboxInstallDeps` and `SandboxStageDeps`) take a `deps` record and build
-  their own rootfs from `deps.build`; scripted families require `source`, while
-  custom-step recipes declare only the inputs their steps need;
+  their own rootfs from `deps.build`; scripted families require `source`,
+  `Cargo` additionally requires `crates`, and custom-step recipes declare only
+  the inputs their steps need;
 - the explicit-rootfs variants (`AutotoolsStageRootfs`, `MakefileStageRootfs`,
   `MesonRootfs`, `CargoRootfs`, `SandboxStageRootfs`) take an explicit `_rootfs`
   input instead of deriving it from `deps.build`; they may still declare
@@ -399,27 +400,50 @@ synthetic builder.
 - **Steps:** vendor the crate dependencies offline (below), then run
   `cargo install --path <source> --offline --locked` to build and install the
   selected crate `[[bin]]` targets into the overlay root.
-- **Recipe field:** required `cargo_lock` — the upstream `Cargo.lock` imported
-  as data (`import "Cargo.lock" as 'Toml`). It is a recipe field beside
-  `config`, not a `config` member.
+- **Inputs:** required `source` and `crates`. `crates` is normally a public
+  `Bundle` recipe generated from the upstream `Cargo.lock` with
+  `cargo.vendor_inputs` from `cargo.ncl`.
 - **Config** (all optional): `features`, `bins`, `no_default_features`, `env`,
   `source_subdir`, `post_install`.
 - **Default build tools:** the common native toolchain plus `rust_bin`.
 
-**Vendoring.** The sandbox has no network, so a Rust build cannot pull crates
-from crates.io; its dependencies are vendored from the lockfile instead. The
-builder reads `cargo_lock` and, via
-`recipe.cargo.vendor_bundle`, lowers it into a single `Bundle` of `.crate` Http
-`Source`s — one per crates.io entry. Each Source's `object_hash` is exactly the
-`checksum` recorded in `Cargo.lock`: the fsobj-hash of a non-executable file
-equals its SHA-256, and crates.io serves each version as an immutable `.crate`,
-so the lockfile content-addresses and verifies every vendored crates.io
-dependency. Git, path, and alternative-registry dependencies are not fetched by
-this helper. The bundle is injected as the `crates` input, and a built-in step
-unpacks it into an offline cargo `vendor/` tree before the build.
+One typical public dependency bundle is:
 
-`CargoRootfs` does not inject this bundle automatically: its recipe must supply
-the `crates` input alongside `source` and `_rootfs`.
+```nickel
+let cargo = import "../../cargo.ncl" in
+let foo_crates = {
+  version | default = "1.2.3",
+  cargo_lock | default = import "Cargo.lock" as 'Toml,
+  name = "foo-%{version}-crates",
+  tag = "Bundle",
+  config = {},
+  inputs = cargo.vendor_inputs cargo_lock,
+} in
+# ... inputs = { source = pkgs.foo_src, crates = pkgs.foo_crates }
+```
+
+**Vendoring.** The sandbox has no network, so a Rust build cannot pull crates
+from crates.io; its dependencies are provided by the explicit `crates` input.
+`cargo.vendor_inputs` turns a parsed lockfile (`import "Cargo.lock" as 'Toml`)
+into one `.crate` HTTP `Source` per crates.io entry. Each Source's
+`object_hash` is exactly the `checksum` recorded in `Cargo.lock`: the
+fsobj-hash of a non-executable file equals its SHA-256, and crates.io serves
+each version as an immutable `.crate`, so the lockfile content-addresses and
+verifies every vendored crates.io dependency. Git, path, and
+alternative-registry dependencies are not fetched by this helper. A built-in
+step unpacks the bundle into an offline Cargo `vendor/` tree before the build.
+
+The source archive and its crates bundle can be separate, overridable recipes
+and must describe the same release. Recipes exposing such a pair should check
+their declared versions. Cargo then uses the `Cargo.lock` shipped by the
+unpacked source with `--locked --offline`. A missing dependency, incompatible
+lockfile, or checksum mismatch therefore fails the build instead of changing
+the lockfile or accessing the network. Custom Meson or Autotools recipes that
+invoke Cargo should run `cargo.verify_lock_step` after preparing the same
+vendor directory.
+
+`CargoRootfs` has the same explicit `source` and `crates` inputs as `Cargo` and
+additionally requires `_rootfs`.
 
 ### `SandboxInstallDeps`, `SandboxStageDeps`, `SandboxStageRootfs`
 
