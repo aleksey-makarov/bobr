@@ -2,11 +2,39 @@
 
 <img src="https://bobr.build/bobr.svg" alt="bobr" width="200">
 
-> `bobr` is a build system. It executes a request — a DAG of recipe nodes — and
-> yields reproducible, content-addressed objects such as filesystem trees and
+> `Bobr` is a content-addressed build system for Linux. It executes a request —
+> a DAG of recipe nodes — and produces objects such as filesystem trees and
 > root-filesystem images.
 
+The accompanying recipe collection builds Linux kernels, initramfs images, and
+complete root filesystems from declarative Nickel recipes. It also provides
+helpers for booting the resulting systems under QEMU.
+
 Website and documentation: [bobr.build](https://bobr.build/).
+
+## Try Bobr
+
+On x86-64 Linux, install the latest release with:
+
+```sh
+curl -fsSL https://bobr.build/install.sh | bash
+```
+
+Then follow [Build and boot a QEMU
+system](https://bobr.build/GETTING_STARTED.html#build-and-boot-a-qemu-system).
+With the public repository of prebuilt objects, the initial download normally
+takes about 1–2 minutes, depending on the connection.
+
+The installer verifies the release checksum and installs into
+`~/.local/bin`. See [Installation](https://bobr.build/INSTALLATION.html) for a
+review-before-running variant, custom destinations, prerequisites, and
+uninstallation.
+
+## Current status
+
+Bobr is under active development and currently targets native x86-64 Linux.
+Development has so far focused on the build system itself; the included guest
+systems remain proof-of-concept demos.
 
 ## Key properties
 
@@ -27,44 +55,30 @@ runs arbitrary build steps, from compiling a package to packing a tree into a
 bootable image. Recipes are written declaratively (in [Nickel](https://nickel-lang.org/))
 and lower to the JSON request `bobr` executes.
 
-## What `bobr` is like
+## Related systems
 
-`bobr` is like [Yocto](https://www.yoctoproject.org/), but with sane recipe syntax. Recipes are a separate
-Nickel layer — a real type-and-contract system, with Nix-style overlays for
-composing them. And where Yocto is built around cross-compiling for embedded
-targets, `bobr` so far builds ordinary systems natively.
+Bobr addresses some of the same system-construction problems as
+[Yocto](https://www.yoctoproject.org/), but keeps recipes in a separate Nickel
+layer with contracts and Nix-style overlays. Yocto is centered on
+cross-compilation for embedded targets; Bobr currently builds ordinary systems
+natively.
 
-`bobr` is like [Nix](https://nixos.org/), but with sane filesystem structure — a recipe choice, not a
-`bobr` constraint; the same engine could produce a Nix-style store. The trade-off
-is that such a layout can't keep several versions of a package side by side, the
-way Nix can; in exchange it should feel more like a normal system and be more
-convenient to use. Like Nix, `bobr` keeps results in a hash-keyed store with
-hermetic, sandboxed builds and heavy deduplication. Unlike Nix, it is
-content-addressed from the start, whereas Nix store paths are input-addressed
-and content-addressed derivations remain experimental.
+Like [Nix](https://nixos.org/), Bobr provides hermetic builds, hash-keyed
+storage, and extensive reuse. Unlike Nix, Bobr does not prescribe a Nix-style
+filesystem layout: filesystem structure is selected by recipes. This makes
+conventional layouts possible, at the cost of not keeping several package
+versions side by side in the resulting system. Bobr is content-addressed from
+the start, whereas Nix store paths are input-addressed and content-addressed
+derivations remain experimental.
 
-`bobr` borrows ideas from [OSTree](https://ostreedev.github.io/ostree/) — a content-addressed store, and an immutable
-read-only rootfs. But OSTree is about delivering and updating that OS on the
-machine (atomic upgrades, rollback), where `bobr` builds the images.
+Bobr borrows ideas from [OSTree](https://ostreedev.github.io/ostree/) — a
+content-addressed store and an immutable read-only rootfs. But OSTree is about
+delivering and updating that OS on the machine (atomic upgrades and rollback),
+where Bobr builds the images.
 
-`bobr` [HostBundles](https://bobr.build/HOST_BUNDLE.html) offer container-like
-portability without a container runtime: a relocatable directory carrying the
-program, its loader, libraries, data, and a tiny static launcher. Run it from the
-store or copy it to another compatible Linux machine — it keeps using its bundled
-runtime, not the host's.
-
-## Install
-
-On x86-64 Linux, install the latest release with:
-
-```sh
-curl -fsSL https://bobr.build/install.sh | bash
-```
-
-The installer verifies the release checksum and installs into
-`~/.local/bin`. See [Installation](https://bobr.build/INSTALLATION.html) for a
-review-before-running variant, custom destinations, prerequisites, and
-uninstallation.
+Bobr [HostBundles](https://bobr.build/HOST_BUNDLE.html) are a proof of concept
+for container-like portability without a container runtime. Their practical
+viability still needs to be evaluated.
 
 ## Independence and Affiliation
 

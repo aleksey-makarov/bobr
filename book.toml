@@ -1,5 +1,6 @@
 [book]
 title = "Bobr"
+description = "A content-addressed build system for Linux"
 authors = ["Aleksei Makarov"]
 language = "en"
 src = "docs"

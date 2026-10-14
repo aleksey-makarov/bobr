@@ -2,7 +2,7 @@
 name = "bobr-build"
 version.workspace = true
 edition = "2024"
-description = "A content-addressed build system; installs the `bobr` command."
+description = "A content-addressed build system for Linux; installs the `bobr` command."
 license.workspace = true
 repository.workspace = true
 
