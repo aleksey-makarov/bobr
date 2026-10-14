@@ -183,11 +183,15 @@ The version and source archive hash must match. For an override to propagate,
 consumers of a public recipe must refer to it through `pkgs` (or `final` in an
 overlay), not a module-local binding that still names the original recipe.
 
-Recipe names are also the current lowering layer's deduplication keys. Multiple
-consumers may share the same recipe value and name, but different reachable
-recipe definitions must have different names. Lowering does not currently
-diagnose a conflict: if two different recipes have the same name, it keeps one
-definition and makes both references point to it.
+> **Important:** Recipe names are also the current lowering layer's
+> deduplication keys. Multiple consumers may share the same recipe value and
+> name, but different reachable recipe definitions must have different names.
+> Lowering does not currently diagnose a conflict: if two different recipes
+> have the same name, it keeps one definition and makes both references point
+> to it.
+
+This is a limitation of the Nickel recipe layer. Recipe names do not
+participate in Bobr's `BuildKey`.
 
 Replacing a public Source such as `shadow_src` above leaves only one shared
 definition, so its version-derived name is sufficient. If an overlay instead
