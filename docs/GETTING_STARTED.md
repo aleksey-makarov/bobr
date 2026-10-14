@@ -451,7 +451,8 @@ run:
 hello
 ```
 
-It prints `Hello from Bobr!`.
+It prints `Hello from Bobr with zlib 1.3.1!`; the version is the one selected
+by the recipes.
 
 ## Rebuild world using repository sources
 
