@@ -369,6 +369,52 @@ After changing either source file, update the source hash before rebuilding:
 bobr-fsobj-hash hello-src > hello-source.fsobj-hash
 ```
 
+## Add a library dependency
+
+A recipe’s result contains only the files installed by that recipe. Bobr does
+not inspect compiled programs to infer their dependencies. `deps.build` adds
+tools, headers, and libraries to the build environment; `deps.runtime` declares
+what must accompany the result when it is included in a root filesystem.
+
+Make `hello` use zlib by replacing `hello.c` with:
+
+```c
+#include <stdio.h>
+#include <zlib.h>
+
+int main(void)
+{
+    printf("Hello from Bobr with zlib %s!\n", zlibVersion());
+    return 0;
+}
+```
+
+Add `-lz` to the link command in `Makefile`:
+
+```make
+	$(CC) $(CFLAGS) -o $@ $< -lz
+```
+
+Then change `deps` in `hello.ncl`:
+
+```nickel
+deps = {
+  build = [pkgs.zlib],
+  runtime = [pkgs.c_runtime, pkgs.zlib],
+},
+```
+
+`pkgs.zlib` in `build` provides `zlib.h` and the library used by the linker.
+The entries in `runtime` cause the C runtime and zlib to accompany `hello` when
+the next section adds it to the QEMU root filesystem.
+
+Update the source hash and rebuild:
+
+```sh
+bobr-fsobj-hash hello-src > hello-source.fsobj-hash
+bobr-recipes/bin/bobr-build.sh
+```
+
 ## Add the program to a QEMU system
 
 Add these fields to the record returned by `overlay.ncl`:
