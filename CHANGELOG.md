@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.12
+
+- Made remote repositories tolerate individual download failures and idle
+  timeouts, and fixed conditional master writes to S3-compatible storage.
+- Rejected malformed repository masters with impossible slot counts safely.
+- Rewrote the documentation around the working QEMU example and the current
+  repository, profile, overlay, and local-recipe interfaces.
+
 ## 0.1.11
 
 - Added the remote repository client with signed master verification, cached
