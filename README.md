@@ -25,6 +25,14 @@ system](https://bobr.build/GETTING_STARTED.html#build-and-boot-a-qemu-system).
 With the public repository of prebuilt objects, the initial download normally
 takes about 1–2 minutes, depending on the connection.
 
+<details>
+<summary>Watch the terminal demo</summary>
+<p>
+  <img src="https://github.com/aleksey-makarov/bobr/releases/download/v0.1.12/bobr-demo.gif"
+       alt="Installing Bobr, downloading three QEMU boot artifacts from the public repository, and booting the guest">
+</p>
+</details>
+
 The installer verifies the release checksum and installs into
 `~/.local/bin`. See [Installation](https://bobr.build/INSTALLATION.html) for a
 review-before-running variant, custom destinations, prerequisites, and
