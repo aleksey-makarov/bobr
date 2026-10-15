@@ -155,7 +155,10 @@ impl RepositoryTransport for HttpTransport {
             builder = builder.header(IF_NONE_MATCH, etag);
         }
         let response = builder.send().await.map_err(|error| {
-            let retryable = error.is_timeout() || error.is_connect() || error.is_body();
+            // Reqwest classifies a failed TLS handshake as a connection error,
+            // but retrying cannot repair a rejected certificate or protocol.
+            let retryable = !has_rustls_cause(&error)
+                && (error.is_timeout() || error.is_connect() || error.is_body());
             RepositoryError::transport(
                 format!("HTTP request failed: {}", error_with_causes(&error)),
                 retryable,
@@ -243,6 +246,22 @@ fn error_with_causes(error: &reqwest::Error) -> String {
         cause = error.source();
     }
     message
+}
+
+fn has_rustls_cause(error: &(dyn std::error::Error + 'static)) -> bool {
+    if error.downcast_ref::<rustls::Error>().is_some() {
+        return true;
+    }
+    // Hyper-rustls nests the rustls error inside one or more io::Error values,
+    // whose custom payload is not part of Error::source() on every Rust version.
+    if let Some(inner) = error
+        .downcast_ref::<std::io::Error>()
+        .and_then(std::io::Error::get_ref)
+        && has_rustls_cause(inner)
+    {
+        return true;
+    }
+    error.source().is_some_and(has_rustls_cause)
 }
 
 type ResourceFailure = Arc<tokio::sync::Mutex<Option<RepositoryError>>>;

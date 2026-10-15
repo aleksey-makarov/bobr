@@ -23,6 +23,7 @@ fsobj-hash.workspace = true
 indicatif.workspace = true
 libc.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

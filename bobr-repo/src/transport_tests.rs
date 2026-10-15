@@ -10,6 +10,7 @@ use tokio_rustls::rustls::{self, pki_types::pem::PemObject};
 
 // Public test-only credentials, unrelated to any deployed repository.
 const CA: &[u8] = include_bytes!("testdata/transport-ca.pem");
+const UNRELATED_CA: &[u8] = include_bytes!("testdata/transport-unrelated-ca.pem");
 const CERT: &[u8] = include_bytes!("testdata/transport-server.pem");
 const KEY: &[u8] = include_bytes!("testdata/transport-server-key.pem");
 const READ_TIMEOUT: Duration = Duration::from_millis(500);
@@ -160,6 +161,30 @@ async fn continuous_https_body_can_outlive_read_timeout() {
     assert_eq!(
         tokio::fs::read(destination).await.unwrap(),
         b"xxxxxxxxxxxxxxxxxxxx"
+    );
+}
+
+#[tokio::test]
+async fn untrusted_https_certificate_reports_tls_cause_without_retry() {
+    let fixture = HttpsFixture::new(Response::Slow).await;
+    let temp = tempfile::tempdir().unwrap();
+    let transport = HttpTransport::anonymous_with_timeouts(
+        &RepositoryTlsConfig::from_ca_bundle_pem(UNRELATED_CA).unwrap(),
+        Duration::from_secs(2),
+        READ_TIMEOUT,
+    )
+    .unwrap();
+    let error = transport
+        .fetch(fixture.request(&temp.path().join("body")))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("UnknownIssuer"),
+        "TLS verification cause is missing from: {error}"
+    );
+    assert_eq!(
+        error.kind(),
+        RepositoryErrorKind::Transport { retryable: false }
     );
 }
 
