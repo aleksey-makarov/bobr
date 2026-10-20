@@ -153,6 +153,11 @@ impl Request {
         validate_secondaries(&request.store, &mut request.secondaries)?;
         Ok(request)
     }
+
+    /// Returns the run work directory supplied by the request.
+    pub fn work_dir(&self) -> &Path {
+        &self.work
+    }
 }
 
 /// Validates that every node is an object. Per-node fields are interpreted

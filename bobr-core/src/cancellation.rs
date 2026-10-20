@@ -11,6 +11,7 @@ use std::sync::{
 };
 
 const FIFO_NAME: &str = "cancel";
+const RUN_CONTROL_DIR_NAME: &str = ".control";
 
 /// A shared, cloneable cancellation flag and broadcast channel.
 ///
@@ -26,7 +27,31 @@ struct CancellationInner {
     cancelled: AtomicBool,
     writer: Mutex<Option<File>>,
     fifo_path: PathBuf,
-    _control_dir: tempfile::TempDir,
+    _control_dir: ControlDirectory,
+}
+
+enum ControlDirectory {
+    Temporary(tempfile::TempDir),
+    Run(PathBuf),
+}
+
+impl ControlDirectory {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Temporary(directory) => directory.path(),
+            Self::Run(path) => path,
+        }
+    }
+}
+
+impl Drop for ControlDirectory {
+    fn drop(&mut self) {
+        let Self::Run(path) = self else {
+            return;
+        };
+        let _ = std::fs::remove_file(path.join(FIFO_NAME));
+        let _ = std::fs::remove_dir(path);
+    }
 }
 
 impl fmt::Debug for CancellationToken {
@@ -44,6 +69,20 @@ impl CancellationToken {
         let control_dir = tempfile::Builder::new()
             .prefix("bobr-cancellation-")
             .tempdir()?;
+        Self::new_in_control_dir(ControlDirectory::Temporary(control_dir))
+    }
+
+    /// Creates a token under the private control directory of one run.
+    ///
+    /// The caller owns `run_work_dir` and must have created it exclusively for
+    /// this run. The `.control` directory is removed with the last token clone.
+    pub fn new_in(run_work_dir: &Path) -> io::Result<Self> {
+        let control_path = run_work_dir.join(RUN_CONTROL_DIR_NAME);
+        std::fs::create_dir(&control_path)?;
+        Self::new_in_control_dir(ControlDirectory::Run(control_path))
+    }
+
+    fn new_in_control_dir(control_dir: ControlDirectory) -> io::Result<Self> {
         std::fs::set_permissions(control_dir.path(), std::fs::Permissions::from_mode(0o700))?;
         let fifo_path = control_dir.path().join(FIFO_NAME);
         create_fifo(&fifo_path)?;
@@ -114,15 +153,34 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Barrier};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     fn open_reader(token: &CancellationToken) -> File {
         open_fifo(token.fifo_path(), false).unwrap()
     }
 
     fn observes_eof(file: &File) -> bool {
-        let mut byte = 0_u8;
-        let result = unsafe { libc::read(file.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) };
-        result == 0
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let mut byte = 0_u8;
+            let result = unsafe { libc::read(file.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) };
+            if result == 0 {
+                return true;
+            }
+            if result < 0 && io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if result < 0
+                && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
+                && Instant::now() < deadline
+            {
+                // A concurrently forked child can briefly retain the writer
+                // until exec closes its O_CLOEXEC descriptors.
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            return false;
+        }
     }
 
     #[test]
@@ -263,5 +321,33 @@ mod tests {
         assert!(fifo.exists());
         drop(clone);
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn run_token_uses_and_removes_control_directory() {
+        let run_work = tempfile::tempdir().unwrap();
+        let control_dir = run_work.path().join(RUN_CONTROL_DIR_NAME);
+        let token = CancellationToken::new_in(run_work.path()).unwrap();
+
+        assert_eq!(token.fifo_path(), control_dir.join(FIFO_NAME));
+        assert_eq!(
+            std::fs::metadata(&control_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(token.fifo_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        drop(token);
+        assert!(!control_dir.exists());
     }
 }

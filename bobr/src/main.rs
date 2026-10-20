@@ -75,13 +75,7 @@ enum Invocation {
 
 fn run() -> MResult<()> {
     match invocation_from_args()? {
-        Invocation::Build(request_file) => {
-            let cancellation = CancellationToken::new().map_err(|error| {
-                BobrError::BuildFailed(format!("failed to initialize cancellation: {error}"))
-            })?;
-            signal::install_handlers(cancellation.clone());
-            build(request_file, cancellation)
-        }
+        Invocation::Build(request_file) => build(request_file),
         Invocation::BuildInfo => print_build_info(),
         Invocation::Version => print_version(),
     }
@@ -119,9 +113,13 @@ fn runtime_worker_exit_code(result: bobr_runtime::runtime::RuntimeResult<()>) ->
     }
 }
 
-fn build(request_file: Option<PathBuf>, cancellation: CancellationToken) -> MResult<()> {
+fn build(request_file: Option<PathBuf>) -> MResult<()> {
     let request_bytes = read_request_bytes(request_file.as_ref())?;
     let request = Request::parse_json(&request_bytes).map_err(map_execution_error)?;
+    let cancellation = CancellationToken::new_in(request.work_dir()).map_err(|error| {
+        BobrError::BuildFailed(format!("failed to initialize cancellation: {error}"))
+    })?;
+    let _signal_guard = signal::install_handlers(cancellation.clone());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -229,8 +227,11 @@ fn map_execution_error(error: bobr::ExecutionError) -> BobrError {
 #[cfg(unix)]
 mod signal {
     use bobr_core::CancellationToken;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::thread;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+    use std::thread::{self, JoinHandle};
     use std::time::Duration;
 
     static SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -243,7 +244,22 @@ mod signal {
         }
     }
 
-    pub(crate) fn install_handlers(cancellation: CancellationToken) {
+    pub(crate) struct Guard {
+        shutdown: Arc<AtomicBool>,
+        watcher: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            self.shutdown.store(true, Ordering::SeqCst);
+            if let Some(watcher) = self.watcher.take() {
+                watcher.thread().unpark();
+                let _ = watcher.join();
+            }
+        }
+    }
+
+    pub(crate) fn install_handlers(cancellation: CancellationToken) -> Guard {
         unsafe {
             libc::signal(
                 libc::SIGINT,
@@ -254,15 +270,27 @@ mod signal {
                 handle_signal as *const () as libc::sighandler_t,
             );
         }
-        thread::spawn(move || {
-            loop {
-                if SIGNAL_COUNT.load(Ordering::SeqCst) > 0 {
-                    cancellation.cancel();
-                    break;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let watcher_shutdown = shutdown.clone();
+        let watcher = thread::Builder::new()
+            .name("bobr-signal-watcher".to_string())
+            .spawn(move || {
+                loop {
+                    if SIGNAL_COUNT.load(Ordering::SeqCst) > 0 {
+                        cancellation.cancel();
+                        break;
+                    }
+                    if watcher_shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    thread::park_timeout(Duration::from_millis(25));
                 }
-                thread::sleep(Duration::from_millis(25));
-            }
-        });
+            })
+            .expect("failed to spawn signal watcher");
+        Guard {
+            shutdown,
+            watcher: Some(watcher),
+        }
     }
 }
 
@@ -270,5 +298,9 @@ mod signal {
 mod signal {
     use bobr_core::CancellationToken;
 
-    pub(crate) fn install_handlers(_cancellation: CancellationToken) {}
+    pub(crate) struct Guard;
+
+    pub(crate) fn install_handlers(_cancellation: CancellationToken) -> Guard {
+        Guard
+    }
 }
