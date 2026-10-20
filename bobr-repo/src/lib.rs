@@ -56,7 +56,7 @@ mod tests {
     fn runtime_registry_contains_encoding_and_download_publication() {
         let functions = super::runtime_functions();
         assert_eq!(functions.len(), 2);
-        assert_eq!(functions[0].name(), "bobr_repo_encode_fs_files");
-        assert_eq!(functions[1].name(), "bobr_repo_publish_fs_files");
+        assert_eq!(functions[0].name(), "repo-encode-fs-files");
+        assert_eq!(functions[1].name(), "repo-publish-fs-files");
     }
 }

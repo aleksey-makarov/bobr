@@ -103,7 +103,7 @@ impl RuntimeFunction for StoreInventoryFunction {
     type Output = ();
 
     fn name(&self) -> &'static str {
-        "bobr_store_inventory"
+        "store-inventory"
     }
 
     fn call(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {

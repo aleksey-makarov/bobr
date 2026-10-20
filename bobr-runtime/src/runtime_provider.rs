@@ -207,7 +207,7 @@ mod tests {
         type Output = String;
 
         fn name(&self) -> &'static str {
-            "test.echo"
+            "test-echo"
         }
 
         fn call(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {

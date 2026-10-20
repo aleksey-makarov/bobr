@@ -140,7 +140,7 @@ impl RuntimeFunction for PublishFsFilesFunction {
     type Output = PublishFsFilesOutput;
 
     fn name(&self) -> &'static str {
-        "bobr_repo_publish_fs_files"
+        "repo-publish-fs-files"
     }
 
     fn call(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {

@@ -77,7 +77,7 @@ impl RuntimeFunction for EncodeFsFilesFunction {
     type Output = ();
 
     fn name(&self) -> &'static str {
-        "bobr_repo_encode_fs_files"
+        "repo-encode-fs-files"
     }
 
     fn call(&self, input: Self::Input) -> Result<Self::Output, RuntimeError> {
