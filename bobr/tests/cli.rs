@@ -6,9 +6,13 @@ use bobr_store::fs_tree::{FsTreeEntry, FsTreeManifest, hash_fs_file_parts};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::fs::{self, FileTimes, OpenOptions};
+use std::io::Read;
+use std::net::TcpListener;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 use support::{
     TEST_RUN_ID, make_run_dirs, recipe_node, store_root, tree_file_recipe, write_request,
@@ -135,6 +139,84 @@ fn cli_reports_machine_readable_build_info() {
     let line = String::from_utf8(output.stdout).unwrap();
     let expected = serde_json::to_string(&bobr::BuildInfo::current().unwrap()).unwrap();
     assert_eq!(line, format!("{expected}\n"));
+}
+
+fn assert_signal_cancels_run(signal: libc::c_int) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (accepted_tx, accepted_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        accepted_tx.send(()).unwrap();
+        let mut request = Vec::new();
+        let _ = stream.read_to_end(&mut request);
+    });
+    let workspace = tempdir().unwrap();
+    let (logs, work) = make_run_dirs(workspace.path());
+    let store = store_root(workspace.path());
+    fs::create_dir_all(&store).unwrap();
+    let request_path = workspace.path().join("cancel.json");
+    fs::write(
+        &request_path,
+        serde_json::to_vec(&json!({
+            "schema": "bobr-request-v6",
+            "store": store,
+            "logs": logs,
+            "work": work,
+            "run_id": "signal-cancel",
+            "goals": ["source"],
+            "nodes": {
+                "source": {
+                    "name": "source",
+                    "tag": "Source",
+                    "object_hash": "11".repeat(32),
+                    "origin": {
+                        "tag": "Http",
+                        "url": format!("http://{address}/source"),
+                        "unpack": false
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_bobr"))
+        .arg(request_path)
+        .current_dir(workspace.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    accepted_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (output_tx, output_rx) = mpsc::channel();
+    thread::spawn(move || output_tx.send(child.wait_with_output()).unwrap());
+
+    assert_eq!(unsafe { libc::kill(pid as libc::pid_t, signal) }, 0);
+    let output = match output_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(output) => output.unwrap(),
+        Err(error) => {
+            let _ = unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+            let _ = output_rx.recv();
+            panic!("bobr did not stop after signal {signal}: {error}");
+        }
+    };
+    server.join().unwrap();
+
+    assert_eq!(output.status.code(), Some(130), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("error[cancelled]"), "{output:?}");
+}
+
+#[test]
+fn sigint_cancels_the_run_and_exits_130() {
+    assert_signal_cancels_run(libc::SIGINT);
+}
+
+#[test]
+fn sigterm_cancels_the_run_and_exits_130() {
+    assert_signal_cancels_run(libc::SIGTERM);
 }
 
 #[test]

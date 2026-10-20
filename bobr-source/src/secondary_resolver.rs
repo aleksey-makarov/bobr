@@ -1559,7 +1559,7 @@ mod tests {
     }
 
     fn local_io() -> LocalIoScheduler {
-        LocalIoScheduler::new(8, CancellationToken::new()).unwrap()
+        LocalIoScheduler::new(8, CancellationToken::new().unwrap()).unwrap()
     }
 
     #[test]

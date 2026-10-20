@@ -95,7 +95,7 @@ mod tests {
         let context = SubjectRunContext::new(
             workspace,
             Arc::new(NoopBuildLogger),
-            CancellationToken::new(),
+            CancellationToken::new().unwrap(),
             RuntimeProvider::namespace(),
             BuildSeed::ZERO,
         );

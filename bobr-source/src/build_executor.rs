@@ -1057,7 +1057,7 @@ mod tests {
             group,
             label,
             should_panic,
-            CancellationToken::new(),
+            CancellationToken::new().unwrap(),
         )
     }
 
@@ -1138,7 +1138,7 @@ mod tests {
             environment.run,
             environment.logger,
             RuntimeProvider::host(),
-            CancellationToken::new(),
+            CancellationToken::new().unwrap(),
         );
         assert!(matches!(
             BuilderJob::new(Arc::new(PlannedNode::Source(source)), execution),
@@ -1331,7 +1331,7 @@ mod tests {
     async fn cancellation_between_staging_and_publication_discards_the_mapping() {
         let environment = environment("cancel-staged");
         register_probe("cancel-staged", true);
-        let cancellation = CancellationToken::new();
+        let cancellation = CancellationToken::new().unwrap();
         let executor = BuildExecutor::new(1, 2).unwrap();
         let (build_key, builder_job) = job_with_cancellation(
             &environment,

@@ -222,7 +222,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn local_io() -> crate::LocalIoScheduler {
-        crate::LocalIoScheduler::new(8, bobr_core::CancellationToken::new()).unwrap()
+        crate::LocalIoScheduler::new(8, bobr_core::CancellationToken::new().unwrap()).unwrap()
     }
 
     fn source(name: &str, hash_digit: char) -> Value {

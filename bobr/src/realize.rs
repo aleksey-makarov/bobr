@@ -841,7 +841,7 @@ mod tests {
         )
         .unwrap();
         let repository = LocalRepository::new(ReadOnlyStore::open(&repository_root).unwrap());
-        let local_io = LocalIoScheduler::new(4, CancellationToken::new()).unwrap();
+        let local_io = LocalIoScheduler::new(4, CancellationToken::new().unwrap()).unwrap();
 
         let (indexes, sources) = provider_capabilities(
             vec![OpenedProvider {

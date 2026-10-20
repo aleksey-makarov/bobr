@@ -254,17 +254,27 @@ impl fmt::Debug for BuildContext {
 }
 
 impl BuildContext {
-    /// A context with a no-op logger and the host runtime, rooted at `fs_tree`
-    /// — for tests and simple callers.
-    pub fn with_noop_logger(temp_dir: PathBuf, fs_tree: FsTree) -> Self {
+    /// A context with a no-op logger and the host runtime, using the supplied
+    /// run-wide cancellation token.
+    pub fn new(temp_dir: PathBuf, fs_tree: FsTree, cancellation: CancellationToken) -> Self {
         Self {
             temp_dir,
             logger: Arc::new(NoopBuildLogger),
-            cancellation: CancellationToken::new(),
+            cancellation,
             runtime: RuntimeProvider::host(),
             fs_tree,
             build_seed: BuildSeed::ZERO,
         }
+    }
+
+    /// A context with a no-op logger and the host runtime, rooted at `fs_tree`
+    /// — for tests and simple callers.
+    pub fn with_noop_logger(temp_dir: PathBuf, fs_tree: FsTree) -> Self {
+        Self::new(
+            temp_dir,
+            fs_tree,
+            CancellationToken::new().expect("failed to initialize test cancellation token"),
+        )
     }
 
     /// Returns the context with the per-build `seed` attached.

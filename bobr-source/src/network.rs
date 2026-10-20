@@ -713,7 +713,7 @@ mod tests {
 
     #[tokio::test]
     async fn global_and_per_host_limits_are_shared() {
-        let scheduler = scheduler(2, 1, CancellationToken::new());
+        let scheduler = scheduler(2, 1, CancellationToken::new().unwrap());
         let same_host = scheduler.acquire("one.example").await.unwrap();
         let other_host = scheduler.acquire("two.example").await.unwrap();
 
@@ -742,7 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_interrupts_a_permit_wait() {
-        let cancellation = CancellationToken::new();
+        let cancellation = CancellationToken::new().unwrap();
         let scheduler = scheduler(1, 1, cancellation);
         let _permit = scheduler.acquire("one.example").await.unwrap();
         let waiter = {
@@ -762,7 +762,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_during_retry_backoff_emits_a_terminal_event() {
-        let scheduler = scheduler(1, 1, CancellationToken::new());
+        let scheduler = scheduler(1, 1, CancellationToken::new().unwrap());
         let events = Arc::new(RecordedEvents::default());
         let operation = NetworkOperation::RepositoryMetadata {
             repository: "primary".to_string(),
@@ -856,7 +856,7 @@ mod tests {
         let transport = ScheduledRepositoryTransport::new(
             "primary",
             inner.clone(),
-            scheduler(1, 1, CancellationToken::new()),
+            scheduler(1, 1, CancellationToken::new().unwrap()),
             events.clone(),
         )
         .with_policy(HttpRetryPolicy::instant());
@@ -908,7 +908,7 @@ mod tests {
         let transport = ScheduledRepositoryTransport::new(
             "primary",
             inner.clone(),
-            scheduler(1, 1, CancellationToken::new()),
+            scheduler(1, 1, CancellationToken::new().unwrap()),
             events,
         )
         .with_policy(HttpRetryPolicy::instant());
@@ -938,7 +938,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let destination = temp.path().join("response");
-        let scheduler = scheduler(1, 1, CancellationToken::new());
+        let scheduler = scheduler(1, 1, CancellationToken::new().unwrap());
         let events = Arc::new(RecordedEvents::default());
         let transport = ScheduledRepositoryTransport::new(
             "primary",
@@ -996,7 +996,7 @@ mod tests {
         }
 
         let temp = TempDir::new().unwrap();
-        let scheduler = scheduler(1, 1, CancellationToken::new());
+        let scheduler = scheduler(1, 1, CancellationToken::new().unwrap());
         let events = Arc::new(RecordedEvents::default());
         let transport = ScheduledRepositoryTransport::new(
             "primary",

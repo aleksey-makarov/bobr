@@ -212,11 +212,14 @@ impl BuilderPlannedSubject {
         inputs: BuilderInputs,
         fs_tree: FsTree,
     ) -> Result<PathBuf, BuilderError> {
-        let mut context = BuildContext::with_noop_logger(ctx.temp_dir().to_path_buf(), fs_tree)
-            .with_logger(ctx.logger().clone())
-            .with_cancellation_token(ctx.cancellation().clone())
-            .with_runtime_provider(ctx.runtime().clone())
-            .with_build_seed(ctx.build_seed());
+        let mut context = BuildContext::new(
+            ctx.temp_dir().to_path_buf(),
+            fs_tree,
+            ctx.cancellation().clone(),
+        )
+        .with_logger(ctx.logger().clone())
+        .with_runtime_provider(ctx.runtime().clone())
+        .with_build_seed(ctx.build_seed());
         self.build(inputs, &mut context)
     }
 }
@@ -294,7 +297,7 @@ mod tests {
         let ctx = SubjectRunContext::new(
             workspace,
             Arc::new(NoopBuildLogger),
-            CancellationToken::new(),
+            CancellationToken::new().unwrap(),
             RuntimeProvider::namespace(),
             bobr_core::BuildSeed::ZERO,
         );

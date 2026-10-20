@@ -34,7 +34,10 @@ fn run_realizer(path: &Path) -> Result<ObjectHash, ExecutionError> {
         .build()
         .unwrap();
     runtime
-        .block_on(realize(parse_fresh(path), CancellationToken::new()))
+        .block_on(realize(
+            parse_fresh(path),
+            CancellationToken::new().unwrap(),
+        ))
         .map(|goals| goals[0].object_hash)
 }
 

@@ -247,11 +247,19 @@ fn build_sandbox(
         .runtime()
         .run(&SandboxInstallFunction, runtime_input)
         .map_err(|error| BuilderError::ExecutionFailed(format!("sandbox build failed: {error}")))?;
-    write_build_report(cx, &output);
+    match output {
+        SandboxFunctionOutput::Completed(output) => {
+            write_build_report(cx, &output);
 
-    // The runtime function produces its output artifact under cx.temp_dir and
-    // guarantees it is host-owned; the builder stages it verbatim.
-    Ok(output.output_path)
+            // The runtime function produces its output artifact under
+            // cx.temp_dir and guarantees it is host-owned; the builder stages
+            // it verbatim.
+            Ok(output.output_path)
+        }
+        SandboxFunctionOutput::Cancelled => Err(BuilderError::Cancelled(
+            "sandbox build cancelled by signal".to_string(),
+        )),
+    }
 }
 
 fn prepare_sandbox_input(
@@ -288,6 +296,9 @@ fn prepare_sandbox_input(
         steps: sandbox_steps,
         build_seed_hex: cx.build_seed().to_hex(),
         plain_object,
+        cancellation: SandboxCancellationInput {
+            fifo: cx.cancellation_token().fifo_path().to_path_buf(),
+        },
     })
 }
 
@@ -998,6 +1009,14 @@ pub struct SandboxInput {
     /// captured as a standalone object; when clear, the overlay upper is
     /// captured as an additive fs-tree delta.
     plain_object: bool,
+    cancellation: SandboxCancellationInput,
+}
+
+/// Serializable receiver for the run-wide sandbox cancellation broadcast.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxCancellationInput {
+    fifo: PathBuf,
 }
 
 /// A named extra input exposed inside the sandbox: a `name` and the host `path`
@@ -1032,9 +1051,21 @@ pub struct SandboxOutput {
     steps: Vec<SandboxStepReport>,
 }
 
+/// Result of a sandbox runtime call. Cancellation is a typed outcome so it can
+/// cross the namespace runtime protocol without masquerading as a runtime
+/// failure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxFunctionOutput {
+    /// The sandbox finished and produced a captured artifact and step reports.
+    Completed(SandboxOutput),
+    /// The run-wide cancellation channel closed before the sandbox finished.
+    Cancelled,
+}
+
 impl RuntimeFunction for SandboxInstallFunction {
     type Input = SandboxInput;
-    type Output = SandboxOutput;
+    type Output = SandboxFunctionOutput;
 
     fn name(&self) -> &'static str {
         "sandbox-install"
@@ -1048,6 +1079,11 @@ impl RuntimeFunction for SandboxInstallFunction {
             )));
         }
 
+        let cancellation = lifecycle::CancellationReceiver::open(&input.cancellation.fifo)?;
+        if cancellation.is_cancelled()? {
+            return Ok(SandboxFunctionOutput::Cancelled);
+        }
+
         // Create the working directories the function owns under `tmp`: the build
         // workspace (mount scaffolding), and -- for the plain-object `Sandbox`
         // path -- the `$out` staging dir bound writable inside the sandbox. The
@@ -1057,29 +1093,45 @@ impl RuntimeFunction for SandboxInstallFunction {
             .map_err(|error| RuntimeError::new(error.to_string()))?;
         let out_dir = if input.plain_object {
             let out = input.tmp.join(OUTPUT_DIR_NAME);
-            recreate_empty_dir_force(&out).map_err(|error| RuntimeError::new(error.to_string()))?;
+            if let Err(error) = recreate_empty_dir_force(&out) {
+                remove_dir_force(&workspace)
+                    .map_err(|cleanup| RuntimeError::new(cleanup.to_string()))?;
+                return Err(RuntimeError::new(error.to_string()));
+            }
             Some(out)
         } else {
             None
         };
 
-        let result = run_sandbox_and_capture(&input, &workspace, out_dir.as_deref());
+        let result = run_sandbox_and_capture(&input, &workspace, out_dir.as_deref(), &cancellation);
 
         // Guarantee no in-namespace-owned files remain in `tmp`. The workspace
         // (build tree) is always removed as ns-root. `$out` is the artifact on
         // success (must stay) but may hold ns-owned files on failure, where the
         // host user could not clear them -- so remove it only on failure.
-        if result.is_err()
-            && let Some(out) = &out_dir
-        {
-            let _ = remove_dir_force(out);
-        }
+        let completed = matches!(result, Ok(SandboxRunOutcome::Completed(_)));
+        let out_cleanup = if !completed {
+            match &out_dir {
+                Some(out) => remove_dir_force(out),
+                None => Ok(()),
+            }
+        } else {
+            Ok(())
+        };
         let workspace_cleanup = remove_dir_force(&workspace);
-        let output = result?;
+        out_cleanup.map_err(|error| RuntimeError::new(error.to_string()))?;
         workspace_cleanup.map_err(|error| RuntimeError::new(error.to_string()))?;
 
-        Ok(output)
+        match result? {
+            SandboxRunOutcome::Completed(output) => Ok(SandboxFunctionOutput::Completed(output)),
+            SandboxRunOutcome::Cancelled => Ok(SandboxFunctionOutput::Cancelled),
+        }
     }
+}
+
+enum SandboxRunOutcome {
+    Completed(SandboxOutput),
+    Cancelled,
 }
 
 /// Runs the sandbox and captures its output: prepares the mounts (always a
@@ -1092,14 +1144,22 @@ fn run_sandbox_and_capture(
     input: &SandboxInput,
     workspace: &Path,
     out_dir: Option<&Path>,
-) -> Result<SandboxOutput, RuntimeError> {
+    cancellation: &lifecycle::CancellationReceiver,
+) -> Result<SandboxRunOutcome, RuntimeError> {
     let prepared = mounts::PreparedSandbox::create(input, workspace, out_dir)?;
-    let steps = lifecycle::run_sandbox_launcher(
+    let steps = match lifecycle::run_sandbox_launcher(
         &input.launcher_path,
         &prepared.launcher_config,
         &prepared.runtime_files.success_report,
         &prepared.runtime_files.failure_report,
-    )?;
+        cancellation,
+    )? {
+        lifecycle::LauncherOutcome::Completed(steps) => steps,
+        lifecycle::LauncherOutcome::Cancelled => return Ok(SandboxRunOutcome::Cancelled),
+    };
+    if cancellation.is_cancelled()? {
+        return Ok(SandboxRunOutcome::Cancelled);
+    }
 
     let output_path = if let Some(out_dir) = out_dir {
         // Plain object: chown the whole `$out` tree to a single owner (ns-root ->
@@ -1129,7 +1189,10 @@ fn run_sandbox_and_capture(
         output_path
     };
 
-    Ok(SandboxOutput { output_path, steps })
+    Ok(SandboxRunOutcome::Completed(SandboxOutput {
+        output_path,
+        steps,
+    }))
 }
 
 /// Recursively chowns `path` to uid 0 / gid 0 (in-namespace root, which maps to
@@ -1460,9 +1523,14 @@ fn xattr_equals(path: &Path, name: &str, expected: &[u8]) -> Result<bool, Runtim
 mod tests {
     use super::*;
     use bobr_builder::Builder;
+    use bobr_runtime::runtime_host::HostRuntime;
     use bobr_store::Store;
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::fs::OpenOptions;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::thread;
     use tempfile::tempdir;
 
     // An `FsTree` from a throwaway store under `<root>/store` (there is no
@@ -1505,6 +1573,14 @@ mod tests {
 
         assert_eq!(functions.len(), 1);
         assert_eq!(functions[0].name(), "sandbox-install");
+    }
+
+    #[test]
+    fn cancelled_output_round_trips_through_runtime_wire_shape() {
+        let encoded = serde_json::to_vec(&SandboxFunctionOutput::Cancelled).unwrap();
+        let decoded: SandboxFunctionOutput = serde_json::from_slice(&encoded).unwrap();
+
+        assert!(matches!(decoded, SandboxFunctionOutput::Cancelled));
     }
 
     #[test]
@@ -1590,6 +1666,7 @@ mod tests {
 
         assert_eq!(input.rootfs, rootfs);
         assert_eq!(input.tmp, cx.temp_dir);
+        assert_eq!(input.cancellation.fifo, cx.cancellation_token().fifo_path());
         assert_eq!(input.steps.len(), 1);
         assert_eq!(
             input.steps[0].cwd,
@@ -1607,6 +1684,106 @@ mod tests {
             fs::read_to_string(cx.temp_dir.join("config").join("args").join("00000000")).unwrap(),
             "--flag"
         );
+    }
+
+    #[test]
+    fn already_cancelled_function_does_not_create_workspace_or_launch() {
+        let temp = tempdir().unwrap();
+        let rootfs = temp.path().join("rootfs");
+        let tmp = temp.path().join("tmp");
+        fs::create_dir(&rootfs).unwrap();
+        fs::create_dir(&tmp).unwrap();
+        let cancellation = bobr_core::CancellationToken::new().unwrap();
+        cancellation.cancel();
+        let input = SandboxInput {
+            rootfs,
+            config_dir: temp.path().join("config"),
+            tmp: tmp.clone(),
+            fs_tree: store_fs_tree(temp.path()),
+            launcher_path: temp.path().join("must-not-run"),
+            extra_inputs: Vec::new(),
+            steps: Vec::new(),
+            build_seed_hex: "00".repeat(32),
+            plain_object: false,
+            cancellation: SandboxCancellationInput {
+                fifo: cancellation.fifo_path().to_path_buf(),
+            },
+        };
+        let input: SandboxInput =
+            serde_json::from_slice(&serde_json::to_vec(&input).unwrap()).unwrap();
+
+        let output = HostRuntime::new()
+            .run(&SandboxInstallFunction, input)
+            .unwrap();
+
+        assert!(matches!(output, SandboxFunctionOutput::Cancelled));
+        assert!(!tmp.join(RUNTIME_DIR_NAME).exists());
+    }
+
+    #[test]
+    fn cancellation_after_workspace_creation_cleans_both_output_modes() {
+        for plain_object in [false, true] {
+            let temp = tempdir().unwrap();
+            let rootfs = temp.path().join("rootfs");
+            let config_dir = temp.path().join("config");
+            let tmp = temp.path().join("tmp");
+            fs::create_dir(&rootfs).unwrap();
+            fs::create_dir(&config_dir).unwrap();
+            fs::create_dir(&tmp).unwrap();
+            let ready = temp.path().join("ready");
+            let ready_c = CString::new(ready.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(ready_c.as_ptr(), 0o600) }, 0);
+            let ready_reader = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(&ready)
+                .unwrap();
+            let launcher = temp.path().join("launcher.sh");
+            fs::write(
+                &launcher,
+                format!(
+                    "#!/bin/sh\nset -eu\ndd bs=1 count=1 <&3 >/dev/null 2>/dev/null\nprintf x > '{}'\nexec sleep 60\n",
+                    ready.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+            let cancellation = bobr_core::CancellationToken::new().unwrap();
+            let input = SandboxInput {
+                rootfs,
+                config_dir,
+                tmp: tmp.clone(),
+                fs_tree: store_fs_tree(temp.path()),
+                launcher_path: launcher,
+                extra_inputs: Vec::new(),
+                steps: Vec::new(),
+                build_seed_hex: "00".repeat(32),
+                plain_object,
+                cancellation: SandboxCancellationInput {
+                    fifo: cancellation.fifo_path().to_path_buf(),
+                },
+            };
+            let thread =
+                thread::spawn(move || HostRuntime::new().run(&SandboxInstallFunction, input));
+            let mut pollfd = libc::pollfd {
+                fd: ready_reader.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert_eq!(unsafe { libc::poll(&mut pollfd, 1, -1) }, 1);
+            let mut byte = 0_u8;
+            assert_eq!(
+                unsafe { libc::read(ready_reader.as_raw_fd(), (&mut byte as *mut u8).cast(), 1,) },
+                1
+            );
+
+            cancellation.cancel();
+            let output = thread.join().unwrap().unwrap();
+
+            assert!(matches!(output, SandboxFunctionOutput::Cancelled));
+            assert!(!tmp.join(RUNTIME_DIR_NAME).exists());
+            assert!(!tmp.join(OUTPUT_DIR_NAME).exists());
+        }
     }
 
     #[test]

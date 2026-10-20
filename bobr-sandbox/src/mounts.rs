@@ -554,6 +554,9 @@ mod tests {
             steps: Vec::new(),
             build_seed_hex: String::new(),
             plain_object: false,
+            cancellation: crate::SandboxCancellationInput {
+                fifo: temp.path().join("cancel"),
+            },
         };
         (input, workspace)
     }

@@ -32,7 +32,7 @@ pub(crate) fn execute_request(request_path: &Path) -> Result<ObjectHash, Executi
         .enable_all()
         .build()
         .map_err(|error| ExecutionError::Build(format!("failed to start Tokio runtime: {error}")))?
-        .block_on(realize(request, CancellationToken::new()))
+        .block_on(realize(request, CancellationToken::new().unwrap()))
         .map(|goals| {
             goals
                 .into_iter()

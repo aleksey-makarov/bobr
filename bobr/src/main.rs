@@ -76,7 +76,9 @@ enum Invocation {
 fn run() -> MResult<()> {
     match invocation_from_args()? {
         Invocation::Build(request_file) => {
-            let cancellation = CancellationToken::new();
+            let cancellation = CancellationToken::new().map_err(|error| {
+                BobrError::BuildFailed(format!("failed to initialize cancellation: {error}"))
+            })?;
             signal::install_handlers(cancellation.clone());
             build(request_file, cancellation)
         }

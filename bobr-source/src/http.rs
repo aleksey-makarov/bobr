@@ -1260,7 +1260,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 logger: NoopBuildLogger,
-                cancellation: CancellationToken::new(),
+                cancellation: CancellationToken::new().unwrap(),
             }
         }
 
@@ -1294,7 +1294,7 @@ mod tests {
         .unwrap();
 
         let logger = CapturingLogger::default();
-        let cancellation = CancellationToken::new();
+        let cancellation = CancellationToken::new().unwrap();
         origin
             .materialize(&OriginContext {
                 temp_root: temp.path(),
@@ -1337,7 +1337,7 @@ mod tests {
         .unwrap();
 
         let logger = NoopBuildLogger;
-        let cancellation = CancellationToken::new();
+        let cancellation = CancellationToken::new().unwrap();
         cancellation.cancel();
         let error = origin
             .materialize(&OriginContext {
@@ -1520,7 +1520,7 @@ mod tests {
             archive_format: None,
         };
         let logger = CapturingLogger::default();
-        let cancellation = CancellationToken::new();
+        let cancellation = CancellationToken::new().unwrap();
         materialize_http_origin_with_timeouts(
             &OriginContext {
                 temp_root: temp.path(),

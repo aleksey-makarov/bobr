@@ -1053,7 +1053,7 @@ mod tests {
             run.run_id(),
             request.quiet,
         )?);
-        let cancellation = CancellationToken::new();
+        let cancellation = CancellationToken::new().unwrap();
         let local_io = LocalIoScheduler::new(
             request.limits.resolved_max_local_jobs(),
             cancellation.clone(),

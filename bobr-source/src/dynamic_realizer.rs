@@ -1538,7 +1538,7 @@ mod tests {
                 Arc::new(LocalTrustedKeyIndex::new(LocalRepository::new(
                     ReadOnlyStore::open(root).unwrap(),
                 ))),
-                local_io(8, CancellationToken::new()),
+                local_io(8, CancellationToken::new().unwrap()),
             )),
         )
     }
@@ -1551,7 +1551,7 @@ mod tests {
                     LocalRepository::new(ReadOnlyStore::open(root).unwrap()),
                     RuntimeProvider::host(),
                 )),
-                local_io(8, CancellationToken::new()),
+                local_io(8, CancellationToken::new().unwrap()),
             )),
         )
     }
@@ -1564,7 +1564,7 @@ mod tests {
                     LocalRepository::new(ReadOnlyStore::open(root).unwrap()),
                     RuntimeProvider::host(),
                 )),
-                local_io(8, CancellationToken::new()),
+                local_io(8, CancellationToken::new().unwrap()),
             )),
         )
     }
@@ -1643,7 +1643,7 @@ mod tests {
             graph,
             indexes,
             sources,
-            CancellationToken::new(),
+            CancellationToken::new().unwrap(),
             2,
         )
     }
@@ -2429,7 +2429,7 @@ mod tests {
                 "miss",
                 Arc::new(crate::LocalContentProvider::new(
                     Arc::new(missed),
-                    LocalIoScheduler::new(4, CancellationToken::new()).unwrap(),
+                    LocalIoScheduler::new(4, CancellationToken::new().unwrap()).unwrap(),
                 )),
             )],
         );
@@ -2558,7 +2558,7 @@ mod tests {
             ),
             Duration::from_millis(75),
         );
-        let tracked_io = local_io(2, CancellationToken::new());
+        let tracked_io = local_io(2, CancellationToken::new().unwrap());
         let (realizer, executor) = dynamic_with_local_jobs(
             &environment,
             graph,
@@ -2570,7 +2570,7 @@ mod tests {
                     tracked_io,
                 )),
             )],
-            CancellationToken::new(),
+            CancellationToken::new().unwrap(),
             2,
         );
 
@@ -2621,7 +2621,7 @@ mod tests {
                 "tracked",
                 Arc::new(crate::LocalContentProvider::new(
                     Arc::new(tracked.clone()),
-                    local_io(8, CancellationToken::new()),
+                    local_io(8, CancellationToken::new().unwrap()),
                 )),
             )],
         );
@@ -2658,7 +2658,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let cancellation = CancellationToken::new();
+        let cancellation = CancellationToken::new().unwrap();
         let local_io = local_io(1, cancellation.clone());
         let content = NamedContentProvider::new(
             "waiting",
@@ -2723,7 +2723,7 @@ mod tests {
             ),
             Duration::from_millis(100),
         );
-        let cancellation = CancellationToken::new();
+        let cancellation = CancellationToken::new().unwrap();
         let tracked_io = local_io(1, cancellation.clone());
         let (realizer, executor) = dynamic_with_local_jobs(
             &environment,

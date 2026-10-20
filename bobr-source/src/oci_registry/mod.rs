@@ -415,7 +415,7 @@ mod tests {
         };
         let temp = tempdir().unwrap();
         let logger = NoopBuildLogger;
-        let cancellation = CancellationToken::new();
+        let cancellation = CancellationToken::new().unwrap();
         let staged = materialize_oci_registry_origin(
             &OriginContext {
                 temp_root: temp.path(),

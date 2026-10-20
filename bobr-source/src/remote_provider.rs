@@ -684,7 +684,7 @@ mod tests {
         assert_eq!(fixture.transport.request_count(&fixture.master_url), 0);
 
         let mapping = RemoteMappingProvider::new(first);
-        let local_io = LocalIoScheduler::new(2, CancellationToken::new()).unwrap();
+        let local_io = LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap();
         let content = RemoteContentProvider::new(
             second,
             fixture.working.clone(),
@@ -735,7 +735,7 @@ mod tests {
             backend,
             Store::create(&working_root).unwrap(),
             RuntimeProvider::host(),
-            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+            LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap(),
         );
 
         let first = mapping
@@ -806,7 +806,7 @@ mod tests {
                     per_host_default: 4,
                     per_host: Default::default(),
                 },
-                CancellationToken::new(),
+                CancellationToken::new().unwrap(),
             ),
             Arc::new(IgnoreNetworkEvents),
         )
@@ -886,7 +886,7 @@ mod tests {
             backend,
             fixture.working.clone(),
             RuntimeProvider::host(),
-            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+            LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap(),
         );
         assert_eq!(
             mapping
@@ -952,7 +952,7 @@ mod tests {
             RemoteRepositoryBackend::new("next-run", reader),
             fixture.working.clone(),
             RuntimeProvider::host(),
-            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+            LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap(),
         );
         next.import_object(&fixture.working, fixture.object_hash)
             .await
@@ -973,7 +973,7 @@ mod tests {
             backend,
             fixture.working.clone(),
             RuntimeProvider::host(),
-            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+            LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap(),
         );
         for key in [fixture.build_key, BuildKey::from_bytes([42; 32])] {
             assert!(matches!(
@@ -1088,7 +1088,7 @@ mod tests {
             backend.clone(),
             fixture.working.clone(),
             RuntimeProvider::host(),
-            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+            LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap(),
         );
         // Unknown entries must not erase successful entries from a batch.
         assert_eq!(
@@ -1263,7 +1263,7 @@ mod tests {
             backend,
             fixture.working.clone(),
             RuntimeProvider::host(),
-            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+            LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap(),
         );
         for _ in 0..2 {
             assert!(matches!(
@@ -1299,7 +1299,7 @@ mod tests {
             fixture.backend,
             fixture.working,
             RuntimeProvider::host(),
-            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+            LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap(),
         );
         assert_eq!(
             content
@@ -1316,7 +1316,7 @@ mod tests {
     #[tokio::test]
     async fn manifest_probe_and_import_download_an_object_once() {
         let fixture = fixture();
-        let local_io = LocalIoScheduler::new(2, CancellationToken::new()).unwrap();
+        let local_io = LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap();
         let content = RemoteContentProvider::new(
             fixture.backend,
             fixture.working.clone(),
@@ -1357,7 +1357,7 @@ mod tests {
                 fixture.backend,
                 fixture.working.clone(),
                 RuntimeProvider::host(),
-                LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+                LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap(),
             )),
         );
         let resolver = SecondaryResolver::new(
@@ -1403,7 +1403,7 @@ mod tests {
                 fixture.backend,
                 fixture.working.clone(),
                 RuntimeProvider::host(),
-                LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+                LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap(),
             )),
         );
         let resolver = SecondaryResolver::new(
@@ -1446,7 +1446,7 @@ mod tests {
             fixture.backend,
             fixture.working.clone(),
             RuntimeProvider::host(),
-            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+            LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap(),
         );
 
         let imported = content
@@ -1552,7 +1552,7 @@ mod tests {
             RemoteRepositoryBackend::new("files", reader),
             working.clone(),
             RuntimeProvider::host(),
-            LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+            LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap(),
         );
         let hashes = files.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
         let imported = content.import_fs_files(&working, &hashes).await.unwrap();
@@ -1701,7 +1701,7 @@ mod tests {
                     backend,
                     working.clone(),
                     RuntimeProvider::host(),
-                    LocalIoScheduler::new(2, CancellationToken::new()).unwrap(),
+                    LocalIoScheduler::new(2, CancellationToken::new().unwrap()).unwrap(),
                 )),
             )],
         )
