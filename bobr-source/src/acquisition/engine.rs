@@ -187,6 +187,7 @@ pub(crate) enum SourceOutcome {
     Downloaded,
     CacheHit,
     Local,
+    Cancelled { name: String },
     Mismatched(Mismatch),
     Failed { name: String, message: String },
 }
@@ -258,7 +259,7 @@ async fn process_source_inner(
         .to_string();
 
     if engine.is_cancelled() {
-        return Err("cancelled before starting".to_string());
+        return Ok(SourceOutcome::Cancelled { name: entry.name });
     }
 
     let workspace = engine
@@ -292,7 +293,51 @@ async fn process_source_inner(
         "materializing source",
     );
 
-    let staged = match tag.as_str() {
+    let result = materialize_source(
+        engine,
+        &entry,
+        declared,
+        &tag,
+        &origin_value,
+        &workspace,
+        &subject_logger,
+    )
+    .await;
+    match result {
+        Ok(outcome) => Ok(outcome),
+        Err(_message) if engine.is_cancelled() => {
+            let run = engine.run.clone();
+            let scratch = workspace.temp_dir().to_path_buf();
+            let cleanup = run_blocking(move || run.remove_scratch(&scratch)).await;
+            if let Err(error) = cleanup.and_then(|result| result.map_err(|error| error.to_string()))
+            {
+                let message = format!("failed to clean cancelled source workspace: {error}");
+                log_subject_error(&subject_logger, &message);
+                return Err(message);
+            }
+            log_subject_cancelled(&subject_logger);
+            Ok(SourceOutcome::Cancelled { name: entry.name })
+        }
+        Err(message) => {
+            log_subject_error(&subject_logger, &message);
+            Err(message)
+        }
+    }
+}
+
+async fn materialize_source(
+    engine: &Arc<Engine>,
+    entry: &SourceEntry,
+    declared: ObjectHash,
+    tag: &str,
+    origin_value: &Value,
+    workspace: &Workspace,
+    subject_logger: &Arc<dyn BuildLogger>,
+) -> Result<SourceOutcome, String> {
+    if engine.is_cancelled() {
+        return Err("cancelled".to_string());
+    }
+    let staged = match tag {
         "Http" => {
             let origin_object = origin_value
                 .as_object()
@@ -300,23 +345,16 @@ async fn process_source_inner(
                 .ok_or_else(|| format!("source '{}': origin: expected object", entry.name))?;
             let origin = http::parse_http_origin(origin_object, "origin")
                 .map_err(|error| format!("source '{}': {error}", entry.name))?;
-            fetch_http_source(engine, &entry.name, &origin, &workspace, &subject_logger).await
+            fetch_http_source(engine, &entry.name, &origin, workspace, subject_logger).await
         }
-        "OciRegistry" => fetch_oci_source(engine, &origin_value, &workspace, &subject_logger).await,
-        "Path" => fetch_path_source(engine, &origin_value, &workspace, &subject_logger).await,
+        "OciRegistry" => fetch_oci_source(engine, origin_value, workspace, subject_logger).await,
+        "Path" => fetch_path_source(engine, origin_value, workspace, subject_logger).await,
         other => Err(format!(
             "source '{}': origin tag '{other}' is not supported by bobr",
             entry.name
         )),
     };
-    let staged = match staged {
-        Ok(staged) => staged,
-        Err(message) => {
-            let message = reclassified(engine, message);
-            log_subject_error(&subject_logger, &message);
-            return Err(message);
-        }
-    };
+    let staged = staged.map_err(|message| reclassified(engine, message))?;
 
     // Import through the same store code the build uses: canonical timestamps,
     // hashing, refs. A mismatch still imports -- that is the placeholder
@@ -365,16 +403,16 @@ async fn process_source_inner(
             // place someone can go and look: a local source that hashes
             // differently is a file on this disk, and naming it saves the
             // reader a trip through the recipes to find out which.
-            let from = origin_location(&origin_value)
+            let from = origin_location(origin_value)
                 .map(|location| format!(" (from {location})"))
                 .unwrap_or_default();
             let message = format!(
                 "source '{}'{from} materialized unexpected object hash: expected {}, got {}",
                 entry.name, declared, actual_hash
             );
-            log_subject_error(&subject_logger, &message);
+            log_subject_error(subject_logger, &message);
             Ok(SourceOutcome::Mismatched(Mismatch {
-                name: entry.name,
+                name: entry.name.clone(),
                 declared: declared.to_string(),
                 actual: actual_hash.to_string(),
             }))
@@ -895,6 +933,18 @@ fn log_subject_error(logger: &Arc<dyn BuildLogger>, message: &str) {
     });
 }
 
+fn log_subject_cancelled(logger: &Arc<dyn BuildLogger>) {
+    logger.log_event(BuildLogEvent {
+        level: BuildLogLevel::Info,
+        status: BuildStatus::Cancelled,
+        op: None,
+        message: "source acquisition cancelled".to_string(),
+        object_hash: None,
+        raw_log_path: None,
+        details: Map::new(),
+    });
+}
+
 /// A download milestone or tick. The host and the byte counts travel as fields
 /// rather than only inside the sentence: the live log adds them up, and adding
 /// up should not mean parsing prose written for a person.
@@ -941,6 +991,7 @@ mod tests {
         downloaded: u64,
         cache_hit: u64,
         local: u64,
+        cancelled: Vec<String>,
         mismatched: Vec<Mismatch>,
         failed: Vec<(String, String)>,
         retries: std::collections::BTreeMap<String, u64>,
@@ -949,7 +1000,7 @@ mod tests {
 
     impl TestSummary {
         fn is_success(&self) -> bool {
-            self.mismatched.is_empty() && self.failed.is_empty()
+            self.cancelled.is_empty() && self.mismatched.is_empty() && self.failed.is_empty()
         }
     }
 
@@ -1082,6 +1133,7 @@ mod tests {
                 SourceOutcome::Downloaded => summary.downloaded += 1,
                 SourceOutcome::CacheHit => summary.cache_hit += 1,
                 SourceOutcome::Local => summary.local += 1,
+                SourceOutcome::Cancelled { name } => summary.cancelled.push(name),
                 SourceOutcome::Mismatched(mismatch) => summary.mismatched.push(mismatch),
                 SourceOutcome::Failed { name, message } => summary.failed.push((name, message)),
             }

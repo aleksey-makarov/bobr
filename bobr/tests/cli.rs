@@ -213,6 +213,25 @@ fn assert_signal_cancels_run(signal: libc::c_int) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("error[cancelled]"), "{output:?}");
     assert!(!control_dir.exists(), "{control_dir:?} was not removed");
+    assert_eq!(
+        fs::read_dir(&work).unwrap().count(),
+        0,
+        "cancelled Source workspace was not removed"
+    );
+    let records = fs::read_to_string(logs.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let source_terminal = records
+        .iter()
+        .filter(|record| {
+            record["subject"]["tag"] == "Source"
+                && matches!(record["status"].as_str(), Some("failed" | "cancelled"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(source_terminal.len(), 1, "{records:#?}");
+    assert_eq!(source_terminal[0]["status"], "cancelled");
 }
 
 #[test]

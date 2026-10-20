@@ -86,11 +86,6 @@ impl DynamicRealizeError {
         }
     }
 
-    fn into_cancelled(mut self) -> Self {
-        self.cancelled = true;
-        self
-    }
-
     /// Returns whether external or propagated cancellation caused this error.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled
@@ -113,7 +108,11 @@ impl From<StoreError> for DynamicRealizeError {
 
 impl From<BuildExecutorError> for DynamicRealizeError {
     fn from(error: BuildExecutorError) -> Self {
-        Self::new(error.to_string())
+        if matches!(error, BuildExecutorError::Cancelled(_)) {
+            Self::cancelled(error.to_string())
+        } else {
+            Self::new(error.to_string())
+        }
     }
 }
 
@@ -224,28 +223,34 @@ impl DynamicRealizer {
             tasks.spawn(async move { (index, key, realizer.realize_local(key).await) });
         }
         let mut results = vec![None; self.graph.goals().len()];
+        let mut first_error = None;
         while let Some(joined) = tasks.join_next().await {
-            let (index, key, result) = joined.map_err(|error| {
-                DynamicRealizeError::new(format!("DAG realization task panicked: {error}"))
-            })?;
-            match result {
-                Ok(hash) => results[index] = Some((key, hash)),
+            match joined {
+                Ok((index, key, Ok(hash))) => {
+                    if first_error.is_none() {
+                        results[index] = Some((key, hash));
+                    }
+                }
+                Ok((_index, _key, Err(error))) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                        self.cancel_run();
+                    }
+                }
                 Err(error) => {
-                    let cancelled = self.cancellation.is_cancelled() || error.is_cancelled();
-                    self.cancellation.cancel();
-                    self.source_engine.cancel();
-                    tasks.abort_all();
-                    while tasks.join_next().await.is_some() {}
-                    cancellation_monitor.abort();
-                    return Err(if cancelled {
-                        error.into_cancelled()
-                    } else {
-                        error
-                    });
+                    if first_error.is_none() {
+                        first_error = Some(DynamicRealizeError::new(format!(
+                            "DAG realization task panicked: {error}"
+                        )));
+                        self.cancel_run();
+                    }
                 }
             }
         }
         cancellation_monitor.abort();
+        if let Some(error) = first_error {
+            return Err(error);
+        }
         Ok(results
             .into_iter()
             .map(|result| result.expect("every goal task produces one result"))
@@ -392,11 +397,11 @@ impl DynamicRealizer {
             let key = *key;
             tasks.spawn(async move { (index, name, realizer.realize_local(key).await) });
         }
-        let input_hashes =
-            collect_ordered_input_tasks(tasks, builder.inputs().len(), "local realization")
-                .await?
-                .into_iter()
-                .collect::<BTreeMap<_, _>>();
+        let input_hashes = self
+            .collect_ordered_input_tasks(tasks, builder.inputs().len(), "local realization")
+            .await?
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
         let reuse_key = builder
             .compute_reuse_key(&input_hashes)
             .map_err(|error| DynamicRealizeError::new(error.to_string()))?;
@@ -511,6 +516,9 @@ impl DynamicRealizer {
                     );
                     Ok(source.declared_object_hash())
                 }
+                SourceOutcome::Cancelled { name } => Err(DynamicRealizeError::cancelled(format!(
+                    "source '{name}' acquisition cancelled"
+                ))),
                 SourceOutcome::Mismatched(mismatch) => Err(DynamicRealizeError::new(format!(
                     "source '{}' declared object '{}' but materialized '{}'",
                     mismatch.name, mismatch.declared, mismatch.actual
@@ -670,9 +678,9 @@ impl DynamicRealizer {
             let key = *key;
             tasks.spawn(async move { (index, name, realizer.candidates(key).await) });
         }
-        let candidates =
-            collect_ordered_input_tasks(tasks, builder.inputs().len(), "candidate resolution")
-                .await?;
+        let candidates = self
+            .collect_ordered_input_tasks(tasks, builder.inputs().len(), "candidate resolution")
+            .await?;
         let mut slots = Vec::with_capacity(candidates.len());
         for (name, candidates) in candidates {
             if candidates.is_empty() {
@@ -807,20 +815,26 @@ impl DynamicRealizer {
         &self,
         keys: &[BuildKey],
     ) -> Result<Vec<MappingCandidates<BuildKey>>, DynamicRealizeError> {
-        self.secondary
-            .lookup_builds(keys)
-            .await
-            .map_err(DynamicRealizeError::from)
+        self.secondary.lookup_builds(keys).await.map_err(|error| {
+            if self.cancellation.is_cancelled() {
+                DynamicRealizeError::cancelled("build cancelled by signal")
+            } else {
+                DynamicRealizeError::from(error)
+            }
+        })
     }
 
     async fn secondary_reuses(
         &self,
         keys: &[ReuseKey],
     ) -> Result<Vec<MappingCandidates<ReuseKey>>, DynamicRealizeError> {
-        self.secondary
-            .lookup_reuses(keys)
-            .await
-            .map_err(DynamicRealizeError::from)
+        self.secondary.lookup_reuses(keys).await.map_err(|error| {
+            if self.cancellation.is_cancelled() {
+                DynamicRealizeError::cancelled("build cancelled by signal")
+            } else {
+                DynamicRealizeError::from(error)
+            }
+        })
     }
 
     fn node(&self, key: BuildKey) -> Result<Arc<PlannedNode>, DynamicRealizeError> {
@@ -835,6 +849,53 @@ impl DynamicRealizer {
         } else {
             Ok(())
         }
+    }
+
+    fn cancel_run(&self) {
+        self.cancellation.cancel();
+        self.source_engine.cancel();
+    }
+
+    async fn collect_ordered_input_tasks<T: Send + 'static>(
+        &self,
+        mut tasks: JoinSet<(usize, String, Result<T, DynamicRealizeError>)>,
+        count: usize,
+        operation: &str,
+    ) -> Result<Vec<(String, T)>, DynamicRealizeError> {
+        let mut ordered = std::iter::repeat_with(|| None)
+            .take(count)
+            .collect::<Vec<Option<(String, T)>>>();
+        let mut first_error = None;
+        while let Some(joined) = tasks.join_next().await {
+            match joined {
+                Ok((index, name, Ok(value))) => {
+                    if first_error.is_none() {
+                        ordered[index] = Some((name, value));
+                    }
+                }
+                Ok((_index, _name, Err(error))) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                        self.cancel_run();
+                    }
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(DynamicRealizeError::new(format!(
+                            "input {operation} task panicked: {error}"
+                        )));
+                        self.cancel_run();
+                    }
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(ordered
+            .into_iter()
+            .map(|result| result.expect("every input task produces one result"))
+            .collect())
     }
 
     fn log_mapping<K: Copy>(&self, kind: &str, key: &str, report: &MappingCandidates<K>) {
@@ -1103,41 +1164,6 @@ fn log_content_terminal(
             .clone(),
         },
     );
-}
-
-async fn collect_ordered_input_tasks<T: Send + 'static>(
-    mut tasks: JoinSet<(usize, String, Result<T, DynamicRealizeError>)>,
-    count: usize,
-    operation: &str,
-) -> Result<Vec<(String, T)>, DynamicRealizeError> {
-    let mut ordered = std::iter::repeat_with(|| None)
-        .take(count)
-        .collect::<Vec<Option<(String, T)>>>();
-    while let Some(joined) = tasks.join_next().await {
-        let (index, name, result) = match joined {
-            Ok(output) => output,
-            Err(error) => {
-                tasks.abort_all();
-                while tasks.join_next().await.is_some() {}
-                return Err(DynamicRealizeError::new(format!(
-                    "input {operation} task panicked: {error}"
-                )));
-            }
-        };
-        let value = match result {
-            Ok(value) => value,
-            Err(error) => {
-                tasks.abort_all();
-                while tasks.join_next().await.is_some() {}
-                return Err(error);
-            }
-        };
-        ordered[index] = Some((name, value));
-    }
-    Ok(ordered
-        .into_iter()
-        .map(|result| result.expect("every input task produces one result"))
-        .collect())
 }
 
 struct CandidateProduct<'a> {
@@ -1470,6 +1496,81 @@ mod tests {
             concurrent
         });
         Ok((left_url, right_url, handle))
+    }
+
+    fn spawn_failing_source_pair() -> std::io::Result<(String, String, thread::JoinHandle<bool>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let fail_url = format!("http://{address}/fail");
+        let hang_url = format!("http://{address}/hang");
+        let handle = thread::spawn(move || {
+            let mut fail = None;
+            let mut hang = None;
+            while fail.is_none() || hang.is_none() {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_http_request(&mut stream);
+                if request.starts_with("GET /fail ") {
+                    fail = Some(stream);
+                } else if request.starts_with("GET /hang ") {
+                    hang = Some(stream);
+                } else {
+                    panic!("unexpected source request: {request}");
+                }
+            }
+
+            let mut fail = fail.unwrap();
+            fail.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+            fail.flush().unwrap();
+
+            let mut hang = hang.unwrap();
+            hang.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut byte = [0_u8; 1];
+            match hang.read(&mut byte) {
+                Ok(0) => true,
+                Err(error) => matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+                ),
+                Ok(_) => false,
+            }
+        });
+        Ok((fail_url, hang_url, handle))
+    }
+
+    fn assert_source_failure_cancelled_its_sibling(environment: &TestEnvironment) {
+        environment.logger.flush();
+        let records = fs::read_to_string(environment.run.logs_dir().join("events.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let mut terminal = records
+            .iter()
+            .filter(|record| {
+                record["subject"]["tag"] == "Source"
+                    && matches!(record["status"].as_str(), Some("failed" | "cancelled"))
+            })
+            .map(|record| {
+                (
+                    record["subject"]["name"].as_str().unwrap(),
+                    record["status"].as_str().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        terminal.sort_unstable();
+        assert_eq!(terminal, [("fail", "failed"), ("hang", "cancelled")]);
+        assert_eq!(environment.logger.outcome_stats().failed, 1);
+        assert_eq!(environment.logger.outcome_stats().cancelled, 1);
+
+        let workspaces = fs::read_dir(environment.run.work_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(workspaces.len(), 1, "unexpected workspaces: {workspaces:?}");
+        assert!(workspaces[0].to_string_lossy().contains("Source-fail"));
     }
 
     fn read_http_request(stream: &mut TcpStream) -> String {
@@ -2472,6 +2573,96 @@ mod tests {
         assert_eq!(workspace_count, 1);
         assert_eq!(environment.logger.outcome_stats().built, 1);
         assert_eq!(environment.logger.outcome_stats().cache_hit, 0);
+        executor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_goal_cooperatively_cancels_and_drains_sibling_sources() {
+        let environment = environment("goal-source-cancellation");
+        let (fail_url, hang_url, server) = spawn_failing_source_pair().unwrap();
+        let fail_hash = ObjectHash::from_str(&"a".repeat(64)).unwrap();
+        let hang_hash = ObjectHash::from_str(&"b".repeat(64)).unwrap();
+        let graph = Arc::new(
+            plan_graph(
+                &BTreeMap::from([
+                    (
+                        "fail".to_string(),
+                        http_source("fail", fail_hash, &fail_url),
+                    ),
+                    (
+                        "hang".to_string(),
+                        http_source("hang", hang_hash, &hang_url),
+                    ),
+                    (
+                        "hang-alias".to_string(),
+                        http_source("hang", hang_hash, &hang_url),
+                    ),
+                ]),
+                &[
+                    "fail".to_string(),
+                    "hang".to_string(),
+                    "hang-alias".to_string(),
+                ],
+            )
+            .unwrap(),
+        );
+        let (realizer, executor) = dynamic(&environment, graph, Vec::new(), Vec::new());
+
+        let error = realizer.realize_goals().await.unwrap_err();
+
+        assert!(
+            !error.is_cancelled(),
+            "the original failure was lost: {error}"
+        );
+        assert!(error.to_string().contains("404 Not Found"), "{error}");
+        assert!(
+            server.join().unwrap(),
+            "the hanging HTTP request was not dropped"
+        );
+        assert_source_failure_cancelled_its_sibling(&environment);
+        executor.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_builder_input_cooperatively_cancels_and_drains_siblings() {
+        let environment = environment("input-source-cancellation");
+        let (fail_url, hang_url, server) = spawn_failing_source_pair().unwrap();
+        let fail_hash = ObjectHash::from_str(&"c".repeat(64)).unwrap();
+        let hang_hash = ObjectHash::from_str(&"d".repeat(64)).unwrap();
+        let graph = Arc::new(
+            plan_graph(
+                &BTreeMap::from([
+                    (
+                        "fail".to_string(),
+                        http_source("fail", fail_hash, &fail_url),
+                    ),
+                    (
+                        "hang".to_string(),
+                        http_source("hang", hang_hash, &hang_url),
+                    ),
+                    (
+                        "root".to_string(),
+                        group_with_inputs("root", &[("fail", "fail"), ("hang", "hang")]),
+                    ),
+                ]),
+                &["root".to_string()],
+            )
+            .unwrap(),
+        );
+        let (realizer, executor) = dynamic(&environment, graph, Vec::new(), Vec::new());
+
+        let error = realizer.realize_goals().await.unwrap_err();
+
+        assert!(
+            !error.is_cancelled(),
+            "the original failure was lost: {error}"
+        );
+        assert!(error.to_string().contains("404 Not Found"), "{error}");
+        assert!(
+            server.join().unwrap(),
+            "the hanging HTTP request was not dropped"
+        );
+        assert_source_failure_cancelled_its_sibling(&environment);
         executor.shutdown().await.unwrap();
     }
 
