@@ -11,7 +11,6 @@ use crate::runtime::{Runtime, RuntimeError, RuntimeFunction, RuntimeResult};
 use crate::runtime_host::HostRuntime;
 use crate::runtime_ns::{JsonCodec, NsRuntime, WireCodec};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 /// Execution backend selected for a [`RuntimeProvider`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +48,6 @@ impl<C> std::fmt::Debug for RuntimeProvider<C> {
 
 struct RuntimeProviderInner<C> {
     backend: RuntimeBackend,
-    namespace_call_timeout: Option<Duration>,
     namespace_runtime: Mutex<Option<Arc<NsRuntime<C>>>>,
 }
 
@@ -73,13 +71,6 @@ impl RuntimeProvider<JsonCodec> {
     pub fn namespace() -> Self {
         Self::namespace_with_codec()
     }
-
-    /// Create a namespace provider with a per-call timeout.
-    ///
-    /// The timeout is applied to the lazily constructed [`NsRuntime`].
-    pub fn namespace_with_call_timeout(timeout: Duration) -> Self {
-        Self::namespace_with_codec_call_timeout(timeout)
-    }
 }
 
 impl<C> RuntimeProvider<C> {
@@ -88,24 +79,19 @@ impl<C> RuntimeProvider<C> {
     /// Codec `C` is used only by namespace providers. Host providers execute
     /// functions in-process and do not encode payloads.
     pub fn new_with_codec(backend: RuntimeBackend) -> Self {
-        Self::from_parts(backend, None)
+        Self::from_backend(backend)
     }
 
     /// Create a host provider using codec `C` for any future namespace calls.
     pub fn host_with_codec() -> Self {
-        Self::from_parts(RuntimeBackend::Host, None)
+        Self::from_backend(RuntimeBackend::Host)
     }
 
     /// Create a namespace provider using codec `C`.
     ///
     /// Namespace setup is deferred until the first [`Runtime::run`] call.
     pub fn namespace_with_codec() -> Self {
-        Self::from_parts(RuntimeBackend::Namespace, None)
-    }
-
-    /// Create a namespace provider using codec `C` and a per-call timeout.
-    pub fn namespace_with_codec_call_timeout(timeout: Duration) -> Self {
-        Self::from_parts(RuntimeBackend::Namespace, Some(timeout))
+        Self::from_backend(RuntimeBackend::Namespace)
     }
 
     /// Return the selected execution backend.
@@ -113,23 +99,10 @@ impl<C> RuntimeProvider<C> {
         self.inner.backend
     }
 
-    /// Return the configured namespace per-call timeout.
-    ///
-    /// `None` means namespace calls run without a runtime-enforced deadline.
-    /// For host providers this value is always `None`.
-    pub fn namespace_call_timeout(&self) -> Option<Duration> {
-        self.inner.namespace_call_timeout
-    }
-
-    fn from_parts(backend: RuntimeBackend, namespace_call_timeout: Option<Duration>) -> Self {
-        let namespace_call_timeout = match backend {
-            RuntimeBackend::Host => None,
-            RuntimeBackend::Namespace => namespace_call_timeout,
-        };
+    fn from_backend(backend: RuntimeBackend) -> Self {
         Self {
             inner: Arc::new(RuntimeProviderInner {
                 backend,
-                namespace_call_timeout,
                 namespace_runtime: Mutex::new(None),
             }),
         }
@@ -150,11 +123,7 @@ where
             return Ok(Arc::clone(runtime));
         }
 
-        let mut runtime = NsRuntime::<C>::new_with_codec()?;
-        if let Some(timeout) = self.inner.namespace_call_timeout {
-            runtime = runtime.with_call_timeout(timeout);
-        }
-        let runtime = Arc::new(runtime);
+        let runtime = Arc::new(NsRuntime::<C>::new_with_codec()?);
         *guard = Some(Arc::clone(&runtime));
         Ok(runtime)
     }
@@ -212,7 +181,6 @@ mod tests {
     use super::{RuntimeBackend, RuntimeProvider, runtime_backend_for_effective_uid};
     use crate::runtime::{Runtime, RuntimeError, RuntimeFunction};
     use serde::{Deserialize, Serialize};
-    use std::time::Duration;
 
     #[test]
     fn root_effective_uid_uses_host_runtime() {
@@ -262,7 +230,6 @@ mod tests {
 
         assert_eq!(output, "hello");
         assert_eq!(runtime.backend(), RuntimeBackend::Host);
-        assert_eq!(runtime.namespace_call_timeout(), None);
     }
 
     #[test]
@@ -270,24 +237,6 @@ mod tests {
         let runtime = RuntimeProvider::namespace();
 
         assert_eq!(runtime.backend(), RuntimeBackend::Namespace);
-        assert_eq!(runtime.namespace_call_timeout(), None);
-    }
-
-    #[test]
-    fn namespace_timeout_is_recorded() {
-        let timeout = Duration::from_secs(5);
-        let runtime = RuntimeProvider::namespace_with_call_timeout(timeout);
-
-        assert_eq!(runtime.backend(), RuntimeBackend::Namespace);
-        assert_eq!(runtime.namespace_call_timeout(), Some(timeout));
-    }
-
-    #[test]
-    fn host_provider_ignores_namespace_timeout() {
-        let runtime: RuntimeProvider = RuntimeProvider::new_with_codec(RuntimeBackend::Host);
-
-        assert_eq!(runtime.backend(), RuntimeBackend::Host);
-        assert_eq!(runtime.namespace_call_timeout(), None);
     }
 
     #[test]

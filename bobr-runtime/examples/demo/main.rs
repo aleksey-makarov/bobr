@@ -9,7 +9,6 @@ use bobr_runtime::runtime_ns::{NsFunction, NsRuntime, worker_invocation_from_env
 use checked_divide::{CheckedDivide, DivideInput};
 use namespace_identity::{NamespaceIdentity, NamespaceIdentityInput};
 use std::process::ExitCode;
-use std::time::Duration;
 use uppercase::{Uppercase, UppercaseInput};
 
 fn main() -> ExitCode {
@@ -32,7 +31,7 @@ fn real_main() -> RuntimeResult<()> {
     let identity = NamespaceIdentity;
 
     let host = HostRuntime::new();
-    let namespace = NsRuntime::new()?.with_call_timeout(Duration::from_secs(30));
+    let namespace = NsRuntime::new()?;
 
     run_example(
         "host",

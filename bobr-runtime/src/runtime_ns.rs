@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 const MAX_IDMAP_HELPER_STDERR_LEN: usize = 64 * 1024;
@@ -88,22 +88,17 @@ impl WireCodec for JsonCodec {
 /// that output explicitly, for example by using `Command::output` or piped
 /// `Stdio`; inherited subprocess stdout and stderr are discarded.
 ///
-/// Calls do not have a timeout by default. Use
-/// [`NsRuntime::with_call_timeout`] to bound each `Runtime::run` call.
 pub struct NsRuntime<C = JsonCodec> {
     executable: File,
     idmap: HostIdmap,
     tools: NsTools,
     next_id: AtomicU64,
-    call_timeout: Option<Duration>,
     _codec: PhantomData<fn() -> C>,
 }
 
 impl<C> std::fmt::Debug for NsRuntime<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NsRuntime")
-            .field("call_timeout", &self.call_timeout)
-            .finish_non_exhaustive()
+        f.debug_struct("NsRuntime").finish_non_exhaustive()
     }
 }
 
@@ -154,38 +149,8 @@ where
             idmap,
             tools,
             next_id: AtomicU64::new(0),
-            call_timeout: None,
             _codec: PhantomData,
         })
-    }
-
-    /// Return a runtime that times out each namespace call after `timeout`.
-    ///
-    /// The timeout applies to the whole [`Runtime::run`] call: worker launch,
-    /// namespace setup, request/response I/O, and child process exit. On
-    /// timeout the parent kills the worker process group and reaps the worker.
-    ///
-    /// A zero duration is allowed and means that calls time out immediately.
-    pub fn with_call_timeout(mut self, timeout: Duration) -> Self {
-        self.call_timeout = Some(timeout);
-        self
-    }
-
-    /// Return a runtime with per-call timeouts disabled.
-    ///
-    /// This restores the default behavior of [`NsRuntime::new`] and
-    /// [`NsRuntime::new_with_codec`].
-    pub fn without_call_timeout(mut self) -> Self {
-        self.call_timeout = None;
-        self
-    }
-
-    /// Return the configured per-call timeout.
-    ///
-    /// `None` means namespace runtime calls are allowed to run without a
-    /// runtime-enforced deadline.
-    pub fn call_timeout(&self) -> Option<Duration> {
-        self.call_timeout
     }
 }
 
@@ -211,17 +176,11 @@ where
 {
     fn call_erased(&self, function_name: &str, input: Vec<u8>) -> RuntimeResult<Vec<u8>> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let deadline = CallDeadline::new(function_name, self.call_timeout);
-        deadline.ensure("starting call")?;
 
         let launch = fork_ns_worker(&self.executable)?;
-        if let Err(error) = complete_namespace_setup(
-            &launch.child,
-            &launch.handshake,
-            &self.tools,
-            &self.idmap,
-            &deadline,
-        ) {
+        if let Err(error) =
+            complete_namespace_setup(&launch.child, &launch.handshake, &self.tools, &self.idmap)
+        {
             terminate_child(&launch.child);
             drop(launch.handshake);
             drop(launch.protocol_writer);
@@ -229,7 +188,7 @@ where
             return Err(error);
         }
 
-        self.call_worker(function_name, id, input, launch, &deadline)
+        self.call_worker(function_name, id, input, launch)
     }
 
     fn call_worker(
@@ -238,7 +197,6 @@ where
         id: u64,
         input: Vec<u8>,
         launch: NsLaunch,
-        deadline: &CallDeadline<'_>,
     ) -> RuntimeResult<Vec<u8>> {
         let NsLaunch {
             child,
@@ -254,12 +212,11 @@ where
             input,
             protocol_writer.as_raw_fd(),
             protocol_reader.as_raw_fd(),
-            deadline,
         );
         drop(protocol_writer);
         drop(protocol_reader);
 
-        let wait_result = wait_for_child(child, deadline);
+        let wait_result = wait_for_child(child);
         match (call_result, wait_result) {
             (Ok(output), Ok(())) => Ok(output),
             (Ok(_), Err(wait_error)) => Err(wait_error),
@@ -277,7 +234,6 @@ fn send_call_and_read_response<C>(
     input: Vec<u8>,
     protocol_write_fd: RawFd,
     protocol_read_fd: RawFd,
-    deadline: &CallDeadline<'_>,
 ) -> RuntimeResult<Vec<u8>>
 where
     C: WireCodec,
@@ -287,14 +243,14 @@ where
         function: function_name.to_string(),
     };
     let request = C::encode(&request)?;
-    write_frame_until(protocol_write_fd, &request, deadline, "protocol request")?;
-    write_frame_until(protocol_write_fd, &input, deadline, "protocol input")?;
+    write_frame_fd(protocol_write_fd, &request, "protocol request")?;
+    write_frame_fd(protocol_write_fd, &input, "protocol input")?;
 
-    let response = read_frame_until(protocol_read_fd, deadline, "protocol response")?
+    let response = read_frame_fd(protocol_read_fd, "protocol response")?
         .ok_or_else(|| RuntimeError::new("namespace runtime exited without response"))?;
     match C::decode::<ChildToParent>(&response)? {
         ChildToParent::Ok { id: response_id } if response_id == id => {
-            read_frame_until(protocol_read_fd, deadline, "protocol output")?
+            read_frame_fd(protocol_read_fd, "protocol output")?
                 .ok_or_else(|| RuntimeError::new("namespace runtime exited without output frame"))
         }
         ChildToParent::Err {
@@ -636,57 +592,6 @@ impl ChildToParent {
     }
 }
 
-struct CallDeadline<'a> {
-    function_name: &'a str,
-    started_at: Instant,
-    timeout: Option<Duration>,
-}
-
-impl<'a> CallDeadline<'a> {
-    fn new(function_name: &'a str, timeout: Option<Duration>) -> Self {
-        Self {
-            function_name,
-            started_at: Instant::now(),
-            timeout,
-        }
-    }
-
-    fn has_timeout(&self) -> bool {
-        self.timeout.is_some()
-    }
-
-    fn is_expired(&self) -> bool {
-        self.timeout
-            .is_some_and(|timeout| self.started_at.elapsed() >= timeout)
-    }
-
-    fn ensure(&self, phase: &'static str) -> RuntimeResult<()> {
-        self.remaining(phase).map(|_| ())
-    }
-
-    fn remaining(&self, phase: &'static str) -> RuntimeResult<Option<Duration>> {
-        let Some(timeout) = self.timeout else {
-            return Ok(None);
-        };
-        let elapsed = self.started_at.elapsed();
-        if elapsed >= timeout {
-            return Err(self.timeout_error(phase));
-        }
-        Ok(Some(timeout - elapsed))
-    }
-
-    fn timeout_error(&self, phase: &'static str) -> RuntimeError {
-        let timeout = self
-            .timeout
-            .map(|timeout| format!("{timeout:?}"))
-            .unwrap_or_else(|| "disabled timeout".to_string());
-        RuntimeError::new(format!(
-            "namespace runtime timed out after {timeout} while running '{}' during {phase}",
-            self.function_name
-        ))
-    }
-}
-
 struct NsLaunch {
     child: NsChild,
     handshake: NsHandshake,
@@ -944,11 +849,6 @@ fn fork_ns_worker(executable: &File) -> RuntimeResult<NsLaunch> {
     drop(worker_stderr);
     drop(userns_ready_write);
     drop(idmap_ready_read);
-    set_fd_nonblocking(protocol_request_write.as_raw_fd(), true)?;
-    set_fd_nonblocking(protocol_response_read.as_raw_fd(), true)?;
-    set_fd_nonblocking(userns_ready_read.as_raw_fd(), true)?;
-    set_fd_nonblocking(idmap_ready_write.as_raw_fd(), true)?;
-
     Ok(NsLaunch {
         child: NsChild { pid },
         handshake: NsHandshake {
@@ -982,11 +882,10 @@ fn complete_namespace_setup(
     handshake: &NsHandshake,
     tools: &NsTools,
     idmap: &HostIdmap,
-    deadline: &CallDeadline<'_>,
 ) -> RuntimeResult<()> {
-    wait_for_child_userns(handshake.userns_ready_read.as_raw_fd(), deadline)?;
-    configure_id_maps(tools, child.pid_u32(), idmap, deadline)?;
-    signal_child_ready(handshake.idmap_ready_write.as_raw_fd(), deadline)
+    wait_for_child_userns(handshake.userns_ready_read.as_raw_fd())?;
+    configure_id_maps(tools, child.pid_u32(), idmap)?;
+    signal_child_ready(handshake.idmap_ready_write.as_raw_fd())
 }
 
 // Child-only post-fork/pre-exec setup.
@@ -1153,12 +1052,16 @@ fn child_read_handshake_byte(fd: RawFd) -> bool {
     }
 }
 
-fn wait_for_child_userns(fd: RawFd, deadline: &CallDeadline<'_>) -> RuntimeResult<()> {
-    read_handshake_byte_until(fd, "child user namespace setup", deadline)
+fn wait_for_child_userns(fd: RawFd) -> RuntimeResult<()> {
+    read_handshake_byte(fd, "child user namespace setup")
 }
 
-fn signal_child_ready(fd: RawFd, deadline: &CallDeadline<'_>) -> RuntimeResult<()> {
-    write_handshake_byte_until(fd, "id map readiness", deadline)
+fn signal_child_ready(fd: RawFd) -> RuntimeResult<()> {
+    write_all_fd(fd, &[1], "id map readiness").map_err(|error| {
+        RuntimeError::new(format!(
+            "failed to signal namespace runtime readiness: {error}"
+        ))
+    })
 }
 
 fn write_handshake_byte(fd: RawFd) -> io::Result<()> {
@@ -1171,11 +1074,7 @@ fn write_handshake_byte(fd: RawFd) -> io::Result<()> {
     }
 }
 
-fn read_handshake_byte_until(
-    fd: RawFd,
-    label: &'static str,
-    deadline: &CallDeadline<'_>,
-) -> RuntimeResult<()> {
+fn read_handshake_byte(fd: RawFd, label: &'static str) -> RuntimeResult<()> {
     let mut byte = [0_u8; 1];
     loop {
         let result = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), byte.len()) };
@@ -1190,7 +1089,6 @@ fn read_handshake_byte_until(
         let error = io::Error::last_os_error();
         match error.kind() {
             io::ErrorKind::Interrupted => {}
-            io::ErrorKind::WouldBlock => poll_fd_until(fd, libc::POLLIN, deadline, label)?,
             _ => {
                 return Err(RuntimeError::new(format!(
                     "failed to read namespace runtime {label} pipe: {error}"
@@ -1200,25 +1098,7 @@ fn read_handshake_byte_until(
     }
 }
 
-fn write_handshake_byte_until(
-    fd: RawFd,
-    label: &'static str,
-    deadline: &CallDeadline<'_>,
-) -> RuntimeResult<()> {
-    let byte = [1_u8; 1];
-    write_all_fd_until(fd, &byte, deadline, label).map_err(|error| {
-        RuntimeError::new(format!(
-            "failed to signal namespace runtime readiness: {error}"
-        ))
-    })
-}
-
-fn configure_id_maps(
-    tools: &NsTools,
-    pid: u32,
-    idmap: &HostIdmap,
-    deadline: &CallDeadline<'_>,
-) -> RuntimeResult<()> {
+fn configure_id_maps(tools: &NsTools, pid: u32, idmap: &HostIdmap) -> RuntimeResult<()> {
     run_map_command(
         &tools.newuidmap,
         pid,
@@ -1226,7 +1106,6 @@ fn configure_id_maps(
             ("0", idmap.current_uid, 1),
             ("1", idmap.subuid.base, idmap.subuid.count),
         ],
-        deadline,
     )?;
     write_setgroups_deny(pid)?;
     run_map_command(
@@ -1236,7 +1115,6 @@ fn configure_id_maps(
             ("0", idmap.current_gid, 1),
             ("1", idmap.subgid.base, idmap.subgid.count),
         ],
-        deadline,
     )
 }
 
@@ -1244,7 +1122,6 @@ fn run_map_command<const N: usize>(
     program: &Path,
     pid: u32,
     ranges: [(&str, u32, u32); N],
-    deadline: &CallDeadline<'_>,
 ) -> RuntimeResult<()> {
     let mut command = Command::new(program);
     command
@@ -1290,11 +1167,7 @@ fn run_map_command<const N: usize>(
                 )));
             }
             None => {
-                if let Err(error) = sleep_until_deadline(deadline, "id map helper") {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(error);
-                }
+                thread::sleep(Duration::from_millis(10));
             }
         }
     }
@@ -1317,16 +1190,8 @@ fn terminate_child(child: &NsChild) {
     let _ = wait_for_pid(child.pid);
 }
 
-fn wait_for_child(child: NsChild, deadline: &CallDeadline<'_>) -> RuntimeResult<()> {
-    let status = match wait_for_pid_until(child.pid, deadline, "child exit") {
-        Ok(status) => status,
-        Err(error) if deadline.is_expired() => {
-            kill_child_process_group(&child);
-            let _ = wait_for_pid(child.pid);
-            return Err(error);
-        }
-        Err(error) => return Err(error),
-    };
+fn wait_for_child(child: NsChild) -> RuntimeResult<()> {
+    let status = wait_for_pid(child.pid)?;
     if raw_wait_status_success(status) {
         Ok(())
     } else {
@@ -1351,34 +1216,6 @@ fn wait_for_pid(pid: libc::pid_t) -> RuntimeResult<i32> {
         let result = unsafe { libc::waitpid(pid, &mut status, 0) };
         if result == pid {
             return Ok(status);
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(RuntimeError::new(format!(
-                "failed to wait for namespace runtime pid {pid}: {error}"
-            )));
-        }
-    }
-}
-
-fn wait_for_pid_until(
-    pid: libc::pid_t,
-    deadline: &CallDeadline<'_>,
-    phase: &'static str,
-) -> RuntimeResult<i32> {
-    if !deadline.has_timeout() {
-        return wait_for_pid(pid);
-    }
-
-    let mut status = 0;
-    loop {
-        let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-        if result == pid {
-            return Ok(status);
-        }
-        if result == 0 {
-            sleep_until_deadline(deadline, phase)?;
-            continue;
         }
         let error = io::Error::last_os_error();
         if error.kind() != io::ErrorKind::Interrupted {
@@ -1440,61 +1277,6 @@ fn drain_nonblocking(reader: &mut impl Read, output: &mut Vec<u8>) -> RuntimeRes
 fn append_idmap_helper_stderr(output: &mut Vec<u8>, bytes: &[u8]) {
     let remaining = MAX_IDMAP_HELPER_STDERR_LEN.saturating_sub(output.len());
     output.extend_from_slice(&bytes[..bytes.len().min(remaining)]);
-}
-
-fn poll_fd_until(
-    fd: RawFd,
-    events: libc::c_short,
-    deadline: &CallDeadline<'_>,
-    phase: &'static str,
-) -> RuntimeResult<()> {
-    loop {
-        let timeout_ms = deadline
-            .remaining(phase)?
-            .map(duration_to_poll_timeout_ms)
-            .unwrap_or(-1);
-        let mut poll_fd = libc::pollfd {
-            fd,
-            events,
-            revents: 0,
-        };
-        let result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
-        if result > 0 {
-            if poll_fd.revents & libc::POLLNVAL != 0 {
-                return Err(RuntimeError::new(format!(
-                    "namespace runtime fd {fd} is invalid during {phase}"
-                )));
-            }
-            return Ok(());
-        }
-        if result == 0 {
-            return Err(deadline.timeout_error(phase));
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(RuntimeError::new(format!(
-                "failed to poll namespace runtime fd {fd} during {phase}: {error}"
-            )));
-        }
-    }
-}
-
-fn duration_to_poll_timeout_ms(duration: Duration) -> libc::c_int {
-    let millis = duration.as_millis();
-    if millis == 0 {
-        1
-    } else {
-        millis.min(libc::c_int::MAX as u128) as libc::c_int
-    }
-}
-
-fn sleep_until_deadline(deadline: &CallDeadline<'_>, phase: &'static str) -> RuntimeResult<()> {
-    let Some(remaining) = deadline.remaining(phase)? else {
-        thread::sleep(Duration::from_millis(10));
-        return Ok(());
-    };
-    thread::sleep(remaining.min(Duration::from_millis(10)));
-    Ok(())
 }
 
 fn current_username(current_uid: u32) -> RuntimeResult<Option<String>> {
@@ -1673,12 +1455,7 @@ fn write_frame(writer: &mut impl Write, payload: &[u8]) -> RuntimeResult<()> {
     Ok(())
 }
 
-fn write_frame_until(
-    fd: RawFd,
-    payload: &[u8],
-    deadline: &CallDeadline<'_>,
-    phase: &'static str,
-) -> RuntimeResult<()> {
+fn write_frame_fd(fd: RawFd, payload: &[u8], phase: &'static str) -> RuntimeResult<()> {
     if payload.len() > MAX_FRAME_LEN {
         return Err(RuntimeError::new(format!(
             "frame length {} exceeds limit {}",
@@ -1688,16 +1465,11 @@ fn write_frame_until(
     }
     let len = u32::try_from(payload.len())
         .map_err(|_| RuntimeError::new(format!("frame length {} exceeds u32", payload.len())))?;
-    write_all_fd_until(fd, &len.to_be_bytes(), deadline, phase)?;
-    write_all_fd_until(fd, payload, deadline, phase)
+    write_all_fd(fd, &len.to_be_bytes(), phase)?;
+    write_all_fd(fd, payload, phase)
 }
 
-fn write_all_fd_until(
-    fd: RawFd,
-    mut bytes: &[u8],
-    deadline: &CallDeadline<'_>,
-    phase: &'static str,
-) -> RuntimeResult<()> {
+fn write_all_fd(fd: RawFd, mut bytes: &[u8], phase: &'static str) -> RuntimeResult<()> {
     while !bytes.is_empty() {
         let result = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
         if result > 0 {
@@ -1713,7 +1485,6 @@ fn write_all_fd_until(
         let error = io::Error::last_os_error();
         match error.kind() {
             io::ErrorKind::Interrupted => {}
-            io::ErrorKind::WouldBlock => poll_fd_until(fd, libc::POLLOUT, deadline, phase)?,
             _ => {
                 return Err(RuntimeError::new(format!(
                     "failed to write namespace runtime fd {fd} during {phase}: {error}"
@@ -1759,13 +1530,9 @@ fn read_frame(reader: &mut impl Read) -> RuntimeResult<Option<Vec<u8>>> {
     Ok(Some(payload))
 }
 
-fn read_frame_until(
-    fd: RawFd,
-    deadline: &CallDeadline<'_>,
-    phase: &'static str,
-) -> RuntimeResult<Option<Vec<u8>>> {
+fn read_frame_fd(fd: RawFd, phase: &'static str) -> RuntimeResult<Option<Vec<u8>>> {
     let mut header = [0_u8; 4];
-    if !read_exact_fd_until(fd, &mut header, true, deadline, phase)? {
+    if !read_exact_fd(fd, &mut header, true, phase)? {
         return Ok(None);
     }
 
@@ -1777,16 +1544,15 @@ fn read_frame_until(
     }
 
     let mut payload = vec![0_u8; len];
-    read_exact_fd_until(fd, &mut payload, false, deadline, phase)?;
+    read_exact_fd(fd, &mut payload, false, phase)?;
 
     Ok(Some(payload))
 }
 
-fn read_exact_fd_until(
+fn read_exact_fd(
     fd: RawFd,
     buffer: &mut [u8],
     allow_empty_eof: bool,
-    deadline: &CallDeadline<'_>,
     phase: &'static str,
 ) -> RuntimeResult<bool> {
     let mut read = 0;
@@ -1809,7 +1575,6 @@ fn read_exact_fd_until(
         let error = io::Error::last_os_error();
         match error.kind() {
             io::ErrorKind::Interrupted => {}
-            io::ErrorKind::WouldBlock => poll_fd_until(fd, libc::POLLIN, deadline, phase)?,
             _ => {
                 return Err(RuntimeError::new(format!(
                     "failed to read namespace runtime fd {fd} during {phase}: {error}"
@@ -1909,36 +1674,6 @@ mod tests {
         );
     }
 
-    fn test_ns_runtime() -> NsRuntime {
-        NsRuntime {
-            executable: open_current_executable().unwrap(),
-            idmap: HostIdmap {
-                current_uid: 0,
-                current_gid: 0,
-                subuid: SubidRange { base: 1, count: 1 },
-                subgid: SubidRange { base: 1, count: 1 },
-            },
-            tools: NsTools {
-                newuidmap: PathBuf::new(),
-                newgidmap: PathBuf::new(),
-            },
-            next_id: AtomicU64::new(0),
-            call_timeout: None,
-            _codec: PhantomData,
-        }
-    }
-
-    #[test]
-    fn call_timeout_api_sets_and_clears_timeout() {
-        let timeout = Duration::from_secs(30);
-
-        let runtime = test_ns_runtime().with_call_timeout(timeout);
-        assert_eq!(runtime.call_timeout(), Some(timeout));
-
-        let runtime = runtime.without_call_timeout();
-        assert_eq!(runtime.call_timeout(), None);
-    }
-
     #[test]
     fn namespace_runtime_handle_can_be_shared_between_threads() {
         fn assert_send_sync<T: Send + Sync>() {}
@@ -2001,71 +1736,39 @@ mod tests {
     }
 
     #[test]
-    fn zero_call_deadline_times_out_immediately() {
-        let deadline = CallDeadline::new("slow-function", Some(Duration::ZERO));
-
-        let error = deadline.ensure("starting call").unwrap_err();
-
-        assert_eq!(
-            error.to_string(),
-            "namespace runtime timed out after 0ns while running 'slow-function' during starting call"
-        );
-    }
-
-    #[test]
-    fn fd_frame_round_trips_before_deadline() {
+    fn fd_frame_round_trips() {
         let Pipe { read, write } = Pipe::new().unwrap();
-        set_fd_nonblocking(read.as_raw_fd(), true).unwrap();
-        set_fd_nonblocking(write.as_raw_fd(), true).unwrap();
-        let deadline = CallDeadline::new("frame-test", Some(Duration::from_secs(1)));
 
-        write_frame_until(write.as_raw_fd(), b"hello", &deadline, "protocol request").unwrap();
+        write_frame_fd(write.as_raw_fd(), b"hello", "protocol request").unwrap();
         drop(write);
 
         assert_eq!(
-            read_frame_until(read.as_raw_fd(), &deadline, "protocol response").unwrap(),
+            read_frame_fd(read.as_raw_fd(), "protocol response").unwrap(),
             Some(b"hello".to_vec())
         );
         assert_eq!(
-            read_frame_until(read.as_raw_fd(), &deadline, "protocol response").unwrap(),
+            read_frame_fd(read.as_raw_fd(), "protocol response").unwrap(),
             None
         );
     }
 
     #[test]
-    fn fd_frame_read_times_out_when_writer_stays_open() {
-        let Pipe { read, write } = Pipe::new().unwrap();
-        set_fd_nonblocking(read.as_raw_fd(), true).unwrap();
-        let deadline = CallDeadline::new("frame-test", Some(Duration::from_millis(10)));
-
-        let error = read_frame_until(read.as_raw_fd(), &deadline, "protocol response").unwrap_err();
-        drop(write);
-
-        assert!(error.to_string().contains(
-            "namespace runtime timed out after 10ms while running 'frame-test' during protocol response"
-        ));
-    }
-
-    #[test]
-    fn wait_for_child_kills_and_reaps_after_timeout() {
+    fn terminate_child_kills_and_reaps_worker() {
         let pid = unsafe { libc::fork() };
         assert!(pid >= 0);
         if pid == 0 {
             unsafe {
-                libc::setpgid(0, 0);
+                if libc::setpgid(0, 0) != 0 {
+                    libc::_exit(127);
+                }
                 loop {
                     libc::pause();
                 }
             }
         }
 
-        let deadline = CallDeadline::new("sleep", Some(Duration::from_millis(10)));
+        terminate_child(&NsChild { pid });
 
-        let error = wait_for_child(NsChild { pid }, &deadline).unwrap_err();
-
-        assert!(error.to_string().contains(
-            "namespace runtime timed out after 10ms while running 'sleep' during child exit"
-        ));
         let mut status = 0;
         let result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
         assert_eq!(result, -1);
