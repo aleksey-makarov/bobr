@@ -98,6 +98,11 @@ pub(crate) fn run_sandbox_launcher(
         .arg(LAUNCHER_WAIT_FD.to_string())
         .arg("--config")
         .arg(launcher_config)
+        // Keep terminal signals in the Bobr process group. This matters for
+        // HostRuntime, where the runtime function itself has no worker process
+        // boundary: Ctrl-C must reach the cancellation FIFO rather than kill
+        // the launcher and turn an expected cancellation into a build failure.
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -487,14 +492,16 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_terminates_and_reaps_running_launcher() {
+    fn launcher_has_its_own_process_group_and_cancellation_reaps_it() {
         let temp = tempdir().unwrap();
         let launcher = temp.path().join("launcher.sh");
         write_script(
             &launcher,
-            "dd bs=1 count=1 <&3 >/dev/null 2>/dev/null\nprintf x > \"$5\"\nexec sleep 60",
+            "dd bs=1 count=1 <&3 >/dev/null 2>/dev/null\nprintf '%s' \"$$\" > \"$5/pid\"\nprintf x > \"$5/ready\"\nexec sleep 60",
         );
-        let ready = temp.path().join("ready");
+        let launcher_config = temp.path().join("config");
+        std::fs::create_dir(&launcher_config).unwrap();
+        let ready = launcher_config.join("ready");
         make_fifo(&ready);
         let ready_reader = OpenOptions::new()
             .read(true)
@@ -509,12 +516,12 @@ mod tests {
         let failure = temp.path().join("failure.json");
         let thread_success = success.clone();
         let thread_failure = failure.clone();
-        let thread_ready = ready.clone();
+        let thread_launcher_config = launcher_config.clone();
         let thread = thread::spawn(move || {
             let receiver = CancellationReceiver::open(thread_token.fifo_path()).unwrap();
             run_sandbox_launcher(
                 &thread_launcher,
-                &thread_ready,
+                &thread_launcher_config,
                 &thread_success,
                 &thread_failure,
                 &receiver,
@@ -523,6 +530,12 @@ mod tests {
         });
 
         wait_for_byte(&ready_reader);
+        let launcher_pid = std::fs::read_to_string(launcher_config.join("pid"))
+            .unwrap()
+            .parse::<libc::pid_t>()
+            .unwrap();
+        assert_eq!(unsafe { libc::getpgid(launcher_pid) }, launcher_pid);
+        assert_ne!(unsafe { libc::getpgrp() }, launcher_pid);
         token.cancel();
 
         assert!(matches!(thread.join().unwrap(), LauncherOutcome::Cancelled));
