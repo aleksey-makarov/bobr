@@ -1,4 +1,4 @@
-use bobr_runtime::runtime::{RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy)]
@@ -22,6 +22,7 @@ pub(crate) struct DivideOutput {
 impl RuntimeFunction for CheckedDivide {
     type Input = DivideInput;
     type Output = DivideOutput;
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "checked-divide"

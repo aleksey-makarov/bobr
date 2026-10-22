@@ -9,9 +9,10 @@ use crate::runtime::{Runtime, RuntimeError, RuntimeFunction};
 
 /// Runtime that calls functions directly in the current process.
 ///
-/// `HostRuntime` performs no marshalling and creates no child process. Calling
-/// [`Runtime::run`] on this runtime is equivalent to calling
-/// [`RuntimeFunction::call`] on the provided function.
+/// `HostRuntime` performs no marshalling and creates no child process.
+/// [`Runtime::run_with_events`] calls
+/// [`RuntimeFunction::call_with_events`] directly; [`Runtime::run`] uses the
+/// same path and discards intermediate events.
 #[derive(Debug, Default)]
 pub struct HostRuntime;
 
@@ -36,10 +37,19 @@ impl HostRuntime {
 }
 
 impl Runtime for HostRuntime {
-    fn run<F>(&self, function: &F, input: F::Input) -> Result<F::Output, RuntimeError>
+    fn run_with_events<F, H>(
+        &self,
+        function: &F,
+        input: F::Input,
+        mut on_event: H,
+    ) -> Result<F::Output, RuntimeError>
     where
         F: RuntimeFunction,
+        H: FnMut(F::Event),
     {
-        function.call(input)
+        function.call_with_events(input, &mut |event| {
+            on_event(event);
+            Ok(())
+        })
     }
 }

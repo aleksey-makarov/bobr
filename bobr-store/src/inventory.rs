@@ -5,7 +5,7 @@ use crate::refs::parse_object_target;
 use crate::store::{BUILDS_DIR, FS_FILES_DIR, OBJECTS_DIR, REUSES_DIR};
 use crate::{ReadOnlyStore, StoreError};
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
-use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, Runtime, RuntimeError, RuntimeFunction};
 use bobr_runtime::runtime_provider::RuntimeProvider;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -101,6 +101,7 @@ pub(crate) struct StoreInventoryFunction;
 impl RuntimeFunction for StoreInventoryFunction {
     type Input = StoreInventoryInput;
     type Output = ();
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "store-inventory"

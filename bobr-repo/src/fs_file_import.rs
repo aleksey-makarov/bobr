@@ -1,7 +1,7 @@
 //! Batched publication of downloaded filesystem-file representations.
 
 use crate::{RepositoryError, RepositoryErrorKind, decode_fs_file_staged};
-use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, Runtime, RuntimeError, RuntimeFunction};
 use bobr_runtime::runtime_provider::RuntimeProvider;
 use bobr_store::fs_tree::FsFileHash;
 use bobr_store::{Store, StoreError};
@@ -138,6 +138,7 @@ pub(crate) struct PublishFsFilesFunction;
 impl RuntimeFunction for PublishFsFilesFunction {
     type Input = PublishFsFilesInput;
     type Output = PublishFsFilesOutput;
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "repo-publish-fs-files"

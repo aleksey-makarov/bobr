@@ -3,7 +3,7 @@ use bobr_core::{
     BuildLogLevel,
     oci::{self, OciDescriptor, OciManifest},
 };
-use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, Runtime, RuntimeError, RuntimeFunction};
 use bobr_store::fs_tree::FsTree;
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
@@ -162,6 +162,7 @@ pub(crate) struct OciExtractOutput {
 impl RuntimeFunction for OciExtractFunction {
     type Input = OciExtractInput;
     type Output = OciExtractOutput;
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "oci-extract"

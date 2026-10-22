@@ -2,7 +2,7 @@
 
 use crate::{Compression, RepositoryError, encode_fs_file, encode_object};
 use bobr_core::ObjectHash;
-use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, Runtime, RuntimeError, RuntimeFunction};
 use bobr_runtime::runtime_provider::RuntimeProvider;
 use bobr_store::StoredFsFile;
 use bobr_store::fs_tree::FsFileHash;
@@ -75,6 +75,7 @@ pub(crate) struct EncodeFsFilesFunction;
 impl RuntimeFunction for EncodeFsFilesFunction {
     type Input = EncodeFsFilesInput;
     type Output = ();
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "repo-encode-fs-files"

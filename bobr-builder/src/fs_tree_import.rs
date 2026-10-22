@@ -1,7 +1,7 @@
 use crate::BuilderError;
 use crate::{BuildContext, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
-use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, Runtime, RuntimeError, RuntimeFunction};
 use bobr_store::fs_tree::{FsTree, FsTreeInstall};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -103,6 +103,7 @@ pub(crate) struct FsTreeImportOutput {
 impl RuntimeFunction for FsTreeImportFunction {
     type Input = FsTreeImportInput;
     type Output = FsTreeImportOutput;
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "fs-tree-import"

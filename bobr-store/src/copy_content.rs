@@ -9,7 +9,7 @@ use crate::object::import_object_with_expected_hash;
 use crate::secondary::{ContentImportOutcome, ContentSource, ContentTransferMode, LocalRepository};
 use crate::{ReadOnlyStore, Store, StoreError};
 use bobr_core::ObjectHash;
-use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, Runtime, RuntimeError, RuntimeFunction};
 use bobr_runtime::runtime_provider::{RuntimeProvider, runtime_provider_for_current_process};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -171,6 +171,7 @@ pub(crate) struct CopyFsFilesFunction;
 impl RuntimeFunction for CopyFsFilesFunction {
     type Input = CopyFsFilesInput;
     type Output = ();
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "repository-copy-fs-files"

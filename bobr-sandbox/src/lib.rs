@@ -14,7 +14,7 @@ mod tools;
 
 use bobr_builder::{BuildContext, Builder, BuilderError, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
-use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, Runtime, RuntimeError, RuntimeFunction};
 use bobr_sandbox_launcher::{
     CONTAINER_BUILD_DIR, CONTAINER_CONFIG_DIR, CONTAINER_INPUTS_DIR, CONTAINER_OUT_DIR,
     SandboxStepReport,
@@ -1066,6 +1066,7 @@ pub enum SandboxFunctionOutput {
 impl RuntimeFunction for SandboxInstallFunction {
     type Input = SandboxInput;
     type Output = SandboxFunctionOutput;
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "sandbox-install"

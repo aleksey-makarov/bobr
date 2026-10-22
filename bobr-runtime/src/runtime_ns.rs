@@ -68,10 +68,10 @@ impl WireCodec for JsonCodec {
 
 /// Runtime that executes functions in a child Linux user namespace.
 ///
-/// Each call to [`Runtime::run`] starts a fresh worker process, configures a
-/// Linux user namespace for that process, sends one framed request, waits for
-/// one framed response, waits for the process to exit, and decodes the typed
-/// output.
+/// Each call starts a fresh worker process, configures a Linux user namespace
+/// for that process, and sends one framed request. The worker may return any
+/// number of typed event frames before one terminal output or error response.
+/// The parent then waits for the process to exit.
 ///
 /// The worker process is started from an executable file descriptor captured
 /// from `/proc/self/exe` when this runtime is constructed, so applications using
@@ -158,13 +158,19 @@ impl<C> Runtime for NsRuntime<C>
 where
     C: WireCodec,
 {
-    fn run<F>(&self, function: &F, input: F::Input) -> Result<F::Output, RuntimeError>
+    fn run_with_events<F, H>(
+        &self,
+        function: &F,
+        input: F::Input,
+        mut on_event: H,
+    ) -> Result<F::Output, RuntimeError>
     where
         F: RuntimeFunction,
+        H: FnMut(F::Event),
     {
         let input = C::encode(&input)
             .map_err(|error| RuntimeError::new(format!("failed to encode input: {error}")))?;
-        let output = self.call_erased(function.name(), input)?;
+        let output = self.call_erased::<F::Event, _>(function.name(), input, &mut on_event)?;
         C::decode(&output)
             .map_err(|error| RuntimeError::new(format!("failed to decode output: {error}")))
     }
@@ -174,7 +180,16 @@ impl<C> NsRuntime<C>
 where
     C: WireCodec,
 {
-    fn call_erased(&self, function_name: &str, input: Vec<u8>) -> RuntimeResult<Vec<u8>> {
+    fn call_erased<E, H>(
+        &self,
+        function_name: &str,
+        input: Vec<u8>,
+        on_event: &mut H,
+    ) -> RuntimeResult<Vec<u8>>
+    where
+        E: DeserializeOwned,
+        H: FnMut(E),
+    {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
         let launch = fork_ns_worker(&self.executable)?;
@@ -188,16 +203,21 @@ where
             return Err(error);
         }
 
-        self.call_worker(function_name, id, input, launch)
+        self.call_worker::<E, H>(function_name, id, input, launch, on_event)
     }
 
-    fn call_worker(
+    fn call_worker<E, H>(
         &self,
         function_name: &str,
         id: u64,
         input: Vec<u8>,
         launch: NsLaunch,
-    ) -> RuntimeResult<Vec<u8>> {
+        on_event: &mut H,
+    ) -> RuntimeResult<Vec<u8>>
+    where
+        E: DeserializeOwned,
+        H: FnMut(E),
+    {
         let NsLaunch {
             child,
             handshake,
@@ -206,16 +226,25 @@ where
         } = launch;
         drop(handshake);
 
-        let call_result = send_call_and_read_response::<C>(
+        let call_result = send_call_and_read_response::<C, E, H>(
             function_name,
             id,
             input,
             protocol_writer.as_raw_fd(),
             protocol_reader.as_raw_fd(),
+            on_event,
         );
         drop(protocol_writer);
         drop(protocol_reader);
 
+        let call_result = match call_result {
+            Ok(WorkerResponse::Output(output)) => Ok(output),
+            Ok(WorkerResponse::FunctionError(error)) => Err(error),
+            Err(protocol_error) => {
+                terminate_child(&child);
+                return Err(protocol_error);
+            }
+        };
         let wait_result = wait_for_child(child);
         match (call_result, wait_result) {
             (Ok(output), Ok(())) => Ok(output),
@@ -228,15 +257,18 @@ where
     }
 }
 
-fn send_call_and_read_response<C>(
+fn send_call_and_read_response<C, E, H>(
     function_name: &str,
     id: u64,
     input: Vec<u8>,
     protocol_write_fd: RawFd,
     protocol_read_fd: RawFd,
-) -> RuntimeResult<Vec<u8>>
+    on_event: &mut H,
+) -> RuntimeResult<WorkerResponse>
 where
     C: WireCodec,
+    E: DeserializeOwned,
+    H: FnMut(E),
 {
     let request = ParentToChild::Call {
         id,
@@ -246,33 +278,61 @@ where
     write_frame_fd(protocol_write_fd, &request, "protocol request")?;
     write_frame_fd(protocol_write_fd, &input, "protocol input")?;
 
-    let response = read_frame_fd(protocol_read_fd, "protocol response")?
-        .ok_or_else(|| RuntimeError::new("namespace runtime exited without response"))?;
-    match C::decode::<ChildToParent>(&response)? {
-        ChildToParent::Ok { id: response_id } if response_id == id => {
-            read_frame_fd(protocol_read_fd, "protocol output")?
-                .ok_or_else(|| RuntimeError::new("namespace runtime exited without output frame"))
+    loop {
+        let response = read_frame_fd(protocol_read_fd, "protocol response")?
+            .ok_or_else(|| RuntimeError::new("namespace runtime exited without response"))?;
+        match C::decode::<ChildToParent>(&response)? {
+            ChildToParent::Event { id: response_id } if response_id == id => {
+                let payload =
+                    read_frame_fd(protocol_read_fd, "protocol event")?.ok_or_else(|| {
+                        RuntimeError::new("namespace runtime exited without event payload frame")
+                    })?;
+                let event = C::decode::<E>(&payload).map_err(|error| {
+                    RuntimeError::new(format!(
+                        "failed to decode event from '{function_name}': {error}"
+                    ))
+                })?;
+                on_event(event);
+            }
+            ChildToParent::Ok { id: response_id } if response_id == id => {
+                let output =
+                    read_frame_fd(protocol_read_fd, "protocol output")?.ok_or_else(|| {
+                        RuntimeError::new("namespace runtime exited without output frame")
+                    })?;
+                return Ok(WorkerResponse::Output(output));
+            }
+            ChildToParent::Err {
+                id: response_id,
+                message,
+            } if response_id == id => {
+                return Ok(WorkerResponse::FunctionError(RuntimeError::new(format!(
+                    "namespace runtime failed while running '{}': {message}",
+                    function_name
+                ))));
+            }
+            response => {
+                return Err(RuntimeError::new(format!(
+                    "namespace runtime returned response for the wrong call: expected id {id}, got id {}",
+                    response.id()
+                )));
+            }
         }
-        ChildToParent::Err {
-            id: response_id,
-            message,
-        } if response_id == id => Err(RuntimeError::new(format!(
-            "namespace runtime failed while running '{}': {message}",
-            function_name
-        ))),
-        response => Err(RuntimeError::new(format!(
-            "namespace runtime returned response for the wrong call: expected id {id}, got id {}",
-            response.id()
-        ))),
     }
+}
+
+#[derive(Debug)]
+enum WorkerResponse {
+    Output(Vec<u8>),
+    FunctionError(RuntimeError),
 }
 
 /// Worker-side erased wrapper around a typed [`RuntimeFunction`].
 ///
 /// `NsFunction` is used only by the namespace worker registry. Parent-side
-/// callers keep using typed function values directly through [`Runtime::run`].
+/// callers keep using typed function values directly through [`Runtime::run`]
+/// or [`Runtime::run_with_events`].
 /// The wrapper exists so a single worker registry can store functions with
-/// different input and output types.
+/// different input, event, and output types.
 pub struct NsFunction<C = JsonCodec> {
     name: &'static str,
     call: Box<ErasedNsCall>,
@@ -287,7 +347,21 @@ impl<C> std::fmt::Debug for NsFunction<C> {
     }
 }
 
-type ErasedNsCall = dyn Fn(&[u8]) -> RuntimeResult<Vec<u8>> + Send + Sync + 'static;
+trait ErasedEventSink {
+    fn emit(&mut self, event: Vec<u8>) -> RuntimeResult<()>;
+}
+
+impl<F> ErasedEventSink for F
+where
+    F: FnMut(Vec<u8>) -> RuntimeResult<()>,
+{
+    fn emit(&mut self, event: Vec<u8>) -> RuntimeResult<()> {
+        self(event)
+    }
+}
+
+type ErasedNsCall =
+    dyn Fn(&[u8], &mut dyn ErasedEventSink) -> RuntimeResult<Vec<u8>> + Send + Sync + 'static;
 
 impl<C> NsFunction<C>
 where
@@ -296,14 +370,14 @@ where
     /// Wrap a typed [`RuntimeFunction`] for use by a namespace worker.
     ///
     /// The parent side can call typed functions directly through
-    /// [`NsRuntime::run`], but the worker side needs a single registry that can
-    /// store functions with different input and output types. `NsFunction`
-    /// performs that type erasure.
+    /// [`NsRuntime::run`] or [`NsRuntime::run_with_events`], but the worker side
+    /// needs a single registry that can store functions with different input,
+    /// event, and output types. `NsFunction` performs that type erasure.
     ///
     /// The wrapper stores the function's [`RuntimeFunction::name`] and an
     /// erased closure. When a request arrives, the closure decodes the input
-    /// bytes with `C`, calls [`RuntimeFunction::call`], and encodes the typed
-    /// output with `C`.
+    /// bytes with `C`, calls [`RuntimeFunction::call_with_events`], encodes
+    /// each typed event, and finally encodes the typed output with `C`.
     ///
     /// The wrapped function must be `'static` because it is stored in the
     /// worker registry for the lifetime of the worker loop.
@@ -312,11 +386,17 @@ where
         F: RuntimeFunction + 'static,
     {
         let name = function.name();
-        let call = Box::new(move |input: &[u8]| {
+        let call = Box::new(move |input: &[u8], erased_emit: &mut dyn ErasedEventSink| {
             let input = C::decode::<F::Input>(input).map_err(|error| {
                 RuntimeError::new(format!("invalid input for '{name}': {error}"))
             })?;
-            let output = function.call(input)?;
+            let mut emit = |event: F::Event| {
+                let event = C::encode(&event).map_err(|error| {
+                    RuntimeError::new(format!("invalid event from '{name}': {error}"))
+                })?;
+                erased_emit.emit(event)
+            };
+            let output = function.call_with_events(input, &mut emit)?;
             C::encode(&output).map_err(|error| {
                 RuntimeError::new(format!("invalid output from '{name}': {error}"))
             })
@@ -335,8 +415,8 @@ impl<C> NsFunction<C> {
         self.name
     }
 
-    fn call_erased(&self, input: &[u8]) -> RuntimeResult<Vec<u8>> {
-        (self.call)(input)
+    fn call_erased(&self, input: &[u8], emit: &mut dyn ErasedEventSink) -> RuntimeResult<Vec<u8>> {
+        (self.call)(input, emit)
     }
 }
 
@@ -457,8 +537,9 @@ fn parse_worker_fd_arg(value: OsString) -> RuntimeResult<RawFd> {
 ///
 /// The worker reads framed requests from the private protocol fd encoded in
 /// `invocation`, dispatches calls by function name through `functions`, and
-/// writes framed responses to the private protocol response fd. Standard
-/// output and standard error are not protocol streams. When the worker is
+/// writes zero or more framed events followed by one terminal response to the
+/// private protocol response fd. Standard output and standard error are not
+/// protocol streams. When the worker is
 /// launched by [`NsRuntime`], all three standard descriptors are redirected to
 /// `/dev/null`. Function implementations that launch commands must configure
 /// and capture those commands' stdout and stderr themselves if the output is
@@ -526,7 +607,19 @@ where
 
     match registry.get(&function) {
         Some(function_impl) => {
-            match panic::catch_unwind(AssertUnwindSafe(|| function_impl.call_erased(&input))) {
+            let result = {
+                let mut emit = |event: Vec<u8>| {
+                    let response = C::encode(&ChildToParent::Event { id })?;
+                    write_frame(writer, &response)?;
+                    write_frame(writer, &event)?;
+                    writer.flush()?;
+                    Ok(())
+                };
+                panic::catch_unwind(AssertUnwindSafe(|| {
+                    function_impl.call_erased(&input, &mut emit)
+                }))
+            };
+            match result {
                 Ok(Ok(output)) => {
                     let response = C::encode(&ChildToParent::Ok { id })?;
                     write_frame(writer, &response)?;
@@ -580,6 +673,7 @@ enum ParentToChild {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ChildToParent {
+    Event { id: u64 },
     Ok { id: u64 },
     Err { id: u64, message: String },
 }
@@ -587,7 +681,7 @@ enum ChildToParent {
 impl ChildToParent {
     fn id(&self) -> u64 {
         match self {
-            Self::Ok { id } | Self::Err { id, .. } => *id,
+            Self::Event { id } | Self::Ok { id } | Self::Err { id, .. } => *id,
         }
     }
 }
@@ -1615,7 +1709,158 @@ impl Pipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::RuntimeFunction;
+    use serde::{Deserialize, Serialize};
     use std::io::Cursor;
+
+    #[derive(Debug, Clone, Copy)]
+    struct EventFunction;
+
+    #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct EventInput {
+        count: u32,
+        fail: bool,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+    enum TestEvent {
+        Tick { value: u32 },
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct EventOutput {
+        count: u32,
+    }
+
+    impl RuntimeFunction for EventFunction {
+        type Input = EventInput;
+        type Output = EventOutput;
+        type Event = TestEvent;
+
+        fn name(&self) -> &'static str {
+            "event-function"
+        }
+
+        fn call(&self, input: Self::Input) -> RuntimeResult<Self::Output> {
+            self.call_with_events(input, &mut |_| Ok(()))
+        }
+
+        fn call_with_events(
+            &self,
+            input: Self::Input,
+            emit: &mut dyn FnMut(Self::Event) -> RuntimeResult<()>,
+        ) -> RuntimeResult<Self::Output> {
+            for value in 0..input.count {
+                emit(TestEvent::Tick { value })?;
+            }
+            if input.fail {
+                return Err(RuntimeError::new("event function failed"));
+            }
+            Ok(EventOutput { count: input.count })
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct EventThenPanicFunction;
+
+    impl RuntimeFunction for EventThenPanicFunction {
+        type Input = ();
+        type Output = ();
+        type Event = TestEvent;
+
+        fn name(&self) -> &'static str {
+            "event-then-panic"
+        }
+
+        fn call(&self, input: Self::Input) -> RuntimeResult<Self::Output> {
+            self.call_with_events(input, &mut |_| Ok(()))
+        }
+
+        fn call_with_events(
+            &self,
+            _input: Self::Input,
+            emit: &mut dyn FnMut(Self::Event) -> RuntimeResult<()>,
+        ) -> RuntimeResult<Self::Output> {
+            emit(TestEvent::Tick { value: 7 })?;
+            panic!("boom after event")
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Deserialize)]
+    struct UnencodableEvent;
+
+    impl Serialize for UnencodableEvent {
+        fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            Err(serde::ser::Error::custom(
+                "deliberate event encoding failure",
+            ))
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct UnencodableEventFunction;
+
+    impl RuntimeFunction for UnencodableEventFunction {
+        type Input = ();
+        type Output = ();
+        type Event = UnencodableEvent;
+
+        fn name(&self) -> &'static str {
+            "unencodable-event"
+        }
+
+        fn call(&self, input: Self::Input) -> RuntimeResult<Self::Output> {
+            self.call_with_events(input, &mut |_| Ok(()))
+        }
+
+        fn call_with_events(
+            &self,
+            _input: Self::Input,
+            emit: &mut dyn FnMut(Self::Event) -> RuntimeResult<()>,
+        ) -> RuntimeResult<Self::Output> {
+            emit(UnencodableEvent)
+        }
+    }
+
+    fn event_request(id: u64, count: u32, fail: bool) -> Vec<u8> {
+        let mut request = Vec::new();
+        write_frame(
+            &mut request,
+            &JsonCodec::encode(&ParentToChild::Call {
+                id,
+                function: EventFunction.name().to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        write_frame(
+            &mut request,
+            &JsonCodec::encode(&EventInput { count, fail }).unwrap(),
+        )
+        .unwrap();
+        request
+    }
+
+    struct ClosedResponsePipe;
+
+    impl Write for ClosedResponsePipe {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "response reader closed",
+            ))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn frame_round_trips() {
@@ -1780,9 +2025,6 @@ mod tests {
 
     #[test]
     fn ns_function_adapts_typed_function_to_erased_json_call() {
-        use crate::runtime::RuntimeFunction;
-        use serde::{Deserialize, Serialize};
-
         #[derive(Debug, Clone, Copy)]
         struct TestUppercase;
 
@@ -1801,6 +2043,7 @@ mod tests {
         impl RuntimeFunction for TestUppercase {
             type Input = TestInput;
             type Output = TestOutput;
+            type Event = crate::runtime::NoRuntimeEvent;
 
             fn name(&self) -> &'static str {
                 "test-uppercase"
@@ -1819,11 +2062,381 @@ mod tests {
         })
         .unwrap();
 
-        let output = function.call_erased(&input).unwrap();
+        let mut event_count = 0;
+        let mut events = |_event: Vec<u8>| {
+            event_count += 1;
+            Ok(())
+        };
+        let output = function.call_erased(&input, &mut events).unwrap();
         let output = <JsonCodec as WireCodec>::decode::<TestOutput>(&output).unwrap();
 
         assert_eq!(function.name(), "test-uppercase");
         assert_eq!(output.text, "ABC");
+        assert_eq!(event_count, 0);
+    }
+
+    #[test]
+    fn worker_streams_typed_events_before_output() {
+        let mut reader = Cursor::new(event_request(12, 3, false));
+        let mut response = Vec::new();
+
+        run_worker_once::<JsonCodec, _, _>(
+            &mut reader,
+            &mut response,
+            vec![NsFunction::new(EventFunction)],
+        )
+        .unwrap();
+
+        let mut response = Cursor::new(response);
+        for value in 0..3 {
+            let header = read_frame(&mut response).unwrap().unwrap();
+            assert!(matches!(
+                JsonCodec::decode::<ChildToParent>(&header).unwrap(),
+                ChildToParent::Event { id: 12 }
+            ));
+            let payload = read_frame(&mut response).unwrap().unwrap();
+            assert_eq!(
+                JsonCodec::decode::<TestEvent>(&payload).unwrap(),
+                TestEvent::Tick { value }
+            );
+        }
+        let header = read_frame(&mut response).unwrap().unwrap();
+        assert!(matches!(
+            JsonCodec::decode::<ChildToParent>(&header).unwrap(),
+            ChildToParent::Ok { id: 12 }
+        ));
+        let payload = read_frame(&mut response).unwrap().unwrap();
+        assert_eq!(
+            JsonCodec::decode::<EventOutput>(&payload).unwrap(),
+            EventOutput { count: 3 }
+        );
+        assert_eq!(read_frame(&mut response).unwrap(), None);
+    }
+
+    #[test]
+    fn erased_function_reports_event_encoding_failure() {
+        let function = NsFunction::<JsonCodec>::new(UnencodableEventFunction);
+        let input = JsonCodec::encode(&()).unwrap();
+        let mut events = |_event: Vec<u8>| Ok(());
+
+        let error = function.call_erased(&input, &mut events).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid event from 'unencodable-event'")
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("deliberate event encoding failure")
+        );
+    }
+
+    #[test]
+    fn worker_stops_when_response_pipe_is_closed() {
+        let mut reader = Cursor::new(event_request(15, 1, false));
+        let mut response = ClosedResponsePipe;
+
+        let error = run_worker_once::<JsonCodec, _, _>(
+            &mut reader,
+            &mut response,
+            vec![NsFunction::new(EventFunction)],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "response reader closed");
+    }
+
+    #[test]
+    fn worker_preserves_events_emitted_before_function_error() {
+        let mut reader = Cursor::new(event_request(13, 2, true));
+        let mut response = Vec::new();
+
+        run_worker_once::<JsonCodec, _, _>(
+            &mut reader,
+            &mut response,
+            vec![NsFunction::new(EventFunction)],
+        )
+        .unwrap();
+
+        let mut response = Cursor::new(response);
+        for value in 0..2 {
+            let header = read_frame(&mut response).unwrap().unwrap();
+            assert!(matches!(
+                JsonCodec::decode::<ChildToParent>(&header).unwrap(),
+                ChildToParent::Event { id: 13 }
+            ));
+            let payload = read_frame(&mut response).unwrap().unwrap();
+            assert_eq!(
+                JsonCodec::decode::<TestEvent>(&payload).unwrap(),
+                TestEvent::Tick { value }
+            );
+        }
+        let header = read_frame(&mut response).unwrap().unwrap();
+        match JsonCodec::decode::<ChildToParent>(&header).unwrap() {
+            ChildToParent::Err { id, message } => {
+                assert_eq!(id, 13);
+                assert_eq!(message, "event function failed");
+            }
+            response => panic!("expected error response, got {response:?}"),
+        }
+        assert_eq!(read_frame(&mut response).unwrap(), None);
+    }
+
+    #[test]
+    fn worker_preserves_event_emitted_before_function_panic() {
+        let mut request = Vec::new();
+        write_frame(
+            &mut request,
+            &JsonCodec::encode(&ParentToChild::Call {
+                id: 14,
+                function: EventThenPanicFunction.name().to_string(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        write_frame(&mut request, &JsonCodec::encode(&()).unwrap()).unwrap();
+        let mut reader = Cursor::new(request);
+        let mut response = Vec::new();
+
+        run_worker_once::<JsonCodec, _, _>(
+            &mut reader,
+            &mut response,
+            vec![NsFunction::new(EventThenPanicFunction)],
+        )
+        .unwrap();
+
+        let mut response = Cursor::new(response);
+        let header = read_frame(&mut response).unwrap().unwrap();
+        assert!(matches!(
+            JsonCodec::decode::<ChildToParent>(&header).unwrap(),
+            ChildToParent::Event { id: 14 }
+        ));
+        let payload = read_frame(&mut response).unwrap().unwrap();
+        assert_eq!(
+            JsonCodec::decode::<TestEvent>(&payload).unwrap(),
+            TestEvent::Tick { value: 7 }
+        );
+        let header = read_frame(&mut response).unwrap().unwrap();
+        match JsonCodec::decode::<ChildToParent>(&header).unwrap() {
+            ChildToParent::Err { id, message } => {
+                assert_eq!(id, 14);
+                assert_eq!(
+                    message,
+                    "function 'event-then-panic' panicked: boom after event"
+                );
+            }
+            response => panic!("expected error response, got {response:?}"),
+        }
+        assert_eq!(read_frame(&mut response).unwrap(), None);
+    }
+
+    #[test]
+    fn parent_delivers_events_in_order_before_output() {
+        let Pipe {
+            read: request_read,
+            write: request_write,
+        } = Pipe::new().unwrap();
+        let Pipe {
+            read: response_read,
+            write: response_write,
+        } = Pipe::new().unwrap();
+        for value in 0..3 {
+            write_frame_fd(
+                response_write.as_raw_fd(),
+                &JsonCodec::encode(&ChildToParent::Event { id: 21 }).unwrap(),
+                "test response",
+            )
+            .unwrap();
+            write_frame_fd(
+                response_write.as_raw_fd(),
+                &JsonCodec::encode(&TestEvent::Tick { value }).unwrap(),
+                "test event",
+            )
+            .unwrap();
+        }
+        write_frame_fd(
+            response_write.as_raw_fd(),
+            &JsonCodec::encode(&ChildToParent::Ok { id: 21 }).unwrap(),
+            "test response",
+        )
+        .unwrap();
+        write_frame_fd(
+            response_write.as_raw_fd(),
+            &JsonCodec::encode(&EventOutput { count: 3 }).unwrap(),
+            "test output",
+        )
+        .unwrap();
+        drop(response_write);
+
+        let mut events = Vec::new();
+        let response = send_call_and_read_response::<JsonCodec, TestEvent, _>(
+            EventFunction.name(),
+            21,
+            JsonCodec::encode(&EventInput {
+                count: 3,
+                fail: false,
+            })
+            .unwrap(),
+            request_write.as_raw_fd(),
+            response_read.as_raw_fd(),
+            &mut |event| events.push(event),
+        )
+        .unwrap();
+        let WorkerResponse::Output(output) = response else {
+            panic!("expected output response");
+        };
+
+        assert_eq!(
+            events,
+            vec![
+                TestEvent::Tick { value: 0 },
+                TestEvent::Tick { value: 1 },
+                TestEvent::Tick { value: 2 },
+            ]
+        );
+        assert_eq!(
+            JsonCodec::decode::<EventOutput>(&output).unwrap(),
+            EventOutput { count: 3 }
+        );
+        drop(request_read);
+    }
+
+    #[test]
+    fn parent_rejects_event_without_payload() {
+        let Pipe {
+            read: request_read,
+            write: request_write,
+        } = Pipe::new().unwrap();
+        let Pipe {
+            read: response_read,
+            write: response_write,
+        } = Pipe::new().unwrap();
+        write_frame_fd(
+            response_write.as_raw_fd(),
+            &JsonCodec::encode(&ChildToParent::Event { id: 22 }).unwrap(),
+            "test response",
+        )
+        .unwrap();
+        drop(response_write);
+
+        let error = send_call_and_read_response::<JsonCodec, TestEvent, _>(
+            EventFunction.name(),
+            22,
+            JsonCodec::encode(&EventInput {
+                count: 1,
+                fail: false,
+            })
+            .unwrap(),
+            request_write.as_raw_fd(),
+            response_read.as_raw_fd(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("without event payload"));
+        drop(request_read);
+    }
+
+    #[test]
+    fn parent_rejects_event_for_wrong_call() {
+        let Pipe {
+            read: request_read,
+            write: request_write,
+        } = Pipe::new().unwrap();
+        let Pipe {
+            read: response_read,
+            write: response_write,
+        } = Pipe::new().unwrap();
+        write_frame_fd(
+            response_write.as_raw_fd(),
+            &JsonCodec::encode(&ChildToParent::Event { id: 999 }).unwrap(),
+            "test response",
+        )
+        .unwrap();
+        drop(response_write);
+
+        let error = send_call_and_read_response::<JsonCodec, TestEvent, _>(
+            EventFunction.name(),
+            23,
+            JsonCodec::encode(&EventInput {
+                count: 1,
+                fail: false,
+            })
+            .unwrap(),
+            request_write.as_raw_fd(),
+            response_read.as_raw_fd(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("expected id 23, got id 999"));
+        drop(request_read);
+    }
+
+    #[test]
+    fn parent_rejects_malformed_response_header() {
+        let Pipe {
+            read: request_read,
+            write: request_write,
+        } = Pipe::new().unwrap();
+        let Pipe {
+            read: response_read,
+            write: response_write,
+        } = Pipe::new().unwrap();
+        write_frame_fd(response_write.as_raw_fd(), b"not-json", "test response").unwrap();
+        drop(response_write);
+
+        let error = send_call_and_read_response::<JsonCodec, TestEvent, _>(
+            EventFunction.name(),
+            24,
+            JsonCodec::encode(&EventInput {
+                count: 1,
+                fail: false,
+            })
+            .unwrap(),
+            request_write.as_raw_fd(),
+            response_read.as_raw_fd(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("expected ident"));
+        drop(request_read);
+    }
+
+    #[test]
+    fn parent_rejects_eof_without_terminal_response() {
+        let Pipe {
+            read: request_read,
+            write: request_write,
+        } = Pipe::new().unwrap();
+        let Pipe {
+            read: response_read,
+            write: response_write,
+        } = Pipe::new().unwrap();
+        drop(response_write);
+
+        let error = send_call_and_read_response::<JsonCodec, TestEvent, _>(
+            EventFunction.name(),
+            25,
+            JsonCodec::encode(&EventInput {
+                count: 1,
+                fail: false,
+            })
+            .unwrap(),
+            request_write.as_raw_fd(),
+            response_read.as_raw_fd(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "namespace runtime exited without response"
+        );
+        drop(request_read);
     }
 
     #[test]
@@ -1847,6 +2460,7 @@ mod tests {
         impl RuntimeFunction for NoisyFunction {
             type Input = NoisyInput;
             type Output = NoisyOutput;
+            type Event = crate::runtime::NoRuntimeEvent;
 
             fn name(&self) -> &'static str {
                 "noisy"
@@ -1920,6 +2534,7 @@ mod tests {
         impl RuntimeFunction for OneShotFunction {
             type Input = OneShotInput;
             type Output = OneShotOutput;
+            type Event = crate::runtime::NoRuntimeEvent;
 
             fn name(&self) -> &'static str {
                 "one-shot"
@@ -2042,6 +2657,7 @@ mod tests {
         impl RuntimeFunction for PanicFunction {
             type Input = PanicInput;
             type Output = PanicOutput;
+            type Event = crate::runtime::NoRuntimeEvent;
 
             fn name(&self) -> &'static str {
                 "panic-function"

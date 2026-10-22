@@ -1,6 +1,6 @@
 //! Privileged, symlink-safe copying into independent plain directory objects.
 
-use bobr_runtime::runtime::{RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, lchown, symlink};
@@ -31,6 +31,7 @@ pub(crate) enum PlainTreeCopy {
 impl RuntimeFunction for PlainTreeCopyFunction {
     type Input = PlainTreeCopyInput;
     type Output = ();
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "plain-tree-copy"

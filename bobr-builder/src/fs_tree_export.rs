@@ -1,7 +1,7 @@
 use crate::BuilderError;
 use crate::{BuildContext, BuilderInputs, InputSpec, TypedBuilder};
 use bobr_core::BuildLogLevel;
-use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, Runtime, RuntimeError, RuntimeFunction};
 use bobr_store::fs_tree::{FsTree, FsTreeEntry, FsTreeManifest};
 use globset::Glob;
 use serde::{Deserialize, Serialize};
@@ -334,6 +334,7 @@ impl ExportOp {
 impl RuntimeFunction for FsTreeExportFunction {
     type Input = FsTreeExportInput;
     type Output = ();
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "fs-tree-export"

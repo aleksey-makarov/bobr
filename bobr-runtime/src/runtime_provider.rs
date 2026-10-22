@@ -55,7 +55,8 @@ impl RuntimeProvider<JsonCodec> {
     /// Create a provider using `backend` and the default JSON namespace codec.
     ///
     /// This constructor performs no namespace setup. For namespace providers,
-    /// setup is deferred until the first [`Runtime::run`] call.
+    /// setup is deferred until the first [`Runtime::run`] or
+    /// [`Runtime::run_with_events`] call.
     pub fn new(backend: RuntimeBackend) -> Self {
         Self::new_with_codec(backend)
     }
@@ -89,7 +90,8 @@ impl<C> RuntimeProvider<C> {
 
     /// Create a namespace provider using codec `C`.
     ///
-    /// Namespace setup is deferred until the first [`Runtime::run`] call.
+    /// Namespace setup is deferred until the first [`Runtime::run`] or
+    /// [`Runtime::run_with_events`] call.
     pub fn namespace_with_codec() -> Self {
         Self::from_backend(RuntimeBackend::Namespace)
     }
@@ -133,15 +135,21 @@ impl<C> Runtime for RuntimeProvider<C>
 where
     C: WireCodec,
 {
-    fn run<F>(&self, function: &F, input: F::Input) -> Result<F::Output, RuntimeError>
+    fn run_with_events<F, H>(
+        &self,
+        function: &F,
+        input: F::Input,
+        on_event: H,
+    ) -> Result<F::Output, RuntimeError>
     where
         F: RuntimeFunction,
+        H: FnMut(F::Event),
     {
         match self.inner.backend {
-            RuntimeBackend::Host => HostRuntime::new().run(function, input),
+            RuntimeBackend::Host => HostRuntime::new().run_with_events(function, input, on_event),
             RuntimeBackend::Namespace => {
                 let runtime = self.namespace_runtime()?;
-                runtime.run(function, input)
+                runtime.run_with_events(function, input, on_event)
             }
         }
     }
@@ -205,6 +213,7 @@ mod tests {
     impl RuntimeFunction for EchoFunction {
         type Input = EchoInput;
         type Output = String;
+        type Event = crate::runtime::NoRuntimeEvent;
 
         fn name(&self) -> &'static str {
             "test-echo"
@@ -230,6 +239,25 @@ mod tests {
 
         assert_eq!(output, "hello");
         assert_eq!(runtime.backend(), RuntimeBackend::Host);
+    }
+
+    #[test]
+    fn no_event_function_does_not_call_event_callback() {
+        let runtime = RuntimeProvider::host();
+        let mut callback_called = false;
+
+        let output = runtime
+            .run_with_events(
+                &EchoFunction,
+                EchoInput {
+                    value: "hello".to_string(),
+                },
+                |_| callback_called = true,
+            )
+            .unwrap();
+
+        assert_eq!(output, "hello");
+        assert!(!callback_called);
     }
 
     #[test]

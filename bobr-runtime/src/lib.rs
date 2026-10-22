@@ -8,7 +8,8 @@
 //!
 //! Application crates define their own [`runtime::RuntimeFunction`] values and
 //! can execute the same typed function through a concrete provider or through a
-//! specific runtime implementation.
+//! specific runtime implementation. A function may stream typed intermediate
+//! events before returning its final typed output.
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("bobr requires Linux");

@@ -1,4 +1,4 @@
-use bobr_runtime::runtime::{RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy)]
@@ -20,6 +20,7 @@ pub(crate) struct UppercaseOutput {
 impl RuntimeFunction for Uppercase {
     type Input = UppercaseInput;
     type Output = UppercaseOutput;
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "uppercase"

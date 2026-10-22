@@ -14,7 +14,7 @@ use crate::object::import_object_with_expected_hash;
 use crate::refs::parse_object_target;
 use crate::{ReadOnlyStore, Store, StoreError};
 use bobr_core::{BuildKey, ObjectHash, ReuseKey};
-use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, Runtime, RuntimeError, RuntimeFunction};
 use bobr_runtime::runtime_provider::{RuntimeProvider, runtime_provider_for_current_process};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -423,6 +423,7 @@ pub(crate) struct HardlinkFsFilesFunction;
 impl RuntimeFunction for HardlinkFsFilesFunction {
     type Input = HardlinkFsFilesInput;
     type Output = ();
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "secondary-hardlink-fs-files"

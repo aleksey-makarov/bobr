@@ -1,4 +1,4 @@
-use bobr_runtime::runtime::{RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, RuntimeError, RuntimeFunction};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -26,6 +26,7 @@ pub(crate) struct NamespaceIdentityOutput {
 impl RuntimeFunction for NamespaceIdentity {
     type Input = NamespaceIdentityInput;
     type Output = NamespaceIdentityOutput;
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "namespace-identity"

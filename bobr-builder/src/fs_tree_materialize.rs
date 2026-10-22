@@ -1,5 +1,5 @@
 use bobr_core::ObjectHash;
-use bobr_runtime::runtime::{Runtime, RuntimeError, RuntimeFunction};
+use bobr_runtime::runtime::{NoRuntimeEvent, Runtime, RuntimeError, RuntimeFunction};
 use bobr_store::fs_tree::FsTree;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -47,6 +47,7 @@ pub(crate) struct FsTreeMaterializeOutput {
 impl RuntimeFunction for FsTreeMaterializeFunction {
     type Input = FsTreeMaterializeInput;
     type Output = FsTreeMaterializeOutput;
+    type Event = NoRuntimeEvent;
 
     fn name(&self) -> &'static str {
         "fs-tree-materialize"
